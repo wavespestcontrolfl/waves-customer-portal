@@ -1951,10 +1951,18 @@ function summarizeBatch(results) {
 // + extraction (primary and fallback) back to back, which at the shipped
 // defaults is exactly 20 minutes — so a flat 20 would have reclaimed a
 // slow-but-working pass out from under itself (pre-push audit P1).
-const { alertCeilingMinutes } = require('../utils/claim-ceiling');
-
-// A claim is reclaimable when it STOPPED BEATING — plus, for a HUMAN pressing
-// the button, one bounded takeover for the hang case (see below).
+// A claim is reclaimable when it STOPPED BEATING. Nothing else — no ceiling,
+// for anybody.
+//
+// A ceiling was tried several ways, because a pass hung on a provider socket
+// keeps its timer beating and could never be reclaimed. The answer turned out
+// to be upstream: EVERY provider call this pass makes is now bounded — the
+// lead synopsis was the last one running on the SDK's defaults — so a stuck
+// pass fails, releases its claim and stops beating on its own. With no
+// unbounded await left, the heartbeat is a complete liveness signal, and
+// nothing has to steal a LIVE claim. That is what every ceiling ultimately
+// does, and what duplicates side effects on a customer's record when it
+// guesses wrong.
 //
 // Earlier revisions added an absolute ceiling so a pass that hangs while its
 // timer keeps beating could still be recovered. Every attempt to size that
@@ -1995,31 +2003,11 @@ const FORCE_CLAIM_QUIET_MINUTES = 3;
 // branch — permanently unreclaimable, the worst possible bug in a lock.
 const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
   + ' AND processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)';
-const reclaimableClaim = (quietMinutes, { operatorTakeover = false } = {}) => {
-  const clauses = [
-    `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`,
-    `(NOT (${CURRENT_BEAT}) AND COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`,
-  ];
-  if (operatorTakeover) {
-    // THE OPERATOR TAKEOVER, and only ever for a human pressing the button.
-    //
-    // A pass hung on an unbounded provider call keeps beating, so no
-    // heartbeat rule can free it — that was the one real hole left, and the
-    // reason five review rounds went into an absolute ceiling. What makes a
-    // ceiling safe HERE and not on the automatic path:
-    //   * a human has looked at the row, after the watchdog has been ringing
-    //     about it since this same threshold;
-    //   * the claim has outlived every budgeted provider path, so a healthy
-    //     pass is not a candidate;
-    //   * a hung pass is by definition not writing, and when it finally
-    //     unsticks it hits the transcript or terminal fence and abandons
-    //     itself at the next checkpoint rather than racing the new owner.
-    // The automatic sweeps keep no ceiling at all: nobody is watching them,
-    // and a wrong steal there duplicates side effects silently.
-    clauses.push(`COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${alertCeilingMinutes()} minutes'`);
-  }
-  return `(${clauses.join(' OR ')})`;
-};
+const reclaimableClaim = (quietMinutes) => "("
+  + `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
+  + ` OR (NOT (${CURRENT_BEAT}) AND`
+  + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
+  + ")";
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
@@ -5986,6 +5974,13 @@ async function generateLeadSynopsis(transcription) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
   try {
+    // BOUNDED, like every other provider call this pass makes. On the SDK's
+    // defaults this one could hang on an open socket indefinitely, and a pass
+    // that hangs keeps its heartbeat beating — which is what made a wedged
+    // claim unreclaimable and drove several attempts at a reclaim ceiling
+    // that could steal live work. With every call bounded, a stuck pass
+    // FAILS, releases and stops beating, and the heartbeat rule alone is
+    // enough.
     const response = await client.messages.create({
       model: MODELS.FLAGSHIP,
       max_tokens: 1200,
@@ -6029,7 +6024,7 @@ One specific, concrete step Virginia or the office should take within the next 2
 Formatting:
 Use markdown headers (##) for sections. Use bullet points. Keep the entire output under 400 words. Write like you're handing a cheat sheet to a technician sitting in the truck.`,
       }],
-    });
+    }, { timeout: PROVIDER_FETCH_TIMEOUTS_MS.extraction });
 
     return response.content[0]?.text?.trim() || null;
   } catch (err) {
@@ -6286,7 +6281,7 @@ const CallRecordingProcessor = {
             // after looking at the row; the automatic paths keep the
             // conservative window.
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-              .orWhereRaw(reclaimableClaim(FORCE_CLAIM_QUIET_MINUTES, { operatorTakeover: true }));
+              .orWhereRaw(reclaimableClaim(FORCE_CLAIM_QUIET_MINUTES));
           })
           .update({
             processing_status: 'processing',
@@ -6333,15 +6328,9 @@ const CallRecordingProcessor = {
         success: false,
         skipped: true,
         reason: 'already_processing',
-        // A forced caller also has the operator takeover available once the
-        // claim outlives every budgeted path, so never quote them longer
-        // than that even when the beat rule would.
-        retryAfterMinutes: (() => {
-          const beatWindow = beating
-            ? (opts.force ? FORCE_CLAIM_QUIET_MINUTES : LEGACY_CLAIM_QUIET_MINUTES)
-            : LEGACY_CLAIM_QUIET_MINUTES;
-          return opts.force ? Math.min(beatWindow, alertCeilingMinutes()) : beatWindow;
-        })(),
+        retryAfterMinutes: beating
+          ? (opts.force ? FORCE_CLAIM_QUIET_MINUTES : LEGACY_CLAIM_QUIET_MINUTES)
+          : LEGACY_CLAIM_QUIET_MINUTES,
       };
     }
 
