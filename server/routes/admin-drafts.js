@@ -598,17 +598,18 @@ router.get('/', async (req, res, next) => {
     const { status = 'pending', campaign_type: campaignType } = req.query;
     // Cursor pagination over a LIVE set: an offset would shift under
     // concurrent inserts/approvals and could return overlapping pages
-    // forever (Codex #3700 r2 P1). The cursor is the last row's
-    // deterministic (created_at, id) position; ties on created_at are
-    // broken by id in both the ORDER BY and the tuple comparison.
-    let cursor = null;
+    // forever (Codex #3700 r2 P1). The cursor is the last row's ID; its
+    // (created_at, id) position is re-read IN SQL via a subquery so the
+    // timestamp round-trips at full PostgreSQL microsecond precision — a
+    // JS Date cursor truncates to milliseconds and can skip rows inside
+    // the truncated window (r3 P1). Ties on created_at break by id in
+    // both the ORDER BY and the tuple comparison. Draft rows are never
+    // deleted (status transitions only), so the anchor persists.
+    let cursorId = null;
     if (req.query.before) {
-      const raw = String(req.query.before);
-      const split = raw.lastIndexOf('|');
-      const ts = split > 0 ? new Date(raw.slice(0, split)) : new Date(NaN);
-      const id = split > 0 ? raw.slice(split + 1) : '';
-      if (Number.isNaN(ts.getTime()) || !id) return res.status(400).json({ error: 'Invalid before cursor' });
-      cursor = { ts, id };
+      cursorId = String(req.query.before);
+      const anchor = await db('message_drafts').where({ id: cursorId }).first('id');
+      if (!anchor) return res.status(400).json({ error: 'Invalid before cursor' });
     }
     let query = db('message_drafts')
       .where(status === 'all' ? {} : { status })
@@ -618,8 +619,11 @@ router.get('/', async (req, res, next) => {
       .orderBy('message_drafts.created_at', 'desc')
       .orderBy('message_drafts.id', 'desc')
       .limit(50);
-    if (cursor) {
-      query = query.whereRaw('(message_drafts.created_at, message_drafts.id) < (?, ?)', [cursor.ts, cursor.id]);
+    if (cursorId) {
+      query = query.whereRaw(
+        '(message_drafts.created_at, message_drafts.id) < (SELECT md.created_at, md.id FROM message_drafts md WHERE md.id = ?)',
+        [cursorId],
+      );
     }
     if (campaignType === 'none') {
       query = query.whereNull('message_drafts.campaign_type');
@@ -628,7 +632,7 @@ router.get('/', async (req, res, next) => {
     }
     const drafts = await query;
     const last = drafts.length === 50 ? drafts[drafts.length - 1] : null;
-    const nextCursor = last ? `${new Date(last.created_at).toISOString()}|${last.id}` : null;
+    const nextCursor = last ? String(last.id) : null;
 
     // The list must promise the SAME recipient/from the approve path will
     // use (resolveDraftRecipient: sms_log thread first, then flags, then

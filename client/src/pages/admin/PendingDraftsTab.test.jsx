@@ -146,7 +146,7 @@ describe("PendingDraftsTab", () => {
   });
 
   it("pages older drafts with the server cursor and appends without duplicates", async () => {
-    adminFetch.mockResolvedValue({ drafts: DRAFTS.drafts, pendingCount: 3, nextCursor: "2026-09-01T00:00:00.000Z|d2" });
+    adminFetch.mockResolvedValue({ drafts: DRAFTS.drafts, pendingCount: 3, nextCursor: "d2" });
     render(<PendingDraftsTab embedded />);
     await screen.findByText("Pat Customer");
     expect(screen.getByText("3 pending drafts")).toBeInTheDocument();
@@ -158,7 +158,7 @@ describe("PendingDraftsTab", () => {
     });
     fireEvent.click(screen.getByText("Load older drafts"));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(
-      "/admin/drafts?status=pending&before=2026-09-01T00%3A00%3A00.000Z%7Cd2",
+      "/admin/drafts?status=pending&before=d2",
     ));
     await waitFor(() => expect(screen.getByText("Old Draft")).toBeInTheDocument());
     expect(screen.getAllByText("Sam Owner")).toHaveLength(1); // dedup by id
