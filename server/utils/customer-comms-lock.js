@@ -36,8 +36,19 @@
  *   pg_advisory_xact_lock(hashtextextended('customer-comms:' || <id>, 0))
  */
 
+// pg_advisory_xact_lock BLOCKS with no deadline of its own, and one of its
+// callers is the call-processing pass — which awaits enrollment while holding
+// a processing claim whose heartbeat keeps beating. An unbounded wait there
+// wedges the call exactly as an unbounded provider call did (codex #3677 P1).
+// SET LOCAL scopes this to the calling transaction, so a contended lock now
+// raises instead of hanging, and every caller already handles a failed
+// transaction. Contention on a per-customer comms key is momentary; ten
+// seconds is generous for it and finite for everything else.
+const LOCK_WAIT_TIMEOUT = '10s';
+
 async function lockCustomerComms(trx, customerId) {
   if (!customerId) return;
+  await trx.raw(`SET LOCAL lock_timeout = '${LOCK_WAIT_TIMEOUT}'`);
   await trx.raw(
     'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
     [`customer-comms:${customerId}`],

@@ -40,7 +40,9 @@ function providerBudgetMs() {
   // The dispatcher's OWN budget, not a mirror of it: a change there must move
   // this ceiling with it (existing-mechanism rule).
   const { DEFAULT_FALLBACK_BUDGET_MS } = require('../services/llm/call');
-  return download + (3 * transcription) + (2 * label) + (2 * extraction) + DEFAULT_FALLBACK_BUDGET_MS;
+  // + the CSR scoring leg, which runs on the extraction budget and is
+  // awaited while the claim is still held (codex #3677 P2).
+  return download + (3 * transcription) + (2 * label) + (3 * extraction) + DEFAULT_FALLBACK_BUDGET_MS;
 }
 
 // TWO ceilings, because alerting and stealing carry opposite risks.
