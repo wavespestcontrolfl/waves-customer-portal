@@ -2592,6 +2592,16 @@ describe('full run', () => {
     // the worker-side mode applies the same rule
     const moved2 = await settleRetiredPlacements(db, { prospectIds: [sending.id, sent.id], now: NOW });
     expect(moved2).toBe(0);
+    // …and locked outreach never moves AT ALL — not even to another outreach lane (local Codex P1)
+    const old2 = { id: uid(), domain_id: d.id, submission_url: null, link_type: 'editorial', superseded_by: null };
+    const resource = { id: uid(), domain_id: d.id, submission_url: null, link_type: 'resource', superseded_by: null };
+    old2.superseded_by = resource.id;
+    const locked = { ...base, id: uid(), path_id: old2.id, outreach_status: 'sending' };
+    const draftedSameLane = { ...base, id: uid(), path_id: old2.id, outreach_status: 'drafted', outreach_send_token: 'tok-2' };
+    db._tables.seo_link_acquisition_paths.push(old2, resource); db._tables.seo_link_prospects.push(locked, draftedSameLane);
+    expect(await settleRetiredPlacements(db, { pathIds: [old2.id], successor: resource, now: NOW })).toBe(1);
+    expect(locked).toMatchObject({ path_id: old2.id, link_type: 'editorial' });
+    expect(draftedSameLane).toMatchObject({ path_id: resource.id, link_type: 'resource', outreach_status: 'drafted', outreach_send_token: 'tok-2' }); // an unsent draft survives an outreach→outreach move
   });
 
   test('supersession uses the RECONCILED disproof set — an apex 404 answered by www never retires the live predecessor (Codex PR r22 P2)', async () => {

@@ -400,15 +400,17 @@ const PLACEMENT_MOVE_COLUMNS = ['id', 'path_id', 'link_type', 'outreach_status',
  * stamp) refuses the move outright.
  */
 function movePatch(row, target, now) {
+  // locked outreach never moves AT ALL — same lane, other outreach lane, or
+  // signup lane: a send may be executing against the path it was claimed
+  // on, or the row awaits human reconciliation; the retired path stays
+  // (nothing can claim it) and the attempt/send stays attributed to it
+  if (OUTREACH_LOCKED.has(row.outreach_status) || row.outreach_sent_at) return null;
   const patch = { path_id: target.id, updated_at: now, automation_policy: null, last_classified_at: null };
   if (target.submission_url) patch.target_url = target.submission_url;
   const nextLane = target.link_type && CLAIMABLE_LINK_TYPES.has(target.link_type) ? target.link_type : null;
   if (nextLane && nextLane !== row.link_type) {
-    if (OUTREACH_LANES.has(row.link_type) && !OUTREACH_LANES.has(nextLane)) {
-      if (OUTREACH_LOCKED.has(row.outreach_status) || row.outreach_sent_at) return null;
-      if (row.outreach_status === 'drafted') {
-        Object.assign(patch, { outreach_status: 'none', outreach_to_email: null, outreach_subject: null, outreach_body: null, outreach_send_token: null });
-      }
+    if (OUTREACH_LANES.has(row.link_type) && !OUTREACH_LANES.has(nextLane) && row.outreach_status === 'drafted') {
+      Object.assign(patch, { outreach_status: 'none', outreach_to_email: null, outreach_subject: null, outreach_body: null, outreach_send_token: null });
     }
     patch.link_type = nextLane;
   }

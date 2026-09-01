@@ -96,3 +96,18 @@ test('a moved placement never keeps a policy classified for the old path — and
   expect(toOutreach).toMatchObject({ path_id: 'p-outreach', target_url: 'https://gated.example/free', link_type: 'editorial', automation_policy: null, claimed_at: null }); // left the signup lane; URL-less successor keeps target_url
   expect(await worker.claim({ n: 5, type: 'signup' })).toEqual([]); // still not the free lane's until the classifier has read the successor
 });
+
+test('a REFUSED settlement never leases the retired path, and a sent-stamped row is never served (local Codex P1)', async () => {
+  const old = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old-join', superseded_by: 'p-live', link_type: 'directory' };
+  const live = { id: 'p-live', domain_id: 'd1', submission_url: 'https://example.com/join', superseded_by: null, link_type: 'directory' };
+  mockStore.seo_link_acquisition_paths.push(old, live);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40, target_domain: 'example.com' };
+  // locked by a sent stamp although its status reads none — the registry refuses to move it
+  const sentStamped = { ...base, id: 'r-sent', path_id: 'p-old', target_url: 'https://example.com/old-join', outreach_status: 'none', outreach_sent_at: new Date('2026-08-20') };
+  const fine = { ...base, id: 'r-fine', path_id: 'p-live', target_url: 'https://example.com/join' };
+  mockStore.seo_link_prospects.push(sentStamped, fine);
+  const claimed = await worker.claim({ n: 5, type: 'signup' });
+  expect(claimed.map((r) => r.id)).toEqual(['r-fine']);
+  expect(sentStamped).toMatchObject({ path_id: 'p-old', claimed_at: null }); // neither moved nor leased on the obsolete route
+});
+

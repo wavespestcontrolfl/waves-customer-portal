@@ -73,7 +73,11 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       // draft — a drafted prospect stays status='prospect' until the operator approves
       // the send (M3b); send_error rows await human reconciliation. Without this they'd
       // be re-claimed and re-drafted, reopening a possibly-sent message.
-      .whereRaw("COALESCE(outreach_status, 'none') NOT IN ('drafted', 'sending', 'sent', 'send_error')");
+      .whereRaw("COALESCE(outreach_status, 'none') NOT IN ('drafted', 'sending', 'sent', 'send_error')")
+      // …nor one that already carries a sent stamp whatever its status
+      // reads (locked outreach state — the registry refuses to move it and
+      // no worker may re-serve it)
+      .whereNull('outreach_sent_at');
     // The in-process auto-drafter emails a stored contact and can't fill a web form,
     // so it claims only prospects that already have a contact_email — leaving
     // form-only prospects untouched (status='prospect') for manual handling rather
@@ -123,20 +127,24 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // claim, is the one place every execution passes through; a release-
     // then-settle sequence could always be raced by the next claim. Fails
     // closed: a settlement error aborts the claim (nothing leased).
-    const settled = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: ids, now: new Date() });
-    if (settled) {
-      const moved = await trx('seo_link_prospects').whereIn('id', ids).select('id', 'path_id', 'target_url', 'link_type', 'automation_policy', 'last_classified_at');
-      const byId = new Map((moved || []).map((m) => [m.id, m]));
-      rows = rows.map((r) => ({ ...r, ...(byId.get(r.id) || {}) }));
-      // The lane/policy filters above ran against the PRE-settlement row.
-      // A moved placement takes the successor's lane and is left
-      // UNCLASSIFIED (policy null until the weekly classifier has read the
-      // successor's page), so it is no longer eligible for THIS claim: it
-      // stays un-leased for the lane that owns it.
-      rows = rows.filter((r) => types.includes(r.link_type));
-      if (effectivePolicy) rows = rows.filter((r) => r.automation_policy === effectivePolicy);
-      if (rows.length === 0) return [];
-    }
+    await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: ids, now: new Date() });
+    // ALWAYS re-read and re-validate after settlement — whether or not
+    // anything moved: a placement whose settlement was REFUSED (locked
+    // outreach state) still sits on a retired path and must not be leased
+    // either. The lane/policy filters above ran against the pre-settlement
+    // row; a moved placement takes the successor's lane and is left
+    // UNCLASSIFIED (policy null until the weekly classifier has read the
+    // successor's page), so it is no longer eligible for THIS claim.
+    const current = await trx('seo_link_prospects').whereIn('id', ids).select('id', 'path_id', 'target_url', 'link_type', 'automation_policy', 'last_classified_at');
+    const byId = new Map((current || []).map((m) => [m.id, m]));
+    rows = rows.map((r) => ({ ...r, ...(byId.get(r.id) || {}) }));
+    const pathIds = [...new Set(rows.map((r) => r.path_id).filter(Boolean))];
+    const retired = new Set(pathIds.length
+      ? (await trx('seo_link_acquisition_paths').whereIn('id', pathIds).whereNotNull('superseded_by').select('id')).map((p) => p.id)
+      : []);
+    rows = rows.filter((r) => !retired.has(r.path_id) && types.includes(r.link_type));
+    if (effectivePolicy) rows = rows.filter((r) => r.automation_policy === effectivePolicy);
+    if (rows.length === 0) return [];
     const leaseIds = rows.map((r) => r.id);
     const now = new Date();
     await trx('seo_link_prospects')
