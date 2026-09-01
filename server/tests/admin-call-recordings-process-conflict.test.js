@@ -80,6 +80,28 @@ describe('POST /process/:callSid skip semantics', () => {
 // own; `operator` means "a human pressed the button" and selects the short
 // quiet window. Conflating them made a manual FIRST run behave like a
 // historical reprocess.
+// A pass that loses its claim must not write through a DELEGATED module
+// either: the scorer awaits a provider for minutes and then inserts a
+// non-idempotent row of its own.
+describe('the CSR scorer refuses to persist after ownership moves', () => {
+  const source = require('fs').readFileSync(require.resolve('../services/csr/csr-coach'), 'utf8');
+
+  test('the ownership check sits immediately before the score insert', () => {
+    const insertAt = source.indexOf("db('csr_call_scores').insert(");
+    expect(insertAt).toBeGreaterThan(-1);
+    const preceding = source.slice(Math.max(0, insertAt - 400), insertAt);
+    expect(preceding).toContain('stillOwnsClaim');
+    expect(preceding).toContain("reason: 'ownership_lost'");
+  });
+
+  test('the processor hands its claim check to the scorer', () => {
+    const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const callAt = processor.indexOf('CSRCoach.scoreCall({');
+    expect(callAt).toBeGreaterThan(-1);
+    expect(processor.slice(callAt, callAt + 300)).toContain('stillOwnsClaim');
+  });
+});
+
 describe('operator intent is distinct from force', () => {
   test('operator shortens the quiet window WITHOUT taking the force branch', () => {
     // The force branch omits the extraction_failed cap and backoff, so an

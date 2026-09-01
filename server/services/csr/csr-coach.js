@@ -20,7 +20,14 @@ class CSRCoach {
   /**
    * Score a call and grade the lead. Returns score + coaching + follow-up task.
    */
-  async scoreCall({ csrName, customerId, callDirection, callSource, transcript, metadata }) {
+  /**
+   * `stillOwnsClaim` — optional async predicate from a caller that holds a
+   * processing claim. Scoring awaits a provider for minutes, and the row it
+   * writes is not idempotent, so a caller whose claim was reclaimed during
+   * that await must not persist a second score (codex #3677 P1). Checked
+   * immediately before the insert, which is the only moment that matters.
+   */
+  async scoreCall({ csrName, customerId, callDirection, callSource, transcript, metadata, stillOwnsClaim }) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       return { error: 'Anthropic API not configured' };
     }
@@ -141,6 +148,11 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`
     if (customerId) {
       const prev = await db('csr_call_scores').where('customer_id', customerId).count('* as count').first();
       isFirstCall = parseInt(prev.count) === 0;
+    }
+
+    if (stillOwnsClaim && !(await stillOwnsClaim())) {
+      logger.warn('[csr-coach] ownership lost during scoring — discarding the score rather than writing a second one');
+      return { skipped: true, reason: 'ownership_lost' };
     }
 
     // Save the score

@@ -6425,7 +6425,12 @@ const CallRecordingProcessor = {
         // in-memory-only clear would leave the phantom link on the row for any
         // call that takes one of those paths. The happy path re-stamps the real
         // resolved customer in Step 4 (customer_id: customerId || call.customer_id).
-        await db('call_log').where({ id: call.id }).update({ customer_id: null, updated_at: new Date() });
+        // Token-fenced: a worker resuming after an operator reclaim would
+        // otherwise clear the REPLACEMENT pass's newly linked customer_id,
+        // even after that pass finalized (codex P1).
+        await db('call_log').where({ id: call.id })
+          .where('processing_token', procToken)
+          .update({ customer_id: null, updated_at: new Date() });
       }
     }
 
@@ -14322,6 +14327,12 @@ const CallRecordingProcessor = {
     }
 
     // Step 7: Log activity
+    // BEFORE the insert, not after it: customer_interactions is explicitly
+    // non-idempotent, and the automation and newsletter awaits above are long
+    // enough for a heartbeat to go quiet and a peer to reclaim. Two passes
+    // both inserting puts the same call on the customer's timeline twice
+    // (codex P1).
+    if (customerId && !(await stillOwnsClaim())) return abandonToPeer('the customer timeline entry');
     if (customerId) {
       await db('customer_interactions').insert({
         customer_id: customerId,
@@ -14389,6 +14400,9 @@ const CallRecordingProcessor = {
         const answeredByCsr = callMeta?.forward_acceptance?.csr_name || 'Unknown';
         const CSRCoach = require('./csr/csr-coach');
         const scoreResult = await CSRCoach.scoreCall({
+          // Checked inside, immediately before the score row is written: the
+          // provider await between here and there is minutes long.
+          stillOwnsClaim,
           csrName: answeredByCsr,
           customerId: customerId || null,
           callDirection: 'inbound',
