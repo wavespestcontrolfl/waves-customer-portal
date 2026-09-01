@@ -128,7 +128,7 @@ describe('lead staleness sweep', () => {
         + 'and ("leads"."next_follow_up_at" is null or "leads"."next_follow_up_at" <= ?) '
         + 'and not exists (select 1 from "lead_activities" '
         + 'where lead_activities.lead_id = leads.id '
-        + 'and not "lead_activities"."activity_type" = ? '
+        + "and lead_activities.activity_type IS DISTINCT FROM 'shared_phone_note' "
         + 'and "lead_activities"."created_at" >= ?) '
         + 'and not exists (select 1 from "scheduled_services" '
         + 'where scheduled_services.customer_id = leads.customer_id '
@@ -136,7 +136,7 @@ describe('lead staleness sweep', () => {
         + "and scheduled_services.created_at >= COALESCE(leads.first_contact_at, leads.created_at) - interval '1 day') "
         + 'returning "id"'
       );
-      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, 'shared_phone_note', cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show']);
+      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show']);
 
       return knex.destroy();
     });

@@ -57,7 +57,9 @@ function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
     .whereNotExists(function () {
       this.select(1).from('lead_activities')
         .whereRaw('lead_activities.lead_id = leads.id')
-        .whereNot('lead_activities.activity_type', 'shared_phone_note')
+        // IS DISTINCT FROM, not <>: activity_type is nullable and a NULL
+        // row must still count as the lead being worked.
+        .whereRaw("lead_activities.activity_type IS DISTINCT FROM 'shared_phone_note'")
         .where('lead_activities.created_at', '>=', cutoff);
     })
     // A lead linked to a customer with booked (or already-delivered) service
