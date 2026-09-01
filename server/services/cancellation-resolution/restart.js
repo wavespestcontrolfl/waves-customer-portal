@@ -649,6 +649,13 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
         && liveFamilies.length === eligibleFamilies.length
         && [...liveFamilies].sort().join(',') === [...eligibleFamilies].sort().join(',');
       const cents = (v) => Math.round(Number(v || 0) * 100);
+      // Same ATTEMPT, not just same scope (codex GH r16 P1): after a
+      // reactivate-then-recancel of the same families, the accept-time
+      // identity check refuses a prior attempt's token — reusing it here
+      // would hand back the same unusable token on every tap. A live quote
+      // from another attempt falls through to the archive + fresh mint.
+      const sameAttempt = String(liveData?.planRestart?.cancellationCaseId ?? '') === String(caseId ?? '')
+        && String(liveData?.planRestart?.cancellationRequestId ?? '') === String(requestId ?? '');
       // Full-offer fingerprint, not just the three aggregates (codex GH r9
       // P1): offsetting price changes across families can keep the totals
       // identical while per-service application prices or the default
@@ -661,6 +668,7 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
         result: data?.result ?? null,
       });
       if (sameScope
+        && sameAttempt
         && cents(monthlyTotal) === cents(live.monthly_total)
         && cents(annualTotal) === cents(live.annual_total)
         && cents(onetimeTotal) === cents(live.onetime_total)

@@ -2365,6 +2365,18 @@ async function reviseAdminEstimate({
         nextData.estimatorEngine = nextEngine;
         preserved = true;
       }
+      // planRestart is provenance too (codex GH r16 P1 on #3671): the V2
+      // revision payload never carries it, and dropping it bricks the
+      // restart acceptance (quoted reads null, every attempt 409s) —
+      // while an edited copy must never repoint the quote at a different
+      // cancellation attempt or scope. FORCED from the stored row, same
+      // rule as the engine keys above: an operator revise may reprice a
+      // restart quote, not change what it restarts.
+      if (existingData.planRestart !== undefined
+          && JSON.stringify(nextData.planRestart) !== JSON.stringify(existingData.planRestart)) {
+        nextData.planRestart = existingData.planRestart;
+        preserved = true;
+      }
       if (preserved) writeFields.estimate_data = JSON.stringify(nextData);
     }
   }

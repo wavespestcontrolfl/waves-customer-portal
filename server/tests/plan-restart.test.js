@@ -332,6 +332,23 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates[0].archived_at == null).toBe(true);
   });
 
+  test('a live quote from a PRIOR attempt is never reused — same families re-cancelled re-mint at today\'s price (codex GH r16 P1)', async () => {
+    // Reactivate-then-recancel of the SAME families: the accept-time
+    // identity check refuses the old token, so reusing it would hand back
+    // the same unusable token on every tap.
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(first.reused).toBe(false);
+    tables.cancellation_cases = [{
+      id: 'case-2', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['pest_control', 'lawn_care']), created_at: '2026-08-30',
+    }];
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('0123456789abcdef') });
+    expect(again.reused).toBe(false);
+    expect(again.estimateId).not.toBe(first.estimateId);
+    // The prior attempt's token is retired, never live beside the new one.
+    const firstRow = tables.estimates.find((e) => e.id === first.estimateId);
+    expect(firstRow.archived_at != null).toBe(true);
+  });
+
   test('same totals but a drifted offer body does NOT reuse — the full fingerprint decides (codex GH r9 P1)', async () => {
     const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
     // Offsetting price changes: aggregates identical, per-service result

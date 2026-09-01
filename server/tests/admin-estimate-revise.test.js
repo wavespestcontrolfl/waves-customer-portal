@@ -448,6 +448,30 @@ describe('reviseAdminEstimate', () => {
     expect(next2.deliveryState.lastDeliveredAt).toBe('2026-08-13T06:00:00.000Z');
   });
 
+  test('planRestart survives the rewrite FORCED — a revised restart quote keeps its attempt identity and scope (codex GH r16 P1 on #3671)', async () => {
+    const planRestart = {
+      families: ['pest_control'], cancelledFamilies: ['pest_control'], familiesSource: 'case_scope',
+      cancellationCaseId: 'case-3', cancellationRequestId: 'req-3', mintedAt: '2026-08-30T00:00:00.000Z',
+    };
+    const restartRow = {
+      ...sentEstimate,
+      source: 'plan_restart',
+      estimate_data: JSON.stringify({ ...JSON.parse(sentEstimate.estimate_data), planRestart }),
+    };
+    const { database, updates } = makeReviseDatabase({ estimate: restartRow });
+    // The V2 revision payload carries no planRestart (the real builder never
+    // sends one) — and even a payload carrying null must not erase it.
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, estimateData: { ...reviseBody.estimateData, planRestart: null } },
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    const data = JSON.parse(updates[0].estimate_data);
+    expect(data.planRestart).toEqual(planRestart);
+  });
+
   test('carries the lead_id mirror and schedule-stitch pointer across the rewrite', async () => {
     const withLinkage = {
       ...sentEstimate,
