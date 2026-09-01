@@ -148,6 +148,7 @@ describe('every side-effect boundary is gated on still owning the claim', () => 
     ['Step 4b: Create lead', 'the lead write'],
     ['Step 5: If appointment detected', 'the appointment SMS'],
     ['Step 6: Enroll in the local new_lead automation', 'the automation enrollment'],
+    ['Step 7b: Generate lead synopsis', 'the synopsis and scoring writes'],
   ])('%s is preceded by an ownership check', (stepMarker, label) => {
     const at = source.indexOf(stepMarker);
     expect(at).toBeGreaterThan(-1);
@@ -270,6 +271,18 @@ describe('customer comms lock timeout is scoped and restorable', () => {
       }),
     };
   };
+
+  test('caps an unlimited wait but never widens a stricter one', () => {
+    const { shouldCapLockTimeout } = require('../utils/customer-comms-lock');
+    // 0 means wait forever — the case the bound exists for.
+    expect(shouldCapLockTimeout('0')).toBe(true);
+    expect(shouldCapLockTimeout('30s')).toBe(true);
+    // A caller's deliberate deadlock or latency guard survives untouched.
+    expect(shouldCapLockTimeout('2500ms')).toBe(false);
+    expect(shouldCapLockTimeout('5s')).toBe(false);
+    // Unreadable: bound it rather than risk an unlimited wait.
+    expect(shouldCapLockTimeout('garbage')).toBe(true);
+  });
 
   test('restores through set_config, which can bind — SET LOCAL cannot', async () => {
     const trx = trxSpy('5s');

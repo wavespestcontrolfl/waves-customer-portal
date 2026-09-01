@@ -45,6 +45,29 @@
 // transaction. Contention on a per-customer comms key is momentary; ten
 // seconds is generous for it and finite for everything else.
 const LOCK_WAIT_TIMEOUT = '10s';
+const LOCK_WAIT_TIMEOUT_MS = 10000;
+
+// PostgreSQL reports lock_timeout as a bare integer of milliseconds or with a
+// unit suffix ('0', '2500ms', '10s', '1min'). '0' means NO timeout, which is
+// the unlimited wait this bound exists to stop — not a small value.
+function lockTimeoutMs(setting) {
+  const raw = String(setting == null ? '' : setting).trim().toLowerCase();
+  if (!raw) return null;
+  const match = raw.match(/^(\d+(?:\.\d+)?)\s*(us|ms|s|min|h|d)?$/);
+  if (!match) return null;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return null;
+  const unit = match[2] || 'ms';
+  const factor = { us: 0.001, ms: 1, s: 1000, min: 60000, h: 3600000, d: 86400000 }[unit];
+  return value * factor;
+}
+
+function shouldCapLockTimeout(previous) {
+  const ms = lockTimeoutMs(previous);
+  if (ms === null) return true;   // unreadable: bound it rather than risk an unlimited wait
+  if (ms === 0) return true;      // 0 = wait forever, the case this exists for
+  return ms > LOCK_WAIT_TIMEOUT_MS;
+}
 
 async function lockCustomerComms(trx, customerId) {
   if (!customerId) return;
@@ -60,7 +83,13 @@ async function lockCustomerComms(trx, customerId) {
   const previous = await trx.raw('SHOW lock_timeout')
     .then((res) => res?.rows?.[0]?.lock_timeout)
     .catch(() => null);
-  await trx.raw("SELECT set_config('lock_timeout', ?, true)", [LOCK_WAIT_TIMEOUT]);
+  // CAP, never widen. A caller that deliberately set a shorter timeout — a
+  // deadlock or latency guard — must keep it; this bound exists only to stop
+  // an UNLIMITED wait, so it applies when the setting is 0 or longer than the
+  // bound (codex #3677 P1).
+  if (shouldCapLockTimeout(previous)) {
+    await trx.raw("SELECT set_config('lock_timeout', ?, true)", [LOCK_WAIT_TIMEOUT]);
+  }
   try {
     await trx.raw(
       'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
@@ -112,4 +141,6 @@ async function withCustomerCommsLock(db, customerId, fn) {
   });
 }
 
-module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock };
+module.exports = {
+  lockTimeoutMs,
+  shouldCapLockTimeout, lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock };

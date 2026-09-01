@@ -14303,6 +14303,12 @@ const CallRecordingProcessor = {
       }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
     }
 
+    // The synopsis and CSR scoring below each await a provider call and then
+    // WRITE — a heartbeat can go quiet and a peer reclaim during either, so
+    // ownership is re-checked here as well as at the earlier boundaries
+    // (codex #3677 P1). This is the last gate before the terminal write,
+    // which is itself token-fenced.
+    if (!(await stillOwnsClaim())) return abandonToPeer('the synopsis and scoring writes');
     // Step 7b: Generate lead synopsis (Sales Strategist analysis)
     let synopsis = null;
     if (transcription && !extracted.is_spam && !extracted.is_voicemail) {
