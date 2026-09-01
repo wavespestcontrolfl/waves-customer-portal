@@ -303,6 +303,18 @@ describe('CancelPlanDialog', () => {
     expect(screen.getByRole('button', { name: 'Cancel the whole plan' })).not.toBeDisabled();
   });
 
+  it('a repair retry syncs the ACCEPTED choices into the controls — the dialog never shows an unchecked waiver over a run that waives', async () => {
+    stubFetch((path) => (path.endsWith('/cancel-plan/preview')
+      ? response(previewBody({ eligible: true, repairRetry: true, waiveLateFee: true, sendConfirmation: false }))
+      : response({})));
+    render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
+    await screen.findByText(/A prior cancellation attempt left follow-up steps unfinished/);
+    await waitFor(() => {
+      expect(screen.getByLabelText('Waive the scheduled-visit fee on pulled visits')).toBeChecked();
+      expect(screen.getByLabelText('Send the customer the confirmation text and email')).not.toBeChecked();
+    });
+  });
+
   it('scheduled-visit fee exposure renders from the server preview and clears when waived', async () => {
     stubFetch((path) => (path.endsWith('/cancel-plan/preview')
       ? response(previewBody({

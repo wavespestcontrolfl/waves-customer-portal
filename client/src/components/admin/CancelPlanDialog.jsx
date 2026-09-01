@@ -111,6 +111,17 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
       .then((r) => {
         if (cancelled) return;
         setPreview(r);
+        // A repair retry runs under the ACCEPTED choices (the commit
+        // inherits them from the durable acceptance) — sync the controls
+        // so the operator sees what will actually execute, never an
+        // unchecked waiver over a run that waives. The synced values match
+        // the server's echo, so the re-fired preview converges in one pass.
+        if (r.repairRetry) {
+          if ((r.waiveLateFee === true) !== waiveLateFee) setWaiveLateFee(r.waiveLateFee === true);
+          if ((r.sendConfirmation !== false) !== sendConfirmation) setSendConfirmation(r.sendConfirmation !== false);
+          if (r.effectiveDate && r.effectiveDate !== effectiveDate) setEffectiveDate(r.effectiveDate);
+          return;
+        }
         // The server decides whether "end of paid coverage" is even a
         // choice; snap back to "now" if it stopped being one.
         if (!r.prepay && effectiveDate !== "now") setEffectiveDate("now");
