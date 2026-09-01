@@ -1207,7 +1207,7 @@ describe('full run', () => {
       id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join-c',
       path_key: 'paid_listing:https://example.com/join-c', superseded_by: null, baseline: false, confidence: 0.7,
       legal_attestation: true, legal_terms_hash: priorHash,
-      last_investigated_at: new Date('2026-08-01'), investigation: JSON.stringify({}),
+      last_investigated_at: new Date('2026-08-01'), investigation: JSON.stringify({ legal_terms_url: 'https://example.com/terms-c' }),
       revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
     };
     const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [existing] });
@@ -1250,7 +1250,7 @@ describe('full run', () => {
       id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
       path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
       legal_attestation: true, legal_terms_hash: priorHash,
-      last_investigated_at: new Date('2026-08-01'), investigation: JSON.stringify({}),
+      last_investigated_at: new Date('2026-08-01'), investigation: JSON.stringify({ legal_terms_url: 'https://example.com/terms' }),
       revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
     };
     const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [existing] });
@@ -1755,6 +1755,25 @@ describe('full run', () => {
     const r = await investigatePaths(db, runOpts(db, { fetchPage: fetcher }));
     expect(fetched).toContain('https://www.example.com'); // the origin variant was tried
     expect(r.investigated).toBe(1); // the www page carried the run — no evidence-less failure
+  });
+
+  test('a CHANGED terms URL that failed verification clears the old hash — never a stale attestation (local Codex r14 P1)', async () => {
+    const d = domainRow();
+    const existing = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      legal_attestation: true, legal_terms_hash: 'd'.repeat(64),
+      last_investigated_at: new Date('2026-08-01'), investigation: JSON.stringify({ legal_terms_url: 'https://example.com/terms-old' }),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [existing] });
+    const echoed = modelPath({ legal_attestation: true, legal_terms_url: 'https://example.com/terms-new' });
+    const fetcher = async (url) => (url.includes('/terms-new')
+      ? { status: 500, finalUrl: url, html: null, blocked: false, error: 'http_500' }
+      : okFetch(url));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([echoed]) }) }));
+    const kept = db._tables.seo_link_acquisition_paths.find((p2) => p2.id === existing.id);
+    expect(kept.legal_terms_hash).toBeNull(); // the old agreement's hash cannot vouch for a different one
   });
 
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {

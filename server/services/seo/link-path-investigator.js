@@ -484,8 +484,18 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
     // An INCONCLUSIVE terms pass (budget exhausted, failed/blocked fetch,
     // off-claim redirect, truncated/non-text/empty body) carries no verdict
     // on the agreement: the previously hashed text stands, so no erase and
-    // no revision bump on its account.
-    if (preserveTermsHash) row = { ...row, legal_terms_hash: existing.legal_terms_hash };
+    // no revision bump on its account — but ONLY while the claimed terms
+    // IDENTITY is unchanged (or unclaimed). A DIFFERENT terms URL that
+    // failed verification must not ride on the old agreement's hash: the
+    // hash clears (INVALID until the new agreement is fetched) and the
+    // revision bumps.
+    if (preserveTermsHash) {
+      const evUrl = (inv) => { try { return (typeof inv === 'string' ? JSON.parse(inv) : inv || {}).legal_terms_url || null; } catch { return null; } };
+      const priorUrl = evUrl(existing.investigation);
+      const claimedUrl = evUrl(row.investigation);
+      const sameIdentity = !claimedUrl || (!!priorUrl && registry.normalizeSubmissionUrl(claimedUrl) === registry.normalizeSubmissionUrl(priorUrl));
+      if (sameIdentity) row = { ...row, legal_terms_hash: existing.legal_terms_hash };
+    }
     // The investigator never owns merchant_binding (an observed-checkout
     // artifact): whatever a runner verified onto the row stands.
     row = { ...row, merchant_binding: existing.merchant_binding };
