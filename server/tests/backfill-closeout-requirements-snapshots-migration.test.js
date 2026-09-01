@@ -55,6 +55,21 @@ describeOrSkip('20260831000080 closeout snapshot backfill (DB-backed)', () => {
         }),
       });
       const incomplete = await insertRecord({ status: 'incomplete', structured_notes: null });
+      // Post-completion reclassify (GH codex r1 P1): the scheduled row was
+      // repointed to another service AFTER completion — the backfill must
+      // freeze the RECORD's historical identity, not the replacement's.
+      const [reclassified] = await trx('scheduled_services').insert({
+        customer_id: customerId,
+        scheduled_date: '2026-08-01',
+        service_type: 'Monthly Mosquito Treatment', // the post-completion repoint
+        status: 'completed',
+      }).returning('id');
+      const reclassifiedRecord = await insertRecord({
+        status: 'completed',
+        structured_notes: null,
+        scheduled_service_id: reclassified.id || reclassified,
+        service_type: 'WDO Inspection Service', // what actually completed
+      });
 
       await migration.up(trx);
 
@@ -84,6 +99,15 @@ describeOrSkip('20260831000080 closeout snapshot backfill (DB-backed)', () => {
       // Incomplete records are out of scope — their eventual completion
       // writes the real freeze.
       expect(await notesOf(incomplete)).toBeNull();
+      // Record identity wins over the repointed scheduled row: WDO
+      // inference (no application log, 2 photos), never the mosquito
+      // treatment's (application log required).
+      expect((await notesOf(reclassifiedRecord)).closeoutRequirements).toMatchObject({
+        serviceName: 'WDO Inspection Service',
+        requiresApplicationLog: false,
+        requiredPhotoCount: 2,
+        source: 'backfilled_from_live_catalog',
+      });
 
       // Idempotent re-run: the stamped snapshot (frozenAt) does not move.
       const firstStamp = stamped.closeoutRequirements.frozenAt;

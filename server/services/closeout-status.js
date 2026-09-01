@@ -1140,10 +1140,16 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
     visitReRead: inputs.visitReRead || null,
     requirements: requirements ? {
       ...requirements,
-      // 'frozen_at_completion' replays the snapshot the completion wrote
-      // (see header); 'current_catalog' is the pre-freeze fallback, where a
-      // catalog edit still retroactively changes these for historical visits.
-      asOf: requirements.frozen ? 'frozen_at_completion' : 'current_catalog',
+      // 'frozen_at_completion' replays the snapshot the completion wrote;
+      // 'frozen_by_backfill' replays migration 20260831000080's honest
+      // guess (today's catalog stamped onto pre-freeze history — GH codex
+      // r1 P2: a backfill must not present as a completion-time
+      // observation); 'current_catalog' is the unfrozen fallback, where a
+      // catalog edit still retroactively changes these for historical
+      // visits.
+      asOf: requirements.frozen
+        ? (requirements.source === 'backfilled_from_live_catalog' ? 'frozen_by_backfill' : 'frozen_at_completion')
+        : 'current_catalog',
       ...(requirements.frozen ? { frozenAt: requirements.frozenAt || null } : {}),
       // requiresCustomerSignature has NO evidence store in the schema (the
       // only "signature" columns are the tree/shrub review hash and the

@@ -37,9 +37,14 @@ exports.up = async function up(knex) {
     .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
     .where('sr.status', 'completed')
     .whereRaw(`(sr.structured_notes -> 'closeoutRequirements') IS NULL`)
+    // The HISTORICAL record's own identity wins (GH codex r1 P1):
+    // update-details can repoint the scheduled row's service_id/service_type
+    // after completion (admin-dispatch.js documents the repoint), and this
+    // backfill must freeze the service that actually completed — the
+    // scheduled row is only the fallback for legacy records carrying none.
     .distinct(
-      knex.raw('ss.service_id AS service_id'),
-      knex.raw('COALESCE(ss.service_type, sr.service_type) AS service_type'),
+      knex.raw('COALESCE(sr.service_id, ss.service_id) AS service_id'),
+      knex.raw('COALESCE(sr.service_type, ss.service_type) AS service_type'),
     );
 
   const frozenAt = new Date().toISOString();
@@ -79,8 +84,8 @@ exports.up = async function up(knex) {
             LEFT JOIN scheduled_services ss ON sr2.scheduled_service_id = ss.id
            WHERE sr2.status = 'completed'
              AND (sr2.structured_notes -> 'closeoutRequirements') IS NULL
-             AND ss.service_id IS NOT DISTINCT FROM :serviceId
-             AND COALESCE(ss.service_type, sr2.service_type) IS NOT DISTINCT FROM :serviceType
+             AND COALESCE(sr2.service_id, ss.service_id) IS NOT DISTINCT FROM :serviceId
+             AND COALESCE(sr2.service_type, ss.service_type) IS NOT DISTINCT FROM :serviceType
         ) target
         WHERE sr.id = target.id`,
       {

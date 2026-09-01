@@ -1183,6 +1183,24 @@ describe('closeout-status: loader against a fake knex', () => {
       expect(resolverMock).not.toHaveBeenCalled();
     });
 
+    test('a BACKFILLED snapshot is frozen but labeled honestly (asOf frozen_by_backfill, GH r1 P2)', async () => {
+      resolverMock.mockClear();
+      catalogRows[0].required_photo_count = 5; // later catalog edit
+      const tables = healthyTables();
+      tables.service_records = [{
+        ...recordRow,
+        structured_notes: {
+          completionSmsStatus: 'sent',
+          closeoutRequirements: { ...FROZEN_SNAP, source: 'backfilled_from_live_catalog', catalogSource: 'catalog_v2' },
+        },
+      }];
+      const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(tables), now: NOW });
+      expect(result.requirements.asOf).toBe('frozen_by_backfill');
+      // Still frozen: the catalog edit does not move the verdict.
+      expect(result.facts.photos).toMatchObject({ state: 'not_required', ruleSource: 'frozen_record' });
+      expect(resolverMock).not.toHaveBeenCalled();
+    });
+
     test('a malformed snapshot falls back to the live catalog (pre-freeze behavior)', async () => {
       resolverMock.mockClear();
       const tables = healthyTables();
