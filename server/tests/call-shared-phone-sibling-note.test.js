@@ -81,6 +81,24 @@ describe('noteSharedPhoneSibling', () => {
     for (const vals of db._statusExclusions) expect(vals).toContain('unresponsive');
   });
 
+  test('a non-exact known id never elects a pair among multiple open siblings', async () => {
+    // The lookup's newest-name-conflict id is NOT exact — with 2+ open
+    // prospects the ambiguity guard must win over the hint.
+    const db = makeDb({
+      siblings: [
+        { id: 'lead-a', first_name: 'Pat', status: 'new', estimate_id: null },
+        { id: 'lead-b', first_name: 'Sam', status: 'contacted', estimate_id: null },
+      ],
+      byId: { 'lead-a': { id: 'lead-a', phone: PHONE, first_name: 'Pat', status: 'new', estimate_id: null } },
+    });
+    const sibId = await noteSharedPhoneSibling(db, {
+      leadId: 'lead-new', phone: PHONE, extracted: {}, knownSiblingId: 'lead-a',
+    });
+    expect(sibId).toBeNull();
+    const note = db._inserts[0].rows;
+    expect((Array.isArray(note) ? note[0] : note).description).toContain('multiple other open leads');
+  });
+
   test('a known sibling id wins over the newest open lead on the phone', async () => {
     const db = makeDb({
       // Newest open row is an UNRELATED prospect on the shared line.
@@ -88,7 +106,7 @@ describe('noteSharedPhoneSibling', () => {
       byId: { 'lead-conflict': { id: 'lead-conflict', phone: PHONE, first_name: 'Kevin', status: 'estimate_viewed', estimate_id: 'est-9' } },
     });
     const sibId = await noteSharedPhoneSibling(db, {
-      leadId: 'lead-new', phone: PHONE, extracted: {}, knownSiblingId: 'lead-conflict',
+      leadId: 'lead-new', phone: PHONE, extracted: {}, knownSiblingId: 'lead-conflict', knownSiblingExact: true,
     });
     expect(sibId).toBe('lead-conflict');
     expect(db._inserts[0].rows[1].lead_id).toBe('lead-conflict');
@@ -100,7 +118,7 @@ describe('noteSharedPhoneSibling', () => {
       byId: {}, // known id no longer resolvable (soft-deleted)
     });
     const sibId = await noteSharedPhoneSibling(db, {
-      leadId: 'lead-new', phone: PHONE, extracted: {}, knownSiblingId: 'lead-gone',
+      leadId: 'lead-new', phone: PHONE, extracted: {}, knownSiblingId: 'lead-gone', knownSiblingExact: true,
     });
     expect(sibId).toBe('lead-fallback');
   });
@@ -128,7 +146,7 @@ describe('noteSharedPhoneSibling', () => {
       byId: { 'lead-moved': { id: 'lead-moved', phone: '+15555550999', first_name: 'Kim', status: 'new', estimate_id: null } },
     });
     const sibId = await noteSharedPhoneSibling(db, {
-      leadId: 'lead-new', phone: PHONE, extracted: {}, knownSiblingId: 'lead-moved',
+      leadId: 'lead-new', phone: PHONE, extracted: {}, knownSiblingId: 'lead-moved', knownSiblingExact: true,
     });
     expect(sibId).toBe('lead-fallback2');
   });
@@ -138,7 +156,7 @@ describe('noteSharedPhoneSibling', () => {
     // rejection of a won/lost sibling) and no open fallback exists.
     const db = makeDb({ byId: {}, sibling: null });
     const sibId = await noteSharedPhoneSibling(db, {
-      leadId: 'lead-new', phone: PHONE, extracted: {}, knownSiblingId: 'lead-won',
+      leadId: 'lead-new', phone: PHONE, extracted: {}, knownSiblingId: 'lead-won', knownSiblingExact: true,
     });
     expect(sibId).toBeNull();
     expect(db._inserts).toHaveLength(0);

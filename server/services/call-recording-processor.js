@@ -2267,7 +2267,7 @@ function applySameCallLeadEligibility(query, { customerId, unclaimedOnly, workab
 // either lead could see the other. Cross-note BOTH timelines so whichever
 // row the office opens points at its sibling. Read + activity inserts only;
 // never throws, never blocks processing.
-async function noteSharedPhoneSibling(database, { leadId, phone, extracted = {}, knownSiblingId = null }) {
+async function noteSharedPhoneSibling(database, { leadId, phone, extracted = {}, knownSiblingId = null, knownSiblingExact = false }) {
   if (!phone || !leadId) return null;
   try {
     // Sibling selection uses the repo's CLOSED convention, not this
@@ -2275,14 +2275,15 @@ async function noteSharedPhoneSibling(database, { leadId, phone, extracted = {},
     // closed for "work that lead instead" purposes.
     const { CLOSED_LEAD_STATUSES } = require('./lead-estimate-link');
     const closedStatuses = [...CLOSED_LEAD_STATUSES];
-    // Prefer the EXACT sibling the caller identified (the row the
-    // name-conflict lookup or the bounced guarded write pointed at) — on a
-    // long-lived shared office/household number the newest open row can be a
-    // different prospect entirely, and a note naming the wrong lead would
-    // steer consolidation at the wrong pair. The newest-open query stays as
-    // the fallback for mints where no specific sibling is known.
+    // A known sibling elects the pair ONLY when it is EXACT — the row a
+    // guarded write just bounced off, i.e. the specific lead this caller
+    // was being matched into. A lookup's newest-name-conflict id is NOT
+    // exact: with 2+ open prospects on a shared line it is an arbitrary
+    // newest, and electing that pair is the wrong-pair steer the
+    // ambiguity guard below exists to refuse — such mints take the
+    // fallback path instead.
     let sibling = null;
-    if (knownSiblingId && knownSiblingId !== leadId) {
+    if (knownSiblingId && knownSiblingId !== leadId && knownSiblingExact) {
       // Revalidated with the SAME open-lead filters as the fallback: the
       // conflict was observed moments ago, but the sibling can have
       // converted or been closed since, and a consolidation note pointing
@@ -2482,7 +2483,9 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // via the REGEXP_REPLACE equivalent of normalizeNamePart; a missing name
   // on either side is compatible, so shells stay reusable and name-less
   // extractions keep today's newest-wins behavior. All-conflict → fresh
-  // mint (the newest row's id rides back for the shared-phone note).
+  // mint (phoneNameConflictLeadId reports the newest conflicting row; the
+  // shared-phone note deliberately does NOT elect it as a pair — it is an
+  // arbitrary newest, not an exact identification).
   if (phone) {
     const extractedFirst = normalizeNamePart(firstName);
     if (!extractedFirst) {
@@ -9549,9 +9552,11 @@ const CallRecordingProcessor = {
           // break call processing.
           await notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadSourceRow, call });
 
-          await noteSharedPhoneSibling(db, {
-            leadId, phone, extracted, knownSiblingId: phoneNameConflictLeadId || null,
-          });
+          // No knownSiblingId here: phoneNameConflictLeadId is the lookup's
+          // NEWEST conflicting row, not an exact identification — with 2+
+          // open prospects the helper's ambiguity guard must refuse a pair,
+          // and with exactly one it finds the same row itself.
+          await noteSharedPhoneSibling(db, { leadId, phone, extracted });
         }
 
         // Dropped-call detector, phase 1 of 2 (owner directive 2026-08-01): a
@@ -10555,7 +10560,7 @@ const CallRecordingProcessor = {
                 // (the helper's newest-open-sibling query finds it; never
                 // throws).
                 await noteSharedPhoneSibling(db, {
-                  leadId, phone, extracted, knownSiblingId: conflictedSiblingId,
+                  leadId, phone, extracted, knownSiblingId: conflictedSiblingId, knownSiblingExact: true,
                 });
                 continue;
               } catch (raceErr) {

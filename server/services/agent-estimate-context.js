@@ -533,7 +533,9 @@ async function buildAgentEstimateContext(leadId) {
     // out of the evidence pack, so it must not enter via local activities
     // (estimate-tools accepts activity descriptions as quote evidence).
     db('lead_activities').where({ lead_id: lead.id })
-      .whereNot('activity_type', 'shared_phone_note')
+      // IS DISTINCT FROM, not <>: activity_type is nullable and NULL-typed
+      // legacy rows must stay in the evidence pack.
+      .whereRaw("activity_type IS DISTINCT FROM 'shared_phone_note'")
       .orderBy('created_at', 'desc').limit(30)
       .select('activity_type', 'description', 'metadata', 'created_at').catch(() => []),
     lead.estimate_id
