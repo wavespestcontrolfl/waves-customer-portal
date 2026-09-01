@@ -702,6 +702,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         // customer-action entry point (owner ruling 2026-08-29) — the
         // confirmation answers the customer's own portal submit immediately,
         // at any hour, so QUIET_HOURS_HOLD cannot surface here.
+        confirmationSmsSent = !!smsResult.sent;
         if (!smsResult.sent) {
           logger.warn(`Request confirmation SMS blocked/failed for customer ${req.customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
         }
