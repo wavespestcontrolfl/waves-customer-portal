@@ -86,6 +86,16 @@ describe("typed area ownership", () => {
     })).toEqual(["Front yard", "Side yards"]);
   });
 
+  it("recognizes mosquito treatment zones as the canonical area field", () => {
+    const schema = { fields: [{ key: "treatment_zones", label: "Treatment zones" }] };
+    expect(typedTreatmentAreaField(schema)?.key).toBe("treatment_zones");
+    expect(completionAreasForTypedFindings({
+      typedAreaKey: "treatment_zones",
+      findingsValues: { treatment_zones: "Lanai, Yard vegetation" },
+      genericAreas: [],
+    })).toEqual(["Lanai", "Yard vegetation"]);
+  });
+
   it("preserves generic areas from drafts created before typed area fields existed", () => {
     expect(completionAreasForTypedFindings({
       typedAreaKey: "areas_treated",

@@ -309,7 +309,9 @@ function parseApplicationAreas(value) {
 }
 export function typedTreatmentAreaField(schema) {
   return (schema?.fields || []).find((field) => (
-    field?.key === "areas_treated" || field?.key === "spot_treatment_areas"
+    field?.key === "areas_treated"
+    || field?.key === "spot_treatment_areas"
+    || field?.key === "treatment_zones"
   )) || null;
 }
 export function completionAreasForTypedFindings({ typedAreaKey, findingsValues, genericAreas }) {
