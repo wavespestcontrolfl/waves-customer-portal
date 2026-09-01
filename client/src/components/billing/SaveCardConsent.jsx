@@ -15,7 +15,7 @@
 // so the text is not interchangeable. Pass 'us_bank_account' or 'ach'
 // for ACH; anything else (or omitted) renders the card variant.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { getConsentText } from '../../lib/paymentMethodConsentText';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 
@@ -41,6 +41,13 @@ export default function SaveCardConsent({
   // the terms instead of consenting — the box can only be checked once the
   // text has been on screen.
   const [viewedTerms, setViewedTerms] = useState(false);
+  // Card and ACH carry DIFFERENT authorizations (NACHA/Reg E vs card
+  // network) — having read one is not having read the other. A method
+  // switch resets the gate (Codex P1 on #3686, round 2).
+  useEffect(() => {
+    setViewedTerms(false);
+    setExpanded(false);
+  }, [methodType]);
   const isAch = methodType === 'us_bank_account' || methodType === 'ach';
   const resolvedHeadline = headline ?? (isAch
     ? 'Save this bank account on file with Waves Pest Control'
