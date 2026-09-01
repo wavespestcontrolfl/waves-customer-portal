@@ -96,6 +96,16 @@ describe('glassEstimateCopyFor', () => {
   });
 });
 
+describe('glassServiceSlug regulated certificate routing', () => {
+  it.each([
+    'pre_slab_termiticide',
+    'Pre-Slab Termiticide Treatment',
+    'Pre slab treatment',
+  ])('keeps mixed-estimate pre-slab row %s out of the termite-bait fallback', (value) => {
+    expect(glassServiceSlug(value)).toBe('pre_slab_termiticide');
+  });
+});
+
 describe('glassCtaMicroFor', () => {
   it('keeps the recurring terms for recurring plans and swaps them for one-time projects', () => {
     expect(glassCtaMicroFor('pest_control')).toBe(GLASS_COPY.ctaMicro);

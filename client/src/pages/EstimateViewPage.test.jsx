@@ -4,9 +4,19 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
+
+describe('regulated certificate estimate surfaces', () => {
+  it('detects a pre-slab line inside a mixed pest estimate', () => {
+    expect(estimateHasRegulatedCertificateSurface(
+      'bundle',
+      [{ key: 'pest_control', name: 'Pest Control' }],
+      [{ service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment' }],
+    )).toBe(true);
+  });
+});
 
 describe('EstimateAskBar', () => {
   it('uses provided service-aware chips instead of the default prompts', () => {

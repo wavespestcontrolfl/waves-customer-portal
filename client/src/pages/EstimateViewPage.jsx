@@ -4249,6 +4249,13 @@ const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']
 // payment intents into B. It also neutralizes a slow /:token/data fetch: a
 // response for A that resolves after navigating to B lands on the unmounted
 // old tree and is dropped, instead of rendering A's PII/pricing under B's URL.
+export function estimateHasRegulatedCertificateSurface(serviceCategory, services = [], oneTimeItems = []) {
+  const regulatedCategories = new Set(['wdo_inspection', 'pre_slab_termiticide']);
+  return regulatedCategories.has(serviceCategory)
+    || services.some((service) => regulatedCategories.has(glassServiceSlug(service?.key || service?.name)))
+    || oneTimeItems.some((item) => regulatedCategories.has(glassServiceSlug(item?.service || item?.label || item?.name)));
+}
+
 export default function EstimateViewPage() {
   const { token } = useParams();
   return <EstimateViewPageInner key={token || 'no-token'} />;
@@ -5938,12 +5945,11 @@ function EstimateViewPageInner() {
   const serviceCategory = copyCommercial
     ? (copyCommercialPest ? 'commercial' : 'commercial_neutral')
     : estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
-  const regulatedCertificateCategories = new Set(['wdo_inspection', 'pre_slab_termiticide']);
-  const isRegulatedCertificateSurface = regulatedCertificateCategories.has(serviceCategory)
-    || services.some((service) => regulatedCertificateCategories.has(glassServiceSlug(service?.key || service?.name)))
-    || (pricing?.oneTimeBreakdown?.items || []).some(
-      (item) => regulatedCertificateCategories.has(glassServiceSlug(item?.service || item?.label || item?.name)),
-    );
+  const isRegulatedCertificateSurface = estimateHasRegulatedCertificateSurface(
+    serviceCategory,
+    services,
+    pricing?.oneTimeBreakdown?.items || [],
+  );
   const copy = estimateCopyFor(serviceCategory);
   // Glass copy pack — null unless glass is active; every service category
   // has a pack now (unknown categories fall back to the property-generic
