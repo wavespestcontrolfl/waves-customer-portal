@@ -124,6 +124,16 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
           `module\\.exports\\s*=\\s*\\{[^}]*\\b${g.name}\\b\\s*(?::\\s*${g.name}\\b)?\\s*[,}]`, 's'
         ).test(src) || new RegExp(`module\\.exports\\.${g.name}\\s*=\\s*${g.name}\\b`).test(src);
         expect({ guard: g.name, module: g.module, honestExport }).toEqual({ guard: g.name, module: g.module, honestExport: true });
+        // ...and that export must be FINAL: a later `module.exports.<name> =
+        // noop`, a second wholesale `module.exports =` assignment, or an
+        // Object.assign over module.exports could replace the guard after
+        // the honest-looking export this regex matched.
+        const memberRewrites = [...src.matchAll(new RegExp(`module\\.exports\\.${g.name}\\s*=\\s*(\\w+)`, 'g'))]
+          .map((x) => x[1]).filter((v) => v !== g.name);
+        const wholesale = (src.match(/module\.exports\s*=[^=]/g) || []).length;
+        const assignOver = /Object\.assign\(\s*module\.exports/.test(src);
+        expect({ guard: g.name, module: g.module, memberRewrites, wholesale, assignOver })
+          .toEqual({ guard: g.name, module: g.module, memberRewrites: [], wholesale: 1, assignOver: false });
       }
     }
   });
@@ -926,6 +936,95 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     // The final export is inline middleware, not a provable router — the
     // mount is rejected instead of scanning the stale router.
     expect(res.problems.some((p) => p.includes('no exported Router'))).toBe(true);
+  });
+
+  test('a router stored in an ARRAY literal is a problem (computed access is unattributable)', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'const holders = [router];',
+        "holders[0].get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('stored in an array'))).toBe(true);
+  });
+
+  test('an inline handler array in a call argument is still legal', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const { guardA } = require('./middleware/a');",
+        "app.use('/api/x', [guardA, require('./routes/x')]);",
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems).toEqual([]);
+    expect(res.publicRoutes).toEqual([]);
+  });
+
+  test('a predicate longer than 80 chars keeps a content digest in its identity', () => {
+    const longCond = "process.env.AAAAAAAAAA === 'x' && process.env.BBBBBBBBBB === 'y' && process.env.CCCCCCCCCC === 'z'";
+    const flipped = longCond.replace("'z'", "'Z'");
+    const keyOf = (cond) => scanOf({
+      'server/index.js': app(`if (${cond}) {\n  app.get('/debug', (req, res) => res.json({}));\n}`),
+    }).publicRoutes.map(routeKey)[0];
+    const a = keyOf(longCond);
+    const b = keyOf(flipped);
+    expect(a).toMatch(/…#[0-9a-f]{8}\]$/);
+    expect(a).not.toEqual(b); // the edit is past char 80 — only the digest differs
+  });
+
+  test('a SHADOWED package object (const express) is never trusted for member provenance', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'function setup() { const express = { json: () => (req, res) => res.json({ secret: 1 }) }; return express; }',
+        'app.use(express.json());',
+      ].join('\n')),
+    });
+    // express is bound at top level (the app() helper) AND shadowed in a
+    // block — provenance refuses, and the opaque factory call is a problem.
+    expect(res.problems.some((p) => p.includes('express.json'))).toBe(true);
+  });
+
+  test('a side-effect module registering on ANOTHER module\'s mounted router is a problem', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "require('./services/installer');",
+        "app.use('/api/x', require('./routes/x'));",
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/services/installer.js': [
+        "const shared = require('../routes/x');",
+        "shared.get('/leak', (req, res) => res.json({}));",
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
+  test("an unproven router.param() callback voids per-route guards on matching routes", () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        "router.param('id', (req, res, next, id) => res.json({ leak: id }));",
+        "router.get('/:id', guardA, (req, res) => res.json({}));",
+        "router.get('/static', guardA, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    // The param callback answers before guardA on /:id; /static (no param)
+    // keeps its guard.
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/:id']);
   });
 
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {

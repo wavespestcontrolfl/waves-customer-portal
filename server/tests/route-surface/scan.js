@@ -56,6 +56,7 @@
 const fs = require('fs');
 const path = require('path');
 const parser = require('@babel/parser');
+const crypto = require('crypto');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const APP_FILE = 'server/index.js';
@@ -122,6 +123,17 @@ function resolveModulePath(fromFile, spec) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Normalize a predicate for use in a route identity. A long predicate keeps
+ * a truncated head PLUS a content digest, so an edit anywhere in it — past
+ * character 80 included — still changes the identity.
+ */
+function predicateLabel(text) {
+  const norm = text.replace(/\s+/g, ' ');
+  if (norm.length <= 80) return norm;
+  return `${norm.slice(0, 80)}…#${crypto.createHash('sha256').update(norm).digest('hex').slice(0, 8)}`;
+}
+
+/**
  * Walk the AST, invoking `visit(node, ctx)` for every node. ctx.topLevel is
  * true only while the current statement is a direct child of Program.
  */
@@ -132,7 +144,7 @@ function walk(node, visit, ctx) {
     // Branch POLARITY is part of a conditional route's identity: the
     // alternate branch is labelled with the negated test, so moving a route
     // from `if (dev)` into its else changes the allowlist key.
-    const t = (ctx.src ? ctx.src.slice(node.test.start, node.test.end) : '?').replace(/\s+/g, ' ').slice(0, 80);
+    const t = predicateLabel(ctx.src ? ctx.src.slice(node.test.start, node.test.end) : '?');
     const branch = (label) => ({ ...ctx, topLevel: false, conds: [...(ctx.conds || []), label] });
     walk(node.test, visit, ctx); // the test itself evaluates unconditionally
     walk(node.consequent, visit, branch(t));
@@ -210,11 +222,14 @@ class ModuleAnalysis {
 
   collect() {
     this.enumScopes = []; // { name, values, start, end } — lexical loop scopes
+    this.directExternalRegs = []; // require('./x').<verb>() registrations
     this.bindingWrites = new Map(); // name -> count of value-bearing writes
     this.reassignedNames = new Set(); // written more than once — ambiguous
     const callsWithIdentifierArgs = [];
     const optionalCalls = [];
     const objectLiterals = [];
+    const arrayLiterals = [];
+    const callArgArrays = new Set();
     const memberAssignments = [];
     walk(this.ast.program, (node, ctx) => {
       if (node.type === 'CallExpression' && node.arguments.some((a) => a && a.type === 'Identifier')) {
@@ -225,6 +240,10 @@ class ModuleAnalysis {
         optionalCalls.push(node);
       }
       if (node.type === 'ObjectExpression') objectLiterals.push(node);
+      if (node.type === 'ArrayExpression') arrayLiterals.push(node);
+      if (node.type === 'CallExpression' || node.type === 'NewExpression') {
+        for (const a of node.arguments) if (a && a.type === 'ArrayExpression') callArgArrays.add(a);
+      }
       if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') {
         this.recordBinding(node.id.name, node.init, ctx.topLevel);
       } else if (node.type === 'VariableDeclarator' && node.id.type === 'ObjectPattern' && isRequireCall(node.init)) {
@@ -316,11 +335,17 @@ class ModuleAnalysis {
           // known; record the node and resolve post-walk. Unresolvable member
           // objects (res.app, this.modules, ...) are dropped there like any
           // non-router object.
-          if (method && (VERBS.has(method) || method === 'use' || method === 'route')) {
+          if (method && (VERBS.has(method) || method === 'use' || method === 'route' || method === 'param')) {
             this.registrations.push({ object: null, objectNode: node.callee.object, method, args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
           }
           return;
-        } else if (method && (VERBS.has(method) || method === 'use' || method === 'route')) {
+        } else if (method && (VERBS.has(method) || method === 'use' || method === 'route' || method === 'param')
+          && isRequireCall(node.callee.object)) {
+          // require('./shared-router').get('/leak', h) — a registration on
+          // another module's export; resolved and rejected in the sweep.
+          const mod = resolveModulePath(this.file, node.callee.object.arguments[0].value);
+          if (mod) this.directExternalRegs.push({ module: mod, name: null, method, loc: this.loc(node) });
+        } else if (method && (VERBS.has(method) || method === 'use' || method === 'route' || method === 'param')) {
           let base = node.callee.object;
           while (base && base.type === 'CallExpression' && !this.isRouterFactory(base)) {
             base = base.callee && base.callee.type === 'MemberExpression' ? base.callee.object : null;
@@ -337,7 +362,7 @@ class ModuleAnalysis {
           // not a chain we can attribute (or not a registration shape at all)
         } else if (unresolvedMethod) {
           this.registrations.push({ object: objName, method: '<computed>', args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
-        } else if (method && (VERBS.has(method) || method === 'use' || method === 'route')) {
+        } else if (method && (VERBS.has(method) || method === 'use' || method === 'route' || method === 'param')) {
           this.registrations.push({ object: objName, method, args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
         }
       }
@@ -379,9 +404,22 @@ class ModuleAnalysis {
         this.problems.push(`${this.loc(a.node)}: router ${a.right.name} assigned into an object shape the scanner cannot model — register routes via the router identifier, or a one-level object literal bound to a const`);
       }
     }
+    this.externalRouterRegs = [...this.directExternalRegs]; // registrations on OTHER modules' routers
     for (const r of this.registrations) {
       if (r.objectNode) r.object = this.resolveMemberChain(r.objectNode) || '<member>';
       else r.object = this.canonName(r.object);
+      const ob = this.cleanBinding(r.object);
+      if (ob && (ob.kind === 'require' || ob.kind === 'requireMember') && ob.module !== null) {
+        // `const shared = require('./shared-router'); shared.get('/leak', h)`
+        // mutates a router OWNED BY ANOTHER MODULE — recorded so the scanner
+        // can reject the pattern wherever the target is mounted surface.
+        this.externalRouterRegs.push({
+          module: ob.module,
+          name: ob.kind === 'requireMember' ? ob.name : null,
+          method: r.method,
+          loc: this.loc(r.node),
+        });
+      }
     }
     // Optional-call registrations (`app?.get('/leak', h)`) still register at
     // runtime (the app exists) but ride node types the collector does not
@@ -396,6 +434,18 @@ class ModuleAnalysis {
     // nested object, a computed key) could carry registrations invisibly —
     // reject unless it is a modeled one-level binding or the module.exports
     // object (whose members resolve via classifyModuleName).
+    // A router in an ARRAY literal can be registered on through a computed
+    // member the scanner cannot resolve (`holders[0].get('/leak', h)`).
+    // Allowed only as a direct call argument (`app.use('/x', [g, router])`,
+    // which classify() flattens); anywhere else it is rejected.
+    for (const arr of arrayLiterals) {
+      if (callArgArrays.has(arr)) continue;
+      for (const el of arr.elements) {
+        if (el && el.type === 'Identifier' && this.routers.has(this.canonName(el.name))) {
+          this.problems.push(`${this.loc(el)}: router ${el.name} stored in an array — the scanner cannot attribute registrations made through array access; mount/register via the router identifier`);
+        }
+      }
+    }
     for (const obj of objectLiterals) {
       if (obj === this.exportObjectNode) continue;
       const modeled = [...this.bindings.values()].some((b) => b.kind === 'object' && b.node === obj);
@@ -472,14 +522,14 @@ class ModuleAnalysis {
     if (!node || node.type !== 'CallExpression') return false;
     const c = node.callee;
     if (c.type === 'Identifier') {
-      const b = this.bindings.get(c.name);
+      const b = this.cleanBinding(c.name);
       return Boolean(b && b.kind === 'requireMember' && b.module === null
         && b.spec === 'express' && b.name === 'Router');
     }
     if (c.type === 'MemberExpression' && !c.computed && c.property.type === 'Identifier' && c.property.name === 'Router') {
       if (isRequireCall(c.object)) return c.object.arguments[0].value === 'express';
       if (c.object.type === 'Identifier') {
-        const b = this.bindings.get(c.object.name);
+        const b = this.cleanBinding(c.object.name);
         return Boolean(b && b.kind === 'require' && b.module === null && b.spec === 'express');
       }
     }
@@ -737,6 +787,16 @@ class ModuleAnalysis {
   }
 
   /**
+   * The binding for `name`, or null when the name is shadowed/reassigned —
+   * every PROVENANCE decision must refuse an ambiguous name (a block-local
+   * `express` could make a fake .json()/.Router() look package-trusted).
+   */
+  cleanBinding(name) {
+    if (this.shadowedNames.has(name) || this.reassignedNames.has(name)) return null;
+    return this.bindings.get(name) || null;
+  }
+
+  /**
    * True when `node` (an Identifier or require() call) resolves to a
    * node_modules import — i.e. code that cannot construct one of OUR routers.
    */
@@ -744,7 +804,7 @@ class ModuleAnalysis {
     if (!node) return false;
     if (isRequireCall(node)) return resolveModulePath(this.file, node.arguments[0].value) === null;
     if (node.type === 'Identifier') {
-      const b = this.bindings.get(node.name);
+      const b = this.cleanBinding(node.name);
       return Boolean(b && (b.kind === 'require' || b.kind === 'requireMember') && b.module === null);
     }
     return false;
@@ -835,8 +895,8 @@ class ModuleAnalysis {
         if (c.type === 'MemberExpression' && !c.computed && c.property.name === 'static'
           && ((isRequireCall(c.object) && c.object.arguments[0].value === 'express')
             || (c.object.type === 'Identifier'
-              && ((this.bindings.get(c.object.name) || {}).kind === 'require')
-              && (this.bindings.get(c.object.name) || {}).spec === 'express'))) {
+              && ((this.cleanBinding(c.object.name) || {}).kind === 'require')
+              && (this.cleanBinding(c.object.name) || {}).spec === 'express'))) {
           // Provenance-checked like Router(): only require('express').static
           // counts — an in-repo helper.static() could return a router whose
           // routes would hide behind an existing STATIC allowlist key.
@@ -882,7 +942,7 @@ class ModuleAnalysis {
           && (this.isNodeModulesRef(c.object)
             || (isRequireCall(c.object) && resolveModulePath(this.file, c.object.arguments[0].value) === null))) {
           // express.json(...), bodyParser.raw(...) — node_modules member call.
-          const spec = isRequireCall(c.object) ? c.object.arguments[0].value : (this.bindings.get(c.object.name) || {}).spec;
+          const spec = isRequireCall(c.object) ? c.object.arguments[0].value : (this.cleanBinding(c.object.name) || {}).spec;
           if (spec && registry.lookupPackagePassthrough(spec, c.property.name)) {
             return [{ type: 'passthrough', name: `${spec}.${c.property.name}` }];
           }
@@ -897,7 +957,7 @@ class ModuleAnalysis {
         let spec = null;
         if (isRequireCall(node.object)) { spec = node.object.arguments[0].value; mod = resolveModulePath(this.file, spec); modKnown = true; }
         else if (node.object.type === 'Identifier') {
-          const b = this.bindings.get(node.object.name);
+          const b = this.cleanBinding(node.object.name);
           if (b && b.kind === 'require') { mod = b.module; spec = b.spec; modKnown = true; }
         }
         if (modKnown && mod === null) {
@@ -1076,7 +1136,52 @@ class Scanner {
       prefix: '/', mountGuards: [], inEffect: [], mountLabel: '/', mountRouter: this.appFile,
       mountConditional: false, mountCond: null,
     });
+    this.checkExternalRouterMutations();
     return this.result();
+  }
+
+  /**
+   * A module can require another module's router and register routes on it
+   * (`require('./shared-router').get('/leak', h)`, or via a binding) — a
+   * side-effect installer the mount-graph walk never opens. Sweep EVERY
+   * server file (mounted or not) and reject registrations that target a
+   * router owned by a module in the mounted surface: routes registered
+   * outside the owning module are invisible to its guard ordering.
+   */
+  checkExternalRouterMutations() {
+    const flag = (m) => {
+      for (const x of m.externalRouterRegs || []) {
+        if (!this.modules.has(x.module)) continue; // target is not mounted surface
+        const t = this.modules.get(x.module);
+        const targetsRouter = x.name ? t.routers.has(t.canonName(x.name)) : Boolean(t.exportedRouter);
+        if (targetsRouter) {
+          this.problems.push(`${x.loc}: ${x.method}() on the router exported by ${x.module} — routes registered outside the owning module bypass its guard ordering; register them in ${x.module}`);
+        }
+      }
+    };
+    for (const m of [...this.modules.values()]) flag(m);
+    for (const rel of this.listServerFiles()) {
+      if (this.modules.has(rel)) continue;
+      let m;
+      try { m = new ModuleAnalysis(rel, this.read(rel), this); } catch { continue; }
+      flag(m); // its OTHER problems are ignored — the file is not mounted surface
+    }
+  }
+
+  listServerFiles() {
+    if (this.virtual) return Object.keys(this.virtual);
+    const out = [];
+    const walkDir = (dir) => {
+      for (const e of fs.readdirSync(path.join(this.root, dir), { withFileTypes: true })) {
+        const rel = `${dir}/${e.name}`;
+        if (e.isDirectory()) {
+          if (e.name === 'node_modules' || rel === 'server/tests') continue;
+          walkDir(rel);
+        } else if (e.name.endsWith('.js')) out.push(rel);
+      }
+    };
+    walkDir('server');
+    return out;
   }
 
   /**
@@ -1091,9 +1196,30 @@ class Scanner {
       return;
     }
     const inEffect = [...ctx.inEffect];
+    // router.param() callbacks run BEFORE a matched route's own middleware
+    // stack, so an unproven callback can answer the request ahead of any
+    // per-route guard. Collect the params whose callback is not provably a
+    // guard/passthrough; routes whose path uses one of them get their
+    // per-route guards voided (mount-level guards still count — they run
+    // before the router entirely).
+    const unsafeParams = new Set();
+    for (const reg of m.registrations) {
+      if (reg.object !== objectName || reg.method !== 'param') continue;
+      const nameArg = reg.args[0];
+      const handlers = reg.args.slice(1).flatMap((a) => m.classify(a));
+      const proven = handlers.length > 0 && handlers.every((h) => h.type === 'guard' || h.type === 'passthrough');
+      if (proven) continue;
+      if (nameArg && nameArg.type === 'StringLiteral') unsafeParams.add(nameArg.value);
+      else unsafeParams.add('*'); // unresolvable param name covers every param
+    }
+    const pathUsesUnsafeParam = (p) => {
+      if (unsafeParams.size === 0 || typeof p !== 'string') return false;
+      if (unsafeParams.has('*') && p.includes(':')) return true;
+      return [...p.matchAll(/:([A-Za-z0-9_]+)/g)].some((mm) => unsafeParams.has(mm[1]));
+    };
     for (const reg of m.registrations) {
       if (reg.object !== objectName) continue;
-      if (reg.method === 'route' || reg.method === '<computed>') continue; // already a problem
+      if (reg.method === 'route' || reg.method === '<computed>' || reg.method === 'param') continue; // route/<computed>: already a problem
       const args = [...reg.args];
       let paths = ['/'];
       let pathResolved = true;
@@ -1227,11 +1353,12 @@ class Scanner {
       const method = (reg.method === 'del' ? 'delete' : reg.method).toUpperCase();
       for (const p of paths) {
         const fullPath = joinPaths(ctx.prefix, p);
+        const paramVoided = pathUsesUnsafeParam(pathToken(p));
         this.routes.push(this.makeRoute({
           method, fullPath, routerFile: m.file, mountPrefix: ctx.mountLabel,
           guards: [
             ...ctx.mountGuards,
-            ...ownGuards.map((g) => ({ ...g, baseScope: ctx.prefix })),
+            ...(paramVoided ? [] : ownGuards).map((g) => ({ ...g, baseScope: ctx.prefix })),
             ...(reg.topLevel ? inEffectGuards(inEffect, fullPath) : []),
           ],
           resolved: pathResolved, conditional: ctx.mountConditional || !reg.topLevel, cond: [ctx.mountCond, reg.cond].filter(Boolean).join(' && ') || null, loc: m.loc(reg.node),
