@@ -2334,6 +2334,27 @@ function frozenSetupFeeAmount(estimateData = {}) {
 // estimate carries a one-time rodent_bait_setup row — every charging path
 // (standard accept AND annual prepay) bills exactly the STORED amount the
 // customer accepted, never a live constant. 0 = no disclosed setup.
+// TRUE when the estimate's rodent bait program is the COMMERCIAL key —
+// its setup is never family-waived (owner ruling 2026-08-29), so the
+// accept-side gained-family guard must not refuse it (codex #3591 r79 P1).
+function estimateRodentBaitIsCommercial(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  const pools = [
+    data?.result?.lineItems,
+    data?.engineResult?.lineItems,
+    data?.result?.recurring?.services,
+    data?.recurring?.services,
+    data?.result?.specItems,
+  ];
+  for (const arr of pools) {
+    if (!Array.isArray(arr)) continue;
+    for (const it of arr) {
+      if (recurringServiceKey(it) === 'commercial_rodent_bait') return true;
+    }
+  }
+  return false;
+}
+
 function frozenRodentBaitSetupAmount(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
   // A persisted ZERO decision for the rodent kind (wizard: claim already
@@ -6362,7 +6383,15 @@ const EstimateConverter = {
       // transaction, a ledger failure fails the accept rather than minting a
       // prepay whose setup could never be restored.
       if (billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount(estimateData) > 0) {
-        const { authoritativeServiceKey, recordSetupFeeClaimForInvoice } = require('./secure-appointment-plans');
+        const { authoritativeServiceKey, recordSetupFeeClaimForInvoice, assertFrozenRodentSetupStillOwed } = require('./secure-appointment-plans');
+        // Gained-family recheck under the customer-row lock (codex #3591
+        // r79 P1): a qualifying booking that committed since the unlocked
+        // pre-accept reconciliation waives a RESIDENTIAL setup — refuse
+        // retryably so a refresh reprices the quote without it. Commercial
+        // bait is never family-waived, so it is exempt.
+        if (!estimateRodentBaitIsCommercial(estimateData)) {
+          await assertFrozenRodentSetupStillOwed(database, customerId);
+        }
         const roots = await database('scheduled_services')
           .where({ source_estimate_id: estimateId, customer_id: customerId })
           .whereNull('recurring_parent_id')
@@ -6895,6 +6924,7 @@ module.exports.estimateHasCommercialOneTime = estimateHasCommercialOneTime;
 module.exports.WAVEGUARD_SETUP_FEE = WAVEGUARD_SETUP_FEE;
 module.exports.frozenSetupFeeAmount = frozenSetupFeeAmount;
 module.exports.frozenRodentBaitSetupAmount = frozenRodentBaitSetupAmount;
+module.exports.estimateRodentBaitIsCommercial = estimateRodentBaitIsCommercial;
 // Annual prepay supports exactly ONE recurring coverage unit — the same math
 // as convertEstimate's fail-closed ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED
 // guard (recurring.services lines + any supplemental companion a solo primary

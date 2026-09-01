@@ -676,6 +676,30 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(migrationSrc).toMatch(/if \(migrationOwnsRuleCycle && ruleAudit\?\.old_value && rule && rule\.tier_qualifier === true && rule\.exclude_from_pct_discount === false\) \{/);
   });
 
+  test('accept-side gained-family guard under the customer lock (residential only) · C360 retire lock · gate-independent waiver qualification (codex #3591 r79 P1)', () => {
+    const plansSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
+    // The guard locks the customer row, re-probes ungated+strict, and
+    // refuses retryably (status 409) when a family was gained.
+    expect(plansSrc).toMatch(/async function assertFrozenRodentSetupStillOwed\(trx, customerId\) \{\s+if \(!customerId\) return;\s+await trx\('customers'\)\.where\(\{ id: customerId \}\)\.forUpdate\(\)\.first\('id'\);[\s\S]*?\{ strict: true, planGate: false \}[\s\S]*?err\.status = 409;/);
+    // All three accept-side mint sites run it, each exempting COMMERCIAL
+    // bait (never family-waived).
+    const estimatePublicSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    expect((estimatePublicSrc.match(/estimateRodentBaitIsCommercial\((acceptedEstDataForPricing|conversionEstData)\)\)\s*\{\s+await (plans\.|require\('\.\.\/services\/secure-appointment-plans'\)\.)assertFrozenRodentSetupStillOwed\(trx, customerId\);/g) || []).length).toBe(2);
+    const converterSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
+    expect(converterSrc).toMatch(/if \(!estimateRodentBaitIsCommercial\(estimateData\)\) \{\s+await assertFrozenRodentSetupStillOwed\(database, customerId\);\s+\}/);
+    // The C360 prepay retry's authoritative re-read runs under the same
+    // customer-row lock the booking creators hold.
+    const retryAt = plansSrc.indexOf('async function retirePrepayOnBookSetupClaim');
+    const retryLockAt = plansSrc.indexOf("await trx('customers').where({ id: customerId }).forUpdate().first('id');", retryAt);
+    const retryDeriveAt = plansSrc.indexOf('module.exports.resolveDirectRodentSetupObligation(trx, { id: anchorId })', retryAt);
+    expect(retryLockAt).toBeGreaterThan(retryAt);
+    expect(retryLockAt).toBeLessThan(retryDeriveAt);
+    // The waiver's canonical qualification is independent of the auto-tier
+    // rollout gate: the legacy label-only branch serves gated TIER reads only.
+    const waveguardSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'waveguard-existing-services.js'), 'utf8');
+    expect(waveguardSrc).toMatch(/if \(planGate && !isEnabled\('autoWaveguardTierEnroll'\)\) \{/);
+  });
+
   test('waiver rechecks run under the customer lock · seeding anchors the coverage claim · verified waiver rides the reprice · prefilled prepay totals add the setup (codex #3591 r77 P1)', () => {
     const plansSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
     // Prepay funnel: advisory lock → visit lock → CUSTOMER lock → owed-now

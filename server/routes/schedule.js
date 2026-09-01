@@ -235,6 +235,24 @@ router.get('/', async (req, res, next) => {
           service_name: s.catalog_service_name,
           catalog_billing_type: s.catalog_billing_type,
         }),
+        // Catalog display name, surfaced ONLY when catalog identity
+        // resolved a DIFFERENT family than the stale label (codex #3591
+        // r79 P2): the client prefers it for card titles so a row still
+        // labeled "Rodent Trapping" but repointed to the bait program does
+        // not title a bait-station card with trapping copy.
+        serviceDisplayName: (() => {
+          if (!s.catalog_service_name) return null;
+          const withCatalog = portalRowWaveGuardFamily({
+            service_type: s.service_type,
+            service_key: s.catalog_service_key,
+            service_name: s.catalog_service_name,
+            catalog_billing_type: s.catalog_billing_type,
+          });
+          const labelOnly = portalRowWaveGuardFamily({ service_type: s.service_type });
+          return withCatalog && withCatalog !== labelOnly
+            ? normalizeServiceType(s.catalog_service_name)
+            : null;
+        })(),
         // Self-serve deep link (same page the reminder texts link) — the
         // portal's Reschedule buttons open this instead of drafting an SMS
         // to the office. Same-customer row, so exposing the token here adds

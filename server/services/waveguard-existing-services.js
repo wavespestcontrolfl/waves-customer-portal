@@ -304,7 +304,14 @@ async function loadExistingRecurringQualifyingRows(database, customerId, { catal
   if (planGate && !(await isActivePlanCustomer(database, customerId, { strict }))) return [];
   const rows = await loadActiveRecurringServiceRows(database, customerId);
   const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('autoWaveguardTierEnroll')) {
+  // The legacy label-only branch is TIER-read behavior under the rollout
+  // gate. A planGate: false read is the rodent SETUP-WAIVER (codex #3591
+  // r79 P1) — it exists precisely for accounts the auto-tier rollout has
+  // not stamped, so it must run the canonical qualification (catalog join,
+  // date/callback/source predicates, commercial and non-bait-rodent
+  // exclusions) regardless of the gate, or a stale past row or a
+  // generically-labelled commercial row waives the $99.
+  if (planGate && !isEnabled('autoWaveguardTierEnroll')) {
     return rows.filter((r) => toQualifyingKeys(r.service_type).length > 0);
   }
   const { etDateString } = require('../utils/datetime-et');

@@ -30,9 +30,11 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
     // The setup-waiver evidence read is UNGATED since codex #3591 r73 P1
     // (planGate: false): it reaches the live rows even for a non-member
     // customer, so the fake serves an empty account (a real lookup failure
-    // 503s the save by design).
+    // 503s the save by design). leftJoin serves the canonical catalog join
+    // the waiver read runs regardless of the auto-tier gate (r79 P1).
     columnInfo: async () => ({ is_recurring: {} }),
     whereNotIn() { return this; },
+    leftJoin() { return this; },
     select: async () => [],
     where(clause) {
       return {

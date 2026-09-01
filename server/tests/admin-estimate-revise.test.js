@@ -70,15 +70,18 @@ function makeReviseDatabase({
       };
       return leadChain;
     }
-    if (table === 'scheduled_services') {
+    if (String(table).startsWith('scheduled_services')) {
       // The setup-waiver evidence read is UNGATED since codex #3591 r73 P1
       // (planGate: false): it reaches the live rows even for a non-member
       // customer, so the fake must serve an empty account instead of
       // throwing (a real lookup failure here 503s the save by design).
+      // leftJoin + the aliased table name serve the canonical catalog join
+      // the waiver read runs regardless of the auto-tier gate (r79 P1).
       const rowsChain = {
         where: () => rowsChain,
         whereNotIn: () => rowsChain,
         whereNull: () => rowsChain,
+        leftJoin: () => rowsChain,
         columnInfo: async () => ({ is_recurring: {} }),
         select: async () => [],
         first: async () => null,

@@ -111,6 +111,17 @@ describe('loadExistingRecurringQualifyingRows plan-gate', () => {
     expect(await loadExistingQualifyingServiceKeys(db, 'c1')).toEqual([]);
   });
 
+  test('planGate: false runs the CANONICAL qualification even while auto-tiering is gated off (codex #3591 r79 P1)', async () => {
+    // GATE_AUTO_WAVEGUARD_TIER is off in tests — the legacy label-only
+    // branch must serve TIER reads only. The waiver read still applies the
+    // full predicates: a commercial row and a past-dated pending row never
+    // waive the $99.
+    const commercialRow = { id: 's2', service_type: 'Commercial Lawn Care', scheduled_date: '2099-09-12', status: 'pending' };
+    const staleRow = { id: 's3', service_type: 'Quarterly Pest Control', scheduled_date: '2001-01-01', status: 'pending' };
+    const db = fakeDb({ customer: { id: 'c1', waveguard_tier: null }, scheduledRows: [commercialRow, staleRow] });
+    expect(await loadExistingQualifyingServiceKeys(db, 'c1', { planGate: false })).toEqual([]);
+  });
+
   test('authoritative qualifying keys expand combined plan components', async () => {
     const db = fakeDb({
       customer: { id: 'c1', waveguard_tier: 'Silver' },

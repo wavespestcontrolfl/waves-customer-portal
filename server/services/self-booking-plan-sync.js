@@ -1079,6 +1079,16 @@ function textHasRodentBaitToken(value) {
 }
 
 function isNonBaitRodentServiceRow(row = {}) {
+  // Authoritative one-time catalog metadata excludes the row outright, and
+  // it decides BEFORE the rodent-led gate (codex #3591 r63 P1 · r79 P1):
+  // services.billing_type is the truth because catalog names do not
+  // reliably carry a one-time token — lawn_fungicide reads as recurring
+  // lawn and termite_cartridge_replacement as termite-bait coverage by
+  // text. A recurring-flagged row repointed to ANY one-time catalog
+  // service (rodent-led or not) must never feed tier/setup-waiver evidence
+  // or the portal plan payload; every caller uses this as an exclusion
+  // predicate, so returning true here excludes exactly that row.
+  if (catalogTextForServiceRow(row) && catalogBillingTypeIsOneTime(row)) return true;
   if (!isRodentLedServiceRow(row)) return false;
   // A rodent-led CATALOG identity decides bait vs non-bait on its own
   // (codex #3591 r30 P1): a recurring row repointed to rodent_trapping that
@@ -1089,14 +1099,6 @@ function isNonBaitRodentServiceRow(row = {}) {
   // or a non-rodent one (the catalog-family prune handles those), still
   // classify from every text field as before.
   const catalogText = catalogTextForServiceRow(row);
-  // Authoritative one-time catalog metadata excludes the row outright (codex
-  // #3591 r63 P1): services.billing_type decides before either text branch,
-  // because catalog names do not reliably carry a one-time token —
-  // lawn_fungicide reads as recurring lawn and termite_cartridge_replacement
-  // as termite-bait coverage by text — and the bait-token scan below would
-  // otherwise keep a recurring-flagged row repointed to one-time work in the
-  // tier/setup-waiver evidence.
-  if (catalogText && catalogBillingTypeIsOneTime(row)) return true;
   if (catalogText && textIsRodentLed(catalogText)) return !textHasRodentBaitToken(catalogText);
   // A NON-rodent catalog identity wins over a stale rodent label (codex
   // #3591 r61 P1): a row repointed to an authoritative pest/lawn/etc.

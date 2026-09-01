@@ -11090,6 +11090,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing);
         if (invoiceModeRodentSetup > 0) {
           const plans = require('../services/secure-appointment-plans');
+          // Gained-family recheck under the customer-row lock (codex #3591
+          // r79 P1): the pre-transaction reconciliation ran unlocked — a
+          // qualifying booking that committed since waives this fee, so
+          // the accept refuses retryably instead of billing it. Commercial
+          // bait is never family-waived (owner 2026-08-29) — exempt.
+          if (!require('../services/estimate-converter').estimateRodentBaitIsCommercial(acceptedEstDataForPricing)) {
+            await plans.assertFrozenRodentSetupStillOwed(trx, customerId);
+          }
           const invoiceModeRoots = await trx('scheduled_services')
             .where({ source_estimate_id: estimate.id, customer_id: customerId })
             .whereNull('recurring_parent_id')
@@ -11434,6 +11442,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               });
             }
             if (acceptedRodentSetupAmount > 0) {
+              // Gained-family recheck under the customer-row lock (codex
+              // #3591 r79 P1): a qualifying booking committed since the
+              // unlocked reconciliation waives this fee — refuse retryably
+              // instead of billing it. Commercial bait is never
+              // family-waived (owner 2026-08-29) — exempt.
+              if (!EstimateConverter.estimateRodentBaitIsCommercial(conversionEstData)) {
+                await require('../services/secure-appointment-plans').assertFrozenRodentSetupStillOwed(trx, customerId);
+              }
               lineItems.push({
                 description: 'Bait Station Setup — one-time setup fee',
                 quantity: 1,

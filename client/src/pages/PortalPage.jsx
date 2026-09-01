@@ -10006,7 +10006,11 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
     const id = detectCatalogServiceId(service);
     if (!id) return;
     if (!detectedServiceIds.includes(id)) detectedServiceIds.push(id);
-    const realName = service.serviceType || service.service_type || service.type;
+    // serviceDisplayName is the server's resolved CATALOG name, set only
+    // when catalog identity overrode a stale label's family (codex #3591
+    // r79 P2) — prefer it so the card title matches the card's program
+    // (a repointed "Rodent Trapping" label never titles the bait card).
+    const realName = service.serviceDisplayName || service.serviceType || service.service_type || service.type;
     if (realName && !detectedServiceNames[id]) detectedServiceNames[id] = realName;
   };
   // Only recurring, non-callback visits represent WaveGuard plan coverage. One-time

@@ -426,6 +426,15 @@ describe('self-booking plan sync helpers', () => {
     expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_inspection', service_name: 'Lawn Inspection' })).toBe(true);
     // …while genuinely recurring catalog identities still win the override.
     expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_care_quarterly' })).toBe(false);
+    // billing_type one_time excludes the row BEFORE the rodent-led gate
+    // (codex #3591 r79 P1): a NON-rodent-led recurring-flagged row
+    // repointed to one-time catalog work must not feed tier/waiver
+    // evidence merely because it never enters the rodent branches.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Monthly Lawn Care', service_key: 'lawn_fungicide', service_name: 'Lawn Fungicide Treatment', catalog_billing_type: 'one_time' })).toBe(true);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Termite Protection', service_key: 'termite_cartridge_replacement', catalog_billing_type: 'one_time' })).toBe(true);
+    // …a recurring billing_type keeps non-rodent rows out of this
+    // exclusion exactly as before.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Monthly Lawn Care', service_key: 'lawn_care_monthly', catalog_billing_type: 'recurring' })).toBe(false);
     // Catalog billing_type is the AUTHORITATIVE one-time signal (codex #3591
     // r63 P1): lawn_fungicide and termite_cartridge_replacement are
     // billing_type 'one_time' in the catalog but carry no one-time token, so
@@ -449,7 +458,9 @@ describe('self-booking plan sync helpers', () => {
     expect(read('scripts', 'align-waveguard-portal-records.js')).toMatch(/\.select\('s\.\*', 'svc\.service_key', 'svc\.name as service_name', 'svc\.billing_type as catalog_billing_type'\)/);
     const schedule = read('routes', 'schedule.js');
     expect(schedule).toMatch(/'catalog_svc\.billing_type as catalog_billing_type'/);
-    expect((schedule.match(/catalog_billing_type: s\.catalog_billing_type,/g) || []).length).toBe(2);
+    // 3 since codex #3591 r79 P2: the serviceDisplayName resolver re-runs
+    // the classifier with the joined catalog fields.
+    expect((schedule.match(/catalog_billing_type: s\.catalog_billing_type,/g) || []).length).toBe(3);
     expect(read('routes', 'admin-schedule.js')).toMatch(/catalog_billing_type: serviceRecord\?\.billing_type,/);
   });
 

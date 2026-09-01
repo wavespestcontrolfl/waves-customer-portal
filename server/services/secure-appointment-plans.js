@@ -586,6 +586,29 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
   return { anchorId: null, amount: cents(Math.max(0, Number(RODENT.baitSetupFee) || 0)) };
 }
 
+// An acceptance is about to bill a FROZEN un-waived rodent setup (codex
+// #3591 r79 P1): the pre-transaction reconciliation's gained-family probe
+// ran unlocked, so a qualifying booking can commit between it and the
+// accept transaction. Lock the customer row (the booking creators'
+// serialization point) and re-probe under it; a family gained since means
+// the rule waives the fee — refuse retryably (err.status 409) so a refresh
+// reprices the quote without the setup instead of billing it.
+async function assertFrozenRodentSetupStillOwed(trx, customerId) {
+  if (!customerId) return;
+  await trx('customers').where({ id: customerId }).forUpdate().first('id');
+  const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+  const otherQualifiers = (await loadExistingQualifyingServiceKeys(trx, customerId, { strict: true, planGate: false }) || [])
+    .filter((key) => key !== 'rodent_bait');
+  if (otherQualifiers.length > 0) {
+    const err = new Error('This account just added a qualifying recurring service, so the bait-station setup is now waived — refresh the quote and accept again.');
+    err.status = 409;
+    err.statusCode = 409;
+    err.isOperational = true;
+    err.code = 'RODENT_SETUP_NOW_WAIVED';
+    throw err;
+  }
+}
+
 // Customer 360 mint of a NEW rodent prepay with no series root yet (codex
 // #3591 r41 P1): re-derive the coverage obligation under the mint's
 // transaction, refuse on drift (an anchor appeared, the amount moved, or the
@@ -632,6 +655,12 @@ async function retirePrepayOnBookSetupClaim(trx, { customerId, scheduledServiceI
     .first('id', 'customer_id', 'recurring_parent_id', 'source_estimate_id');
   if (!visit || String(visit.customer_id) !== String(customerId)) throw conflict('The prepaid series does not belong to this customer — refresh and retry');
   const anchorId = visit.recurring_parent_id || visit.id;
+  // Serialize with the recurring-booking creators (codex #3591 r79 P1):
+  // they lock the CUSTOMER ROW before inserting a qualifying series, so the
+  // authoritative re-read below must wait behind an in-flight booking or
+  // this mint approves a $99 the just-added family waives. Same
+  // advisory-then-customer order as the coverage-only mint and the funnel.
+  await trx('customers').where({ id: customerId }).forUpdate().first('id');
   // Through module.exports so a caller's spy on the shared resolver sees
   // this leg exactly as it sees the preview's (same test seam).
   const owed = await module.exports.resolveDirectRodentSetupObligation(trx, { id: anchorId });
@@ -1365,6 +1394,7 @@ module.exports = {
   stampedSetupForVisit,
   anchorSetupFeeClaim,
   liveAnchorlessCoverageSetupClaim,
+  assertFrozenRodentSetupStillOwed,
   retireDirectSetupClaimForPrepay,
   retirePrepayOnBookSetupClaim,
   findDirectRodentSetupObligationForCoverage,
