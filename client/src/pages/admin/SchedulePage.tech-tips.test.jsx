@@ -3,7 +3,7 @@
 // vocabulary they use at the truck lands on the right tip first), and the
 // option subtext is the copy's first sentence, trimmed.
 import { describe, expect, test } from 'vitest';
-import { rankTechTips, techTipSubtext, techTipSentLabel, TECH_TIP_MAX } from './SchedulePage.jsx';
+import { rankTechTips, techTipSubtext, techTipSentLabel, parkTaggedNoteLines, TECH_TIP_MAX } from './SchedulePage.jsx';
 
 const TIPS = [
   { id: 'water_bromeliads', label: 'Flush bromeliads weekly', keywords: ['bromeliad', 'cups', 'water'], copy: 'If you have bromeliads, the cup holds water. Flush weekly.' },
@@ -56,6 +56,35 @@ describe('techTipSentLabel', () => {
     expect(techTipSentLabel('')).toBeNull();
     expect(techTipSentLabel(undefined)).toBeNull();
     expect(techTipSentLabel('Aug 3')).toBeNull();
+  });
+});
+
+describe('parkTaggedNoteLines', () => {
+  const notes = [
+    'Treated the perimeter and the lanai.',
+    '[Found] Ant trail at the slider track',
+    '[found] moisture under the kitchen sink',
+    '[Found] German roach activity',
+    '[Next] Reservice the lanai in two weeks',
+    '[Protocol] Perimeter spray',
+  ].join('\n');
+
+  test('parks free-typed lines for the tag, case-insensitively, skipping chip marker lines', () => {
+    expect(parkTaggedNoteLines({ notes, tag: 'found', labels: ['German roach activity'], current: '' }))
+      .toBe('Ant trail at the slider track\nmoisture under the kitchen sink');
+    expect(parkTaggedNoteLines({ notes, tag: 'next' })).toBe('Reservice the lanai in two weeks');
+  });
+
+  test('appends to existing text without duplicating it', () => {
+    expect(parkTaggedNoteLines({ notes, tag: 'next', current: 'Reservice the lanai in two weeks\nTrim the hedge' }))
+      .toBe('Reservice the lanai in two weeks\nTrim the hedge');
+    expect(parkTaggedNoteLines({ notes, tag: 'next', current: 'Trim the hedge' }))
+      .toBe('Trim the hedge\nReservice the lanai in two weeks');
+  });
+
+  test('nothing to park is null, so state is left untouched', () => {
+    expect(parkTaggedNoteLines({ notes: 'Plain prose only.', tag: 'found', current: 'keep me' })).toBeNull();
+    expect(parkTaggedNoteLines({ notes, tag: 'found', labels: ['Ant trail at the slider track', 'moisture under the kitchen sink', 'German roach activity'] })).toBeNull();
   });
 });
 

@@ -12361,6 +12361,13 @@ export function CompletionPanel({
       );
       setChipLinesDetached(true);
     }
+    // Free-typed [Found]/[Next] lines would vanish with the notes — park
+    // them (parkTaggedNoteLines) so completion, regeneration, the photo
+    // context and drafts keep them.
+    const parkedFound = parkTaggedNoteLines({ notes, tag: "found", labels: selectedObservationLabels, current: observationsText });
+    if (parkedFound !== null) setObservationsText(parkedFound);
+    const parkedNext = parkTaggedNoteLines({ notes, tag: "next", labels: selectedRecommendationLabels, current: recommendationsText });
+    if (parkedNext !== null) setRecommendationsText(parkedNext);
     setNotes(String(reportText || "").trim());
   }
   // Deselect handle after an AI draft: remove a structured selection from its
@@ -12426,11 +12433,15 @@ export function CompletionPanel({
       .map((line) => line.match(rx)?.[1]?.trim() || "")
       .filter(Boolean);
   }
+  function uniqueLines(lines) {
+    const seen = new Set();
+    return lines.filter((line) => !seen.has(line.toLowerCase()) && seen.add(line.toLowerCase()));
+  }
   function observationFreeText() {
-    return [...freeTextLines(observationsText), ...taggedNoteLines("found")];
+    return uniqueLines([...freeTextLines(observationsText), ...taggedNoteLines("found")]);
   }
   function recommendationFreeText() {
-    return [...freeTextLines(recommendationsText), ...taggedNoteLines("next")];
+    return uniqueLines([...freeTextLines(recommendationsText), ...taggedNoteLines("next")]);
   }
   // Single source of truth for the AI report payload + the "is there enough to
   // generate?" gate, so the two Generate buttons (mobile + desktop) and the
@@ -19421,6 +19432,27 @@ export function techTipSentLabel(day) {
   const at = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12));
   if (Number.isNaN(at.getTime())) return null;
   return `sent ${at.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
+}
+
+// Free-typed `[Found] …` / `[Next] …` note lines are the typed findings /
+// next-steps channel once the textareas are gone. They have no label array
+// to survive an AI draft in (chip lines do — labelsStillInNotes), so before
+// Generate replaces the notes with prose they are parked in the observation
+// / recommendation text state, which every reader already merges. Lines
+// that carry a still-selected chip label are the chip's own marker line and
+// stay with the chip. Returns the new text, or null when nothing to park.
+export function parkTaggedNoteLines({ notes, tag, labels = [], current = "" }) {
+  const rx = new RegExp(`^\\[${tag}\\]\\s*(.+)$`, "i");
+  const chipLabels = labels.map((l) => String(l || "").trim().toLowerCase()).filter(Boolean);
+  const typed = String(notes || "")
+    .split("\n")
+    .map((line) => line.trim().match(rx)?.[1]?.trim() || "")
+    .filter((line) => line && !chipLabels.some((label) => line.toLowerCase().includes(label)));
+  if (!typed.length) return null;
+  const seen = new Set();
+  const merged = [...String(current || "").split("\n").map((l) => l.trim()), ...typed]
+    .filter((line) => line && !seen.has(line.toLowerCase()) && seen.add(line.toLowerCase()));
+  return merged.join("\n");
 }
 
 export function rankTechTips(tips, q) {
