@@ -210,6 +210,9 @@ function scanSourceForDynamicTableInserts(src) {
   const RAW_DYNAMIC_RES = [
     /\binsert\s+into\s+(?:only\s+)?\$\{([^}]+)\}/gi,
     /\binsert\s+into\s+(?:only\s+)?['"`]\s*\+\s*([\w$.[\]]+)/gi,
+    // Knex identifier binding at the table position — the bound value is
+    // runtime data, so it is dynamic by definition (never resolvable).
+    /\binsert\s+into\s+(?:only\s+)?(\?\?)/gi,
   ];
   for (const re of RAW_DYNAMIC_RES) {
     re.lastIndex = 0;
@@ -404,6 +407,11 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
       "await db.raw('INSERT INTO ' + table + ' (a) VALUES (?)', [a]);"
     );
     expect(rawConcat).toHaveLength(1);
+    const rawBound = scanSourceForDynamicTableInserts(
+      "await db.raw('INSERT INTO ?? (a) VALUES (?)', [table, a]);"
+    );
+    expect(rawBound).toHaveLength(1);
+    expect(rawBound[0].expr).toBe('??');
     // A literal raw table with interpolated VALUES stays with the literal scan.
     const rawLiteralTable = scanSourceForDynamicTableInserts(
       'await db.raw(`INSERT INTO other_things (a) VALUES (${a})`);'

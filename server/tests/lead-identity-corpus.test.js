@@ -180,14 +180,15 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     for (const c of CASES) {
       for (const rec of [c.a, c.b]) {
         if (rec.phone != null) {
-          const digits = String(rec.phone).replace(/\D/g, '');
-          // Zero digits → must be an allowlisted sentinel string; any digits →
-          // the COMPLETE number must be a reserved NANP fixture (NXX-555-01xx,
-          // optional leading 1). A real 7-digit local number or a non-NANP
-          // number merely ending in 55501xx fails here by design.
-          const ok = digits.length === 0
-            ? NON_PHONE_SENTINELS.has(String(rec.phone).trim().toLowerCase())
-            : NUMERIC_PHONE_SENTINELS.has(digits) || /^1?[2-9]\d\d55501\d\d$/.test(digits);
+          const v = String(rec.phone).trim();
+          // The COMPLETE trimmed value must be ONE allowed form — a reserved
+          // NANP fixture number (NXX-555-01xx) in common punctuation, an
+          // exact numeric caller-ID sentinel, or an allowlisted word
+          // sentinel. Digit-stripping alone would let prose (a name, a
+          // street) ride in front of a reserved number and pass.
+          const ok = /^\+?1?[\s.-]?\(?[2-9]\d\d\)?[\s.-]?555[\s.-]?01\d\d$/.test(v)
+            || (/^\+?\d+$/.test(v) && NUMERIC_PHONE_SENTINELS.has(v.replace('+', '')))
+            || NON_PHONE_SENTINELS.has(v.toLowerCase());
           expect({ id: c.id, phone: rec.phone, ok })
             .toEqual({ id: c.id, phone: rec.phone, ok: true });
         }
