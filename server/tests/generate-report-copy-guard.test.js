@@ -204,6 +204,41 @@ describe('deterministic report fallback', () => {
   test('returns no fallback when only unstructured notes could be preserved', () => {
     expect(buildDeterministicReportCopy({ serviceType: 'General Pest Control' })).toBeNull();
   });
+
+  test.each([
+    ['Fire Ant Treatment', 'Front lawn', 'Individual mound treatment', 'Active mounds observed'],
+    ['Tick Control Service', 'Pet resting area', 'Targeted exterior habitat treatment', 'Brown dog tick'],
+    ['Yellowjacket Removal', 'Ground cavity', 'Ground nest treated', 'Yellowjacket'],
+    ['Mud Dauber Removal', 'Lanai / pool cage', 'Active nests treated and removed', 'Active mud nests'],
+    ['Bed Bug Hybrid Treatment', 'Primary bedroom', 'Hybrid heat and chemical treatment', 'Live adults'],
+    ['Seasonal Mosquito Service', 'Planters / bromeliads', 'Standing water removed where practical', 'Removable standing water found'],
+    ['Lawn Dethatching', 'Heavy-thatch areas', 'Double-pass dethatching completed', 'Heavy debris removed'],
+    ['Lawn Plugging', 'Thin turf areas', 'Sod plugs installed at quoted spacing', '9-inch spacing'],
+  ])('preserves structured %s completion facts in customer-approved fallback copy', (serviceType, area, action, finding) => {
+    const report = buildDeterministicReportCopy({
+      serviceType,
+      areas: [area],
+      actions: [action],
+      observations: [finding],
+    });
+    expect(report).toContain(area);
+    expect(report).toContain(action);
+    expect(report).toContain(finding);
+    expect(reportCopyRejection(report)).toBeNull();
+    expect(report).not.toMatch(/\[(?:Found|Protocol)\]/);
+  });
+
+  test('inspection-only specialty work does not become a treatment claim', () => {
+    const report = buildDeterministicReportCopy({
+      serviceType: 'Bee / Yellowjacket Inspection',
+      areas: ['Eaves / soffit'],
+      actions: ['Inspection and identification only'],
+      observations: ['Flying activity with no nest located'],
+    });
+    expect(report).toContain('Inspection and identification only');
+    expect(report).not.toMatch(/treated|treatment applied|pesticide applied/i);
+    expect(reportCopyRejection(report)).toBeNull();
+  });
 });
 
 describe('generate-report typed findings prompt block (buildTypedFindingsPromptBlock)', () => {

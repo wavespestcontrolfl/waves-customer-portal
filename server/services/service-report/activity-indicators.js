@@ -684,7 +684,7 @@ const CUSTOMER_VALUE_LABELS = {
 // state by the caller — the registry itself stays permissive.
 const REQUIRED_FINDINGS_FIELDS = {
   pest_inspection: ['severity'],
-  one_time_pest_treatment: ['activity_level'],
+  one_time_pest_treatment: ['activity_level', 'work_completed'],
   mosquito_event: ['activity_level', 'standing_water'],
   palm_injection: ['palm_condition'],
   one_time_lawn_treatment: ['lawn_condition'],
@@ -1156,6 +1156,71 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       && values.termite_activity
       && String(values.termite_activity) !== 'Active termites present') {
       errors.push('"Live termites in station" requires termite activity "Active termites present"');
+    }
+  }
+
+  // Cross-field consistency for the general specialty treatment families.
+  // Zero/absence choices may coexist with customer-reported history or old
+  // evidence where explicitly worded that way, but never with current live
+  // activity or a positive location recorded by the technician.
+  const list = (value) => String(value || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (type === 'pest_inspection') {
+    const findings = list(values.findings_observed);
+    if (findings.includes('No live activity observed') && findings.includes('Active pest activity')) {
+      errors.push('"No live activity observed" cannot be combined with "Active pest activity"');
+    }
+  }
+  if (type === 'cockroach' && String(values.activity_level) === 'None observed') {
+    const conflicts = [
+      ...list(values.activity_locations),
+      ...list(values.evidence_observed).filter((item) => item === 'Live roaches'),
+    ];
+    if (conflicts.length) errors.push('Activity level "None observed" contradicts live cockroach activity or recorded activity locations');
+  }
+  if (type === 'mosquito_event' && String(values.activity_level) === 'None observed'
+    && list(values.activity_locations).length) {
+    errors.push('Activity locations cannot be recorded with mosquito activity level "None observed"');
+  }
+  if (type === 'bed_bug') {
+    const evidence = list(values.evidence_observed);
+    if (evidence.includes('No visible evidence') && evidence.length > 1) {
+      errors.push('"No visible evidence" cannot be combined with other bed bug evidence');
+    }
+    const activeEvidence = evidence.filter((item) => ['Live bed bugs', 'Eggs'].includes(item));
+    if (String(values.evidence_level) === 'No active signs observed' && activeEvidence.length) {
+      errors.push('"No active signs observed" contradicts live bed bugs or eggs recorded in evidence');
+    }
+  }
+  if (type === 'one_time_pest_treatment') {
+    const pests = list(values.pests_observed);
+    const evidence = list(values.evidence_observed);
+    const work = list(values.work_completed);
+    if (pests.includes('No pest activity observed') && pests.some((item) => !['No pest activity observed', 'Customer-reported activity only'].includes(item))) {
+      errors.push('"No pest activity observed" cannot be combined with a technician-observed pest');
+    }
+    if (evidence.includes('No evidence observed') && evidence.some((item) => !['No evidence observed', 'Customer-reported activity only'].includes(item))) {
+      errors.push('"No evidence observed" cannot be combined with positive technician-observed evidence');
+    }
+    if (String(values.activity_level) === 'None observed'
+      && (evidence.includes('Live pests observed') || evidence.includes('Active trail / foraging'))) {
+      errors.push('Activity level "None observed" contradicts current live pest evidence');
+    }
+    const noApplicationChoices = ['Inspection / identification only', 'Treatment deferred'];
+    const applicationChoices = work.filter((item) => ![
+      ...noApplicationChoices,
+      'Treatment limited by site conditions',
+      'Other',
+    ].includes(item));
+    if (work.some((item) => noApplicationChoices.includes(item)) && applicationChoices.length) {
+      errors.push('Inspection-only or deferred work cannot be combined with performed treatment actions');
+    }
+  }
+  if (type === 'palm_injection') {
+    for (const key of ['deficiency_signs', 'pest_disease_signs']) {
+      const findings = list(values[key]);
+      if (findings.includes('None observed today') && findings.length > 1) {
+        errors.push(`"None observed today" cannot be combined with other ${key === 'deficiency_signs' ? 'nutrient' : 'pest or disease'} findings`);
+      }
     }
   }
 
@@ -1635,6 +1700,27 @@ function rodentComboModuleSentences(values = {}) {
 // Only selected chips with a phrase contribute; types without an entry (or
 // with no selections) fall through to the generic fallback chain.
 const WORK_PHRASE_FIELDS = {
+  one_time_pest_treatment: {
+    field: 'work_completed',
+    phrases: {
+      'Inspection / identification only': 'completed an inspection and pest identification',
+      'Exterior perimeter application': 'treated the exterior perimeter',
+      'Interior crack & crevice application': 'treated interior cracks and crevices',
+      'Targeted spot treatment': 'completed a targeted spot treatment',
+      'Bait placement': 'placed targeted bait',
+      'Insect growth regulator applied': 'applied an insect growth regulator',
+      'Dust applied to labeled voids': 'applied dust to labeled voids',
+      'Nest treated': 'treated the located nest',
+      'Accessible nest removed': 'removed the accessible nest',
+      'Individual mound treatment': 'treated individual fire-ant mounds',
+      'Broadcast lawn application': 'completed a broadcast lawn application',
+      'Mechanical removal / vacuuming': 'completed mechanical removal and vacuuming',
+      'Monitoring devices installed or checked': 'installed or checked monitoring devices',
+      'Source reduction completed': 'completed source reduction',
+      'Treatment limited by site conditions': 'completed the work accessible under today’s site conditions',
+      'Treatment deferred': 'documented the conditions and deferred treatment',
+    },
+  },
   mosquito_event: {
     field: 'treatment_completed',
     phrases: {
