@@ -277,7 +277,12 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     for (const run of String(text).match(/\+?\d[\d\s().-]{5,}\d/g) || []) {
       const digits = run.replace(/\D/g, '');
       if (digits.length < 7) continue;
-      const ok = NUMERIC_PHONE_SENTINELS.has(digits) || /^1?[2-9]\d\d55501\d\d$/.test(digits);
+      // Same +1 rule as the contact validator: a '+' not followed by the
+      // full country code (+5415550101) is an international shape that
+      // could be real, even when its digits happen to fit the NANP mask.
+      const nanp = /^1?[2-9]\d\d55501\d\d$/.test(digits)
+        && (!run.trim().startsWith('+') || /^\+1/.test(run.trim()));
+      const ok = NUMERIC_PHONE_SENTINELS.has(digits) || nanp;
       expect({ where, run, ok }).toEqual({ where, run, ok: true });
     }
   }

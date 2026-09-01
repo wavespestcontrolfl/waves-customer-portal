@@ -219,7 +219,16 @@ const DYNAMIC_TABLE_INSERTS = [
     anchor: 'await db(table).insert({',
     expr: 'table',
     reason: 'caller-supplied funnel PHOTO table (lawn/pest assessment photo tables), never leads',
-    callerContract: { kind: 'object-call', helper: 'storeFunnelPhotos', prop: 'table', allowIndirect: 'config.photoTable', minCallers: 3 },
+    // allowIndirect is accepted ONLY from indirectFile — the one file whose
+    // config object the config-literals contract validates.
+    callerContract: {
+      kind: 'object-call',
+      helper: 'storeFunnelPhotos',
+      prop: 'table',
+      allowIndirect: 'config.photoTable',
+      indirectFile: 'routes/admin-photo-assessments.js',
+      minCallers: 3,
+    },
   },
 ];
 

@@ -152,7 +152,13 @@ function lexBlank(code, { keepStrings = false } = {}) {
   while (i < n) {
     const c = code[i];
     const d = code[i + 1];
-    if (c === '/' && d !== '/' && d !== '*' && (lastSig === '' || REGEX_PRECEDERS.includes(lastSig))) {
+    if (c === '/' && d !== '/' && d !== '*'
+      && (lastSig === '' || REGEX_PRECEDERS.includes(lastSig) || (() => {
+        // A regex can also follow an expression-start KEYWORD — `return
+        // /'/…` — where lastSig is the keyword's final letter.
+        const kw = out.slice(-24).trimEnd().match(/([A-Za-z_$][\w$]*)$/);
+        return Boolean(kw) && ['return', 'typeof', 'case', 'in', 'of', 'instanceof', 'new', 'delete', 'void', 'do', 'else', 'yield', 'await'].includes(kw[1]);
+      })())) {
       blank(c); i += 1;
       let inClass = false;
       while (i < n && code[i] !== '\n') {
@@ -574,6 +580,10 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
       "await db(/'/.test(kind) ? table : fallback).insert(row);"
     );
     expect(regexArg).toHaveLength(1);
+    const returnRegex = scanSourceForDynamicTableInserts(
+      "function f(kind, table, row) {\n  return /'/.test(kind) ? db(table).insert(row) : null;\n}"
+    );
+    expect(returnRegex).toHaveLength(1);
     const shadowedUpper = scanSourceForDynamicTableInserts(
       "const TABLE = 'audit';\nasync function f(TABLE, row) {\n  await db(TABLE).insert(row);\n}"
     );
@@ -728,11 +738,15 @@ describe('lead-writer registry (#3137 groundwork)', () => {
         // are split by balanced-paren depth — a computed earlier argument
         // (upsertChunked(getTrx(), …)) cannot hide the call. The table
         // argument must be a LITERAL non-leads table.
-        const code = blankComments(files.find((f) => f.rel === w.file).src);
+        // Locate calls on FULLY blanked code (comments/strings are not
+        // invocations); read arguments from the string-preserving view.
+        const fileSrc = files.find((f) => f.rel === w.file).src;
+        const bareCode = blankCommentsAndStrings(fileSrc);
+        const code = blankComments(fileSrc);
         const re = new RegExp(String.raw`(?<!function )\b${escapeRe(cc.helper)}\s*\(`, 'g');
         let m;
         let callCount = 0;
-        while ((m = re.exec(code))) {
+        while ((m = re.exec(bareCode))) {
           callCount += 1;
           const args = [];
           let depth = 1;
@@ -772,11 +786,17 @@ describe('lead-writer registry (#3137 groundwork)', () => {
         // entry's contract validates).
         let callers = 0;
         for (const { rel, src } of files) {
+          // Locate calls on FULLY blanked code (a comment or log string
+          // saying "storeFunnelPhotos(opts)" is not an invocation); read
+          // the argument from the string-preserving view at the same
+          // offsets (the binding values are string literals).
+          const bareSrc = blankCommentsAndStrings(src);
+          const codeSrc = blankComments(src);
           const re = new RegExp(String.raw`(?<!function )\b${escapeRe(cc.helper)}\s*\(`, 'g');
           let m;
-          while ((m = re.exec(src))) {
+          while ((m = re.exec(bareSrc))) {
             callers += 1;
-            const after = src.slice(re.lastIndex, re.lastIndex + 600);
+            const after = codeSrc.slice(re.lastIndex, re.lastIndex + 600);
             const openIdx = after.search(/\S/);
             const objectLiteral = after[openIdx] === '{';
             expect({ caller: `${rel}@${m.index}`, objectLiteral })
@@ -815,9 +835,14 @@ describe('lead-writer registry (#3137 groundwork)', () => {
               .toEqual({ caller: `${rel}@${m.index}`, sneakyKey: null });
             // The COMPLETE value must be the literal or the indirect
             // expression — a delimiter must follow, so `'lead' + 's'` and
-            // `config.photoTableSuffix` don't pass on a prefix.
+            // `config.photoTableSuffix` don't pass on a prefix. The
+            // indirect expression is accepted ONLY in its declared file
+            // (indirectFile) — the config-literals contract validates that
+            // file's config; any other caller's `config` is unproven and
+            // must use a literal.
+            const indirectOk = cc.allowIndirect && rel === cc.indirectFile;
             const bindRe = new RegExp(
-              String.raw`\b${escapeRe(cc.prop)}\s*:\s*(?:'([\w.]+)'${cc.allowIndirect ? `|${escapeRe(cc.allowIndirect)}\\b` : ''})\s*(?=[,}\n])`
+              String.raw`\b${escapeRe(cc.prop)}\s*:\s*(?:'([\w.]+)'${indirectOk ? `|${escapeRe(cc.allowIndirect)}\\b` : ''})\s*(?=[,}\n])`
             );
             const bound = top.match(bindRe);
             expect({ caller: `${rel}@${m.index}`, bound: Boolean(bound) })
