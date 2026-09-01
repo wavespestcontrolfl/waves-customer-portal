@@ -350,17 +350,34 @@ function isContractCompleted(source, arg) {
   // Passing the tracked object to a CALL is an escape too — a helper can
   // mutate it (`stripAttribution(data)`) — unless the callee is on the
   // known non-mutating list (GH Codex r11 P2).
-  const callRe = new RegExp(`([A-Za-z_$][\\w$]*(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*)*)\\s*\\(\\s*(?:[^()]*?,\\s*)?${text}\\b\\s*(?=[,)])`, 'g');
+  // Arguments are split on top-level commas after a balanced walk, so a
+  // nested call earlier in the list (`mutate(makeOptions(), data)`) can't
+  // hide the escape (GH Codex r12 P2).
+  const callRe = /([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(/g;
   let cm;
   while ((cm = callRe.exec(source)) !== null) {
+    const open = cm.index + cm[0].length - 1;
+    const args = topLevelArgs(source.slice(open + 1, balancedParens(source, open) - 1));
+    if (!args.some((a) => a === text)) continue;
     const callee = cm[1].replace(/\s+/g, '');
     const last = callee.split('.').pop();
     if (NOT_A_FUNCTION.has(callee)) continue; // `if (data)` is not a call
     if (NON_MUTATING_CALLEES.has(callee) || NON_MUTATING_LAST.has(last) || /^(?:console|logger|log)\./.test(callee)) continue;
     return false;
   }
+  // A method called ON the tracked value is a mutation unless it is a
+  // known read-only one — `rows.unshift(raw)` / `splice` / `fill` would
+  // smuggle an unvalidated row into a completed accumulator (GH Codex r12
+  // P2). `.push(` is judged as a write above.
+  const methodRe = new RegExp(`\\b${text}\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\(`, 'g');
+  let mm;
+  while ((mm = methodRe.exec(source)) !== null) {
+    if (mm[1] === 'push' || READ_ONLY_METHODS.has(mm[1])) continue;
+    return false;
+  }
   return true;
 }
+const READ_ONLY_METHODS = new Set(['map', 'filter', 'forEach', 'some', 'every', 'find', 'findIndex', 'slice', 'includes', 'indexOf', 'join', 'concat', 'reduce', 'flat', 'flatMap', 'entries', 'keys', 'values', 'at', 'toString', 'hasOwnProperty', 'toJSON']);
 const NON_MUTATING_CALLEES = new Set(['completeScheduledServiceInsert', 'JSON.stringify', 'structuredClone', 'Object.keys', 'Object.values', 'Object.entries', 'Object.freeze', 'Array.isArray', 'String']);
 const NON_MUTATING_LAST = new Set(['insert', 'batchInsert']);
 
@@ -570,8 +587,10 @@ function collectInsertSites(source) {
   // Builder refs, schema-qualified or not (`trx('public.scheduled_services')`),
   // plus any CONSTANT bound to the table name in this file
   // (`const TABLE = 'scheduled_services'; trx(TABLE)…` — GH Codex r9 P2).
-  const constNames = [...source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*['"`](?:\w+\.)?scheduled_services['"`]/g)].map((c) => c[1]);
-  const re = new RegExp(`['"\`](?:\\w+\\.)?scheduled_services['"\`]${constNames.length ? `|\\b(?:${constNames.join('|')})\\b` : ''}`, 'g');
+  // The literal may carry Knex's string alias (`'scheduled_services as s'`
+  // — GH Codex r12 P2).
+  const constNames = [...source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*['"`](?:\w+\.)?scheduled_services(?:\s+as\s+\w+)?['"`]/g)].map((c) => c[1]);
+  const re = new RegExp(`['"\`](?:\\w+\\.)?scheduled_services(?:\\s+as\\s+\\w+)?['"\`]${constNames.length ? `|\\b(?:${constNames.join('|')})\\b` : ''}`, 'g');
   let m;
   while ((m = re.exec(source)) !== null) {
     // knex.batchInsert('scheduled_services', rows[, chunk]) — the table is
@@ -673,6 +692,10 @@ describe('booking insert-site contract', () => {
     // A builder captured in a variable is followed through the alias
     // (GH Codex r4 P2 — the fluent-chain-only scan missed it).
     expect(collectInsertSites("const visits = trx('scheduled_services');\nawait doStuff();\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
+    // Knex's string alias form is the same table (GH Codex r12 P2)…
+    expect(collectInsertSites("await trx('scheduled_services as s').insert(data);")).toEqual(["await trx( scheduled_services').insert(data"]);
+    expect(collectInsertSites("const T = 'scheduled_services as ss';\nawait trx(T).insert(data);")).toEqual(["await trx( scheduled_services').insert(data"]);
+    expect(collectInsertSites("await trx('scheduled_services as s').where({ 's.id': id }).first();")).toEqual([]);
     // Static bracket-notation calls are chain links too (GH Codex r11 P2)…
     expect(collectInsertSites("await trx('scheduled_services')['insert'](data);")).toEqual(["await trx( scheduled_services').insert(data"]);
     expect(collectInsertSites("const visits = trx('scheduled_services');\nawait visits['insert'](data);")).toEqual(["await alias:visits.insert(data"]);
@@ -691,6 +714,11 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("await trx.batchInsert('scheduled_services', rows, 50);")).toEqual(["await trx.batchInsert( batchInsert:scheduled_services, rows"]);
     expect(collectInsertSites("const TABLE = 'scheduled_services';\nawait knex.batchInsert(TABLE, [row]);")).toEqual(["await knex.batchInsert( batchInsert:scheduled_services, ["]);
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
+    // …a mutating array method smuggles a row past the helper (r12 P2), while a read-only one is fine…
+    for (const smuggle of ['rows.unshift(raw);', 'rows.splice(0, 0, raw);', 'rows.fill(raw);']) {
+      expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\n${smuggle}\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
+    }
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nconst ids = rows.map((r) => r.customer_id);\nif (rows.some((r) => !r.customer_id)) throw new Error('x');\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
     // …unless a completed row is mutated in place afterwards (r10 P2).
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows[0].source_action = null;\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     // Table-FIRST fluent forms are sites (GH Codex r8 P2)…
@@ -772,6 +800,9 @@ describe('booking insert-site contract', () => {
     // …and so does passing it to a helper that could mutate it (r11 P2)…
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nstripAttribution(data);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nawait audit.record('x', data);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    // (a nested call earlier in the argument list can't hide it — r12 P2)
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nmutate(makeOptions({ a: 1 }), data);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.info(makeCtx(), data);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
     // (a property read, a spread, or a known non-mutating callee is not an escape)
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nconst id = data.customer_id;\nconst copy = { ...data };\nlogger.info('booking', data);\nconst json = JSON.stringify(data);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
     // …a payload MUTATED after completion stays bare (pre-push r6 P1)…
