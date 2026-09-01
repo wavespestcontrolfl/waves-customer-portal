@@ -288,6 +288,26 @@ async function resolveExemption({ customerId, scheduledServiceId }) {
         }
       } catch (probeErr) {
         logger.warn(`[appt-card-request] rodent setup probe failed under the autopay exemption for visit ${scheduledServiceId}: ${probeErr.message}`);
+        // UNREADABLE is not exempt (codex #3591 r84 P1): schedule creation
+        // may already have stamped pending_setup_fee, nothing retries this
+        // decision (the previsit backstop excludes recurring owners), and
+        // an exemption here lets completion bill the $99 undisclosed. Only
+        // a PROVABLY non-rodent visit keeps the Auto Pay exemption; a
+        // rodent-ish or unreadable one takes the /secure rail — the page
+        // re-derives fail-closed, and a zero fee just renders the plan
+        // options.
+        let rodentish = true;
+        try {
+          const plans = require('./secure-appointment-plans');
+          const visitRow = await db('scheduled_services')
+            .where({ id: scheduledServiceId })
+            .first('id', 'customer_id', 'service_type', 'service_id');
+          rodentish = !visitRow || plans.isRodentBaitProgramKey(await plans.authoritativeServiceKey(db, visitRow));
+        } catch { rodentish = true; }
+        if (rodentish) {
+          logger.error(`[appt-card-request] FIX: rodent setup obligation unreadable under the autopay exemption for visit ${scheduledServiceId} — keeping the /secure disclosure rail instead of exempting`);
+          return { exempt: false };
+        }
       }
       return { exempt: true, reason: 'autopay_already_active' };
     }

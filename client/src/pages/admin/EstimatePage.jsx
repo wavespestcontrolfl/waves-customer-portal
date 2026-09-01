@@ -1065,9 +1065,15 @@ function EstimateToolView() {
       approx.foamRecurring = Math.round((base * cadMult[cad] * cadVisits[cad]) / 12);
     }
 
-    const separateRecurringMonthly = (approx.injection || 0) + (approx.foamRecurring || 0);
+    // Rodent revenue leaves the discountable subtotal when the LIVE policy
+    // excludes it from the tier % (codex #3591 r84 P2) — the authoritative
+    // engine reads the same exclude_from_pct_discount flag, so the preview
+    // must not show a tier reduction the engine will not apply.
+    const rodentPctExcluded = rodentBaitWaveguardFlags().excludeFromPctDiscount === true;
+    const separateRecurringMonthly = (approx.injection || 0) + (approx.foamRecurring || 0)
+      + (rodentPctExcluded ? (approx.rodentBait || 0) : 0);
     const discountableRecurringMonthlyBefore = Object.entries(approx).reduce(
-      (s, [key, value]) => s + (key === "injection" || key === "foamRecurring" ? 0 : value),
+      (s, [key, value]) => s + (key === "injection" || key === "foamRecurring" || (rodentPctExcluded && key === "rodentBait") ? 0 : value),
       0,
     );
     const recurringMonthly = Math.round(

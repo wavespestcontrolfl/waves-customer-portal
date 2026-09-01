@@ -1163,6 +1163,15 @@ async function enrollNoPlanCustomerTier({ database, log, customer, customerId, c
   if (tierSentinelKey(customer?.waveguard_tier) === 'commercial') {
     return { synced: false, reason: 'commercial_customer' };
   }
+  // The customer's property CHANNEL refuses enrollment too (codex #3591
+  // r84 P1): a commercial/business customer with no 'commercial' tier
+  // sentinel yet — e.g. a direct booking persisting the generic shared-
+  // catalog bait label — must not be stamped a residential Bronze member.
+  // Same 'commercial'+'business' set the /secure, taxation, and bait
+  // channel classifiers use; commercial is never a WaveGuard membership.
+  if (['commercial', 'business'].includes(String(customer?.property_type || '').toLowerCase())) {
+    return { synced: false, reason: 'commercial_customer' };
+  }
 
   const detectedPlanKeys = await detectUpcomingRecurringPlanKeys(database, customerId, today);
   const enrollment = buildNoPlanTierEnrollmentUpdates(customer, detectedPlanKeys, customerColumns);
