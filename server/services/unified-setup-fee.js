@@ -34,6 +34,13 @@ function unifiedSetupFeeAmount() {
 // live: mis-reading a genuinely active legacy customer as "new" would
 // charge a fee the ruling waives.
 const LIVE_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
+// The EXISTING-customer predicate excludes 'rescheduled' (audit r16 P0):
+// a rescheduled row is a REPLACED visit — its replacement carries the live
+// status, and if that replacement is later cancelled the stale
+// 'rescheduled' shell would otherwise mark a former customer existing
+// forever. The claim probe above keeps 'rescheduled' deliberately (a
+// replaced visit's stamp can still be consumed by its replacement).
+const ACTIVE_SERVICE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 
 /**
  * The "existing customer" predicate (owner ruling 2026-09-01): at least one
@@ -62,7 +69,7 @@ async function hasActiveRecurringService(db, customerId) {
         .orWhereNotNull('recurring_pattern');
     })
     .where(function liveRow() {
-      this.whereNull('status').orWhereIn('status', LIVE_STATUSES);
+      this.whereNull('status').orWhereIn('status', ACTIVE_SERVICE_STATUSES);
     })
     .where(function notCallback() {
       this.whereNull('is_callback').orWhere('is_callback', false);

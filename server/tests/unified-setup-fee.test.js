@@ -66,7 +66,10 @@ describe('hasActiveRecurringService — the "existing customer" predicate', () =
     expect(src).toMatch(/is_recurring', true\)[\s\S]{0,80}orWhereNotNull\('recurring_parent_id'\)[\s\S]{0,80}orWhereNotNull\('recurring_pattern'\)/);
     expect(src).not.toMatch(/waveguard_tier|service_type|loadExistingQualifyingServiceKeys/);
     // Status-based liveness incl. NULL-open legacy rows; date never enters.
-    expect(src).toMatch(/whereNull\('status'\)\.orWhereIn\('status', LIVE_STATUSES\)/);
+    // …and 'rescheduled' (a replaced visit's shell) never marks a customer
+    // existing (audit r16 P0).
+    expect(src).toMatch(/whereNull\('status'\)\.orWhereIn\('status', ACTIVE_SERVICE_STATUSES\)/);
+    expect(src).toMatch(/ACTIVE_SERVICE_STATUSES = \['pending', 'confirmed', 'en_route', 'on_site'\]/);
     expect(src).not.toMatch(/scheduled_date/);
     expect(src).toMatch(/whereNull\('is_callback'\)/);
   });
