@@ -166,7 +166,11 @@ const DEFAULT_TECHNICAL_REVIEWER = Object.freeze({
   fdacs_license: 'JB351547',
   bio_url: '/about/authors/adam-benetti',
 });
-const DISCLOSURE_TYPES = new Set(['pricing-transparency', 'service-area-limits', 'regulatory', 'none']);
+// 'affiliate' rides through normalization untouched — the FTC disclosure
+// the renderer keys off it would otherwise be rewritten to
+// pricing-transparency and every affiliate PR rejected at the astro gate
+// (Codex #3646 r24 P1). Guardrails enforce the links<->type biconditional.
+const DISCLOSURE_TYPES = new Set(['pricing-transparency', 'service-area-limits', 'regulatory', 'affiliate', 'none']);
 
 const CATEGORY_ALIASES = {
   pest: 'pest-control',

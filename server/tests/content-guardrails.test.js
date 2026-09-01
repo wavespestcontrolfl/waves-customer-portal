@@ -805,6 +805,24 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('hub stamps pass; removing the last affiliate link on refresh blocks; JS-flavored species parse (Codex #3646 r24)', () => {
+    withAffiliateEnv(() => {
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+      // Publisher hub stamps never trip the hub-only rule; a spoke does.
+      const hubBody = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: hubBody, frontmatter: fm({ domains: ['wavespestcontrol.com'], tracking: { domains: ['wavespestcontrol.com'] } }) }, { targetIsBlog: true }))).toEqual([]);
+      expect(affiliateCodes(guardrails.evaluate({ body: hubBody, frontmatter: fm({ domains: ['wavespestcontrol.com', 'bradentonpestcontrol.com'] }) }, { targetIsBlog: true }))).toContain('P0:AFFILIATE_POST_NOT_HUB_ONLY');
+      // A refresh that removes the last live affiliate link fails closed.
+      const prior = `Old.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>`;
+      const stripped = guardrails.evaluate({ body: 'New body with no links.\n\n## Sec\n\nProse.', frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: prior });
+      expect(stripped.findings.some((f) => f.code === 'AFFILIATE_LINK_REMOVED_ON_REFRESH')).toBe(true);
+      // JS-flavored species (single quotes, trailing comma) parses and validates.
+      const jsSpecies = "<SpiderIdBoard species={[{'name': 'Wolf', 'risk': 'weird', 'where': 'x', 'hunt': 'y', 'eggSac': 'z'},]} />";
+      expect(codesOf(guardrails.evaluate({ body: wrap(jsSpecies), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    });
+  });
+
   test('static string expressions carry real values the schemas reject (Codex #3646 r23)', () => {
     const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
     const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
@@ -972,7 +990,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       'AFFILIATE_LINK_ADDED_ON_REFRESH', 'AFFILIATE_LINK_ON_PROTECTED_PAGE', 'PROHIBITED_AFFILIATE_PRODUCT',
       'INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT', 'PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW',
       'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'AFFILIATE_PLACEMENT_NOT_ALLOWED',
-      'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', 'AFFILIATE_POST_NOT_HUB_ONLY', 'INVALID_INLINECTA_PROPS', 'INVALID_AFFILIATELINK_PROPS', 'INVALID_SPIDERIDBOARD_PROPS',
+      'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', 'AFFILIATE_POST_NOT_HUB_ONLY', 'INVALID_INLINECTA_PROPS', 'INVALID_AFFILIATELINK_PROPS', 'INVALID_SPIDERIDBOARD_PROPS', 'AFFILIATE_LINK_REMOVED_ON_REFRESH',
     ]) {
       expect(typeof GATE_RETRY_INSTRUCTIONS[code]).toBe('string');
     }

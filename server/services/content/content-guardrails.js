@@ -1697,7 +1697,7 @@ function blankExpressionStringLiterals(text, { attrValues = true } = {}) {
   let inTag = false; let attrQ = null; let word = ''; let wordDot = false;
   const parenCtl = [];
   const braceKind = []; // true = object literal (see closeOfExpressionAt)
-  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word);
+  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || (OBJECT_CONTEXT_KEYWORDS.has(word) && !wordDot);
   for (let i = 0; i < s.length; i += 1) {
     const c = s[i];
     if (c === '\\') { i += 1; continue; }
@@ -1718,7 +1718,7 @@ function blankExpressionStringLiterals(text, { attrValues = true } = {}) {
     }
     if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
     if (c === '}') { depth -= 1; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
-    if (depth > 0 && c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word)); prevSig = '('; word = ''; continue; }
+    if (depth > 0 && c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word) && !wordDot); prevSig = '('; word = ''; continue; } // member calls are not control flow
     if (depth > 0 && c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (depth > 0) {
       if (c === '"' || c === "'" || c === '`') {
@@ -1768,6 +1768,9 @@ const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'v
 // A `)` closing one of these keywords' condition returns to STATEMENT
 // position — `if (ok) /x/.test(y)` opens a regex (astro parity).
 const CONTROL_FLOW_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'with']);
+// Keywords after which a { is an OBJECT literal (return {}); blocks follow
+// else/do even though those allow regexes after them (astro parity).
+const OBJECT_CONTEXT_KEYWORDS = new Set(['return', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'instanceof', 'yield', 'await', 'new', 'throw']);
 
 // Index of the `}` closing the expression whose `{` is at `i` (-1 if
 // unbalanced) — string/regex/comment-aware (astro closeOfExpressionAt).
@@ -1777,7 +1780,7 @@ function closeOfExpressionAt(s, i) {
   // Brace KINDS: a statement block's } returns to statement position (a /
   // after `if (ok) {}` is a regex); an object literal's } is an operand.
   const braceKind = [];
-  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word);
+  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || (OBJECT_CONTEXT_KEYWORDS.has(word) && !wordDot);
   for (let j = i; j < s.length; j += 1) {
     const c = s[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
@@ -1797,7 +1800,7 @@ function closeOfExpressionAt(s, i) {
     }
     if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
     if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
-    if (c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word)); prevSig = '('; word = ''; continue; }
+    if (c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word) && !wordDot); prevSig = '('; word = ''; continue; } // member calls are not control flow
     if (c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY — division follows it
     if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c;
@@ -2164,6 +2167,40 @@ function inlineCtaContractFinding(body) {
 const SPIDER_ID_BOARD_PROP_NAMES = Object.freeze(new Set(['title', 'eyebrow', 'species', 'footnote', 'caption']));
 const SPIDER_RISKS = new Set(['beneficial', 'nuisance', 'medical']);
 const SPIDER_GLYPHS = new Set(['orb', 'tangle', 'crevice', 'hunter']);
+// JSX authoring is JS, not strict JSON — tolerate single-quoted strings
+// and trailing commas the way the astro static parser does (Codex #3646
+// r24 P1): convert single-quoted spans, drop trailing commas, then
+// JSON.parse. undefined = not statically parseable (opaque; astro leaves
+// those unvalidated too).
+function tolerantStaticJson(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) return undefined;
+  try { return { value: JSON.parse(trimmed) }; } catch (_) { /* try JS-flavored */ }
+  try {
+    let out = '';
+    for (let i = 0; i < trimmed.length; i += 1) {
+      const ch = trimmed[i];
+      if (ch === '"') {
+        let j = i + 1;
+        while (j < trimmed.length && trimmed[j] !== '"') { if (trimmed[j] === '\\') j += 1; j += 1; }
+        out += trimmed.slice(i, j + 1);
+        i = j;
+      } else if (ch === "'") {
+        let j = i + 1; let inner = '';
+        while (j < trimmed.length && trimmed[j] !== "'") {
+          if (trimmed[j] === '\\') { inner += trimmed[j + 1]; j += 2; continue; }
+          inner += trimmed[j]; j += 1;
+        }
+        out += JSON.stringify(inner);
+        i = j;
+      } else {
+        out += ch;
+      }
+    }
+    return { value: JSON.parse(out.replace(/,\s*([\]}])/g, '$1')) };
+  } catch (_) { return undefined; }
+}
+
 function spiderSpeciesRowsValid(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return false;
   for (const r of rows) {
@@ -2209,9 +2246,13 @@ function spiderIdBoardContractFinding(body) {
         if (literal !== null || staticStringOfExpr(expr) !== null) {
           return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard species> string — species must be a JSON array expression of shaped records (name, risk, where, hunt, eggSac; optional sciName, glyph, source{label, https url}).');
         }
+        if (expr && /^\{\s*(?:true|false|null|undefined|-?\d)/.test(expr)) {
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a <SpiderIdBoard species=${expr}> — a scalar literal never satisfies the species array schema.`);
+        }
         if (expr) {
-          let parsed; let jsonish = false;
-          try { parsed = JSON.parse(expr.slice(1, -1)); jsonish = true; } catch (_) { /* JS-flavored/opaque — astro leaves it unvalidated */ }
+          const parsedRes = tolerantStaticJson(expr.slice(1, -1));
+          const jsonish = parsedRes !== undefined;
+          const parsed = jsonish ? parsedRes.value : undefined;
           if (jsonish && !spiderSpeciesRowsValid(parsed)) {
             return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard species={…}> whose value does not validate: a non-empty JSON array of records with name/risk (beneficial|nuisance|medical)/where/hunt/eggSac (optional sciName, glyph orb|tangle|crevice|hunter, source{label, https url}) — the astro publish gate rejects it.');
           }
@@ -2258,6 +2299,13 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   if (tags.length === 0) {
     if (disclosure.type === 'affiliate') {
       push('P0', 'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', '', 'Frontmatter declares disclosure.type "affiliate" but the body carries no <AffiliateLink> — the astro gate blocks the mismatch; remove the disclosure or restore the links.');
+    }
+    // A refresh that removes the LAST affiliate link is unpublishable: the
+    // live frontmatter is FROZEN with disclosure.type affiliate, which the
+    // astro biconditional then rejects — and the link-free draft would
+    // bypass affiliate_review entirely (Codex #3646 r24 P1).
+    if (isRefresh && typeof priorBody === 'string' && priorBody.trim() && collectAffiliateLinkTags(priorBody).length > 0) {
+      push('P0', 'AFFILIATE_LINK_REMOVED_ON_REFRESH', '', 'Refresh draft removes every <AffiliateLink> the live body carries — the frozen frontmatter keeps disclosure.type "affiliate", which the astro gate rejects without links; preserve at least one affiliate link or handle the removal through the manual lane (frontmatter edit included).');
     }
     return findings;
   }
@@ -2361,10 +2409,14 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   // Hub-only during the pilot (astro parity — Codex #3646 r10 P1): a
   // spoke-targeted affiliate draft would park for owner review and then be
   // rejected by the astro gate; block it before the review item exists.
-  const domainsDeclared = (Array.isArray(frontmatter?.domains) && frontmatter.domains.length > 0)
-    || (Array.isArray(frontmatter?.tracking?.domains) && frontmatter.tracking.domains.length > 0);
-  if (domainsDeclared) {
-    push('P0', 'AFFILIATE_POST_NOT_HUB_ONLY', '', 'Draft carries affiliate links and declares frontmatter domains/tracking.domains — affiliate posts are hub-only during the pilot; remove the domains targeting or every affiliate link.');
+  // The publisher stamps HUB domains on every post, so hub-only means "no
+  // NON-hub domain" (astro parity — Codex #3646 r24 P1).
+  const isHubDomain = (d) => typeof d === 'string' && ['wavespestcontrol.com', 'www.wavespestcontrol.com'].includes(d.trim().toLowerCase().replace(/\.$/, ''));
+  const declaredDomains = []
+    .concat(Array.isArray(frontmatter?.domains) ? frontmatter.domains : [])
+    .concat(Array.isArray(frontmatter?.tracking?.domains) ? frontmatter.tracking.domains : []);
+  if (declaredDomains.some((d) => !isHubDomain(d))) {
+    push('P0', 'AFFILIATE_POST_NOT_HUB_ONLY', '', 'Draft carries affiliate links and targets a non-hub domain — affiliate posts are hub-only during the pilot; remove the spoke targeting or every affiliate link.');
   }
   if (tags.length > AFFILIATE_LINK_MAX_PER_POST) {
     push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'count', `Draft carries ${tags.length} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post (affiliate is fallback monetization, never the point of the page).`);

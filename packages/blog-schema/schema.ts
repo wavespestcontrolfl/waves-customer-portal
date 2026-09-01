@@ -800,6 +800,9 @@ const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'v
 // A `)` closing one of these keywords' condition puts the lexer back at
 // STATEMENT position — `if (ok) /x/.test(y)` starts a regex, not division.
 const CONTROL_FLOW_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'with']);
+// Keywords after which a { is an OBJECT literal (return {}); blocks
+// follow else/do even though those allow regexes after them.
+const OBJECT_CONTEXT_KEYWORDS = new Set(['return', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'instanceof', 'yield', 'await', 'new', 'throw']);
 
 // Index of the `}` closing the expression whose `{` is at `i` (-1 if
 // unbalanced). Honors JS literals so their content can't end it early:
@@ -813,7 +816,7 @@ function closeOfExpressionAt(src: string, i: number): number {
   // after `if (ok) {}` is a regex); an object literal's `}` is an operand
   // (Codex #504 r26).
   const braceKind: boolean[] = []; // true = object literal
-  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word);
+  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || (OBJECT_CONTEXT_KEYWORDS.has(word) && !wordDot);
   for (let j = i; j < src.length; j += 1) {
     const c = src[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
@@ -833,7 +836,7 @@ function closeOfExpressionAt(src: string, i: number): number {
     }
     if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
     if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
-    if (c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word)); prevSig = '('; word = ''; continue; }
+    if (c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word) && !wordDot); prevSig = '('; word = ''; continue; } // obj.if(…) is a member CALL, not control flow
     if (c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY, not the keyword — a / after it is division
     if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener
@@ -926,7 +929,7 @@ function blankExpressionStrings(src: string): string {
   let inTag = false; let attrQ: string | null = null; let word = ''; let wordDot = false;
   const parenCtl: boolean[] = [];
   const braceKind: boolean[] = []; // true = object literal (see closeOfExpressionAt)
-  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word);
+  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || (OBJECT_CONTEXT_KEYWORDS.has(word) && !wordDot);
   for (let i = 0; i < src.length; i += 1) {
     const c = src[i];
     if (c === '\\') { i += 1; continue; }
@@ -947,7 +950,7 @@ function blankExpressionStrings(src: string): string {
     }
     if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
     if (c === '}') { depth -= 1; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
-    if (depth > 0 && c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word)); prevSig = '('; word = ''; continue; }
+    if (depth > 0 && c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word) && !wordDot); prevSig = '('; word = ''; continue; } // member calls are not control flow
     if (depth > 0 && c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (depth > 0) {
       if (c === '"' || c === "'" || c === '`') {
@@ -1240,75 +1243,96 @@ function hasJsxSpread(attrs: string): boolean {
     if (c !== '{') continue;
     const attrPos = i === 0 || /\s/.test(s[i - 1]);
     if (attrPos && /^\{\s*\.\.\./.test(s.slice(i))) return true;
-    // Consume the balanced brace span (quote-aware) so nothing inside it
-    // is mistaken for attribute position.
-    let depth = 0;
-    for (; i < s.length; i += 1) {
-      const d = s[i];
-      if (d === '"' || d === "'" || d === '`') { i += 1; while (i < s.length && s[i] !== d) { if (s[i] === '\\') i += 1; i += 1; } continue; }
-      if (d === '{') depth += 1;
-      else if (d === '}') { depth -= 1; if (depth === 0) break; }
-    }
+    // Balance the expression with the shared string/regex/comment-aware
+    // lexer — a regex like {/\{/} must not derail the walk past a real
+    // {...spread} (Codex #504 r27); unbalanced fails closed.
+    const e = closeOfExpressionAt(s, i);
+    if (e < 0) return true;
+    i = e;
   }
   return false;
 }
 
-// Sequential quote/brace-aware attribute walk (one nesting level of braces
-// for style objects) shared by the visibility predicates below — a value
-// merely CONTAINING "display:none" or "open" (aria-label={"display:none"},
-// title="open") is that attribute's value, never a style or open prop.
-const JSX_ATTR_WALK_RE = /\s*([^\s=/>"'{}]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|(\{(?:[^{}]|\{[^{}]*\})*\})|([^\s"'{}]+)))?/y;
+// Balanced attribute walk shared by the visibility predicates: names with
+// quoted-literal or expression values, expressions consumed whole via the
+// shared lexer (deeply nested style objects parse instead of derailing a
+// flat regex — Codex #504 r27). ok=false means unparseable residue: the
+// caller fails CLOSED. Spread spans are consumed silently (hasJsxSpread
+// owns spread policy).
+function walkJsxAttrs(attrs: string): { list: Array<{ name: string; literal: string | null; expr: string | null }>; ok: boolean } {
+  const s = String(attrs || '');
+  const list: Array<{ name: string; literal: string | null; expr: string | null }> = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /[\s/]/.test(s[i])) i += 1;
+    if (i >= s.length) break;
+    if (s[i] === '{') { const e = closeOfExpressionAt(s, i); if (e < 0) return { list, ok: false }; i = e + 1; continue; }
+    const nm = /^[^\s=/>"'{}]+/.exec(s.slice(i));
+    if (!nm) return { list, ok: false };
+    const name = nm[0];
+    i += name.length;
+    let k = i;
+    while (k < s.length && /\s/.test(s[k])) k += 1;
+    if (s[k] !== '=') { list.push({ name, literal: null, expr: null }); i = k; continue; }
+    k += 1;
+    while (k < s.length && /\s/.test(s[k])) k += 1;
+    const c = s[k];
+    if (c === '"' || c === "'") {
+      let j = k + 1;
+      while (j < s.length && s[j] !== c) j += 1;
+      if (j >= s.length) return { list, ok: false };
+      list.push({ name, literal: s.slice(k + 1, j), expr: null });
+      i = j + 1; continue;
+    }
+    if (c === '{') {
+      const e = closeOfExpressionAt(s, k);
+      if (e < 0) return { list, ok: false };
+      list.push({ name, literal: null, expr: s.slice(k, e + 1) });
+      i = e + 1; continue;
+    }
+    const um = /^[^\s"'{}>]+/.exec(s.slice(k));
+    list.push({ name, literal: null, expr: null });
+    i = k + (um ? um[0].length : 1);
+  }
+  return { list, ok: true };
+}
 
 // True when a literal `style` attribute itself hides the element —
-// display:none in a CSS string or a JSX style object. An attr text the
-// walker cannot parse fails CLOSED (treated as hiding: over-blanking only
-// discounts a CTA, never manufactures one).
+// display:none or visibility:hidden in a CSS string or JSX style object.
+// Unparseable attr text fails CLOSED (hidden).
 function styleHidesElement(attrs: string): boolean {
-  const re = new RegExp(JSX_ATTR_WALK_RE.source, 'y');
+  const walked = walkJsxAttrs(attrs);
+  if (!walked.ok) return true;
   let styleValue: string | null = null;
-  let m: RegExpExecArray | null;
-  while (re.lastIndex < attrs.length && (m = re.exec(attrs)) !== null) {
-    if (m[0].length === 0) return true; // unparseable residue — fail closed
-    if (m[1].toLowerCase() !== 'style') continue;
-    styleValue = m[2] ?? m[3] ?? m[4] ?? m[5] ?? null; // last occurrence wins (JSX)
-  }
-  // visibility:hidden hides just as surely as display:none (Codex #504 r26).
+  for (const a of walked.list) if (a.name.toLowerCase() === 'style') styleValue = a.literal ?? a.expr ?? null; // last wins (JSX)
   return styleValue !== null && /(?:display\s*['"]?\s*:\s*['"]?\s*none|visibility\s*['"]?\s*:\s*['"]?\s*hidden)/i.test(styleValue);
 }
 
-// True when a <details> renders OPEN: bare `open`, a non-empty string
-// value, an unquoted value, or exactly {true}. Absent, ""/'' (React omits
-// a falsey boolean attribute), {false}/{null}/{0}/{''} and every dynamic
-// expression render closed or cannot be determined (fail closed — a CTA a
-// reader must expand for is no CTA). Last occurrence wins (JSX).
-// True when the element's `hidden` attribute renders it hidden. Same
-// sequential last-wins walk as detailsRendersOpen, opposite fail
-// direction: bare hidden, a non-empty string, an unquoted value, {true},
-// or any DYNAMIC expression hides (over-blanking only discounts a CTA);
-// absent, ""/'', and the falsey literals ({false}/{null}/{0}/{''}) don't.
+// True when the element's `hidden` attribute renders it hidden (last-wins;
+// dynamic and unparseable fail CLOSED — over-blanking only discounts a CTA).
 function hiddenAttrRendersHidden(attrs: string): boolean {
-  const re = new RegExp(JSX_ATTR_WALK_RE.source, 'y');
+  const walked = walkJsxAttrs(attrs);
+  if (!walked.ok) return true;
   let hidden = false;
-  let m: RegExpExecArray | null;
-  while (re.lastIndex < attrs.length && (m = re.exec(attrs)) !== null) {
-    if (m[0].length === 0) return true; // unparseable residue — fail closed
-    if (m[1].toLowerCase() !== 'hidden') continue;
-    if (m[4] !== undefined) hidden = !/^\{\s*(?:false|null|undefined|0|(['"`])\1?)\s*\}$/.test(m[4]);
-    else if (m[2] !== undefined || m[3] !== undefined) hidden = (m[2] ?? m[3] ?? '') !== '';
-    else hidden = true; // bare `hidden` or an unquoted value
+  for (const a of walked.list) {
+    if (a.name.toLowerCase() !== 'hidden') continue;
+    if (a.expr !== null) hidden = !/^\{\s*(?:false|null|undefined|0|(['"`])\1?)\s*\}$/.test(a.expr);
+    else if (a.literal !== null) hidden = a.literal !== '';
+    else hidden = true; // bare `hidden` or unquoted value
   }
   return hidden;
 }
 
+// True when a <details> renders OPEN (last-wins; dynamic/unparseable fail
+// CLOSED as closed — a CTA a reader must expand for is no CTA).
 function detailsRendersOpen(attrs: string): boolean {
-  const re = new RegExp(JSX_ATTR_WALK_RE.source, 'y');
+  const walked = walkJsxAttrs(attrs);
+  if (!walked.ok) return false;
   let open = false;
-  let m: RegExpExecArray | null;
-  while (re.lastIndex < attrs.length && (m = re.exec(attrs)) !== null) {
-    if (m[0].length === 0) return false; // unparseable residue — fail closed
-    if (m[1].toLowerCase() !== 'open') continue;
-    if (m[4] !== undefined) open = /^\{\s*true\s*\}$/.test(m[4]);
-    else if (m[2] !== undefined || m[3] !== undefined) open = (m[2] ?? m[3] ?? '') !== '';
+  for (const a of walked.list) {
+    if (a.name.toLowerCase() !== 'open') continue;
+    if (a.expr !== null) open = /^\{\s*true\s*\}$/.test(a.expr);
+    else if (a.literal !== null) open = a.literal !== '';
     else open = true; // bare `open` or an unquoted value
   }
   return open;
@@ -1443,6 +1467,9 @@ export function validateAffiliateUsage(
   }, unmasked);
   structural = blankBalancedElements(structural, (attrs, name) => name === 'details'
     && !detailsRendersOpen(attrs), unmasked);
+  // Inherently NON-RENDERED containers never show their content — a CTA
+  // inside one is no CTA (Codex #3646 r24 P1).
+  structural = blankBalancedElements(structural, (attrs, name) => ['template', 'script', 'style', 'noscript', 'datalist'].includes(name), unmasked);
   // Tag-shaped text inside a quoted JSX attribute (<div title="<AffiliateLink />">)
   // renders no component — position-check the count against the attr-masked
   // view, like the InlineCTA scan (Codex #3646 r15 P1).
@@ -1529,9 +1556,15 @@ export function validateAffiliateUsage(
       blockers.push(`affiliate product "${id}" does not allow placement "${placement}" (allowed: ${(row.allowed_placements ?? []).join(', ') || 'none — the row declares no placements'})`);
     }
   }
-  const domainsDeclared = (Array.isArray(frontmatter.domains) && frontmatter.domains.length > 0)
-    || (Array.isArray(frontmatter.tracking?.domains) && (frontmatter.tracking!.domains as unknown[]).length > 0);
-  if (domainsDeclared) blockers.push('affiliate posts are hub-only during the pilot — remove domains/tracking.domains');
+  // The publisher stamps HUB domains on every post (top-level + tracking),
+  // so hub-only means "no NON-hub domain", not "no domains at all" —
+  // otherwise every published affiliate draft would be rejected
+  // (Codex #3646 r24 P1).
+  const isHubDomain = (d: unknown) => typeof d === 'string' && WAVES_HUB_HOSTS.has(d.trim().toLowerCase().replace(/\.$/, ''));
+  const declaredDomains = ([] as unknown[])
+    .concat(Array.isArray(frontmatter.domains) ? frontmatter.domains : [])
+    .concat(Array.isArray(frontmatter.tracking?.domains) ? (frontmatter.tracking!.domains as unknown[]) : []);
+  if (declaredDomains.some((d) => !isHubDomain(d))) blockers.push('affiliate posts are hub-only during the pilot — remove spoke domains from domains/tracking.domains');
   for (const pos of positions) {
     const window = cleaned.slice(Math.max(0, pos - 120), pos + 200);
     if (/\$\s?\d/.test(window)) { warnings.push('a dollar amount appears near an affiliate link — never print merchant prices; say "view current price"'); break; }
@@ -1814,22 +1847,25 @@ function parseJsxProps(attrs: string): {
   // the string/array schemas must see and reject; scan a value-blanked
   // view so a bare-looking word inside a quoted value never matches
   // (Codex #3646 r22 P1).
-  const quotedMasked = attrs
-    .replace(/(["'])(?:(?!\1)[\s\S])*\1/g, (q) => q[0] + ' '.repeat(q.length - 2) + q[q.length - 1]);
-  // Brace expressions blank BALANCED (a non-greedy regex stops at a nested
-  // object's first } and leaves trailing identifiers to false-flag as
-  // bare props — Codex #504 r25).
-  const bvChars = quotedMasked.split('');
-  for (let bi = 0; bi < quotedMasked.length; bi += 1) {
-    if (quotedMasked[bi] !== '{') continue;
-    let d = 0; let be = -1;
-    for (let bj = bi; bj < quotedMasked.length; bj += 1) {
-      if (quotedMasked[bj] === '{') d += 1;
-      else if (quotedMasked[bj] === '}') { d -= 1; if (d === 0) { be = bj; break; } }
+  // The bare view is built with ONE lexer-aware walk: quoted values blank
+  // whole, brace expressions blank BALANCED via closeOfExpressionAt (a
+  // regex quote inside one must never pair with a later real attr quote
+  // and blank an intervening bare prop — Codex #504 r27).
+  const bvChars = attrs.split('');
+  for (let bi = 0; bi < attrs.length; bi += 1) {
+    const bc = attrs[bi];
+    if (bc === '"' || bc === "'") {
+      let bj = bi + 1;
+      while (bj < attrs.length && attrs[bj] !== bc) { if (attrs[bj] === '\\') bj += 1; bj += 1; }
+      for (let bk = bi; bk <= Math.min(bj, attrs.length - 1); bk += 1) bvChars[bk] = ' ';
+      bi = bj; continue;
     }
-    const stop = be === -1 ? quotedMasked.length - 1 : be;
-    for (let bk = bi; bk <= stop; bk += 1) bvChars[bk] = ' ';
-    bi = stop;
+    if (bc === '{') {
+      const be = closeOfExpressionAt(attrs, bi);
+      const stop = be === -1 ? attrs.length - 1 : be;
+      for (let bk = bi; bk <= stop; bk += 1) bvChars[bk] = ' ';
+      bi = stop; continue;
+    }
   }
   const bareView = bvChars.join('');
   const bare = /(?:^|\s)([a-zA-Z_$][\w$]*)(?=\s|\/|$)(?!\s*=)/g;
