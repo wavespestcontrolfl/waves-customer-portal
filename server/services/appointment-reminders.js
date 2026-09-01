@@ -1022,9 +1022,14 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, 
   const rows = await conn('appointment_reminders as ar')
     .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
     .where({ 'ar.customer_id': customerId, 'ar.cancelled': false, 'ar.windows_preclosed': false })
+    // Visit present ⇒ MEMBERS ONLY (GH codex r4 P2): a same-timestamp
+    // non-member (another property, a non-groupable service) must not ride
+    // the grouped notice — it keeps its own reminder, unprotected by the
+    // visit effect, and advertising it here would double-speak. No visit ⇒
+    // the historical exact-slot merge, unchanged.
     .andWhere(function slotOrVisit() {
-      this.where('ar.appointment_time', apptTime);
-      if (visitId) this.orWhere('ss.visit_id', visitId);
+      if (visitId) this.where('ss.visit_id', visitId);
+      else this.where('ar.appointment_time', apptTime);
     })
     .andWhere(function liveServiceSendableOrLegacy() {
       this.whereNull('ss.id').orWhereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);

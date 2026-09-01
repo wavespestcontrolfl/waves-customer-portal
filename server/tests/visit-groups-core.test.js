@@ -263,67 +263,59 @@ describe('effectTypeForKind / dedupeKeyFor (reminder rails, spec §4)', () => {
 });
 
 describe('customerExcludedByAutopay (spec rev-2: autopay customers are not grouped)', () => {
-  const knexFor = (customerRow) => (table) => ({
-    where: () => ({ first: async () => (table === 'customers' ? customerRow : undefined) }),
+  // Enrollment signals only — the chargeability predicate is deliberately
+  // never consulted (GH r2/r3/r4 P0+P1s: pauses, expired cards, and
+  // pending ACH all read as "not on autopay" to customerOnAutopay while
+  // still representing enrollment).
+  const knexFor = (customerRow, methodRow) => (table) => ({
+    where: () => ({
+      first: async () => (table === 'customers' ? customerRow
+        : table === 'payment_methods' ? methodRow : undefined),
+    }),
   });
 
   afterEach(() => { jest.dontMock('../services/autopay-eligibility'); jest.resetModules(); });
 
-  const freshVG = (onAutopayImpl, isPausedImpl = () => false) => {
-    jest.doMock('../services/autopay-eligibility', () => ({ customerOnAutopay: onAutopayImpl, isPaused: isPausedImpl }));
+  const freshVG = (isPausedImpl = () => false) => {
+    jest.doMock('../services/autopay-eligibility', () => ({
+      isPaused: isPausedImpl,
+      customerOnAutopay: jest.fn(() => { throw new Error('chargeability predicate must not be consulted'); }),
+    }));
     jest.resetModules();
     return require('../services/visit-groups');
   };
 
-  test('an autopay customer is excluded; a non-autopay customer is not', async () => {
-    const vg = freshVG(jest.fn(async (c) => c.autopay_enabled === true));
+  test('explicit enrollment flag decides first: true excludes, false admits (stale pause ignored)', async () => {
+    const vg = freshVG();
     expect(await vg.customerExcludedByAutopay('c-auto', knexFor({ id: 'c-auto', autopay_enabled: true }))).toBe(true);
-    expect(await vg.customerExcludedByAutopay('c-plain', knexFor({ id: 'c-plain', autopay_enabled: false }))).toBe(false);
+    expect(await vg.customerExcludedByAutopay('c-off', knexFor({ id: 'c-off', autopay_enabled: false, autopay_paused_until: '2099-01-01' }))).toBe(false);
   });
 
-  test('a PAUSED autopay customer is still excluded — enrollment excludes, not current chargeability (pre-push P0)', async () => {
-    // customerOnAutopay returns FALSE during a pause; the explicit
-    // enrollment flag must exclude anyway, or a group formed during the
-    // pause persists into resumed autopay.
-    const onAutopay = jest.fn(async () => false);
-    const vg = freshVG(onAutopay);
-    expect(await vg.customerExcludedByAutopay('c-paused', knexFor({
-      id: 'c-paused', autopay_enabled: true, autopay_paused_until: '2099-01-01',
-    }))).toBe(true);
-    // Short-circuited on the enrollment flag — the chargeability predicate
-    // is never even consulted.
-    expect(onAutopay).not.toHaveBeenCalled();
-  });
-
-  test('fail closed: unreadable customer or throwing predicate refuses grouping', async () => {
-    const vg = freshVG(jest.fn(async () => { throw new Error('autopay read down'); }));
-    expect(await vg.customerExcludedByAutopay('c1', knexFor({ id: 'c1' }))).toBe(true);
-    const vg2 = freshVG(jest.fn(async () => false));
-    expect(await vg2.customerExcludedByAutopay('c-missing', knexFor(undefined))).toBe(true);
-  });
-
-  test('a paused LEGACY enrollment (NULL flag + live pause) is excluded via isPaused, and an explicit false is not (GH r3 P1)', async () => {
-    // customerOnAutopay returns false for every pause before inspecting the
-    // method — a NULL-flag legacy enrollment must be caught by the pause
-    // itself (only enrolled accounts pause).
-    const onAutopay = jest.fn(async () => false);
-    const paused = jest.fn((c) => Boolean(c.autopay_paused_until));
-    const vg = freshVG(onAutopay, paused);
+  test('a PAUSED legacy enrollment (NULL flag) is excluded — only enrolled accounts pause', async () => {
+    const vg = freshVG((c) => Boolean(c.autopay_paused_until));
     expect(await vg.customerExcludedByAutopay('c-legacy', knexFor({
       id: 'c-legacy', autopay_enabled: null, autopay_paused_until: '2099-01-01',
     }))).toBe(true);
-    expect(onAutopay).not.toHaveBeenCalled();
-    // Explicitly disabled = unenrolled, even with a stale pause stamp left
-    // behind — never excluded, and never consults the predicates.
-    expect(await vg.customerExcludedByAutopay('c-off', knexFor({
-      id: 'c-off', autopay_enabled: false, autopay_paused_until: '2099-01-01',
-    }))).toBe(false);
   });
 
-  test('the predicate is called failClosed (an unreadable autopay state must throw, not read as unenrolled)', async () => {
-    const spy = jest.fn(async () => false);
-    const vg = freshVG(spy);
-    await vg.customerExcludedByAutopay('c1', knexFor({ id: 'c1' }));
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'c1' }), expect.objectContaining({ failClosed: true }));
+  test('a legacy enrollment with ANY autopay-enabled method is excluded, chargeable or not (GH r4 P1)', async () => {
+    const vg = freshVG();
+    // An expired card / pending ACH row still carries autopay_enabled=true.
+    expect(await vg.customerExcludedByAutopay('c-legacy', knexFor(
+      { id: 'c-legacy', autopay_enabled: null },
+      { id: 'pm-expired' },
+    ))).toBe(true);
+    // No autopay-enabled method at all ⇒ not enrolled.
+    expect(await vg.customerExcludedByAutopay('c-plain', knexFor(
+      { id: 'c-plain', autopay_enabled: null },
+      undefined,
+    ))).toBe(false);
+  });
+
+  test('fail closed: unreadable customer or a throwing read refuses grouping', async () => {
+    const vg = freshVG();
+    expect(await vg.customerExcludedByAutopay('c-missing', knexFor(undefined))).toBe(true);
+    expect(await vg.customerExcludedByAutopay('c-err', () => { throw new Error('db down'); })).toBe(true);
   });
 });
+

@@ -5129,6 +5129,17 @@ router.post('/', requireAdmin, async (req, res, next) => {
         notes: combinedNotes, is_recurring: isRecurring || false, recurring_pattern: recurringPattern,
       };
 
+      // Property identity for the visit-group stamp (GH codex r4 P2):
+      // manual bookings have no estimate-linkage regroup, so an unstamped
+      // property makes maybeGroupRow refuse forever — and spawned
+      // children/extensions inherit whatever the parent carries
+      // (copyStampedServiceAddressFields). Only the customer's SOLE active
+      // property is unambiguous; multi-property customers stay
+      // office-placed. Never overrides an explicit stamp.
+      if (cols.property_id && insertData.property_id === undefined) {
+        insertData.property_id = await require('../services/customer-properties')
+          .soleActivePropertyId(customerId, trx);
+      }
       // Add new workflow columns (safe — migration may not have run yet)
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
       if (cols.service_key_snapshot) insertData.service_key_snapshot = pricing.primaryServiceKey || null;

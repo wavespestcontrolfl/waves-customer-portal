@@ -1066,13 +1066,19 @@ async function customerExcludedByAutopay(customerId, database = db) {
     if (customer.autopay_enabled === true) return true;
     // Explicitly disabled = unenrolled, regardless of any stale pause stamp.
     if (customer.autopay_enabled === false) return false;
-    const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
-    // Legacy NULL-flag rows (GH codex r3 P1): a LIVE pause implies
-    // enrollment — only enrolled accounts pause — and customerOnAutopay
-    // returns false for every pause before it ever inspects the method,
-    // which would admit a paused legacy enrollment.
+    // Legacy NULL-flag rows: ENROLLMENT signals only — never the
+    // chargeability predicate (customerOnAutopay), which returns false for
+    // a pause, an expired card, or a pending ACH even though all three
+    // still represent enrollment (GH codex r3+r4 P1s: the flag survives a
+    // card replacement, and the group would persist into resumed
+    // chargeability). Enrolled = a live pause (only enrolled accounts
+    // pause) OR ANY autopay-enabled method on file, chargeable or not.
+    const { isPaused } = require('./autopay-eligibility');
     if (isPaused(customer)) return true;
-    return await customerOnAutopay(customer, { db: database, failClosed: true });
+    const method = await database('payment_methods')
+      .where({ customer_id: customerId, autopay_enabled: true })
+      .first('id');
+    return Boolean(method);
   } catch (err) {
     require('./logger').warn(`[visit-groups] autopay-exclusion check failed for customer ${customerId} — refusing to group: ${err.message}`);
     return true;
