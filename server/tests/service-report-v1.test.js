@@ -483,6 +483,13 @@ describe('service report v1', () => {
       expect(normalized).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 120 });
     });
 
+    test('mixed flea area chips retain both interior and exterior scope', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { areas_serviced: JSON.stringify(['Furniture / upholstery', 'Front lawn']) },
+      });
+      expect(normalized).toMatchObject({ interior_reentry_min: 120, exterior_reentry_min: 30 });
+    });
+
     test('conflict: exterior area + interior action ⇒ interior fires', () => {
       const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
         service: {

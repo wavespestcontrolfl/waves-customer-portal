@@ -42,8 +42,16 @@ beforeEach(() => {
   db.mockImplementation((table) => (table === 'technicians' ? chain([{ id: 't1', name: 'A' }]) : chain([])));
 });
 
-const FUTURE_DATE = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-const NEXT_FUTURE_DATE = new Date(Date.now() + 31 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+function nextBookableDate(from) {
+  const date = new Date(from);
+  do date.setUTCDate(date.getUTCDate() + 1);
+  while (date.getUTCDay() === 0);
+  return date;
+}
+const FUTURE_DATE_VALUE = nextBookableDate(Date.now() + 29 * 24 * 60 * 60 * 1000);
+const NEXT_FUTURE_DATE_VALUE = nextBookableDate(FUTURE_DATE_VALUE);
+const FUTURE_DATE = FUTURE_DATE_VALUE.toISOString().slice(0, 10);
+const NEXT_FUTURE_DATE = NEXT_FUTURE_DATE_VALUE.toISOString().slice(0, 10);
 const BASE = { lat: 27.4, lng: -82.5, durationMinutes: 60, dateFrom: FUTURE_DATE, dateTo: FUTURE_DATE, topN: 5 };
 
 test('default (no step) returns the exact earliest-feasible minute', async () => {
