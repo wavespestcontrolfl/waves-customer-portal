@@ -4,8 +4,9 @@
  *   - gate off → nothing (no DB read, no bell);
  *   - the rule's LIVE params decide the match (DB-tunable knobs), engine
  *     defaults fill a missing knob;
- *   - one bell per estimate per 24h, deduped DURABLY against the
- *     notifications table under one stable per-estimate advisory lock (the
+ *   - one bell per estimate per 24h, deduped DURABLY through notifyAdmin's
+ *     shared rolling-window dedupe (stable per-estimate key, never a
+ *     service-local lock — GH codex P1 on #3709) (the
  *     concurrent-open race);
  *   - the bell carries the category, deep link and metadata the admin
  *     Estimates page and push settings key on;
@@ -155,12 +156,10 @@ describe('maybeRaiseHotViewAlert', () => {
     expect(notify.mock.calls[0][2]).toBe('3rd visit in 72h — $75.08/mo, 123 Fixture Way, Testville, FL');
   });
 
-  test('a match raises ONE bell with the category, deep link and metadata', async () => {
-    const dbh = fakeDb();
+  test('a match raises ONE bell with the category, deep link, metadata and the shared rolling dedupe', async () => {
     const notify = jest.fn(async () => ({ id: 'n-1', deduped: false }));
-    const out = await maybeRaiseHotViewAlert({ estimate: ESTIMATE, sessions: [session(1), session(2), session(3), session(4)], rule: RULE, now: NOW, dbh, notify, gateOn: () => true });
+    const out = await maybeRaiseHotViewAlert({ estimate: ESTIMATE, sessions: [session(1), session(2), session(3), session(4)], rule: RULE, now: NOW, notify, gateOn: () => true });
     expect(out).toEqual({ raised: true, reason: 'sent' });
-    expect(dbh.reads).toEqual(['notifications']);
     expect(notify).toHaveBeenCalledTimes(1);
     const [category, title, body, opts] = notify.mock.calls[0];
     expect(category).toBe(HOT_VIEW_CATEGORY);
@@ -168,49 +167,26 @@ describe('maybeRaiseHotViewAlert', () => {
     expect(body).toBe('4th visit in 72h — $75.08/mo, 123 Fixture Way, Testville, FL');
     expect(opts.link).toBe('/admin/estimates?estimateId=est-1');
     expect(opts.metadata).toEqual({ estimateId: 'est-1', customerId: 'cust-1', sessions: 4 });
-    // Unserialized (mock) path: no trx connection is threaded through.
+    // The dedupe is notifyAdmin's: a STABLE per-estimate key (never a time
+    // bucket, so two opens straddling a day boundary contend on one lock)
+    // plus the rolling 24h window. No service-local lock or read.
+    expect(opts.dedupeKey).toBe('estimate_hot_view:est-1');
+    expect(opts.dedupeWindowMs).toBe(24 * 3600000);
     expect(opts.connection).toBeUndefined();
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('raised for estimate est-1'));
   });
 
-  test('a second match inside 24h is deduped against the notifications table', async () => {
-    const dbh = fakeDb({ existing: { id: 'n-0' } });
-    const notify = jest.fn();
-    const out = await maybeRaiseHotViewAlert({ estimate: ESTIMATE, sessions: [session(1), session(2), session(3)], rule: RULE, now: NOW, dbh, notify, gateOn: () => true });
+  test('a second match inside 24h is reported deduped by the shared mechanism', async () => {
+    const notify = jest.fn(async () => ({ id: 'n-0', deduped: true }));
+    const out = await maybeRaiseHotViewAlert({ estimate: ESTIMATE, sessions: [session(1), session(2), session(3)], rule: RULE, now: NOW, notify, gateOn: () => true });
     expect(out).toEqual({ raised: false, reason: 'deduped' });
-    expect(notify).not.toHaveBeenCalled();
-    // The lookup is scoped to this estimate, the category and the 24h window.
-    const builder = dbh.mock.results[0].value;
-    expect(builder.where).toHaveBeenCalledWith({ recipient_type: 'admin', category: HOT_VIEW_CATEGORY });
-    expect(builder.whereRaw).toHaveBeenCalledWith("metadata->>'estimateId' = ?", ['est-1']);
-    expect(builder.where).toHaveBeenCalledWith('created_at', '>', "NOW() - interval '24 hours'");
+    expect(logger.info).not.toHaveBeenCalled();
   });
 
-  test('with a real knex: the check and the send run under ONE stable per-estimate advisory lock (pre-push codex P1)', async () => {
-    // Two opens straddling a day boundary must contend on the same lock —
-    // the key is the estimate id alone, never a time bucket.
-    const events = [];
-    const dbh = fakeDb();
-    const trx = jest.fn((table) => { events.push(`read:${table}`); return dbh(table); });
-    trx.raw = jest.fn((expr, bindings) => { if (/advisory/.test(expr)) events.push(`lock:${bindings[0]}`); return expr; });
-    dbh.transaction = jest.fn(async (fn) => { events.push('begin'); const r = await fn(trx); events.push('commit'); return r; });
-    const notify = jest.fn(async (...args) => { events.push('notify'); return { id: 'n-1' }; });
-    const out = await maybeRaiseHotViewAlert({ estimate: ESTIMATE, sessions: [session(1), session(2), session(3)], rule: RULE, now: NOW, dbh, notify, gateOn: () => true });
-    expect(out).toEqual({ raised: true, reason: 'sent' });
-    expect(events).toEqual(['begin', 'lock:estimate_hot_view:est-1', 'read:notifications', 'notify', 'commit']);
-    // The bell insert rides the SAME transaction as the existence check.
-    expect(notify.mock.calls[0][3].connection).toBe(trx);
-  });
-
-  test('with a real knex: a row inside the window short-circuits under the lock without a send', async () => {
-    const dbh = fakeDb({ existing: { id: 'n-0' } });
-    const trx = jest.fn((table) => dbh(table));
-    trx.raw = jest.fn((expr) => expr);
-    dbh.transaction = jest.fn(async (fn) => fn(trx));
-    const notify = jest.fn();
-    const out = await maybeRaiseHotViewAlert({ estimate: ESTIMATE, sessions: [session(1), session(2), session(3)], rule: RULE, now: NOW, dbh, notify, gateOn: () => true });
-    expect(out).toEqual({ raised: false, reason: 'deduped' });
-    expect(notify).not.toHaveBeenCalled();
+  test('a failed-closed notify (null: lock or read failure) is reported, never re-tried here', async () => {
+    const notify = jest.fn(async () => null);
+    const out = await maybeRaiseHotViewAlert({ estimate: ESTIMATE, sessions: [session(1), session(2), session(3)], rule: RULE, now: NOW, notify, gateOn: () => true });
+    expect(out).toEqual({ raised: false, reason: 'notify_failed' });
   });
 
   test('a suppressed bell (policy) is terminal success, not a retry', async () => {
@@ -219,12 +195,10 @@ describe('maybeRaiseHotViewAlert', () => {
     expect(out).toEqual({ raised: true, reason: 'suppressed' });
   });
 
-  test('notify throwing or the DB failing is swallowed and logged', async () => {
-    const out = await maybeRaiseHotViewAlert({ estimate: ESTIMATE, sessions: [session(1), session(2), session(3)], rule: RULE, now: NOW, dbh: fakeDb(), notify: jest.fn(async () => { throw new Error('boom'); }), gateOn: () => true });
+  test('notify throwing is swallowed and logged (a DB failure inside notifyAdmin surfaces as its null, see notify_failed)', async () => {
+    const out = await maybeRaiseHotViewAlert({ estimate: ESTIMATE, sessions: [session(1), session(2), session(3)], rule: RULE, now: NOW, notify: jest.fn(async () => { throw new Error('boom'); }), gateOn: () => true });
     expect(out).toEqual({ raised: false, reason: 'error' });
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('boom'));
-    const out2 = await maybeRaiseHotViewAlert({ estimate: ESTIMATE, sessions: [session(1), session(2), session(3)], rule: RULE, now: NOW, dbh: fakeDb({ throwOnRead: true }), notify: jest.fn(), gateOn: () => true });
-    expect(out2).toEqual({ raised: false, reason: 'error' });
   });
 
   test('a nameless estimate still reads sensibly', async () => {

@@ -15,14 +15,14 @@
  * - NOT a customer message. Nothing here reaches the customer; the email
  *   job path and shadow accounting in the engine are untouched.
  * - Rule 14 caveat: this IS a bell. It is scoped to one per estimate per
- *   day, durably deduped against the notifications table (never in memory),
+ *   day, durably deduped through notifyAdmin's shared rolling-window
+ *   dedupe (never in memory, never a service-local lock),
  *   and its category is silent by default: the owner turns it on under push
  *   settings (category:estimate_hot_view). That default is enforced HERE,
  *   not only by the admin bell policy gate, which ships off.
  * - Never throws: a failure here must not break the view hook.
  */
 
-const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const NotificationService = require('./notification-service');
@@ -59,7 +59,6 @@ function moneyPerMonth(value) {
  * @param {Array}  sessions  sessionized views (estimate-engagement-sessions)
  * @param {object} rule      the multi_view_high_intent rule row incl. params
  * @param {Date}   now
- * @param {function} dbh     knex (injectable for tests)
  * @param {function} notify  NotificationService.notifyAdmin (injectable)
  */
 async function maybeRaiseHotViewAlert({
@@ -67,7 +66,6 @@ async function maybeRaiseHotViewAlert({
   sessions,
   rule,
   now = new Date(),
-  dbh = db,
   notify = (...args) => NotificationService.notifyAdmin(...args),
   gateOn = () => isEnabled('estimateHotViewAlert'),
   categoryAllowed = () => bellPolicy.bellAllowed({ category: HOT_VIEW_CATEGORY }),
@@ -99,39 +97,27 @@ async function maybeRaiseHotViewAlert({
     if (tail) bodyParts.push(tail);
     const title = `${who} is reading their estimate again`;
     const body = bodyParts.join(' — ');
+    // Durable ROLLING 24h dedupe through the SHARED admin mechanism
+    // (NotificationService.notifyAdmin dedupeKey + dedupeWindowMs): one
+    // stable per-estimate key, so two opens straddling a day boundary
+    // contend on the same advisory lock inside notifyAdmin's own transaction
+    // and the insert rides that transaction (GH codex P1 on #3709 — no
+    // service-local lock/existence implementation to drift from the shared
+    // one). notifyAdmin fails CLOSED (null) when the lock or read fails.
     const opts = {
       // Same deep-link the estimate bells already use; EstimatesPageV2
       // scrolls to ?estimateId=<id>.
       link: `/admin/estimates?estimateId=${estimate.id}`,
       metadata: { estimateId: estimate.id, customerId: estimate.customer_id || null, sessions: recent },
+      dedupeKey: `${HOT_VIEW_CATEGORY}:${estimate.id}`,
+      dedupeWindowMs: HOT_VIEW_DEDUPE_HOURS * 3600000,
     };
-
-    // Durable ROLLING 24h dedupe on the notifications table — the same
-    // existence check the office-request notify core uses, so a redeploy or
-    // a second process never re-rings. The check and the insert run under
-    // ONE stable per-estimate advisory xact lock (pre-push codex P1): a
-    // day-bucketed dedupeKey would hand two opens straddling the bucket
-    // boundary different locks, and both could pass the check before either
-    // inserted. The lock holder commits before releasing, so the next opener
-    // sees the row. Unit-test mocks without transaction support take the
-    // unserialized path.
-    const decideAndSend = async (trx) => {
-      const existing = await trx('notifications')
-        .where({ recipient_type: 'admin', category: HOT_VIEW_CATEGORY })
-        .whereRaw("metadata->>'estimateId' = ?", [String(estimate.id)])
-        .where('created_at', '>', trx.raw(`NOW() - interval '${HOT_VIEW_DEDUPE_HOURS} hours'`))
-        .first();
-      if (existing) return { raised: false, reason: 'deduped' };
-      const result = await notify(HOT_VIEW_CATEGORY, title, body, trx === dbh ? opts : { ...opts, connection: trx });
-      if (!result) return { raised: false, reason: 'notify_failed' };
-      return { raised: true, reason: result.suppressed ? 'suppressed' : 'sent' };
-    };
-    const outcome = typeof dbh.transaction === 'function'
-      ? await dbh.transaction(async (trx) => {
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${HOT_VIEW_CATEGORY}:${estimate.id}`]);
-        return decideAndSend(trx);
-      })
-      : await decideAndSend(dbh);
+    const result = await notify(HOT_VIEW_CATEGORY, title, body, opts);
+    const outcome = !result
+      ? { raised: false, reason: 'notify_failed' }
+      : result.deduped
+        ? { raised: false, reason: 'deduped' }
+        : { raised: true, reason: result.suppressed ? 'suppressed' : 'sent' };
     if (outcome.raised) {
       logger.info(`[est-hot-view] raised for estimate ${estimate.id} (${recent} sessions / ${windowHours}h)`);
     }
