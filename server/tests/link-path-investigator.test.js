@@ -555,6 +555,15 @@ describe('full run', () => {
     expect(db._tables.seo_link_domains[0].agent_state).toBe('rejected');
   });
 
+  test('a TRUNCATED agreement body is never hashed — partial terms must not bind acceptance (Codex r7 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const legal = modelPath({ legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
+    const fetcher = jest.fn(async (url) => ({ ...(await okFetch(url)), truncated: url.includes('/terms') }));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([legal]) }) }));
+    expect(db._tables.seo_link_acquisition_paths[0].legal_terms_hash).toBeNull();
+  });
+
   test('the terms budget caps ATTEMPTS — failed fetches spend it too (Codex r4 P1)', async () => {
     const d = domainRow();
     const db = makeDb({ seo_link_domains: [d] });

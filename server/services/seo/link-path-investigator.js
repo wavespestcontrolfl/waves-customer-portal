@@ -598,8 +598,12 @@ async function investigatePaths(db, {
           out.fetches += 1;
           const t = await fetcher(p.legal_terms_url);
           // same redirect rule as candidate pages: an agreement that redirects
-          // off the registry domain is never hashed as this domain's terms
-          if (t && t.html && !t.blocked && !t.error && hostBound(host, t.finalUrl || p.legal_terms_url)) {
+          // off the registry domain is never hashed as this domain's terms —
+          // and neither is a TRUNCATED body (600 KB cap / cut stream): the
+          // hash binds legal acceptance (§3.2), so a partial agreement must
+          // stay unhashed (path stays INVALID under §6.3 → owner-manual)
+          // rather than freeze a snapshot missing its later clauses.
+          if (t && t.html && !t.blocked && !t.error && !t.truncated && hostBound(host, t.finalUrl || p.legal_terms_url)) {
             termsHashByUrl.set(p.legal_terms_url, sha256(canonicalizeTerms(t.html)));
           }
         }
