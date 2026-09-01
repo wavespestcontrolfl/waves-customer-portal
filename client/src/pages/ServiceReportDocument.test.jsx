@@ -857,6 +857,22 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain('Where we treated');
   });
 
+  it('keeps aftercare for a non-chemical heat treatment without claiming an application', () => {
+    const data = {
+      ...BASE_DATA,
+      applications: [],
+      applicationMade: false,
+      treatmentPerformed: true,
+      dynamicContext: {},
+      advisory: { pet_advisory: 'Keep pets out until the treated rooms have cooled.' },
+      reportV2: { aftercare: { reentry: 'Re-enter once the rooms return to normal temperature.' } },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toContain('Re-enter once the rooms return to normal temperature.');
+    expect(container.textContent).toContain('Keep pets out until the treated rooms have cooled.');
+    expect(container.textContent).not.toContain('Where we treated');
+  });
+
   it('keeps aftercare for a legacy application that has no zone ids', () => {
     // "did treatment happen" must not inherit the map predicate's zone-id rule
     const data = {

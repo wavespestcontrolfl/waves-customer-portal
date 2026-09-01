@@ -520,6 +520,16 @@ describe('service report v1', () => {
         { ...advisory, reentry_adjusted: { exterior: true, interior: false } },
         { service: inspectionOnly, treatmentEvidence: false },
       )).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
+      // A non-chemical treatment (heat) is still treatment: the stored guidance stands.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          areas_serviced: JSON.stringify(['Primary bedroom']),
+          structured_notes: { protocolActionScopesCompleted: [
+            { label: 'Heat treatment', scope: 'interior', treatmentApplied: false, treatmentPerformed: true },
+          ] },
+        },
+        treatmentEvidence: false,
+      })).toMatchObject({ interior_reentry_min: 120 });
       // No declared actions at all: legacy records keep today's behavior.
       expect(normalizeAdvisoryForTreatmentScope(advisory, {
         service: { areas_serviced: JSON.stringify(['Eaves / soffit']) }, treatmentEvidence: false,

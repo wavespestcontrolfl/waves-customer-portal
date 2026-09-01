@@ -178,15 +178,22 @@ describe('specialty service closeout vocabulary', () => {
       actions: ['Void nest treated', 'Inspection and identification only', 'Not a preset action'],
       areas: ['Attic'],
     })).toEqual([
-      { label: 'Void nest treated', scope: 'interior', treatmentApplied: true },
-      { label: 'Inspection and identification only', scope: 'interior', treatmentApplied: false },
+      { label: 'Void nest treated', scope: 'interior', treatmentApplied: true, treatmentPerformed: true },
+      { label: 'Inspection and identification only', scope: 'interior', treatmentApplied: false, treatmentPerformed: false },
     ]);
     expect(specialtyProtocolActionScopes('bee_wasp_removal', {
       actions: ['Void nest treated'], areas: ['Attic', 'Eaves / soffit'],
-    })).toEqual([{ label: 'Void nest treated', scope: 'exterior', treatmentApplied: true }]);
+    })).toEqual([{ label: 'Void nest treated', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true }]);
     expect(specialtyProtocolActionScopes('tick_control', {
       actions: ['Pet-resting or kennel-area treatment'], areas: ['Interior pet areas', 'Furniture near pet areas'],
-    })).toEqual([{ label: 'Pet-resting or kennel-area treatment', scope: 'interior', treatmentApplied: true }]);
+    })).toEqual([{ label: 'Pet-resting or kennel-area treatment', scope: 'interior', treatmentApplied: true, treatmentPerformed: true }]);
+    // Heat and steam are treatment without a pesticide application.
+    expect(specialtyProtocolActionScopes('bed_bug', {
+      actions: ['Heat treatment', 'Vacuuming performed'], areas: ['Primary bedroom'],
+    })).toEqual([
+      { label: 'Heat treatment', scope: 'interior', treatmentApplied: false, treatmentPerformed: true },
+      { label: 'Vacuuming performed', scope: 'interior', treatmentApplied: false, treatmentPerformed: false },
+    ]);
     expect(specialtyProtocolActionScopes('general_pest', { actions: ['Anything'], areas: [] })).toBeNull();
     expect(specialtyActionScopeForAreas(['Other'], 'exterior')).toBe('exterior');
     expect(specialtyActionScopeForAreas([], 'interior')).toBe('interior');

@@ -488,15 +488,22 @@ function structuredActionScope(service = {}) {
   let hasExterior = false;
   let hasTreatment = false;
   let hasActions = false;
+  // Non-chemical treatment (heat, steam — treatmentPerformed without
+  // treatmentApplied): treatment occurred, so aftercare and the stored
+  // re-entry guidance stand, but it is never pesticide-application evidence.
+  let hasNonChemicalTreatment = false;
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') continue;
     hasActions = true;
-    if (entry.treatmentApplied !== true) continue;
+    if (entry.treatmentApplied !== true) {
+      if (entry.treatmentPerformed === true) hasNonChemicalTreatment = true;
+      continue;
+    }
     const scope = String(entry.scope || '').toLowerCase();
     if (scope === 'interior') { hasInterior = true; hasTreatment = true; }
     else if (scope === 'exterior') { hasExterior = true; hasTreatment = true; }
   }
-  return { hasInterior, hasExterior, hasTreatment, hasActions };
+  return { hasInterior, hasExterior, hasTreatment, hasActions, hasNonChemicalTreatment };
 }
 
 // Controlled treatment-area labels carry an explicit scope
@@ -584,7 +591,7 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   // applied" (codex P1 r10 #3701). Only the read-time caller knows the
   // product-load verdict, so the rule is gated on an explicit `false`.
   const declared = structuredActionScope(service);
-  if (treatmentEvidence === false && declared.hasActions && !declared.hasTreatment) {
+  if (treatmentEvidence === false && declared.hasActions && !declared.hasTreatment && !declared.hasNonChemicalTreatment) {
     if (!sideAdjusted('interior') && normalized.interior_reentry_min != null) normalized.interior_reentry_min = 0;
     if (!sideAdjusted('exterior') && normalized.exterior_reentry_min != null) normalized.exterior_reentry_min = 0;
     return normalized;
@@ -3992,6 +3999,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     });
   const readTimeSprayEvidence = applications.some((app) => isSprayApplicationMethod(app.method) || isInferredPesticideApplication(app))
     || structuredActionScope(service).hasTreatment;
+  // Treatment occurred, chemical or not — the aftercare/precaution gate for
+  // the PDF; applicationMade stays the pesticide-application verdict.
+  const treatmentPerformed = readTimeSprayEvidence || structuredActionScope(service).hasNonChemicalTreatment;
   const storedAdvisory = parseJsonObject(service.advisory);
   // Legacy no-spray termite records (bait/monitoring/inspection completed
   // before the 0/0 rule) persisted the old 30/120 line defaults, and the
@@ -4095,6 +4105,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceDisplayName: linkedServiceName,
     serviceDate: service.service_date,
     applicationMade: readTimeSprayEvidence,
+    treatmentPerformed,
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,
@@ -5074,6 +5085,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceLineDisplay: config.displayName,
     serviceDate: service.service_date,
     applicationMade: readTimeSprayEvidence,
+    treatmentPerformed,
     coverageServiceType: coverageServiceType(serviceLine),
     technicianName,
     technician: {

@@ -153,7 +153,12 @@ function specialtyProtocolActionScopes(serviceKey, { actions, areas } = {}) {
     .map((label) => ({
       label,
       scope: specialtyActionScopeForAreas(areas, byLabel.get(label).scope),
+      // treatmentApplied = a pesticide/product application (drives applicationMade,
+      // re-entry evidence and weather-at-application copy). treatmentPerformed =
+      // treatment occurred, chemical or not (heat, steam) — keeps aftercare and
+      // the stored re-entry guidance without claiming pesticide use.
       treatmentApplied: byLabel.get(label).treatmentApplied === true,
+      treatmentPerformed: byLabel.get(label).treatmentApplied === true || byLabel.get(label).treatmentPerformed === true,
     }));
 }
 
