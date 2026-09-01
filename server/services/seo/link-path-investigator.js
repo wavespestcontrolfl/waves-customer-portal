@@ -491,7 +491,7 @@ async function investigatePaths(db, {
   const out = {
     dryRun, gated, selected: targets.length, investigated: 0, qualified: 0,
     notReproducible: 0, watching: 0, pathRefreshes: 0, pathsWritten: 0,
-    superseded: 0, failed: [], fetches: 0, llmCalls: 0,
+    superseded: 0, staleClaims: 0, failed: [], fetches: 0, llmCalls: 0,
   };
   if (gated || dryRun || !targets.length) {
     if (dryRun && !gated) {
@@ -527,11 +527,16 @@ async function investigatePaths(db, {
           if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) break;
           out.fetches += 1;
           const page = await fetcher(url);
-          if (page && page.html && !page.blocked && !page.error) {
+          const finalUrl = (page && page.finalUrl) || url;
+          if (page && page.html && !page.blocked && !page.error && hostBound(host, finalUrl)) {
             const text = canonicalizeTerms(page.html);
             // html/text stay only for THIS domain's evidence verification —
             // never persisted, never prompted beyond the excerpt.
-            pages.push({ url: page.finalUrl || url, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html });
+            pages.push({ url: finalUrl, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html });
+          } else if (page && page.html && !page.blocked && !page.error) {
+            // the request was host-bound but a redirect left the domain —
+            // an off-site page must never become model input or evidence
+            fetchErrors.push({ url, reason: 'offsite_redirect' });
           } else {
             fetchErrors.push({ url, reason: (page && (page.error || (page.blocked && 'blocked'))) || `status_${page && page.status}` });
           }
@@ -577,11 +582,23 @@ async function investigatePaths(db, {
           if (termsHashByUrl.size >= TERMS_FETCH_BUDGET) break;
           out.fetches += 1;
           const t = await fetcher(p.legal_terms_url);
-          if (t && t.html && !t.blocked && !t.error) termsHashByUrl.set(p.legal_terms_url, sha256(canonicalizeTerms(t.html)));
+          // same redirect rule as candidate pages: an agreement that redirects
+          // off the registry domain is never hashed as this domain's terms
+          if (t && t.html && !t.blocked && !t.error && hostBound(host, t.finalUrl || p.legal_terms_url)) {
+            termsHashByUrl.set(p.legal_terms_url, sha256(canonicalizeTerms(t.html)));
+          }
         }
 
-        // Write phase — one transaction per domain.
+        // Write phase — one transaction per domain. The network phase ran
+        // outside any lock, so FIRST re-read the row under a row lock and
+        // verify the claim still stands: an admin reject/watch or another
+        // lane moving the domain during the fetch/model window OWNS the state
+        // now — abort every mutation rather than overwrite it (the domain is
+        // simply re-selected by a later sweep if it comes back).
+        let staleClaim = false;
         await db.transaction(async (trx) => {
+          const fresh = await trx('seo_link_domains').where({ id: domain.id }).forUpdate().first('agent_state');
+          if (!fresh || (claimState && fresh.agent_state !== 'investigating')) { staleClaim = true; return; }
           const writtenIds = [];
           for (const p of writable) {
             // The model's price claims count only when the exact quote/marker
@@ -648,6 +665,10 @@ async function investigatePaths(db, {
           }
           await trx('seo_link_domains').where({ id: domain.id }).update(patch);
         });
+        if (staleClaim) {
+          out.staleClaims += 1;
+          continue;
+        }
 
         out.investigated += 1;
         if (!claimState) out.pathRefreshes += 1;

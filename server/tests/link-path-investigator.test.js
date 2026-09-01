@@ -80,6 +80,7 @@ function makeDb(seed = {}) {
       whereIn(col, arr) { state.preds.push((row, get) => arr.includes(get(row, col))); return q; },
       whereNotIn(col, arr) { state.preds.push((row, get) => !arr.includes(get(row, col))); return q; },
       join(tableExpr, on1, on2) { state.join = { tableExpr, on1, on2 }; return q; },
+      forUpdate() { return q; },
       groupBy() { return q; },
       select(...cols) { state.select = cols; return q; },
       orderBy(col, dir) { state.order.push({ col, dir }); return q; },
@@ -496,6 +497,41 @@ describe('full run', () => {
     expect(v.price_text).toBe('$95 / year'); // the quote itself is on the page
     expect(v.currency_evidence).toBeNull();
     expect(v.verification.currency_evidence).toBe('processor_currency_unverifiable_static');
+  });
+
+  test('a redirect that leaves the domain is rejected as model input and evidence (Codex r3 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    // every fetch redirects off-domain
+    const redirecting = async (url) => ({ status: 200, finalUrl: 'https://evil.example.net/landing', html: '<html>Join for USD 95 / year</html>', blocked: false, truncated: false });
+    const legal = modelPath({ legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
+    const llm = jest.fn(async (route, payload) => {
+      expect(payload.text).not.toContain('evil.example.net'); // off-site page never reaches the prompt
+      return { ok: true, json: verdictOf([legal]) };
+    });
+    await investigatePaths(db, runOpts(db, { fetchPage: redirecting, llmDispatch: llm }));
+    const p = db._tables.seo_link_acquisition_paths[0];
+    expect(p.legal_terms_hash).toBeNull(); // the terms redirect is not this domain's agreement
+    expect(p.currency).toBe('unknown'); // the quote had no on-domain page to verify against
+    expect(p.estimated_cost_cents).toBeNull();
+    const evidence = JSON.parse(p.investigation);
+    expect(evidence.fetch_errors.every((f) => f.reason === 'offsite_redirect')).toBe(true);
+  });
+
+  test('a claim lost during the network window aborts every write (Codex r3 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    // an admin rejects the domain while the model call is in flight
+    const llm = jest.fn(async () => {
+      db._tables.seo_link_domains[0].agent_state = 'rejected';
+      return { ok: true, json: verdictOf([modelPath()]) };
+    });
+    const r = await investigatePaths(db, runOpts(db, { llmDispatch: llm }));
+    expect(r.staleClaims).toBe(1);
+    expect(r.investigated).toBe(0);
+    expect(r.pathsWritten).toBe(0);
+    expect(db._tables.seo_link_acquisition_paths).toHaveLength(0);
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('rejected'); // the admin's state stands
   });
 
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {
