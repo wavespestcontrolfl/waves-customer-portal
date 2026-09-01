@@ -3341,7 +3341,9 @@ function recurringWithoutBillableAmount({
   // the gate 409 a priced service that completion WOULD invoice (Codex P1).
   // Defaults FALSE to match shouldAutoInvoiceCompletion's own default:
   // defaulting true would let ANY priced visit satisfy the typed-one-time
-  // branch and silently undo the round-16 fix. Callers resolve it.
+  // branch and silently undo the round-16 fix. Callers resolve it; NULL
+  // means the profile lookup FAILED (the resolver always returns a profile
+  // on success) — see the unverified verdict after the mint question.
   typedOneTimeBilling = false,
   isCallback,
   serviceType,
@@ -3417,9 +3419,26 @@ function recurringWithoutBillableAmount({
     serviceType,
     isCallback,
     visitPerformed: true,
-    typedOneTimeBilling,
+    typedOneTimeBilling: typedOneTimeBilling === true,
   });
   if (willMint) return null;
+  // An UNREADABLE profile (transient catalog error) matters only where the
+  // profile could have flipped the verdict: a POSITIVE floor, which a typed
+  // one-time profile would mint. A $0 floor mints under no profile at all,
+  // so it takes the ordinary refusal below. For the priced case the gate
+  // stays CLOSED — standing down let a priced null-mode series through on
+  // a read error and complete unbilled (pre-push Codex P0) — but says what
+  // actually happened: the plan could not be verified, retry. Calling it
+  // "no billable amount" sent the operator chasing a rate the plan may
+  // already have (pre-push Codex P1). Distinct code; no fix hints, since
+  // nothing on the profile needs changing.
+  if (typedOneTimeBilling === null && Number(recurringFloorPrice) > 0) {
+    return {
+      error: 'Could not verify whether this recurring plan will bill — the service catalog read failed. Try again in a moment.',
+      code: 'RECURRING_BILLING_UNVERIFIED',
+      fix: { monthlyRate: false, perApplicationFee: false, visitPrice: false },
+    };
+  }
 
   // Lane-specific guidance: recommending a monthly rate to a customer whose
   // lane deliberately IGNORES monthly rates leaves the operator stuck
@@ -5282,7 +5301,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
         recurringFloorPrice: Number.isFinite(recurringFloorPrice) ? recurringFloorPrice : 0,
         customer,
         createInvoiceOnComplete: createInvoiceStamp,
-        typedOneTimeBilling: String(gateProfile?.billingType || '').toLowerCase() === 'one_time',
+        typedOneTimeBilling: gateProfile
+          ? String(gateProfile.billingType || '').toLowerCase() === 'one_time'
+          : null,
         isCallback: resolvedIsCallback,
         serviceType,
       });
@@ -9542,8 +9563,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               recurringFloorPrice: Number.isFinite(spawnFloor) ? spawnFloor : 0,
               customer: gateCustomer,
               createInvoiceOnComplete: memberSeriesCovered ? false : spawnInv,
-              typedOneTimeBilling: String(spawnProfile?.billingType || '').toLowerCase() === 'one_time'
-                && parent.followup_included !== true,
+              typedOneTimeBilling: spawnProfile
+                ? String(spawnProfile.billingType || '').toLowerCase() === 'one_time'
+                  && parent.followup_included !== true
+                : null,
               isCallback: !!parent.is_callback,
               serviceType: spawnSeriesServiceType,
             });
@@ -11458,8 +11481,10 @@ async function reconcileRecurringSeriesVisitCount(trx, {
         customer: gateCustomer,
         createInvoiceOnComplete: !!(cols.create_invoice_on_complete
           && (seriesCioc !== undefined ? seriesCioc : parent.create_invoice_on_complete)),
-        typedOneTimeBilling: String(extendProfile?.billingType || '').toLowerCase() === 'one_time'
-          && parent.followup_included !== true,
+        typedOneTimeBilling: extendProfile
+          ? String(extendProfile.billingType || '').toLowerCase() === 'one_time'
+            && parent.followup_included !== true
+          : null,
         isCallback: !!parent.is_callback,
         serviceType: extendSeriesServiceType,
       });

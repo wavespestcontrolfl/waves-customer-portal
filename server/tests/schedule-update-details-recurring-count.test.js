@@ -21,6 +21,14 @@ jest.mock('../services/job-status', () => ({
   nextClaimTs: jest.fn(() => 'claim-token-1'),
   transitionJobStatus: jest.fn().mockResolvedValue(undefined),
 }));
+// The extend gate resolves the completion profile through the catalog; the
+// scripted conn has no catalog, so serve a resolved untyped profile (what
+// the real resolver synthesizes for an unknown service) and reject it only
+// where a test wants the unknown-profile stand-down.
+jest.mock('../services/service-completion-profiles', () => ({
+  ...jest.requireActual('../services/service-completion-profiles'),
+  resolveCompletionProfileForScheduledService: jest.fn(async () => ({ synthesized: true, billingType: null })),
+}));
 
 const fs = require('fs');
 const path = require('path');
@@ -31,6 +39,7 @@ const {
   MAX_SERIES_VISIT_COUNT,
 } = adminScheduleRouter._test;
 const { transitionJobStatus } = require('../services/job-status');
+const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
 const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
@@ -541,6 +550,16 @@ describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend 
     expect(inserted).toHaveLength(0);
   });
 
+  test('a typed one-time profile is a mint trigger — a priced series on one extends without the stamp', async () => {
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ synthesized: false, billingType: 'one_time' });
+    const { conn, parent } = scenario({
+      upcoming: 2, customer: unpricedCustomer,
+      parentOverrides: { estimated_price: '185.00', create_invoice_on_complete: false },
+    });
+    const result = await reconcile(conn, parent, 4);
+    expect(result.added).toHaveLength(2);
+  });
+
   test('a priced series with the create-invoice stamp extends', async () => {
     const { conn, parent, inserted } = scenario({
       upcoming: 2, customer: unpricedCustomer, parentOverrides: { estimated_price: '185.00' },
@@ -562,6 +581,27 @@ describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend 
     const member = { id: 5, billing_mode: 'monthly_membership', monthly_rate: 0, waveguard_tier: 'silver', per_application_fee: null };
     const { conn, parent } = scenario({ upcoming: 2, customer: member });
     await expect(reconcile(conn, parent, 4)).rejects.toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+  });
+
+  test('a failed completion-profile read fails CLOSED with a retryable verdict on a PRICED series (pre-push Codex P1 + P0)', async () => {
+    // Priced, no create-invoice stamp: a typed one-time profile is the one
+    // trigger that could mint, and it could not be read — refuse, but as
+    // "unverified, retry", not "no billable amount".
+    resolveCompletionProfileForScheduledService.mockRejectedValueOnce(new Error('catalog read failed'));
+    const priced = scenario({
+      upcoming: 2, customer: unpricedCustomer,
+      parentOverrides: { estimated_price: '185.00', create_invoice_on_complete: false },
+    });
+    await expect(reconcile(priced.conn, priced.parent, 4)).rejects.toMatchObject({
+      statusCode: 409, code: 'RECURRING_BILLING_UNVERIFIED',
+    });
+    expect(priced.inserted).toHaveLength(0);
+    // Unpriced: no profile could make a $0 visit bill, so the same failed
+    // read takes the ordinary refusal.
+    resolveCompletionProfileForScheduledService.mockRejectedValueOnce(new Error('catalog read failed'));
+    const unpriced = scenario({ upcoming: 2, customer: unpricedCustomer });
+    await expect(reconcile(unpriced.conn, unpriced.parent, 4)).rejects.toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+    expect(unpriced.inserted).toHaveLength(0);
   });
 
   test('a shortening or an unchanged count never consults the gate', async () => {

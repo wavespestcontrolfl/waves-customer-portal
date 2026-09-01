@@ -204,6 +204,34 @@ describe('recurringWithoutBillableAmount — typed one-time profile (Codex P1)',
     // branch and silently undo the mint-decision fix.
     expect(recurringWithoutBillableAmount(base)).toBeTruthy();
   });
+
+  test('NULL (profile lookup failed) on a PRICED series fails CLOSED with a retryable verdict, not "no amount" (pre-push Codex P1 + P0)', () => {
+    // The typed one-time profile is the one trigger that could mint here
+    // and it could not be read: refuse (never fail open on a read error)
+    // but say so — the operator retries rather than chasing a rate.
+    expect(recurringWithoutBillableAmount({ ...base, typedOneTimeBilling: null })).toMatchObject({
+      code: 'RECURRING_BILLING_UNVERIFIED',
+      fix: { monthlyRate: false, perApplicationFee: false, visitPrice: false },
+    });
+    // A resolved non-one-time profile is the ordinary refusal.
+    expect(recurringWithoutBillableAmount({ ...base, typedOneTimeBilling: false }).code).toBe('RECURRING_WITHOUT_BILLABLE_AMOUNT');
+    // A $0 floor mints under no profile, so uncertainty changes nothing:
+    // ordinary refusal, with the fix hints.
+    expect(recurringWithoutBillableAmount({ ...base, recurringFloorPrice: 0, typedOneTimeBilling: null }).code).toBe('RECURRING_WITHOUT_BILLABLE_AMOUNT');
+    // A read failure never overrides a verdict that mints anyway.
+    expect(recurringWithoutBillableAmount({ ...base, typedOneTimeBilling: null, createInvoiceOnComplete: true })).toBeNull();
+  });
+
+  test('every gate call site passes NULL when the profile read fails, never false', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    // POST create, make-recurring spawn, visit-count extend: each resolves
+    // the profile with .catch(() => null) and maps null → null.
+    const sites = src.match(/typedOneTimeBilling: (gateProfile|spawnProfile|extendProfile)\n/g) || [];
+    expect(sites).toHaveLength(3);
+    expect((src.match(/typedOneTimeBilling: String\(/g) || []).length).toBe(0);
+  });
 });
 
 describe('enrichBillingLaneWithWalletGap wiring (source guards)', () => {
