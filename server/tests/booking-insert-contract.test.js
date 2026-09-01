@@ -226,7 +226,10 @@ function insertArgument(text) {
 // inline, or an identifier whose EVERY write in the file — assignment or
 // `.push(` (an empty-array accumulator initializer is neutral) — runs the
 // helper. An identifier with any helper-free write stays bare: importing
-// the helper elsewhere in the file launders nothing.
+// the helper elsewhere in the file launders nothing. A payload MUTATED
+// after completion (`data.x = …`, `data[k] = …`, `Object.assign(data, …)`,
+// `delete data.x`) is bare too — the final payload never passed validation
+// (pre-push Codex r6 P1); an adopter shapes the payload BEFORE the helper.
 const HELPER_CALL = /\bcompleteScheduledServiceInsert\s*\(/;
 function isContractCompleted(source, arg) {
   const text = String(arg || '').trim();
@@ -240,7 +243,13 @@ function isContractCompleted(source, arg) {
     if (HELPER_CALL.test(stmt)) completed += 1;
     else if (!/=\s*\[\s*\]\s*$/.test(stmt)) return false;
   }
-  return completed > 0;
+  if (!completed) return false;
+  const mutated = new RegExp(
+    `\\b${text}\\s*(?:\\.\\s*[A-Za-z_$][\\w$]*|\\[[^\\]]*\\])\\s*(?:[-+*/%|&^]|\\*\\*|\\?\\?|\\|\\||&&)?=(?![=>])`
+    + `|\\bdelete\\s+${text}\\b`
+    + `|\\bObject\\s*\\.\\s*assign\\s*\\(\\s*${text}\\b`,
+  );
+  return !mutated.test(source);
 }
 
 // The statement text on the ref's line BEFORE the match — call-site
@@ -411,6 +420,12 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nawait trx.insert(data).into('scheduled_services');")).toEqual([]);
     // …but importing the helper elsewhere in the file launders nothing…
     expect(collectInsertSites("const ok = await completeScheduledServiceInsert(raw, opts);\nawait trx('scheduled_services').insert(other);")).toEqual(["await trx( scheduled_services').insert(other"]);
+    // …a payload MUTATED after completion stays bare (pre-push r6 P1)…
+    for (const mutation of ['data.customer_id = null;', "data['status'] = 'x';", 'data.count += 1;', 'Object.assign(data, raw);', 'delete data.source_action;']) {
+      expect(collectInsertSites(`const data = await completeScheduledServiceInsert(raw, opts);\n${mutation}\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    }
+    // (a READ of a property, or a comparison, is not a mutation)
+    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nif (data.status === 'x' || data.n >= 2) log(data.customer_id);\nawait trx('scheduled_services').insert(data);")).toEqual([]);
     // …a payload REASSIGNED without the helper stays bare…
     expect(collectInsertSites("let data = await completeScheduledServiceInsert(raw, opts);\ndata = buildRaw();\nawait trx('scheduled_services').insert(data);")).toHaveLength(1);
     // …and raw SQL never passes through the helper.
