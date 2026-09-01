@@ -159,10 +159,15 @@ function serviceOptOutRemovableKeys(estData = {}, sections = [], rowTier = null)
 function serviceIsPresentInInputs(parsedData, sectionKey) {
   const spec = SERVICE_OPT_OUT_KEYS[sectionKey];
   if (!spec) return false;
-  for (const carrier of inputCarriers(parsedData)) {
-    if (isPlainObject(carrier.services)
-      && spec.engine.some((k) => carrier.services[k] != null)) return true;
-  }
+  // Presence must come from a carrier the canonical recompute can actually
+  // REPLAY — engineRequest or engineInputs (admin-estimate-persistence
+  // accepts nothing else). A legacy { inputs, result } estimate would be
+  // advertised removable and then 409 `reprice_unavailable` on every preview
+  // (pre-push codex P1 on 15ca6d3). `inputs` is still pruned and restored by
+  // the surgery below; it just cannot be the eligibility evidence.
+  const engineInputs = parsedData?.engineInputs;
+  if (isPlainObject(engineInputs) && isPlainObject(engineInputs.services)
+    && spec.engine.some((k) => engineInputs.services[k] != null)) return true;
   const req = parsedData?.engineRequest;
   if (isPlainObject(req) && Array.isArray(req.selectedServices)) {
     if (req.selectedServices.some((t) => spec.selected.includes(String(t).toUpperCase()))) return true;

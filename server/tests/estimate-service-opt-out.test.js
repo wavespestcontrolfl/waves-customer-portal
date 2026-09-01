@@ -229,15 +229,28 @@ describe('the audit record', () => {
     expect(readRemovedInputs(undefined)).toBeNull();
   });
 
-  it('recognizes the snake_case termite_bait input carrier (codex r3 P1)', () => {
-    // estimate-add-service-request writes inputs.services.termite_bait and the
-    // engine consumes that alias — presence detection and the prune must too.
-    const data = { inputs: { services: { termite_bait: { stations: 12 } } } };
+  it('recognizes the snake_case termite_bait engine key (codex r3 P1)', () => {
+    // estimate-add-service-request writes services.termite_bait and the engine
+    // consumes that alias — presence detection and the prune must too. The
+    // prune also cleans a mirrored `inputs` copy of the same alias.
+    const data = {
+      engineInputs: { services: { termite_bait: { stations: 12 } } },
+      inputs: { services: { termite_bait: { stations: 12 } } },
+    };
     expect(serviceIsPresentInInputs(data, 'termite_bait')).toBe(true);
     const applied = applyServiceOptOutToEstimateData(data, { serviceKey: 'termite_bait', included: false });
     expect(applied.ok).toBe(true);
+    expect(data.engineInputs.services.termite_bait).toBeUndefined();
     expect(data.inputs.services.termite_bait).toBeUndefined();
-    expect(applied.removedInputs.inputs.termite_bait).toEqual({ stations: 12 });
+    expect(applied.removedInputs.engineInputs.termite_bait).toEqual({ stations: 12 });
+  });
+
+  it('an inputs-only estimate is NOT eligible — the canonical recompute cannot replay it', () => {
+    // serverRecomputeFromEstimateData accepts only engineRequest/engineInputs;
+    // advertising removability off `inputs` alone would 409 every preview
+    // (pre-push codex P1 on 15ca6d3).
+    const data = { inputs: { services: { pest: { apps: 4 } } } };
+    expect(serviceIsPresentInInputs(data, 'pest_control')).toBe(false);
   });
 
   it('currentlyOptedOutKeys reflects the LATEST state per service', () => {
