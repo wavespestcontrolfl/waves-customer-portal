@@ -72,7 +72,22 @@ const GRACE_MINUTES = 20;
 // P1). At 8 the watchdog calls a claim dead two minutes before the pipeline
 // does, which is safe because the bell is no longer permanent — see the
 // per-day dedupe below.
+//
+// A claim is aged from its HEARTBEAT, matching every reclaim predicate in
+// processAllPending: the owning pass bumps processing_heartbeat_at while it
+// works, so "stale" means STOPPED BEATING, not "started long ago". Without
+// that, a healthy five-minute transcription aged past this threshold on
+// processing_started_at alone and rang a false stall on a pass that was
+// working perfectly. Falls back to processing_started_at for rows claimed
+// before the column existed.
 const CLAIM_STALE_MINUTES = 8;
+// The heartbeat is a TIMER, so it keeps beating while a pass is alive even
+// when the work is hung on a provider socket. The processor bounds that with
+// an absolute ceiling on how long any claim may be held, DERIVED from the
+// provider timeout budgets; the watchdog reads the same derivation, so a
+// hung-but-beating pass is a stall here rather than a call that silently
+// never rings — and so tuning a provider timeout moves both together.
+const { alertCeilingMinutes } = require('../utils/claim-ceiling');
 // One bell per call per DAY, not one per call forever. Permanence was what
 // made an aggressive staleness threshold dangerous: a single false positive
 // on a slow-but-healthy pass would have settled that SID for good and
@@ -115,6 +130,10 @@ function maskPhone(value) {
 function computeStalledCalls(rows, { now = new Date() } = {}) {
   const graceCutoff = new Date(now.getTime() - GRACE_MINUTES * 60 * 1000);
   const claimCutoff = new Date(now.getTime() - CLAIM_STALE_MINUTES * 60 * 1000);
+  // The BELL ceiling, deliberately earlier than the processor's reclaim
+  // ceiling: a hung-but-beating pass should ring long before a peer is
+  // allowed to take its claim away.
+  const ceilingCutoff = new Date(now.getTime() - alertCeilingMinutes() * 60 * 1000);
   const stalled = [];
   for (const r of rows) {
     const readyAt = recordingReadyAt(r);
@@ -128,8 +147,21 @@ function computeStalledCalls(rows, { now = new Date() } = {}) {
     // the grace window: measured against the grace window a crash-reclaim
     // loop refreshed the claim faster than it could ever look stale.
     if (status === 'processing') {
-      const claimed = r.processing_started_at ? new Date(r.processing_started_at) : null;
-      if (claimed && !Number.isNaN(claimed.getTime()) && claimed > claimCutoff) continue;
+      // A beat only speaks for the claim that WROTE it: one left behind by a
+      // previous pass is older than this claim's start, and reading it as
+      // this claim's silence rings a false stall on a freshly claimed row
+      // during a rolling deploy. Same rule as the processor's reclaim
+      // predicate (codex P2).
+      const started = r.processing_started_at ? new Date(r.processing_started_at) : null;
+      const rawBeat = r.processing_heartbeat_at ? new Date(r.processing_heartbeat_at) : null;
+      const currentBeat = rawBeat && !Number.isNaN(rawBeat.getTime())
+        && (!started || Number.isNaN(started.getTime()) || rawBeat >= started)
+        ? rawBeat : null;
+      const beat = currentBeat || r.processing_started_at;
+      const claimed = beat ? new Date(beat) : null;
+      const beating = claimed && !Number.isNaN(claimed.getTime()) && claimed > claimCutoff;
+      const withinCeiling = !started || Number.isNaN(started.getTime()) || started > ceilingCutoff;
+      if (beating && withinCeiling) continue;
     }
     const hasRecording = !!String(r.recording_url || '').trim();
     const panQuarantined = (() => {
@@ -230,7 +262,8 @@ async function runInner({ now = new Date() } = {}) {
     .modify((b) => excludeSettledSids(b, today))
     .select(
       'id', 'twilio_call_sid', 'customer_id', 'from_phone', 'to_phone', 'created_at',
-      'processing_status', 'processing_started_at', 'updated_at', 'metadata', 'recording_url',
+      'processing_status', 'processing_started_at', 'processing_heartbeat_at',
+      'updated_at', 'metadata', 'recording_url',
       'recording_duration_seconds', 'duration_seconds',
       'transcription', 'transcription_metadata',
     )

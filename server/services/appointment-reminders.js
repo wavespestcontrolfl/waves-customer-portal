@@ -444,7 +444,7 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
 // blockedCode and leave their row unmarked so the next cron tick re-decides
 // (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
 // applies the same-day skip ruling).
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null }) {
+async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null }) {
   // LAST-moment unit-move hold check, at the one chokepoint every
   // confirmation/72h/24h leg passes — inline creation confirmations
   // included (codex #3609 r30 P1): a grouped move stamped after a caller's
@@ -477,7 +477,16 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   // accept flow) throw on a blocked/undeliverable send; for email/both that must
   // not abort the email leg or bubble out of the booking/accept flow — treat a
   // throw as "not reached" so the email still goes out and the alert logic runs.
+  // `stillOwnsClaim` — optional predicate from a caller that holds a
+  // processing claim (the call-recording pass). Checked immediately before
+  // EVERY leg: the caller's SMS closure cannot abandon the pass from inside
+  // this helper — its return only leaves the closure — so once the claim
+  // has moved, no later leg (the 'both' email) may go out on the
+  // superseded pass's behalf (codex #3677 P1). Null = unconditional.
+  const legPermitted = async () => !stillOwnsClaim || !!(await stillOwnsClaim());
+  const sendEmailLeg = async () => (await legPermitted()) ? sendAppointmentNoticeEmail(emailArgs) : { ok: false, reason: 'claim_lost' };
   const runSms = async () => {
+    if (!(await legPermitted())) return false;
     try {
       return await smsAttempt();
     } catch (err) {
@@ -491,8 +500,10 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   const emailReasonOf = (res) => (res?.blocked ? 'suppressed' : 'missing');
 
   if (ch === 'email') {
-    const res = await sendAppointmentNoticeEmail(emailArgs);
+    const res = await sendEmailLeg();
     if (res?.ok) return true;
+    // Claim moved: not an unreachable customer — no SMS fallback, no alert.
+    if (res?.reason === 'claim_lost') return false;
     // Held at the handoff by a grouped move — defer the whole notice: no
     // SMS fallback (it would carry the same stale time), no alert.
     if (res?.held) {
@@ -524,12 +535,15 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
       // (the old shape) lost BOTH legs for a night booking of a pre-8AM
       // visit: at 08:00 the past-appointment guard closes the row before
       // the sweep can deliver anything.
-      const heldEmailRes = await sendAppointmentNoticeEmail(emailArgs);
+      const heldEmailRes = await sendEmailLeg();
       logger.info(`[appt-remind] ${kind} SMS leg for ${customerId} held at the send-window boundary — SMS deferred, email leg ${heldEmailRes?.ok ? 'sent now' : `not sent (${heldEmailRes?.reason || heldEmailRes?.error || 'unknown'})`}`);
       return false;
     }
-    const emailRes = await sendAppointmentNoticeEmail(emailArgs);
+    const emailRes = await sendEmailLeg();
     const emailOk = !!emailRes?.ok;
+    // Claim moved between the legs: the superseded pass sent nothing more,
+    // and the replacement pass owns the notice — no alert.
+    if (!smsOk && emailRes?.reason === 'claim_lost') return false;
     // Email leg held by a grouped move mid-flight and no SMS went out —
     // a whole-notice deferral, not an unreachable customer.
     if (!smsOk && emailRes?.held) {
@@ -637,8 +651,12 @@ async function scheduledServiceApptTime(scheduledServiceId, { throwOnError = fal
 // skipped (false) unless the visit is still pre-visit live; a failed read
 // also skips — fail closed, the caller's repair rail retries. Booking-time
 // callers omit it: they just created/confirmed the row in-flow.
-async function deliverConfirmationByChannel({ customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt, smsPermanentlyBlocked = false, requireLiveVisitStatus = false }) {
+async function deliverConfirmationByChannel({ customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt, smsPermanentlyBlocked = false, stillOwnsClaim = null, requireLiveVisitStatus = false }) {
   const visitStillLive = async () => {
+    // A caller holding a processing claim whose claim has moved must not
+    // send any leg — same per-leg gate deliverAppointmentNotice applies
+    // (codex #3677 P1).
+    if (stillOwnsClaim && !(await stillOwnsClaim())) return false;
     if (!requireLiveVisitStatus || !scheduledServiceId) return true;
     try {
       const row = await db('scheduled_services')
@@ -720,6 +738,7 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
     serviceLabel,
     smsAttempt,
     smsOutcome: holdOutcome,
+    stillOwnsClaim,
   });
   if (!reached && holdOutcome.blockedCode === 'MOVE_HOLD' && scheduledServiceId) {
     try {
