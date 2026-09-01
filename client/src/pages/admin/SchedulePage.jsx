@@ -313,9 +313,12 @@ export function typedTreatmentAreaField(schema) {
   )) || null;
 }
 export function completionAreasForTypedFindings({ typedAreaKey, findingsValues, genericAreas }) {
-  return typedAreaKey
-    ? parseApplicationAreas(findingsValues?.[typedAreaKey])
-    : (genericAreas || []);
+  if (!typedAreaKey) return genericAreas || [];
+  const typedAreas = parseApplicationAreas(findingsValues?.[typedAreaKey]);
+  // Drafts saved before a lane gained its typed area field carry only the
+  // generic list. Preserve that scope until the technician picks a typed
+  // value; new typed selections remain authoritative once present.
+  return typedAreas.length ? typedAreas : (genericAreas || []);
 }
 export function specialtyActionScope({ specialtyKey, label, areas, defaultScope }) {
   const normalizedSpecialty = String(specialtyKey || "").toLowerCase();
@@ -10829,13 +10832,22 @@ export function CompletionPanel({
   // (codex P3 r2 on #2950).
   useEffect(() => {
     if (!areasTreatedHidden) return;
-    if (areasServiced.length) setAreasServiced([]);
+    if (areasServiced.length) {
+      if (typedTreatmentArea?.key) {
+        setFindingsValues((current) => (
+          parseApplicationAreas(current?.[typedTreatmentArea.key]).length
+            ? current
+            : { ...current, [typedTreatmentArea.key]: areasServiced.join(", ") }
+        ));
+      }
+      setAreasServiced([]);
+    }
     setSelectedProducts((prev) => (
       prev.some((p) => p && p.applicationArea)
         ? prev.map((p) => (p && p.applicationArea ? { ...p, applicationArea: "" } : p))
         : prev
     ));
-  }, [areasTreatedHidden, areasServiced, selectedProducts]);
+  }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea?.key]);
   // Default pest tank mix (owner 2026-08-29): recurring general-pest and
   // pest re-service completions open with Taurus SC + Talstar P + the
   // non-ionic surfactant already on the Products list, totals prefilled

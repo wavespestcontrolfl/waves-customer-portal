@@ -83,6 +83,14 @@ describe("typed area ownership", () => {
       genericAreas: ["Back yard"],
     })).toEqual(["Front yard", "Side yards"]);
   });
+
+  it("preserves generic areas from drafts created before typed area fields existed", () => {
+    expect(completionAreasForTypedFindings({
+      typedAreaKey: "areas_treated",
+      findingsValues: { areas_treated: "" },
+      genericAreas: ["Exterior perimeter", "Garage"],
+    })).toEqual(["Exterior perimeter", "Garage"]);
+  });
 });
 
 describe("specialty treatment scope", () => {
