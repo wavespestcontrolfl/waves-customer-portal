@@ -20,7 +20,7 @@ const { familyLabel } = require('./templates');
 
 const labelOf = (key) => familyLabel(key) || String(key || '').replace(/_/g, ' ');
 
-async function buildCancellationImpact(customerId, requestedFamilies = [], { after = null, keepVisitIds = null } = {}) {
+async function buildCancellationImpact(customerId, requestedFamilies = [], { after = null, keepVisitIds = null, keepScoped = false } = {}) {
   const { planScopedWindDown, familyOfServiceRow } = require('../cancellation-processor');
   const { inferTierFromServiceCount } = require('../self-booking-plan-sync');
 
@@ -96,9 +96,15 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
   // here). For a whole-account selection there is nothing remaining to
   // reprice — tierAfter is null and the totals go to zero.
   const scope = (requestedFamilies || []).filter((f) => owned.includes(f));
-  const wholeAccount = !scope.length || scope.length === owned.length;
+  // keepScoped (admin repair retries): a scoped cancellation whose accepted
+  // family already lost every live row must stay SCOPED — an empty owned
+  // intersection means "nothing left to pull for that family", not a
+  // whole-account cancel of whatever remains (which would preview and
+  // fingerprint the OTHER family's visits and a tier drop to zero that the
+  // repair-only processor never performs).
+  const wholeAccount = keepScoped ? false : (!scope.length || scope.length === owned.length);
   let plan = null;
-  if (!wholeAccount) {
+  if (!wholeAccount && scope.length) {
     try {
       plan = await planScopedWindDown(customerId, scope);
       if (!plan.ok) plan = null;

@@ -383,7 +383,7 @@ describe('POST /:id/cancel-plan/preview', () => {
     const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
     // The preview hands the impact math the LIVE term's canonical covered
     // rows (coverageRowsForTerm) — the same set the processor will keep.
-    expect(buildCancellationImpact).toHaveBeenLastCalledWith('cust-1', [], { after: '2027-02-28', keepVisitIds: ['s1', 's3', 's4', 's5'] });
+    expect(buildCancellationImpact).toHaveBeenLastCalledWith('cust-1', [], { after: '2027-02-28', keepVisitIds: ['s1', 's3', 's4', 's5'], keepScoped: false });
     expect(body.effectiveOn).toBe('2027-02-28');
     expect(body.prepay).toEqual(expect.objectContaining({ termId: 'term-1', termEnd: '2027-02-28', disposition: 'end_at_term', refund: null }));
 
@@ -595,6 +595,47 @@ describe('POST /:id/cancel-plan', () => {
     const body = await (await postCancel(baseUrl, { families: ['lawn_care'] })).json();
     expect(body.requestId).toBe('req-ib');
     expect(mockState.inserted).toBeUndefined();
+  }));
+
+  test('a scoped repair whose family lost every live row stays SCOPED in the preview AND the approved-facts view — never a whole-account impact over the other family', () => withServer(async (baseUrl) => {
+    const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
+    mockState.service_requests = [{
+      id: 'req-s', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+      subject: 'Cancel Lawn Care (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: ['lawn_care'], waiveLateFee: false, sendConfirmation: true } }),
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+    }];
+    // Run 1 pulled every lawn row: ownership resolution now refuses the
+    // family, and the open acceptance makes this a repair retry.
+    mockPlan.mockResolvedValue({ ok: false, error: 'scope_not_owned' });
+    const scopedEmpty = {
+      families: [{ key: 'pest_control', label: 'Pest Control', monthlyRate: 45, upcomingVisits: 2, nextVisitDate: '2099-01-05' }],
+      tierBefore: 'Bronze', tierAfter: null, accountMonthlyBefore: 45, accountMonthlyAfter: null,
+      remaining: [], perAppChanges: [], visitsCancelled: 0, nextVisitCancelled: null, pulledVisitKeys: [],
+      openBalance: 0, autopayOn: true, termiteRental: false, wholeAccount: false, scopedSupported: false,
+    };
+    buildCancellationImpact.mockClear().mockResolvedValueOnce(scopedEmpty).mockResolvedValueOnce(scopedEmpty);
+    const preview = await (await post(baseUrl, '/cancel-plan/preview', { families: ['lawn_care'] })).json();
+    expect(preview.repairRetry).toBe(true);
+    expect(preview.scopedSupported).toBe(true);
+    expect(buildCancellationImpact).toHaveBeenLastCalledWith('cust-1', ['lawn_care'], expect.objectContaining({ keepScoped: true }));
+    // The repair-only processor pulls nothing new; the approved pull set is
+    // empty too, so the retry closes clean instead of parking on
+    // visits_pulled_beyond_preview forever.
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: true, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: [], cancelledCount: 0, cancelledIds: [] });
+    const res = await post(baseUrl, '/cancel-plan', { families: ['lawn_care'], previewFingerprint: preview.previewFingerprint });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(buildCancellationImpact).toHaveBeenLastCalledWith('cust-1', ['lawn_care'], expect.objectContaining({ keepScoped: true }));
+    expect(body.requestId).toBe('req-s');
+    expect(body.errors).toEqual([]);
+    expect(mockState.service_requests[0].status).toBe('resolved');
+    // A FIRST-run scoped preview (family still owned) keeps the ordinary
+    // classification — the repair option is never passed.
+    mockState.service_requests = [];
+    mockPlan.mockResolvedValue({ ok: true, inScope: ['lawn_care'], remaining: ['pest_control'], tierBefore: 'Silver', tierAfter: 'Bronze' });
+    await post(baseUrl, '/cancel-plan/preview', { families: ['lawn_care'] });
+    expect(buildCancellationImpact).toHaveBeenLastCalledWith('cust-1', ['lawn_care'], expect.objectContaining({ keepScoped: false }));
   }));
 
   test('a fresh commit without the preview fingerprint is refused — the approval boundary is mandatory', () => withServer(async (baseUrl) => {
@@ -1084,6 +1125,10 @@ describe('POST /:id/cancel-plan', () => {
       // the term-states guard test). Coverage revocation happens when the
       // recorded refund actually lands (move 9).
       expect(mockRecordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'term-1', action: 'cancel', adminUserId: 'admin-1' }));
+      // The durable renewal note is written BEFORE the task and case persist
+      // — it describes the refund as owed, never as already recorded.
+      expect(mockRecordDecision.mock.calls[0][0].notes).toMatch(/refund owed/);
+      expect(mockRecordDecision.mock.calls[0][0].notes).not.toMatch(/recorded on the cancellation case/);
       expect((mockState.updates || []).filter((u) => u.table === 'annual_prepay_terms')).toEqual([]);
       expect(body.refund).toEqual(expect.objectContaining({ amount: 360, remainingVisits: 3, needsManualCalc: false }));
       expect(body.prepayTermOutcome).toBe('ended_now');
@@ -1366,13 +1411,17 @@ describe('POST /:id/cancel-plan', () => {
         snapshot: JSON.stringify({
           prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', refund: null,
           proposedRefund: { prepaidAmount: 480, includedVisits: 4, completedVisits: 1, remainingVisits: 3, amount: 360, needsManualCalc: false },
+          // The stamp landed (only the task was lost) — a MISSING stamp
+          // bypasses this latch for the repair retry instead.
+          outcome: { visitsPulled: 3, scope: [], confirmationRequested: false, confirmation: null, confirmationChannels: [], errors: ['prepay_term_disposition'] },
         }),
       }];
       // Plain post (exempt via the open acceptance): a fresh-preview
       // fingerprint would legitimately APPROVE the changed numbers.
       let body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
       expect(body.duplicate).toBe(true);
-      expect(body.errors).toEqual(['refund_facts_changed']);
+      // Run 1's recorded disposition failure rides along with the refusal.
+      expect(body.errors).toEqual(['prepay_term_disposition', 'refund_facts_changed']);
       expect(body.refund).toBeUndefined();
       // No task for numbers nobody approved.
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -1653,6 +1702,83 @@ describe('POST /:id/cancel-plan', () => {
       expect(mockState.service_requests[0].status).toBe('resolved');
     }));
 
+    test('a decided-term OPEN acceptance with NO recorded outcome (lost stamp) runs the repair retry instead of echoing — the pull count is reconstructed and the acceptance resolves', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      // Run 1 decided the term and wrote the case, then lost its outcome
+      // stamp (outcome_record_failed kept the acceptance open).
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+        snapshot: JSON.stringify({ prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term' }),
+      }];
+      // The repair pass finds run 1's two cancelled rows under this
+      // request's note and pulls nothing new.
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 0, cancelledIds: [], repairedCount: 2, keptThrough: '2027-02-28' });
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      // Not an echo: the processor ran, the decided term read as already
+      // recorded, and nothing was re-decided.
+      expect(body.duplicate).toBeUndefined();
+      expect(mockProcess).toHaveBeenCalledTimes(1);
+      expect(mockRecordDecision).not.toHaveBeenCalled();
+      expect(body.requestId).toBe('req-9');
+      expect(body.processed).toBe(true);
+      expect(body.errors).toEqual([]);
+      expect(body.prepayTermOutcome).toBe('decision_already_recorded');
+      // The re-stamped record carries run 1's pull set, not "0 pulled".
+      const stamped = mockState.cancellation_cases.find((c) => c.service_request_id === 'req-9' && JSON.parse(c.snapshot).outcome);
+      expect(JSON.parse(stamped.snapshot).outcome.visitsPulled).toBe(2);
+      expect(mockState.service_requests[0].status).toBe('resolved');
+    }));
+
+    test('a lost-stamp end-now retry that is fingerprint-exempt never mints a task on drifted numbers — the recorded proposal gates it, a fresh preview approves it', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: false, effectiveDate: 'now', prepayDisposition: 'end_now_refund' } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      // Run 1 proposed $360 (3 remaining), lost its task AND its outcome
+      // stamp; a covered visit completed since — live is $240.
+      mockState.scheduled_services = [
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-05-01' },
+      ];
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', effectiveDate: 'now', refund: null,
+          proposedRefund: { prepaidAmount: 480, includedVisits: 4, completedVisits: 1, remainingVisits: 3, amount: 360, needsManualCalc: false },
+        }),
+      }];
+      // Exempt plain post: the latch is bypassed (no outcome), the processor
+      // repairs, but the drifted recount is refused as a task.
+      let body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(body.duplicate).toBeUndefined();
+      expect(mockProcess).toHaveBeenCalledTimes(1);
+      expect(body.errors).toEqual(['refund_facts_changed']);
+      expect(body.refund).toBeUndefined();
+      expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[0])).not.toContain('billing');
+      expect(mockState.service_requests[0].status).toBe('new');
+      // Approval path: fresh preview → commit with its fingerprint raises
+      // the task on the approved live numbers and closes the acceptance.
+      NotificationService.notifyAdmin.mockClear();
+      const preview = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json();
+      body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: preview.previewFingerprint })).json();
+      expect(body.errors).toEqual([]);
+      expect(body.refund).toEqual(expect.objectContaining({ amount: 240, remainingVisits: 2 }));
+      expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[0])).toEqual(['billing']);
+      expect(mockState.service_requests[0].status).toBe('resolved');
+    }));
+
     test('a stale termite_retrieval_task on a decided-term duplicate repairs — the office recovers the dated pull instruction', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.service_requests = [{
@@ -1736,19 +1862,23 @@ describe('POST /:id/cancel-plan', () => {
         snapshot: JSON.stringify({
           prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', refund: null,
           proposedRefund: { prepaidAmount: 480, includedVisits: 4, completedVisits: 0, remainingVisits: 4, amount: 480, needsManualCalc: false },
+          outcome: { visitsPulled: 4, scope: [], confirmationRequested: false, confirmation: null, confirmationChannels: [], errors: ['prepay_term_disposition'] },
         }),
       }];
       NotificationService.notifyAdmin.mockResolvedValueOnce({ suppressed: true });
       let body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.duplicate).toBe(true);
-      expect(body.errors).toEqual(['prepay_refund_task_missing']);
+      expect(body.errors).toEqual(['prepay_term_disposition', 'prepay_refund_task_missing']);
       expect(body.refund).toBeUndefined();
 
       // A prior run that DID record its refund answers as-is — no re-raise.
       NotificationService.notifyAdmin.mockClear();
       mockState.cancellation_cases = [{
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
-        snapshot: JSON.stringify({ prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', refund: { amount: 360, needsManualCalc: false } }),
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', refund: { amount: 360, needsManualCalc: false },
+          outcome: { visitsPulled: 4, scope: [], confirmationRequested: false, confirmation: null, confirmationChannels: [], errors: [] },
+        }),
       }];
       body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body).toEqual(expect.objectContaining({ duplicate: true, errors: [] }));

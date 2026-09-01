@@ -1282,6 +1282,10 @@ async function processCancellationRequest({
 
   return {
     cancelledCount, cancelledIds, recurrenceStopped, churned, ok, errors,
+    // Rows a PRIOR attempt of this same request already cancelled (found by
+    // its note) — disjoint from cancelledCount; a caller whose first-run
+    // record was lost reconstructs the pull count from it.
+    repairedCount: repairs.length,
     termiteRetrievalPending,
     // C3 facts the caller records on the case: what was kept, and whether
     // the requested waiver was CONFIRMED by every applicable fee rail —

@@ -620,6 +620,17 @@ async function acquireCancelCommitLock(customerId) {
 // our read — only a re-read separates "already recorded" from a conflict
 // that must fail the disposition (and, for end_now_refund, must not promise
 // a refund on a term that is renewing).
+// The refund facts the operator approved, component by component: prepaid ÷
+// included × remaining can produce the same dollars from different inputs.
+function refundFactsMatch(a, b) {
+  return !!a && !!b
+    && a.needsManualCalc === b.needsManualCalc
+    && a.amount === b.amount
+    && a.prepaidAmount === b.prepaidAmount
+    && a.includedVisits === b.includedVisits
+    && a.remainingVisits === b.remainingVisits;
+}
+
 async function decideTermCancel(term, actorUserId, notes) {
   const { recordDecision } = require('./annual-prepay-renewals');
   const decided = term.renewal_decision === 'cancel'
@@ -738,7 +749,10 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
   const keepVisitIds = prepayPlan.keepThrough ? await liveCoveredKeepIds(term, customerId) : null;
   const [eligible, impact] = await Promise.all([
     hasCancellableWork(customerId),
-    buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough, keepVisitIds }),
+    // A scoped repair whose family already lost its live rows previews as
+    // SCOPED (nothing more to pull) — the same option the commit's
+    // approved-facts view passes, so the fingerprint matches on retry.
+    buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough, keepVisitIds, keepScoped: scopedRetry }),
   ]);
   const refund = term && prepayPlan.prepayDisposition === 'end_now_refund'
     ? await computePrepayRefund({ ...term, customer_id: customerId })
@@ -930,6 +944,12 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     if (!retryAcceptance) throw scopeErrorToHttp(scopeError);
     logger.info(`[admin-cancellation] scoped repair retry for ${customerId} — open acceptance ${retryAcceptance.id} overrides scope_not_owned`);
   }
+  // The accepted family owns no live rows any more: the approved-facts view
+  // must stay scoped (mirrors the preview) or it reclassifies to a
+  // whole-account impact over the OTHER family's visits, approves ids the
+  // repair-only run never pulls, and visits_pulled_beyond_preview parks
+  // every retry forever.
+  const scopedRetry = !!openAcceptance && scopeError === 'scope_not_owned';
   if (!(await hasCancellableWork(customerId))) {
     // A prior partial run may have already wound the account down and then
     // lost a follow-up step (case write, refund task, confirmation) —
@@ -1001,7 +1021,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // refund-task repair, which must never mint a task from numbers nobody
   // approved.
   const liveApprovedFacts = async ({ feeNow = new Date() } = {}) => {
-    const liveImpact = await buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough, keepVisitIds });
+    const liveImpact = await buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough, keepVisitIds, keepScoped: scopedRetry });
     const liveVisitFees = await previewVisitFees(liveImpact ? liveImpact.pulledVisitKeys : null, feeNow);
     return {
       liveImpact,
@@ -1052,18 +1072,34 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // from the live rows).
       if (prior) {
         let tied = false;
+        let openTie = false;
         try {
           const priorReq = prior.service_request_id
             ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at')
             : null;
-          tied = !!priorReq && (priorReq.status === 'new'
-            || (priorReq.status === 'resolved'
-              && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000));
+          openTie = !!priorReq && priorReq.status === 'new';
+          tied = openTie
+            || (!!priorReq && priorReq.status === 'resolved'
+              && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000);
         } catch (tieErr) {
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
         }
         if (!tied) {
           logger.info(`[admin-cancellation] case ${prior.id} has no live acceptance — treating this as a NEW cancellation, not a retry`);
+          prior = null;
+          priorSnap = null;
+        } else if (openTie && !(priorSnap && priorSnap.outcome)) {
+          // An OPEN acceptance whose case carries NO outcome is a LOST
+          // STAMP (the first run pushed outcome_record_failed and kept the
+          // acceptance open), not a finished run to echo: every repair in
+          // this latch keys on the recorded outcome, so echoing would
+          // answer "processed, 0 pulled, no errors" on every retry while
+          // the acceptance never resolves. Fall through instead — the open
+          // acceptance carries the retry into the processor's repair pass
+          // (which reconstructs the pull set from run 1's cancelled rows),
+          // the decided term reads decision_already_recorded, the refund
+          // task dedupes by term, and the run re-stamps the outcome.
+          logger.info(`[admin-cancellation] case ${prior.id} has an open acceptance but no recorded outcome (lost stamp) — running the repair retry instead of echoing`);
           prior = null;
           priorSnap = null;
         }
@@ -1108,12 +1144,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         // Neither → refund_facts_changed; a fresh preview → commit is the
         // approval path.
         const proposed = priorSnap && priorSnap.proposedRefund ? priorSnap.proposedRefund : null;
-        let approved = !!proposed && !!refund
-          && proposed.needsManualCalc === refund.needsManualCalc
-          && proposed.amount === refund.amount
-          && proposed.prepaidAmount === refund.prepaidAmount
-          && proposed.includedVisits === refund.includedVisits
-          && proposed.remainingVisits === refund.remainingVisits;
+        let approved = refundFactsMatch(proposed, refund);
         if (!approved && suppliedFingerprint) {
           try {
             approved = (await liveApprovedFacts()).fingerprint === suppliedFingerprint;
@@ -1378,6 +1409,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // forever (and per-request dedupe keys would double-bell).
   let request = openAcceptance;
   let priorOutcome = null;
+  // Run 1's PROPOSED (never recorded) refund: a fingerprint-exempt repair
+  // retry may only raise the office task on these approved numbers.
+  let priorProposedRefund = null;
   if (request) {
     logger.info(`[admin-cancellation] retry reuses accepted request ${request.id} for customer ${customerId} by ${actorLabel}`);
     // The FIRST attempt's recorded facts: its accepted waiver is STICKY on
@@ -1419,6 +1453,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         ? (typeof priorCase.snapshot === 'string' ? JSON.parse(priorCase.snapshot) : (priorCase.snapshot || {}))
         : null;
       priorOutcome = snap && snap.outcome ? snap.outcome : null;
+      priorProposedRefund = snap && !snap.refund && snap.proposedRefund ? snap.proposedRefund : null;
       if (snap && snap.waiveLateFee === true && !input.waiveLateFee) {
         input.waiveLateFee = true;
         logger.info(`[admin-cancellation] retry inherits the accepted fee waiver from request ${request.id} (case snapshot)`);
@@ -1578,7 +1613,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         // clears the prepaid stamps. Until then the decided term rides out
         // with no visits left — the processor pulled them above.
         const decision = await decideTermCancel(term, actorUserId,
-          `Cancel plan (${actorLabel}) — ended now; unused-value refund recorded on the cancellation case.`);
+          // Written BEFORE the refund task and the case row persist — the
+          // note says OWED, never "recorded": a lost task/case write leaves
+          // refundRecorded false and bells the office, and a durable
+          // renewal note claiming the record exists would contradict it.
+          `Cancel plan (${actorLabel}) — ended now; unused-value refund owed to the customer (office refund task + cancellation case follow).`);
         if (!decision.verified) {
           // A racing renew/switch_plan decision means the term is NOT
           // cancelled — recording a refund task for it would promise money
@@ -1606,8 +1645,19 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             logger.warn(`[admin-cancellation] refund recomputed after sweep for request ${request.id}: $${refund.amount} → ${recount.needsManualCalc ? 'manual' : `$${recount.amount}`}`);
           }
           refundFacts = recount;
-          await raisePrepayRefundTask({ customer, request, term, refund: recount, actorLabel });
-          refundRecorded = true;
+          if (!suppliedFingerprint && priorProposedRefund && !refundFactsMatch(priorProposedRefund, recount)) {
+            // Same posture as the duplicate latch (codex r8 P1): a
+            // fingerprint-exempt repair retry (the decided-term lost-stamp
+            // bypass lands here too) must never mint an actionable billing
+            // task for numbers nobody approved — the recount drifted from
+            // run 1's proposal, so the task waits for a fresh preview →
+            // commit; the case keeps the recount as PROPOSED only.
+            errors.push('refund_facts_changed');
+            logger.error(`[admin-cancellation] refund for request ${request.id} drifted from the recorded proposal ($${priorProposedRefund.amount} → ${recount.needsManualCalc ? 'manual' : `$${recount.amount}`}) — task NOT raised without a fresh approved preview`);
+          } else {
+            await raisePrepayRefundTask({ customer, request, term, refund: recount, actorLabel });
+            refundRecorded = true;
+          }
         }
       }
     } catch (err) {
@@ -1726,7 +1776,13 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           // "3 visits pulled, Silver → Bronze" into "0 pulled" — the case
           // and lost-response echoes must keep what actually happened.
           outcome: {
-            visitsPulled: (priorOutcome ? Number(priorOutcome.visitsPulled) || 0 : 0)
+            // No recorded first-run outcome (lost stamp): the processor's
+            // repair set — run 1's cancelled rows under this request's
+            // note — IS the first run's pull set, so the reconstructed
+            // record never reads "0 pulled" for a cancel that happened.
+            visitsPulled: (priorOutcome
+              ? Number(priorOutcome.visitsPulled) || 0
+              : (result ? Number(result.repairedCount) || 0 : 0))
               + (result ? Number(result.cancelledCount) || 0 : 0),
             scope: (Array.isArray(result?.scope) && result.scope.length)
               ? result.scope

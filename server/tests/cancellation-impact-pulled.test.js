@@ -146,3 +146,22 @@ test('termiteRental promises a retrieval task only when one will be raised — n
   const none = await buildCancellationImpact('cust-1', []);
   expect(none.termiteRental).toBe(false);
 });
+
+test('keepScoped: a requested family that owns no live rows stays a SCOPED, empty impact — never a whole-account cancel of the remaining family', async () => {
+  mockRows = [
+    { id: 'v1', family: 'pest_control', status: 'confirmed', scheduled_date: '2099-02-05', track_state: null },
+  ];
+  // Admin repair retry: run 1 already pulled every lawn row.
+  const repair = await buildCancellationImpact('cust-1', ['lawn_care'], { keepScoped: true });
+  expect(repair.wholeAccount).toBe(false);
+  expect(repair.visitsCancelled).toBe(0);
+  expect(repair.pulledVisitKeys).toEqual([]);
+  expect(repair.tierAfter).toBeNull();
+  expect(repair.accountMonthlyAfter).toBeNull();
+  expect(repair.remaining).toEqual([]);
+  // First-run semantics are unchanged: without the option the empty owned
+  // intersection still reads as the whole account.
+  const fresh = await buildCancellationImpact('cust-1', ['lawn_care']);
+  expect(fresh.wholeAccount).toBe(true);
+  expect(fresh.visitsCancelled).toBe(1);
+});
