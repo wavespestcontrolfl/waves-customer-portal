@@ -84,6 +84,12 @@ const CANCELLED_READ_ROUTES = [
   // soft-deletes every profile and revokes all sessions itself (codex GH r5
   // P1: the strict contract 401'd a cancelled customer AFTER the confirm).
   ['DELETE', '/api/auth/account'],
+  // Native sign-out's device-token deactivation (codex GH r12 P1): the app
+  // posts this BEFORE clearing credentials and swallows failures, so a
+  // 401 here left the push_subscriptions row active and billing/service
+  // notifications kept reaching a signed-out device. Narrow write: it only
+  // deactivates the caller's own token.
+  ['POST', '/api/push/native-unsubscribe'],
 ];
 
 function cancelledReadRoute(req) {

@@ -552,11 +552,17 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     // source estimate carried its own verification markers — never becomes
     // a customer-visible price. The customer gets the priced-by-hand 409.
     const raw = recomputed.rawEngineResult || {};
+    // The CANONICAL review predicates (draft-builder, same trio proposal
+    // generation gates on — codex GH r12 P1): a hand-rolled subset missed
+    // heuristic turf BASES (plausibleMaxTurfCap reports MEDIUM confidence
+    // yet means "capped at the parcel's plausible maximum") and the other
+    // review markers lineRequiresReview covers (requiresMeasurement,
+    // manualReviewReasons, the zero-tree underquote, …).
+    const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
     const flaggedLine = (raw.lineItems || []).some((l) => l && (
-      l.customQuoteFlag === true
-      || l.requiresManualReview === true
+      lineRequiresReview(l)
+      || lineHasHeuristicTurf(l)
       || String(l.pricingConfidence || '').toLowerCase() === 'low'
-      || String(l.turfConfidence || '').toLowerCase() === 'low'
     ));
     if (flaggedLine
       || (Array.isArray(raw.fieldVerify) && raw.fieldVerify.length > 0)

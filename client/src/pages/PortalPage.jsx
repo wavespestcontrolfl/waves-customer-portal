@@ -6050,7 +6050,13 @@ function BillingTab({ customer, refreshCustomer }) {
             // No scheduled date → "Next Not scheduled" reads broken; show a
             // neutral sub instead (eyeball 07-12 finding 3).
             { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : perVisitBilling ? 'Invoiced per visit' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : cancelledAccount ? 'Plan cancelled' : 'Manage below' },
-            { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
+            // Cancelled sessions get an EMPTY methods projection by design
+            // (privacy) — "None saved" would falsely claim the retained
+            // methods no longer exist (codex GH r12 P2). Neutral value,
+            // no count claim.
+            ...(cancelledAccount
+              ? [{ label: 'Default method', value: '—', sub: 'Not shown' }]
+              : [{ label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' }]),
             // Billing-mode aware (codex 2642 r4): per-application / prepaid
             // customers never see a combined monthly total here either.
             {

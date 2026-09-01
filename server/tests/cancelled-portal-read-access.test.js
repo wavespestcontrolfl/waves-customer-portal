@@ -145,6 +145,7 @@ beforeAll((done) => {
   app.use('/api/notifications', standIn([['GET', '/preferences'], ['PUT', '/preferences'], ['GET', '/property-preferences'], ['PUT', '/property-preferences/:id']]));
   app.use('/api/requests', standIn([['POST', '/restart-plan'], ['POST', '/cancel-resolution'], ['GET', '/']]));
   app.use('/api/referrals', standIn([['GET', '/'], ['POST', '/']]));
+  app.use('/api/push', standIn([['POST', '/native-unsubscribe'], ['POST', '/native-subscribe']]));
   app.use('/api/ai', standIn([['POST', '/chat']]));
   app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
   server = app.listen(0, '127.0.0.1', () => {
@@ -185,6 +186,8 @@ const WIDENED_READS = [
   ['GET', '/api/documents'], ['GET', '/api/documents/service-report/svc-1'], ['GET', '/api/documents/doc-1/download'],
   ['GET', '/api/property/termite-bond'],
   ['POST', '/api/requests/restart-plan'],
+  // Native sign-out's device-token deactivation (codex GH r12 P1).
+  ['POST', '/api/push/native-unsubscribe'],
 ];
 const STILL_BLOCKED = [
   // Reads the cancelled UI renders nothing from stay un-widened: saved-card
@@ -201,6 +204,9 @@ const STILL_BLOCKED = [
   ['GET', '/api/referrals'], ['POST', '/api/referrals'],
   ['POST', '/api/ai/chat'],
   ['POST', '/api/auth/select-property'], ['PUT', '/api/auth/credit-preference'],
+  // Subscribing (re-arming) push stays blocked — only the deactivation is
+  // admitted.
+  ['POST', '/api/push/native-subscribe'],
 ];
 
 describe('cancelled customer — read allowance (gate on)', () => {
