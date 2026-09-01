@@ -1229,6 +1229,27 @@ describe('full run', () => {
     expect(JSON.parse(successor.investigation).replaces_rejected).toEqual({ id: oldPath.id, reason: 'successor_unobserved' });
   });
 
+  test('an attempted-but-failed terms fetch never erases a previously valid hash (local Codex P1)', async () => {
+    const d = domainRow();
+    const priorHash = 'b'.repeat(64);
+    const existing = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      legal_attestation: true, legal_terms_hash: priorHash,
+      last_investigated_at: new Date('2026-08-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [existing] });
+    const legal = modelPath({ legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
+    const fetcher = async (url) => (url.includes('/terms')
+      ? { status: 500, finalUrl: url, html: null, blocked: false, error: 'http_500' }
+      : okFetch(url));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([legal]) }) }));
+    const kept = db._tables.seo_link_acquisition_paths.find((p2) => p2.id === existing.id);
+    expect(kept.legal_terms_hash).toBe(priorHash); // a transient failure is not a verdict on the agreement
+    expect(kept.last_investigated_at).toBeNull(); // unstamped — retried on rotation
+  });
+
   test('a non-text agreement body is never hashed — a PDF cannot bind acceptance (Codex PR r5 P1)', async () => {
     const d = domainRow();
     const db = makeDb({ seo_link_domains: [d] });

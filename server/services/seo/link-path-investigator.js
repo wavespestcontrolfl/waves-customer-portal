@@ -432,9 +432,10 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
     .where({ domain_id: domainId, path_key: row.path_key }).whereNull('superseded_by').first('*');
   let id;
   if (existing) {
-    // A pass that never ATTEMPTED the terms fetch (budget exhausted) carries
-    // no verdict on the agreement: the previously hashed text stands, so no
-    // erase and no revision bump on its account.
+    // An INCONCLUSIVE terms pass (budget exhausted, failed/blocked fetch,
+    // off-claim redirect, truncated/non-text/empty body) carries no verdict
+    // on the agreement: the previously hashed text stands, so no erase and
+    // no revision bump on its account.
     if (preserveTermsHash) row = { ...row, legal_terms_hash: existing.legal_terms_hash };
     const bump = {
       revision_payment: changedInputs(existing, row, PAYMENT_INPUTS),
@@ -909,13 +910,16 @@ async function investigatePaths(db, {
                 evidence.replaces_rejected = { id: p.replaces_path_id, reason: gone ? 'successor_unobserved' : 'no_deterministic_predecessor_evidence' };
               }
             }
-            if (p.termsBudgetExhausted) evidence.terms_verification = 'terms_budget_exhausted';
+            // ANY inconclusive terms outcome — budget exhausted (never
+            // attempted), fetch failed/blocked, off-host or off-claim
+            // redirect, truncated, non-text, empty shell — is not a verdict
+            // on the agreement: the previously hashed text stands and the
+            // path stays unstamped for a rotated retry. A hash is REPLACED
+            // only by a successfully observed agreement's new hash.
+            const termsInconclusive = !!(p.legal_attestation && p.legal_terms_url && !termsHashByUrl.has(p.legal_terms_url));
+            if (termsInconclusive) evidence.terms_verification = p.termsBudgetExhausted ? 'terms_budget_exhausted' : 'terms_fetch_inconclusive';
             const row = pathRowFrom({ ...p, ...verified }, { legalTermsHash: p.legal_terms_url ? termsHashByUrl.get(p.legal_terms_url) : null, now, evidence });
-            if (p.termsBudgetExhausted) {
-              // the hash was never ATTEMPTED — not a verdict: leave the path
-              // unstamped so the rotation retries it next pass, and let
-              // upsertPath keep any previously valid hash instead of erasing
-              // it (and bumping authority revisions) on a budget limit
+            if (termsInconclusive) {
               row.last_investigated_at = null;
               p.unstamped = true;
             }
@@ -931,7 +935,7 @@ async function investigatePaths(db, {
                 p.unstamped = true;
               }
             }
-            const id = await upsertPath(trx, domain.id, row, { replacesPathId: replaces, now, preserveTermsHash: !!p.termsBudgetExhausted });
+            const id = await upsertPath(trx, domain.id, row, { replacesPathId: replaces, now, preserveTermsHash: termsInconclusive });
             if (id) {
               writtenIds.push(id);
               if (p.unstamped) unstampedIds.add(id);
