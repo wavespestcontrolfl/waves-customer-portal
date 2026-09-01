@@ -781,10 +781,12 @@ describe('processCancellationRequest', () => {
     const result = await processCancellationRequest({ customerId: 'c1', requestId: 'reqT2', keepThrough: '2099-02-28', keepVisitIds: ['tv1'] });
 
     expect(result.churned).toBe(true);
-    const [, title, body, opts] = mockNotifyAdmin.mock.calls[0];
-    expect(title).toContain('after paid coverage ends 2099-02-28');
-    expect(body).toContain('schedule the retrieval AFTER that date');
-    expect(opts.metadata).toEqual(expect.objectContaining({ retrieveAfter: '2099-02-28' }));
+    // The DATED task is DEFERRED, never raised here: it also depends on the
+    // caller's annual-prepay term decision, which happens after this run —
+    // a conflicting renew decision must leave no instruction to pull
+    // stations from a program that continues.
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(result.termiteRetrievalPending).toEqual({ retrieveAfter: '2099-02-28' });
     // The covered termite visit stays on the calendar.
     expect(db.__tables.scheduled_services[0].status).toBe('confirmed');
   });

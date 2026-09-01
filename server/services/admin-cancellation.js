@@ -615,7 +615,32 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
   // attempt's failed side effects are stranded. Mirrors the commit gate.
   let repairRetry = false;
   try {
-    repairRetry = !!(await findCancelAcceptance(customerId, wholeAccount, scope, 'new'));
+    const acceptance = await findCancelAcceptance(customerId, wholeAccount, scope, 'new');
+    repairRetry = !!acceptance;
+    if (acceptance) {
+      // The commit inherits the FIRST attempt's accepted choices (sticky
+      // waiver from request metadata or the case snapshot; sticky
+      // no-communication) — the preview must present those EFFECTIVE
+      // values, or the card says "fee charged, customer texted" while the
+      // retry waives and stays silent. Same restore rules as the commit.
+      const requestMeta = requestCancelPlanMeta(acceptance);
+      if (requestMeta && requestMeta.waiveLateFee === true) input.waiveLateFee = true;
+      if (requestMeta && requestMeta.sendConfirmation === false) input.sendConfirmation = false;
+      if (!input.waiveLateFee) {
+        try {
+          const priorCase = await db('cancellation_cases')
+            .where({ service_request_id: acceptance.id })
+            .orderBy('created_at', 'desc')
+            .first('snapshot');
+          const snap = priorCase
+            ? (typeof priorCase.snapshot === 'string' ? JSON.parse(priorCase.snapshot) : (priorCase.snapshot || {}))
+            : null;
+          if (snap && snap.waiveLateFee === true) input.waiveLateFee = true;
+        } catch (snapErr) {
+          logger.warn(`[admin-cancellation] prior-case preview load failed for request ${acceptance.id}: ${snapErr.message}`);
+        }
+      }
+    }
   } catch (retryErr) {
     logger.warn(`[admin-cancellation] retry-acceptance preview lookup failed for ${customerId}: ${retryErr.message}`);
   }
@@ -737,8 +762,14 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     try {
       return await findCancelAcceptance(customerId, wholeAccount, scope, 'new');
     } catch (reuseErr) {
-      logger.warn(`[admin-cancellation] open-acceptance lookup failed for ${customerId}: ${reuseErr.message}`);
-      return null;
+      // Unverified is NOT "none": proceeding without proof either strands a
+      // prior partial run's repairs (nothing_to_cancel skips its failed
+      // side effects forever) or opens a SECOND request whose
+      // request-keyed dedupe double-bells the office. Fail closed,
+      // retryable — nothing has been written yet.
+      logger.error(`[admin-cancellation] open-acceptance lookup failed for ${customerId}: ${reuseErr.message}`);
+      throw new CancelPlanError(503, 'acceptance_check_unavailable',
+        'Could not verify whether an unfinished cancellation already exists for this customer — nothing was changed. Try again shortly.');
     }
   };
   const openAcceptance = await findOpenAcceptance();
@@ -1331,6 +1362,28 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     } catch (err) {
       errors.push('prepay_term_disposition');
       logger.error(`[admin-cancellation] prepay term disposition failed for request ${request.id}: ${err.message}`);
+    }
+  }
+
+  // Deferred DATED termite retrieval (end-of-coverage): the processor holds
+  // the dated task until the term decision stands — a conflicting renew
+  // decision means the program continues, and staff must never hold an
+  // instruction to pull Waves-owned stations on a date the plan no longer
+  // ends. Skipped on a conflict/failed disposition: that run is already
+  // partial (belled), and the repair retry re-runs the processor, which
+  // re-derives the pending task from live rows.
+  if (result && result.termiteRetrievalPending) {
+    if (processed && (termOutcome === 'ends_at_term' || termOutcome === 'decision_already_recorded')) {
+      try {
+        const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
+        await raiseTermiteRetrievalTask(customerId, request.id,
+          { retrieveAfter: result.termiteRetrievalPending.retrieveAfter });
+      } catch (termiteErr) {
+        errors.push('termite_retrieval_task');
+        logger.error(`[admin-cancellation] deferred termite retrieval task failed for request ${request.id}: ${termiteErr.message}`);
+      }
+    } else {
+      logger.warn(`[admin-cancellation] dated termite retrieval NOT raised for request ${request.id} — term decision not confirmed (${termOutcome || 'no disposition'})`);
     }
   }
 

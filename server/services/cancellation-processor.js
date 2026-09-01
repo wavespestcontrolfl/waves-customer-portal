@@ -473,6 +473,7 @@ async function processCancellationRequest({
   // soft-deleted ones, so every second the account stays chargeable is a
   // window for a billing cron to charge a customer who just cancelled.
   let churned = false;
+  let termiteRetrievalPending = null;
   let wasChurnedStage = false;
   // A scoped cancel never churns the account — the customer keeps the
   // families that stay; their billing wind-down happens per family below.
@@ -627,49 +628,6 @@ async function processCancellationRequest({
     await holdQuery.update({ status: 'cancelled', updated_at: new Date() });
   } catch (err) {
     logger.warn(`[cancellation-processor] hold invalidation failed for ${customerId}: ${err.message}`);
-  }
-
-  if (churned || (scoped && scopedFamilies.includes('termite_bait'))) {
-    try {
-      // The DATED task exists so RETAINED covered termite visits stay
-      // deliverable. On a mixed account whose prepaid term covers a
-      // DIFFERENT service, the uncovered termite visits are pulled NOW —
-      // dating the task by the unrelated term's end would tell staff to
-      // leave Waves-owned hardware in the ground for months after the
-      // termite program ended. Date it only when a kept covered row is
-      // itself a termite visit; anything ambiguous retrieves now (staff
-      // can see a live covered visit on the calendar and hold off, but a
-      // months-late instruction self-executes).
-      let retrieveAfter = null;
-      if (sweepAfter && keepIds && keepIds.length) {
-        const keptRows = await db('scheduled_services')
-          .where({ customer_id: customerId })
-          .whereIn('id', keepIds)
-          // 'rescheduled' matches the sweep's own predicate: an open rebook
-          // intent is pulled regardless of date and keepIds, so a covered
-          // termite row in that state does NOT stay deliverable — counting
-          // it would date the retrieval task for a visit nobody delivers.
-          .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
-          .select('id', 'scheduled_date', 'status', 'service_id', 'service_type');
-        const serviceIds = [...new Set(keptRows.map((r) => r.service_id).filter(Boolean))];
-        const services = serviceIds.length
-          ? await db('services').whereIn('id', serviceIds).select('id', 'service_key', 'service_name')
-          : [];
-        const byId = new Map(services.map((s) => [s.id, s]));
-        const keptTermite = keptRows.some((r) => {
-          const d = r.scheduled_date instanceof Date
-            ? r.scheduled_date.toISOString().slice(0, 10)
-            : String(r.scheduled_date || '').slice(0, 10);
-          return d && d <= sweepAfter
-            && familyOfServiceRow({ ...r, ...(byId.get(r.service_id) || {}) }) === 'termite_bait';
-        });
-        if (keptTermite) retrieveAfter = sweepAfter;
-      }
-      await raiseTermiteRetrievalTask(customerId, requestId, { retrieveAfter });
-    } catch (err) {
-      errors.push('termite_retrieval_task');
-      logger.error(`[cancellation-processor] termite station retrieval task failed for ${customerId}: ${err.message}`);
-    }
   }
 
   let recurrenceStopped = 0;
@@ -1117,6 +1075,63 @@ async function processCancellationRequest({
     }
   }
 
+  // Termite retrieval — AFTER the sweep and wind-down, never before: the
+  // task instructs staff to pull Waves-owned hardware, so it must not
+  // exist while the steps that actually end the program can still fail
+  // (stations must never come out of a live, still-billed program). Whole
+  // account: the churn persisted. Scoped termite: the wind-down committed.
+  if (churned || (scoped && scopedFamilies.includes('termite_bait') && scopedWoundDown)) {
+    try {
+      // The DATED task exists so RETAINED covered termite visits stay
+      // deliverable. On a mixed account whose prepaid term covers a
+      // DIFFERENT service, the uncovered termite visits are pulled NOW —
+      // dating the task by the unrelated term's end would tell staff to
+      // leave Waves-owned hardware in the ground for months after the
+      // termite program ended. Date it only when a kept covered row is
+      // itself a termite visit; anything ambiguous retrieves now (staff
+      // can see a live covered visit on the calendar and hold off, but a
+      // months-late instruction self-executes).
+      let retrieveAfter = null;
+      if (sweepAfter && keepIds && keepIds.length) {
+        const keptRows = await db('scheduled_services')
+          .where({ customer_id: customerId })
+          .whereIn('id', keepIds)
+          // 'rescheduled' matches the sweep's own predicate: an open rebook
+          // intent is pulled regardless of date and keepIds, so a covered
+          // termite row in that state does NOT stay deliverable — counting
+          // it would date the retrieval task for a visit nobody delivers.
+          .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
+          .select('id', 'scheduled_date', 'status', 'service_id', 'service_type');
+        const serviceIds = [...new Set(keptRows.map((r) => r.service_id).filter(Boolean))];
+        const services = serviceIds.length
+          ? await db('services').whereIn('id', serviceIds).select('id', 'service_key', 'service_name')
+          : [];
+        const byId = new Map(services.map((s) => [s.id, s]));
+        const keptTermite = keptRows.some((r) => {
+          const d = r.scheduled_date instanceof Date
+            ? r.scheduled_date.toISOString().slice(0, 10)
+            : String(r.scheduled_date || '').slice(0, 10);
+          return d && d <= sweepAfter
+            && familyOfServiceRow({ ...r, ...(byId.get(r.service_id) || {}) }) === 'termite_bait';
+        });
+        if (keptTermite) retrieveAfter = sweepAfter;
+      }
+      if (retrieveAfter) {
+        // Deferred: the DATED task also depends on the caller's annual-
+        // prepay term decision, which happens AFTER this run — the caller
+        // raises it only once the cancel decision stands. A conflicting
+        // renew decision means the program continues, and no retrieval
+        // instruction may exist for a plan that did not end.
+        termiteRetrievalPending = { retrieveAfter };
+      } else {
+        await raiseTermiteRetrievalTask(customerId, requestId, { retrieveAfter: null });
+      }
+    } catch (err) {
+      errors.push('termite_retrieval_task');
+      logger.error(`[cancellation-processor] termite station retrieval task failed for ${customerId}: ${err.message}`);
+    }
+  }
+
   if (churned && !wasChurnedStage) {
     try {
       await db('customer_interactions').insert({
@@ -1163,6 +1178,7 @@ async function processCancellationRequest({
 
   return {
     cancelledCount, cancelledIds, recurrenceStopped, churned, ok, errors,
+    termiteRetrievalPending,
     // C3 facts the caller records on the case: what was kept, and whether
     // the requested waiver was CONFIRMED by every applicable fee rail —
     // never the raw request while a fee may still charge.

@@ -77,9 +77,11 @@ jest.mock('../services/cancellation-resolution', () => ({
 }));
 const mockProcess = jest.fn();
 const mockPlan = jest.fn();
+const mockRaiseTermite = jest.fn(async () => ({ raised: true }));
 jest.mock('../services/cancellation-processor', () => ({
   processCancellationRequest: (...args) => mockProcess(...args),
   planScopedWindDown: (...args) => mockPlan(...args),
+  raiseTermiteRetrievalTask: (...args) => mockRaiseTermite(...args),
   familyOfServiceRow: (row) => row.family || null,
   CHURN_REASON: 'Customer cancellation request',
   CANCELLABLE_STATUSES: ['pending', 'confirmed', 'rescheduled'],
@@ -272,6 +274,7 @@ beforeEach(() => {
   mockPlan.mockReset().mockResolvedValue({ ok: true, inScope: ['lawn_care'], remaining: ['pest_control'], tierBefore: 'Silver', tierAfter: 'Bronze' });
   hasCancellableWork.mockResolvedValue(true);
   mockOpenCase.mockReset().mockImplementation(defaultOpenCase);
+  mockRaiseTermite.mockClear();
   mockRecordDecision.mockClear();
   mockSignupPreview.mockClear().mockResolvedValue({ eligible: false, blockers: ['beyond deposit stage'] });
   mockHoldPreview.mockClear().mockResolvedValue({ held: false, feeApplies: false });
@@ -671,6 +674,37 @@ describe('POST /:id/cancel-plan', () => {
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('outcome_record_failed');
   }));
 
+  test('a repair-retry preview presents the INHERITED accepted choices — the card must not promise a fee and a text the retry will not deliver', () => withServer(async (baseUrl) => {
+    mockState.service_requests = [{
+      id: 'req-1', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: true, sendConfirmation: false } }),
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+    }];
+    const body = await (await post(baseUrl, '/cancel-plan/preview')).json();
+    expect(body.repairRetry).toBe(true);
+    // The dialog defaults (unchecked waiver, confirmation on) are OVERRIDDEN
+    // by what the first attempt's operator accepted.
+    expect(body.waiveLateFee).toBe(true);
+    expect(body.sendConfirmation).toBe(false);
+  }));
+
+  test('an unverifiable open-acceptance lookup fails the commit closed — never nothing_to_cancel or a duplicate request', () => withServer(async (baseUrl) => {
+    db.mockImplementation((table) => {
+      const b = builderFor(table);
+      if (table === 'service_requests') {
+        // findCancelAcceptance awaits .select('*') — that terminal throws.
+        b.select = jest.fn(async () => { throw new Error('lookup down'); });
+      }
+      return b;
+    });
+    const res = await postCancel(baseUrl);
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe('acceptance_check_unavailable');
+    expect(mockProcess).not.toHaveBeenCalled();
+    expect(mockState.inserted).toBeUndefined();
+  }));
+
   test('the accepted waiver survives a LOST case write — the request metadata is the durable record', () => withServer(async (baseUrl) => {
     // Run 1: waived, a fee leg failed AND the case write failed.
     mockOpenCase.mockRejectedValueOnce(new Error('case table down'));
@@ -888,6 +922,31 @@ describe('POST /:id/cancel-plan', () => {
       expect(mockOpenCase.mock.calls[0][0].snapshot).toEqual(expect.objectContaining({ effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term', prepayTermId: 'term-1' }));
       // The confirmation names the coverage end, not today.
       expect(sendCancellationConfirmations.mock.calls[0][0].effectiveAt).toMatch(/^2027-02-28/);
+    }));
+
+    test('a deferred DATED termite task is raised only once the term decision stands — a conflict leaves no pull instruction', () => withServer(async (baseUrl) => {
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', termiteRetrievalPending: { retrieveAfter: '2027-02-28' } });
+      const ok = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      expect(ok.processed).toBe(true);
+      expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', ok.requestId, { retrieveAfter: '2027-02-28' });
+      // A racing renew decision stands: the program continues, so no
+      // retrieval instruction may exist — and the run parks for review.
+      mockRaiseTermite.mockClear();
+      mockState.service_requests = [];
+      mockState.annual_prepay_terms[0].renewal_decision = null;
+      mockRecordDecision.mockResolvedValueOnce(null);
+      db.mockImplementation((table) => {
+        if (table === 'annual_prepay_terms') {
+          const b = builderFor(table);
+          b.first = jest.fn(async () => ({ ...mockState.annual_prepay_terms[0], renewal_decision: 'renew' }));
+          return b;
+        }
+        return builderFor(table);
+      });
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', termiteRetrievalPending: { retrieveAfter: '2027-02-28' } });
+      const conflicted = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      expect(conflicted.prepayTermOutcome).toBe('decision_conflict');
+      expect(mockRaiseTermite).not.toHaveBeenCalled();
     }));
 
     test('now + refund: coverage cancelled, refund RECORDED on the case + office task — nothing refunded automatically', () => withServer(async (baseUrl) => {
