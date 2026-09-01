@@ -222,8 +222,15 @@ const TOP_LEVEL_TRANSPARENT = new Set([
 function condLabel(node, src) {
   // If/ternary branches are labelled directly in walk() (polarity-aware);
   // this covers the remaining constructs.
-  if (node.type === 'ForOfStatement' || node.type === 'ForInStatement'
-    || node.type === 'ForStatement' || node.type === 'WhileStatement' || node.type === 'DoWhileStatement') {
+  if (node.type === 'ForOfStatement' || node.type === 'ForInStatement') {
+    // The iterated source is identity — looping over a different list of
+    // paths must not reuse the old approval.
+    return `loop over ${predicateLabel(src ? src.slice(node.right.start, node.right.end) : '?')}`;
+  }
+  if (node.type === 'ForStatement' || node.type === 'WhileStatement' || node.type === 'DoWhileStatement') {
+    // The loop TEST is identity: flipping `!== 'production'` to `===` moves
+    // a debug route into production and must break the allowlist key.
+    if (node.test) return `loop while (${predicateLabel(src ? src.slice(node.test.start, node.test.end) : '?')})`;
     return 'loop';
   }
   if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') {
@@ -300,6 +307,22 @@ class ModuleAnalysis {
         && memberPropName(node.callee) === 'listen') {
         listenCalls.push(node);
       }
+      if (node.type === 'ImportDeclaration') {
+        // ESM imports bind exactly like require(): a default/namespace import
+        // is the module, a named import is one export — so an .mjs installer
+        // mutating a mounted router is caught like its CommonJS twin.
+        const spec = node.source.value;
+        const mod = this.resolveModule(spec);
+        for (const s of node.specifiers) {
+          this.countWrite(s.local.name);
+          if (s.type === 'ImportSpecifier') {
+            const imported = s.imported.type === 'Identifier' ? s.imported.name : s.imported.value;
+            this.setBinding(s.local.name, { kind: 'requireMember', module: mod, spec, name: imported, topLevel: true });
+          } else {
+            this.setBinding(s.local.name, { kind: 'require', module: mod, spec, topLevel: true });
+          }
+        }
+      }
       if (node.type === 'CallExpression'
         && node.callee.type === 'MemberExpression'
         && node.callee.object.type === 'Identifier') {
@@ -334,7 +357,7 @@ class ModuleAnalysis {
         }
       } else if (node.type === 'FunctionDeclaration' && node.id) {
         this.countWrite(node.id.name);
-        this.setBinding(node.id.name, { kind: 'function', topLevel: ctx.topLevel });
+        this.setBinding(node.id.name, { kind: 'function', node, topLevel: ctx.topLevel });
       } else if (node.type === 'ForOfStatement'
         && node.left.type === 'VariableDeclaration'
         && node.left.declarations.length === 1
@@ -569,6 +592,19 @@ class ModuleAnalysis {
     for (const r of this.registrations) {
       if (r.objectNode) r.object = this.resolveMemberChain(r.objectNode) || '<member>';
       else r.object = this.canonName(r.object);
+      if (r.object === '<member>' && r.objectNode) {
+        // `app._router.get('/leak', h)` — an unresolved member chain ROOTED
+        // at a known app/router registers real surface through internal
+        // state; never drop it silently.
+        let root = r.objectNode;
+        while (root.type === 'MemberExpression' || root.type === 'OptionalMemberExpression') root = root.object;
+        if (root.type === 'Identifier') {
+          const rootCanon = this.canonName(root.name);
+          if (this.routers.has(rootCanon) || APP_IDENTIFIERS.has(rootCanon)) {
+            this.problems.push(`${this.loc(r.node)}: ${r.method}() through unresolved member ${this.src.slice(r.objectNode.start, r.objectNode.end)} of ${rootCanon} — register through the router/app identifier directly`);
+          }
+        }
+      }
       const ob = this.cleanBinding(r.object);
       if (ob && (ob.kind === 'require' || ob.kind === 'requireMember') && ob.module !== null) {
         // `const shared = require('./shared-router'); shared.get('/leak', h)`
@@ -882,7 +918,7 @@ class ModuleAnalysis {
     } else if (init && init.type === 'ArrayExpression') {
       this.setBinding(name, { kind: 'array', elements: init.elements, topLevel });
     } else if (init && (init.type === 'ArrowFunctionExpression' || init.type === 'FunctionExpression')) {
-      this.setBinding(name, { kind: 'function', topLevel });
+      this.setBinding(name, { kind: 'function', node: init, topLevel });
     } else if (init && init.type === 'CallExpression') {
       // Express registration calls RETURN the router, so
       // `const api = router.get('/x', h)` aliases the router — later
@@ -1098,6 +1134,24 @@ class ModuleAnalysis {
   }
 
   /**
+   * A ROUTER identifier referenced anywhere inside a function used as a
+   * handler: a wrapper delegating to a captured router
+   * (`(req, res, next) => hidden(req, res, next)`) serves that router's
+   * routes behind the wrapper's own allowlist identity. Full applications
+   * are excluded — inline middleware legitimately reads app.locals/settings,
+   * and apps are policed by the listener/consumer checks instead.
+   */
+  routerReferencedIn(fnNode) {
+    let found = null;
+    walk(fnNode, (n) => {
+      if (found || n.type !== 'Identifier') return;
+      const canon = this.canonName(n.name);
+      if (this.routers.has(canon) && !this.apps.has(canon) && !APP_IDENTIFIERS.has(canon)) found = n.name;
+    }, { topLevel: false, conds: [], src: this.src });
+    return found;
+  }
+
+  /**
    * cleanBinding through alias chains: `const makeApp = express` must carry
    * express's provenance to `makeApp()` — but only when neither the alias
    * name nor the canonical name is shadowed/reassigned.
@@ -1147,9 +1201,14 @@ class ModuleAnalysis {
       case 'ArrayExpression':
         return node.elements.flatMap((el) => this.classify(el, depth + 1));
       case 'ArrowFunctionExpression':
-      case 'FunctionExpression':
-        // An inline function is definitionally not a Router instance.
+      case 'FunctionExpression': {
+        // An inline function is definitionally not a Router instance — but
+        // one DELEGATING to a captured router serves that router's routes
+        // behind its own identity; never credit it as plain middleware.
+        const delegated = this.routerReferencedIn(node);
+        if (delegated) return [{ type: 'opaque', desc: `inline function delegating to router ${delegated}` }];
         return [{ type: 'middleware', desc: 'inline function' }];
+      }
       case 'Identifier': {
         const canon = this.canonName(node.name);
         if (this.shadowedNames.has(node.name) || (canon !== node.name && this.shadowedNames.has(canon))) {
@@ -1198,7 +1257,10 @@ class ModuleAnalysis {
           const g = registry.lookup(this.file, canon, { local: true });
           if (g && !g.factory) return [{ type: 'guard', name: g.name, exempts: g.exempts }];
           if (registry.lookupPassthrough(this.file, canon, { local: true })) return [{ type: 'passthrough', name: canon }];
-          // A function declared in this file cannot be a Router instance.
+          // A function declared in this file cannot be a Router instance —
+          // but one delegating to a captured router is never plain middleware.
+          const delegated = b.node ? this.routerReferencedIn(b.node) : null;
+          if (delegated) return [{ type: 'opaque', desc: `${node.name} (delegates to router ${delegated})` }];
           return [{ type: 'middleware', desc: node.name }];
         }
         if (b.kind === 'call') {

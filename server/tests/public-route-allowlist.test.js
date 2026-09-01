@@ -1525,6 +1525,61 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.problems.some((p) => p.includes('listen() on application live'))).toBe(true);
   });
 
+  test('an ESM side-effect module (import + mutate) is swept like its CommonJS twin', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/installer.mjs': [
+        "import shared from './routes/x.js';",
+        "shared.get('/leak', (req, res) => res.json({}));",
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
+  test('a route inside a LOOP carries the loop test in its identity', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "for (; process.env.NODE_ENV !== 'production';) {",
+        "  app.get('/debug', (req, res) => res.json({}));",
+        '  break;',
+        '}',
+      ].join('\n')),
+    });
+    const r = res.publicRoutes.find((x) => x.path === '/debug');
+    expect(r).toBeDefined();
+    expect(r.cond).toContain("loop while (process.env.NODE_ENV !== 'production')");
+  });
+
+  test('an inline wrapper DELEGATING to a captured router is never plain middleware', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const hidden = require('express').Router();",
+        "hidden.get('/leak', (req, res) => res.json({}));",
+        "app.use('/approved', (req, res, next) => hidden(req, res, next));",
+      ].join('\n')),
+    });
+    // The wrapper must NOT be inventoried as an approvable plain inline
+    // function — the delegation is visible in its identity or rejected.
+    const clean = res.publicRoutes.filter((r) => (r.extra || '').includes('inline function') && !(r.extra || '').includes('delegating'));
+    expect(clean).toEqual([]);
+    expect(JSON.stringify([res.problems, res.publicRoutes.map((r) => r.extra)])).toContain('delegating to router hidden');
+  });
+
+  test("registrations through Express internals (app._router.get) are rejected, never dropped", () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "app.get('/ok', (req, res) => res.json({}));",
+        "app._router.get('/leak', (req, res) => res.json({}));",
+      ].join('\n')),
+    });
+    expect(res.problems.some((p) => p.includes('through unresolved member'))).toBe(true);
+  });
+
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {
     const res = new Scanner({
       appFile: 'server/index.js',
