@@ -613,13 +613,25 @@ describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend 
     await expect(reconcile(same.conn, same.parent, 2)).resolves.toMatchObject({ added: [] });
   });
 
-  test('the gate sits before the insert loop, priced from the same template the loop stamps', () => {
+  test('the gate sits before the insert loop, through the shared extension verdict', () => {
     const fn = src.slice(src.indexOf('async function reconcileRecurringSeriesVisitCount('));
-    const gate = fn.indexOf('const unbillableExtend = recurringWithoutBillableAmount({');
+    const gate = fn.indexOf('const unbillableExtend = await seriesExtensionUnbillable(trx, {');
     const loop = fn.indexOf('for (const nd of extendDates) {');
     expect(gate).toBeGreaterThan(-1);
     expect(loop).toBeGreaterThan(gate);
-    expect(fn.slice(0, loop)).toContain('calculateStoredVisitFinancials(gatePriceParent, dueAddons, parentAddons, storedDiscountScope)');
+    // The helper prices exactly as the insert loops stamp (same financials call).
+    const helper = src.slice(src.indexOf('async function seriesExtensionUnbillable('), src.indexOf("router.get('/', async (req, res, next) => {"));
+    expect(helper).toContain('calculateStoredVisitFinancials(gatePriceParent, dueAddons, parentAddons, storedDiscountScope)');
+    expect(helper).toContain('resolveSeriesExtensionPriceTemplate(conn, parent.id, parent)');
+  });
+
+  test('every OFFICE series writer consults the shared verdict; the completion auto-extend deliberately does not (owner ruling: warn at completion)', () => {
+    // reconcile (count raise + ongoing flip) + the two alert-action loops.
+    expect((src.match(/await seriesExtensionUnbillable\(trx, \{/g) || []).length).toBe(3);
+    const from = src.indexOf('async function runRecurringSeriesMaintenanceLocked(');
+    const autoExtend = src.slice(from, src.indexOf('\nasync function ', from + 10));
+    expect(autoExtend).toContain("insert(nextData)");
+    expect(autoExtend).not.toContain('seriesExtensionUnbillable(');
   });
 });
 

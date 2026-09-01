@@ -3055,8 +3055,17 @@ async function extendedChargeGuardsClear(invoice, scheduledServiceId, autopayAct
   }
 }
 
+// An attached invoice that completion treats as REPLACEABLE rather than as
+// an existing-invoice suppressor: void and canceled rows never settle and
+// completion mints past them, so neither may short-circuit the mint
+// question (Codex P1 — the shortcut excluded only void, and a canceled
+// latest invoice silenced the warning on a visit that then completed with
+// no replacement). Refunded is deliberately NOT here: completion suppresses
+// on it and parks a manual-billing alert instead of re-minting.
+const DEAD_ATTACHED_INVOICE_STATUSES = Object.freeze(['void', 'canceled', 'cancelled']);
+
 function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeLikely = false, chargeGuardsClear = false, visitPayerBilled = false } = {}) {
-  if (!invoice || invoice.status === 'void') return null;
+  if (!invoice || DEAD_ATTACHED_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) return null;
   const amount = invoice.total != null
     ? Math.max(0, Number(invoice.total) - Number(invoice.credit_applied || 0))
     : null;
@@ -3417,6 +3426,62 @@ function recurringWithoutBillableAmount({
   };
 }
 
+// The SAME billable-amount verdict for every OFFICE writer that grows an
+// existing series — the Edit Appointment count raise and fixed→ongoing flip
+// (reconcileRecurringSeriesVisitCount) and the recurring-plan alert actions
+// (extend / convert_ongoing). Each of these mints recurring rows without
+// passing the POST or make-recurring gates, so an unpriced, zero-rate plan
+// kept growing through them (Codex P1, two rounds). One helper, so a fourth
+// office writer cannot drift. Priced exactly as the insert loops stamp their
+// rows: the extension price template + the add-on lines due on each date
+// through calculateStoredVisitFinancials (the same call
+// applyStoredVisitFinancials makes), minimum across `dates`; the
+// create-invoice stamp is the sibling-resolved value the rows get.
+//
+// NOT applied to the completion-time auto-extend (runRecurringSeriesMaintenance):
+// owner ruling 2026-08-31 — warn at completion, block at booking — and a
+// refusal there would either fail the completion or silently end an ongoing
+// plan. The visit it spawns carries the non-blocking NOTHING WILL BILL
+// warning instead, which is the completion-side mechanism for existing
+// unpriced plans.
+//
+// An unreadable customer skips the verdict, as the spawn gate does: the
+// writer never fails on a read the insert itself does not need. A failed
+// completion-profile read maps to null and takes the unverified verdict
+// inside recurringWithoutBillableAmount.
+async function seriesExtensionUnbillable(conn, {
+  parent, dates, cols, parentAddons, storedDiscountScope, blackoutDates, skipParent, seriesCioc,
+}) {
+  if (!dates.length) return null;
+  const gateCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
+  if (!gateCustomer) return null;
+  const gatePriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
+  const floor = dates.reduce((min, d) => {
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, blackoutDates, skipParent);
+    const f = calculateStoredVisitFinancials(gatePriceParent, dueAddons, parentAddons, storedDiscountScope);
+    return Math.min(min, Number(f.price) > 0 ? Number(f.price) : 0);
+  }, Infinity);
+  const extendProfile = await resolveCompletionProfileForScheduledService(parent, conn).catch(() => null);
+  // The PARENT's own label — asks whether the series' service is always-free;
+  // children still resolve the live catalog identity at insert (same
+  // convention as the spawn gate, so the child-identity golden master stays
+  // strict).
+  const extendSeriesServiceType = parent.service_type;
+  return recurringWithoutBillableAmount({
+    isRecurring: true,
+    recurringFloorPrice: Number.isFinite(floor) ? floor : 0,
+    customer: gateCustomer,
+    createInvoiceOnComplete: !!(cols.create_invoice_on_complete
+      && (seriesCioc !== undefined ? seriesCioc : parent.create_invoice_on_complete)),
+    typedOneTimeBilling: extendProfile
+      ? String(extendProfile.billingType || '').toLowerCase() === 'one_time'
+        && parent.followup_included !== true
+      : null,
+    isCallback: !!parent.is_callback,
+    serviceType: extendSeriesServiceType,
+  });
+}
+
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
   try {
@@ -3585,7 +3650,7 @@ router.get('/', async (req, res, next) => {
       try {
         checkoutInvoice = await db('invoices')
           .where({ scheduled_service_id: s.id })
-          .whereNot('status', 'void')
+          .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
           .orderBy('created_at', 'desc')
           .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
       } catch { /* scheduled_service_id may be absent before migration */ }
@@ -4112,7 +4177,7 @@ router.get('/week', async (req, res, next) => {
         try {
           checkoutInvoice = await db('invoices')
             .where({ scheduled_service_id: s.id })
-            .whereNot('status', 'void')
+            .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
             .orderBy('created_at', 'desc')
             .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
         } catch { /* scheduled_service_id may be absent before migration */ }
@@ -4182,7 +4247,7 @@ router.get('/week', async (req, res, next) => {
         try {
           attachedInvoice = await db('invoices')
             .where({ scheduled_service_id: s.id })
-            .whereNot('status', 'void')
+            .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
             .orderBy('created_at', 'desc')
             .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'line_items', 'credit_applied', 'payer_id');
         } catch { /* scheduled_service_id may be absent before migration */ }
@@ -11638,53 +11703,15 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     baseDateStr, pattern: parent.recurring_pattern, rOpts, skip: skipParent, dir: dirParent, seen, need,
     blackoutDates: extendBlackoutDates,
   });
-  // SAME billable-amount gate as POST creation and the make-recurring spawn
-  // (Codex P1): this writer is the third path that mints recurring rows —
-  // the Edit Appointment count raise and the fixed→ongoing flip both arrive
-  // with spawnRecurringChildren=false and never reached the spawn-branch
-  // gate, so an unpriced, zero-rate plan kept growing through here. Priced
-  // from the SAME template and date-filtered add-ons the insert loop below
-  // stamps (applyStoredVisitFinancials), minimum across the dates it will
-  // actually write, with the sibling-resolved create-invoice stamp the rows
-  // get. An operator-scoped explicit $0 series is free BY DESIGN (the
-  // price/service-scope lane writes 0 to mean "made free", and completion
-  // honors it), so it is not a money gap. An unreadable customer skips the
-  // gate, as the spawn branch does — the writer never fails on a read the
-  // insert itself does not need.
-  if (extendDates.length) {
-    const gateCustomer = await trx('customers').where({ id: parent.customer_id }).first().catch(() => null);
-    const scopedFreeSeries = isEnabled('editApptPriceServiceScope')
-      && parseTemplateOverrides(parent?.recurring_template_overrides)?.estimated_price === 0;
-    if (gateCustomer && !scopedFreeSeries) {
-      const gatePriceParent = await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent);
-      const extendFloor = extendDates.reduce((min, d) => {
-        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, extendBlackoutDates, skipParent);
-        const f = calculateStoredVisitFinancials(gatePriceParent, dueAddons, parentAddons, storedDiscountScope);
-        return Math.min(min, Number(f.price) > 0 ? Number(f.price) : 0);
-      }, Infinity);
-      const extendProfile = await resolveCompletionProfileForScheduledService(parent, trx).catch(() => null);
-      // The PARENT's own label — asks whether the series' service is
-      // always-free; children still resolve the live catalog identity at
-      // insert (same convention as the spawn gate, so the child-identity
-      // golden master stays strict).
-      const extendSeriesServiceType = parent.service_type;
-      const unbillableExtend = recurringWithoutBillableAmount({
-        isRecurring: true,
-        recurringFloorPrice: Number.isFinite(extendFloor) ? extendFloor : 0,
-        customer: gateCustomer,
-        createInvoiceOnComplete: !!(cols.create_invoice_on_complete
-          && (seriesCioc !== undefined ? seriesCioc : parent.create_invoice_on_complete)),
-        typedOneTimeBilling: extendProfile
-          ? String(extendProfile.billingType || '').toLowerCase() === 'one_time'
-            && parent.followup_included !== true
-          : null,
-        isCallback: !!parent.is_callback,
-        serviceType: extendSeriesServiceType,
-      });
-      if (unbillableExtend) {
-        throw Object.assign(httpError(409, unbillableExtend.error), { code: unbillableExtend.code });
-      }
-    }
+  // Billable-amount gate on the dates this writer will add (shared helper —
+  // rationale on seriesExtensionUnbillable). Trims and unchanged counts never
+  // reach here.
+  const unbillableExtend = await seriesExtensionUnbillable(trx, {
+    parent, dates: extendDates, cols, parentAddons, storedDiscountScope,
+    blackoutDates: extendBlackoutDates, skipParent, seriesCioc,
+  });
+  if (unbillableExtend) {
+    throw Object.assign(httpError(409, unbillableExtend.error), { code: unbillableExtend.code });
   }
   for (const nd of extendDates) {
     const childIdentity = await resolveSeriesChildIdentity(trx, parent);
@@ -16816,6 +16843,15 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
+        // Billable-amount gate per placed date (shared helper); a refusal
+        // throws and rolls the whole action back, alert left open.
+        const unbillableAction = await seriesExtensionUnbillable(trx, {
+          parent, dates: [nd], cols, parentAddons, storedDiscountScope,
+          blackoutDates: alertBlackoutDates, skipParent, seriesCioc,
+        });
+        if (unbillableAction) {
+          throw Object.assign(httpError(409, unbillableAction.error), { code: unbillableAction.code });
+        }
         const [row] = await trx('scheduled_services').insert(data).returning('*');
         spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
         inserted++;
@@ -16895,6 +16931,15 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
+        // Billable-amount gate per placed date (shared helper); a refusal
+        // throws and rolls the whole action back, alert left open.
+        const unbillableAction = await seriesExtensionUnbillable(trx, {
+          parent, dates: [nd], cols, parentAddons, storedDiscountScope,
+          blackoutDates: alertBlackoutDates, skipParent, seriesCioc,
+        });
+        if (unbillableAction) {
+          throw Object.assign(httpError(409, unbillableAction.error), { code: unbillableAction.code });
+        }
         const [row] = await trx('scheduled_services').insert(data).returning('*');
         spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
         inserted++;
@@ -17221,6 +17266,7 @@ router._test = {
   noCardOnFileAlert,
   unbilledVisitAlert,
   recurringWithoutBillableAmount,
+  predictionFromAttachedInvoice,
   isTechnicianRequest,
   scopeToAssignedTech,
   technicianOwnsScheduledService,

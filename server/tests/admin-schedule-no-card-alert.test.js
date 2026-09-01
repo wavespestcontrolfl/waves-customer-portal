@@ -258,3 +258,29 @@ describe('enrichBillingLaneWithWalletGap wiring (source guards)', () => {
     expect((fn.match(/alerts\.push\(/g) || []).length).toBe(2);
   });
 });
+
+describe('predictionFromAttachedInvoice — dead attachments never short-circuit the mint question (Codex P1)', () => {
+  const { predictionFromAttachedInvoice } = adminScheduleRouter._test;
+  const inv = { id: 'i1', status: 'sent', total: 129, credit_applied: 0, payer_id: null };
+
+  test('a live attachment is the prediction source', () => {
+    expect(predictionFromAttachedInvoice(inv)).toMatchObject({ kind: 'invoice', amount: 129, source: 'attached_invoice' });
+  });
+
+  test('void AND canceled attachments yield null — completion replaces them, so the row prediction (and its mint verdict) must run', () => {
+    for (const status of ['void', 'canceled', 'cancelled', 'Canceled']) {
+      expect(predictionFromAttachedInvoice({ ...inv, status })).toBeNull();
+    }
+  });
+
+  test('the day/week feed loads pick the latest LIVE attachment — a newer canceled one must not hide an older open one', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    // The three feed loads that feed predictionFromAttachedInvoice / the
+    // sheet's checkout lines. The Charge-now mint-or-reuse loads (svc.id)
+    // are a different contract and deliberately untouched.
+    expect((src.match(/\.whereNotIn\('status', DEAD_ATTACHED_INVOICE_STATUSES\)/g) || []).length).toBe(3);
+    expect(src).not.toMatch(/scheduled_service_id: s\.id \}\)\s*\n\s*\.whereNot\('status', 'void'\)/);
+  });
+});
