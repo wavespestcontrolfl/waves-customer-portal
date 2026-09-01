@@ -8,6 +8,20 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The scheduler floors a same-day date at ET "now" + 30 min lead, so the
+// fixture date below rotted the whole suite once the wall clock passed
+// 08:00 ET on 2026-09-01 (main went red that morning). Pin ET "now" to a
+// fixed instant the day BEFORE the fixture date; explicit dates still go
+// through the real converter.
+jest.mock('../utils/datetime-et', () => {
+  const actual = jest.requireActual('../utils/datetime-et');
+  const PINNED_NOW = new Date('2026-08-31T16:00:00Z'); // 12:00 ET, Aug 31
+  return {
+    ...actual,
+    etParts: (date) => actual.etParts(date || PINNED_NOW),
+    etDateString: (date) => actual.etDateString(date || PINNED_NOW),
+  };
+});
 jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 27.39, lng: -82.39 },
   haversine: () => 0.5,
