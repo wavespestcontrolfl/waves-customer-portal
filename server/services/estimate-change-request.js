@@ -45,6 +45,10 @@ const CHANGE_REQUEST_KIND = {
   category: 'estimate_change_request',
   tag: 'estimate-change-request',
   lock: 'estimate-change-request-notify',
+  // Direct customer communication (the customer asked for a revision and is
+  // promised one): rings by default through the explicit bell tag, the way
+  // accepted estimates do. The category stays overridable for silencing.
+  bell: true,
 };
 
 // Chip set on the sheet's "change something" branch — keys are the API

@@ -129,6 +129,8 @@ describe('createEstimateChangeRequest', () => {
     expect(category).toBe('estimate_change_request');
     expect(subject).toContain('EST-2026-0099');
     expect(opts.link).toBe('/admin/customers?customerId=cust-1');
+    // Direct customer communication rings by default (explicit bell tag).
+    expect(opts.bell).toBe(true);
     expect(opts.metadata).toMatchObject({ estimateId: 'est-1', requestId: 'req-1' });
   });
 
@@ -223,7 +225,7 @@ describe('recordEstimateStillDeciding', () => {
 });
 
 describe('bell policy', () => {
-  test('estimate_change_request is owner-overridable (silent by default, owner ruling 2026-08-28)', () => {
+  test('estimate_change_request is owner-overridable (silenceable) while the send itself carries bell:true', () => {
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/notification-bell-policy'), 'utf8');
     const allowlistBlock = src.slice(src.indexOf('CATEGORY_BELL_ALLOWLIST = new Set(['), src.indexOf(']);', src.indexOf('CATEGORY_BELL_ALLOWLIST = new Set([')));

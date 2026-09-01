@@ -215,6 +215,10 @@ async function sendOfficeNotification(database, { subject, description, customer
       // requests page is gone; note the ?customerId=<id> panel form).
       link: `/admin/customers?customerId=${customerId}`,
       metadata: { estimateId, requestId, customerId },
+      // A kind that is direct customer communication rings by default via the
+      // explicit site tag (same mechanism as accepted estimates); the category
+      // stays owner-overridable so it can still be silenced.
+      ...(kind.bell ? { bell: true } : {}),
     }
   ).catch((err) => {
     logger.error(`[${kind.tag}] admin notification threw for request ${requestId}: ${err.message}`);
