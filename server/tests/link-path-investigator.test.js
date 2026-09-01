@@ -163,7 +163,7 @@ const modelPath = (over = {}) => ({
 });
 const verdictOf = (paths, verdict = 'qualified') => ({ verdict, watch_reason: verdict === 'watching' ? 'closed today' : null, paths });
 
-const okFetch = async (url) => ({ status: 200, finalUrl: url, html: `<html><body>Join for USD 95 / year — ${url}</body></html>`, blocked: false, truncated: false });
+const okFetch = async (url) => ({ status: 200, finalUrl: url, html: `<html><body>Directory listing page with membership details and vendor information. Join for USD 95 / year — ${url}. Applications are reviewed within five business days.</body></html>`, blocked: false, truncated: false });
 const passthrough = (name, fn) => fn();
 const runOpts = (db, over = {}) => ({
   now: NOW, exclusive: passthrough, fetchPage: okFetch,
@@ -363,6 +363,9 @@ describe('full run', () => {
     const p2 = db2._tables.seo_link_acquisition_paths[0];
     expect(p2.confidence).toBe(0); // never a best path, never past a §6.3 floor
     expect(JSON.parse(p2.investigation).submission_verification).toBe('status_404');
+    // a transient probe failure is NOT a verdict — the row stays unstamped
+    // so a later pass retries instead of hiding it for 90 days (Codex r3 P1)
+    expect(p2.last_investigated_at).toBeNull();
     expect(db2._tables.seo_link_domains[0].agent_state).toBe('watching'); // qualified with no executable path downgrades
   });
 
@@ -744,6 +747,101 @@ describe('full run', () => {
     expect(v.price_text).toBeNull(); // USD 95 must not verify against USD 950
     const exact = verifyPriceEvidence(pages, { price_text: 'USD 950', price_page_url: 'https://example.com/join' });
     expect(exact.price_text).toBe('USD 950');
+  });
+
+  test('a claim inside LEFT-side thousands separators is not verification (Codex PR r3 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const pages = [{ url: 'https://example.com/join', text: 'annual membership usd 1,950 per year', html: '<html/>', truncated: false }];
+    const v = verifyPriceEvidence(pages, { price_text: '950', price_page_url: 'https://example.com/join' });
+    expect(v.price_text).toBeNull(); // "950" must not verify against "1,950"
+    const whole = verifyPriceEvidence(pages, { price_text: 'usd 1,950', price_page_url: 'https://example.com/join' });
+    expect(whole.price_text).toBe('usd 1,950');
+  });
+
+  test('a currency marker must stand as a complete token — "95 USDT" never proves USD (Codex PR r3 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const pages = [{ url: 'https://example.com/join', text: 'listing price: 95 usdt per year', html: '<html/>', truncated: false }];
+    const v = verifyPriceEvidence(pages, {
+      price_text: '95 usdt', price_page_url: 'https://example.com/join',
+      currency_evidence: { marker: 'usd', kind: 'quote', page_url: 'https://example.com/join' },
+    });
+    expect(v.price_text).toBe('95 usdt'); // the quote itself is on the page
+    expect(v.currency_evidence).toBeNull(); // but 'usd' inside 'usdt' is no marker
+    expect(v.verification.currency_evidence).toBe('marker_not_in_verified_quote');
+  });
+
+  test('a terms fetch that soft-redirects to another page never hashes it as the agreement (Codex PR r3 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const long = `<html><body>${'Agreement clause text that is long enough to pass the substantive floor. '.repeat(6)}</body></html>`;
+    const homeRedirect = async (url) => (url.includes('/terms')
+      ? { status: 200, finalUrl: 'https://example.com/', html: long, blocked: false, truncated: false }
+      : okFetch(url));
+    const legal = modelPath({ legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
+    await investigatePaths(db, runOpts(db, { fetchPage: homeRedirect, llmDispatch: async () => ({ ok: true, json: verdictOf([legal]) }) }));
+    expect(db._tables.seo_link_acquisition_paths[0].legal_terms_hash).toBeNull();
+  });
+
+  test('a content-empty page shell is existence, not coverage — its omissions disprove nothing (Codex PR r3 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating' });
+    const stalePath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [stalePath] });
+    const shellFetch = async (url) => (url.includes('/join')
+      ? { status: 200, finalUrl: url, html: '<html><script src="app.js"></script><body></body></html>', blocked: false, truncated: false }
+      : okFetch(url));
+    const other = modelPath({ acquisition_type: 'business_claim', submission_url: 'https://example.com/register', payment_required: false, fee_scope: null, price_text: null, price_page_url: null, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null, renewal_period: null });
+    await investigatePaths(db, runOpts(db, { fetchPage: shellFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([other]) }) }));
+    const stale = db._tables.seo_link_acquisition_paths.find((p) => p.id === stalePath.id);
+    expect(Number(stale.confidence)).toBe(0.7); // the model observed nothing on the shell
+    expect(stale.last_investigated_at).toEqual(new Date('2026-05-01'));
+  });
+
+  test('a terminal not_reproducible verdict defers to watching while an uncovered positive path remains (Codex PR r3 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating' });
+    const uncovered = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/deep/hidden-join',
+      path_key: 'paid_listing:https://example.com/deep/hidden-join', superseded_by: null, baseline: false, confidence: 0.6,
+      last_investigated_at: new Date('2026-06-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [uncovered] });
+    const fetcher = async (url, opts) => (url.includes('hidden-join')
+      ? { status: 500, finalUrl: url, html: null, blocked: false, error: 'http_500' }
+      : okFetch(url));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('watching'); // never closed while a path stands unexamined
+    expect(dom.score_reasons).toMatch(/terminal verdict deferred/);
+    expect(dom.best_path_id).toBe(uncovered.id); // no contradiction: state defers instead
+  });
+
+  test('an owner-seed refresh outranks a full page of normal new rows (Codex PR r3 P2)', async () => {
+    const { selectTargets } = _internals;
+    const normals = Array.from({ length: 5 }, (_, i) => domainRow({ domain: `n${i}.com`, created_at: new Date('2026-08-02') }));
+    const seedAcquired = domainRow({ domain: 'seedref.com', agent_state: 'acquired', discovery_priority: 'owner_seed' });
+    const path = { id: uid(), domain_id: seedAcquired.id, path_key: 'unknown:-', superseded_by: null, last_investigated_at: null };
+    const db = makeDb({ seo_link_domains: [...normals, seedAcquired], seo_link_acquisition_paths: [path] });
+    const targets = await selectTargets(db, { limit: 3, now: NOW });
+    expect(targets[0].domain.domain).toBe('seedref.com');
+    expect(targets[0].claimState).toBe(false);
+  });
+
+  test('the score is computed from the LOCKED row, not the pre-fetch snapshot (Codex PR r3 P1)', async () => {
+    const d = domainRow(); // DR 40 at selection
+    const db = makeDb({ seo_link_domains: [d] });
+    const llm = jest.fn(async () => {
+      db._tables.seo_link_domains[0].domain_rating = 80; // enrichment lands mid-flight
+      return { ok: true, json: verdictOf([modelPath()]) };
+    });
+    await investigatePaths(db, runOpts(db, { llmDispatch: llm }));
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.score_reasons).toContain('DR 80');
+    expect(dom.score).toBe(Math.max(0, Math.min(100, Math.round(0.6 * 80 + 0.2 * Math.min(100, 3 * 10) + 20 * 0.7 - 0.4 * 5))));
   });
 
   test('a TRUNCATED candidate page proves existence but never coverage (Codex PR r2 P1)', async () => {

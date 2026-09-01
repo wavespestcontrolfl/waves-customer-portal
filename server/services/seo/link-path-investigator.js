@@ -64,6 +64,9 @@ const SUBMISSION_VERIFY_BUDGET = 3;
 // A real agreement has substantive text; a client-rendered shell canonicalizes
 // to (almost) nothing and must never produce a binding legal_terms_hash.
 const MIN_TERMS_TEXT_CHARS = 200;
+// A fetched page COVERS its URL (stamping/disproof) only with real canonical
+// text — a script shell is existence, not observation.
+const MIN_COVERAGE_TEXT_CHARS = 80;
 const PAGE_EXCERPT_CHARS = 6000;
 const REINVESTIGATE_AFTER_DAYS = 90;
 const WATCH_RECHECK_DAYS = 30;
@@ -316,7 +319,8 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
   const out = [];
   const take = (rows, claimState) => {
     for (const domain of rows || []) {
-      if (seen.has(domain.id) || out.length >= limit) return;
+      if (out.length >= limit) return;
+      if (seen.has(domain.id)) continue; // already ranked by an earlier bucket
       seen.add(domain.id);
       out.push({ domain, claimState });
     }
@@ -335,42 +339,34 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
     const seed = (d) => (d.discovery_priority === 'owner_seed' ? 0 : 1);
     return seed(a) - seed(b) || (new Date(a.created_at) - new Date(b.created_at));
   });
-  take(claimPool, true);
   const notSeen = (q) => ([...seen].length ? q.whereNotIn('d.id', [...seen]) : q);
-  if (out.length < limit) {
-    // Never-investigated active paths (baseline imports on acquired domains
-    // included, §5): refreshed WITHOUT touching the domain's aggregate state.
-    // The failure backoff applies here too — a repeatedly failing refresh
-    // target is deferred, never re-picked every hourly sweep.
-    const rows = await notSeen(db('seo_link_domains as d')
+  // Refresh buckets (path-based, §5): never-investigated active paths, then
+  // 90-day-stale ones — always state-less, always deferrable, and bound by
+  // owner actions (rejected never re-fetches; watching waits for its recheck).
+  const refreshRows = (kind, { seedOnly = false } = {}) => {
+    let q = notSeen(db('seo_link_domains as d')
       .join('seo_link_acquisition_paths as p', 'p.domain_id', 'd.id')
-      .whereNull('p.superseded_by').whereNull('p.last_investigated_at')
-      .where(backoffDue('d.investigate_after'))
-      // Owner actions bind the refresh lanes too: a rejected domain is never
-      // re-fetched, and a watching one waits for its recheck date.
-      .whereNotIn('d.agent_state', ['rejected'])
-      .where((b) => b.whereNot('d.agent_state', 'watching').orWhere('d.watch_recheck_at', '<=', now)))
-      .groupBy('d.id')
-      .select('d.*')
-      .orderByRaw("CASE WHEN d.discovery_priority = 'owner_seed' THEN 0 ELSE 1 END")
-      .orderBy('d.created_at', 'asc')
-      .limit(limit);
-    take(rows, false);
-  }
-  if (out.length < limit) {
-    const cutoff = new Date(now.getTime() - REINVESTIGATE_AFTER_DAYS * 24 * 60 * 60 * 1000);
-    const rows = await notSeen(db('seo_link_domains as d')
-      .join('seo_link_acquisition_paths as p', 'p.domain_id', 'd.id')
-      .whereNull('p.superseded_by').where('p.last_investigated_at', '<', cutoff)
+      .whereNull('p.superseded_by')
       .where(backoffDue('d.investigate_after'))
       .whereNotIn('d.agent_state', ['rejected'])
-      .where((b) => b.whereNot('d.agent_state', 'watching').orWhere('d.watch_recheck_at', '<=', now)))
-      .groupBy('d.id')
-      .select('d.*')
-      .orderByRaw('MIN(p.last_investigated_at) asc')
-      .limit(limit);
-    take(rows, false);
-  }
+      .where((b) => b.whereNot('d.agent_state', 'watching').orWhere('d.watch_recheck_at', '<=', now)));
+    if (kind === 'never') q = q.whereNull('p.last_investigated_at');
+    else q = q.where('p.last_investigated_at', '<', new Date(now.getTime() - REINVESTIGATE_AFTER_DAYS * 24 * 60 * 60 * 1000));
+    if (seedOnly) q = q.where('d.discovery_priority', 'owner_seed');
+    q = q.groupBy('d.id').select('d.*');
+    if (kind === 'never') q = q.orderByRaw("CASE WHEN d.discovery_priority = 'owner_seed' THEN 0 ELSE 1 END").orderBy('d.created_at', 'asc');
+    else q = q.orderByRaw('MIN(p.last_investigated_at) asc');
+    return q.limit(limit);
+  };
+  // Owner seeds jump the WHOLE queue (§5), refresh work included: seed
+  // claims, then seed refreshes, then everything else — a seed with a due
+  // path can never be starved behind a full page of ordinary new rows.
+  take(claimPool.filter((d) => d.discovery_priority === 'owner_seed'), true);
+  if (out.length < limit) take(await refreshRows('never', { seedOnly: true }), false);
+  if (out.length < limit) take(await refreshRows('stale', { seedOnly: true }), false);
+  take(claimPool, true); // seeds already taken; dedupe skips them
+  if (out.length < limit) take(await refreshRows('never'), false);
+  if (out.length < limit) take(await refreshRows('stale'), false);
   return out;
 }
 
@@ -492,14 +488,24 @@ const quoteOnPage = (pages, pageUrl, quote) => {
   let idx = t.indexOf(q);
   while (idx !== -1) {
     const before = idx > 0 ? t[idx - 1] : '';
+    const beforePrev = idx > 1 ? t[idx - 2] : '';
     const after = t[idx + q.length] || '';
     const afterNext = t[idx + q.length + 1] || '';
-    const digitBefore = /\d/.test(before);
+    // a separator flanked by a digit continues the number on EITHER side:
+    // "USD 1,950" must not verify a claimed "950", nor "USD 95" a "USD 95.50"
+    const digitBefore = /\d/.test(before) || (/[.,]/.test(before) && /\d/.test(beforePrev));
     const digitAfter = /\d/.test(after) || (/[.,]/.test(after) && /\d/.test(afterNext));
     if (!digitBefore && !digitAfter) return true;
     idx = t.indexOf(q, idx + 1);
   }
   return false;
+};
+
+// A currency marker inside a verified quote must stand as a COMPLETE token —
+// "95 USDT" never proves USD.
+const markerInText = (text, marker) => {
+  const esc = String(marker || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return !!esc && new RegExp(`(^|[^A-Za-z0-9])${esc}($|[^A-Za-z0-9])`).test(text);
 };
 
 /**
@@ -522,7 +528,7 @@ function verifyPriceEvidence(pages, p) {
   if (ev && ev.marker) {
     if (ev.kind === 'quote') {
       const verifiedQuotes = [priceOk ? p.price_text : '', renewalOk ? p.renewal_price_text : ''].join(' ');
-      if (verifiedQuotes.includes(ev.marker)) evidence = ev;
+      if (markerInText(verifiedQuotes, ev.marker)) evidence = ev;
       else verification.currency_evidence = 'marker_not_in_verified_quote';
     } else if (ev.kind === 'jsonld_price_currency') {
       const page = findPage(pages, ev.page_url);
@@ -642,7 +648,15 @@ async function investigatePaths(db, {
         ]);
 
         // Fetch phase — hardened fetcher only, capped, failures recorded.
-        const urls = candidateUrls(host, { touches, competitorUrls: (competitorRows || []).map((r) => r.source_url), existingPaths });
+        // Due paths rotate to the FRONT of the fetch order (never-covered
+        // first, then oldest coverage): with more paths than the cap fits, the
+        // path that stays uncovered this pass leads the next one instead of
+        // the same capped prefix repeating forever.
+        const orderedPaths = [...existingPaths].sort((a, b) => {
+          const t = (x) => (x.last_investigated_at ? new Date(x.last_investigated_at).getTime() : 0);
+          return t(a) - t(b);
+        });
+        const urls = candidateUrls(host, { touches, competitorUrls: (competitorRows || []).map((r) => r.source_url), existingPaths: orderedPaths });
         const pages = [];
         const fetchErrors = [];
         const redirectMap = new Map(); // normalized requested URL → normalized final URL (supersession evidence)
@@ -729,7 +743,10 @@ async function investigatePaths(db, {
         // untruncated page the model fully saw — the only basis for stamping
         // a path investigated or disproving an omitted one).
         const fetchedKeys = new Set(pages.map((pg) => registry.normalizeSubmissionUrl(pg.url)));
-        const coverageKeys = new Set(pages.filter((pg) => !pg.truncated).map((pg) => registry.normalizeSubmissionUrl(pg.url)));
+        // Coverage additionally requires SUBSTANTIVE canonical text — a
+        // client-rendered script shell proves the URL exists but the model
+        // observed nothing on it, so its omissions disprove nothing.
+        const coverageKeys = new Set(pages.filter((pg) => !pg.truncated && pg.text.length >= MIN_COVERAGE_TEXT_CHARS).map((pg) => registry.normalizeSubmissionUrl(pg.url)));
         let verifyAttempts = 0;
         for (const p of writable) {
           if (!p.submission_url) continue; // outreach-shaped paths have no URL to verify
@@ -772,7 +789,14 @@ async function investigatePaths(db, {
           // nothing): the hash binds legal acceptance (§3.2), so a partial or
           // absent agreement must stay unhashed (path stays INVALID under
           // §6.3 → owner-manual) rather than freeze a snapshot of nothing.
-          if (t && t.html && !t.blocked && !t.error && !t.truncated && hostBound(host, t.finalUrl || p.legal_terms_url)) {
+          // …and the fetch must LAND on the claimed agreement (scheme/slash
+          // redirects of the same page aside): a terms URL that soft-redirects
+          // to the homepage would otherwise hash an unrelated body as the
+          // agreement and clear the §6.3 legal-validity gate.
+          const termsFinal = (t && t.finalUrl) || p.legal_terms_url;
+          const schemelessTerms = (u) => registry.normalizeSubmissionUrl(u).replace(/^https?:\/\//, '');
+          if (t && t.html && !t.blocked && !t.error && !t.truncated
+              && hostBound(host, termsFinal) && schemelessTerms(termsFinal) === schemelessTerms(p.legal_terms_url)) {
             const termsText = canonicalizeTerms(t.html);
             if (termsText.length >= MIN_TERMS_TEXT_CHARS) termsHashByUrl.set(p.legal_terms_url, sha256(termsText));
           }
@@ -786,8 +810,10 @@ async function investigatePaths(db, {
         // simply re-selected by a later sweep if it comes back).
         let staleClaim = false;
         let effectiveVerdict = verdict.verdict;
+        const unstampedIds = new Set();
         await db.transaction(async (trx) => {
-          const fresh = await trx('seo_link_domains').where({ id: domain.id }).forUpdate().first('agent_state');
+          const fresh = await trx('seo_link_domains').where({ id: domain.id }).forUpdate()
+            .first('agent_state', 'domain_rating', 'spam_score', 'organic_traffic', 'competitors_linked');
           // Claims must still hold `investigating`; a REFRESH must still see
           // the lane state it selected — either way, a state that moved
           // during the un-locked network window owns the row now.
@@ -832,10 +858,22 @@ async function investigatePaths(db, {
               }
             }
             const row = pathRowFrom({ ...p, ...verified }, { legalTermsHash: p.legal_terms_url ? termsHashByUrl.get(p.legal_terms_url) : null, now, evidence });
-            if (p.submissionUnverified) row.confidence = 0; // exists only as a claim until a pass observes the URL
+            if (p.submissionUnverified) {
+              row.confidence = 0; // exists only as a claim until a pass observes the URL
+              // A TRANSIENT verification failure (probe error/status, budget
+              // exhausted) is not a verdict on the claim: leave the row
+              // unstamped so a later pass retries instead of hiding it for
+              // 90 days. Deterministic rejections (off-host, missing URL for
+              // a site-executed type) ARE verdicts and stamp normally.
+              if (!['offhost_submission_url', 'missing_submission_url'].includes(p.submissionUnverified)) {
+                row.last_investigated_at = null;
+                p.unstamped = true;
+              }
+            }
             const id = await upsertPath(trx, domain.id, row, { replacesPathId: replaces, now });
             if (id) {
               writtenIds.push(id);
+              if (p.unstamped) unstampedIds.add(id);
               out.pathsWritten += 1;
               if (replaces) out.superseded += 1;
             }
@@ -848,8 +886,9 @@ async function investigatePaths(db, {
           // eligible for a later pass instead of hiding for 90 days.
           const activeAll = await trx('seo_link_acquisition_paths')
             .where({ domain_id: domain.id }).whereNull('superseded_by').select('id', 'submission_url');
-          const stampIds = new Set(writtenIds);
+          const stampIds = new Set(writtenIds.filter((id) => !unstampedIds.has(id)));
           for (const ap of activeAll) {
+            if (unstampedIds.has(ap.id)) continue; // transient verification failure — retryable next pass
             if (!ap.submission_url || coverageKeys.has(registry.normalizeSubmissionUrl(ap.submission_url))) stampIds.add(ap.id);
           }
           if (stampIds.size) {
@@ -892,19 +931,27 @@ async function investigatePaths(db, {
           const active = await trx('seo_link_acquisition_paths').where({ domain_id: domain.id }).whereNull('superseded_by').where({ baseline: false }).select('*');
           const ranked = active.map((p) => ({ p, v: pathValue(p) })).filter((r) => r.v > 0).sort((a, b) => b.v - a.v);
           const best = ranked.length ? ranked[0].p : null;
-          const { score, reasons } = scoreDomain(domain, best);
+          // Score from the LOCKED row — a concurrent enrichment (the Sunday
+          // feeders can still be running at :20) must not leave a freshly
+          // qualified domain scored on superseded quality inputs.
+          const { score, reasons } = scoreDomain({ ...domain, ...fresh }, best);
           const watchNote = claimState && verdict.verdict === 'watching' && verdict.watch_reason ? ` · watching: ${verdict.watch_reason}` : '';
           const patch = { best_path_id: best ? best.id : null, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: 0, investigate_after: null };
           if (claimState) {
-            // The schema requires a qualified verdict to contain an
-            // executable, positive-confidence path, so `best` exists here in
-            // practice — but the write path is defensive: qualified with no
-            // best path downgrades to `watching` rather than producing a
-            // qualified domain nothing can act on.
-            effectiveVerdict = verdict.verdict === 'qualified' && !best ? 'watching' : verdict.verdict;
+            // Defensive downgrades, both directions: a qualified verdict with
+            // no executable best path parks `watching` (never a qualified
+            // domain nothing can act on), and a TERMINAL not_reproducible
+            // with a positive-value path still standing (an uncovered path
+            // this pass could not disprove) also parks `watching` — the
+            // domain is not closed until every active path has been covered,
+            // and the due-first fetch rotation covers it next pass.
+            effectiveVerdict = verdict.verdict;
+            let downgradeNote = null;
+            if (verdict.verdict === 'qualified' && !best) { effectiveVerdict = 'watching'; downgradeNote = 'qualified verdict carried no executable path'; }
+            if (verdict.verdict === 'not_reproducible' && best) { effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: an uncovered active path remains'; }
             patch.agent_state = effectiveVerdict === 'qualified' ? 'qualified' : effectiveVerdict === 'watching' ? 'watching' : 'not_reproducible';
             patch.watch_recheck_at = effectiveVerdict === 'watching' ? new Date(now.getTime() + WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000) : null;
-            if (effectiveVerdict !== verdict.verdict) patch.score_reasons = `${patch.score_reasons} · downgraded: qualified verdict carried no executable path`;
+            if (downgradeNote) patch.score_reasons = `${patch.score_reasons} · downgraded: ${downgradeNote}`;
           }
           await trx('seo_link_domains').where({ id: domain.id }).update(patch);
         });
