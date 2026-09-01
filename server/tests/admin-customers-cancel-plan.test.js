@@ -454,6 +454,23 @@ describe('POST /:id/cancel-plan', () => {
     expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(2);
   }));
 
+  test('a LOST acceptance close is a surfaced follow-up failure — never a clean run leaving a reusable stale request', () => withServer(async (baseUrl) => {
+    // The resolve update lands on zero rows (row vanished / status raced).
+    db.mockImplementation((table) => {
+      const b = builderFor(table);
+      if (table === 'service_requests') {
+        const update = b.update;
+        b.update = async (patch) => (patch.status === 'resolved' ? 0 : update(patch));
+      }
+      return b;
+    });
+    const body = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(body.processed).toBe(true);
+    expect(body.errors).toEqual(['acceptance_close_failed']);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('acceptance_close_failed');
+  }));
+
   test('a scoped retry after its visits were pulled is not stranded by scope_not_owned — the acceptance carries it to the repair pass', () => withServer(async (baseUrl) => {
     // Run 1: feasible scoped cancel; a per-visit side effect failed.
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: ['pest_control'], errors: ['invoice_void:s1'] });

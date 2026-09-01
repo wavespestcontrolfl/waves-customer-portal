@@ -1114,10 +1114,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // an unnecessary reuse, never a lost cancel.
   if (processed && errors.length === 0) {
     try {
-      await db('service_requests').where({ id: request.id })
+      const closed = await db('service_requests').where({ id: request.id })
         .update({ status: 'resolved', updated_at: new Date() });
+      if (!closed) throw new Error('acceptance close updated zero rows');
     } catch (closeErr) {
-      logger.warn(`[admin-cancellation] acceptance close failed for request ${request.id}: ${closeErr.message}`);
+      // A stale 'new' acceptance would hand the NEXT cancellation in 24h
+      // this request/case and its dedupe keys — a lost close is a
+      // follow-up failure (review bell below), never a silent clean run.
+      errors.push('acceptance_close_failed');
+      logger.error(`[admin-cancellation] acceptance close failed for request ${request.id}: ${closeErr.message}`);
     }
   }
 
