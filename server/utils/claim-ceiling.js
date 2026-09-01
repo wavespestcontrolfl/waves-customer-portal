@@ -48,14 +48,14 @@ function providerBudgetMs() {
 // Ringing a bell early on a pass that turns out to be healthy costs one
 // notification. RECLAIMING a live claim costs duplicate side effects on a
 // customer's record, so it must never happen to a pass that is merely slow.
-// THREE thresholds, because the actor differs.
+// ONE threshold, and it only ever rings a BELL.
 //
-// A pass past every legitimate provider path is not healthy, so that is where
-// the bell rings AND where a human forcing a reprocess is allowed to win —
-// the operator is looking at the row and asking on purpose, and making them
-// wait longer is the wedge this branch exists to shorten. Automatic reclaim
-// stays far more conservative: robot-vs-robot stealing is what produces
-// duplicate side effects with nobody watching.
+// Reclaim is heartbeat-only: a ceiling that lets a peer take a still-beating
+// claim has to sit above the longest legitimate pass, the pipeline contains
+// provider calls with no bounded timeout, and a ceiling set too low steals
+// live work and duplicates side effects on a customer's record. Alerting has
+// no such downside — a false bell costs one notification — so this ceiling
+// governs the watchdog alone.
 //
 // Neither number is an attempt to enumerate the call graph. The processor can
 // run more legs than the four timeouts describe — a second labeling attempt,
@@ -71,31 +71,10 @@ function providerBudgetMs() {
 // than by margin. That needs cancellation threaded through every provider
 // await and is deliberately not attempted here.
 const ALERT_HEADROOM = 1.2;
-const HUMAN_RECLAIM_HEADROOM = 1.2;
-const RECLAIM_HEADROOM = 4;
 
 // When the stall watchdog should ring about a claim that is still beating.
 function alertCeilingMinutes() {
   return Math.ceil((providerBudgetMs() * ALERT_HEADROOM) / 60000);
 }
 
-// When an OPERATOR forcing a reprocess may take a still-beating claim. Past
-// every legitimate provider path, a human asking wins.
-function humanReclaimCeilingMinutes() {
-  return Math.ceil((providerBudgetMs() * HUMAN_RECLAIM_HEADROOM) / 60000);
-}
-
-// When an automatic sweep may take a still-beating claim. Deliberately far
-// out: nobody is watching, and a wrong steal duplicates side effects.
-function reclaimCeilingMinutes() {
-  return Math.ceil((providerBudgetMs() * RECLAIM_HEADROOM) / 60000);
-}
-
-module.exports = {
-  alertCeilingMinutes,
-  humanReclaimCeilingMinutes,
-  reclaimCeilingMinutes,
-  providerBudgetMs,
-  ALERT_HEADROOM,
-  RECLAIM_HEADROOM,
-};
+module.exports = { alertCeilingMinutes, providerBudgetMs, ALERT_HEADROOM };

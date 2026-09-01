@@ -96,9 +96,7 @@ describe('processAllPending counters', () => {
 // derivation mirrors the processor's own timeout map — pinned here so the two
 // cannot drift apart silently.
 describe('claim ceiling is derived from the provider budgets', () => {
-  const {
-    alertCeilingMinutes, humanReclaimCeilingMinutes, reclaimCeilingMinutes, providerBudgetMs,
-  } = require('../utils/claim-ceiling');
+  const { alertCeilingMinutes, providerBudgetMs } = require('../utils/claim-ceiling');
   const { PROVIDER_FETCH_TIMEOUTS_MS } = jest.requireActual('../services/call-recording-processor')._test;
 
   test('the mirrored budget counts every sequential leg at the processor timeouts', () => {
@@ -113,23 +111,19 @@ describe('claim ceiling is derived from the provider budgets', () => {
     expect(providerBudgetMs()).toBe(expected);
   });
 
-  test('no legitimate provider path reaches any ceiling', () => {
-    const worstCaseMs = providerBudgetMs();
-    for (const minutes of [alertCeilingMinutes(), humanReclaimCeilingMinutes(), reclaimCeilingMinutes()]) {
-      expect(minutes * 60000).toBeGreaterThan(worstCaseMs);
-    }
-  });
-
-  test('a human may reclaim a hung claim long before an automatic sweep', () => {
-    // The wedge this branch exists to shorten: an operator looking at the row
-    // must not wait hours behind a pass that is beating but going nowhere.
-    expect(humanReclaimCeilingMinutes()).toBeLessThan(reclaimCeilingMinutes());
-  });
-
-  test('the bell rings before a peer may steal a still-beating claim', () => {
-    // A premature bell costs a notification; a premature reclaim costs
-    // duplicate side effects on a customer's record.
-    expect(alertCeilingMinutes()).toBeLessThan(reclaimCeilingMinutes());
+  test('the bell sits above every budgeted provider path', () => {
     expect(alertCeilingMinutes() * 60000).toBeGreaterThan(providerBudgetMs());
   });
+
+  test('the ceiling never reaches the reclaim predicates — those are heartbeat-only', () => {
+    // A ceiling that lets a peer take a still-beating claim has to sit above
+    // the longest legitimate pass, and the pipeline has unbounded provider
+    // calls; set too low it steals live work and duplicates side effects.
+    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const predicate = source.match(/const reclaimableClaim = [^;]+;/s)[0];
+    expect(predicate).toContain('processing_heartbeat_at');
+    expect(predicate).not.toMatch(/Ceiling|ceiling/);
+  });
+
+
 });

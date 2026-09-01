@@ -1951,20 +1951,29 @@ function summarizeBatch(results) {
 // + extraction (primary and fallback) back to back, which at the shipped
 // defaults is exactly 20 minutes — so a flat 20 would have reclaimed a
 // slow-but-working pass out from under itself (pre-push audit P1).
-const { humanReclaimCeilingMinutes, reclaimCeilingMinutes } = require('../utils/claim-ceiling');
-// `human` picks the ceiling for the FORCE path: an operator looking at the
-// row and asking on purpose may take a claim that has outlived every
-// legitimate provider path, while an automatic sweep waits far longer —
-// nobody is watching a robot steal, and a wrong steal duplicates side
-// effects.
-const reclaimableClaim = (quietMinutes, { human = false } = {}) => {
-  const ceiling = human ? humanReclaimCeilingMinutes() : reclaimCeilingMinutes();
-  return "("
-    + `COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '${quietMinutes} minutes'`
-    + ` OR COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${ceiling} minutes'`
-    + ")";
-};
-
+// A claim is reclaimable when it STOPPED BEATING. Nothing else.
+//
+// Earlier revisions added an absolute ceiling so a pass that hangs while its
+// timer keeps beating could still be recovered. Every attempt to size that
+// ceiling failed the same way: it has to sit above the longest LEGITIMATE
+// pass, the pipeline contains provider calls with no bounded timeout (the
+// contact decoder, the synopsis call on SDK defaults), and a ceiling below
+// the true worst case lets a peer steal a live claim and run a second pass
+// concurrently — duplicate side effects on a customer's record, which is far
+// worse than the hang it was guarding.
+//
+// So the ceiling is gone from the reclaim path. What replaces it is not
+// silence: the stall watchdog still rings on a claim that has outlived every
+// budgeted path (see utils/claim-ceiling.js — a false bell costs a
+// notification, a false steal costs a duplicate), so a hung-but-beating pass
+// surfaces to a human instead of being taken by a robot on a guess.
+//
+// KNOWN RESIDUAL: recovering that hung pass needs a human today. Closing it
+// properly needs ONE end-to-end deadline enforced inside the pass, so no leg
+// can outlive it and reclaim becomes safe by construction rather than by
+// margin — a larger change than this branch carries.
+const reclaimableClaim = (quietMinutes) =>
+  `COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '${quietMinutes} minutes'`;
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
@@ -6231,7 +6240,7 @@ const CallRecordingProcessor = {
             // after looking at the row; the automatic paths keep the
             // conservative window.
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-              .orWhereRaw(reclaimableClaim(3, { human: true }));
+              .orWhereRaw(reclaimableClaim(3));
           })
           .update({
             processing_status: 'processing',
