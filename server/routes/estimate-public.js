@@ -11649,6 +11649,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     let invoiceAmount = txResult.invoiceAmount || null;
     let invoicePayUrl = txResult.invoicePayUrl || null;
     let invoiceLinkDelivered = false;
+    // Quiet-hours cohort (GH Codex P2 r5): a phone-only after-hours accept
+    // queues the invoice SMS for the 8 AM window open (sms.scheduled) and
+    // returns ok:false — delivery is in flight, not failed. Tracked apart
+    // from invoiceLinkDelivered so ONLY the acceptance-text gate below
+    // counts it; the prepay stamp resolution and the accept notification
+    // still require a CONFIRMED delivery.
+    let invoiceSmsQueued = false;
     let invoiceServiceLabel = txResult.invoiceServiceLabel || acceptedOneTimeServiceLabel || null;
     const invoiceKind = txResult.invoiceKind || null;
     const annualPrepayConversion = txResult.annualPrepayConversion || null;
@@ -12670,7 +12677,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // primary) still owes the appointment confirmation — the SMS legs
     // below no-op without a number and deliverConfirmationByChannel then
     // reaches the email. A customer-less accept has no prefs/email row to
-    // resolve, so it still needs a phone to enter.
+    // resolve, so it still needs a phone to enter. (The annual-prepay
+    // acceptance text lives AFTER the invoice delivery below.)
     if (!billByInvoice && treatAsOneTime && (acceptSmsPhone || customerId)) {
       try {
         if (treatAsOneTime) {
@@ -12854,13 +12862,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             });
           }
         }
-        // Annual prepay accepts send NO separate acceptance SMS. The
-        // estimate_accepted_annual_prepay branch that used to sit here was
-        // unreachable since #1520 (2026-06-03) narrowed this block to
-        // treatAsOneTime, and the customer already gets two receipts for the
-        // year: the onboarding email above and the prepay invoice's own
-        // SMS + email (InvoiceService.sendViaSMSAndEmail below) — a third
-        // "invoice coming" text would land seconds before the invoice text.
+        // Annual prepay: the acceptance text is sent AFTER the invoice
+        // delivery below (post-credit amount, delivery-confirmed).
         // Standard recurring accepts no longer send a separate acceptance SMS;
         // the onboarding handoff text was retired with the onboarding flow.
         // Customers continue through the invoice/pay-link path below.
@@ -12913,6 +12916,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           delivery = await runDelivery();
         }
         if (delivery?.payUrl) invoicePayUrl = delivery.payUrl;
+        if (delivery?.sms?.scheduled === true) invoiceSmsQueued = true;
         if (delivery?.ok) {
           invoiceLinkDelivered = true;
         } else {
@@ -12926,6 +12930,105 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.error(`[estimate-accept] Invoice delivery failed: ${deliveryErr.message}`);
       }
       logger.info(`[estimate-accept] Accept invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
+    }
+
+    // Annual-prepay acceptance text (owner ruling 2026-08-31: revived — it
+    // had been unreachable since #1520, 2026-06-03). Runs AFTER the invoice
+    // delivery, keyed on it (pre-push Codex P1 r3): sendViaSMSAndEmail
+    // auto-applies account credit, so the amount is the FINAL due re-read
+    // from the row; a fully-covered invoice (nothing delivered, or due 0)
+    // or a payer-billed one (payer_id — payer-billed prepay skips the card
+    // lane, so prepayAutoCharge can be null) sends nothing: the homeowner
+    // must never be promised an invoice that is not coming to them. The
+    // auto-charged statuses never reach delivery, so they never reach here.
+    // No phone or no WaveGuard tier (the template names one; lawn/commercial
+    // prepay has none — never invent "Bronze") ⇒ no text. Kill switch:
+    // disable the estimate_accepted_annual_prepay admin SMS template.
+    // invoiceSmsQueued counts as delivery here (GH Codex P2 r5): the queued
+    // pay-link SMS goes out at 8 AM and the channel-neutral copy ("is on
+    // the way") stays truthful — without it the phone-only after-hours
+    // cohort would never receive this one-shot text.
+    if (annualPrepaySelected && invoiceId && (invoiceLinkDelivered || invoiceSmsQueued)) {
+      try {
+        // Live-account resolution (GH Codex P1 r5): estimate.customer_phone
+        // is an intake-time snapshot, while the invoice legs deliver to the
+        // CURRENT customers.phone — a billing-bearing text (tier + exact
+        // amount due) must resolve the same live contact (account-primary
+        // fallback for secondary-property rows, #1995) or not send at all.
+        // The tier likewise comes from the converted customer row: the
+        // accept transaction just wrote the converter-derived tier there,
+        // which also covers engine-generated drafts whose tier lives only
+        // in estimate_data (GH Codex P2 r5) — and the non-membership
+        // predicate keeps Commercial / One-Time / lawn-only NULL tiers out
+        // of a template that names a WaveGuard tier.
+        let prepaySmsPhone = '';
+        let prepayTier = '';
+        if (customerId) {
+          const { withAccountPrimaryContact } = require('../services/customer-contact');
+          const liveRow = await db('customers').where({ id: customerId }).first('id', 'phone', 'account_id', 'is_primary_profile', 'waveguard_tier');
+          const liveContact = liveRow ? await withAccountPrimaryContact(liveRow) : null;
+          prepaySmsPhone = String(liveContact?.phone || '').trim();
+          prepayTier = String(liveRow?.waveguard_tier || '').trim();
+        } else {
+          // Customer-less accept: the estimate token is the only identity —
+          // its snapshot phone/tier are all there is (trust level below
+          // stays estimate_token_verified for this branch).
+          prepaySmsPhone = acceptSmsPhone;
+          prepayTier = String(estimate.waveguard_tier || '').trim();
+        }
+        const { membershipTierKey, NON_MEMBERSHIP_TIER_KEYS } = require('../services/membership-state');
+        const prepayTierKey = membershipTierKey(prepayTier);
+        const finalRow = await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied', 'payer_id');
+        const finalDue = finalRow ? require('../services/invoice-helpers').invoiceAmountDue(finalRow) : null;
+        if (!prepaySmsPhone || !prepayTierKey || NON_MEMBERSHIP_TIER_KEYS.has(prepayTierKey)) {
+          logger.info(`[estimate-accept] prepay acceptance SMS skipped for estimate ${estimate.id}: ${!prepaySmsPhone ? 'no live phone' : 'no WaveGuard membership tier'}`);
+        } else if (!finalRow || finalRow.payer_id || !(Number(finalDue) > 0)) {
+          logger.info(`[estimate-accept] prepay acceptance SMS skipped for estimate ${estimate.id}: ${!finalRow ? 'invoice unreadable' : (finalRow.payer_id ? 'payer-billed' : 'nothing due after credit')}`);
+        } else {
+          const customerBody = await renderEditableSmsTemplate(
+            'estimate_accepted_annual_prepay',
+            {
+              first_name: firstName,
+              waveguard_tier: prepayTier,
+              amount_text: ` for ${fmtMoney(finalDue)}`,
+            },
+            { workflow: 'estimate_accept_annual_prepay', entity_type: 'estimate', entity_id: estimate.id },
+          );
+          if (!customerBody) {
+            logger.warn(`[estimate-accept] estimate_accepted_annual_prepay SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
+          } else {
+            const sendResult = await sendCustomerMessage({
+              to: prepaySmsPhone,
+              body: customerBody,
+              channel: 'sms',
+              audience: customerId ? 'customer' : 'lead',
+              purpose: 'estimate_followup',
+              customerId: customerId || undefined,
+              estimateId: estimate.id,
+              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+              consentBasis: customerId ? undefined : {
+                status: 'transactional_allowed',
+                source: 'estimate_token_acceptance',
+                capturedAt: new Date().toISOString(),
+              },
+              entryPoint: 'estimate_accept_annual_prepay',
+              metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
+            });
+            // No quiet-hours requeue: estimate_accept_annual_prepay is a
+            // customer-action entry point (owner ruling 2026-08-29) — the
+            // acceptance text answers the customer's own web acceptance
+            // immediately, at any hour, so QUIET_HOURS_HOLD cannot surface
+            // here.
+            if (sendResult.blocked || sendResult.sent === false) {
+              logger.error(`[estimate-accept] Annual prepay acceptance SMS blocked for estimate ${estimate.id}: ${sendResult.code || sendResult.reason || 'unknown'}`);
+            } else {
+              logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
+            }
+          }
+        }
+      } catch (prepaySmsErr) {
+        logger.error(`[estimate-accept] Annual prepay acceptance SMS failed for estimate ${estimate.id}: ${prepaySmsErr.message}`);
+      }
     }
 
     // Late stamp resolution for UNCOLLECTED prepay outcomes (pre-push Codex

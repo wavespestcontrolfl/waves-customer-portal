@@ -9,7 +9,7 @@ const {
   updateAlert,
   listEvents,
 } = require('../services/admin-alerts');
-const { resolveCloseoutRequirementsForJobs } = require('../services/service-closeout-requirements');
+const { loadCloseoutStatuses, closeoutIssuesForVisit, CLOSEOUT_ALERT_LABELS } = require('../services/closeout-alerts');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -205,92 +205,39 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
   }
 
   if (completedJobIds.length) {
-    const completedJobs = rows
-      .filter((r) => completedJobIds.includes(r.sourceRecordId))
-      .map((r) => ({
-        id: r.sourceRecordId,
-        service_id: r.metadata.serviceId,
-        service_type: r.metadata.serviceType,
-      }));
-    const requirementsByJob = await resolveCloseoutRequirementsForJobs(completedJobs);
-    const formRows = await db('job_form_submissions')
-      .whereIn('scheduled_service_id', completedJobIds)
-      .whereNotNull('completed_at')
-      .select('scheduled_service_id')
-      .catch(() => []);
-    const withForms = new Set(formRows.map((r) => r.scheduled_service_id));
-
-    const appRows = await db('property_application_history as pah')
-      .leftJoin('service_records as sr', 'pah.service_record_id', 'sr.id')
-      .whereIn('sr.scheduled_service_id', completedJobIds)
-      // A job whose only ledger rows were retracted (recap correction)
-      // has NO active applications — the required-material-log alert must
-      // fire for it (codex P1, PR #3419).
-      .whereNull('pah.retracted_at')
-      .select('sr.scheduled_service_id')
-      .catch(() => []);
-    const withApplications = new Set(appRows.map((r) => r.scheduled_service_id));
-
-    const serviceRecordRows = await db('service_records')
-      .whereIn('scheduled_service_id', completedJobIds)
-      .select('id', 'scheduled_service_id')
-      .catch(() => []);
-    const serviceRecordByJobId = new Map(serviceRecordRows.map((r) => [r.scheduled_service_id, r]));
-    const serviceRecordIds = serviceRecordRows.map((r) => r.id).filter(Boolean);
-    const photoRows = serviceRecordIds.length
-      ? await db('service_photos')
-        .whereIn('service_record_id', serviceRecordIds)
-        .groupBy('service_record_id')
-        .select('service_record_id')
-        .count('* as count')
-        .catch(() => [])
-      : [];
-    const photoCountByServiceRecordId = new Map(photoRows.map((r) => [r.service_record_id, Number(r.count || 0)]));
-
+    // Closeout truth comes from the canonical service (#3647) through the
+    // shared fact→issue mapping (services/closeout-alerts.js) — the same
+    // mapping the dashboard's live `closeout_gaps_today` action uses, so the
+    // two surfaces can never disagree. Alert types, ids, labels, and
+    // severities stay byte-identical so admin_alerts lifecycle rows carry
+    // over; an outage or a legitimate not_required never renders as
+    // "missing" the way the previous inline `.catch(() => [])` queries did.
+    const statusByJobId = await loadCloseoutStatuses(completedJobIds);
     for (const row of rows.filter((r) => completedJobIds.includes(r.sourceRecordId))) {
-      const closeoutRequirements = requirementsByJob.get(row.sourceRecordId) || {};
-      if (closeoutRequirements.requiresServiceReport && !withForms.has(row.sourceRecordId)) {
+      const status = statusByJobId.get(row.sourceRecordId);
+      const closeoutRequirements = status?.requirements || {};
+      for (const found of closeoutIssuesForVisit(status)) {
         attention.push(issue({
           ...row,
-          id: `${row.sourceRecordId}_missing_required_service_report`,
-          type: 'missing_required_service_report',
+          // identity (set on contradiction issues) carries the code — two
+          // contradiction codes on one visit must not share an id, or the
+          // sync's single INSERT ... ON CONFLICT hits the same dedupe_key
+          // twice and Postgres rejects the whole statement (pre-push P1).
+          id: `${row.sourceRecordId}_${found.identity || found.type}`,
+          type: found.type,
           severity: 'medium',
-          label: 'Missing required service report',
-          summary: 'Completed job is missing the required closeout report.',
-          metadata: { ...row.metadata, closeoutRequirements },
+          label: CLOSEOUT_ALERT_LABELS[found.type],
+          summary: found.summary,
+          metadata: {
+            ...row.metadata,
+            closeoutRequirements,
+            closeoutFact: found.fact,
+            closeoutReason: found.reason,
+            ...(found.type === 'missing_required_photos'
+              ? { actualPhotoCount: found.actualPhotoCount, requiredPhotoCount: found.requiredPhotoCount }
+              : {}),
+          },
         }));
-      }
-      if (closeoutRequirements.requiresApplicationLog && !withApplications.has(row.sourceRecordId)) {
-        attention.push(issue({
-          ...row,
-          id: `${row.sourceRecordId}_missing_required_material_log`,
-          type: 'missing_required_material_log',
-          severity: 'medium',
-          label: 'Missing required material log',
-          summary: 'Completed job is missing the required chemical or material application record.',
-          metadata: { ...row.metadata, closeoutRequirements },
-        }));
-      }
-      const requiredPhotoCount = Number(closeoutRequirements.requiredPhotoCount || 0);
-      if (requiredPhotoCount > 0) {
-        const serviceRecord = serviceRecordByJobId.get(row.sourceRecordId);
-        const actualPhotoCount = serviceRecord?.id ? Number(photoCountByServiceRecordId.get(serviceRecord.id) || 0) : 0;
-        if (actualPhotoCount < requiredPhotoCount) {
-          attention.push(issue({
-            ...row,
-            id: `${row.sourceRecordId}_missing_required_photos`,
-            type: 'missing_required_photos',
-            severity: 'medium',
-            label: 'Missing required photos',
-            summary: `Completed job has ${actualPhotoCount} of ${requiredPhotoCount} required closeout photo${requiredPhotoCount === 1 ? '' : 's'}.`,
-            metadata: {
-              ...row.metadata,
-              closeoutRequirements,
-              actualPhotoCount,
-              requiredPhotoCount,
-            },
-          }));
-        }
       }
     }
   }
@@ -651,3 +598,4 @@ router.get('/alerts/:id/events', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.__private = { getJobsNeedingAttention };

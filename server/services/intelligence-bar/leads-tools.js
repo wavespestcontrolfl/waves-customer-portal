@@ -526,11 +526,25 @@ async function updateLeadStatus(input) {
   // (and liveness), so a concurrent transition between the SELECT above and
   // this statement matches zero rows instead of being overwritten — the
   // _expected_status pre-check alone cannot close that race (codex P1).
-  const updatedRows = await db('leads')
-    .where('id', lead.id)
-    .where('status', oldStatus)
-    .whereNull('deleted_at')
-    .update(updates, ['id']);
+  // The activity-history entry commits WITH the status change (GH r14 P2):
+  // the card promises the audit entry, and the claimed card cannot be
+  // retried — a failed insert must roll the whole transition back rather
+  // than leave a changed status with the promised entry absent.
+  const updatedRows = await db.transaction(async (trx) => {
+    const rows = await trx('leads')
+      .where('id', lead.id)
+      .where('status', oldStatus)
+      .whereNull('deleted_at')
+      .update(updates, ['id']);
+    if (!rows || rows.length === 0) return rows;
+    await trx('lead_activities').insert({
+      lead_id: lead.id,
+      activity_type: 'status_change',
+      description: `Status: ${oldStatus} → ${new_status}${lost_reason ? ` (${lost_reason})` : ''}`,
+      performed_by: 'Intelligence Bar',
+    });
+    return rows;
+  });
   if (!updatedRows || updatedRows.length === 0) {
     return {
       error: 'Lead changed while the update was being applied. Re-check the lead and rebuild the confirmation card.',
@@ -540,14 +554,12 @@ async function updateLeadStatus(input) {
 
   // Mirror the transition onto the lead's ad_service_attribution funnel row
   // (same guarded pattern as the admin-leads routes — monotonic, best-effort).
-  await bridgeLeadFunnelStage(lead.id, new_status);
-
-  await db('lead_activities').insert({
-    lead_id: lead.id,
-    activity_type: 'status_change',
-    description: `Status: ${oldStatus} → ${new_status}${lost_reason ? ` (${lost_reason})` : ''}`,
-    performed_by: 'Intelligence Bar',
-  });
+  // The card describes this as conditional on a linked row; a bridge ERROR
+  // still surfaces as a warning, never a silent Done (GH r13 P2).
+  const funnel = await bridgeLeadFunnelStage(lead.id, new_status);
+  const funnelWarning = funnel?.reason === 'error'
+    ? "Status updated, but mirroring it onto the lead's ad-attribution funnel row failed — attribution reporting may lag this transition."
+    : null;
 
   logger.info(`[intelligence-bar:leads] Updated lead ${lead.id} ${lead.first_name} ${lead.last_name}: ${oldStatus} → ${new_status}`);
 
@@ -557,6 +569,7 @@ async function updateLeadStatus(input) {
     old_status: oldStatus,
     new_status,
     lost_reason: lost_reason || null,
+    ...(funnelWarning ? { warning: funnelWarning } : {}),
   };
 }
 
@@ -597,6 +610,9 @@ async function bulkUpdateLeads(input) {
       dry_run: true,
       matches: matching.length,
       matched_ids: matching.map(l => l.id),
+      // Complete identity list for the confirmation card (W0B): the exact-
+      // effects disclosure names EVERY pinned lead, not a sample.
+      all_names: matching.map(l => `${l.first_name || ''} ${l.last_name || ''}`.trim() || `lead ${l.id}`),
       preview: matching.slice(0, 10).map(l => ({
         name: `${l.first_name} ${l.last_name || ''}`.trim(),
         current_status: l.status,
@@ -616,14 +632,47 @@ async function bulkUpdateLeads(input) {
   const updates = { status: new_status, updated_at: new Date() };
   if (lost_reason) updates.lost_reason = lost_reason;
 
-  const updatedRows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
-    .update(updates, ['id']);
-  const ids = updatedRows.map(r => r.id);
+  // W0B exact-set enforcement (codex r5): a card that listed N leads must
+  // move ALL N or none. Inside one transaction: lock the still-matching
+  // rows, refuse if any pinned lead left current_status, then update the
+  // locked set. Non-pinned callers keep the legacy intersect behavior.
+  let ids;
+  if (input._expect_full_set && Array.isArray(lead_ids) && lead_ids.length) {
+    try {
+      ids = await db.transaction(async (trx) => {
+        const rows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
+          .transacting(trx).forUpdate().select('id');
+        if (rows.length !== lead_ids.length) {
+          const err = new Error('bulk_set_changed');
+          err.previewChanged = true;
+          throw err;
+        }
+        const updated = await trx('leads').whereIn('id', rows.map(r => r.id)).update(updates, ['id']);
+        return updated.map(r => r.id);
+      });
+    } catch (err) {
+      if (err && err.previewChanged) {
+        return {
+          error: 'One or more of the approved leads changed status after the card was shown — nothing was updated. Ask again for a fresh card.',
+          preview_changed: true,
+        };
+      }
+      throw err;
+    }
+  } else {
+    const updatedRows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
+      .update(updates, ['id']);
+    ids = updatedRows.map(r => r.id);
+  }
   if (ids.length === 0) return { success: true, updated: 0, note: 'No matching leads found' };
 
   // Funnel-row mirror for the whole batch — one set-based UPDATE with the
-  // same monotonic stage predicate as the single-lead bridge.
-  await bridgeLeadsFunnelStage(ids, new_status);
+  // same monotonic stage predicate as the single-lead bridge. Conditional
+  // on linked rows; an ERROR surfaces as a warning (GH r13 P2).
+  const funnel = await bridgeLeadsFunnelStage(ids, new_status);
+  const funnelWarning = funnel?.reason === 'error'
+    ? "Statuses updated, but mirroring them onto the leads' ad-attribution funnel rows failed — attribution reporting may lag this transition."
+    : null;
 
   // Log activity for each
   const activities = ids.map(id => ({
@@ -632,7 +681,14 @@ async function bulkUpdateLeads(input) {
     description: `Bulk update: ${current_status} → ${new_status}${lost_reason ? ` (${lost_reason})` : ''}`,
     performed_by: 'Intelligence Bar',
   }));
-  await db('lead_activities').insert(activities).catch(err => logger.error(`[intelligence-bar:leads] Failed to log bulk activities: ${err.message}`));
+  // Best-effort, but never a silent Done (GH r11 P2): the contract
+  // discloses the per-lead activity-history append, so a failed insert
+  // after the committed status changes must surface as a card warning.
+  let activityWarning = null;
+  await db('lead_activities').insert(activities).catch((err) => {
+    logger.error(`[intelligence-bar:leads] Failed to log bulk activities: ${err.message}`);
+    activityWarning = `Statuses updated, but the ${ids.length} activity-history entries could not be written — the leads' histories are missing this bulk change.`;
+  });
 
   logger.info(`[intelligence-bar:leads] Bulk updated ${ids.length} leads: ${current_status} → ${new_status}`);
 
@@ -641,6 +697,11 @@ async function bulkUpdateLeads(input) {
     updated: ids.length,
     from_status: current_status,
     to_status: new_status,
+    // ONE warning key (card renders result.warning only) — combine, never
+    // overwrite.
+    ...(activityWarning || funnelWarning
+      ? { warning: [activityWarning, funnelWarning].filter(Boolean).join(' ') }
+      : {}),
   };
 }
 

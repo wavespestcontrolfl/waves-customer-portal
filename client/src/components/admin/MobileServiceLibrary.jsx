@@ -810,7 +810,7 @@ function AllServicesView({ onBack }) {
   return (
     <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 640 }}>
       {" "}
-      <Header title="All Services" centerTitle onBack={onBack} />{" "}
+      <Header title="All services" centerTitle onBack={onBack} />{" "}
       <button
         type="button"
         onClick={() => {

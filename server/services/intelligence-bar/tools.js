@@ -903,7 +903,11 @@ async function findDuplicates(input) {
 const UPDATABLE_FIELDS = {
   first_name: 'first_name', last_name: 'last_name', email: 'email',
   phone: 'phone', city: 'city', state: 'state', zip: 'zip',
-  address_line1: 'address_line1', waveguard_tier: 'waveguard_tier',
+  // address_line2 accepted (GH r19 P2): the fan-out and its disclosure
+  // already treat a unit-only edit as an address change — omitting it here
+  // made a unit-only card fail as no-valid-fields and silently dropped the
+  // unit from combined updates.
+  address_line1: 'address_line1', address_line2: 'address_line2', waveguard_tier: 'waveguard_tier',
   pipeline_stage: 'pipeline_stage', lead_source: 'lead_source',
   monthly_rate: 'monthly_rate', active: 'active', notes: 'crm_notes',
 };
@@ -1048,6 +1052,12 @@ async function updateCustomer(customerId, updates) {
 
   const before = await db('customers').where('id', customerId).first();
   if (!before) return { error: 'Customer not found' };
+  // A customer merged/soft-deleted during the card's pending window must
+  // not be edited back to life — the proposal-time resolution was the only
+  // live check before this (GH r9 P1).
+  if (before.deleted_at) {
+    return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
+  }
 
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
   clearLineTypeOnPhoneChange(clean, before);
@@ -1111,7 +1121,16 @@ async function updateCustomer(customerId, updates) {
       // Row lock serializes overlapping address edits (see the Customers
       // route): before/merged are re-derived from the locked row so a losing
       // concurrent editor still matches the snapshots the winner moved.
-      const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
+      const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first();
+      // Liveness re-asserted on the LOCKED row (GH r10 P1): the preflight
+      // deleted_at check above ran unlocked, so a merge/soft-delete that
+      // commits between it and this row lock must still refuse — never
+      // edit a merged-away profile back to life.
+      if (!lockedBefore || lockedBefore.deleted_at) {
+        const err = new Error('customer_no_longer_live');
+        err.customerNoLongerLive = true;
+        throw err;
+      }
       const lockedMerged = { ...lockedBefore, ...clean };
       // Close the inferred-monthly vector (#3140 resolution): billing_mode
       // is not an IB-updatable field, so a tier/rate write that leaves the
@@ -1191,6 +1210,9 @@ async function updateCustomer(customerId, updates) {
       }
     });
   } catch (e) {
+    if (e && e.customerNoLongerLive) {
+      return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
+    }
     if (e && e.code === '23505') {
       return { error: 'That address already exists as another property on this customer.' };
     }
@@ -1347,20 +1369,43 @@ async function bulkUpdateCustomers(customerIds, updates) {
     // explicitly in the same transaction. Per-row decision, since each
     // row's before-state differs under one shared update payload.
     const laneStampRelevant = clean.monthly_rate !== undefined || clean.waveguard_tier !== undefined;
-    const { count, laneStampIds } = await db.transaction(async (trx) => {
+    const { count, laneStampIds, skippedRows } = await db.transaction(async (trx) => {
       let rateChangedIds = [];
       let stampIds = [];
       if (laneStampRelevant) {
         // Membership-affecting bulk writes join the customer-comms
         // serialization (codex #3426 r6 P2) — same reason as updateCustomer.
-        // Comms locks BEFORE the row locks below, and in a STABLE (sorted)
-        // order so two concurrent bulk writers over overlapping id sets
-        // acquire in the same sequence instead of deadlocking.
+        // Comms locks FIRST, over the FULL approved id set in a STABLE
+        // (sorted) order, BEFORE the customers row locks below (GH r10
+        // P1): taking the row locks first inverted the documented order
+        // (customer-comms-lock.js) and deadlocked against a concurrent
+        // single-customer membership write already holding the advisory
+        // lock while waiting on a row this transaction held. Locking an
+        // id that turns out dead below is harmless — the advisory key
+        // serializes nothing for an absent row.
         for (const cid of [...customerIds].map(String).sort()) {
           await lockCustomerComms(trx, cid);
         }
+      }
+      // The card promised EVERY listed customer transitions or is reported
+      // (GH r9 P1): resolve the live pinned set under row locks — AFTER
+      // the comms locks above — so a customer deleted/merged while the
+      // card was pending surfaces as a warning instead of silently
+      // shrinking a single whereIn UPDATE.
+      const liveRows = await trx('customers')
+        .whereIn('id', customerIds)
+        .forUpdate()
+        .whereNull('deleted_at')
+        .select('id', 'first_name', 'last_name');
+      const liveIds = new Set(liveRows.map((r) => String(r.id)));
+      const skipped = customerIds
+        .filter((cid) => !liveIds.has(String(cid)))
+        .map((cid) => ({ customer_id: String(cid) }));
+      const targetIds = [...liveIds];
+      if (!targetIds.length) return { count: 0, laneStampIds: [], skippedRows: skipped };
+      if (laneStampRelevant) {
         const beforeRows = await trx('customers')
-          .whereIn('id', customerIds)
+          .whereIn('id', targetIds)
           .forUpdate()
           .select('id', 'monthly_rate', 'billing_mode', 'waveguard_tier');
         if (clean.monthly_rate !== undefined) {
@@ -1374,7 +1419,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
           .filter((row) => impliedMonthlyStampForWrite(row, { ...row, ...clean }))
           .map((row) => row.id);
       }
-      const updated = await trx('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
+      const updated = await trx('customers').whereIn('id', targetIds).update({ ...clean, ...stageStamp });
       if (stampIds.length) {
         await trx('customers').whereIn('id', stampIds).update({ billing_mode: 'monthly_membership' });
       }
@@ -1384,15 +1429,24 @@ async function bulkUpdateCustomers(customerIds, updates) {
           await PlanRateLedger.syncScalarWriteToLedger(trx, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
         }
       }
-      return { count: updated, laneStampIds: stampIds };
+      return { count: updated, laneStampIds: stampIds, skippedRows: skipped };
     });
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     notifyBulkLaneStamps(laneStampIds);
+    if (!count && skippedRows.length) {
+      return { error: 'None of the approved customers are still live (deleted or merged while the card was pending) — nothing was updated.', skipped_customers: skippedRows };
+    }
     return {
       success: true,
       updated_count: count,
       fields_updated: Object.keys(updates),
       ...bulkLaneStampResult(laneStampIds),
+      // Skipped rows surface on the card, never a silent Done (same
+      // contract as the per-row address/email path; GH r9 P1).
+      ...(skippedRows.length ? {
+        skipped_customers: skippedRows,
+        warning: `${skippedRows.length} approved customer(s) were NOT updated — no longer live (deleted or merged while the card was pending).`,
+      } : {}),
     };
   }
 
@@ -1418,6 +1472,13 @@ async function bulkUpdateCustomers(customerIds, updates) {
       errors.push({ customer_id: customerId, error: 'Customer not found' });
       continue;
     }
+    // Same live-customer bar as every other IB customer writer (pre-push
+    // r11 P1): a soft-deleted/merged row must not be edited, fanned out,
+    // or emailed by the per-row branch.
+    if (before.deleted_at) {
+      errors.push({ customer_id: customerId, error: 'Customer record is no longer live (deleted or merged)' });
+      continue;
+    }
     let emailSync = null;
     let rowLaneStamp = null;
     try {
@@ -1436,8 +1497,14 @@ async function bulkUpdateCustomers(customerIds, updates) {
         if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
           await lockCustomerComms(trx, customerId);
         }
-        // Same row-lock serialization as the single-edit path.
-        const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
+        // Same row-lock serialization AND locked liveness re-assert as the
+        // single-edit path (GH r10 / pre-push r11 P1).
+        const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first();
+        if (!lockedBefore || lockedBefore.deleted_at) {
+          const err = new Error('customer_no_longer_live');
+          err.customerNoLongerLive = true;
+          throw err;
+        }
         const lockedMerged = { ...lockedBefore, ...clean };
         if (emailSubmitted && clean.email) {
           const emailLc = String(clean.email).trim().toLowerCase();
@@ -1478,6 +1545,10 @@ async function bulkUpdateCustomers(customerIds, updates) {
         }
       });
     } catch (e) {
+      if (e && e.customerNoLongerLive) {
+        errors.push({ customer_id: customerId, error: 'Customer record is no longer live (deleted or merged)' });
+        continue;
+      }
       if (e && e.code === '23505') {
         errors.push({ customer_id: customerId, error: 'That address already exists as another property on this customer.' });
         continue;
@@ -1515,7 +1586,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
     updated_count: count,
     fields_updated: Object.keys(updates),
     ...bulkLaneStampResult(perRowLaneStampIds),
-    ...(errors.length ? { errors } : {}),
+    ...(errors.length ? {
+      errors,
+      // The confirm card renders `warning` — a partial bulk update must never
+      // read as a clean Done (W0B).
+      warning: `${errors.length} of ${count + errors.length} customers were NOT updated (${errors.length === 1 ? 'it' : 'they'} no longer resolved at commit); ${count} updated.`,
+    } : {}),
   };
 }
 
@@ -1727,8 +1803,9 @@ async function cancelPlan(input, actionContext = {}) {
   }
 }
 
-// Terminal scheduled_services statuses — one-way; never movable.
-const TERMINAL_APPOINTMENT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
+// Terminal scheduled_services statuses — one-way; never movable. Shared
+// with the route's proposal guard via proposal-pins (codex r7 on #3648).
+const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
 // Live tracker-lifecycle statuses — movable, but the move must rewind the
 // tracker lifecycle (rebooker LIVE_LIFECYCLE_RESET) so stale arrival
 // timestamps don't survive onto the new date.
@@ -1887,6 +1964,12 @@ async function createAppointment(input) {
 
   const customer = await db('customers').where('id', customer_id).first();
   if (!customer) return { error: 'Customer not found' };
+  // Same live-customer bar as update_customer (GH r9 P1): a profile
+  // merged/soft-deleted while the card was pending must not receive a new
+  // appointment after its records were repointed.
+  if (customer.deleted_at) {
+    return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was booked.', preview_changed: true };
+  }
 
   // Resolve the technician BEFORE any write. The old `.first()` on an
   // unordered ILIKE silently picked an arbitrary tech on multiple matches,
@@ -1936,6 +2019,7 @@ async function createAppointment(input) {
   // still never blocks the booking.
   let appointment;
   let overlapAdvisory = null;
+  try {
   await db.transaction(async (trx) => {
     // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
     // occupancy lock + tech-blind probe FIRST, before the comms key (rung
@@ -1948,6 +2032,27 @@ async function createAppointment(input) {
     }
     // Rung 6 — the same comms fence withCustomerCommsLock provided.
     await lockCustomerComms(trx, customer_id);
+    // Credit advisory lock BEFORE the customer row lock (pre-push r10 P1):
+    // offer creation (recordInspectionCreditOffer) takes the credit lock
+    // first and its offer INSERT then needs an FK key-share on this
+    // customer row — row-lock-first here was the AB-BA half of a deadlock.
+    // One consistent order: comms → credit advisory → customer row. The
+    // later projection re-acquires the same xact-scoped key, a no-op.
+    if (input._inspection_credit_amount !== undefined) {
+      await require('../inspection-credit').lockInspectionCreditCustomer(trx, customer_id);
+    }
+    // Liveness re-asserted under the fence (GH r10 P1): the deleted_at
+    // preflight above ran outside this transaction, so a merge/soft-delete
+    // committing in between must abort the booking — never insert onto a
+    // merged-away profile. Row-locked so the recheck holds through the
+    // insert (comms lock before row lock, per the documented order).
+    const lockedCustomer = await trx('customers')
+      .where('id', customer_id).whereNull('deleted_at').forUpdate().first();
+    if (!lockedCustomer) {
+      const err = new Error('customer_no_longer_live');
+      err.customerNoLongerLive = true;
+      throw err;
+    }
     const [created] = await trx('scheduled_services').insert({
       customer_id,
       scheduled_date: dateStr,
@@ -1961,13 +2066,75 @@ async function createAppointment(input) {
       updated_at: new Date(),
     }).returning('*');
     appointment = created;
+    // W0B authorization pin: a card-confirmed booking is approved as
+    // credit-FREE (credit-bearing bookings are refused at proposal). Verify
+    // inside the booking transaction — if an open credit appeared since the
+    // card, abort before the marker/redemption can consume it undisclosed.
+    if (input._inspection_credit_amount !== undefined) {
+      // Customer-scoped credit lock shared with offer creation: an offer
+      // being recorded concurrently either commits BEFORE this projection
+      // (and the mismatch aborts the booking) or waits until this booking
+      // has committed with its event (and is redeemed by the next booking,
+      // exactly as the card said). No READ COMMITTED blind spot remains.
+      // COMPLETE offer set, gate-paused offers included (pre-push P0 + GH
+      // r19 P1 reconciliation): the proposal refuses whenever ANY offer
+      // exists, so this locked re-check must see the same full set — a
+      // paused offer appearing since the card aborts rather than being
+      // stamped over (which would orphan it) or minted later (which the
+      // card never approved).
+      await require('../inspection-credit').lockInspectionCreditCustomer(trx, customer_id);
+      const projected = await require('../inspection-credit').projectRedeemableOfferAmount(customer_id, { dbh: trx, includePaused: true });
+      const live = Number(projected?.amount ?? projected) || 0;
+      if (live !== Number(input._inspection_credit_amount)) {
+        const err = new Error('booking_credit_changed');
+        err.previewChanged = true;
+        throw err;
+      }
+    }
+    // The booking event is a FACT the credit rails require ("this customer
+    // booked") — never skipped, even for a card-approved credit-free
+    // booking: an offer committed concurrently would otherwise lose its
+    // proof forever (silent permanent credit loss). The credit-free
+    // promise is enforced by the customer-scoped credit lock taken above,
+    // which offer creation shares.
     await require('../inspection-credit').markBookingForInspectionCredit(trx, {
       customerId: customer_id,
       scheduledServiceId: created.id,
-      source: 'intelligence_bar',
+      // A card-approved credit-free booking stamps the dedicated source:
+      // its event proves "this customer booked" but is NEVER adoptable by
+      // an offer serialized after it (pre-push P0 on #3648 r7 — the
+      // recovery path backdates offer created_at to the promise moment, so
+      // a late offer's timestamp can sort BEFORE this booking and the
+      // sweep would mint against a booking whose card said no credit; the
+      // late offer now redeems on the NEXT booking instead, the ratified
+      // r6b contract).
+      // Safe unconditionally: the locked full-set check above guarantees
+      // ZERO open offers (paused included) existed when a card-approved
+      // booking reaches this stamp — no promise can be orphaned by it.
+      source: input._inspection_credit_amount !== undefined
+        ? require('../inspection-credit').CREDIT_FREE_CARD_EVENT_SOURCE
+        : 'intelligence_bar',
     });
   });
+  } catch (err) {
+    if (err && err.customerNoLongerLive) {
+      return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was booked.', preview_changed: true };
+    }
+    if (err && err.previewChanged) {
+      return {
+        error: 'This customer\'s inspection credit changed after the card was shown — nothing was booked. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+    throw err;
+  }
 
+  // Card-confirmed bookings are approved credit-free (W0B): skip ONLY the
+  // immediate redemption so this Confirm can never mint credit — an offer
+  // created after the card is applied by the hourly sweep, the documented
+  // ambient path. Reminder registration below still runs (codex r5 P1: an
+  // earlier early-return here silently skipped it).
+  if (input._inspection_credit_amount === undefined) {
   try {
     // Fast redemption post-commit, mirroring the admin-schedule/self-book
     // paths (Codex #3178 r26 P2): the marker alone leaves the credit
@@ -1980,6 +2147,7 @@ async function createAppointment(input) {
       createdBy: 'system:inspection_credit_ib_booking',
     });
   } catch { /* redemption is best-effort; the booking stands */ }
+  }
 
   // Register the durable confirmation/reminder row synchronously with the
   // insert, like the canonical admin create path (admin-schedule POST) —
@@ -2002,6 +2170,7 @@ async function createAppointment(input) {
   //
   // Best-effort like the admin path: a registration failure must not fail
   // the already-committed insert (registerAppointment also self-alerts).
+  let reminderWarning = null;
   try {
     const AppointmentReminders = require('../appointment-reminders');
     await AppointmentReminders.registerAppointment(
@@ -2012,13 +2181,20 @@ async function createAppointment(input) {
     );
   } catch (err) {
     logger.error(`[intelligence-bar] reminder registration failed for appointment ${appointment.id}: ${err.message}`);
+    // Surfaced on the confirm card as a partial-failure warning (W0B): the
+    // booking stands, but the promised reminder rows did not register.
+    reminderWarning = 'Booked, but reminder registration failed — no 72h/24h reminder rows exist for this visit yet; the reminder sync/alert rail will retry or the office adds them manually.';
   }
 
   // Ids only — customer names/phones/addresses never go to logs (PII rule).
   logger.info(`[intelligence-bar] Created appointment ${appointment.id} for customer ${customer_id} on ${dateStr}`);
 
+  // One `warning` key — both the reminder failure and the occupancy advisory
+  // must survive when they coincide (the card renders result.warning).
+  const warnings = [reminderWarning, overlapAdvisory].filter(Boolean);
   return {
     success: true,
+    ...(warnings.length ? { warning: warnings.join(' ') } : {}),
     appointment_id: appointment.id,
     customer_name: `${customer.first_name} ${customer.last_name}`,
     date: dateStr,
@@ -2026,8 +2202,6 @@ async function createAppointment(input) {
     // The RESOLVED tech's canonical name — never the raw input, which can be
     // absent on an id-only retry or disagree with the id it rode in with.
     technician: resolvedTechnicianName || 'Unassigned',
-    // Advisory occupancy-overlap note (gated probe) — the booking stands.
-    ...(overlapAdvisory ? { warning: overlapAdvisory } : {}),
   };
 }
 
@@ -2036,6 +2210,19 @@ async function rescheduleAppointment(input) {
   const { appointment_id, new_date, new_time_window, reason } = input;
 
   const appt = await db('scheduled_services').where('id', appointment_id).first();
+  // W0B pin (codex r4): assert the approved snapshot against THIS read —
+  // the same row the move's CAS is based on — so a visit that changed
+  // between the route preflight and here refuses instead of becoming the
+  // executor's new baseline.
+  if (appt && input._appointment_fingerprint) {
+    const { normalizeAppointmentPin, appointmentPinFingerprint } = require('./proposal-pins');
+    if (appointmentPinFingerprint(normalizeAppointmentPin(appt)) !== String(input._appointment_fingerprint)) {
+      return {
+        error: 'This visit changed after the card was shown — nothing was moved. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+  }
   if (!appt) return { error: 'Appointment not found' };
 
   // Terminal rows are one-way — a completed/cancelled visit must not quietly
@@ -2266,12 +2453,16 @@ async function rescheduleAppointment(input) {
   // Rebooker-parity side effects of the live → confirmed flip above:
   // job_status_history audit row, tech_status release, customer tracker
   // refresh. Best-effort: the move is committed — a side-effect failure
-  // must not report the move itself as failed.
+  // must not report the move itself as failed, but the card promised the
+  // release, so a failure surfaces as a warning, never a bare Done
+  // (GH r9 P1).
+  let lifecycleWarning = null;
   if (wasLive) {
     try {
       await applyLiveMoveSideEffects(db, appt);
     } catch (err) {
       logger.error(`[intelligence-bar] live-move side effects failed for ${appointment_id}: ${err.message}`);
+      lifecycleWarning = 'The move committed, but releasing the technician/tracker state failed — check the tech pointer and lifecycle history for this visit.';
     }
   } else if (trackRewound) {
     // No status transition happened (status was never live), so no history
@@ -2282,12 +2473,15 @@ async function rescheduleAppointment(input) {
       await applyLiveMovePostCommitEffects(appt, { toStatus: appt.status });
     } catch (err) {
       logger.error(`[intelligence-bar] track-rewind side effects failed for ${appointment_id}: ${err.message}`);
+      lifecycleWarning = 'The move committed, but the stale-tracker cleanup failed — check the tech pointer for this visit.';
     }
   }
 
   // Audit row, matching the rebooker's reschedule_log conventions.
   // Best-effort: the move above is already committed — a log failure must
-  // not report the move itself as failed.
+  // not report the move itself as failed, but the card disclosed the audit
+  // append (GH r16 P2), so it surfaces as a warning, never a bare Done.
+  let auditWarning = null;
   try {
     await db('reschedule_log').insert({
       scheduled_service_id: appointment_id,
@@ -2304,6 +2498,7 @@ async function rescheduleAppointment(input) {
     });
   } catch (err) {
     logger.error(`[intelligence-bar] reschedule_log insert failed for ${appointment_id}: ${err.message}`);
+    auditWarning = "The move committed, but the reschedule audit entry could not be written — this move is missing from the visit's reschedule history.";
   }
 
   logger.info(`[intelligence-bar] Rescheduled appointment ${appointment_id} from ${oldDate} to ${dateStr}`);
@@ -2311,11 +2506,17 @@ async function rescheduleAppointment(input) {
   // Visit-group seam (visit-group-scope.md §2; codex #3590 r11): this
   // writer moves the date/window directly (not via the rebooker), so it
   // repairs grouped membership itself. Runs LAST, after every query this
-  // tool issues for its own result. Best-effort, no-op for ungrouped rows.
+  // tool issues for its own result. Best-effort, no-op for ungrouped rows —
+  // but for a GROUPED row the card promised the detach/dissolve, so a
+  // failed repair surfaces as a warning, never a bare Done (GH r14 P2).
+  let groupWarning = null;
   try {
     await require('../visit-groups').handleChildStopChanged(appointment_id);
   } catch (vgErr) {
     logger.warn(`[intelligence-bar] visit-group seam failed for ${appointment_id}: ${vgErr.message}`);
+    if (appt.visit_id) {
+      groupWarning = 'The move committed, but repairing grouped-visit membership failed — the visit may still list this service at the old stop; re-check the visit on the schedule.';
+    }
   }
 
   return {
@@ -2325,8 +2526,12 @@ async function rescheduleAppointment(input) {
     old_date: oldDate,
     new_date: dateStr,
     service_type: appt.service_type,
-    // Advisory occupancy-overlap note (gated probe) — the move stands.
-    ...(overlapAdvisory ? { warning: overlapAdvisory } : {}),
+    // ONE warning key (card renders result.warning only): advisory overlap
+    // note + lifecycle-cleanup + group-repair + audit-append failures
+    // COMBINE, never overwrite.
+    ...(overlapAdvisory || lifecycleWarning || groupWarning || auditWarning
+      ? { warning: [overlapAdvisory, lifecycleWarning, groupWarning, auditWarning].filter(Boolean).join(' ') }
+      : {}),
   };
 }
 
@@ -2656,4 +2861,4 @@ async function resolveActiveTechnicianById(id) {
   return db('technicians').where('id', id).where('active', true).first();
 }
 
-module.exports = { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById };
+module.exports = { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS };

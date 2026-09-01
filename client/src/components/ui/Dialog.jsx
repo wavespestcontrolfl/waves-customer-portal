@@ -67,8 +67,12 @@ export function Dialog({
   return createPortal(
     <div
       className={cn(
-        // z-[100] clears the admin shell's fixed mobile header (90) and tab bar (95).
-        'fixed inset-0 z-[100] flex items-center justify-center p-4',
+        // z-[120] sits decisively above ALL shell chrome — mobile header (90),
+        // tab bar (95), sidebar backdrop (99), sidebar (100) — and above the
+        // C360 estimates panel (110). At the old z-[100] the overlay TIED the
+        // sidebar and only won by portal DOM order. Palette/notification
+        // popovers (9998/9999) still deliberately beat modals.
+        'fixed inset-0 z-[120] flex items-center justify-center p-4',
         // `!` beats the inline safe-area padding below; that padding stays for
         // every card layout (compact dialogs, and content dialogs from `sm` up).
         !isCompact && 'max-sm:!p-0',

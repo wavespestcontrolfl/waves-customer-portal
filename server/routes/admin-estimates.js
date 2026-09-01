@@ -1948,6 +1948,23 @@ router.get('/source-performance', async (req, res, next) => {
   }
 });
 
+// Free-text filter for the estimates list. EVERY column here is
+// table-qualified on purpose: the list query leftJoins `technicians`, and
+// that table grew its own `address` column in the payroll-profile migration
+// (20260428000007_technicians_payroll_profile). An unqualified `address`
+// therefore compiles to a Postgres "column reference \"address\" is
+// ambiguous" error, and every admin estimate search — by name, phone, or
+// address alike — 500'd instead of returning rows. Qualify anything added
+// here, even when the column is unique on `estimates` today.
+function applyEstimateSearchFilter(query, search) {
+  const s = `%${search}%`;
+  return query.where(function () {
+    this.whereILike('estimates.customer_name', s)
+      .orWhereILike('estimates.customer_phone', s)
+      .orWhereILike('estimates.address', s);
+  });
+}
+
 // GET /api/admin/estimates — list
 router.get('/', async (req, res, next) => {
   try {
@@ -1978,12 +1995,7 @@ router.get('/', async (req, res, next) => {
       const sources = source.split(',');
       query = query.whereIn('estimates.source', sources);
     }
-    if (search) {
-      const s = `%${search}%`;
-      query = query.where(function () {
-        this.whereILike('customer_name', s).orWhereILike('customer_phone', s).orWhereILike('address', s);
-      });
-    }
+    if (search) query = applyEstimateSearchFilter(query, search);
     if (archived === 'only') query = query.whereNotNull('estimates.archived_at');
     else if (archived !== 'all') query = query.whereNull('estimates.archived_at');
 
@@ -3603,6 +3615,7 @@ router._internals = {
   estimateEmailIdempotencyKey,
   smtpFallbackAllowed,
   resolveEstimateStatusPatch,
+  applyEstimateSearchFilter,
 };
 
 module.exports = router;

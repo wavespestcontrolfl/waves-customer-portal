@@ -589,7 +589,7 @@ export default function WavesPPCDashboard() {
         >
           {" "}
           <h1 style={{ fontSize: 28, fontWeight: 400, margin: 0 }}>
-            Waves PPC Command Center
+            Waves PPC command center
           </h1>{" "}
           <span
             style={{

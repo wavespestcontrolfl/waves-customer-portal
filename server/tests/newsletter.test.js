@@ -16,6 +16,11 @@
  *     silently corrupts campaign analytics or double-applies events.
  */
 
+// Pin the portal origin to the production default before any module loads a
+// local .env: quiz links assert https:// URLs, and CLIENT_URL=http://localhost
+// from a dev .env would otherwise win in utils/portal-url.
+process.env.PUBLIC_PORTAL_URL = 'https://portal.wavespestcontrol.com';
+
 const { buildSubscriberQuery, excludeGloballySuppressed, excludeArchivedCustomers, narrowServiceLineFilter, sanitizePersonalizationToken } = require('../services/newsletter-sender');
 const db = require('../models/db');
 const publicRouter = require('../routes/public-newsletter');

@@ -110,7 +110,7 @@ export default function GrowthSection({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 md:mb-5">
         {salesCapture && (
           <ChartCard
-            title="Sales Capture"
+            title="Sales capture"
             sub={`${fmtMoney(salesCapture.captured)} captured of ${fmtMoney(
               (salesCapture.captured || 0) + (salesCapture.missed || 0),
             )} estimated · MTD`}
@@ -229,7 +229,7 @@ export default function GrowthSection({
       {/* Estimate funnel + revenue by city */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 md:mb-5">
         <ChartCard
-          title="Estimate Funnel"
+          title="Estimate funnel"
           sub={
             funnel?.period ? `${funnel.period.from} → ${funnel.period.to}` : ""
           }
@@ -244,7 +244,7 @@ export default function GrowthSection({
         </ChartCard>
         {revenueByCity ? (
           <ChartCard
-            title="Revenue by City"
+            title="Revenue by city"
             sub={`${fmtMoney(revenueByCity.total || 0)} · MTD`}
           >
             <RevenueByCity
@@ -276,7 +276,7 @@ export default function GrowthSection({
       ) : (
         <div className="mb-5">
           <ChartCard
-            title="Where to Put Ad Dollars"
+            title="Where to put ad dollars"
             sub="acquisition channels by gross-profit LTV : all-in CAC · last 90 days"
           >
             <CapitalAllocationCard data={capAlloc} />
@@ -340,7 +340,7 @@ export default function GrowthSection({
         </MobileFold>
       ) : (
         <ChartCard
-          title="Marketing Attribution"
+          title="Marketing attribution"
           sub={
             callsBySource?.period?.label || kpis?.periodLabel || "Month to Date"
           }
@@ -374,7 +374,7 @@ export default function GrowthSection({
       ) : (
         <div className="mt-4">
           <ChartCard
-            title="Lead Funnel by Source"
+            title="Lead funnel by source"
             sub={leadFunnel?.period?.label || kpis?.periodLabel || "Month to Date"}
           >
             <FunnelBySource

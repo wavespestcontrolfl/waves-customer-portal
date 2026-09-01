@@ -96,15 +96,20 @@ describe('extraction failure: attempt counter + terminal triage card', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    delete process.env.GEMINI_API_KEY;
-    delete process.env.GOOGLE_AI_API_KEY;
-    delete process.env.OPENAI_API_KEY;
     // No network in tests: the recording download rejects, forcing the
     // cached-transcript path.
     fetchSpy = jest.spyOn(global, 'fetch').mockRejectedValue(new Error('network disabled in test'));
     jest.isolateModules(() => {
       processor = require('../services/call-recording-processor');
     });
+    // Delete AFTER the require: loading the processor pulls config/index.js,
+    // whose dotenv.config() re-fills deleted keys from a local .env. The
+    // processor reads these at call time, so post-require deletes hold.
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_AI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
   });
 
   afterEach(() => fetchSpy.mockRestore());

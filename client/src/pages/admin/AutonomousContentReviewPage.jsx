@@ -330,7 +330,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                 <span className="hidden sm:inline">Refresh</span>
               </button>
             </div>
-            <h1 className="mt-3 text-22 font-medium leading-tight tracking-tight sm:text-28">Content Review</h1>
+            <h1 className="mt-3 text-22 font-medium leading-tight tracking-tight sm:text-28">Content review</h1>
             <p className="mt-1.5 max-w-md text-13 text-white/65 sm:text-14">
               The engine drafts the posts — you approve what goes live. Every named-competitor comparison lands here first.
             </p>
@@ -351,7 +351,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       </div>
 
       {error && (
-        <div className="mt-4 flex items-center gap-2 rounded-xl bg-[#FEECEB] px-3 py-2.5 text-13 text-[#B42318]">
+        <div className="mt-4 flex items-center gap-2 rounded-md bg-[#FEECEB] px-3 py-2.5 text-13 text-[#B42318]">
           <AlertTriangle size={16} strokeWidth={2} className="shrink-0" />
           <span>{error}</span>
         </div>
@@ -566,7 +566,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
 
                     {selected.draft?.body_preview && (
                       <Section title="Draft preview">
-                        <div className="max-h-96 overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#FAF7EF] p-3 text-14 leading-relaxed text-zinc-800">
+                        <div className="max-h-96 overflow-y-auto whitespace-pre-wrap rounded-md bg-[#FAF7EF] p-3 text-14 leading-relaxed text-zinc-800">
                           {selected.draft.body || selected.draft.body_preview}
                         </div>
                       </Section>
@@ -1010,7 +1010,7 @@ function LinkContext({ title, value }) {
   if (!value) return null;
   return (
     <Section title={title}>
-      <div className="max-h-44 overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#FAF7EF] p-3 text-13 leading-relaxed text-zinc-600">
+      <div className="max-h-44 overflow-y-auto whitespace-pre-wrap rounded-md bg-[#FAF7EF] p-3 text-13 leading-relaxed text-zinc-600">
         {value}
       </div>
     </Section>

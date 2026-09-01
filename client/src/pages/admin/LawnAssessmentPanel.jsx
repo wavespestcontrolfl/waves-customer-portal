@@ -399,7 +399,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
     return (
       <div>
         {" "}
-        {!embedded && <AdminCommandHeader title="Lawn Assessment" icon={Leaf} />}{" "}
+        {!embedded && <AdminCommandHeader title="Lawn assessment" icon={Leaf} />}{" "}
         <div
           style={{
             ...cardStyle,
@@ -473,7 +473,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
         )
       ) : (
         <AdminCommandHeader
-          title="Lawn Assessment"
+          title="Lawn assessment"
           icon={Leaf}
           action={
             step !== "select"

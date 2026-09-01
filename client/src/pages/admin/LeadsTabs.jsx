@@ -1323,7 +1323,7 @@ export function LeadsSection() {
               letterSpacing: "0.02em",
             }}
           >
-            Pipeline Status
+            Pipeline status
           </h2>
           <div style={{ margin: 0, color: C.muted, fontSize: 12 }}>
             Current lead counts by status for the selected month.
@@ -3889,7 +3889,7 @@ export function LeadsSection() {
               letterSpacing: "0.02em",
             }}
           >
-            Channel Comparison
+            Channel comparison
           </h2>
           {byChannel.length === 0 && (
             <div style={{ color: C.muted, fontSize: 13 }}>
@@ -4005,7 +4005,7 @@ export function LeadsSection() {
               letterSpacing: "0.02em",
             }}
           >
-            Source ROI Matrix
+            Source ROI matrix
           </h2>
           {scatterSources.length === 0 ? (
             <div style={{ color: C.muted, fontSize: 13 }}>
@@ -4142,7 +4142,7 @@ export function LeadsSection() {
                 letterSpacing: "0.02em",
               }}
             >
-              Response Time vs Conversion
+              Response time vs conversion
             </h2>
             <div
               style={{
@@ -4285,7 +4285,7 @@ export function LeadsSection() {
                 letterSpacing: "0.02em",
               }}
             >
-              Lost Lead Reasons
+              Lost lead reasons
             </h2>
             <div
               style={{
@@ -4397,7 +4397,7 @@ export function LeadsSection() {
                 letterSpacing: "0.02em",
               }}
             >
-              Phone Number ROI
+              Phone number ROI
             </h2>{" "}
           </div>{" "}
           <table
@@ -4530,7 +4530,7 @@ export function LeadsSection() {
 
     if (showModal === "newLead")
       return (
-        <Modal title="New Lead" onClose={() => setShowModal(null)}>
+        <Modal title="New lead" onClose={() => setShowModal(null)}>
           {" "}
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             {" "}
@@ -4636,7 +4636,7 @@ export function LeadsSection() {
     if (showModal === "builderWarranty")
       return (
         <Modal
-          title="Builder Termite Warranty"
+          title="Builder termite warranty"
           onClose={() => setShowModal(null)}
         >
           {" "}
@@ -4667,7 +4667,7 @@ export function LeadsSection() {
 
     if (showModal === "convert")
       return (
-        <Modal title="Convert to Customer" onClose={() => setShowModal(null)}>
+        <Modal title="Convert to customer" onClose={() => setShowModal(null)}>
           {" "}
           <Input
             label="Customer ID (required)"
@@ -4703,7 +4703,7 @@ export function LeadsSection() {
 
     if (showModal === "lost")
       return (
-        <Modal title="Mark Lead Lost" onClose={() => setShowModal(null)}>
+        <Modal title="Mark lead lost" onClose={() => setShowModal(null)}>
           {" "}
           <Input
             label="Reason"
@@ -4759,7 +4759,7 @@ export function LeadsSection() {
 
     if (showModal === "assign")
       return (
-        <Modal title="Assign Lead" onClose={() => setShowModal(null)}>
+        <Modal title="Assign lead" onClose={() => setShowModal(null)}>
           {" "}
           <Input
             label="Technician"
@@ -4778,7 +4778,7 @@ export function LeadsSection() {
 
     if (showModal === "newSource")
       return (
-        <Modal title="Add Lead Source" onClose={() => setShowModal(null)}>
+        <Modal title="Add lead source" onClose={() => setShowModal(null)}>
           {" "}
           <Input
             label="Name"
@@ -4842,7 +4842,7 @@ export function LeadsSection() {
 
     if (showModal === "logCost")
       return (
-        <Modal title="Log Source Cost" onClose={() => setShowModal(null)}>
+        <Modal title="Log source cost" onClose={() => setShowModal(null)}>
           {" "}
           <Input
             label="Month"

@@ -460,6 +460,131 @@ describe('autonomous versus lane (pest showdown)', () => {
     expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/book/');
   });
 
+  // Every ET fire day (day % 4 === 2) of the given month.
+  const fireDays = (yearMonth) =>
+    [2, 6, 10, 14, 18, 22, 26, 30].map((d) => etNoon(`${yearMonth}-${String(d).padStart(2, '0')}`));
+
+  test('the same card never publishes twice in one month (pair AND city both rotate)', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    // Aug 2026 was the regression: day % 4 aliased city to Sarasota on every
+    // fire and hid half the pair bank, publishing the identical termite-swarmer
+    // card on Aug 6, 18, and 30. June exercises the ungated (6-pair) bank.
+    for (const yearMonth of ['2026-08', '2026-06']) {
+      // Out-of-season slots yield null (the campaign lane takes those days).
+      const plans = fireDays(yearMonth).map((d) => Studio.selectAutonomousVersusPlan(d)).filter(Boolean);
+      const cards = plans.map((p) => `${p.versusPair.key}|${p.city}`);
+      expect(new Set(cards).size).toBe(cards.length);
+      expect(new Set(plans.map((p) => p.city)).size).toBeGreaterThan(1);
+      // All eligible pairs surface before any repeats — no half-hidden bank.
+      const eligibleCount = Studio.PEST_VERSUS_PAIRS
+        .filter((p) => !p.months || p.months.includes(Number(yearMonth.slice(5)))).length;
+      expect(new Set(plans.map((p) => p.versusPair.key)).size).toBe(eligibleCount);
+    }
+  });
+
+  test('every pair+city combination is walked before any card repeats, across short months', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    // The sequence counts days that actually fire, not a fixed 8 slots/month:
+    // February has no 30th, so reserving a phantom slot skipped a sequence
+    // value and shortened the cycle — 2026-02-02 and 2026-05-02 both produced
+    // chinch-bug|Sarasota, 23 fires apart instead of 24 (Codex finding).
+    // Walk two full years of real fire days, ignoring the season gate so the
+    // underlying rotation is measured rather than the gated subset.
+    const cards = [];
+    for (let y = 2026; y <= 2027; y++) {
+      for (let m = 1; m <= 12; m++) {
+        const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        for (const d of [2, 6, 10, 14, 18, 22, 26, 30].filter((x) => x <= lastDay)) {
+          const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+          const plan = Studio.selectAutonomousVersusPlan(etNoon(iso));
+          // Out-of-season slots return null but still consume a sequence step.
+          cards.push(plan ? `${plan.versusPair.key}|${plan.city}` : null);
+        }
+      }
+    }
+    const combos = Studio.PEST_VERSUS_PAIRS.length * 4; // 6 pairs x 4 cities
+    const lastSeen = new Map();
+    let minGap = Infinity;
+    cards.forEach((c, i) => {
+      if (c === null) return;
+      if (lastSeen.has(c)) minGap = Math.min(minGap, i - lastSeen.get(c));
+      lastSeen.set(c, i);
+    });
+    expect(minGap).toBe(combos); // 24 fires between identical cards, never 23
+  });
+
+  test('cards stay unique across a season boundary (fixed modulus, no remapping)', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    // Regression per Codex review: filtering the bank before the modulo
+    // shifted the surviving indices in July, replaying June's exact cards
+    // within 14 days (2027-06-18 and 2027-07-02 both gave chinch-bug for
+    // Lakewood Ranch). The swarmer's July slot must yield to the campaign
+    // lane, not remap the sequence.
+    const plans = [...fireDays('2027-06'), ...fireDays('2027-07')]
+      .map((d) => Studio.selectAutonomousVersusPlan(d));
+    expect(plans.some((p) => p === null)).toBe(true); // out-of-season slots skipped
+    const cards = plans.filter(Boolean).map((p) => `${p.versusPair.key}|${p.city}`);
+    expect(new Set(cards).size).toBe(cards.length);
+  });
+
+  test('season-gated pairs stay out of off-season months, at selection AND approval', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    // Termite swarmer cards are swarm-season content (Feb–Jun) — never August.
+    for (const plan of fireDays('2026-08').map((d) => Studio.selectAutonomousVersusPlan(d)).filter(Boolean)) {
+      expect(plan.versusPair.key).not.toBe('termite_swarmer_vs_winged_ant');
+    }
+    // In season the pair is still reachable.
+    const marchKeys = fireDays('2026-03').map((d) => Studio.selectAutonomousVersusPlan(d).versusPair.key);
+    expect(marchKeys).toContain('termite_swarmer_vs_winged_ant');
+
+    // A draft created in season must not be APPROVABLE out of season — the
+    // stored versusPair is re-checked against the current ET month.
+    const swarmer = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'termite_swarmer_vs_winged_ant');
+    expect(Studio.versusPublishBlocker({ versusPair: swarmer }, etNoon('2026-08-14'))).toMatch(/out of season/);
+    expect(Studio.versusPublishBlocker({ versusPair: swarmer }, etNoon('2026-03-14'))).toBeNull();
+    // Ungated pairs and non-versus drafts are never blocked.
+    expect(Studio.versusPublishBlocker({ versusPair: Studio.PEST_VERSUS_PAIRS[0] }, etNoon('2026-08-14'))).toBeNull();
+    expect(Studio.versusPublishBlocker({}, etNoon('2026-08-14'))).toBeNull();
+  });
+
+  test('approval gate reads seasonality from the canonical bank, not the stored snapshot', () => {
+    // run.input is a JSON snapshot frozen at selection: a draft created before
+    // `months` existed stores a pair object WITHOUT it. Trusting that snapshot
+    // let a June swarmer draft publish in August (Codex finding); the guard
+    // resolves the pair by key against PEST_VERSUS_PAIRS instead.
+    const legacyDraft = {
+      versusPair: {
+        key: 'termite_swarmer_vs_winged_ant',
+        service: 'termite',
+        left: { name: 'Termite Swarmer', points: ['Straight antennae'] },
+        right: { name: 'Winged Ant', points: ['Bent antennae'] },
+        verdict: 'Wings on the windowsill? Check the waist first.',
+      },
+    };
+    expect(legacyDraft.versusPair.months).toBeUndefined(); // pre-`months` snapshot
+    expect(Studio.versusPublishBlocker(legacyDraft, etNoon('2026-08-14'))).toMatch(/out of season/);
+    expect(Studio.versusPublishBlocker(legacyDraft, etNoon('2026-03-14'))).toBeNull();
+    // A snapshot claiming a season the bank does not grant cannot self-approve.
+    const forgedDraft = { versusPair: { key: 'termite_swarmer_vs_winged_ant', months: [8] } };
+    expect(Studio.versusPublishBlocker(forgedDraft, etNoon('2026-08-14'))).toMatch(/out of season/);
+    // An unrecognized key (pair retired from the bank) is not blocked here.
+    expect(Studio.versusPublishBlocker({ versusPair: { key: 'gone_from_bank' } }, etNoon('2026-08-14'))).toBeNull();
+  });
+
+  test('the season is evaluated at publish time, so a run crossing ET midnight is caught', () => {
+    // Direct-publish mode renders and uploads between selection and publish
+    // (Codex finding): a run selected at 23:58 ET Jun 30 can reach the
+    // pre-publish gate after ET midnight, and must not post a swarmer card
+    // in July. The blocker takes `now` so both call sites evaluate the
+    // CURRENT month rather than the selection month.
+    const swarmer = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'termite_swarmer_vs_winged_ant');
+    const plan = { versusPair: swarmer };
+    // 23:58 ET Jun 30 2026 = 03:58 UTC Jul 1 — still June in ET, publishable.
+    expect(Studio.versusPublishBlocker(plan, new Date('2026-07-01T03:58:00Z'))).toBeNull();
+    // 00:02 ET Jul 1 2026 = 04:02 UTC — now July in ET, blocked.
+    expect(Studio.versusPublishBlocker(plan, new Date('2026-07-01T04:02:00Z'))).toMatch(/out of season/);
+  });
+
   test('every pair in the bank produces drafts that pass the compliance validators', () => {
     for (const pair of Studio.PEST_VERSUS_PAIRS) {
       const drafts = Studio.buildVersusDrafts(pair, 'Sarasota');

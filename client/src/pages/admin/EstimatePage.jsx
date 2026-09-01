@@ -235,7 +235,7 @@ class EstimateErrorBoundary extends Component {
               marginBottom: 12,
             }}
           >
-            Estimate Render Error
+            Estimate render error
           </div>{" "}
           <div
             style={{
@@ -2695,7 +2695,7 @@ function EstimateToolView() {
               margin: 0,
             }}
           >
-            Waves Estimating Engine
+            Waves estimating engine
           </h1>{" "}
           <span
             style={{

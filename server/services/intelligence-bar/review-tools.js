@@ -332,6 +332,11 @@ async function submitReviewReply(reviewId, replyText, groundingToken) {
       note: result.googlePosted
         ? 'Reply posted to Google.'
         : 'Google Business Profile is not configured in this environment — the reply was saved locally only.',
+      // The card presents this as an irreversible PUBLIC post — a
+      // local-only save surfaces as a warning the card renders (GH r9 P2).
+      ...(result.googlePosted ? {} : {
+        warning: 'The reply was saved locally only — it was NOT posted to Google (Business Profile not configured in this environment).',
+      }),
     };
   } catch (err) {
     if (err instanceof ReviewReplyError) return { error: err.message, code: err.code };
@@ -406,7 +411,18 @@ async function triggerReviewRequest(input) {
     }).first();
   }
   if (!customer) return { error: 'Customer not found' };
-  if (!customer.phone) return { error: `${customer.first_name} ${customer.last_name} has no phone number` };
+  // The effective SMS recipient is what the centralized sender resolves
+  // (service contact when consented, else the account holder) — validate
+  // THAT, not the bare primary phone, so a service-contact-only account is
+  // neither refused here nor promised a card that cannot execute.
+  const { getServiceContactSmsRecipient } = require('../customer-contact');
+  const target = getServiceContactSmsRecipient(customer);
+  if (!target.phone) return { error: `${customer.first_name} ${customer.last_name} has no phone number` };
+  // W0B pinned recipient: the operator approved THIS phone on the card —
+  // enforced here before ReviewService.create.
+  if (input._pinned_phone && String(target.phone) !== String(input._pinned_phone)) {
+    return { error: 'The review-request recipient changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
+  }
 
   // Check if already sent recently. "Last 30 days" is a rolling DURATION, not a
   // calendar boundary, so compare created_at (a UTC timestamp) against the exact
@@ -417,7 +433,14 @@ async function triggerReviewRequest(input) {
     .where({ customer_id: customer.id })
     .where('created_at', '>=', new Date(Date.now() - 30 * 86400000).toISOString())
     .first();
-  if (recent) return { already_sent: true, status: recent.status, sent_at: recent.created_at, note: 'Already sent a review request in the last 30 days' };
+  if (recent) {
+    // A card-confirmed run promised a send: suppression here is a failed
+    // effect, never a silent Done (the route also re-checks before commit).
+    if (input._pinned_phone) {
+      return { error: 'A review request was already sent to this customer in the last 30 days — nothing was sent. Ask again after the cooldown.', preview_changed: true, already_sent: true };
+    }
+    return { already_sent: true, status: recent.status, sent_at: recent.created_at, note: 'Already sent a review request in the last 30 days' };
+  }
 
   // Create request
   try {
@@ -425,6 +448,11 @@ async function triggerReviewRequest(input) {
     const request = await ReviewService.create({
       customerId: customer.id,
       triggeredBy: 'intelligence_bar',
+      // The approved phone rides to the FINAL recipient read (GH r14 P1):
+      // sendSMS re-resolves the recipient from a fresh customer load, so
+      // the pre-create check above cannot cover a phone changed after it —
+      // the sender itself refuses the drifted number.
+      expectedPhone: input._pinned_phone || null,
     });
     const fresh = await db('review_requests').where({ id: request.id }).first().catch(() => null);
     const status = fresh?.status || request.status || 'pending';
@@ -441,8 +469,18 @@ async function triggerReviewRequest(input) {
       note: fresh?.sms_sent_at
         ? 'Review request SMS sent through the centralized messaging policy.'
         : 'Review request created; status reflects whether it is queued, blocked, or awaiting retry.',
+      // The card promised "Send review request" — an unsent SMS surfaces as
+      // a warning the card renders, never only a note (GH r9 P2).
+      ...(fresh?.sms_sent_at ? {} : {
+        warning: 'The review request was recorded, but the SMS has NOT been sent (queued, blocked, or awaiting retry) — check the request status.',
+      }),
     };
   } catch (err) {
+    if (err && err.code === 'approved_phone_drift') {
+      // The sender's own message discloses whether a queued ask was parked
+      // as part of the refusal — pass it through verbatim.
+      return { error: `${err.message} Ask again for a fresh card.`, preview_changed: true };
+    }
     return { error: `Failed to create review request: ${err.message}` };
   }
 }
@@ -556,4 +594,36 @@ async function getVelocityPipeline(days) {
 }
 
 
-module.exports = { REVIEW_TOOLS, executeReviewTool };
+
+// Full customer row for the proposal-time recipient pin — the service-contact
+// resolver needs the slot columns + consent artifact, not a phone projection.
+async function loadReviewRecipient(customerId) {
+  if (!customerId) return null;
+  return db('customers').where('id', String(customerId)).first();
+}
+
+// The FULL outreach gate stack ReviewService.create enforces (GH r17 P1),
+// run at proposal AND at the confirm preflight so a card can never promise
+// a send create() deterministically rejects: archived customer,
+// already-reviewed flag, then checkUnscheduledAskGates (30-day cooldown,
+// 3-in-180-days cap, active cadence, already-queued ask). Returns null when
+// the ask may proceed, else the operator-facing reason.
+async function reviewAskBlockedReason(customer) {
+  if (!customer) return 'Customer not found';
+  if (customer.deleted_at) return 'This customer is archived — review outreach is not sent to archived customers.';
+  if (customer.has_left_google_review) return 'This customer is marked as already having left a Google review.';
+  const ReviewService = require('../review-request');
+  const gate = await ReviewService.checkUnscheduledAskGates(customer.id);
+  if (gate && gate.allowed === false) {
+    const messages = {
+      in_cadence: 'Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.',
+      at_cap: 'Customer has already received 3 review requests in the last 6 months.',
+      cooldown: 'Customer received a review request in the last 30 days.',
+      already_queued: 'A review request to this customer is already queued and will send automatically.',
+    };
+    return messages[gate.outcome] || 'Review request blocked by the outreach gates.';
+  }
+  return null;
+}
+
+module.exports = { REVIEW_TOOLS, executeReviewTool, loadReviewRecipient, reviewAskBlockedReason };

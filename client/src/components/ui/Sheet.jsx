@@ -22,8 +22,12 @@ export function Sheet({ open, onClose, children, width = 'md', className, ariaLa
 
   return createPortal(
     <div
-      // z-[100] clears the admin shell's fixed mobile header (90) and tab bar (95).
-      className="fixed inset-0 z-[100]"
+      // z-[120] sits decisively above ALL shell chrome — mobile header (90),
+      // tab bar (95), sidebar backdrop (99), sidebar (100) — and above the
+      // C360 estimates panel (110). At the old z-[100] the overlay TIED the
+      // sidebar and only won by portal DOM order. Palette/notification
+      // popovers (9998/9999) still deliberately beat modals.
+      className="fixed inset-0 z-[120]"
       role="dialog"
       aria-modal="true"
       aria-label={ariaLabel}

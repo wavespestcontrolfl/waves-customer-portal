@@ -198,7 +198,7 @@ export function MarginCalculator() {
             letterSpacing: "0.02em",
           }}
         >
-          Margin Calculator
+          Margin calculator
         </h2>{" "}
         <button
           onClick={fetchMargins}
@@ -559,7 +559,7 @@ function SpecServicesPanel() {
             letterSpacing: "0.02em",
           }}
         >
-          Missing-Services Pricing Spec
+          Missing-services pricing spec
         </h2>{" "}
         <span
           style={{
@@ -745,7 +745,7 @@ function PestCalibrationPanel() {
               fontFamily: ROBOTO,
             }}
           >
-            Pest Production Calibration
+            Pest production calibration
           </h2>{" "}
           <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>
             Shadow estimator minutes compared with completed job timers from
@@ -1035,8 +1035,8 @@ function PestCalibrationPanel() {
         }}
       >
         {" "}
-        <CalibrationGroup title="By Pool Cage Size" rows={poolRows} />{" "}
-        <CalibrationGroup title="By Lot Band" rows={lotRows} />{" "}
+        <CalibrationGroup title="By pool cage size" rows={poolRows} />{" "}
+        <CalibrationGroup title="By lot band" rows={lotRows} />{" "}
       </div>
       {reviewQueue.length > 0 && (
         <div
