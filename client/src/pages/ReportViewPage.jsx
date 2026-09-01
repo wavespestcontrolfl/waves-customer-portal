@@ -2290,6 +2290,95 @@ function TechnicianVisitLine({ data }) {
   );
 }
 
+
+/* ── Tips from your tech — the note ─────────────────────────────────
+   Renders the tips frozen at completion (payload.techNote) as one quoted
+   note from the technician, under the Visit Timeline on the live report
+   (owner decisions 2026-09-01: first name only, no sign-off, varied
+   greeting — the hero already says "Hi {first}", so the note never does —
+   live only, never the PDF). The card is a data-glass section like its
+   neighbours, so the glass theme dresses it; only the quote treatment is
+   local. Greeting and opener are seeded by the record id: the same report
+   always reads the same, the next visit's reads differently. */
+const TECH_NOTE_GREETINGS = [
+  (first) => `Hey ${first},`,
+  (first) => `${first},`,
+  (first) => `Hello ${first},`,
+];
+const TECH_NOTE_OPENERS = {
+  1: ['One thing that will help between visits:', 'If you do one thing before I’m back, make it this:'],
+  2: ['Two things that will do more between visits than anything I can spray:', 'A couple of things I’d take care of before my next visit:'],
+  3: ['Three things that will do more between visits than anything I can spray:', 'A few things I’d take care of before my next visit:'],
+};
+
+export function techNoteSeed(value) {
+  let h = 0;
+  for (const ch of String(value || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h;
+}
+
+// ALL-CAPS records title-case for display, the same rule the hero uses.
+function techNoteFirstName(customerName) {
+  const raw = String(customerName || '').trim().split(/\s+/)[0] || '';
+  if (!raw) return null;
+  return raw.length > 1 && raw === raw.toUpperCase() ? raw[0] + raw.slice(1).toLowerCase() : raw;
+}
+
+export function composeTechNote({ tips = [], customerName = '', seed = 0 } = {}) {
+  const count = Math.min(Math.max(tips.length, 1), 3);
+  const first = techNoteFirstName(customerName);
+  const greeting = first ? TECH_NOTE_GREETINGS[seed % TECH_NOTE_GREETINGS.length](first) : 'Hey there,';
+  const openers = TECH_NOTE_OPENERS[count];
+  return { greeting, opener: openers[Math.floor(seed / 7) % openers.length] };
+}
+
+export function TechNoteCard({ data, mode = 'live' }) {
+  const note = data?.techNote;
+  const tips = Array.isArray(note?.tips) ? note.tips.filter((t) => t && t.copy) : [];
+  if (mode !== 'live' || !tips.length) return null;
+  const techFirst = String(note.technicianFirstName || '').trim();
+  const { greeting, opener } = composeTechNote({
+    tips,
+    customerName: data.customerName,
+    seed: techNoteSeed(data.serviceRecordId || data.token),
+  });
+  const photoUrl = data.technician?.photoUrl || null;
+  const initial = (techFirst || 'W')[0].toUpperCase();
+  return (
+    <section data-glass="card" className="sr-section" id="tech-note">
+      <div className="section-eyebrow">{techFirst ? `A note from ${techFirst}` : 'A note from your technician'}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '10px 0 12px' }}>
+        {photoUrl ? (
+          <img src={photoUrl} alt="" className="tech-photo" referrerPolicy="no-referrer" style={{ width: 38, height: 38, borderRadius: '50%', objectFit: 'cover' }} />
+        ) : (
+          <div aria-hidden="true" style={{ width: 38, height: 38, borderRadius: '50%', background: 'var(--text, #04395E)', color: '#fff', display: 'grid', placeItems: 'center', fontWeight: 600, fontSize: 14 }}>{initial}</div>
+        )}
+        <div>
+          <div style={{ fontWeight: 600, color: 'var(--text, #04395E)', lineHeight: 1.3 }}>{techFirst || 'Your technician'}</div>
+          <div style={{ fontSize: 14, color: 'var(--muted, #475569)' }}>Your Waves technician</div>
+        </div>
+      </div>
+      <blockquote style={{ position: 'relative', margin: 0, padding: '4px 4px 0 22px' }}>
+        <span aria-hidden="true" style={{ position: 'absolute', left: -2, top: -14, fontSize: 56, lineHeight: 1, color: 'var(--line-strong, rgba(4,57,94,0.35))', fontFamily: 'Georgia, serif' }}>“</span>
+        <p style={{ margin: '0 0 10px', fontWeight: 600, color: 'var(--text, #04395E)' }}>{greeting}</p>
+        <p style={{ margin: '0 0 10px', lineHeight: 1.6 }}>{opener}</p>
+        {tips.map((tip, i) => (
+          <p key={`${tip.id || 'tip'}-${i}`} style={{ margin: '0 0 10px', lineHeight: 1.6 }}>
+            {tip.copy}
+            {tip.link?.path ? (
+              <>
+                {' '}
+                <a href={tip.link.path}>{tip.link.label || 'My Property'}</a>
+              </>
+            ) : null}
+            {i === tips.length - 1 ? <span aria-hidden="true" style={{ fontFamily: 'Georgia, serif', fontSize: 22, lineHeight: 0, verticalAlign: -6, marginLeft: 3, color: 'var(--line-strong, rgba(4,57,94,0.55))' }}>”</span> : null}
+          </p>
+        ))}
+      </blockquote>
+    </section>
+  );
+}
+
 function readinessSummary(context, mode = 'live', nowMsOverride) {
   const fallbackNowMs = mode === 'live' ? Date.now() : Date.parse(context?.generatedAt) || Date.now();
   const nowMs = Number.isFinite(nowMsOverride) ? nowMsOverride : fallbackNowMs;
@@ -9002,6 +9091,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           />
         )}
 
+        {/* Tips from your tech — directly under the Visit Timeline (owner
+            2026-09-01). The V2-lead layouts mount their own copy after the
+            lawn timeline below; the two are exclusive on isV2LeadLayout so
+            #tech-note never duplicates. Live only. */}
+        {!isV2LeadLayout && <TechNoteCard data={data} mode={mode} />}
+
         {/* Cross-sell offer — INTERWOVEN placement (owner 2026-08-11: spaced
             through the report, not stacked at the bottom): after the visit
             story (hero / re-entry / timeline), before the findings detail.
@@ -9145,6 +9240,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 </LawnPrintContext.Provider>
               </div>
             )}
+            <TechNoteCard data={data} mode={mode} />
           </>
         )}
 
