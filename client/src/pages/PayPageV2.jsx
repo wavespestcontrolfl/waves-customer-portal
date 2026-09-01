@@ -2858,8 +2858,14 @@ export default function PayPageV2() {
                 combined-balance itemization. A bare "Total due" that repeats
                 the line-item figure was removed (owner 2026-08-31). */}
             {(() => {
+              // taxAmount alone (no isCommercial guard): a frozen
+              // commercial contract keeps its committed tax even after the
+              // customer's property_type flips residential — the tax ROW
+              // stays gated on isCommercial (pre-existing rule) but the
+              // summary must still render so Total due shows the figure
+              // actually charged (Codex P1, round 4).
               const hasAdjustments = invoice.discountAmount > 0
-                || (invoice.taxAmount > 0 && customer?.isCommercial)
+                || invoice.taxAmount > 0
                 || depositCreditTotal > 0
                 || Number(invoice.creditApplied) > 0;
               const combinedPreviewPossible = !!(stripeSetup?.combined || (!stripeSetup && data.previousBalance?.invoices?.length));

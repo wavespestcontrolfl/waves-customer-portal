@@ -62,12 +62,13 @@ export default function SaveCardConsent({
     : 'Save this payment method on file with Waves Pest Control');
   const consentText = getConsentText(methodType);
   // Display-only paragraph breaks — the canonical consent string (and its
-  // CONSENT_VERSION) is unchanged; splitting must never alter characters.
-  // Zero-width split (both sides are lookarounds) so the inter-sentence
-  // space stays in the preceding segment and joining the segments — DOM
+  // CONSENT_VERSION) is unchanged; splitting must never alter characters:
+  // each segment keeps its trailing ". ", so joining the segments — DOM
   // textContent, copy/paste, screen readers — reproduces the canonical
-  // string byte-for-byte (Codex P1 on #3686).
-  const paragraphs = consentText.split(/(?<=\. )(?=[A-Z])/);
+  // string byte-for-byte (Codex P1 on #3686). match() with lookahead only:
+  // lookbehind throws a syntax error on Safari/iOS < 16.4, which must
+  // never break a public payment page (Codex P1, round 4).
+  const paragraphs = consentText.match(/.*?\. (?=[A-Z])|.+$/g) || [consentText];
   const isChecked = locked ? true : !!checked;
   // The authorization may collapse only while UNCHECKED. Once the box is
   // checked — and always in locked required-save flows — the full canonical
