@@ -78,6 +78,7 @@ function knexInsertPatterns(token) {
 function insertFirstMatches(code, tailRe) {
   const bare = blankCommentsAndStrings(code);
   const out = [];
+  const sticky = new RegExp(tailRe.source.replace(/^\^/, ''), 'y');
   const headRe = new RegExp(INSERT_CALL, 'g');
   let h;
   while ((h = headRe.exec(bare))) {
@@ -88,7 +89,8 @@ function insertFirstMatches(code, tailRe) {
       else if (bare[k] === ')') depth -= 1;
     }
     if (depth !== 0) continue;
-    const t = tailRe.exec(code.slice(k));
+    sticky.lastIndex = k;
+    const t = sticky.exec(code);
     if (t) out.push({ index: h.index, length: (k - h.index) + t[0].length, capture: t[1] });
   }
   return out;
@@ -143,6 +145,31 @@ function simpleAssignPairs(src) {
 // / a bare destructured `raw(`, or a native pg `.query(` (`client.query`,
 // `pool.query`) — never a substring (`draw(`, `withdraw(`).
 const RAW_CALLEE = String.raw`(?:\??\.\s*(?:raw|query)|(?:\?\.)?\[\s*['"\x60](?:raw|query)['"\x60]\s*\]|(?<![.\w$])raw)\s*\(`;
+// The declaration that holds the SQL literal at `idx`: `{ name, member }`,
+// where `member` is the regex tail required after the name at the callee
+// (empty for a plain constant; the property access for SQL held in an
+// object property, or optionally the whole object for pg's `text` key), or
+// null when the literal is not stored in a declaration.
+function sqlDeclaration(code, idx) {
+  const bare = blankCommentsAndStrings(code);
+  let j = idx;
+  while (j > 0 && (bare[j - 1] === ' ' || bare[j - 1] === '\n' || code[j - 1] === '+')) j -= 1;
+  const lead = code.slice(Math.max(0, j - 200), j);
+  const decl = lead.match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/);
+  if (decl) return { name: decl[1], member: '' };
+  // SQL held in an OBJECT PROPERTY — `const SQL = { create: 'INSERT …' };
+  // db.raw(SQL.create)`: the key's enclosing object literal is what must
+  // be declared, and raw must receive `OBJ.key` / `OBJ['key']` — or, for
+  // pg's QueryConfig convention (`{ text, values }`), the WHOLE object.
+  const key = lead.match(/([A-Za-z_$][\w$]*)\s*:\s*$/);
+  const opener = key ? enclosingOpener(bare, j) : -1;
+  if (opener === -1) return null;
+  const objDecl = code.slice(Math.max(0, opener - 200), opener).match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/);
+  if (!objDecl) return null;
+  const member = String.raw`\s*(?:\.\s*${escapeRe(key[1])}\b|(?:\?\.)?\[\s*['"\x60]${escapeRe(key[1])}['"\x60]\s*\]${key[1] === 'text' ? String.raw`|(?![\s.\[])` : ''})`;
+  return { name: objDecl[1], member };
+}
+
 function inRawContext(code, idx) {
   // Nearest preceding raw callee whose call is still OPEN at the match:
   // walk paren depth on the fully blanked view (SQL-string parens are
@@ -168,28 +195,12 @@ function inRawContext(code, idx) {
   // string literal(s) — every string char is blank in the fully blanked
   // view, and `+` glue joins concatenated pieces — to the `=` of the
   // declaration, then require that identifier to reach a raw callee.
-  let j = idx;
-  while (j > 0 && (bare[j - 1] === ' ' || bare[j - 1] === '\n' || code[j - 1] === '+')) j -= 1;
-  const lead = code.slice(Math.max(0, j - 200), j);
-  let decl = lead.match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/);
-  // …or SQL held in an OBJECT PROPERTY — `const SQL = { create: 'INSERT …' };
-  // db.raw(SQL.create)`: the key's enclosing object literal is what must
-  // be declared, and raw must receive `OBJ.key` / `OBJ['key']`.
-  let member = '';
-  if (!decl) {
-    const key = lead.match(/([A-Za-z_$][\w$]*)\s*:\s*$/);
-    const opener = key ? enclosingOpener(bare, j) : -1;
-    if (opener !== -1) {
-      decl = code.slice(Math.max(0, opener - 200), opener).match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/);
-      // `OBJ.key` / `OBJ['key']` — or, for pg's QueryConfig convention
-      // (`{ text, values }`), the WHOLE object (`client.query(cfg)`).
-      member = String.raw`\s*(?:\.\s*${escapeRe(key[1])}\b|(?:\?\.)?\[\s*['"\x60]${escapeRe(key[1])}['"\x60]\s*\]${key[1] === 'text' ? String.raw`|(?![\s.\[])` : ''})`;
-    }
-  }
+  const decl = sqlDeclaration(code, idx);
   if (!decl) return false;
+  const { member } = decl;
   // The constant may reach raw through simple aliases (`const QUERY = SQL;
   // db.raw(QUERY)`), followed transitively to a fixpoint.
-  const names = new Set([decl[1]]);
+  const names = new Set([decl.name]);
   let grew = true;
   while (grew) {
     grew = false;
@@ -248,8 +259,11 @@ function wholeArgumentPasses(bare, name) {
 // every `function NAME(...) {` and block-bodied arrow head, walk the body to
 // its matching brace, and report the name when the body RETURNS a builder
 // matching bodyRe (whose first capture is returned for the caller).
+const functionBodiesCache = new Map();
 function balancedFunctionBodies(src) {
+  if (functionBodiesCache.has(src)) return functionBodiesCache.get(src);
   const out = [];
+  functionBodiesCache.set(src, out);
   // Braces are counted on the STRING-BLANKED view (same length, aligned),
   // so `const marker = '}'` inside a body cannot close it early; the body
   // text itself is sliced from `src` for return analysis.
@@ -269,7 +283,7 @@ function balancedFunctionBodies(src) {
       if (bare[j] === '{') depth += 1;
       else if (bare[j] === '}') depth -= 1;
     }
-    out.push({ name, params, body: src.slice(headRe.lastIndex, j) });
+    out.push({ name, params, body: src.slice(headRe.lastIndex, j), start: headRe.lastIndex, end: j });
   }
   return out;
 }
@@ -277,20 +291,45 @@ function balancedFunctionBodies(src) {
 // `localDeclRe` (capture 1 = name, capture 2 = table expression when the
 // caller has one) finds builders STORED in the body — `function q() { const
 // base = db('leads'); return base; }` is a factory through its local alias.
+// The return statements are matched ONCE over the whole file and mapped to
+// every function whose body encloses them (nested bodies overlap — scanning
+// each body separately re-read the same text once per nesting level).
+// A return statement belongs to the INNERMOST function enclosing it — an
+// inner arrow's `return db('leads')` does not make the outer handler a
+// factory.
 function balancedBodyFactories(src, bodyRe, localDeclRes = []) {
+  const fns = balancedFunctionBodies(src);
+  const innermost = (idx) => {
+    let best = null;
+    for (const f of fns) if (f.start <= idx && idx < f.end && (!best || f.end - f.start < best.end - best.start)) best = f;
+    return best;
+  };
   const out = [];
-  for (const { name, body } of balancedFunctionBodies(src)) {
-    bodyRe.lastIndex = 0;
-    const bm = bodyRe.exec(body);
-    if (bm) { out.push({ name, capture: bm[1] }); continue; }
-    const locals = new Map();
-    for (const localDeclRe of localDeclRes) {
-      localDeclRe.lastIndex = 0;
-      let ld;
-      while ((ld = localDeclRe.exec(body))) if (!locals.has(ld[1])) locals.set(ld[1], ld[2] ?? ld[1]);
+  const seen = new Set();
+  const push = (fn, capture) => { if (fn && !seen.has(fn)) { seen.add(fn); out.push({ name: fn.name, capture }); } };
+  const globalRe = new RegExp(bodyRe.source, 'g');
+  let bm;
+  while ((bm = globalRe.exec(src))) push(innermost(bm.index), bm[1]);
+  // `return IDENT;` — an alias factory when IDENT is a builder declared in
+  // that same body (direct or conditional initializer). Locals are
+  // collected once per function, and keyword returns are not aliases.
+  const retRe = /\breturn\s+([A-Za-z_$][\w$]*)\s*;/g;
+  const localsOf = new Map();
+  let ret;
+  while ((ret = retRe.exec(src))) {
+    if (/^(?:null|undefined|true|false|this)$/.test(ret[1])) continue;
+    const fn = innermost(ret.index);
+    if (!fn || seen.has(fn)) continue;
+    if (!localsOf.has(fn)) {
+      const locals = new Map();
+      for (const localDeclRe of localDeclRes) {
+        localDeclRe.lastIndex = 0;
+        let ld;
+        while ((ld = localDeclRe.exec(fn.body))) if (!locals.has(ld[1])) locals.set(ld[1], ld[2] ?? ld[1]);
+      }
+      localsOf.set(fn, locals);
     }
-    const ret = body.match(/\breturn\s+([A-Za-z_$][\w$]*)\s*;/);
-    if (ret && locals.has(ret[1])) out.push({ name, capture: locals.get(ret[1]) });
+    if (localsOf.get(fn).has(ret[1])) push(fn, localsOf.get(fn).get(ret[1]));
   }
   return out;
 }
@@ -306,10 +345,13 @@ function balancedBodyFactories(src, bodyRe, localDeclRes = []) {
 // lead writer) and its functions checked the same way, so the caller's
 // `writeRow(db('leads'), row)` registers here. Renamed bindings
 // (`{ writeRow: write }`, `writeRow as write`) map to the local name.
-const helperModuleCache = new Map();
-function importedInsertingHelpers(src, filePath) {
-  const names = new Set();
-  if (!filePath) return names;
+// Every RELATIVE require/import in `src`, resolved against `filePath`:
+// `{ resolved, ns }` for a namespace/default binding, `{ resolved,
+// bindings: [[orig, local]] }` for a destructured one. Package specifiers
+// are not followed — a third-party package cannot be a Waves lead writer.
+function relativeImports(src, filePath) {
+  const out = [];
+  if (!filePath) return out;
   const importRe = /\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\bimport\s*\{([^{}]*)\}\s*from\s*['"](\.{1,2}\/[^'"]+)['"]|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\bimport\s+(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)\s+from\s*['"](\.{1,2}\/[^'"]+)['"]/g;
   let m;
   while ((m = importRe.exec(src))) {
@@ -317,26 +359,81 @@ function importedInsertingHelpers(src, filePath) {
     const resolved = [target, `${target}.js`, path.join(target, 'index.js')]
       .find((c) => fs.existsSync(c) && fs.statSync(c).isFile());
     if (!resolved) continue;
-    if (!helperModuleCache.has(resolved)) {
-      const modSrc = blankComments(fs.readFileSync(resolved, 'utf8'));
-      helperModuleCache.set(resolved, { names: insertingHelperNames(modSrc), callableDefault: defaultExportInserts(modSrc) });
-    }
-    const { names: exported, callableDefault } = helperModuleCache.get(resolved);
+    const ns = m[5] || m[7];
+    if (ns) { out.push({ resolved, ns }); continue; }
+    const bindings = (m[1] || m[3]).split(',')
+      .map((part) => part.split(/\s*(?::|\bas\b)\s*/).map((x) => x && x.trim()))
+      .filter(([orig]) => orig);
+    out.push({ resolved, bindings });
+  }
+  return out;
+}
+
+// What a sibling module EXPORTS that matters here, read once per module:
+// its parameter-inserting helper names, whether its default export inserts,
+// and the names of its lead-SQL constants (`const CREATE_LEAD = 'INSERT
+// INTO leads …'`).
+const moduleFactsCache = new Map();
+function computeModuleFacts(raw) {
+  // Cheap prechecks: no insert call → no helper; no `leads` → no lead SQL.
+  const modSrc = /insert|leads/i.test(raw) ? blankComments(raw) : '';
+  const hasInsert = /insert/i.test(modSrc);
+  return {
+    helpers: hasInsert ? insertingHelperNames(modSrc) : new Set(),
+    callableDefault: hasInsert && defaultExportInserts(modSrc),
+    sqlConstants: /leads/i.test(modSrc) ? leadSqlConstantNames(modSrc) : new Set(),
+  };
+}
+// The repo pass fills this cache as a by-product of each file's own scan
+// (its views are already lexed then); the single-file API reads on demand.
+function moduleFacts(resolved) {
+  if (!moduleFactsCache.has(resolved)) moduleFactsCache.set(resolved, computeModuleFacts(fs.readFileSync(resolved, 'utf8')));
+  return moduleFactsCache.get(resolved);
+}
+
+function importedInsertingHelpers(src, filePath) {
+  const names = new Set();
+  for (const imp of relativeImports(src, filePath)) {
+    const { helpers, callableDefault } = moduleFacts(imp.resolved);
     // NAMESPACE / default binding (`const writers = require('./writers')`,
     // `import * as writers from …`): every inserting function is reachable
     // as a MEMBER call, recorded as `writers.writeRow`; when the module's
     // default export IS an inserting function (`module.exports = function
     // writeRow(builder, row) {…}`), the bare local name is the callee too.
-    const ns = m[5] || m[7];
-    if (ns) {
-      for (const fn of exported) names.add(`${ns}.${fn}`);
-      if (callableDefault) names.add(ns);
+    if (imp.ns) {
+      for (const fn of helpers) names.add(`${imp.ns}.${fn}`);
+      if (callableDefault) names.add(imp.ns);
       continue;
     }
-    for (const part of (m[1] || m[3]).split(',')) {
-      const [orig, local] = part.split(/\s*(?::|\bas\b)\s*/).map((x) => x && x.trim());
-      if (orig && exported.has(orig)) names.add(local || orig);
-    }
+    for (const [orig, local] of imp.bindings) if (helpers.has(orig)) names.add(local || orig);
+  }
+  return names;
+}
+
+// Lead-SQL constants IMPORTED from a sibling module and handed to raw/query
+// here (`const { CREATE_LEAD } = require('./queries'); client.query(
+// CREATE_LEAD)`): the defining module has no executable context and this
+// file has no SQL token, so the call site is the writer. Returns the local
+// callee spellings (bare or `ns.NAME`).
+function importedSqlConstants(src, filePath) {
+  const names = new Set();
+  if (!new RegExp(RAW_CALLEE).test(src)) return names; // nothing executes SQL here
+  for (const imp of relativeImports(src, filePath)) {
+    const { sqlConstants } = moduleFacts(imp.resolved);
+    if (imp.ns) { for (const c of sqlConstants) names.add(`${imp.ns}.${c}`); continue; }
+    for (const [orig, local] of imp.bindings) if (sqlConstants.has(orig)) names.add(local || orig);
+  }
+  return names;
+}
+// Names of constants in `code` (comment-blanked, strings kept) whose
+// initializer holds a lead INSERT/MERGE — the module side of the above.
+function leadSqlConstantNames(code) {
+  const names = new Set();
+  RAW_SQL_INSERT_RE.lastIndex = 0;
+  let m;
+  while ((m = RAW_SQL_INSERT_RE.exec(code))) {
+    const decl = sqlDeclaration(code, m.index);
+    if (decl && !decl.member) names.add(decl.name);
   }
   return names;
 }
@@ -382,10 +479,24 @@ function defaultExportInserts(src) {
 
 function insertingHelperNames(src) {
   const names = new Set();
-  for (const { name, params, body } of balancedFunctionBodies(src)) {
-    for (const param of params) {
-      if (new RegExp(String.raw`\b${escapeRe(param)}${CHAIN}\s*${INSERT_CALL}`).test(body)) names.add(name);
-    }
+  const paramInserts = (params, body) => params.some((param) => new RegExp(String.raw`\b${escapeRe(param)}${CHAIN}\s*${INSERT_CALL}`).test(body));
+  // Every insert call on a BARE identifier receiver, found once over the
+  // file; each is a helper when some enclosing function declares that
+  // identifier as a parameter (the receiver may sit in a nested callback).
+  const fns = balancedFunctionBodies(src);
+  const recvRe = new RegExp(String.raw`(?<![.\w$])([A-Za-z_$][\w$]*)${CHAIN}\s*${INSERT_CALL}`, 'g');
+  let r;
+  while ((r = recvRe.exec(src))) {
+    for (const f of fns) if (f.start <= r.index && r.index < f.end && f.params.includes(r[1])) names.add(f.name);
+  }
+  // EXPRESSION-bodied named arrows — `const writeRow = (builder, row) =>
+  // builder.insert(row);` — have no brace block; the body runs to the
+  // statement end.
+  const exprArrowRe = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\(([^()]*)\)|([A-Za-z_$][\w$]*))\s*=>\s*(?!\{)([^;\n]*)/g;
+  let a;
+  while ((a = exprArrowRe.exec(src))) {
+    const params = (a[2] ?? a[3] ?? '').split(',').map((x) => x.trim().replace(/^\.\.\./, '').split(/[=\s]/)[0]).filter((x) => /^[A-Za-z_$][\w$]*$/.test(x));
+    if (paramInserts(params, a[4])) names.add(a[1]);
   }
   return names;
 }
@@ -483,7 +594,7 @@ function nearestDeclBindsLeads(code, name, idx) {
 // schema-qualified head (`db.withSchema('public').table(X)`) via the same
 // CHAIN of intermediate calls the direct patterns allow, for X = the literal
 // or a resolved constant.
-function aliasInsertPatterns(src, token, filePath) {
+function aliasInsertPatterns(src, token, filePath, imports = 'all') {
   // Declaration keyword OPTIONAL — a builder stored by a later assignment
   // (`let target; target = db('leads');`) is the same stored-builder form.
   // Optional factory call after the head identifier — `getDb()('leads')`.
@@ -529,7 +640,11 @@ function aliasInsertPatterns(src, token, filePath) {
   // A leads builder CONSTRUCTED AS AN ARGUMENT to an insertion helper —
   // in-file or imported from a sibling module (`writeRow(db('leads'),
   // row)`): the construction site is the registered writer.
-  for (const helper of new Set([...insertingHelperNames(src), ...importedInsertingHelpers(src, filePath)])) {
+  const helperNames = new Set([
+    ...(imports === 'only' ? [] : insertingHelperNames(src)),
+    ...(imports === 'skip' ? [] : importedInsertingHelpers(src, filePath)),
+  ]);
+  for (const helper of helperNames) {
     patternsExtra.push(new RegExp(
       String.raw`${helperCallee(helper)}\s*\((?:[^()]|\([^()]*\))*?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}${TABLE_OPTS}\)`,
       'g'
@@ -570,20 +685,23 @@ function aliasInsertPatterns(src, token, filePath) {
       }
     }
   }
+  if (imports === 'only') return patternsExtra;
   const patterns = [...patternsExtra];
   const bare = blankCommentsAndStrings(src);
-  for (const n of builders) {
-    const re = new RegExp(String.raw`\b${escapeRe(n)}${CHAIN}\s*${INSERT_CALL}`, 'g');
-    if (leadDecls.has(n)) {
-      re.verify = (idx) => {
-        const d = nearestVisibleDecl(bare, n, idx);
-        return d === -1 || leadDecls.get(n).has(d);
-      };
-    }
+  if (builders.size) {
+    // ONE use regex over every stored-builder name; the captured name picks
+    // its scope check.
+    const re = new RegExp(String.raw`\b(${[...builders].map(escapeRe).join('|')})${CHAIN}\s*${INSERT_CALL}`, 'g');
+    re.verify = (idx, n) => {
+      if (!leadDecls.has(n)) return true;
+      const d = nearestVisibleDecl(bare, n, idx);
+      return d === -1 || leadDecls.get(n).has(d);
+    };
     patterns.push(re);
   }
-  for (const pn of props) {
-    patterns.push(new RegExp(String.raw`\b[A-Za-z_$][\w$]*\s*(?:\.\s*${escapeRe(pn)}|(?:\?\.)?\[\s*['"\x60]${escapeRe(pn)}['"\x60]\s*\])${CHAIN}\s*${INSERT_CALL}`, 'g'));
+  if (props.size) {
+    const alt = [...props].map(escapeRe).join('|');
+    patterns.push(new RegExp(String.raw`\b[A-Za-z_$][\w$]*\s*(?:\.\s*(?:${alt})|(?:\?\.)?\[\s*['"\x60](?:${alt})['"\x60]\s*\])${CHAIN}\s*${INSERT_CALL}`, 'g'));
   }
   for (const n of factories) {
     patterns.push(new RegExp(String.raw`\b${escapeRe(n)}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g'));
@@ -609,62 +727,99 @@ function aliasInsertPatterns(src, token, filePath) {
 // only errs toward flagging.)
 function lexBlank(code, { keepStrings = false } = {}) {
   const n = code.length;
-  let out = '';
-  const blank = (c) => { out += c === '\n' ? '\n' : ' '; };
-  const emitStr = (c) => { if (keepStrings) out += c; else blank(c); };
+  // Output is assembled from SEGMENTS: plain code runs are copied as slices
+  // and only the inside of strings, comments, template literals and regex
+  // literals is walked character by character (the earlier per-character
+  // concatenation was the single largest cost of the repository pass).
+  const parts = [];
+  let segStart = 0;
   // Last significant (non-whitespace) code character — a `/` after one of
   // these starts a REGEX LITERAL, not division. Its content (quotes
   // included) is data and blanks out, so `db(/'/.test(kind) ? t : f)` does
   // not derail the string lexer.
   let lastSig = '';
   const REGEX_PRECEDERS = '(,=:[!&|?{};+-*%~^<>';
+  const REGEX_KEYWORDS = ['return', 'typeof', 'case', 'in', 'of', 'instanceof', 'new', 'delete', 'void', 'do', 'else', 'yield', 'await'];
+  const blankRun = (t) => t.replace(/[^\n]/g, ' ');
+  const flush = (i) => {
+    if (i <= segStart) return;
+    const run = code.slice(segStart, i);
+    parts.push(run);
+    const t = run.trimEnd();
+    if (t) lastSig = t[t.length - 1];
+  };
+  // The most recent ≤24 output characters before `i` (plain run + earlier
+  // segments) — for the regex-after-keyword and bracket-key rules.
+  const tail = (i) => {
+    let t = code.slice(segStart, i);
+    for (let k = parts.length - 1; t.length < 24 && k >= 0; k -= 1) t = parts[k] + t;
+    return t.slice(-24);
+  };
+  const closeBracket = /\s*\]/y;
+  const special = /[/'"`]/g;
   let i = 0;
   while (i < n) {
+    special.lastIndex = i;
+    const sp = special.exec(code);
+    if (!sp) break;
+    i = sp.index;
     const c = code[i];
     const d = code[i + 1];
-    if (c === '/' && d !== '/' && d !== '*'
-      && (lastSig === '' || REGEX_PRECEDERS.includes(lastSig) || (() => {
-        // A regex can also follow an expression-start KEYWORD — `return
-        // /'/…` — where lastSig is the keyword's final letter.
-        const kw = out.slice(-24).trimEnd().match(/([A-Za-z_$][\w$]*)$/);
-        return Boolean(kw) && ['return', 'typeof', 'case', 'in', 'of', 'instanceof', 'new', 'delete', 'void', 'do', 'else', 'yield', 'await'].includes(kw[1]);
-      })())) {
-      blank(c); i += 1;
-      let inClass = false;
-      while (i < n && code[i] !== '\n') {
-        const ch = code[i];
-        if (ch === '\\') { blank(ch); i += 1; if (i < n) { blank(code[i]); i += 1; } continue; }
-        if (ch === '[') inClass = true;
-        else if (ch === ']') inClass = false;
-        blank(ch); i += 1;
-        if (ch === '/' && !inClass) break;
-      }
-      lastSig = '/';
-      continue;
-    }
+    const runT = code.slice(segStart, i).trimEnd();
+    const sigHere = runT ? runT[runT.length - 1] : lastSig;
     if (c === '/' && d === '/') {
-      while (i < n && code[i] !== '\n') { blank(code[i]); i += 1; }
+      flush(i);
+      const e = code.indexOf('\n', i);
+      const end = e === -1 ? n : e;
+      parts.push(blankRun(code.slice(i, end)));
+      i = end; segStart = i;
       continue;
     }
     if (c === '/' && d === '*') {
-      blank(c); blank(d); i += 2;
-      while (i < n && !(code[i] === '*' && code[i + 1] === '/')) { blank(code[i]); i += 1; }
-      if (i < n) { blank('*'); blank('/'); i += 2; }
+      flush(i);
+      const e = code.indexOf('*/', i + 2);
+      const end = e === -1 ? n : e + 2;
+      parts.push(blankRun(code.slice(i, end)));
+      i = end; segStart = i;
+      continue;
+    }
+    if (c === '/') {
+      const isRegex = sigHere === '' || REGEX_PRECEDERS.includes(sigHere) || (() => {
+        // A regex can also follow an expression-start KEYWORD — `return
+        // /'/…` — where the last significant char is the keyword's letter.
+        const kw = tail(i).trimEnd().match(/([A-Za-z_$][\w$]*)$/);
+        return Boolean(kw) && REGEX_KEYWORDS.includes(kw[1]);
+      })();
+      if (!isRegex) { i += 1; continue; } // division — stays in the plain run
+      flush(i);
+      let j = i + 1;
+      let inClass = false;
+      while (j < n && code[j] !== '\n') {
+        const ch = code[j];
+        if (ch === '\\') { j += 2; continue; }
+        if (ch === '[') inClass = true;
+        else if (ch === ']') inClass = false;
+        j += 1;
+        if (ch === '/' && !inClass) break;
+      }
+      j = Math.min(j, n);
+      parts.push(blankRun(code.slice(i, j)));
+      lastSig = '/';
+      i = j; segStart = i;
       continue;
     }
     if (c === "'" || c === '"') {
-      // Buffer the whole string, then decide: in keepStrings mode a string
-      // is preserved only when it PLAUSIBLY names a table (a short
+      flush(i);
+      // The whole string (through its closing quote, or the newline that
+      // ends an unterminated one), then decide: in keepStrings mode a
+      // string is preserved only when it PLAUSIBLY names a table (a short
       // word/dot token) or is SQL text (starts with a SQL keyword) — a
       // code-shaped doc string ("await db('leads').insert(row)") blanks
       // out so it can never read as a live writer.
-      let buf = c;
-      i += 1;
-      while (i < n && code[i] !== c && code[i] !== '\n') {
-        if (code[i] === '\\') { buf += code[i]; i += 1; }
-        if (i < n) { buf += code[i]; i += 1; }
-      }
-      if (i < n) { buf += code[i]; i += 1; }
+      let j = i + 1;
+      while (j < n && code[j] !== c && code[j] !== '\n') { if (code[j] === '\\') j += 1; j += 1; }
+      const end = Math.min(j + 1, n);
+      const buf = code.slice(i, end);
       const content = buf.slice(1, buf[buf.length - 1] === c ? -1 : undefined);
       // Keep a string UNLESS it embeds quote characters — that's what makes
       // a doc string code-shaped ("await db('leads').insert(row)"): its
@@ -680,40 +835,42 @@ function lexBlank(code, { keepStrings = false } = {}) {
       const methodName = /^(?:insert|table|from|raw|query)$/.test(content);
       // So do identifier-shaped BRACKET KEYS (`queries['lead']`), so a
       // stored builder reached by bracket access stays visible too.
-      const bracketKey = /^[A-Za-z_$][\w$]*$/.test(content) && /\[\s*$/.test(out) && /^\s*\]/.test(code.slice(i));
-      for (const ch of buf) {
-        if ((keepStrings && plausible) || methodName || bracketKey) out += ch;
-        else out += ch === '\n' ? '\n' : ' ';
-      }
+      closeBracket.lastIndex = end;
+      const bracketKey = /^[A-Za-z_$][\w$]*$/.test(content) && /\[\s*$/.test(tail(i)) && closeBracket.test(code);
+      parts.push((keepStrings && plausible) || methodName || bracketKey ? buf : blankRun(buf));
       lastSig = c; // after a string, `/` is division
+      i = end; segStart = i;
       continue;
     }
-    if (c === '`') {
-      emitStr(c); i += 1;
-      let depth = 0;
-      while (i < n) {
-        if (depth === 0 && code[i] === '\\') { emitStr(code[i]); i += 1; if (i < n) { emitStr(code[i]); i += 1; } continue; }
-        if (depth === 0 && code[i] === '`') { emitStr(code[i]); i += 1; break; }
-        if (depth === 0 && code[i] === '$' && code[i + 1] === '{') { depth = 1; out += keepStrings ? '${' : '  '; i += 2; continue; }
-        if (depth > 0) {
-          if (code[i] === '{') depth += 1;
-          else if (code[i] === '}') {
-            depth -= 1;
-            if (depth === 0) { out += keepStrings ? '}' : ' '; i += 1; continue; }
-          }
-          out += code[i]; i += 1;
-          continue;
+    // Template literal: text blanks (or is kept), `${ … }` substitutions
+    // stay code in both views.
+    flush(i);
+    const tb = [];
+    const emitStr = (ch) => { tb.push(keepStrings ? ch : (ch === '\n' ? '\n' : ' ')); };
+    emitStr(c);
+    let j = i + 1;
+    let depth = 0;
+    while (j < n) {
+      if (depth === 0 && code[j] === '\\') { emitStr(code[j]); j += 1; if (j < n) { emitStr(code[j]); j += 1; } continue; }
+      if (depth === 0 && code[j] === '`') { emitStr(code[j]); j += 1; break; }
+      if (depth === 0 && code[j] === '$' && code[j + 1] === '{') { depth = 1; tb.push(keepStrings ? '${' : '  '); j += 2; continue; }
+      if (depth > 0) {
+        if (code[j] === '{') depth += 1;
+        else if (code[j] === '}') {
+          depth -= 1;
+          if (depth === 0) { tb.push(keepStrings ? '}' : ' '); j += 1; continue; }
         }
-        emitStr(code[i]); i += 1;
+        tb.push(code[j]); j += 1;
+        continue;
       }
-      lastSig = '`';
-      continue;
+      emitStr(code[j]); j += 1;
     }
-    out += c;
-    if (!/\s/.test(c)) lastSig = c;
-    i += 1;
+    parts.push(tb.join(''));
+    lastSig = '`';
+    i = j; segStart = i;
   }
-  return out;
+  flush(n);
+  return parts.join('');
 }
 // Several contract passes lex the same ~1600 sources — cache per source
 // string so each file is lexed at most once per mode.
@@ -750,7 +907,7 @@ const DYNAMIC_INSERT_PATTERNS = [
 // / `.table(table)` / `.from(table)`, payload walked balanced.
 const DYN_INSERT_FIRST_TAIL = new RegExp(String.raw`^${CHAIN}\s*(?:\.into|${TABLE_SEL}|${FROM_SEL})\s*\(${DYN_EXPR}${TABLE_OPTS}\)`);
 
-function scanSourceForDynamicTableInserts(src, filePath) {
+function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
   const lines = src.split('\n');
   const code = blankCommentsAndStrings(src); // patterns run on CODE only …
   const endsByLine = new Map();
@@ -789,15 +946,22 @@ function scanSourceForDynamicTableInserts(src, filePath) {
     endsByLine.get(line).add(index + matchLen);
     if (!exprByLine.has(line)) exprByLine.set(line, expr.trim());
   };
-  for (const pattern of DYNAMIC_INSERT_PATTERNS) {
+  // Every in-file dynamic form ends in an insert call; without one the
+  // file can only reach a writer through an imported helper (below).
+  const hasInsert = /insert/i.test(code) && imports !== 'only';
+  for (const pattern of hasInsert ? DYNAMIC_INSERT_PATTERNS : []) {
     pattern.lastIndex = 0;
     let m;
     while ((m = pattern.exec(code))) record(m.index, m[0].length, m[1]);
   }
-  for (const f of insertFirstMatches(code, DYN_INSERT_FIRST_TAIL)) record(f.index, f.length, f.capture);
+  if (hasInsert) for (const f of insertFirstMatches(code, DYN_INSERT_FIRST_TAIL)) record(f.index, f.length, f.capture);
   // A dynamic-table builder handed to an insertion helper, in-file or
   // imported (`writeRow(db(table), row)`) — the dynamic mirror.
-  for (const helper of new Set([...insertingHelperNames(code), ...importedInsertingHelpers(src, filePath)])) {
+  const dynHelpers = new Set([
+    ...(imports === 'only' ? [] : insertingHelperNames(code)),
+    ...(imports === 'skip' ? [] : importedInsertingHelpers(src, filePath)),
+  ]);
+  for (const helper of dynHelpers) {
     const useRe = new RegExp(String.raw`${helperCallee(helper)}\s*\((?:[^()]|\([^()]*\))*?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}${TABLE_OPTS}\)`, 'g');
     let use;
     while ((use = useRe.exec(code))) record(use.index, use[0].length, use[1]);
@@ -816,7 +980,7 @@ function scanSourceForDynamicTableInserts(src, filePath) {
     dynDecls.get(name).add(m.index);
   };
   let decl;
-  while ((decl = dynDeclRe.exec(code))) {
+  while (hasInsert && (decl = dynDeclRe.exec(code))) {
     if (!decl[2].trim() || isResolved(decl[2])) continue;
     dynBuilders.set(decl[1], decl[2]);
     noteDynDecl(decl[1], decl);
@@ -828,7 +992,7 @@ function scanSourceForDynamicTableInserts(src, filePath) {
     'g'
   );
   let cnd;
-  while ((cnd = dynCondDeclRe.exec(code))) {
+  while (hasInsert && (cnd = dynCondDeclRe.exec(code))) {
     if (!cnd[2].trim() || isResolved(cnd[2])) continue;
     if (!dynBuilders.has(cnd[1])) dynBuilders.set(cnd[1], cnd[2]);
     noteDynDecl(cnd[1], cnd);
@@ -839,21 +1003,22 @@ function scanSourceForDynamicTableInserts(src, filePath) {
     String.raw`([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}${TABLE_OPTS}\)`,
     'g'
   );
-  const seenDynProps = new Set();
+  const dynProps = new Map(); // prop -> table expr
   let pdd;
-  while ((pdd = dynPropDeclRe.exec(code))) {
-    if (!pdd[2].trim() || isResolved(pdd[2]) || seenDynProps.has(pdd[1])) continue;
-    seenDynProps.add(pdd[1]);
-    // Cheap precheck before the heavy use-pattern: the file must even
-    // mention the property (dot or bracket form).
-    if (!code.includes(`.${pdd[1]}`) && !new RegExp(String.raw`(?:\?\.)?\[\s*['"\x60]${escapeRe(pdd[1])}['"\x60]\s*\]`).test(code)) continue;
-    const useRe = new RegExp(String.raw`\b[A-Za-z_$][\w$]*\s*(?:\.\s*${escapeRe(pdd[1])}|(?:\?\.)?\[\s*['"\x60]${escapeRe(pdd[1])}['"\x60]\s*\])${CHAIN}\s*${INSERT_CALL}`, 'g');
+  while (hasInsert && (pdd = dynPropDeclRe.exec(code))) {
+    if (!pdd[2].trim() || isResolved(pdd[2]) || dynProps.has(pdd[1])) continue;
+    dynProps.set(pdd[1], pdd[2]);
+  }
+  // ONE use regex over all discovered properties (dot or bracket access).
+  if (dynProps.size) {
+    const alt = [...dynProps.keys()].map(escapeRe).join('|');
+    const useRe = new RegExp(String.raw`\b[A-Za-z_$][\w$]*\s*(?:\.\s*(${alt})|(?:\?\.)?\[\s*['"\x60](${alt})['"\x60]\s*\])${CHAIN}\s*${INSERT_CALL}`, 'g');
     let use;
-    while ((use = useRe.exec(code))) record(use.index, use[0].length, pdd[2]);
+    while ((use = useRe.exec(code))) record(use.index, use[0].length, dynProps.get(use[1] || use[2]));
   }
   // Transitive aliases inherit the table expression (in-memory closure
   // over one assignment-pair pass).
-  const dynPairs = simpleAssignPairs(code);
+  const dynPairs = hasInsert ? simpleAssignPairs(code) : [];
   let grewDyn = true;
   while (grewDyn) {
     grewDyn = false;
@@ -866,17 +1031,18 @@ function scanSourceForDynamicTableInserts(src, filePath) {
       }
     }
   }
-  for (const [n, expr] of dynBuilders) {
-    const useRe = new RegExp(String.raw`\b${escapeRe(n)}${CHAIN}\s*${INSERT_CALL}`, 'g');
+  if (dynBuilders.size) {
+    const useRe = new RegExp(String.raw`\b(${[...dynBuilders.keys()].map(escapeRe).join('|')})${CHAIN}\s*${INSERT_CALL}`, 'g');
     let use;
     while ((use = useRe.exec(code))) {
+      const n = use[1];
       // Same lexical rule as the literal pass: the nearest VISIBLE
       // declaration of the name must be one of the dynamic-builder ones.
       if (dynDecls.has(n)) {
         const d = nearestVisibleDecl(code, n, use.index);
         if (d !== -1 && !dynDecls.get(n).has(d)) continue;
       }
-      record(use.index, use[0].length, expr);
+      record(use.index, use[0].length, dynBuilders.get(n));
     }
   }
   // Arrow FACTORY over a dynamic table — `const q = (t) => db(t); …
@@ -894,7 +1060,7 @@ function scanSourceForDynamicTableInserts(src, filePath) {
   }
   // Function/block-arrow factories over a dynamic table, balanced bodies.
   const dynReturnRe = new RegExp(String.raw`\breturn\b[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*\(${DYN_EXPR}${TABLE_OPTS}\)`);
-  for (const f of balancedBodyFactories(code, dynReturnRe, [dynDeclRe, dynCondDeclRe])) {
+  for (const f of hasInsert ? balancedBodyFactories(code, dynReturnRe, [dynDeclRe, dynCondDeclRe]) : []) {
     if (!f.capture || !f.capture.trim() || isResolved(f.capture)) continue;
     const useRe = new RegExp(String.raw`(?<!function )\b${escapeRe(f.name)}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g');
     let use;
@@ -964,29 +1130,43 @@ function walk(dir, out = []) {
 // while two inserts sharing one source line end at different characters and
 // surface as siteCount 2 — which the contract below rejects, because two
 // same-line sites cannot get distinguishable anchor keys.
-function scanSourceForLeadInserts(src, filePath) {
+function scanSourceForLeadInserts(src, filePath, imports = 'all') {
   const lines = src.split('\n');
   // Comment-normalized, string-preserving view: an inline comment inside a
   // builder call (`db(/* primary table */ 'leads')`) reads as whitespace,
   // and a comment merely SAYING "insert into leads" is not a site.
   const code = blankComments(src);
   const endsByLine = new Map();
-  const patterns = [RAW_SQL_INSERT_RE];
+  // Every in-file form — builder token, table constant, raw SQL — contains
+  // the word `leads`; a file without it can only be a writer through an
+  // IMPORTED SQL constant, so the pattern passes are skipped entirely.
+  const patterns = /leads/i.test(code) && imports !== 'only' ? [RAW_SQL_INSERT_RE] : [];
   const constOf = new Map();
   const add = (index, len) => {
     const line = code.slice(0, index).split('\n').length;
     if (!endsByLine.has(line)) endsByLine.set(line, new Set());
     endsByLine.get(line).add(index + len);
   };
-  for (const { token, name } of leadsTableTokens(code)) {
-    const group = [...knexInsertPatterns(token), ...aliasInsertPatterns(code, token, filePath)];
+  for (const { token, name } of /leads/i.test(code) ? leadsTableTokens(code) : []) {
+    const group = imports === 'only'
+      ? aliasInsertPatterns(code, token, filePath, 'only')
+      : [...knexInsertPatterns(token), ...aliasInsertPatterns(code, token, filePath, imports)];
     if (name) for (const p of group) constOf.set(p, name);
     patterns.push(...group);
+    if (imports === 'only') continue;
     const tail = new RegExp(String.raw`^${CHAIN}\s*(?:\.into|${TABLE_SEL}|${FROM_SEL})\s*\(\s*(${token})${TABLE_OPTS}\)`);
     for (const f of insertFirstMatches(code, tail)) {
       if (name && !nearestDeclBindsLeads(code, name, f.index)) continue;
       add(f.index, f.length);
     }
+  }
+  // Lead SQL imported as a constant and executed here — directly or as the
+  // `text` of an inline pg QueryConfig.
+  for (const local of imports === 'skip' ? [] : importedSqlConstants(code, filePath)) {
+    const callee = helperCallee(local);
+    const re = new RegExp(String.raw`${RAW_CALLEE}\s*(?:${callee}\b(?![.\[])|\{[^{}]*\btext\s*:\s*${callee}\b)`, 'g');
+    let m;
+    while ((m = re.exec(code))) add(m.index, m[0].length);
   }
   for (const pattern of patterns) {
     pattern.lastIndex = 0;
@@ -994,7 +1174,7 @@ function scanSourceForLeadInserts(src, filePath) {
     while ((m = pattern.exec(code))) {
       if (pattern === RAW_SQL_INSERT_RE && !inRawContext(code, m.index)) continue;
       if (constOf.has(pattern) && !nearestDeclBindsLeads(code, constOf.get(pattern), m.index)) continue;
-      if (pattern.verify && !pattern.verify(m.index)) continue;
+      if (pattern.verify && !pattern.verify(m.index, m[1])) continue;
       add(m.index, m[0].length);
     }
   }
@@ -1003,28 +1183,51 @@ function scanSourceForLeadInserts(src, filePath) {
     .map(([line, ends]) => ({ line, anchor: lines[line - 1].trim(), siteCount: ends.size }));
 }
 
-function scanLeadInsertSites() {
+// ONE bounded pass over the server tree, memoized: each file is read once,
+// both scans run on it, and its lexer views are released afterwards (the
+// blanked views are the memory multiplier — retaining them across ~4k
+// files is what made the earlier two-walk version approach a gigabyte).
+// A file that never mentions insert/merge cannot hold a site in either
+// scan (every builder shape needs an insert call; raw SQL needs INSERT or
+// MERGE), so it is skipped before any regex runs. `files` keeps the raw
+// sources for the caller-contract test, which needs every source anyway.
+let repoScanMemo = null;
+function repoScan() {
+  if (repoScanMemo) return repoScanMemo;
   const sites = [];
+  const dynamic = [];
+  const files = [];
   for (const abs of walk(SERVER_ROOT).sort()) {
     const rel = path.relative(SERVER_ROOT, abs).split(path.sep).join('/');
-    if (SKIP_FILES.has(rel)) continue;
-    for (const site of scanSourceForLeadInserts(fs.readFileSync(abs, 'utf8'), abs)) {
-      sites.push({ file: rel, ...site });
+    const src = fs.readFileSync(abs, 'utf8');
+    files.push({ rel, src });
+    if (SKIP_FILES.has(rel) || !/insert|merge/i.test(src)) continue;
+    for (const site of scanSourceForLeadInserts(src, abs, 'skip')) sites.push({ file: rel, ...site });
+    for (const site of scanSourceForDynamicTableInserts(src, abs, 'skip')) dynamic.push({ file: rel, ...site });
+    // What THIS module exports to importers — computed while its views are
+    // hot, so phase 2 never parses a module twice.
+    moduleFactsCache.set(abs, computeModuleFacts(src));
+    for (const cache of [lexCache, functionBodiesCache]) {
+      cache.delete(src);
+      for (const view of cache.keys()) if (view.length === src.length) cache.delete(view);
     }
   }
-  return sites;
-}
-
-function scanDynamicTableInsertSites() {
-  const sites = [];
-  for (const abs of walk(SERVER_ROOT).sort()) {
-    const rel = path.relative(SERVER_ROOT, abs).split(path.sep).join('/');
+  // Phase 2 — CROSS-MODULE writers: a file whose relative imports resolve
+  // to an inserting helper or a lead-SQL constant gets the imported-only
+  // patterns run (few files; everything else was settled in phase 1).
+  for (const { rel, src } of files) {
     if (SKIP_FILES.has(rel)) continue;
-    for (const site of scanSourceForDynamicTableInserts(fs.readFileSync(abs, 'utf8'), abs)) {
-      sites.push({ file: rel, ...site });
-    }
+    const abs = path.join(SERVER_ROOT, rel);
+    const imports = relativeImports(src, abs);
+    if (!imports.some((imp) => { const f = moduleFactsCache.get(imp.resolved); return f && (f.helpers.size || f.callableDefault || f.sqlConstants.size); })) continue;
+    for (const site of scanSourceForLeadInserts(src, abs, 'only')) sites.push({ file: rel, ...site });
+    for (const site of scanSourceForDynamicTableInserts(src, abs, 'only')) dynamic.push({ file: rel, ...site });
+    for (const cache of [lexCache, functionBodiesCache]) for (const view of cache.keys()) if (view.length === src.length) cache.delete(view);
   }
-  return sites;
+  sites.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+  dynamic.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+  repoScanMemo = { sites, dynamic, files };
+  return repoScanMemo;
 }
 
 const key = (site) => `${site.file} :: ${site.anchor}`;
@@ -1083,6 +1286,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['triple-nested chain arguments', "await db('leads').modify(qb => qb.whereIn('id', ids.map(id => normalize(id)))).insert(row);"],
     ['deeply nested insert payload before .into', "await db.insert(rows.map(row => normalize(row, opts.get('k')))).into('leads');"],
     ['insert payload before .table', "await db.insert(rows.map(row => normalize(row))).table('leads');"],
+    ['expression-bodied named arrow helper', "const writeRow = (builder, row) => builder.insert(row);\nawait writeRow(db('leads'), row);"],
     ['SQL constant as the text of an inline pg query config', "const SQL = 'INSERT INTO leads (a) VALUES ($1)';\nawait client.query({ text: SQL, values: [a] });"],
     ['SQL constant wrapped into a declared pg query config', "const SQL = 'INSERT INTO leads (a) VALUES ($1)';\nconst cfg = { text: SQL, values: [a] };\nawait client.query(cfg);"],
     ['optional computed insert call', "await db('leads')?.['insert'](row);"],
@@ -1183,12 +1387,21 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(dynDefault).toHaveLength(1);
     const optionalDyn = scanSourceForDynamicTableInserts("await db(table)?.['insert'](row);");
     expect(optionalDyn).toHaveLength(1);
+    // Lead-SQL constants imported from a sibling module.
+    fs.writeFileSync(path.join(dir, 'queries.js'), "const CREATE_LEAD = 'INSERT INTO leads (a) VALUES ($1)';\nconst COUNT_LEADS = 'SELECT count(*) FROM leads';\nmodule.exports = { CREATE_LEAD, COUNT_LEADS };\n");
+    expect(found("const { CREATE_LEAD } = require('./queries');\nawait client.query(CREATE_LEAD, [a]);", route)).toEqual(['await client.query(CREATE_LEAD, [a]);']);
+    expect(found("const q = require('./queries');\nawait db.raw(q.CREATE_LEAD, [a]);", route)).toEqual(['await db.raw(q.CREATE_LEAD, [a]);']);
+    expect(found("const { CREATE_LEAD: sql } = require('./queries');\nawait client.query({ text: sql, values: [a] });", route)).toEqual(['await client.query({ text: sql, values: [a] });']);
+    expect(found("const { COUNT_LEADS } = require('./queries');\nawait db.raw(COUNT_LEADS);", route)).toEqual([]);
+    expect(found("const { CREATE_LEAD } = require('./queries');\nmodule.exports = { CREATE_LEAD };", route)).toEqual([]);
     // Arrow-valued default exports, expression and block bodies.
     fs.writeFileSync(path.join(dir, 'write-arrow.js'), "module.exports = (builder, row) => builder.insert(row);\n");
     fs.writeFileSync(path.join(dir, 'write-arrow-block.mjs'), "export default async (builder, row) => {\n  audit();\n  return builder.insert(row);\n};\n");
     expect(found("const write = require('./write-arrow');\nawait write(db('leads'), row);", route)).toEqual(["await write(db('leads'), row);"]);
     const dynArrow = scanSourceForDynamicTableInserts("import write from './write-arrow-block.mjs';\nawait write(db(table), row);", route);
     expect(dynArrow).toHaveLength(1);
+    const dynExprArrow = scanSourceForDynamicTableInserts("const writeRow = (builder, row) => builder.insert(row);\nawait writeRow(db(table), row);");
+    expect(dynExprArrow).toHaveLength(1);
   });
 
   test('var is function-scoped: a block-nested var shadows through its block, not past its function', () => {
@@ -1382,7 +1595,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
 });
 
 describe('lead-writer registry (#3137 groundwork)', () => {
-  const scanned = scanLeadInsertSites();
+  let scanned;
+  beforeAll(() => { scanned = repoScan().sites; });
 
   test('scanner finds the known writer population (sanity — not a cap)', () => {
     // Guards against the scan silently returning nothing (regex drift, wrong
@@ -1392,7 +1606,7 @@ describe('lead-writer registry (#3137 groundwork)', () => {
   });
 
   test('every dynamic-table insert is allowlisted with a never-leads reason (and the allowlist is live)', () => {
-    const dynamic = scanDynamicTableInsertSites();
+    const { dynamic } = repoScan();
     const allowed = new Set(DYNAMIC_TABLE_INSERTS.map(key));
     const unlisted = dynamic.filter((s) => !allowed.has(key(s)));
     expect(unlisted.map((s) => `${s.file}:${s.line} — ${s.anchor} (expr: ${s.expr})`)).toEqual([]);
@@ -1425,10 +1639,7 @@ describe('lead-writer registry (#3137 groundwork)', () => {
   });
 
   test("dynamic-table helpers: every allowlist entry declares a caller contract, and every CALLER satisfies it (the never-leads reason isn't just prose)", () => {
-    const files = walk(SERVER_ROOT).map((abs) => ({
-      rel: path.relative(SERVER_ROOT, abs).split(path.sep).join('/'),
-      src: fs.readFileSync(abs, 'utf8'),
-    }));
+    const { files } = repoScan();
     const leadsShaped = (t) => /^(?:[\w$]+\.)?leads$/i.test(t);
     const assertNotLeads = (where, t) => {
       expect({ where, table: t, leads: leadsShaped(t) }).toEqual({ where, table: t, leads: false });
