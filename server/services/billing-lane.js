@@ -52,6 +52,18 @@ const MONTHLY_LANE_SQL = `
       NOT IN ('none', 'onetime', 'na', 'no', 'notset', 'commercial')
   ))`;
 
+// SQL mirror of isMembershipTier ALONE (no billing-mode arm): a REAL
+// (non-empty, non-sentinel) WaveGuard tier. For MEMBERSHIP audiences —
+// pricing/upsell economics where per-application and annual-prepay members
+// still count — as opposed to MONTHLY_LANE_SQL's dues audience (Codex #3669
+// r7: the money-model core stage must not drop prepay members). Same
+// normalization and sentinel list as isMembershipTier / MONTHLY_LANE_SQL
+// above (and MEMBERSHIP_SQL in admin-automations.js).
+const MEMBERSHIP_TIER_SQL = `
+  (regexp_replace(lower(coalesce(waveguard_tier, '')), '[^a-z0-9]+', '', 'g') <> ''
+   AND regexp_replace(lower(coalesce(waveguard_tier, '')), '[^a-z0-9]+', '', 'g')
+     NOT IN ('none', 'onetime', 'na', 'no', 'notset', 'commercial'))`;
+
 // Explicit mode wins; NULL infers the legacy split: a REAL WaveGuard tier +
 // a positive monthly rate has always meant "the 8AM cron bills the dues and
 // visits are covered" — everything else bills per visit at completion.
@@ -577,6 +589,7 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date()) {
 module.exports = {
   BILLING_MODES,
   MONTHLY_LANE_SQL,
+  MEMBERSHIP_TIER_SQL,
   isMembershipTier,
   impliedMonthlyStampForWrite,
   resolveBillingLane,

@@ -622,7 +622,11 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
     // $35 flat monthly is a wrong promise (codex 1A-ii r3).
     if ((family === 'termite' || family === 'rodent')
       && (num(row.mo) > 0 || num(row.monthly) > 0)
-      && row.billedPerApplication !== true) {
+      // perApplicationBilled is the canonical 2026-08-29 marker every new
+      // rodent row carries (codex #3591 r7 P1) — either flag proves the
+      // per-application cadence.
+      && row.billedPerApplication !== true
+      && row.perApplicationBilled !== true) {
       unrepresentable.push(`${String(row.name || row.service || 'service')} (${family} billing cadence cannot be proven — flat-monthly vs per-application)`);
       continue;
     }

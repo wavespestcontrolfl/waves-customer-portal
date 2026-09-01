@@ -1204,10 +1204,10 @@ function accountPricingFromContext(context = {}) {
     ? [...new Set(account.existing_service_keys.filter(Boolean))]
     : [];
   // Duplicate checks must cover EVERY active recurring service, not just the
-  // WaveGuard-qualifying set — rodent_bait / palm_injection live only in
-  // current_services (loaded for spend recognition) and would otherwise be
-  // quotable again as a duplicate draft. Pricing still uses the qualifying
-  // set only. Each entry carries the property addresses the service is
+  // WaveGuard-qualifying set — palm_injection (and, pre-2026-08-29,
+  // rodent_bait) lives only in current_services (loaded for spend
+  // recognition) and would otherwise be quotable again as a duplicate
+  // draft. Pricing still uses the qualifying set only. Each entry carries the property addresses the service is
   // active at, and commercial_* programs also match their base key so a
   // requested `pest` collides with an active "Commercial Pest Control".
   const activeServices = (Array.isArray(account.current_services) ? account.current_services : [])
@@ -3442,6 +3442,31 @@ async function setEstimatePresentation(input, actionContext = {}) {
       return { error: `No priced service on this estimate matches "${service}" anymore — it changed after the preview. Nothing was changed.` };
     }
     const lockedPrevious = [...new Set(lockedRows.map((row) => String(row.displayName || row.label || row.name || row.service || 'service')))];
+    // The card approved a specific previous_names → new_display_name
+    // transition (GH r10 P2): re-assert that approved snapshot on the FRESH
+    // rows under this lock. The stable engine key still matches a row a
+    // concurrent editor relabeled after the confirm-time preview, and
+    // committing would silently overwrite wording the operator never saw.
+    const approvedPrevious = Array.isArray(input?._verified_previous_names)
+      ? input._verified_previous_names.map(String) : null;
+    if (approvedPrevious && (lockedPrevious.length !== approvedPrevious.length
+      || lockedPrevious.some((n) => !approvedPrevious.includes(n)))) {
+      return {
+        error: 'The displayed name(s) on this estimate changed after the card was shown — nothing was relabeled. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+    // Row COUNT binds too (GH r11 P2): a row ADDED with the same displayed
+    // name after the confirm-time preview keeps the unique-name set
+    // identical while widening what this relabel touches beyond the
+    // approved rows_matched.
+    const approvedRowCount = Number(input?._verified_rows_matched);
+    if (Number.isFinite(approvedRowCount) && lockedRows.length !== approvedRowCount) {
+      return {
+        error: 'The set of matching service rows on this estimate changed after the card was shown — nothing was relabeled. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
     for (const row of lockedRows) {
       // displayName ONLY — never label: legacy rows without a stable
       // service/key are CLASSIFIED by label (recurringServiceKey and
@@ -3506,7 +3531,7 @@ async function setEstimatePresentation(input, actionContext = {}) {
   };
 }
 
-async function toggleEstimateV2View({ estimate_identifier, enabled }) {
+async function toggleEstimateV2View({ estimate_identifier, enabled, _expected_flag_value }) {
   if (!estimate_identifier) {
     return { error: 'estimate_identifier required (UUID, token, or phone)' };
   }
@@ -3517,7 +3542,18 @@ async function toggleEstimateV2View({ estimate_identifier, enabled }) {
   }
 
   const next = typeof enabled === 'boolean' ? enabled : !estimate.use_v2_view;
-  await db('estimates').where({ id: estimate.id }).update({ use_v2_view: next });
+  // Card confirms carry the approved CURRENT value (pre-push r11 P1): the
+  // UPDATE is conditional on it, so a concurrent toggle between the confirm
+  // preflight and this write refuses instead of silently inverting or
+  // overwriting newer state. COALESCE covers a NULL flag.
+  const expected = typeof _expected_flag_value === 'boolean' ? _expected_flag_value : undefined;
+  const updated = await db('estimates')
+    .where({ id: estimate.id })
+    .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(use_v2_view, false) = ?', [expected]); })
+    .update({ use_v2_view: next });
+  if (expected !== undefined && !updated) {
+    return { error: 'This estimate\'s view flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
+  }
 
   logger.info(`[estimate-v2] Toggled use_v2_view for estimate ${estimate.id} → ${next}`);
 
@@ -3530,7 +3566,7 @@ async function toggleEstimateV2View({ estimate_identifier, enabled }) {
   };
 }
 
-async function toggleShowOneTimeOption({ estimate_identifier, enabled }) {
+async function toggleShowOneTimeOption({ estimate_identifier, enabled, _expected_flag_value }) {
   if (!estimate_identifier) {
     return { error: 'estimate_identifier required (UUID, token, or phone)' };
   }
@@ -3552,7 +3588,16 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled }) {
     });
     if (deliveryError) return { error: deliveryError };
   }
-  await db('estimates').where({ id: estimate.id }).update({ show_one_time_option: next });
+  // Conditional on the approved current value — same contract as
+  // toggleEstimateV2View (pre-push r11 P1).
+  const expected = typeof _expected_flag_value === 'boolean' ? _expected_flag_value : undefined;
+  const updated = await db('estimates')
+    .where({ id: estimate.id })
+    .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(show_one_time_option, false) = ?', [expected]); })
+    .update({ show_one_time_option: next });
+  if (expected !== undefined && !updated) {
+    return { error: 'This estimate\'s one-time-option flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
+  }
 
   logger.info(`[estimate-v2] Toggled show_one_time_option for estimate ${estimate.id} → ${next}`);
 
@@ -3568,6 +3613,9 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled }) {
 module.exports = {
   ESTIMATE_TOOLS,
   executeEstimateTool,
+  // Route-side proposal pin (W0B): resolve the toggle target ONCE at proposal
+  // so the card names the estimate and Confirm acts on that immutable id.
+  resolveEstimateByIdentifier,
   _private: {
     agentEstimatePayload,
     compactAgentLine,

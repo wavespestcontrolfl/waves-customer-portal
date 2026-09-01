@@ -6,7 +6,7 @@ const gmailClient = require('../services/email/gmail-client');
 const { syncEmails } = require('../services/email/email-sync');
 const { classifyEmail } = require('../services/email/email-classifier');
 const { executeAutoAction } = require('../services/email/email-actions');
-const { unblockSender, isProtectedDomain } = require('../services/email/spam-blocker');
+const { unblockSender, manualBlockSender } = require('../services/email/spam-blocker');
 const logger = require('../services/logger');
 const { publicPortalUrl } = require('../utils/portal-url');
 const {
@@ -15,17 +15,8 @@ const {
 } = require('../services/staff-oauth-state');
 
 const MAX_PAGE_LIMIT = 200;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const DOMAIN_RE = /^(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,63}$/i;
 const GMAIL_OAUTH_STATE_PREFIX = 'gmail.oauth_state:';
 const GMAIL_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
-
-function redactEmail(value) {
-  const normalized = value ? String(value).trim().toLowerCase() : '';
-  const [local, domain] = normalized.split('@');
-  if (!local || !domain) return normalized || 'unknown';
-  return `${local.slice(0, 1)}***@${domain}`;
-}
 
 // Gate everything except Google's OAuth callback.
 // /oauth/callback is hit by Google's redirect (no Authorization header possible)
@@ -729,47 +720,17 @@ router.get('/blocked', async (req, res) => {
   }
 });
 
-// POST /block — manually block a domain/sender
+// POST /block — manually block a domain/sender. Shared implementation with
+// the IB block_sender card (GH r9 on #3648: one manual blocker, never two):
+// validation, Gmail filter, blocklist row, and orphan-filter rollback all
+// live in spam-blocker.manualBlockSender. email_address wins when both are
+// supplied (the filter always targeted the address in that case anyway).
 router.post('/block', async (req, res) => {
   try {
     const { email_address, domain, reason } = req.body;
-    if (!email_address && !domain) return res.status(400).json({ error: 'email_address or domain required' });
-
-    const blockEmail = email_address ? String(email_address).trim().toLowerCase() : null;
-    const blockDomain = domain ? String(domain).trim().toLowerCase().replace(/^@/, '') : null;
-    if (!blockEmail && !blockDomain) return res.status(400).json({ error: 'email_address or domain required' });
-    if (blockEmail && !EMAIL_RE.test(blockEmail)) return res.status(400).json({ error: 'Invalid email address' });
-    if (blockDomain && !DOMAIN_RE.test(blockDomain)) return res.status(400).json({ error: 'Invalid domain' });
-    if (blockDomain && isProtectedDomain(blockDomain)) {
-      return res.status(400).json({ error: 'Protected domains cannot be blocked domain-wide. Block a specific sender address instead.' });
-    }
-    const filterFrom = blockEmail || `@${blockDomain}`;
-
-    // Create Gmail filter
-    let gmailFilterId = null;
-    try {
-      const gmail = await gmailClient.getGmail();
-      const filter = await gmail.users.settings.filters.create({
-        userId: 'me',
-        requestBody: { criteria: { from: filterFrom }, action: { removeLabelIds: ['INBOX'], addLabelIds: ['TRASH'] } },
-      });
-      gmailFilterId = filter.data.id;
-    } catch (e) {
-      logger.warn(`[email] Gmail filter creation failed: ${e.message}`);
-    }
-
-    const [entry] = await db('blocked_email_senders')
-      .insert({
-        email_address: blockEmail,
-        domain: blockDomain,
-        gmail_filter_id: gmailFilterId,
-        reason: reason || 'Manual block',
-        blocked_count: 0,
-      })
-      .returning('*');
-
-    logger.info(`[email] Manually blocked sender: ${blockEmail ? redactEmail(blockEmail) : `@${blockDomain}`}`);
-    res.json(entry);
+    const result = await manualBlockSender({ email_address, domain, reason });
+    if (result.error) return res.status(400).json({ error: result.error });
+    res.json({ ...(result.entry || {}), ...(result.warning ? { warning: result.warning } : {}) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -96,7 +96,7 @@ const {
   normalizeRoachType,
 } = require('./service-pricing');
 const {
-  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard,
+  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, lineFlagsBlockPercentDiscount,
   pestProgramFloorAnnual, validateEstimateDiscounts,
   serviceManualRecurringDiscountEligible,
 } = require('./discount-engine');
@@ -1148,8 +1148,68 @@ function generateEstimate(input) {
   }
 
   // Rodent Bait
+  // Saved-estimate legacy replay pin (codex #3591 r2 P0): a pre-2026-08-29
+  // estimate replayed through the CURRENT engine must reproduce its
+  // disclosed price, not the new bracket ladder. estimate-public's
+  // savedFloorReplayOverrides derives the pin from stored row evidence
+  // (a rodent line with no perApplicationBilled/stations marker) and
+  // threads it in as an input-level override; fresh pricing never carries
+  // it. A pinned line keeps the FULL legacy posture: monthly-billed, no
+  // tier count, no % discount — otherwise the replay would also move the
+  // OTHER lines' tier discounts on the same old quote.
+  const rodentLegacyPin = input.rodentBaitLegacyReplay && typeof input.rodentBaitLegacyReplay === 'object'
+    ? input.rodentBaitLegacyReplay
+    : null;
   if (services.rodentBait) {
-    if (propertyIsCommercial) {
+    if (propertyIsCommercial && Number(rodentLegacyPin?.commercialAnnual) > 0) {
+      const annual = Math.round(Number(rodentLegacyPin.commercialAnnual) * 100) / 100;
+      const visits = Number(rodentLegacyPin.commercialVisits) > 0 ? Number(rodentLegacyPin.commercialVisits) : 4;
+      lineItems.push({
+        service: 'commercial_rodent_bait',
+        name: 'Commercial Rodent Bait Stations',
+        originalRequestedService: 'rodent_bait',
+        propertyType: 'commercial',
+        isCommercial: true,
+        commercialPricingMode: 'auto_estimate',
+        estimatedPricing: true,
+        discountable: false,
+        excludeFromPctDiscount: true,
+        quoteRequired: false,
+        requiresManualReview: false,
+        detail: 'Commercial rodent bait-station program. Estimated from property data — final price confirmed on site.',
+        disclaimer: 'Estimated from property data — final price confirmed on site.',
+        frequency: visits,
+        visitsPerYear: visits,
+        annual,
+        monthly: Math.round(annual / 12 * 100) / 100,
+        perApp: Math.round(annual / visits * 100) / 100,
+        perVisit: Math.round(annual / visits * 100) / 100,
+        pricingBasis: 'LEGACY_PINNED_REPLAY',
+        legacyPinnedReplay: true,
+        taxable: true,
+        taxCategory: 'nonresidential_pest_control',
+      });
+      activeServiceKeys.push('commercial_rodent_bait');
+    } else if (!propertyIsCommercial && Number(rodentLegacyPin?.monthly) > 0) {
+      const monthly = Math.round(Number(rodentLegacyPin.monthly) * 100) / 100;
+      const annual = Math.round(monthly * 12 * 100) / 100;
+      lineItems.push({
+        service: 'rodent_bait',
+        name: 'Rodent Bait Stations',
+        monthly,
+        annual,
+        visitsPerYear: 4,
+        legacyPinnedReplay: true,
+        // Legacy posture in full: never tier-counted (no activeServiceKeys
+        // push below), never % discounted.
+        discountable: false,
+        discountEligible: false,
+        waveGuardDiscountEligible: false,
+        countsTowardWaveGuardTier: false,
+        excludeFromPctDiscount: true,
+        tierQualifier: false,
+      });
+    } else if (propertyIsCommercial) {
       // Commercial rodent bait stations auto-price off the building footprint;
       // with no real building size it falls back to a manual quote.
       const result = priceCommercialRodentBait(property, {
@@ -1169,10 +1229,24 @@ function generateEstimate(input) {
       }
     } else {
       const result = priceRodentBait(property, { modifiers });
-      result.annual = Math.round(result.annual);
-      result.monthly = Math.round(result.annual / 12 * 100) / 100;
+      // Saved-replay posture freeze (codex #3591 r43 P1): the stored
+      // new-model row carries the rodent_waveguard flags in force at save —
+      // a replay re-stamps them so a later live-flag flip never moves a
+      // sent quote's tier or % treatment. Fresh pricing injects nothing.
+      const postureReplay = input.rodentWaveguardPostureReplay && typeof input.rodentWaveguardPostureReplay === 'object'
+        ? input.rodentWaveguardPostureReplay
+        : null;
+      if (postureReplay) {
+        result.tierQualifier = postureReplay.tierQualifier !== false;
+        result.countsTowardWaveGuardTier = postureReplay.tierQualifier !== false;
+        result.excludeFromPctDiscount = postureReplay.excludeFromPctDiscount === true;
+        result.waveGuardDiscountEligible = postureReplay.excludeFromPctDiscount !== true;
+      }
       lineItems.push(result);
-      // Rodent does NOT add to activeServiceKeys for tier determination
+      // WaveGuard member since 2026-08-29 (owner directive): counts toward
+      // the tier and receives the tier % like the other recurring programs.
+      // A frozen non-qualifying posture keeps the key OUT of the tier count.
+      if (!postureReplay || postureReplay.tierQualifier !== false) activeServiceKeys.push('rodent_bait');
     }
   }
 
@@ -1187,6 +1261,15 @@ function generateEstimate(input) {
   // the one-time perk even if this estimate has no recurring line.
   const priorQualifyingServices = Array.isArray(input.priorQualifyingServices)
     ? input.priorQualifyingServices
+    : [];
+  // Setup-waiver-ONLY prior services (codex #3591 r14 P1): the public quote
+  // wizard prices before it links the customer, so it resolves the account's
+  // canonical qualifying families up front and passes them here — they
+  // decide the rodent bait-station setup waiver (owner rule: waived by any
+  // OTHER qualifying recurring service, on the estimate or already active)
+  // without changing the wizard's estimate-level tier pricing.
+  const setupWaiverPriorQualifyingServices = Array.isArray(input.setupWaiverPriorQualifyingServices)
+    ? input.setupWaiverPriorQualifyingServices
     : [];
   // A customer with prior qualifying recurring services IS a recurring customer,
   // so prior services force this true even when the form serialized an explicit
@@ -1712,18 +1795,29 @@ function generateEstimate(input) {
     lineItems.push(priceTrapOnlyRetainer(opts));
   }
 
-  // Bait station setup fee — waived when any recurring plan is on the
-  // estimate; only fires if explicitly forced or no recurring services.
-  if (services.rodentBait && !propertyIsCommercial) {
-    const hasAnyRecurring = !!(
-      services.pest || services.lawn || services.treeShrub ||
-      services.mosquito || services.termiteBait || services.rodentBait ||
-      palmService
-    );
-    const setup = priceBaitSetup({
-      waived: hasAnyRecurring && !services.rodentBaitSetupForce,
-    });
-    if (setup.price > 0) lineItems.push(setup);
+  // Bait-station setup fee (owner directive 2026-08-29): $99 one-time for
+  // NON-WaveGuard members only. "Member" = any OTHER qualifying recurring
+  // service, on this estimate or already active (priorQualifyingServices) —
+  // rodent bait itself doesn't self-waive its own setup. Commercial rodent
+  // programs are never WaveGuard members, so a priced commercial line
+  // carries the fee too (same pricing, owner directive). The old
+  // rodentBaitSetupForce escape hatch is retired with the $199 fee.
+  if (services.rodentBait && !rodentLegacyPin) {
+    const rodentLine = lineItems.find((i) => i.service === 'rodent_bait' || i.service === 'commercial_rodent_bait');
+    const rodentPriced = !!rodentLine && !rodentLine.quoteRequired;
+    const otherQualifiers = [...new Set([...activeServiceKeys, ...priorQualifyingServices, ...setupWaiverPriorQualifyingServices])]
+      .filter((key) => key !== 'rodent_bait');
+    // COMMERCIAL bait is ALWAYS setup-bearing (codex #3591 r56 local P0):
+    // commercial coverage is never a WaveGuard member, so an account's
+    // residential families must not waive the commercial program's setup —
+    // the shared resolver and the coverage helpers already refuse this
+    // waiver, and the estimate must price the same money.
+    const isWaveGuardMember = !propertyIsCommercial
+      && determineWaveGuardTier(otherQualifiers).qualifyingCount > 0;
+    if (rodentPriced && !isWaveGuardMember) {
+      const setup = priceBaitSetup({ waived: false });
+      if (setup.price > 0) lineItems.push(setup);
+    }
   }
 
   // ── Rodent bundle discount ──────────────────────────────────
@@ -1868,7 +1962,16 @@ function generateEstimate(input) {
   const tierServiceKeys = priorQualifyingServices.length
     ? [...new Set([...activeServiceKeys, ...priorQualifyingServices])]
     : activeServiceKeys;
-  const waveGuardTier = determineWaveGuardTier(tierServiceKeys);
+  // Frozen-ON rodent posture with the live flag since turned OFF (codex
+  // #3591 r43 P1): the key is in activeServiceKeys but the live filter would
+  // drop it — assume it qualifying so the sent quote's tier holds.
+  const rodentPostureReplay = input.rodentWaveguardPostureReplay && typeof input.rodentWaveguardPostureReplay === 'object'
+    ? input.rodentWaveguardPostureReplay
+    : null;
+  const waveGuardTier = determineWaveGuardTier(tierServiceKeys,
+    rodentPostureReplay && rodentPostureReplay.tierQualifier !== false && tierServiceKeys.includes('rodent_bait')
+      ? { assumeQualifying: ['rodent_bait'] }
+      : undefined);
 
   // ── 5. Apply discounts to each line item ───────────────────
   // paymentMethod is no longer a pricing input (ACH discount retired in an
@@ -1908,15 +2011,26 @@ function generateEstimate(input) {
       continue;
     }
 
-    // Flat-commercial guard (codex #3594 P1): getEffectiveDiscount resolves by
-    // service key + customer status and cannot see per-line flags, so a
-    // commercial-marked line whose KEY is discount-allowlisted (e.g. a scoped
-    // one-time re-marked by the commercial post-pass) would still receive the
-    // 15% recurring-customer perk. Guard on discountable:false ONLY — the
-    // weaker excludeFromPctDiscount flag also rides on residential palm and
-    // rodent-bait lines that still earn their FLAT credits (Gold+ $10/palm,
-    // rodent setup credit) through getEffectiveDiscount.
-    if (item.discountable === false) {
+    // Flat-commercial guard (codex #3594 P1) + pinned legacy rodent replay
+    // (codex #3591 r9 P0): getEffectiveDiscount resolves by service key +
+    // customer status and cannot see per-line flags, so a commercial-marked
+    // line whose KEY is discount-allowlisted (e.g. a scoped one-time
+    // re-marked by the commercial post-pass) would still receive the 15%
+    // recurring-customer perk, and a pinned $49/mo legacy rodent row would
+    // replay at $529.20/yr under Silver+ now that rodent_bait's policy says
+    // tier-discounted. Both carry discountable:false and skip the pass
+    // entirely — the line keeps its amount. Guard on discountable:false ONLY
+    // (plus the explicit pin marker): the weaker excludeFromPctDiscount flag
+    // also rides on residential palm lines that still earn their FLAT
+    // credits (Gold+ $10/palm) through getEffectiveDiscount — the flags
+    // block the percentage, not the pass.
+    // A new-model rodent row replayed under a frozen posture keeps its
+    // frozen % treatment exactly like a pinned legacy row (codex #3591 r44
+    // P1): the flags were re-stamped from the stored quote above, so the
+    // interpreter — not the live service policy — decides.
+    if (item.discountable === false
+      || (item.legacyPinnedReplay === true && lineFlagsBlockPercentDiscount(item))
+      || (item.service === 'rodent_bait' && input.rodentWaveguardPostureReplay && lineFlagsBlockPercentDiscount(item))) {
       item.discount = {
         serviceKey,
         waveGuardTier: waveGuardTier.tier,
@@ -1924,14 +2038,20 @@ function generateEstimate(input) {
         effectiveDiscount: 0,
         totalDiscount: 0,
         discountable: false,
+        lineFlagsBlocked: true,
       };
       if (item.annual) {
         item.annualBeforeDiscount = item.annual;
         item.annualAfterDiscount = item.annual;
-      }
-      if (item.price) {
+        item.monthlyAfterDiscount = Number(item.monthly) > 0
+          ? Math.round(Number(item.monthly) * 100) / 100
+          : Math.round(item.annual / 12 * 100) / 100;
+      } else if (item.price) {
         item.priceBeforeDiscount = item.price;
         item.priceAfterDiscount = item.price;
+      } else if (item.total) {
+        item.totalBeforeDiscount = item.total;
+        item.totalAfterDiscount = item.total;
       }
       continue;
     }
@@ -1941,6 +2061,13 @@ function generateEstimate(input) {
       isOneTimeService: isOneTime,
       palmCount: item.palmCount,
       annualBeforeCredits: item.annualBeforeCredits ?? item.annual,
+      // Frozen-ELIGIBLE rodent posture with the live map since flipped to
+      // excluded (codex #3591 r44 P1): the sent quote's % holds.
+      ...(item.service === 'rodent_bait'
+        && input.rodentWaveguardPostureReplay
+        && !lineFlagsBlockPercentDiscount(item)
+        ? { ignorePercentExclusion: true }
+        : {}),
     });
 
     item.discount = discount;
@@ -2413,6 +2540,16 @@ function generateEstimate(input) {
   const specialtyTotalGross = specialtyItems.reduce((sum, i) => sum + (i.totalAfterDiscount ?? i.total ?? 0), 0);
   const oneTimeTotal = Math.max(0, roundMoney(oneTimeTotalGross - manualDiscountOneTimeAmount));
   const specialtyTotal = Math.max(0, roundMoney(specialtyTotalGross - manualDiscountSpecialtyAmount));
+  // The $99 bait-station setup is INTRINSIC to a rodent bait plan, not
+  // one-time work: it stays inside oneTimeTotal (converter/invoice/display
+  // all read it there), but the self-serve mixed-billing gate
+  // (booking-pay-at-visit.engineSummaryHasMixedBilling) subtracts this
+  // share so a standalone rodent quote keeps its self-book funnel — the
+  // plan and its setup fee ride staff conversion, exactly like the
+  // WaveGuard setup fee on a solo mosquito self-book (codex #3591 r8).
+  const rodentBaitSetupTotal = roundMoney(oneTimeItems
+    .filter((i) => i.service === 'rodent_bait_setup')
+    .reduce((sum, i) => sum + (i.priceAfterDiscount ?? i.price ?? 0), 0));
 
   // Installation costs (termite)
   const installationTotal = recurringItems
@@ -2494,6 +2631,7 @@ function generateEstimate(input) {
       manualDiscount: manualDiscountInfo,
       serviceSpecificDiscounts,
       oneTimeTotal,
+      rodentBaitSetupTotal,
       specialtyTotal,
       installationTotal,
       year1Total: Math.round(year1Total),

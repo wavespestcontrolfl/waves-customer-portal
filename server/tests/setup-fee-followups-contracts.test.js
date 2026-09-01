@@ -32,11 +32,27 @@ describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
     expect(booking).toMatch(/await stampDisclosedSetupFee\(trx, \{ stampServiceRow: serviceRow \}\)/);
   });
 
+  test('the signed funnel key is normalized to the priced family before the setup-fee intersection (codex #3591 r25 P1)', () => {
+    expect(booking).toMatch(/const FUNNEL_TO_DRAFT_FAMILY = \{ rodent: \['rodent_bait'\], termite: \['termite_bait'\] \};/);
+    expect(booking).toMatch(/!signedFeeComponents\.every\(draftHasComponent\)/);
+  });
+
   test('member-waiver retires a consumed draft, or freezes a zero-waiver into a live one', () => {
-    expect(booking).toMatch(/if \(activeMember\) \{\s*\n\s*await retireOrWaiveDraft\('existing_member'\);/);
+    // The member waiver is the membership fee's; a rodent setup quote is
+    // never waived by account-level membership (codex #3591 r18 P1).
+    expect(booking).toMatch(/if \(activeMember && !rodentSetupQuote\) \{\s*\n\s*await retireOrWaiveDraft\('existing_member'\);/);
     expect(booking).toMatch(/await retireOrWaiveDraft\('fee_already_queued'\);/);
-    // Non-invoiceable solo visits keep the draft LIVE with the frozen waiver.
-    expect(booking).toMatch(/setupFeeQuote: \{ amount: 0, waived: waivedReason \}/);
+    // Non-invoiceable solo visits keep the draft LIVE with the frozen waiver —
+    // kind preserved and the rodent setup row stripped (codex #3591 r28 P1).
+    expect(booking).toMatch(/setupFeeQuote: \{ amount: 0, waived: waivedReason, \.\.\.\(priorKind \? \{ kind: priorKind \} : \{\}\) \}/);
+    expect(booking).toMatch(/if \(priorKind === 'rodent_bait_setup'\) \{\s*\n\s*const \{ stripWaivedRodentSetupFromDraft \} = require\('\.\/public-quote'\)\._internals;/);
+  });
+
+  test('the lookup-failure waiver keeps the setup-fee KIND so the rodent strip + frozen reader honor it (codex #3591 r30 P1)', () => {
+    // A lookup failure keeps the engine-priced fee (codex #3591 r43 local
+    // P0) — never a persisted zero that strips the authorized line.
+    expect(publicQuote).toMatch(/return \{ amount: setupFeeBasis\.amount, kind: setupFeeBasis\?\.kind, unverified: 'membership_undetermined' \};/);
+    expect(publicQuote).not.toMatch(/amount: 0, waived: 'membership_undetermined'/);
   });
 
   test('consumed-handoff retry identity comes ONLY from the contact-bound shared recovery', () => {

@@ -556,6 +556,9 @@ describe('admin customers route helpers', () => {
     expect(isSchedulableOneTimeEstimateLine({ kind: 'discount', price: -50 })).toBe(false);
     expect(isSchedulableOneTimeEstimateLine({ service: 'bed_bug', quoteRequired: true })).toBe(false);
     expect(isSchedulableOneTimeEstimateLine({ label: 'Membership setup fee', amount: 99 })).toBe(false);
+    // Rodent bait-station setup is invoiced, never visited — the recurring
+    // rodent_bait row is the schedulable program (codex #3591 r8).
+    expect(isSchedulableOneTimeEstimateLine({ service: 'rodent_bait_setup', name: 'Bait Station Setup', price: 99, detail: 'One-time $99 setup — waived for WaveGuard members' })).toBe(false);
     expect(isSchedulableOneTimeEstimateLine({ service: 'termite_bait', label: 'Termite bait installation', amount: 499 })).toBe(true);
   });
 

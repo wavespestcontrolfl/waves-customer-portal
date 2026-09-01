@@ -11,6 +11,7 @@ const {
   isAutoDerivedTierLabelRow,
   isCommercialServiceRow,
   isRodentLedServiceRow,
+  isNonBaitRodentServiceRow,
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
@@ -194,6 +195,16 @@ describe('self-booking plan sync helpers', () => {
 
     expect(uniqueServiceFamilies(detected)).toEqual(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub']);
     expect(inferTierFromServiceCount(uniqueServiceFamilies(detected).length)).toBe('Platinum');
+    // rodent_bait is a tier family only while the live flag is on (codex #3591 r13 P1).
+    expect(uniqueServiceFamilies(['pest_control_quarterly', 'rodent_bait'])).toEqual(['pest_control', 'rodent_bait']);
+    const constants = require('../services/pricing-engine/constants');
+    const idx = constants.WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+    constants.WAVEGUARD.qualifyingServices.splice(idx, 1);
+    try {
+      expect(uniqueServiceFamilies(['pest_control_quarterly', 'rodent_bait'])).toEqual(['pest_control']);
+    } finally {
+      constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
+    }
     expect(representativePlanKeys(detected)).toEqual([
       'pest_control_quarterly',
       'lawn_care_6week',
@@ -381,6 +392,76 @@ describe('self-booking plan sync helpers', () => {
       service_type: 'Pest & Rodent Control',
       service_name: 'Pest & Rodent Control',
     })).toBe(false);
+  });
+
+  test('non-bait rodent exclusion: a rodent-led catalog identity vetoes a stale bait label (codex #3591 r30 P1)', () => {
+    // Repointed to trapping but still labeled as bait: the catalog decides —
+    // the row is NOT tier evidence and never enrolls a rodent_bait plan.
+    const repointed = { service_type: 'Rodent Bait Station Service', service_key: 'rodent_trapping', service_name: 'Rodent Trapping' };
+    expect(isNonBaitRodentServiceRow(repointed)).toBe(true);
+    // The reverse: a bait catalog identity with a stale trapping label stays
+    // qualifying coverage.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'rodent_bait_station_quarterly' })).toBe(false);
+    // Unlinked legacy rows still classify from the label alone.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Bait Station Service' })).toBe(false);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping' })).toBe(true);
+    // A NON-rodent catalog identity that resolves a qualifying family wins
+    // over the stale label outright (codex #3591 r61 P1): a row repointed
+    // to pest/lawn coverage while service_type still says "Rodent Trapping"
+    // is that family's real coverage — never excluded here.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Bait Station Service', service_key: 'pest_general_quarterly' })).toBe(false);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'pest_general_quarterly' })).toBe(false);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_care_monthly', service_name: 'Monthly Lawn Care' })).toBe(false);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Pest & Rodent Control', service_key: 'rodent_trapping' })).toBe(true);
+    // A non-rodent catalog identity that resolves NO qualifying family
+    // (one-time/cleanout) still classifies from the label as before.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'pest_cleanout_one_time', service_name: 'One-Time Pest Cleanout' })).toBe(true);
+    // ONE-TIME catalog identities never anchor the override (codex #3591
+    // r62 P1): the lawn resolver is cadence-lenient and would map
+    // lawn_care_one_time to a recurring plan — a recurring-flagged row
+    // repointed to one-time lawn work with a stale rodent label must stay
+    // excluded, not promote the tier / waive a later rodent setup.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_care_one_time', service_name: 'One-Time Lawn Treatment' })).toBe(true);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'tree_shrub_one_time' })).toBe(true);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_inspection', service_name: 'Lawn Inspection' })).toBe(true);
+    // …while genuinely recurring catalog identities still win the override.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_care_quarterly' })).toBe(false);
+    // billing_type one_time excludes the row BEFORE the rodent-led gate
+    // (codex #3591 r79 P1): a NON-rodent-led recurring-flagged row
+    // repointed to one-time catalog work must not feed tier/waiver
+    // evidence merely because it never enters the rodent branches.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Monthly Lawn Care', service_key: 'lawn_fungicide', service_name: 'Lawn Fungicide Treatment', catalog_billing_type: 'one_time' })).toBe(true);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Termite Protection', service_key: 'termite_cartridge_replacement', catalog_billing_type: 'one_time' })).toBe(true);
+    // …a recurring billing_type keeps non-rodent rows out of this
+    // exclusion exactly as before.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Monthly Lawn Care', service_key: 'lawn_care_monthly', catalog_billing_type: 'recurring' })).toBe(false);
+    // Catalog billing_type is the AUTHORITATIVE one-time signal (codex #3591
+    // r63 P1): lawn_fungicide and termite_cartridge_replacement are
+    // billing_type 'one_time' in the catalog but carry no one-time token, so
+    // by text alone they read as recurring lawn / termite-bait coverage.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_fungicide', service_name: 'Lawn Fungicide Treatment', catalog_billing_type: 'one_time' })).toBe(true);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'termite_cartridge_replacement', service_name: 'Termite Bait Station Cartridge Replacement', catalog_billing_type: 'one_time' })).toBe(true);
+    // …even with a stale BAIT label, which the token scan would otherwise keep.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Bait Station Service', service_key: 'termite_cartridge_replacement', service_name: 'Termite Bait Station Cartridge Replacement', catalog_billing_type: 'one_time' })).toBe(true);
+    // The same identities flagged recurring by the catalog keep the override.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_care_quarterly', catalog_billing_type: 'recurring' })).toBe(false);
+    // And metadata beats a recurring-looking name even without any token.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_care_quarterly', catalog_billing_type: 'one_time' })).toBe(true);
+  });
+
+  test('every loader that feeds isNonBaitRodentServiceRow joins services.billing_type as catalog_billing_type (codex #3591 r63 P1)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const read = (...p) => fs.readFileSync(path.join(__dirname, '..', ...p), 'utf8');
+    expect(read('services', 'self-booking-plan-sync.js')).toMatch(/'svc\.billing_type as catalog_billing_type',\s*\)\);/);
+    expect(read('services', 'waveguard-existing-services.js')).toMatch(/\.select\('s\.id', 'svc\.service_key', 'svc\.name as service_name', 'svc\.billing_type as catalog_billing_type'\)/);
+    expect(read('scripts', 'align-waveguard-portal-records.js')).toMatch(/\.select\('s\.\*', 'svc\.service_key', 'svc\.name as service_name', 'svc\.billing_type as catalog_billing_type'\)/);
+    const schedule = read('routes', 'schedule.js');
+    expect(schedule).toMatch(/'catalog_svc\.billing_type as catalog_billing_type'/);
+    // 3 since codex #3591 r79 P2: the serviceDisplayName resolver re-runs
+    // the classifier with the joined catalog fields.
+    expect((schedule.match(/catalog_billing_type: s\.catalog_billing_type,/g) || []).length).toBe(3);
+    expect(read('routes', 'admin-schedule.js')).toMatch(/catalog_billing_type: serviceRecord\?\.billing_type,/);
   });
 
   test('auto-derived label detection: only auto-provenance zero-rate label-lane tiers', () => {

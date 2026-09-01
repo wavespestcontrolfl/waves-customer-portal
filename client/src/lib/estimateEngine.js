@@ -568,6 +568,146 @@ export function applyServerTermiteRentalPricingConfig(config) {
 const TERMITE_MONITORING_DEFAULTS = { baseMonthly: 19, stepMonthly: 5, bracketStations: 5 };
 let TERMITE_MONITORING = { ...TERMITE_MONITORING_DEFAULTS };
 
+// Rodent bait footprint brackets (owner 2026-08-29) — DB-tunable via
+// pricing_config.rodent_bait_brackets + rodent_setup_fee (admin-editable
+// since #3591), same live-rates posture as the termite appliers above: the
+// retained fallback must price from what the server will use, or a save
+// that lands on the CLIENT_FALLBACK path (no replayable inputs / server
+// recompute error) is sent and accepted at a stale literal ladder (codex
+// #3591 r10 P1). Cents-preserving, mirroring db-bridge.
+const RODENT_BAIT_DEFAULTS = {
+  brackets: [
+    { maxSqFt: 1750, stations: 4, perVisit: 79 },
+    { maxSqFt: 2750, stations: 5, perVisit: 89 },
+    { maxSqFt: 3750, stations: 6, perVisit: 99 },
+    { maxSqFt: 4750, stations: 7, perVisit: 109 },
+    { maxSqFt: 5750, stations: 8, perVisit: 119 },
+    { maxSqFt: 6750, stations: 9, perVisit: 129 },
+  ],
+  extension: { perSqFt: 1000, stationsPerStep: 1, perVisitPerStep: 10 },
+  setupFee: 99,
+  // pricing_config.rodent_waveguard (admin-editable): tier-counted and
+  // bundle-%-discountable by default (owner 2026-08-29).
+  tierQualifier: true,
+  excludeFromPctDiscount: false,
+};
+let RODENT_BAIT = {
+  brackets: RODENT_BAIT_DEFAULTS.brackets.map((b) => ({ ...b })),
+  extension: { ...RODENT_BAIT_DEFAULTS.extension },
+  setupFee: RODENT_BAIT_DEFAULTS.setupFee,
+  tierQualifier: RODENT_BAIT_DEFAULTS.tierQualifier,
+  excludeFromPctDiscount: RODENT_BAIT_DEFAULTS.excludeFromPctDiscount,
+};
+
+export function applyServerRodentBaitBracketsPricingConfig(config) {
+  const cents = (v) => Math.round(Number(v) * 100) / 100;
+  const parsed = (Array.isArray(config?.brackets) ? config.brackets : [])
+    .map((b) => ({
+      maxSqFt: Number(b?.max_sq_ft ?? b?.maxSqFt),
+      stations: Number(b?.stations),
+      perVisit: cents(b?.per_visit ?? b?.perVisit),
+    }))
+    .filter((b) => Number.isFinite(b.maxSqFt) && b.maxSqFt > 0
+      && Number.isFinite(b.stations) && b.stations > 0
+      && Number.isFinite(b.perVisit) && b.perVisit > 0)
+    .sort((a, b) => a.maxSqFt - b.maxSqFt);
+  const ext = config?.extension || {};
+  const perSqFt = Number(ext.per_sq_ft ?? ext.perSqFt);
+  const stationsPerStep = Number(ext.stations_per_step ?? ext.stationsPerStep);
+  const perVisitPerStep = Number(ext.per_visit_per_step ?? ext.perVisitPerStep);
+  RODENT_BAIT = {
+    brackets: parsed.length ? parsed : RODENT_BAIT_DEFAULTS.brackets.map((b) => ({ ...b })),
+    extension: {
+      perSqFt: Number.isFinite(perSqFt) && perSqFt > 0 ? perSqFt : RODENT_BAIT_DEFAULTS.extension.perSqFt,
+      stationsPerStep: Number.isInteger(stationsPerStep) && stationsPerStep >= 0
+        ? stationsPerStep
+        : RODENT_BAIT_DEFAULTS.extension.stationsPerStep,
+      perVisitPerStep: Number.isFinite(perVisitPerStep) && perVisitPerStep > 0
+        ? cents(perVisitPerStep)
+        : RODENT_BAIT_DEFAULTS.extension.perVisitPerStep,
+    },
+    setupFee: RODENT_BAIT.setupFee,
+    tierQualifier: RODENT_BAIT.tierQualifier,
+    excludeFromPctDiscount: RODENT_BAIT.excludeFromPctDiscount,
+  };
+  return { ...RODENT_BAIT, brackets: RODENT_BAIT.brackets.map((b) => ({ ...b })) };
+}
+
+// The live WaveGuard posture (codex #3591 r12 P1): the server's qualifying
+// and %-exclusion maps follow pricing_config.rodent_waveguard, so a
+// CLIENT_FALLBACK save must count/discount rodent exactly as generateEstimate
+// would. Booleans only; anything else keeps the current value.
+export function applyServerRodentWaveguardPricingConfig(config) {
+  RODENT_BAIT = {
+    ...RODENT_BAIT,
+    tierQualifier: typeof config?.tier_qualifier === 'boolean'
+      ? config.tier_qualifier
+      : (config == null ? RODENT_BAIT_DEFAULTS.tierQualifier : RODENT_BAIT.tierQualifier),
+    excludeFromPctDiscount: typeof config?.exclude_from_pct_discount === 'boolean'
+      ? config.exclude_from_pct_discount
+      : (config == null ? RODENT_BAIT_DEFAULTS.excludeFromPctDiscount : RODENT_BAIT.excludeFromPctDiscount),
+  };
+  return { tierQualifier: RODENT_BAIT.tierQualifier, excludeFromPctDiscount: RODENT_BAIT.excludeFromPctDiscount };
+}
+
+export function rodentBaitWaveguardFlags() {
+  return { tierQualifier: RODENT_BAIT.tierQualifier, excludeFromPctDiscount: RODENT_BAIT.excludeFromPctDiscount };
+}
+
+// Estimator panel note for the rodent bait row, derived from the EMITTED
+// result (row-level tier/discount posture + whether the setup line fired)
+// and the live setup fee — never the migration-default literals (codex
+// #3591 r13 P2): staff read the policy the estimate they are about to send
+// actually follows.
+export function rodentBaitPolicyNote(E = {}) {
+  const row = (E?.recurring?.services || []).find((s) => s?.service === 'rodent_bait');
+  if (!row) return 'Not included in WaveGuard bundle discount — priced separately';
+  const setupLine = (E?.oneTime?.items || []).find((i) => i?.service === 'rodent_bait_setup');
+  const counts = row.countsTowardWaveGuardTier !== false && row.tierQualifier !== false;
+  const discountable = row.discountable !== false && row.excludeFromPctDiscount !== true;
+  // The EMITTED row's amount is the frozen figure the customer sees and
+  // acceptance invoices; the live config is only the fallback when no row
+  // fired (codex #3591 r22 P2).
+  const fee = setupLine && Number(setupLine.price) > 0
+    ? Number(setupLine.price)
+    : (Number(RODENT_BAIT.setupFee) || 0);
+  const feeText = fee > 0
+    ? (setupLine
+      ? `$${fee} setup applies (no other qualifying service)`
+      : `$${fee} setup waived (another qualifying service / member)`)
+    : 'no setup fee';
+  return `${counts ? 'WaveGuard qualifying service' : 'Not counted toward the WaveGuard tier'} — ${discountable ? 'tier discount applies' : 'excluded from the tier %'}; ${feeText}`;
+}
+
+// Zero is the documented "fee disabled" value; a missing row keeps the
+// in-code default (same as db-bridge).
+export function applyServerRodentSetupFeePricingConfig(config) {
+  const fee = Number(config?.value);
+  RODENT_BAIT = {
+    ...RODENT_BAIT,
+    setupFee: Number.isFinite(fee) && fee >= 0 ? Math.round(fee * 100) / 100 : RODENT_BAIT_DEFAULTS.setupFee,
+  };
+  return RODENT_BAIT.setupFee;
+}
+
+export function rodentBaitBracketForFootprint(footprintSqFt) {
+  const fpEff = Number(footprintSqFt) > 0 ? Number(footprintSqFt) : 2500;
+  const found = RODENT_BAIT.brackets.find((b) => fpEff <= b.maxSqFt);
+  if (found) return { stations: found.stations, perVisit: found.perVisit, extended: false };
+  const top = RODENT_BAIT.brackets[RODENT_BAIT.brackets.length - 1];
+  const ext = RODENT_BAIT.extension;
+  const steps = Math.ceil((fpEff - top.maxSqFt) / ext.perSqFt);
+  return {
+    stations: top.stations + steps * ext.stationsPerStep,
+    perVisit: Math.round((top.perVisit + steps * ext.perVisitPerStep) * 100) / 100,
+    extended: true,
+  };
+}
+
+export function rodentBaitSetupFee() {
+  return RODENT_BAIT.setupFee;
+}
+
 export function applyServerTermiteMonitoringPricingConfig(config) {
   const pos = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
   const nonNeg = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
@@ -2642,18 +2782,25 @@ export function calculateEstimate(inputs) {
   /* ── RODENT BAIT ─────────────────────────────────────────── */
   if (svcRodentBait && !isCommercial) {
     hasRec = true;
-    // v1.5: matrix classification — both footprint AND lot matter for rodent pressure
-    // A 2,600sf home on a 40,000sf lot has very different pressure than 2,600sf on 10,000sf
-    const fpEff = footprint > 0 ? footprint : 2500;
-    let rodentScore = 0;
-    if (fpEff >= 2500) rodentScore += 2; else if (fpEff >= 1800) rodentScore += 1;
-    if (lotSqFt >= 20000) rodentScore += 2; else if (lotSqFt >= 12000) rodentScore += 1;
-    if (nearWater) rodentScore += 1;
-    if (treeDensity === 'HEAVY') rodentScore += 1;
-    const rmo = rodentScore >= 3 ? 69 : rodentScore <= 1 ? 49 : 59;
-    R.rodBaitMo = rmo;
-    R.rodBaitSize = rodentScore >= 3 ? 'Large' : rodentScore <= 1 ? 'Small' : 'Medium';
-    R.rodBaitScore = rodentScore;
+    // Footprint-bracket quarterly pricing (owner directive 2026-08-29,
+    // mirrors server rodentBaitBracketFor): station allowance + per-visit
+    // price by home size; above 6,750 sf the ladder extends +1 station /
+    // +$10 per 1,000 sf. Billed per quarterly application — the monthly
+    // figure is display-only (annual / 12).
+    // Live ladder (pricing_config.rodent_bait_brackets via
+    // applyServerRodentBaitBracketsPricingConfig), never a second literal
+    // dollar authority (codex #3591 r10 P1).
+    const rbBracket = rodentBaitBracketForFootprint(footprint);
+    const rbAnnual = Math.round(rbBracket.perVisit * 4 * 100) / 100;
+    R.rodBaitMo = Math.round(rbAnnual / 12 * 100) / 100;
+    R.rodBaitSize = rbBracket.stations <= 5 ? 'Small' : rbBracket.stations <= 7 ? 'Medium' : 'Large';
+    R.rodBait = {
+      stations: rbBracket.stations,
+      perVisit: rbBracket.perVisit,
+      visitsPerYear: 4,
+      annual: rbAnnual,
+      detail: `Up to ${rbBracket.stations} stations · $${rbBracket.perVisit} per application (quarterly)`,
+    };
   }
 
   /* ═══════════ ONE-TIME ═══════════ */
@@ -3399,6 +3546,75 @@ export function calculateEstimate(inputs) {
     ra += R.foamRec.ann;
     lineItems.push({ name: 'Recurring Foam', service: 'foam_recurring', ann: R.foamRec.ann, discountable: false });
   }
+  // Rodent Bait Stations — full WaveGuard member since 2026-08-29 (owner
+  // directive): tier-counted and bundle-%-discountable, INSIDE the recurring
+  // totals (the old rba add-on is retired). $99 one-time setup for
+  // non-members: fires only when rodent bait is the sole qualifying service
+  // on the estimate (mirrors the server; existing-customer priors are only
+  // known server-side).
+  if (R.rodBait) {
+    // Live WaveGuard posture (pricing_config.rodent_waveguard via
+    // applyServerRodentWaveguardPricingConfig): tier count and bundle %
+    // follow the flags the server's maps follow (codex #3591 r12 P1).
+    const rbFlags = rodentBaitWaveguardFlags();
+    const rbCountsTowardTier = rbFlags.tierQualifier !== false;
+    const rbDiscountable = rbFlags.excludeFromPctDiscount !== true;
+    if (rbCountsTowardTier) ac++;
+    ra += R.rodBait.annual;
+    lineItems.push({ name: 'Rodent Bait Stations', service: 'rodent_bait', ann: R.rodBait.annual, discountable: rbDiscountable });
+    wgServices.push({
+      name: 'Rodent Bait Stations',
+      service: 'rodent_bait',
+      mo: R.rodBaitMo,
+      perTreatment: R.rodBait.perVisit,
+      visitsPerYear: R.rodBait.visitsPerYear,
+      // Billing-unit marker (mirrors the server pricer/mapper) — without it
+      // the canonical rodentBaitLineBillsMonthly gate reads this row as a
+      // legacy monthly plan and suppresses per-application provenance.
+      perApplicationBilled: true,
+      // EXPLICIT posture in both directions (codex #3591 r49 P1 — parity
+      // with the server mapper and the compact quote mirror): the replay
+      // signal needs the affirmative booleans too, or a later flag flip
+      // re-prices a saved CLIENT_FALLBACK estimate.
+      tierQualifier: !!rbCountsTowardTier,
+      countsTowardWaveGuardTier: !!rbCountsTowardTier,
+      excludeFromPctDiscount: !rbDiscountable,
+      waveGuardDiscountEligible: !!rbDiscountable,
+      ...(rbDiscountable ? {} : { discountable: false }),
+    });
+    // Setup only for NON-members: no other qualifying service on this
+    // estimate AND no ACTIVE WaveGuard membership on the matched account.
+    // The generic recurring-customer toggle (isRC) is NOT membership
+    // evidence — a palm/foam-only account, or a staff member ticking the
+    // loyalty box, has no other qualifying service and owes the fee, exactly
+    // as generateEstimate's priorQualifyingServices decides (codex #3591 r10
+    // P1). The estimator passes existingWaveGuardMember from the matched
+    // customer's active tier (the same evidence that unlocks loyalty).
+    const rbSetupFee = rodentBaitSetupFee();
+    // Waiver evidence = an OTHER qualifying family already on the account
+    // (existingOtherQualifyingService — the estimator derives it from the
+    // canonical qualifying-service loader, the same identities
+    // generateEstimate reads as priorQualifyingServices minus rodent_bait;
+    // codex #3591 r13 P1), never the account-level tier/rate: a rodent-only
+    // Bronze account owes the setup on a second rodent quote.
+    const existingOtherQualifierWaives = inputs.existingOtherQualifyingService === true
+      || (Array.isArray(inputs.existingQualifyingServices)
+        && inputs.existingQualifyingServices.some((k) => k && k !== 'rodent_bait'));
+    // "Sole qualifier" = no OTHER qualifying service on the estimate (rodent
+    // never self-waives, whether or not it counts toward the tier).
+    const otherQualifiersOnEstimate = ac - (rbCountsTowardTier ? 1 : 0);
+    if (otherQualifiersOnEstimate === 0 && !existingOtherQualifierWaives && rbSetupFee > 0) {
+      hasOT = true;
+      otItems.push({
+        service: 'rodent_bait_setup',
+        name: 'Bait Station Setup',
+        price: rbSetupFee,
+        discountable: false,
+        excludeFromPctDiscount: true,
+        detail: `One-time $${rbSetupFee} setup — waived with any other WaveGuard recurring service`,
+      });
+    }
+  }
 
   // WaveGuard tier discounts — must match server
   // pricing-engine/constants.WAVEGUARD.tiers (see docs/pricing/POLICY.md).
@@ -3407,6 +3623,22 @@ export function calculateEstimate(inputs) {
   // This file is deprecated (Session 11 retirement); kept in sync as a
   // hardcoded literal until then since the server constants can't be
   // imported into the browser bundle.
+  // Existing qualifying families on the MATCHED account (canonical keys the
+  // estimator loaded — codex #3591 r21 P1) count toward the tier exactly as
+  // generateEstimate's priorQualifyingServices do: a pest customer adding
+  // rodent bait prices at Silver, not Bronze. Families already on this
+  // estimate are not double-counted; rodent follows its live flag.
+  const priorQualifyingFamilies = Array.isArray(inputs.existingQualifyingServices) ? inputs.existingQualifyingServices : [];
+  if (priorQualifyingFamilies.length) {
+    const onEstimate = new Set(lineItems.map((li) => li.service));
+    const rbQualifiesLive = rodentBaitWaveguardFlags().tierQualifier !== false;
+    for (const key of new Set(priorQualifyingFamilies)) {
+      if (!['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait', 'rodent_bait'].includes(key)) continue;
+      if (key === 'rodent_bait' && !rbQualifiesLive) continue;
+      if (onEstimate.has(key)) continue;
+      ac++;
+    }
+  }
   let wt = 'Bronze', wd = 0;
   if (ac >= 4) { wt = 'Platinum'; wd = 0.20; }
   else if (ac === 3) { wt = 'Gold'; wd = 0.15; }
@@ -3489,7 +3721,22 @@ export function calculateEstimate(inputs) {
   const md = inputs.manualDiscount;
   let manualDiscountAmount = 0;
   let manualDiscountInfo = null;
-  const manualDiscountableRecurringAnnual = waveGuardDiscountableAnnual - da;
+  // Manual (admin-entered) recurring discounts stay scoped to the four core
+  // programs on the server (MANUAL_RECURRING_DISCOUNT_SERVICES) — rodent
+  // bait takes the automatic tier % but is NOT manually discountable, so
+  // its post-WaveGuard annual leaves the manual base (codex #3591 r5 P1;
+  // the server regression test asserts the manual amount stays zero on a
+  // rodent-only estimate).
+  // Subtract the rodent share ONLY when it is inside
+  // waveGuardDiscountableAnnual — a rodent line the live flags marked
+  // discountable:false (exclude_from_pct_discount) was never added there,
+  // and subtracting it again would shrink the OTHER services' manual base
+  // (codex #3591 r17 P1).
+  const rodentLineForManualBase = lineItems.find((li) => li.service === 'rodent_bait');
+  const rodentPostWgAnnual = R.rodBait && rodentLineForManualBase && rodentLineForManualBase.discountable !== false
+    ? Math.round(R.rodBait.annual * (1 - wd) * 100) / 100
+    : 0;
+  const manualDiscountableRecurringAnnual = Math.max(0, waveGuardDiscountableAnnual - da - rodentPostWgAnnual);
   if (md && Number(md.value) > 0) {
     const v = Number(md.value);
     if (md.type === 'PERCENT') {
@@ -3588,12 +3835,13 @@ export function calculateEstimate(inputs) {
     : 0;
   ot = Math.round(ot * 100) / 100;
 
-  const rba = R.rodBaitMo ? R.rodBaitMo * 12 : 0;
+  // Rodent bait rides INSIDE ad since 2026-08-29 (WaveGuard member) — the
+  // old rba add-on is gone.
   const palmAnn = R.injection ? R.injection.ann : 0;
   const palmMo = R.injection ? R.injection.mo : 0;
   const totalOT = ot + tmInstall;
-  const y1 = Math.round((ad + rba + palmAnn + totalOT) * 100) / 100;
-  const y2 = Math.round((ad + rba + palmAnn + (R.trench && !R.trench.quoteRequired && !R.trench.requiresMeasurement ? 325 : 0)) * 100) / 100;
+  const y1 = Math.round((ad + palmAnn + totalOT) * 100) / 100;
+  const y2 = Math.round((ad + palmAnn + (R.trench && !R.trench.quoteRequired && !R.trench.requiresMeasurement ? 325 : 0)) * 100) / 100;
   const y2mo = Math.round(y2 / 12 * 100) / 100;
 
   return {
@@ -3632,7 +3880,11 @@ export function calculateEstimate(inputs) {
       discount: wd,
       savings: da,
       pestProgramFloorApplied,
-      rodentBaitMo: R.rodBaitMo || 0,
+      // Since 2026-08-29 the rodent bait plan is a services ROW inside
+      // monthlyTotal — the legacy scalar is emitted as 0 so the admin render
+      // fallbacks (monthlyTotal + rodentBaitMo when grandTotal is absent)
+      // cannot count the plan twice (codex #3591 r33 P2).
+      rodentBaitMo: 0,
       palmInjectionMo: palmMo,
       palmInjectionAnn: palmAnn,
       foamRecurringMo: R.foamRec ? R.foamRec.mo : 0,
