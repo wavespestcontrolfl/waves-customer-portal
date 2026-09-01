@@ -2694,6 +2694,16 @@ async function createSelfBooking(payload = {}) {
           .where({ id: scheduledRow.id })
           .update({ notes: trx.raw("COALESCE(notes, '') || ' — booked beside an existing pest plan; kept as a one-off visit (no second series seeded)'") });
       }
+      // Visit groups (visit-group-scope.md §2): the primary self-booked row
+      // stamps at scheduling, same as the seeded series rows below.
+      // Gate-checked + best-effort + self-refusing inside maybeGroupRow
+      // (savepoint on the trx — a grouping failure never poisons the
+      // booking); inert until property linkage stamps property_id, then
+      // completed by the estimate-property-linkage regroup pass.
+      {
+        const { maybeGroupRow } = require('../services/visit-groups');
+        await maybeGroupRow(scheduledRow.id, { database: trx, createdBy: 'seeder' });
+      }
 
       // Mark abandoned-booking recovery intents converted ATOMICALLY with the
       // booking (same transaction), so converted_at is visible the instant the

@@ -227,3 +227,71 @@ describe('visitSummariesForRows (schedule payload)', () => {
     expect(rows[0].visit.liveCount).toBe(0);
   });
 });
+
+describe('effectTypeForKind / dedupeKeyFor (reminder rails, spec §4)', () => {
+  const { _test: { effectTypeForKind, dedupeKeyFor } } = require('../services/visit-groups');
+
+  test('tracker kinds keep their historical mapping — unknown falls back to arrived', () => {
+    expect(effectTypeForKind('en_route')).toBe('tracker_en_route');
+    expect(effectTypeForKind('arrived')).toBe('tracker_arrived');
+    expect(effectTypeForKind('on_site')).toBe('tracker_arrived');
+    expect(effectTypeForKind('anything_else')).toBe('tracker_arrived');
+  });
+
+  test('reminder kinds map to their own effect types', () => {
+    expect(effectTypeForKind('reminder_72h')).toBe('reminder_72h');
+    expect(effectTypeForKind('reminder_24h')).toBe('reminder_24h');
+  });
+
+  test('tracker dedupe keys are byte-identical to the historical shape (existing prod rows must keep matching)', () => {
+    const visit = { id: 'v1', scheduled_date: '2026-08-30' };
+    expect(dedupeKeyFor(visit, 'tracker_en_route')).toBe('v1:tracker_en_route');
+    expect(dedupeKeyFor(visit, 'tracker_arrived')).toBe('v1:tracker_arrived');
+  });
+
+  test('reminder keys carry the visit DATE — a moved visit claims fresh at the new date (fires once, never zero)', () => {
+    const visit = { id: 'v1', scheduled_date: '2026-08-30' };
+    expect(dedupeKeyFor(visit, 'reminder_72h')).toBe('v1:reminder_72h:2026-08-30');
+    expect(dedupeKeyFor(visit, 'reminder_24h')).toBe('v1:reminder_24h:2026-08-30');
+    const moved = { ...visit, scheduled_date: '2026-09-02' };
+    expect(dedupeKeyFor(moved, 'reminder_72h')).toBe('v1:reminder_72h:2026-09-02');
+    expect(dedupeKeyFor(moved, 'reminder_72h')).not.toBe(dedupeKeyFor(visit, 'reminder_72h'));
+    // pg Date instance normalizes to the same calendar day.
+    expect(dedupeKeyFor({ id: 'v1', scheduled_date: new Date('2026-08-30T00:00:00Z') }, 'reminder_72h'))
+      .toBe('v1:reminder_72h:2026-08-30');
+  });
+});
+
+describe('customerExcludedByAutopay (spec rev-2: autopay customers are not grouped)', () => {
+  const knexFor = (customerRow) => (table) => ({
+    where: () => ({ first: async () => (table === 'customers' ? customerRow : undefined) }),
+  });
+
+  afterEach(() => { jest.dontMock('../services/autopay-eligibility'); jest.resetModules(); });
+
+  const freshVG = (onAutopayImpl) => {
+    jest.doMock('../services/autopay-eligibility', () => ({ customerOnAutopay: onAutopayImpl }));
+    jest.resetModules();
+    return require('../services/visit-groups');
+  };
+
+  test('an autopay customer is excluded; a non-autopay customer is not', async () => {
+    const vg = freshVG(jest.fn(async (c) => c.autopay_enabled === true));
+    expect(await vg.customerExcludedByAutopay('c-auto', knexFor({ id: 'c-auto', autopay_enabled: true }))).toBe(true);
+    expect(await vg.customerExcludedByAutopay('c-plain', knexFor({ id: 'c-plain', autopay_enabled: false }))).toBe(false);
+  });
+
+  test('fail closed: unreadable customer or throwing predicate refuses grouping', async () => {
+    const vg = freshVG(jest.fn(async () => { throw new Error('autopay read down'); }));
+    expect(await vg.customerExcludedByAutopay('c1', knexFor({ id: 'c1' }))).toBe(true);
+    const vg2 = freshVG(jest.fn(async () => false));
+    expect(await vg2.customerExcludedByAutopay('c-missing', knexFor(undefined))).toBe(true);
+  });
+
+  test('the predicate is called failClosed (an unreadable autopay state must throw, not read as unenrolled)', async () => {
+    const spy = jest.fn(async () => false);
+    const vg = freshVG(spy);
+    await vg.customerExcludedByAutopay('c1', knexFor({ id: 'c1' }));
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'c1' }), expect.objectContaining({ failClosed: true }));
+  });
+});

@@ -5194,6 +5194,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
       [svc] = await trx('scheduled_services').insert(insertData).returning('*');
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
+      // Visit groups (visit-group-scope.md §2): stamp at scheduling —
+      // gate-checked + best-effort + self-refusing inside maybeGroupRow.
+      await require('../services/visit-groups').maybeGroupRow(svc.id, { database: trx, createdBy: 'dispatch' });
       createdAppointments.push({ id: svc.id, date: scheduledDate, confirmation: sendConfirmationSms === undefined ? true : !!sendConfirmationSms });
       // Inspection credit: durable in-transaction marker on the series
       // ANCHOR (Codex #3178 P1) — a recurring series is one booking, so
@@ -5277,6 +5280,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
           }
         }
         const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
+        // Visit groups: stamp per inserted row (parity with the seeder,
+        // which already stamps identical rows).
+        if (childRow?.id) await require('../services/visit-groups').maybeGroupRow(childRow.id, { database: trx, createdBy: 'dispatch' });
         // Mirror only add-on lines due on this child date. Mixed-cadence
         // bundles stay one visit on overlap months, but slower lines do
         // not ride every faster-cadence child.
@@ -5355,6 +5361,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
             }
           }
           const [boosterRow] = await trx('scheduled_services').insert(boosterData).returning('*');
+          // Visit groups: stamp per inserted row (seeder parity).
+          if (boosterRow?.id) await require('../services/visit-groups').maybeGroupRow(boosterRow.id, { database: trx, createdBy: 'dispatch' });
 
           // Mirror only add-ons due on this booster date; one-time and
           // off-cadence recurring lines stay off future generated visits.
@@ -9307,6 +9315,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               warnings: editWarnings,
             });
             const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
+            // Visit groups: stamp per inserted row (seeder parity).
+            if (childRow?.id) await require('../services/visit-groups').maybeGroupRow(childRow.id, { database: trx, createdBy: 'dispatch' });
             if (childRow?.id) {
               spawnedRecurringChildren.push({
                 id: childRow.id,
@@ -11129,6 +11139,8 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     }
     const [row] = await trx('scheduled_services').insert(data).returning('*');
     if (!row?.id) continue;
+    // Visit groups: stamp per inserted row (seeder parity).
+    await require('../services/visit-groups').maybeGroupRow(row.id, { database: trx, createdBy: 'dispatch' });
     // Mirror the parent's add-on lines onto the new visit — a multi-service
     // recurring appointment would otherwise top up with the primary only.
     //
@@ -11462,6 +11474,10 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           // add-on failure can't void the visit and the reminder writer
           // (separate connection) only ever sees a committed row.
           if (autoExtLive && autoExtRow?.id) {
+            // Visit groups: stamp ONLY after the post-insert cancellation
+            // re-check passes — stamping earlier could mint a visit whose
+            // member this same transaction compensating-deletes.
+            await require('../services/visit-groups').maybeGroupRow(autoExtRow.id, { database: conn, createdBy: 'dispatch' });
             spawnedVisit = {
               scheduledServiceId: autoExtRow.id,
               customerId: parent.customer_id,
@@ -16110,6 +16126,8 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await trx('scheduled_services').insert(data).returning('*');
+        // Visit groups: stamp per inserted row (seeder parity).
+        if (row?.id) await require('../services/visit-groups').maybeGroupRow(row.id, { database: trx, createdBy: 'dispatch' });
         spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
         inserted++;
         created++;
@@ -16189,6 +16207,8 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await trx('scheduled_services').insert(data).returning('*');
+        // Visit groups: stamp per inserted row (seeder parity).
+        if (row?.id) await require('../services/visit-groups').maybeGroupRow(row.id, { database: trx, createdBy: 'dispatch' });
         spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
         inserted++;
         created++;

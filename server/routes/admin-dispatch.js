@@ -13506,7 +13506,15 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
           err.code = 'VISIT_OWNER_CHANGED';
           throw err;
         }
-        return trx('scheduled_services').insert(insertData).returning('*');
+        const inserted = await trx('scheduled_services').insert(insertData).returning('*');
+        // Visit groups (visit-group-scope.md §2): stamp at scheduling —
+        // gate-checked + best-effort + self-refusing inside maybeGroupRow
+        // (savepoint on the trx; a grouping failure never poisons the
+        // follow-up booking).
+        if (inserted && inserted[0]) {
+          await require('../services/visit-groups').maybeGroupRow(inserted[0].id, { database: trx, createdBy: 'dispatch' });
+        }
+        return inserted;
       });
     } catch (err) {
       // Partial unique index on followup_source_service_id — a concurrent

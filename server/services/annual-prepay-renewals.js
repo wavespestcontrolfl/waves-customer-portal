@@ -1172,6 +1172,12 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     }
     if (await termOwnerMovedUnderFence(trx)) return null;
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
+    // Visit groups (visit-group-scope.md §2; owner ruling 2026-08-31):
+    // prepaid timed first visits stamp like any other booking — nothing to
+    // charge, so no autopay/billing risk, and the shared stop gets one
+    // reminder/tracker. Gate-checked + best-effort + self-refusing inside
+    // maybeGroupRow (windowless seeds below never stamp — self-refused).
+    if (row?.id) await require('./visit-groups').maybeGroupRow(row.id, { database: trx, createdBy: 'seeder' });
     // Filed only once the visit actually exists: fileCoverageException writes
     // through the global connection and dedupes for 7 days, so a notice
     // emitted before a deferred/aborted insert would outlive the rollback
@@ -1304,11 +1310,15 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       } else if (await termOwnerMovedUnderFence(conn)) {
         created = null;
       } else {
+        // Visit groups: deliberately NOT stamped — these are windowless
+        // seeds (buildInsert(date, null)), which maybeGroupRow refuses by
+        // policy; office placement is their grouping moment.
         [created] = await conn('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
       }
     } else {
       // Fresh transaction holds nothing yet — a blocking rung-6 acquire is
       // safe here (utils/customer-comms-lock.js).
+      // Visit groups: deliberately NOT stamped — windowless seed (above).
       [created] = await withCustomerCommsLock(conn, term.customer_id, async (trx) => {
         if (await termOwnerMovedUnderFence(trx)) return [null];
         return trx('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');

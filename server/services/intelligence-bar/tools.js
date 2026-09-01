@@ -1926,6 +1926,11 @@ async function createAppointment(input) {
       updated_at: new Date(),
     }).returning('*');
     appointment = created;
+    // Visit groups (visit-group-scope.md §2): stamp at scheduling —
+    // gate-checked + best-effort + self-refusing inside maybeGroupRow
+    // (savepoint on the trx; a grouping failure never poisons the booking;
+    // the IB write-gate confirm boundary is upstream and unaffected).
+    await require('../visit-groups').maybeGroupRow(created.id, { database: trx, createdBy: 'dispatch' });
     // W0B authorization pin: a card-confirmed booking is approved as
     // credit-FREE (credit-bearing bookings are refused at proposal). Verify
     // inside the booking transaction — if an open credit appeared since the

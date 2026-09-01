@@ -993,7 +993,11 @@ async function buildServiceLabel(scheduledServiceId, parentName, conn = db) {
   }
 }
 
-async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, strict = false }) {
+// `visitId` (spec §4: the grouped reminder lists both services): widens the
+// sibling selection from exact-slot to same-visit membership — grouped
+// members with overlapping-but-different windows still merge into one
+// label. Absent ⇒ the historical exact-slot selection, unchanged.
+async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, strict = false, visitId = null }) {
   // Rebuild the merged label from the PRISTINE service names of every
   // reminder sharing this customer+slot — never parse a merged label back
   // apart. Real service names contain both list delimiters (e.g. "Rodent
@@ -1011,7 +1015,11 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, 
   // Legacy rows with no linked service keep their fallback label.
   const rows = await conn('appointment_reminders as ar')
     .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
-    .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false, 'ar.windows_preclosed': false })
+    .where({ 'ar.customer_id': customerId, 'ar.cancelled': false, 'ar.windows_preclosed': false })
+    .andWhere(function slotOrVisit() {
+      this.where('ar.appointment_time', apptTime);
+      if (visitId) this.orWhere('ss.visit_id', visitId);
+    })
     .andWhere(function liveServiceSendableOrLegacy() {
       this.whereNull('ss.id').orWhereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
     })
@@ -1087,7 +1095,7 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, 
 // component ('service' = its no-real-label placeholder — e.g. the
 // appointment moved out from under this scan), and on any error: a
 // reminder with yesterday's label beats no reminder.
-async function liveReminderServiceLabel(row) {
+async function liveReminderServiceLabel(row, { visitId = null } = {}) {
   const stored = smsServiceLabelStored(row.service_type);
   if (!row.scheduled_service_id) return stored;
   try {
@@ -1095,6 +1103,7 @@ async function liveReminderServiceLabel(row) {
       customerId: row.customer_id,
       apptTime: row.appointment_time,
       nextLabel: null,
+      visitId,
       // A partially-failed merge (add-on or estimate-name read down) must
       // not replace a complete persisted label — throw to the stored
       // fallback below instead (codex #3430 r1 P2).
@@ -2689,10 +2698,16 @@ const AppointmentReminders = {
         // customer. Truly terminal states self-heal the row; 'rescheduled' is a
         // pending-rebook marker, so we skip the send but leave the row armed for
         // the rebook (see status-set comments above).
+        // Grouped-visit membership rides on the same guard read: NULL for
+        // every ungrouped/legacy row, which keeps today's path with zero
+        // additional queries (gate on or off — lifecycle seams are
+        // gate-independent).
+        let svcVisitId = null;
         if (r.scheduled_service_id) {
           const svc = await db('scheduled_services')
             .where({ id: r.scheduled_service_id })
-            .first('status');
+            .first('status', 'visit_id');
+          svcVisitId = svc?.visit_id || null;
           const svcStatus = String(svc?.status || '').toLowerCase();
           if (REMINDER_BLOCKING_STATUSES.has(svcStatus)) {
             if (SELF_HEAL_TERMINAL_STATUSES.has(svcStatus)) {
@@ -2778,6 +2793,36 @@ const AppointmentReminders = {
             continue;
           }
 
+          // Grouped stop: exactly-once per visit per tier via the
+          // visit_effects claim (spec §4) — taken AFTER every skip/defer
+          // check so a claim exists only when this row would actually send.
+          // 'detached' (a split/move raced the scan) falls back to the
+          // per-row send: over-notify, never silence.
+          const vg72 = svcVisitId ? require('./visit-groups') : null;
+          const claim72 = vg72
+            ? await vg72.claimVisitNotification({ id: r.scheduled_service_id, visit_id: svcVisitId }, 'reminder_72h')
+            : null;
+          if (claim72 && claim72.state === 'taken') {
+            // A sibling already sent/suppressed this tier for the visit —
+            // close only our own row (appointment_time-guarded, same as the
+            // preference skip: 0 rows = moved mid-scan, leave the re-arm).
+            const covered72 = await db('appointment_reminders')
+              .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
+              .update({ reminder_72h_sent: true, reminder_72h_sent_at: new Date() });
+            logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} covered by visit ${svcVisitId}${covered72 === 0 ? ' — appointment moved during scan; leaving re-armed row' : ''}`);
+            results.skipped++;
+            continue;
+          }
+          if (claim72 && (claim72.state === 'in_flight' || claim72.state === 'error')) {
+            // Another member is mid-send, or the claim state is unknown —
+            // never send, never mark; the next 15-minute tick re-decides
+            // (a stale claim reclaims after the lease).
+            logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} — visit claim ${claim72.state}; row left unmarked`);
+            continue;
+          }
+          const ownsVisit72 = Boolean(claim72 && claim72.state === 'owner');
+
           try {
             const { customer } = await getCustomerAndTech(r.customer_id, r.scheduled_service_id);
             if (!customer) { results.skipped++; continue; }
@@ -2786,7 +2831,10 @@ const AppointmentReminders = {
             const date = formatDate(apptTime);
             const time = formatTime(apptTime);
 
-            const serviceLabel = await liveReminderServiceLabel(r);
+            // The visit owner texts on behalf of every sibling — the label
+            // lists them all (spec §4: "appointment page lists both
+            // services"); non-owners keep the exact-slot label.
+            const serviceLabel = await liveReminderServiceLabel(r, { visitId: ownsVisit72 ? svcVisitId : null });
             // Self-serve reschedule deep link — one mint shared by the SMS
             // clause and the email CTA. Best-effort: null renders clean copy.
             const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
@@ -2823,8 +2871,21 @@ const AppointmentReminders = {
             // defer: the 15-minute cron re-selects it and the reminder goes
             // out at 8:00 AM, still days ahead of the visit.
             if (!reached72 && (smsOutcome72.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome72.blockedCode === 'MOVE_HOLD')) {
+              // Release the visit claim as retryable (effect → failed) so
+              // the next tick reclaims immediately instead of waiting out
+              // the lease; the row itself stays unmarked, as today.
+              if (ownsVisit72) await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', 'retry', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
               logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred, row left unmarked`);
               continue;
+            }
+
+            // Advance the visit ledger with the actual outcome before the
+            // per-row flag: a finalize failure leaves the effect `claimed`
+            // (lease-expiry retry at the visit level) while the row still
+            // closes — the sibling sees in_flight/taken, never a second
+            // send (the finalize's sent-guard cannot double-send past it).
+            if (ownsVisit72) {
+              await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', reached72 ? 'sent' : 'suppressed', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
             }
 
             // Guard on appointment_time: a concurrent move re-arms this row
@@ -2908,14 +2969,32 @@ const AppointmentReminders = {
             // Best-effort + idempotent per occurrence; an email failure
             // still closes (same as the SMS-only skip, where nothing sends).
             if (apptChannel(channel24) === 'both') {
-              const emailRes = await sendAppointmentNoticeEmail({
-                kind: '24h',
-                customerId: r.customer_id,
-                scheduledServiceId: r.scheduled_service_id,
-                apptTime,
-                serviceLabel: await liveReminderServiceLabel(r),
-              });
-              logger.info(`[appt-remind] 24h night skip for ${r.scheduled_service_id} — email leg ${emailRes?.ok ? 'sent' : `not sent (${emailRes?.reason || emailRes?.error || 'unknown'})`} before close`);
+              // Grouped stop: the email leg is a customer send too — one
+              // per visit via the same reminder_24h claim.
+              const vgNight = svcVisitId ? require('./visit-groups') : null;
+              const nightClaim = vgNight
+                ? await vgNight.claimVisitNotification({ id: r.scheduled_service_id, visit_id: svcVisitId }, 'reminder_24h')
+                : null;
+              if (nightClaim && (nightClaim.state === 'in_flight' || nightClaim.state === 'error')) {
+                logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} — visit claim ${nightClaim.state}; row left unmarked`);
+                continue;
+              }
+              if (nightClaim && nightClaim.state === 'taken') {
+                logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} covered by visit ${svcVisitId}`);
+              } else {
+                const ownsNight = Boolean(nightClaim && nightClaim.state === 'owner');
+                const emailRes = await sendAppointmentNoticeEmail({
+                  kind: '24h',
+                  customerId: r.customer_id,
+                  scheduledServiceId: r.scheduled_service_id,
+                  apptTime,
+                  serviceLabel: await liveReminderServiceLabel(r, { visitId: ownsNight ? svcVisitId : null }),
+                });
+                if (ownsNight) {
+                  await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', emailRes?.ok ? 'sent' : 'suppressed', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
+                }
+                logger.info(`[appt-remind] 24h night skip for ${r.scheduled_service_id} — email leg ${emailRes?.ok ? 'sent' : `not sent (${emailRes?.reason || emailRes?.error || 'unknown'})`} before close`);
+              }
             }
             const closedWindow24 = await db('appointment_reminders')
               .where({ id: r.id })
@@ -2930,13 +3009,33 @@ const AppointmentReminders = {
             continue;
           }
 
+          // Grouped stop: exactly-once per visit per tier — see the 72h twin.
+          const vg24 = svcVisitId ? require('./visit-groups') : null;
+          const claim24 = vg24
+            ? await vg24.claimVisitNotification({ id: r.scheduled_service_id, visit_id: svcVisitId }, 'reminder_24h')
+            : null;
+          if (claim24 && claim24.state === 'taken') {
+            const covered24 = await db('appointment_reminders')
+              .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
+              .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
+            logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} covered by visit ${svcVisitId}${covered24 === 0 ? ' — appointment moved during scan; leaving re-armed row' : ''}`);
+            results.skipped++;
+            continue;
+          }
+          if (claim24 && (claim24.state === 'in_flight' || claim24.state === 'error')) {
+            logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} — visit claim ${claim24.state}; row left unmarked`);
+            continue;
+          }
+          const ownsVisit24 = Boolean(claim24 && claim24.state === 'owner');
+
           try {
             const { customer } = await getCustomerAndTech(r.customer_id, r.scheduled_service_id);
             if (!customer) { results.skipped++; continue; }
 
             const time = formatTime(apptTime);
 
-            const serviceLabel = await liveReminderServiceLabel(r);
+            const serviceLabel = await liveReminderServiceLabel(r, { visitId: ownsVisit24 ? svcVisitId : null });
             // Self-serve reschedule deep link — one mint shared by the SMS
             // clause and the email CTA. Best-effort: null renders clean copy.
             const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
@@ -2981,8 +3080,16 @@ const AppointmentReminders = {
             // visit day, otherwise skip+close), which this mid-flight
             // point must not re-implement.
             if (!reached24 && (smsOutcome24.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome24.blockedCode === 'MOVE_HOLD')) {
+              // Release the visit claim as retryable — see the 72h twin.
+              if (ownsVisit24) await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
               logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred to the next scan's window ruling`);
               continue;
+            }
+
+            // Advance the visit ledger before the per-row flag — see the
+            // 72h twin for the finalize-failure argument.
+            if (ownsVisit24) {
+              await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', reached24 ? 'sent' : 'suppressed', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
             }
 
             // Same appointment_time guard as the 72h flag above — a

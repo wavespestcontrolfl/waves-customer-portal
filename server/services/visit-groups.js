@@ -1022,6 +1022,24 @@ async function dissolveForLegacyCompletion(visitId, { expectChildId = null, trx 
  * property + date, non-terminal, groupable catalog type, unattached or in
  * one open visit) and groups them with `rowId`.
  */
+/**
+ * TRUE when grouping must be refused for this customer because they are on
+ * autopay (or their autopay state cannot be read — fail closed). Shared by
+ * the automatic stamping path and the office group route.
+ */
+async function customerExcludedByAutopay(customerId, database = db) {
+  try {
+    const customer = await database('customers').where({ id: customerId })
+      .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
+    if (!customer) return true;
+    const { customerOnAutopay } = require('./autopay-eligibility');
+    return await customerOnAutopay(customer, { db: database, failClosed: true });
+  } catch (err) {
+    require('./logger').warn(`[visit-groups] autopay-exclusion check failed for customer ${customerId} — refusing to group: ${err.message}`);
+    return true;
+  }
+}
+
 async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
   const { gates } = require('../config/feature-gates');
   if (!gates.visitGroups) return null;
@@ -1049,6 +1067,17 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
     if (!row.window_start) return null;
     if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(row)) return null;
     if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) return null;
+    // Autopay exclusion (spec rev-2 item: "autopay customers are not
+    // grouped until grouped autopay ships"; owner ruling 2026-08-31): the
+    // per-row autopay charger would charge each sibling separately under
+    // one visit. Authoritative predicate reused (autopay-eligibility), and
+    // FAIL-CLOSED: an unreadable autopay state refuses grouping — the safe
+    // direction (an ungrouped stop merely over-notifies; a grouped autopay
+    // stop double-charges). Enforced at the CREATION entry points only
+    // (here + the office group route), never inside createOrJoinVisit —
+    // a unit move of an existing visit whose customer enrolled later must
+    // not start failing.
+    if (await customerExcludedByAutopay(row.customer_id, database)) return null;
     const partnersQ = database('scheduled_services as ss')
       .leftJoin('services as svc', 'ss.service_id', 'svc.id')
       .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
@@ -1178,9 +1207,44 @@ function siblingEligibleFor(toStatus, siblingStatus) {
  * finalize; a reclaim issues a new token, so a stalled former owner can
  * neither send nor finalize over it. null when the row has no visit.
  */
+/**
+ * kind → visit_effects.effect_type. Tracker kinds keep their historical
+ * mapping (anything unrecognized falls back to tracker_arrived, byte-
+ * identical to the old ternary); reminder kinds are the 72h/24h
+ * appointment-reminder rails (spec §4: once per visit via
+ * visit_effects(reminder_72h/24h)).
+ */
+const EFFECT_TYPE_BY_KIND = Object.freeze({
+  en_route: 'tracker_en_route',
+  arrived: 'tracker_arrived',
+  on_site: 'tracker_arrived',
+  reminder_72h: 'reminder_72h',
+  reminder_24h: 'reminder_24h',
+});
+const REMINDER_EFFECT_TYPES = new Set(['reminder_72h', 'reminder_24h']);
+function effectTypeForKind(kind) {
+  return EFFECT_TYPE_BY_KIND[kind] || 'tracker_arrived';
+}
+/**
+ * Dedupe key for a visit-level effect. Tracker kinds keep the historical
+ * `${visitId}:${effectType}` shape (existing prod rows must keep matching).
+ * Reminder kinds carry the visit's DATE: a unit move to a new date yields a
+ * new key, so the moved visit gets exactly one fresh reminder per tier —
+ * without touching the move path's tracker-only effect deletions. Chosen
+ * over a window-bearing key deliberately: membership churn recomputes the
+ * visit window, and a window key would re-text customers on ordinary
+ * joins/leaves. Consequence (documented divergence): a same-date retime
+ * does not re-send an already-sent tier.
+ */
+function dedupeKeyFor(visit, effectType) {
+  return REMINDER_EFFECT_TYPES.has(effectType)
+    ? `${visit.id}:${effectType}:${dateOnly(visit.scheduled_date)}`
+    : `${visit.id}:${effectType}`;
+}
+
 async function claimVisitNotification(row, kind) {
   if (!row || !row.visit_id) return null;
-  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  const effectType = effectTypeForKind(kind);
   const logger = require('./logger');
   const token = require('crypto').randomBytes(16).toString('hex');
   try {
@@ -1211,11 +1275,15 @@ async function claimVisitNotification(row, kind) {
       // caller reports the stop incomplete and the next signal retries.
       // sent / suppressed ⇒ 'taken' (this row is covered).
       const leaseCutoff = new Date(Date.now() - NOTIFICATION_CLAIM_LEASE_MS);
+      // Key computed from the POST-LOCK parent (reminder keys carry the
+      // visit's date — a move that committed while we waited must claim
+      // under the date it actually holds).
+      const dedupeKey = dedupeKeyFor(visit, effectType);
       const rows = await t('visit_effects')
         .insert({
           visit_id: visit.id,
           effect_type: effectType,
-          dedupe_key: `${visit.id}:${effectType}`,
+          dedupe_key: dedupeKey,
           status: 'claimed',
           attempts: 0,
           claimed_at: new Date(),
@@ -1230,11 +1298,11 @@ async function claimVisitNotification(row, kind) {
             });
         })
         .returning('id');
-      if (rows && rows.length) return { state: 'owner', token };
+      if (rows && rows.length) return { state: 'owner', token, dedupeKey };
       const existing = await t('visit_effects')
-        .where({ visit_id: visit.id, effect_type: effectType, dedupe_key: `${visit.id}:${effectType}` })
+        .where({ visit_id: visit.id, effect_type: effectType, dedupe_key: dedupeKey })
         .first('status');
-      return { state: existing && String(existing.status) === 'claimed' ? 'in_flight' : 'taken', token: null };
+      return { state: existing && String(existing.status) === 'claimed' ? 'in_flight' : 'taken', token: null, dedupeKey };
     });
   } catch (err) {
     logger.warn(`[visit-groups] notification claim ${effectType} for visit ${row.visit_id} failed: ${err.message}`);
@@ -1280,16 +1348,19 @@ async function otherLiveMembers(t, visitId, rowId) {
  * step: a failure here leaves the row `claimed`, so the caller reports the
  * stop incomplete instead of advertising a status that was never written.
  */
-async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null) {
-  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null, { dedupeKey = null } = {}) {
+  const effectType = effectTypeForKind(kind);
   if (!visitId || !NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome))) return { ok: true, skipped: true, effectType, status: null };
   const status = smsOutcome === 'sent' ? 'sent' : smsOutcome === 'retry' ? 'failed' : 'suppressed';
+  // Reminder kinds MUST pass the claim's key (it carries the visit date);
+  // tracker call sites keep the historical default untouched.
+  const key = dedupeKey || `${visitId}:${effectType}`;
   try {
     await db('visit_effects')
       .insert({
         visit_id: visitId,
         effect_type: effectType,
-        dedupe_key: `${visitId}:${effectType}`,
+        dedupe_key: key,
         status,
         attempts: 1,
         sent_at: status === 'sent' ? at : null,
@@ -1328,12 +1399,12 @@ const NOTIFICATION_CLAIM_LEASE_MS = 10 * 60 * 1000;
  * valid through the send even if the preceding work ate the lease; a
  * reclaim (new token) or a terminal row makes this fail — do not send.
  */
-async function renewNotificationLease(visitId, kind, token) {
+async function renewNotificationLease(visitId, kind, token, { dedupeKey = null } = {}) {
   if (!visitId || !token) return false;
-  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  const effectType = effectTypeForKind(kind);
   try {
     const n = await db('visit_effects')
-      .where({ visit_id: visitId, effect_type: effectType, dedupe_key: `${visitId}:${effectType}`, status: 'claimed', claim_token: token })
+      .where({ visit_id: visitId, effect_type: effectType, dedupe_key: dedupeKey || `${visitId}:${effectType}`, status: 'claimed', claim_token: token })
       .update({ claimed_at: new Date() });
     return Number(n) > 0;
   } catch (err) {
@@ -1347,12 +1418,12 @@ async function renewNotificationLease(visitId, kind, token) {
  * before slow pre-send work; the send itself is guarded by
  * renewNotificationLease.
  */
-async function notificationLeaseLive(visitId, kind, token) {
+async function notificationLeaseLive(visitId, kind, token, { dedupeKey = null } = {}) {
   if (!visitId || !token) return false;
-  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  const effectType = effectTypeForKind(kind);
   try {
     const row = await db('visit_effects')
-      .where({ visit_id: visitId, effect_type: effectType, dedupe_key: `${visitId}:${effectType}` })
+      .where({ visit_id: visitId, effect_type: effectType, dedupe_key: dedupeKey || `${visitId}:${effectType}` })
       .first('status', 'claimed_at', 'claim_token');
     // Ours, still claimed, inside the lease — a reclaim replaced the token.
     return Boolean(row && String(row.status) === 'claimed' && row.claimed_at
@@ -1557,7 +1628,7 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
     // terminal effect — or no visit effect at all (legacy per-row send) —
     // covers the siblings.
     try {
-      const effectType0 = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+      const effectType0 = effectTypeForKind(kind);
       const eff = await db('visit_effects')
         .where({ visit_id: fan.visitId, effect_type: effectType0, dedupe_key: `${fan.visitId}:${effectType0}` })
         .first('status');
@@ -2855,6 +2926,7 @@ module.exports = {
   appointmentSendHeld,
   createOrJoinVisit,
   maybeGroupRow,
+  customerExcludedByAutopay,
   splitChild,
   handleChildTerminal,
   handleChildStopChanged,
@@ -2888,5 +2960,7 @@ module.exports = {
     canSplit,
     isRowVisitBlocked,
     toMinutes,
+    effectTypeForKind,
+    dedupeKeyFor,
   },
 };
