@@ -196,6 +196,19 @@ const SETUP_VISIT_COLUMNS = ['id', 'customer_id', 'service_type', 'service_id', 
 // rodent_trapping is not. Unlinked legacy rows classify from the label. A
 // failed catalog read throws — callers fail closed (skip / unavailable /
 // refuse), never a label-only guess for a linked row.
+// The customer-level commercial channel (codex #3591 r82/r83 P1): the repo
+// treats property_type 'commercial' AND 'business' as commercial for
+// /secure eligibility and taxation (deriveSecurePlanContext, InvoiceService
+// tax) — bait channel classification must use the same set, or a business
+// customer's series takes the residential family-waiver branch only for
+// /secure itself to reject them.
+const COMMERCIAL_PROPERTY_TYPES = ['commercial', 'business'];
+async function customerHasCommercialChannel(database, customerId) {
+  if (!customerId) return false;
+  const owner = await database('customers').where({ id: customerId }).first('property_type');
+  return COMMERCIAL_PROPERTY_TYPES.includes(String(owner?.property_type || '').toLowerCase());
+}
+
 async function authoritativeServiceKey(database, row = {}) {
   if (row.service_id) {
     const catalog = await database('services').where({ id: row.service_id }).first('service_key', 'name');
@@ -219,10 +232,7 @@ async function authoritativeServiceKey(database, row = {}) {
         if (!ownerId && row.id) {
           ownerId = (await database('scheduled_services').where({ id: row.id }).first('customer_id'))?.customer_id;
         }
-        if (ownerId) {
-          const owner = await database('customers').where({ id: ownerId }).first('property_type');
-          if (String(owner?.property_type || '').toLowerCase() === 'commercial') return 'commercial_rodent_bait';
-        }
+        if (await customerHasCommercialChannel(database, ownerId)) return 'commercial_rodent_bait';
       }
       return catalogKey;
     }
@@ -499,7 +509,13 @@ async function liveAnchorlessCoverageSetupClaim(database, { customerId, rootId }
     .whereNotNull('t.prepay_invoice_id')
     .select('t.prepay_invoice_id as prepay_invoice_id', 't.coverage_service_type as coverage_service_type');
   for (const term of terms || []) {
-    if (recurringServiceKey({ name: term.coverage_service_type }) !== programKey) continue;
+    let termKey = recurringServiceKey({ name: term.coverage_service_type });
+    // Same-customer channel lift (codex #3591 r83 P1): a generic coverage
+    // label on a commercial customer's term is the commercial program —
+    // the term and the root belong to the same customer, so a commercial
+    // root implies the commercial channel for the term's generic label.
+    if (termKey === 'rodent_bait' && programKey === 'commercial_rodent_bait') termKey = 'commercial_rodent_bait';
+    if (termKey !== programKey) continue;
     const claim = await database('setup_fee_claims')
       .where({ invoice_id: term.prepay_invoice_id })
       .whereNull('scheduled_service_id')
@@ -551,7 +567,16 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
   // Catalog identity decides the match for a LINKED root (codex #3591 r42
   // P1): a bait-program root wearing a stale "Pest Control" label still IS
   // the rodent coverage; only unlinked legacy rows match on the label.
-  const coverageKey = recurringServiceKey({ name: coverageServiceType });
+  let coverageKey = recurringServiceKey({ name: coverageServiceType });
+  // The requested coverage's channel comes from the CUSTOMER (codex #3591
+  // r83 P1): Customer 360 submits the generic catalog label for a
+  // commercial bait prepay, so a label-derived 'rodent_bait' must be
+  // lifted to the commercial key for a commercial/business customer —
+  // otherwise the exact comparison below skips their live commercial root
+  // and the fallback mis-waives or double-claims the setup.
+  if (coverageKey === 'rodent_bait' && await customerHasCommercialChannel(database, customerId)) {
+    coverageKey = 'commercial_rodent_bait';
+  }
   const coverageIsBait = isRodentBaitProgramKey(coverageKey);
   let sawMatchingRoot = false;
   // Every matching root that still owes its per-series setup (codex #3591

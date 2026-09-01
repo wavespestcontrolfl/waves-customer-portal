@@ -636,14 +636,18 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       if (rodentOwedHere && (await visitIsCommercialBait())) return commercialBaitStaffReview('owed');
       if (rodentOwedHere) {
         logger.error(`[appt-card-request] FIX: visit ${visit.id} owes the rodent bait-station setup but messaging is suppressed (TCPA) — send the /secure link or collect the setup manually`);
-        try {
-          await require('./notification-service').notifyAdmin(
-            'billing',
-            'Rodent setup needs manual disclosure',
-            `A direct rodent bait booking owes its bait-station setup, but the call's TCPA verdict blocked messaging — no /secure link was sent. Handle the disclosure from the schedule (visit ${visit.id}).`,
-            { icon: '🐀', link: '/admin/schedule' },
-          );
-        } catch { /* best-effort page */ }
+        // This alert is the ONLY recovery — no /secure link, no stamp
+        // (codex #3591 r83 P1). Same verified retry as the commercial
+        // branches: notifyAdmin swallows insert errors and resolves null.
+        const sendSuppressedPage = () => require('./notification-service').notifyAdmin(
+          'billing',
+          'Rodent setup needs manual disclosure',
+          `A direct rodent bait booking owes its bait-station setup, but the call's TCPA verdict blocked messaging — no /secure link was sent. Handle the disclosure from the schedule (visit ${visit.id}).`,
+          { icon: '🐀', link: '/admin/schedule' },
+        ).catch(() => null);
+        if (!(await sendSuppressedPage()) && !(await sendSuppressedPage())) {
+          logger.error(`[appt-card-request] FIX: TCPA-suppressed rodent setup alert could NOT be persisted for visit ${visit.id} — the disclosure handoff has no notification; reconcile from this log`);
+        }
         return skip('rodent_setup_staff_review');
       }
       return skip('delivery_suppressed');

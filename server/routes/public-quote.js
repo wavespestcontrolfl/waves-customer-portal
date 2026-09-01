@@ -1399,7 +1399,32 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // rather than mispricing it in either direction.
     if (services.rodentBait) {
       try {
-        const existingForWaiver = await findExistingCustomerByContact(db, { contactPhone, contactEmail });
+        // UNAMBIGUOUS contact match only (codex #3591 r83 P1): duplicate
+        // emails/phones are supported (shared household/business contacts,
+        // migration 20260417000010), and an unordered .first() on a shared
+        // contact would apply an arbitrary neighbor's account evidence —
+        // nondeterministically waiving or adding the $99. Two or more
+        // matches decline the evidence (fail toward charging; the accept
+        // path re-derives against the actually-linked customer and the
+        // gained-family reconciliation removes a fee the rule waives).
+        const phoneDigits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
+        const emailLc = String(contactEmail || '').trim().toLowerCase();
+        let contactMatches = [];
+        if (phoneDigits.length === 10) {
+          contactMatches = await db('customers')
+            .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
+            .whereNull('deleted_at')
+            .limit(2)
+            .select('id');
+        }
+        if (!contactMatches.length && emailLc) {
+          contactMatches = await db('customers')
+            .whereRaw('LOWER(email) = ?', [emailLc])
+            .whereNull('deleted_at')
+            .limit(2)
+            .select('id');
+        }
+        const existingForWaiver = contactMatches.length === 1 ? contactMatches[0] : null;
         // STRICT (codex #3591 r71 P1): the default loader converts a failed
         // membership/catalog read into [] — this catch's 503 would never run
         // and /calculate would price and persist a $99 the customer's other

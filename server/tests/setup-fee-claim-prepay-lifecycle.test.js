@@ -693,6 +693,38 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(await plans.authoritativeServiceKey(commercialOwner, { service_id: 'svc-1', customer_id: 'cust-1', service_type: 'Rodent Bait Station Service' })).toBe('commercial_rodent_bait');
     const residentialOwner = conn({ catalog: { service_key: 'rodent_bait_quarterly', name: 'Rodent Bait Stations' }, customerRow: { property_type: 'residential' } });
     expect(await plans.authoritativeServiceKey(residentialOwner, { service_id: 'svc-1', customer_id: 'cust-1', service_type: 'Rodent Bait Station Service' })).toBe('rodent_bait');
+    // 'business' is commercial too (codex #3591 r83 P1) — same set /secure
+    // eligibility and taxation use.
+    const businessOwner = conn({ catalog: { service_key: 'rodent_bait_quarterly', name: 'Rodent Bait Stations' }, customerRow: { property_type: 'business' } });
+    expect(await plans.authoritativeServiceKey(businessOwner, { service_id: 'svc-1', customer_id: 'cust-1', service_type: 'Rodent Bait Station Service' })).toBe('commercial_rodent_bait');
+  });
+
+  test('a generic coverage label lifts to the commercial channel for a commercial/business customer (codex #3591 r83 P1)', async () => {
+    // Customer 360 submits the generic catalog label; the customer's
+    // channel decides — and commercial setup is never family-waived, so
+    // even a member account still owes it.
+    mockQualifyingKeys = async () => ['rodent_bait', 'pest_control'];
+    const businessRoot = { id: 'root-rb', customer_id: 'cust-1', service_type: 'Rodent Bait Station Service', service_id: 'svc-1', source_estimate_id: null, recurring_parent_id: null, created_at: '2026-09-01T12:00:00.000Z', status: 'confirmed' };
+    const c = conn({
+      rootsForCoverage: [businessRoot],
+      catalog: { service_key: 'rodent_bait_quarterly', name: 'Rodent Bait Stations' },
+      customerRow: { property_type: 'business' },
+    });
+    expect(await findDirectRodentSetupObligationForCoverage(c, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Station Service' }))
+      .toEqual({ anchorId: 'root-rb', amount: 99 });
+    mockQualifyingKeys = async () => ['rodent_bait'];
+  });
+
+  test('the TCPA-suppressed setup alert is verified+retried; the wizard waiver requires an UNAMBIGUOUS contact match (codex #3591 r83 P1)', () => {
+    const cardRequestSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'appointment-card-request.js'), 'utf8');
+    expect(cardRequestSrc).toMatch(/if \(!\(await sendSuppressedPage\(\)\) && !\(await sendSuppressedPage\(\)\)\) \{\s+logger\.error\(`\[appt-card-request\] FIX: TCPA-suppressed rodent setup alert could NOT be persisted/);
+    // Both commercial staff-review pages verify too.
+    expect(cardRequestSrc).toMatch(/const pageBilling = async \(title, body\) => \{[\s\S]*?if \(!\(await send\(\)\) && !\(await send\(\)\)\) \{/);
+    // The /calculate waiver read declines account evidence on a SHARED
+    // contact (two matches) instead of applying an arbitrary customer's.
+    const publicQuoteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
+    expect(publicQuoteSrc).toMatch(/const existingForWaiver = contactMatches\.length === 1 \? contactMatches\[0\] : null;/);
+    expect(publicQuoteSrc).toMatch(/\.limit\(2\)\s+\.select\('id'\);[\s\S]{0,600}const existingForWaiver = contactMatches\.length === 1/);
   });
 
   test('the lapse branch skips an operator-disabled fee and retries the page once (codex #3591 r81 P1)', () => {
