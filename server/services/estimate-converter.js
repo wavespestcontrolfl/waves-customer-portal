@@ -6010,6 +6010,19 @@ const EstimateConverter = {
       const setupFeeAmount = acceptUnifiedDecision === true
         ? unifiedAcceptSetupFeeAmount(estimateData)
         : frozenSetupFeeAmount(estimateData);
+      // Hoisted so BOTH the prepay invoice line and the claim ledger below
+      // key on the same figure (audit r19 P0: never ledger a fee the
+      // invoice did not bill). A NO-FREEZE decision never adds a prepay
+      // line (audit r18 P0): the legacy solo-mix card the page showed says
+      // "waived with prepay" — only a FROZEN unified quote (whose page
+      // disclosed the fee as charged) rides the prepay invoice. When the
+      // rodent line carries the fee, the unified line stands down (one
+      // vehicle, never both — audit r17 P0).
+      const prepayHasFrozenUnified = normalizeEstimateData(estimateData)?.setupFeeQuote?.kind === 'unified';
+      const prepayUnifiedSetupAmount = billingTerm === 'prepay_annual'
+        && acceptUnifiedDecision === true && !rodentLineCarriesFee && prepayHasFrozenUnified
+        ? unifiedAcceptSetupFeeAmount(estimateData)
+        : 0;
       const hasDraftAmount = billingTerm === 'prepay_annual'
         ? annualPrepayAmount > 0
         : setupFeeApplies || standardFirstApplicationAmount > 0;
@@ -6042,17 +6055,8 @@ const EstimateConverter = {
           // The pre-seeding locked decision governs (frozen-positive quotes
           // route through its accept-time dedupe too — audit r10 P0);
           // amount is frozen-first.
-          // When the rodent line carries the fee (no-freeze rodent
-          // estimate, decision non-null), the unified line stands down —
-          // one vehicle, never both (audit r17 P0). And a NO-FREEZE
-          // decision never adds a prepay line (audit r18 P0): the legacy
-          // solo-mix card the page showed says "waived with prepay", so
-          // only a FROZEN unified quote (whose page disclosed the fee as
-          // charged) may ride the prepay invoice.
-          const prepayHasFrozenUnified = normalizeEstimateData(estimateData)?.setupFeeQuote?.kind === 'unified';
-          const prepayUnifiedSetupAmount = acceptUnifiedDecision === true && !rodentLineCarriesFee && prepayHasFrozenUnified
-            ? unifiedAcceptSetupFeeAmount(estimateData)
-            : 0;
+          // prepayUnifiedSetupAmount is hoisted above hasDraftAmount so the
+          // claim ledger keys on the same figure (audit r17/r18/r19 P0s).
           const prepayLineDescription = commercialOnlyRecurring
             ? `${prepayPlanPrefix} — 12 months prepaid`
             : prepayDiscountApplied
@@ -6579,7 +6583,16 @@ const EstimateConverter = {
       // rodent claim above by construction (the unified decision is null
       // whenever a rodent setup line rides), and recordSetupFeeClaimFor-
       // Invoice is idempotent on the invoice id.
-      if (draftInvoiceId && acceptUnifiedDecision === true && !rodentLineCarriesFee) {
+      // Ledger ONLY a fee the invoice actually billed (audit r19 P0): the
+      // standard invoice carries it iff setupFeeApplies; the prepay invoice
+      // iff prepayUnifiedSetupAmount rode as a line. A decision that stood
+      // down (no-freeze prepay honoring the legacy waiver copy) writes no
+      // claim — a false claim would both block future signups' fees and
+      // restore a nonexistent obligation on refund.
+      const unifiedFeeRodeInvoice = billingTerm === 'prepay_annual'
+        ? prepayUnifiedSetupAmount > 0
+        : setupFeeApplies === true;
+      if (draftInvoiceId && acceptUnifiedDecision === true && !rodentLineCarriesFee && unifiedFeeRodeInvoice) {
         const { recordSetupFeeClaimForInvoice } = require('./secure-appointment-plans');
         const unifiedRoots = await database('scheduled_services')
           .where({ source_estimate_id: estimateId, customer_id: customerId })
