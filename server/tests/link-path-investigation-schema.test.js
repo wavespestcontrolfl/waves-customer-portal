@@ -64,7 +64,8 @@ describe('investigator output schema', () => {
   test('confidence is bounded [0,1] in the schema itself', () => {
     expect(validateInvestigation(good({ paths: [goodPath({ confidence: 1.2 })] })).valid).toBe(false);
     expect(validateInvestigation(good({ paths: [goodPath({ confidence: -0.1 })] })).valid).toBe(false);
-    expect(validateInvestigation(good({ paths: [goodPath({ confidence: 0 })] })).valid).toBe(true);
+    // 0 is inside the bounds (though a qualified verdict needs one >0 path, so bound-check under not_reproducible)
+    expect(validateInvestigation(good({ verdict: 'not_reproducible', paths: [goodPath({ confidence: 0 })] })).valid).toBe(true);
     expect(validateInvestigation(good({ paths: [goodPath({ confidence: 1 })] })).valid).toBe(true);
   });
 
@@ -74,7 +75,9 @@ describe('investigator output schema', () => {
     for (const t of R.ACQUISITION_TYPES) {
       const paid = R.PAID_ACQUISITION_TYPES.includes(t);
       const p = goodPath({ acquisition_type: t, payment_required: paid, fee_scope: paid ? 'per_location' : null });
-      expect({ t, valid: validateInvestigation(good({ paths: [p] })).valid }).toEqual({ t, valid: true });
+      // dead-end types are valid path OBJECTS but cannot alone back a qualified verdict
+      const verdict = ['unknown', 'not_reproducible'].includes(t) ? 'not_reproducible' : 'qualified';
+      expect({ t, valid: validateInvestigation(good({ verdict, paths: [p] })).valid }).toEqual({ t, valid: true });
     }
   });
 
@@ -88,6 +91,18 @@ describe('investigator output schema', () => {
   test('§3.2 type consistency: paid types require payment_required; self_service_free forbids it', () => {
     expect(validateInvestigation(good({ paths: [goodPath({ acquisition_type: 'membership', payment_required: false })] })).valid).toBe(false);
     expect(validateInvestigation(good({ paths: [goodPath({ acquisition_type: 'self_service_free', payment_required: true, fee_scope: 'per_location' })] })).valid).toBe(false);
+  });
+
+  test('qualified requires at least one EXECUTABLE, positive-confidence path (Codex r5 P1)', () => {
+    // only a dead-end type ⇒ invalid
+    expect(validateInvestigation(good({ paths: [goodPath({ acquisition_type: 'unknown' })] })).valid).toBe(false);
+    expect(validateInvestigation(good({ paths: [goodPath({ acquisition_type: 'not_reproducible' })] })).valid).toBe(false);
+    // only zero confidence ⇒ invalid
+    expect(validateInvestigation(good({ paths: [goodPath({ confidence: 0 })] })).valid).toBe(false);
+    // one real path beside a dead-end one ⇒ valid
+    expect(validateInvestigation(good({ paths: [goodPath({ acquisition_type: 'unknown' }), goodPath()] })).valid).toBe(true);
+    // the same paths under a NON-qualified verdict stay valid (evidence-only answers are fine there)
+    expect(validateInvestigation(good({ verdict: 'not_reproducible', paths: [goodPath({ acquisition_type: 'unknown' })] })).valid).toBe(true);
   });
 
   test('verdicts: watching requires a reason; qualified requires ≥1 path; not_reproducible may have none', () => {

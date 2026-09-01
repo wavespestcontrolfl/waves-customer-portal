@@ -604,6 +604,7 @@ async function investigatePaths(db, {
         // now — abort every mutation rather than overwrite it (the domain is
         // simply re-selected by a later sweep if it comes back).
         let staleClaim = false;
+        let effectiveVerdict = verdict.verdict;
         await db.transaction(async (trx) => {
           const fresh = await trx('seo_link_domains').where({ id: domain.id }).forUpdate().first('agent_state');
           if (!fresh || (claimState && fresh.agent_state !== 'investigating')) { staleClaim = true; return; }
@@ -668,8 +669,15 @@ async function investigatePaths(db, {
           const watchNote = claimState && verdict.verdict === 'watching' && verdict.watch_reason ? ` · watching: ${verdict.watch_reason}` : '';
           const patch = { best_path_id: best ? best.id : null, score, score_reasons: `${reasons}${watchNote}`, updated_at: now };
           if (claimState) {
-            patch.agent_state = verdict.verdict === 'qualified' ? 'qualified' : verdict.verdict === 'watching' ? 'watching' : 'not_reproducible';
-            patch.watch_recheck_at = verdict.verdict === 'watching' ? new Date(now.getTime() + WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000) : null;
+            // The schema requires a qualified verdict to contain an
+            // executable, positive-confidence path, so `best` exists here in
+            // practice — but the write path is defensive: qualified with no
+            // best path downgrades to `watching` rather than producing a
+            // qualified domain nothing can act on.
+            effectiveVerdict = verdict.verdict === 'qualified' && !best ? 'watching' : verdict.verdict;
+            patch.agent_state = effectiveVerdict === 'qualified' ? 'qualified' : effectiveVerdict === 'watching' ? 'watching' : 'not_reproducible';
+            patch.watch_recheck_at = effectiveVerdict === 'watching' ? new Date(now.getTime() + WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000) : null;
+            if (effectiveVerdict !== verdict.verdict) patch.score_reasons = `${patch.score_reasons} · downgraded: qualified verdict carried no executable path`;
           }
           await trx('seo_link_domains').where({ id: domain.id }).update(patch);
         });
@@ -680,8 +688,8 @@ async function investigatePaths(db, {
 
         out.investigated += 1;
         if (!claimState) out.pathRefreshes += 1;
-        else if (verdict.verdict === 'qualified') out.qualified += 1;
-        else if (verdict.verdict === 'watching') out.watching += 1;
+        else if (effectiveVerdict === 'qualified') out.qualified += 1;
+        else if (effectiveVerdict === 'watching') out.watching += 1;
         else out.notReproducible += 1;
       } catch (err) {
         logger.error(`[link-investigator] ${domain.domain}: ${err.message}`);

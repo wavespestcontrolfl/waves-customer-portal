@@ -23,6 +23,13 @@ const {
 
 const VERDICTS = Object.freeze(['qualified', 'not_reproducible', 'watching']);
 
+// Types that carry an executable identity — `unknown`/`not_reproducible`
+// paths live only in the evidence (the investigator never writes them as
+// rows), so a `qualified` verdict must contain at least one of these.
+const EXECUTABLE_ACQUISITION_TYPES = Object.freeze(
+  ACQUISITION_TYPES.filter((t) => t !== 'unknown' && t !== 'not_reproducible'),
+);
+
 const nullable = (schema) => ({ anyOf: [schema, { type: 'null' }] });
 const nullableEnum = (values) => nullable({ type: 'string', enum: [...values] });
 const nullableString = (maxLength) => nullable({ type: 'string', maxLength });
@@ -135,10 +142,27 @@ const INVESTIGATION_SCHEMA = {
       if: { properties: { verdict: { const: 'watching' } } },
       then: { properties: { watch_reason: { type: 'string', minLength: 1 } } },
     },
-    // A qualified domain must show at least one path that is not a dead end.
+    // A qualified domain must show at least one EXECUTABLE path with real
+    // confidence — a verdict backed only by unknown/not_reproducible or
+    // zero-confidence paths would qualify a domain with no best path at all.
     {
       if: { properties: { verdict: { const: 'qualified' } } },
-      then: { properties: { paths: { type: 'array', minItems: 1 } } },
+      then: {
+        properties: {
+          paths: {
+            type: 'array',
+            minItems: 1,
+            contains: {
+              type: 'object',
+              required: ['acquisition_type', 'confidence'],
+              properties: {
+                acquisition_type: { enum: [...EXECUTABLE_ACQUISITION_TYPES] },
+                confidence: { type: 'number', exclusiveMinimum: 0 },
+              },
+            },
+          },
+        },
+      },
     },
   ],
 };
@@ -155,4 +179,4 @@ function validateInvestigation(data) {
   };
 }
 
-module.exports = { INVESTIGATION_SCHEMA, PATH_SCHEMA, VERDICTS, validateInvestigation };
+module.exports = { INVESTIGATION_SCHEMA, PATH_SCHEMA, VERDICTS, EXECUTABLE_ACQUISITION_TYPES, validateInvestigation };
