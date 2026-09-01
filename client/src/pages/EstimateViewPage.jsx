@@ -5938,7 +5938,11 @@ function EstimateViewPageInner() {
   const serviceCategory = copyCommercial
     ? (copyCommercialPest ? 'commercial' : 'commercial_neutral')
     : estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
-  const isRegulatedWdoSurface = serviceCategory === 'wdo_inspection';
+  const isRegulatedWdoSurface = serviceCategory === 'wdo_inspection'
+    || services.some((service) => glassServiceSlug(service?.key || service?.name) === 'wdo_inspection')
+    || (pricing?.oneTimeBreakdown?.items || []).some(
+      (item) => glassServiceSlug(item?.service || item?.label || item?.name) === 'wdo_inspection',
+    );
   const copy = estimateCopyFor(serviceCategory);
   // Glass copy pack — null unless glass is active; every service category
   // has a pack now (unknown categories fall back to the property-generic

@@ -3277,6 +3277,16 @@ function boraCareCustomerCopy() {
   };
 }
 
+function hasWdoServiceMix(recurring = [], oneTimeItems = []) {
+  const recurringRows = Array.isArray(recurring) ? recurring : [];
+  const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  const isWdoRow = (row = {}) => /\bwdo\b|wood destroying/i.test(
+    [row.key, row.service, row.name, row.label].filter(Boolean).join(' ').replace(/[_-]+/g, ' '),
+  );
+  return recurringRows.some(isWdoRow)
+    || oneTimeRows.some((row) => serviceCategoryForOneTimeItem(row) === 'wdo_inspection' || isWdoRow(row));
+}
+
 function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
   const recurringRows = Array.isArray(recurring) ? recurring : [];
   const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
@@ -5652,7 +5662,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // ── Waves AI block ──────────────────────────────────────────────
   // Canonical customer-facing AI/property explanation. The same payload
   // is exposed to the React v2 estimate via GET /:token/data.
-  const isRegulatedWdoSurface = deriveServiceCategory(estData, recurring, oneTimeItems) === 'wdo_inspection';
+  const isRegulatedWdoSurface = hasWdoServiceMix(recurring, oneTimeItems);
   const intelligence = isRegulatedWdoSurface
     ? null
     : buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
@@ -24342,6 +24352,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       recurringServicesForIntelligence,
       pricingBundle?.oneTimeBreakdown?.items || []
     );
+    const isRegulatedWdoSurface = hasWdoServiceMix(
+      recurringServicesForIntelligence,
+      pricingBundle?.oneTimeBreakdown?.items || [],
+    );
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
     // payment-only (invoice) accept. An existing linked appointment keeps
@@ -24360,7 +24374,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
       commercialNoSlotAccept,
     });
-    const intelligence = serviceCategory === 'wdo_inspection'
+    const intelligence = isRegulatedWdoSurface
       ? null
       : buildWaveGuardIntelligencePayload(
           {
@@ -25066,6 +25080,7 @@ module.exports._resetPerApplicationColumnsProbeForTests = resetPerApplicationCol
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
+module.exports.hasWdoServiceMix = hasWdoServiceMix;
 module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;

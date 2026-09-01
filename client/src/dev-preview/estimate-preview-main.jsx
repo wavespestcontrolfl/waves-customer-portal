@@ -872,14 +872,14 @@ function boraCareScenario() {
 }
 
 function trapOnlyScenario() {
-  const base = oneTimeFixture({ category: 'trap_only', service: 'trap_only_retainer', label: 'Standard Trap-Only Monitoring Retainer', amount: 495, detail: '$49.50/month with a 12-month agreement' });
+  const base = oneTimeFixture({ category: 'trap_only', service: 'trap_only_retainer', label: 'Standard Trap-Only Monitoring Retainer', amount: 495, detail: '12-month monitoring retainer' });
   return {
     ...base,
     pricing: {
       ...base.pricing,
       anchorOneTimePrice: 694,
       oneTimeBreakdown: { total: 694, items: [
-        { service: 'trap_only_retainer', label: 'Standard Trap-Only Monitoring Retainer', amount: 495, detail: '$49.50/month with a 12-month agreement', kind: 'charge' },
+        { service: 'trap_only_retainer', label: 'Standard Trap-Only Monitoring Retainer', amount: 495, detail: '12-month monitoring retainer', kind: 'charge' },
         { service: 'trap_only_setup', label: 'Trap-Only Setup / Inspection', amount: 199, detail: 'Initial setup and property inspection', kind: 'charge' },
       ] },
     },
