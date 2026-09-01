@@ -946,14 +946,14 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
       // The rail's own resolver re-runs on every step (removability shrinks
       // as lines leave — the last recurring line is never removable).
       const preview = await estimatePublic.applyServiceMixChange({
-        estimate: current, body: { serviceKey, included: false, dryRun: true }, actor: 'staff',
+        estimate: cloneEstimateRow(current), body: { serviceKey, included: false, dryRun: true }, actor: 'staff',
       });
       if (preview.status !== 200 || !preview.body?.previewBasis) {
         logger.info(`[admin-estimates] lead-service send: ${serviceKey} not parked on estimate ${estimate.id} (${preview.body?.error || preview.status})`);
         continue;
       }
       const commit = await estimatePublic.applyServiceMixChange({
-        estimate: current, body: { serviceKey, included: false, previewBasis: preview.body.previewBasis }, actor: 'staff',
+        estimate: cloneEstimateRow(current), body: { serviceKey, included: false, previewBasis: preview.body.previewBasis }, actor: 'staff',
       });
       if (commit.status !== 200) {
         logger.warn(`[admin-estimates] lead-service send: commit for ${serviceKey} refused on estimate ${estimate.id} (${commit.body?.error || commit.status})`);
@@ -985,6 +985,20 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
   }
 }
 
+// The rail parses estimate_data and PRUNES the parsed carriers in place; when
+// Postgres hands the JSONB column back as an object, that object IS the row's
+// carrier, so a dry run would mutate the row the commit then re-reads —
+// "service_not_removable" on every commit (GH codex r3 P1). Every rail call
+// gets its own deep copy of the row.
+function cloneEstimateRow(row) {
+  if (!row || typeof row !== 'object') return row;
+  const copy = { ...row };
+  if (row.estimate_data && typeof row.estimate_data === 'object') {
+    copy.estimate_data = JSON.parse(JSON.stringify(row.estimate_data));
+  }
+  return copy;
+}
+
 // Compensation for a send that delivered on NO channel: the parked line is
 // restored through the same rail (actor 'staff', dry run → commit), against
 // the row as it is now. Runs after the delivery claim is released.
@@ -994,14 +1008,14 @@ async function revertLeadServiceForSend(estimateId, serviceKey) {
     if (!row || row.archived_at || row.price_locked_at) return false;
     const estimatePublic = require('./estimate-public');
     const preview = await estimatePublic.applyServiceMixChange({
-      estimate: row, body: { serviceKey, included: true, dryRun: true }, actor: 'staff',
+      estimate: cloneEstimateRow(row), body: { serviceKey, included: true, dryRun: true }, actor: 'staff',
     });
     if (preview.status !== 200 || !preview.body?.previewBasis) {
       logger.warn(`[admin-estimates] lead-service revert: preview refused for ${serviceKey} on estimate ${estimateId} (${preview.body?.error || preview.status})`);
       return false;
     }
     const commit = await estimatePublic.applyServiceMixChange({
-      estimate: row, body: { serviceKey, included: true, previewBasis: preview.body.previewBasis }, actor: 'staff',
+      estimate: cloneEstimateRow(row), body: { serviceKey, included: true, previewBasis: preview.body.previewBasis }, actor: 'staff',
     });
     if (commit.status !== 200) {
       logger.warn(`[admin-estimates] lead-service revert: commit refused for ${serviceKey} on estimate ${estimateId} (${commit.body?.error || commit.status})`);

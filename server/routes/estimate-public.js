@@ -14699,6 +14699,11 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // preview-and-confirm rail, priced by the same recompute. Customer-only:
     // the staff send-time path only ever removes.
     let mode = included === false ? 'remove' : 'restore';
+    // A staff-parked offer restores through the restore MECHANICS (the
+    // customer's own quote-time subtree comes back) but reads to the
+    // customer as a new offer — they never removed it — so its disclosures
+    // use add wording (GH codex r3 P2).
+    const staffOffered = included === true && OptOut.latestOptOutEventIsStaff(parsedData, serviceKey);
 
     if (included === false) {
       // ONE resolver for the /data stamp and this write, so the payload can
@@ -14880,7 +14885,8 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       }
     }
     const impact = optOutImpact({
-      beforeResult, afterResult, beforeData, afterData: parsedData, label, mode,
+      beforeResult, afterResult, beforeData, afterData: parsedData, label,
+      mode: mode === 'restore' && staffOffered ? 'add' : mode,
     });
     if (included === false && impact.wouldChargeBundled.length) {
       return { status: 400, body: ({

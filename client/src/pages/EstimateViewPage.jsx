@@ -1606,6 +1606,21 @@ export function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = fal
   );
 }
 
+// When the legacy offer ladder has no candidate for this mix (a mosquito-only
+// plan, say) but the server stamped keys addable, the priced card is built
+// from the server's stamp — the stamp is the eligibility truth (GH codex r3
+// P2). Exported for tests.
+export function offerFromAddable(addable = []) {
+  const first = (Array.isArray(addable) ? addable : []).find((a) => a && a.key && a.label);
+  if (!first) return null;
+  return {
+    serviceKey: first.key,
+    label: first.label,
+    title: `Add ${first.label} and save more`,
+    body: '',
+  };
+}
+
 // Confirm panel shared by every "a line joins the plan" moment — a priced add
 // (GATE_ESTIMATE_SERVICE_ADD), a customer restore, and a staff-parked offer.
 // The dryRun's disclosures show the resulting terms BEFORE the reprice is
@@ -4711,10 +4726,14 @@ function EstimateViewPageInner() {
   // server stamped its key addable — same optOut state and rail as a restore.
   // Never on a terminal/accepted page (the accept-time reprice is frozen);
   // the server never stamps `addable` on a staff draft preview.
-  const pricedAddOffer = addServiceOffer && data?.cta?.terminalState == null
-    && (data?.serviceOptOut?.addable || []).some((a) => a?.key === addServiceOffer.serviceKey)
-    ? addServiceOffer
+  const addableStamp = data?.serviceOptOut?.addable || [];
+  const pricedAddOffer = data?.cta?.terminalState == null && addableStamp.length
+    ? (addServiceOffer && addableStamp.some((a) => a?.key === addServiceOffer.serviceKey)
+      ? addServiceOffer
+      : (addServiceOffer ? null : offerFromAddable(addableStamp)))
     : null;
+  // The card renders the priced offer even when the legacy ladder is silent.
+  const offerCardOffer = addServiceOffer || pricedAddOffer;
   // Download PDF / Share / Print / Portal Login at the top of every estimate
   // render (owner ask 2026-07-09, live review screen) — the same shared bar
   // as the report/pay/receipt/contract pages. The PDF endpoint streams the
@@ -6818,7 +6837,7 @@ function EstimateViewPageInner() {
         chips={askChips}
       />
       <EstimateAddServiceRequestCard
-        offer={addServiceOffer}
+        offer={offerCardOffer}
         requestState={addServiceRequestState}
         onRequest={handleAddServiceRequest}
         priced={pricedAddProps}
@@ -7288,7 +7307,7 @@ function EstimateViewPageInner() {
                 chips={askChips}
               />
               <EstimateAddServiceRequestCard
-                offer={addServiceOffer}
+                offer={offerCardOffer}
                 requestState={addServiceRequestState}
                 onRequest={handleAddServiceRequest}
                 priced={pricedAddProps}

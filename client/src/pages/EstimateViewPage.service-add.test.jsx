@@ -7,7 +7,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { EstimateAddServiceRequestCard } from './EstimateViewPage';
+import { EstimateAddServiceRequestCard, offerFromAddable } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -87,5 +87,14 @@ describe('EstimateAddServiceRequestCard', () => {
     />);
     expect(screen.getByRole('button', { name: 'Updating…' })).toBeDisabled();
     expect(screen.getByText(/joins your plan with no change/)).toBeInTheDocument();
+  });
+});
+
+describe('offerFromAddable', () => {
+  it('builds the priced offer from the server stamp when the legacy ladder has no candidate', () => {
+    expect(offerFromAddable([{ key: 'pest_control', label: 'Pest Control' }, { key: 'lawn_care', label: 'Lawn Care' }]))
+      .toEqual({ serviceKey: 'pest_control', label: 'Pest Control', title: 'Add Pest Control and save more', body: '' });
+    expect(offerFromAddable([])).toBeNull();
+    expect(offerFromAddable([{ key: '', label: 'x' }, null])).toBeNull();
   });
 });

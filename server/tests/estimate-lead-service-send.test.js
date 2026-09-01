@@ -169,7 +169,8 @@ test('an undelivered send is compensated: the parked line is restored through th
     ['staff', 'lawn_care', true, true, null],
     ['staff', 'lawn_care', true, false, 'digest-1'],
   ]);
-  for (const call of mockMixCalls) expect(call.estimate).toBe(parkedRow);
+  // Deep copies of the row (GH codex r3 P1), never the row object itself.
+  for (const call of mockMixCalls) { expect(call.estimate).toEqual(parkedRow); expect(call.estimate).not.toBe(parkedRow); }
 });
 
 test('a refused or throwing revert is logged, never thrown, and reports false', async () => {
@@ -209,4 +210,21 @@ test('a row that became grouped or non-residential between the read and the clai
     expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
   }
   expect(mockMixCalls).toHaveLength(0);
+});
+
+test('the rail never receives the row object itself: each dry run and commit gets its own deep copy (GH codex r3 P1)', async () => {
+  const row = newCustomerRow();
+  const claimed = claimedRowFor(row);
+  // JSONB hydrated as an OBJECT — the shape that made the dry run mutate the row.
+  claimed.estimate_data = JSON.parse(claimed.estimate_data);
+  mockRows.queue = [claimed, parkedRow];
+  await applyLeadServiceForSend(row);
+  expect(mockMixCalls).toHaveLength(2);
+  const [preview, commit] = mockMixCalls;
+  expect(preview.estimate).not.toBe(claimed);
+  expect(commit.estimate).not.toBe(claimed);
+  expect(preview.estimate).not.toBe(commit.estimate);
+  expect(preview.estimate.estimate_data).not.toBe(claimed.estimate_data);
+  expect(commit.estimate.estimate_data).not.toBe(preview.estimate.estimate_data);
+  expect(commit.estimate.estimate_data).toEqual(claimed.estimate_data);
 });
