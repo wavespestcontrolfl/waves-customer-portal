@@ -1130,8 +1130,11 @@ async function fetchEstimates({ search, source, ownerId }) {
     // derive "Follow up" next-actions despite the mint's zero-delivery /
     // no-follow-up contract, prompting an operator to contact a customer
     // nobody quoted. Acceptance converts on its own; cancel/restart state
-    // lives on the customer-intel surfaces.
-    .whereNot('estimates.source', 'plan_restart')
+    // lives on the customer-intel surfaces. NULL-aware (codex GH r20 P2):
+    // legacy/imported rows carry source NULL, which a bare <> would drop.
+    .where(function notPlanRestart() {
+      this.whereNull('estimates.source').orWhereNot('estimates.source', 'plan_restart');
+    })
     .orderBy('estimates.created_at', 'desc')
     .limit(MAX_CANDIDATES + 1);
 

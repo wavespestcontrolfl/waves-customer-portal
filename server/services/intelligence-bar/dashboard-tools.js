@@ -401,7 +401,11 @@ async function comparePeriods(input) {
           // plan_restart sent_at is a synthetic publish stamp (the
           // customer self-served the quote; nothing was delivered) — it
           // is not an estimate SENT (codex GH r19 P1 on #3671).
-          .whereNot('e.source', 'plan_restart')
+          // NULL-aware (r20 P2): legacy rows carry source NULL, which a
+          // bare <> would drop from the count.
+          .where(function notPlanRestart() {
+            this.whereNull('e.source').orWhereNot('e.source', 'plan_restart');
+          })
       ).count('* as count').first();
       m.estimates_sent = parseInt(es?.count || 0);
     }
