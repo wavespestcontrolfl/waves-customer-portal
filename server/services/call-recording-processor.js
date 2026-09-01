@@ -6201,13 +6201,13 @@ const CallRecordingProcessor = {
           .forUpdate()
           .first('first_name', 'last_name', 'phone', 'updated_at') || null;
       }
-      // `operator` — a human pressed a button — selects the short quiet
-      // window. `force` still means "re-run a call that already finished",
-      // which carries its own policy elsewhere (the name-correction
-      // auto-apply gate at allowNameAutoApply). Overloading one flag for both
-      // made every manual first run behave like a historical reprocess and
-      // left valid caller-stated name corrections review-only (codex P2).
-      if (!(opts.force || opts.operator)) {
+      // Only `force` takes the other branch. Routing operator clicks there as
+      // well skipped this branch's extraction_failed cap and 10-minute
+      // backoff, so an ordinary first-run retry could re-enter this
+      // side-effect-heavy pipeline over and over (codex P1). `operator` does
+      // one thing and one thing only: it shortens the heartbeat-quiet window
+      // INSIDE this predicate, below.
+      if (!opts.force) {
         // Reclaim stale 'processing' rows older than 10 min — server crash or
         // Gemini hang between claim (this UPDATE) and terminal status write
         // would otherwise wedge the row forever, since both the claim guard
@@ -6222,7 +6222,12 @@ const CallRecordingProcessor = {
           .whereRaw("processing_status IS DISTINCT FROM 'processed'")
           .where(function () {
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-              .orWhereRaw(reclaimableClaim(10));
+              // A human pressing Process waits for the short quiet window; an
+              // unattended pass keeps the conservative one. Everything else
+              // about this claim — the retry cap, the backoff — is unchanged.
+              .orWhereRaw(reclaimableClaim(
+                opts.operator ? FORCE_CLAIM_QUIET_MINUTES : LEGACY_CLAIM_QUIET_MINUTES,
+              ));
           })
           // Retryable-failure guard: the sweep's cap/backoff filter only
           // protects sweep-originated runs — direct callers (the

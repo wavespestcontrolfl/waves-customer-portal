@@ -81,6 +81,17 @@ describe('POST /process/:callSid skip semantics', () => {
 // quiet window. Conflating them made a manual FIRST run behave like a
 // historical reprocess.
 describe('operator intent is distinct from force', () => {
+  test('operator shortens the quiet window WITHOUT taking the force branch', () => {
+    // The force branch omits the extraction_failed cap and backoff, so an
+    // operator click routed through it could re-enter this side-effect-heavy
+    // pipeline over and over.
+    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(source).toContain('if (!opts.force) {');
+    expect(source).not.toContain('if (!(opts.force || opts.operator)) {');
+    // operator only picks the window inside the non-force predicate.
+    expect(source).toMatch(/opts\.operator \? FORCE_CLAIM_QUIET_MINUTES : LEGACY_CLAIM_QUIET_MINUTES/);
+  });
+
   beforeEach(() => jest.clearAllMocks());
 
   test('a plain operator click does not set force', async () => {
