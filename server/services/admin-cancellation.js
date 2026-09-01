@@ -94,6 +94,27 @@ function normalizeInput(raw = {}) {
   };
 }
 
+// Deposit-stage accounts belong to the DEDICATED signup-cancellation flow
+// (customer-offboarding.cancelSignupAndRefundDeposit): the generic plan
+// cancel would churn the account and pull the booked visits WITHOUT
+// refunding the received deposit. Refuse and point at the right action.
+// Best-effort probe: a failed check proceeds (matching today's behavior)
+// rather than blocking every cancellation on an offboarding hiccup.
+async function refuseDepositStageAccount(customerId) {
+  let signupEligible = false;
+  try {
+    const { previewCancelSignup } = require('./customer-offboarding');
+    const signup = await previewCancelSignup(customerId);
+    signupEligible = signup && signup.eligible === true;
+  } catch (probeErr) {
+    logger.warn(`[admin-cancellation] signup-cancel probe failed for ${customerId}: ${probeErr.message}`);
+  }
+  if (signupEligible) {
+    throw new CancelPlanError(409, 'use_cancel_signup',
+      'This account is still at the deposit stage — use "Cancel signup & refund deposit" so the deposit is refunded, instead of a plan cancellation.');
+  }
+}
+
 async function loadCustomer(customerId) {
   const customer = await db('customers')
     .where({ id: customerId })
@@ -144,29 +165,36 @@ async function resolveLiveTerm(customerId, wholeAccount) {
 
 const dateOnly = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : null);
 
-// Acceptance matching is by CUSTOMER + canonical SCOPE SET, never the exact
-// presentation subject: the subject embeds the proposing operator and the
-// caller's family order, and a partial cancellation must stay repairable by
-// another admin, from the other surface (Customer 360 ↔ Intelligence Bar),
-// or with the families reordered. The scope is recovered from our own
-// subject format with the actor suffix stripped.
-const ACTOR_SUFFIX_RE = / \((?:Admin|Intelligence Bar)(?: \(user [^)]*\))?\)$/;
-function subjectScopeLabels(subject) {
-  const base = String(subject || '').replace(ACTOR_SUFFIX_RE, '');
-  if (base === 'Cancel plan') return []; // whole account
-  if (!base.startsWith('Cancel ')) return null; // not a cancel-plan subject
-  return base.slice('Cancel '.length).split(', ').sort();
+// Acceptance matching is by CUSTOMER + canonical SCOPE SET, carried in the
+// request's own metadata (written at acceptance time, BEFORE any
+// processing) — never the presentation subject, which embeds the proposing
+// operator and the caller's family order; another admin, the other surface
+// (Customer 360 ↔ Intelligence Bar), or a reordered family list must still
+// land the repair on the first attempt's request. OPEN acceptances match
+// with NO age cutoff: 'new' means the run still owes follow-ups (a clean
+// run stamps 'resolved'), and a partial cancellation revisited after a
+// weekend must still reach the repair pass. RESOLVED echoes stay bounded
+// to 24h — a lost response retries promptly, and an old resolved
+// acceptance must not answer for a genuinely empty account months later.
+const cancelScopeKey = (wholeAccount, scope) => JSON.stringify(wholeAccount ? [] : [...scope].sort());
+function requestCancelPlanMeta(row) {
+  try {
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || null);
+    return meta && meta.cancel_plan ? meta.cancel_plan : null;
+  } catch { return null; }
 }
 async function findCancelAcceptance(customerId, wholeAccount, scope, status) {
-  const wanted = JSON.stringify(wholeAccount ? [] : scope.map(familyLabelOf).sort());
-  const candidates = await db('service_requests')
+  const wanted = cancelScopeKey(wholeAccount, scope);
+  let query = db('service_requests')
     .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status })
-    .where('created_at', '>=', new Date(Date.now() - 24 * 60 * 60 * 1000))
-    .orderBy('created_at', 'desc')
-    .select('*');
+    .orderBy('created_at', 'desc');
+  if (status !== 'new') {
+    query = query.where('created_at', '>=', new Date(Date.now() - 24 * 60 * 60 * 1000));
+  }
+  const candidates = await query.select('*');
   for (const row of candidates || []) {
-    const labels = subjectScopeLabels(row.subject);
-    if (labels && JSON.stringify(labels) === wanted) return row;
+    const cp = requestCancelPlanMeta(row);
+    if (cp && JSON.stringify(Array.isArray(cp.scope) ? [...cp.scope].sort() : null) === wanted) return row;
   }
   return null;
 }
@@ -569,6 +597,9 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     logger.warn(`[admin-cancellation] retry-acceptance preview lookup failed for ${customerId}: ${retryErr.message}`);
   }
   const scopedRetry = repairRetry && scopeError === 'scope_not_owned';
+  // A deposit-stage account routes to the signup-cancellation flow — but a
+  // repair retry of a partial generic cancel finishes what already started.
+  if (!repairRetry) await refuseDepositStageAccount(customerId);
   const term = await resolveLiveTerm(customerId, wholeAccount);
   const prepayPlan = resolvePrepay(input, term, wholeAccount);
   // The preview's "visits pulled" must count what pressing the button pulls:
@@ -687,6 +718,10 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       return null;
     }
   };
+  // Deposit-stage accounts belong to the dedicated signup-cancel flow; an
+  // open acceptance means a generic cancel already partially ran — finish
+  // its repairs instead of stranding them.
+  if (!(await findOpenAcceptance())) await refuseDepositStageAccount(customerId);
   if (scopeError) {
     // A scoped retry whose first run already pulled every selected visit no
     // longer OWNS those families — refusing scope_not_owned here would
@@ -951,6 +986,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     // push already-waived rows through the ordinary charge path), and its
     // outcome merges into this run's record so the case never regresses to
     // "0 visits pulled" repair facts.
+    // The DURABLE waiver lives on the request's own metadata (written at
+    // acceptance, before anything could fail); the case snapshot is only a
+    // fallback — a run that lost BOTH a fee side effect and its case write
+    // must still restore the waiver the operator accepted.
+    const requestMeta = requestCancelPlanMeta(request);
+    if (requestMeta && requestMeta.waiveLateFee === true && !input.waiveLateFee) {
+      input.waiveLateFee = true;
+      logger.info(`[admin-cancellation] retry inherits the accepted fee waiver from request ${request.id}`);
+    }
     try {
       const priorCase = await db('cancellation_cases')
         .where({ service_request_id: request.id })
@@ -962,10 +1006,22 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       priorOutcome = snap && snap.outcome ? snap.outcome : null;
       if (snap && snap.waiveLateFee === true && !input.waiveLateFee) {
         input.waiveLateFee = true;
-        logger.info(`[admin-cancellation] retry inherits the accepted fee waiver from request ${request.id}`);
+        logger.info(`[admin-cancellation] retry inherits the accepted fee waiver from request ${request.id} (case snapshot)`);
       }
     } catch (priorErr) {
       logger.warn(`[admin-cancellation] prior-case load failed for request ${request.id}: ${priorErr.message}`);
+    }
+    // A retry that ADDS the waiver ratchets it onto the durable record so a
+    // later retry keeps it even if this run's case write fails.
+    if (input.waiveLateFee && (!requestMeta || requestMeta.waiveLateFee !== true)) {
+      try {
+        await db('service_requests').where({ id: request.id }).update({
+          metadata: JSON.stringify({ cancel_plan: { ...(requestMeta || { scope: wholeAccount ? [] : [...scope].sort() }), waiveLateFee: true } }),
+          updated_at: new Date(),
+        });
+      } catch (metaErr) {
+        logger.warn(`[admin-cancellation] waiver ratchet failed for request ${request.id}: ${metaErr.message}`);
+      }
     }
   } else {
     [request] = await db('service_requests')
@@ -979,6 +1035,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         photos: JSON.stringify([]),
         status: 'new',
         source: 'admin',
+        // Durable retry state, written BEFORE any processing: the canonical
+        // scope set keys acceptance matching, and the accepted waiver must
+        // survive a lost case write (it is money the operator promised).
+        metadata: JSON.stringify({
+          cancel_plan: {
+            scope: wholeAccount ? [] : [...scope].sort(),
+            waiveLateFee: input.waiveLateFee,
+          },
+        }),
       })
       .returning('*');
     logger.info(`[admin-cancellation] request ${request.id} opened for customer ${customerId} by ${actorLabel}`);

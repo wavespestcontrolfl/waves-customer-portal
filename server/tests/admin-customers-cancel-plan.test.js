@@ -37,6 +37,8 @@ const mockHoldPreview = jest.fn(async () => ({ held: false, feeApplies: false })
 const mockApptPreview = jest.fn(async () => ({ secured: false, feeApplies: false }));
 jest.mock('../services/estimate-card-holds', () => ({ cardHoldCancelPreview: (...a) => mockHoldPreview(...a) }));
 jest.mock('../services/appointment-card-request', () => ({ appointmentCardCancelPreview: (...a) => mockApptPreview(...a) }));
+const mockSignupPreview = jest.fn(async () => ({ eligible: false, blockers: ['beyond deposit stage'] }));
+jest.mock('../services/customer-offboarding', () => ({ previewCancelSignup: (...a) => mockSignupPreview(...a) }));
 jest.mock('../services/cancellation-eligibility', () => ({
   hasCancellableWork: jest.fn().mockResolvedValue(true),
   CANCELLABLE_STATUSES: ['pending', 'confirmed', 'rescheduled'],
@@ -207,7 +209,7 @@ function builderFor(table) {
   });
   b.insert = jest.fn((row) => ({
     returning: jest.fn(async () => {
-      const inserted = { id: `${table}-${(mockState.inserted ??= []).length + 1}`, created_at: new Date('2026-08-31T14:00:00Z'), ...row };
+      const inserted = { id: `${table}-${(mockState.inserted ??= []).length + 1}`, created_at: new Date(), ...row };
       mockState.inserted.push({ table, row: inserted });
       (mockState[table] ??= []).push(inserted);
       return [inserted];
@@ -261,6 +263,7 @@ beforeEach(() => {
   hasCancellableWork.mockResolvedValue(true);
   mockOpenCase.mockReset().mockImplementation(defaultOpenCase);
   mockRecordDecision.mockClear();
+  mockSignupPreview.mockClear().mockResolvedValue({ eligible: false, blockers: ['beyond deposit stage'] });
   mockHoldPreview.mockClear().mockResolvedValue({ held: false, feeApplies: false });
   mockApptPreview.mockClear().mockResolvedValue({ secured: false, feeApplies: false });
   sendCancellationConfirmations.mockClear();
@@ -535,13 +538,49 @@ describe('POST /:id/cancel-plan', () => {
     mockState.service_requests = [{
       id: 'req-ib', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
       subject: 'Cancel Lawn Care (Intelligence Bar (user other-admin))', description: '',
-      created_at: new Date('2026-08-31T14:00:00Z'),
+      metadata: JSON.stringify({ cancel_plan: { scope: ['lawn_care'], waiveLateFee: false } }),
+      // Three days old: an OPEN acceptance stays repairable past any
+      // freshness window (a weekend must not strand the repair).
+      created_at: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
     }];
     mockPlan.mockResolvedValue({ ok: false, error: 'scope_not_owned' });
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: true, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: [], cancelledCount: 0 });
     const body = await (await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] })).json();
     expect(body.requestId).toBe('req-ib');
     expect(mockState.inserted).toBeUndefined();
+  }));
+
+  test('a deposit-stage account is refused — 409 use_cancel_signup routes to the dedicated offboarding flow', () => withServer(async (baseUrl) => {
+    mockSignupPreview.mockResolvedValue({ eligible: true, blockers: [] });
+    const commit = await post(baseUrl, '/cancel-plan');
+    expect(commit.status).toBe(409);
+    expect((await commit.json()).code).toBe('use_cancel_signup');
+    expect(mockState.inserted).toBeUndefined();
+    expect(mockProcess).not.toHaveBeenCalled();
+    const preview = await post(baseUrl, '/cancel-plan/preview');
+    expect(preview.status).toBe(409);
+    // An OPEN acceptance (a generic cancel already partially ran) bypasses
+    // the guard so its repairs are not stranded.
+    mockState.service_requests = [{
+      id: 'req-1', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false } }),
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+    }];
+    const retry = await post(baseUrl, '/cancel-plan');
+    expect(retry.status).toBe(200);
+  }));
+
+  test('the accepted waiver survives a LOST case write — the request metadata is the durable record', () => withServer(async (baseUrl) => {
+    // Run 1: waived, a fee leg failed AND the case write failed.
+    mockOpenCase.mockRejectedValueOnce(new Error('case table down'));
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, lateFeeWaived: false, errors: ['card_hold:s1'] });
+    const first = await (await post(baseUrl, '/cancel-plan', { waiveLateFee: true })).json();
+    expect(first.caseId).toBeNull();
+    // Retry from the default unchecked state still carries the waiver.
+    const second = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(second.requestId).toBe(first.requestId);
+    expect(mockProcess.mock.calls[1][0].waiveLateFee).toBe(true);
   }));
 
   test('a sticky waiver: a repair retry inherits the first attempt\'s accepted fee waiver', () => withServer(async (baseUrl) => {
@@ -571,7 +610,9 @@ describe('POST /:id/cancel-plan', () => {
     // Whole-account: wound down, follow-up failed, acceptance open.
     mockState.service_requests = [{
       id: 'req-1', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
-      subject: 'Cancel plan (Admin (user admin-1))', description: '', created_at: new Date('2026-08-31T14:00:00Z'),
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false } }),
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
     }];
     hasCancellableWork.mockResolvedValue(false);
     let preview = await (await post(baseUrl, '/cancel-plan/preview')).json();
@@ -581,7 +622,9 @@ describe('POST /:id/cancel-plan', () => {
     // Scoped: the family is gone from the live rows but the acceptance is open.
     mockState.service_requests = [{
       id: 'req-2', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
-      subject: 'Cancel Lawn Care (Admin (user admin-1))', description: '', created_at: new Date('2026-08-31T14:00:00Z'),
+      subject: 'Cancel Lawn Care (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: ['lawn_care'], waiveLateFee: false } }),
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
     }];
     mockPlan.mockResolvedValue({ ok: false, error: 'scope_not_owned' });
     preview = await (await post(baseUrl, '/cancel-plan/preview', { families: ['lawn_care'] })).json();
