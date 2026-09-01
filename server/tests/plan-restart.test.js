@@ -154,6 +154,7 @@ function builder(table) {
       where: (sa, sop, sval) => { push(false, typeof sa === 'function' ? groupCond(sa) : scalarCond(sa, sop, sval)); return sub; },
       andWhere: (sa, sop, sval) => sub.where(sa, sop, sval),
       orWhere: (sa, sop, sval) => { push(true, typeof sa === 'function' ? groupCond(sa) : scalarCond(sa, sop, sval)); return sub; },
+      whereNot: (col, val) => { push(false, (r) => String(r[norm(col)]) !== String(val)); return sub; },
       whereNull: (col) => { push(false, (r) => r[norm(col)] == null); return sub; },
       orWhereNull: (col) => { push(true, (r) => r[norm(col)] == null); return sub; },
       whereNotNull: (col) => { push(false, (r) => r[norm(col)] != null); return sub; },
@@ -492,6 +493,25 @@ describe('mintRestartEstimate', () => {
     }];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
     expect(found).toEqual({ families: ['pest_control'], caseId: 'case-5', source: 'cancelled_rows' });
+  });
+
+  test('a cancel-then-refunded prepay term still names the cancelled plan (codex GH r11 P1)', async () => {
+    // Refund processing CANCELS the term — historical evidence must survive
+    // the status flip; ownership (live classifier) correctly excludes it,
+    // so the family is restartable.
+    tables.cancellation_cases = [{
+      id: 'case-8', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-14',
+    }];
+    tables.scheduled_services = [];
+    tables.annual_prepay_terms = [{
+      id: 'term-4', customer_id: 'cust-1', status: 'cancelled', term_start: '2026-01-01', term_end: '2026-12-31',
+      plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: null,
+    }];
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-8', source: 'cancelled_rows' });
+    const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(result.reused).toBe(false);
+    expect(tables.estimates).toHaveLength(1);
   });
 
   test('a prepay term still covering TODAY is owned coverage — the mint refuses rather than re-sell it (codex pre-push P0)', async () => {

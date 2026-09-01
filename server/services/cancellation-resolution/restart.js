@@ -175,7 +175,7 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   try {
     const { etDateString } = require('../../utils/datetime-et');
     const attemptDate = etDateString(attemptAnchor ? new Date(attemptAnchor) : new Date());
-    for (const key of await prepayTermFamilyKeys(dbh, customerId, attemptDate)) {
+    for (const key of await prepayTermFamilyKeys(dbh, customerId, attemptDate, { historical: true })) {
       if (!keys.includes(key)) keys.push(key);
     }
   } catch (err) {
@@ -209,17 +209,33 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   return { families: [], caseId: current ? current.id : null, source: 'none' };
 }
 
-// Families named by the annual-prepay terms covering `dateStr` — the same
-// coveredTermsAsOf derivation the cancellation facts run (facts.js):
-// family off the term's anchor visit, falling back to the plan label.
-// Serves BOTH readers: cancelled-plan evidence (attempt date, fail-open to
-// narrower) and residual ownership (today, fail-closed).
-async function prepayTermFamilyKeys(dbh, customerId, dateStr) {
+// Families named by the annual-prepay terms covering `dateStr`, family off
+// the term's anchor visit, falling back to the plan label (facts.js's own
+// derivation). Two modes:
+//   - live (default): coveredTermsAsOf's strict paid/refund classifier —
+//     residual OWNERSHIP as of today, fail-closed at the callers.
+//   - historical: terms that covered the date and were really bought — the
+//     cancel-then-refund flow CANCELS the term and refunds its invoice, so
+//     the live classifier erases exactly the plan this customer just
+//     cancelled (codex GH r11 P1); status/refund churn AFTER the attempt
+//     must not erase what they had. Only a never-paid pending is excluded.
+async function prepayTermFamilyKeys(dbh, customerId, dateStr, { historical = false } = {}) {
   const {
     detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow,
   } = require('../self-booking-plan-sync');
   const { coveredTermsAsOf } = require('../annual-prepay-renewals');
-  const terms = await coveredTermsAsOf(dbh, dateStr)
+  const base = historical
+    ? dbh('annual_prepay_terms as t')
+      .leftJoin('invoices as i', 'i.id', 't.prepay_invoice_id')
+      .where('t.term_start', '<=', dateStr)
+      .where('t.term_end', '>=', dateStr)
+      .where(function reallyBought() {
+        this.whereNot('t.status', 'payment_pending')
+          .orWhere('i.status', 'paid')
+          .orWhereNotNull('i.paid_at');
+      })
+    : coveredTermsAsOf(dbh, dateStr);
+  const terms = await base
     .where('t.customer_id', customerId)
     .select('t.plan_label', 't.last_scheduled_service_id');
   const keys = [];
