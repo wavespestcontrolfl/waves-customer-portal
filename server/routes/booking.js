@@ -3031,8 +3031,14 @@ async function createSelfBooking(payload = {}) {
                 // (codex #3591 r18 P1): a rodent bait-station setup is waived
                 // only by another qualifying family, which the quote already
                 // applied — a rodent-only Bronze member still owes it.
+                // A UNIFIED-kind decision (GATE_UNIFIED_SETUP_FEE, owner
+                // ruling 2026-09-01) is decide-once: a positive frozen fee is
+                // authoritative and no membership/tier re-read may erase it —
+                // only the queued-claim race guard below (one account setup
+                // at a time; drain protection) still waives.
                 const rodentSetupQuote = estData?.setupFeeQuote?.kind === 'rodent_bait_setup';
-                if (activeMember && !rodentSetupQuote) {
+                const unifiedSetupQuote = estData?.setupFeeQuote?.kind === 'unified';
+                if (activeMember && !rodentSetupQuote && !unifiedSetupQuote) {
                   await retireOrWaiveDraft('existing_member');
                   return;
                 }

@@ -5932,14 +5932,33 @@ const EstimateConverter = {
           const prepayPlanPrefix = commercialOnlyRecurring
             ? 'Commercial'
             : `WaveGuard ${tier && tier !== 'none' ? tier : 'Bronze'}`;
+          // Unified accept-time setup fee (owner ruling 2026-09-01,
+          // GATE_UNIFIED_SETUP_FEE quotes): prepay accepts CHARGE the setup
+          // — a frozen positive unified decision rides this same invoice as
+          // its own line (the prepay invoice is the only invoice a prepay
+          // estimate ever mints, so a fee skipped here is never collected).
+          // The operator's explicit per-estimate waiver still zeroes it.
+          // Unified quotes are never commercial (the quote basis excludes
+          // commercial), so the commercial tax blend needs no unified arm.
+          const prepayUnifiedQuote = normalizeEstimateData(estimateData)?.setupFeeQuote;
+          const prepayUnifiedSetupAmount = prepayUnifiedQuote?.kind === 'unified'
+            && Number(prepayUnifiedQuote.amount) > 0
+            && !estimateOperatorSetupFeeWaived(estimateData)
+            ? Math.round(Number(prepayUnifiedQuote.amount) * 100) / 100
+            : 0;
           const prepayLineDescription = commercialOnlyRecurring
             ? `${prepayPlanPrefix} — 12 months prepaid`
             : prepayDiscountApplied
               ? `${prepayPlanPrefix} — 12 months prepaid (${prepayDiscountPctLabel} prepay discount)`
-              : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
+              : prepayUnifiedSetupAmount > 0
+                // The unified fee rides this invoice — never claim a waiver.
+                ? `${prepayPlanPrefix} — 12 months prepaid`
+                : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
           const prepayNotes = prepayDiscountApplied
             ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayDiscountPctLabel} annual-prepay discount applied to the recurring annual.`
-            : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $${setupFeeAmount.toFixed(2)} setup fee waived per WaveGuard membership policy.`;
+            : prepayUnifiedSetupAmount > 0
+              ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $${prepayUnifiedSetupAmount.toFixed(2)} one-time setup fee billed with the prepay.`
+              : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $${setupFeeAmount.toFixed(2)} setup fee waived per WaveGuard membership policy.`;
           // Commercial prepay tax: pass an explicit BLENDED rate (see
           // resolveCommercialPrepayTaxRate) so only the taxable pest share of a
           // mixed commercial plan is taxed. Non-commercial prepay passes no rate
@@ -6024,6 +6043,11 @@ const EstimateConverter = {
               description: 'Bait Station Setup — one-time setup fee',
               quantity: 1,
               unit_price: prepayRodentSetupAmount,
+            }] : []),
+            ...(prepayUnifiedSetupAmount > 0 ? [{
+              description: 'Setup Fee — one-time (billed with prepay)',
+              quantity: 1,
+              unit_price: prepayUnifiedSetupAmount,
             }] : [])],
             notes: prepayNotes,
             dueDate: etDateString(),

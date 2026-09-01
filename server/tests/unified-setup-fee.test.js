@@ -181,3 +181,27 @@ describe('converter: a frozen unified quote is authoritative both ways', () => {
     expect(shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: bundle, estimateData: {} })).toBe(false);
   });
 });
+
+describe('decide-once enforcement on the billing/handoff paths (pre-push audit P0s)', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  test('prepay accepts CHARGE a frozen positive unified fee — its line rides the prepay invoice, and the "setup fee waived" copy never fires beside it', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
+    // The fee line rides the SAME InvoiceService.create lineItems array as
+    // the rodent setup line, gated on the frozen unified quote + the
+    // operator waiver.
+    expect(src).toMatch(/prepayUnifiedSetupAmount = prepayUnifiedQuote\?\.kind === 'unified'[\s\S]{0,200}estimateOperatorSetupFeeWaived\(estimateData\)/);
+    expect(src).toMatch(/prepayUnifiedSetupAmount > 0 \? \[\{\s*description: 'Setup Fee — one-time \(billed with prepay\)'/);
+    // Copy: a riding fee suppresses the waiver claim in description AND notes.
+    expect(src).toMatch(/prepayUnifiedSetupAmount > 0\s*\n\s*\/\/ The unified fee rides this invoice — never claim a waiver\./);
+    expect(src).toMatch(/one-time setup fee billed with the prepay\./);
+  });
+
+  test('self-booking never re-waives a positive unified decision via the legacy member check (decide-once)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
+    expect(src).toMatch(/if \(activeMember && !rodentSetupQuote && !unifiedSetupQuote\) \{/);
+    // The zero-decision branch bails before any lapse re-derivation too.
+    expect(src).toMatch(/setupFeeQuote\?\.kind === 'unified'\) return;/);
+  });
+});
