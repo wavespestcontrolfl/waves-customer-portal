@@ -322,8 +322,9 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     // hide its nested values from every pattern below.
     expect({ where, type: typeof text }).toEqual({ where, type: 'string' });
     for (const email of String(text).match(/[\w.+%-]+@[\w.-]+/g) || []) {
-      expect({ where, email, reserved: /@(?:[a-z0-9-]+\.)*example\.com$/i.test(email) })
-        .toEqual({ where, email, reserved: true });
+      const ok = /@(?:[a-z0-9-]+\.)*example\.com$/i.test(email)
+        && SYNTHETIC_EMAIL_LOCALS.has(email.toLowerCase().split('@')[0]);
+      expect({ where, email, ok }).toEqual({ where, email, ok: true });
     }
     for (const run of String(text).match(/\+?\d[\d\s().-]{5,}\d/g) || []) {
       const digits = run.replace(/\D/g, '');
