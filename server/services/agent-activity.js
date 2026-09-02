@@ -303,6 +303,9 @@ function digestItem(row) {
   return {
     id: `digest:${row.id}`,
     kind: 'digest',
+    // The Review link marks this bell row read (PUT /admin/notifications/:id/read)
+    // so an ACT item clears from the feed once the owner has followed it.
+    notificationId: row.id,
     agent: OPS_AGENT,
     title: subject.replace(/^(ACT|FIX|FIRST):\s*/i, ''),
     subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),

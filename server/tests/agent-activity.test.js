@@ -249,6 +249,7 @@ describe('buildActivity digests', () => {
       ['digest:n4', 'completed', 'autopay charge on a card hold', 'Waves Ops'],
     ]);
     expect(items[0].subtitle).toBe('promised estimate · needs you');
+    expect(items[0].notificationId).toBe('n1');
     expect(items[1].subtitle).toBe('lead to cash invariants · needs a fix');
     expect(items[0].link).toBe('/admin/pipeline');
     expect(items[0].detail).toBe('Line one\nLine two');

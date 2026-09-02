@@ -62,13 +62,14 @@ describe('deliverOpsDigest', () => {
     expect(out).toMatchObject({ ok: true, channel: 'email', fallback: true });
   });
 
-  it('gate on + notify:false: skips the email and writes nothing (sender already bells)', async () => {
+  it('gate on: caps the stored title at the 200-char column and keeps the full subject in metadata', async () => {
     withGate(true);
-    const sendEmail = jest.fn();
-    const out = await deliverOpsDigest({ key: 'gbp-sync-health', subject: 's', text: 't', notify: false, sendEmail });
-    expect(sendEmail).not.toHaveBeenCalled();
-    expect(mockNotifyAdmin).not.toHaveBeenCalled();
-    expect(out).toEqual({ ok: true, channel: 'in_app', id: null });
+    mockNotifyAdmin.mockResolvedValue({ id: 'n2' });
+    const subject = 'ACT: bounced email fix suggested — ' + 'x'.repeat(300);
+    await deliverOpsDigest({ key: 'email-bounce-rescue', subject, text: 't', sendEmail: jest.fn() });
+    const [, title, , opts] = mockNotifyAdmin.mock.calls[0];
+    expect(title).toHaveLength(200);
+    expect(opts.metadata.subject).toBe(subject);
   });
 
   it('requires a sendEmail thunk', async () => {
