@@ -166,14 +166,22 @@ function isoOrNull(value) {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+// Seeds come from the V2 extraction ONLY, and only where V2 pinned a
+// transcript quote for the field: downstream composers never read V1
+// (AGENTS.md), and a commitment with no evidence would be an obligation
+// nobody can check against the words. A flag without a quote is left to the
+// model pass, which must ground every item verbatim. `v1` and
+// `disposition` are accepted for call-site compatibility only.
+ 
 function deriveCommitmentsFromExtraction({ v2 = null, v1 = null, disposition = null } = {}) {
   const items = [];
   const sr = v2?.service_request || {};
   const sched = v2?.scheduling || {};
   const conf = v2?.confidence || {};
+  const withEvidence = (item) => { if (item.evidence.length) items.push(item); };
 
-  if (sr.quote_promised === true || v1?.quote_promised === true) {
-    items.push({
+  if (sr.quote_promised === true) {
+    withEvidence({
       party: 'waves',
       kind: 'send_estimate',
       description: 'Send the caller an estimate',
@@ -194,8 +202,8 @@ function deriveCommitmentsFromExtraction({ v2 = null, v1 = null, disposition = n
   // verbatim evidence to record it.
 
   const callbackWindow = isoOrNull(sched.callback_window_start);
-  if (disposition === 'callback_task_created' || v2?.recommended_disposition === 'callback_task_created' || callbackWindow) {
-    items.push({
+  if (callbackWindow || v2?.recommended_disposition === 'callback_task_created') {
+    withEvidence({
       party: 'waves',
       kind: 'callback',
       description: callbackWindow ? `Call the customer back (asked for ${sched.callback_window_start})` : 'Call the customer back',
@@ -204,13 +212,13 @@ function deriveCommitmentsFromExtraction({ v2 = null, v1 = null, disposition = n
       due_basis: callbackWindow ? 'stated' : null,
       confidence: typeof conf.scheduling_window === 'number' ? conf.scheduling_window : null,
       evidence: evidenceFor(v2, ['/scheduling/callback_window_start', '/scheduling/callback_window_end']),
-      origin: callbackWindow ? 'v2:scheduling.callback_window_start' : 'disposition:callback_task_created',
+      origin: callbackWindow ? 'v2:scheduling.callback_window_start' : 'v2:recommended_disposition',
     });
   }
 
   if (sched.follow_up_mentioned === true) {
     const followUpAt = isoOrNull(sched.follow_up_start_at);
-    items.push({
+    withEvidence({
       party: 'waves',
       kind: 'technician_follow_up',
       description: followUpAt ? `Follow-up visit or contact around ${sched.follow_up_start_at}` : 'Follow-up visit or contact was discussed',

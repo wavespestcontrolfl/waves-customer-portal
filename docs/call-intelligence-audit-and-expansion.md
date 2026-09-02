@@ -187,6 +187,10 @@ Per file, with the proving test.
   migration dedupes any pre-existing duplicates (keeping the earliest row)
   before creating the index, so it can never block a deploy; live-Postgres
   test runs down → duplicates → up.
+- Pre-push Codex round 21 (1 P1, fixed): deterministic seeds come from V2
+  only and only where V2 pinned a transcript quote for the field — V1
+  flags and the routing disposition never seed a commitment; flags without
+  a quote are left to the model pass, which grounds every item verbatim.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 

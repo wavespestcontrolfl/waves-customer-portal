@@ -75,6 +75,8 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
     evidence: [
       { field_path: '/service_request/quoted_price_usd', quote: 'about a hundred forty nine', speaker: 'agent', transcript_offset_ms: null },
       { field_path: '/scheduling/confirmed_start_at', quote: 'Thursday at ten works', speaker: 'caller', transcript_offset_ms: null },
+      { field_path: '/scheduling/callback_window_start', quote: 'call me back tomorrow at nine', speaker: 'caller', transcript_offset_ms: null },
+      { field_path: '/scheduling/follow_up_start_at', quote: 'we come back around the twentieth', speaker: 'agent', transcript_offset_ms: null },
     ],
   };
 
@@ -103,16 +105,14 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
     expect(deriveCommitmentsFromExtraction({ v2: { scheduling: { status: 'requested' }, service_request: {} } })).toEqual([]);
   });
 
-  test('the legacy flat extraction can still seed the estimate promise', () => {
-    const items = deriveCommitmentsFromExtraction({ v1: { quote_promised: true } });
-    expect(items).toHaveLength(1);
-    expect(items[0].kind).toBe('send_estimate');
-    expect(items[0].evidence).toEqual([]);
+  test('V1 and the routing disposition never seed a commitment — downstream reads V2 + transcript only', () => {
+    expect(deriveCommitmentsFromExtraction({ v1: { quote_promised: true } })).toEqual([]);
+    expect(deriveCommitmentsFromExtraction({ v2: { scheduling: {} }, disposition: 'callback_task_created' })).toEqual([]);
   });
 
-  test('the callback disposition seeds a callback with no invented due time', () => {
-    const items = deriveCommitmentsFromExtraction({ v2: { scheduling: {} }, disposition: 'callback_task_created' });
-    expect(items).toEqual([expect.objectContaining({ kind: 'callback', due_at: null, due_basis: null })]);
+  test('a V2 flag with no pinned transcript quote is not seeded — the model pass must ground it', () => {
+    expect(deriveCommitmentsFromExtraction({ v2: { ...v2, evidence: [] } })).toEqual([]);
+    expect(deriveCommitmentsFromExtraction({ v2: { scheduling: {}, recommended_disposition: 'callback_task_created', evidence: [] } })).toEqual([]);
   });
 });
 
