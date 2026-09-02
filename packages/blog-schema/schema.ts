@@ -1180,7 +1180,29 @@ function tagsNamed(src: string, name: string): Array<{ start: number; attrs: str
 
 // A child expression that renders NOTHING: an empty string or a boolean/
 // nullish literal, with optional comment trivia around it.
-const NON_RENDERING_CHILD_RE = new RegExp('\\{' + '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*' + '(?:([\'"`])\\1|true|false|null|undefined)' + '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*' + '\\}', 'g');
+// An ARRAY whose slots are all non-rendering (or elided) renders nothing
+// either ({[]}, {[null]}, {[false, '']}; Codex #3646 r39).
+const NON_RENDERING_CHILD_RE = (() => {
+  const trivia = '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*';
+  const lit = "(?:''|\"\"|``|true|false|null|undefined)"; // no backreference — the array branch repeats the group
+  const arr = '\\[' + trivia + '(?:' + lit + '?' + trivia + ',' + trivia + ')*' + '(?:' + lit + trivia + ')?' + '\\]';
+  return new RegExp('\\{' + trivia + '(?:' + lit + '|' + arr + ')' + trivia + '\\}', 'g');
+})();
+
+// A class list hides at EVERY viewport when any hiding utility present
+// lacks the breakpoint reset that undoes ITS property (Codex #508 r5/r6):
+// `hidden` (display) ↔ md:block/flex/…; `invisible` (visibility) ↔
+// md:visible; `sr-only` ↔ md:not-sr-only. Only VIEWPORT breakpoints
+// prove responsive visibility — print:/hover:/focus: variants leave the
+// element hidden in ordinary viewing.
+const HIDING_UTILITY_RESETS: Array<[RegExp, RegExp]> = [
+  [/(?:^|\s)hidden(?=\s|$)/, /\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/],
+  [/(?:^|\s)invisible(?=\s|$)/, /\b(?:sm|md|lg|xl|2xl):visible\b/],
+  [/(?:^|\s)sr-only(?=\s|$)/, /\b(?:sm|md|lg|xl|2xl):not-sr-only\b/],
+];
+function classListStaticallyHidden(cls: string): boolean {
+  return HIDING_UTILITY_RESETS.some(([hide, reset]) => hide.test(cls) && !reset.test(cls));
+}
 
 // Definitely-hidden element predicates, shared by the structural view and
 // the AffiliateLink child check (Codex #3646 r37).
@@ -1214,12 +1236,7 @@ function classStaticallyHidden(attrs: string): boolean {
     cls = a.literal !== null ? a.literal : staticExprString(a.expr);
   }
   if (cls === null) return false;
-  if (!/(?:^|\s)(?:hidden|invisible|sr-only)(?=\s|$)/.test(cls)) return false;
-  // Responsively-visible wrappers (class="hidden md:block") stay: mask
-  // only elements hidden at EVERY breakpoint.
-  // Only VIEWPORT breakpoints prove responsive visibility — print:/
-  // hover:/focus: variants leave the element hidden in ordinary viewing.
-  return !/\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item|not-sr-only|visible)\b/.test(cls); // visibility RESETS (md:not-sr-only, md:visible) un-hide too (Codex #508 r5)
+  return classListStaticallyHidden(cls);
 }
 const NON_RENDERED_CONTAINERS = ['template', 'script', 'style', 'noscript', 'datalist'];
 
@@ -1263,9 +1280,9 @@ function affiliateLinkTextIsEmpty(src: string, strView: string, start: number, a
           tagRe2.lastIndex = end + 1;
         }
         text += visible.slice(last);
-        // Comment trivia around the literal ({false /* note */}) renders
-        // nothing either (Codex #508 r5).
-        return !text.replace(NON_RENDERING_CHILD_RE, '').trim();
+        // Comment trivia around the literal ({false /* note */}) and
+        // fragment delimiters (<></>) render nothing either (Codex #508 r5/r6).
+        return !text.replace(/<>|<\/>/g, '').replace(NON_RENDERING_CHILD_RE, '').trim();
       }
     } else {
       const a = tagAttrsAt(src, t.index);
@@ -1497,7 +1514,17 @@ function styleHidesElement(attrs: string): boolean {
   if (!walked.ok) return true;
   let styleValue: string | null = null;
   for (const a of walked.list) if (a.name.toLowerCase() === 'style') styleValue = a.literal ?? a.expr ?? null; // last wins (JSX)
-  return styleValue !== null && /(?:display\s*['"]?\s*:\s*['"]?\s*none|visibility\s*['"]?\s*:\s*['"]?\s*hidden)/i.test(styleValue);
+  if (styleValue === null) return false;
+  // CSS applies the LAST declaration of a property (Codex #508 r6):
+  // "display:none; display:inline" is visible. Read the final value of
+  // each property (CSS string or JSX style-object spelling).
+  const lastValue = (prop: string): string | null => {
+    const re = new RegExp(`(?:^|[^a-z0-9_-])${prop}\\s*['"]?\\s*:\\s*['"\`]?\\s*([a-z-]+)`, 'gi');
+    let m: RegExpExecArray | null; let last: string | null = null;
+    while ((m = re.exec(styleValue)) !== null) last = m[1].toLowerCase();
+    return last;
+  };
+  return lastValue('display') === 'none' || lastValue('visibility') === 'hidden';
 }
 
 // True when the element's `hidden` attribute renders it hidden (last-wins;
@@ -2203,8 +2230,9 @@ function tryParseStaticJson(body: string): { value: unknown } | undefined {
       // JSON — carried through as a sentinel and resolved with JS semantics
       // (an object property with an undefined value is ABSENT; an array
       // slot stays undefined) so the container is still validated
-      // (Codex #3646 r38).
-      const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/([:\[,]\s*)undefined(?=\s*[,\]}])/g, '$1"\\u0000undefined"').replace(/,\s*([\]}])/g, '$1'))).join('');
+      // (Codex #3646 r38). An array ELISION ([, x]) is an undefined slot
+      // too (Codex #3646 r39); a trailing comma is not.
+      const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/([:\[,]\s*)undefined(?=\s*[,\]}])/g, '$1"\\u0000undefined"').replace(/([\[,])(\s*)(?=,)/g, '$1$2"\\u0000undefined"').replace(/,\s*([\]}])/g, '$1'))).join('');
       return { value: resolveUndefinedSentinels(JSON.parse(keyed)) };
     } catch {
       return undefined;

@@ -2814,6 +2814,12 @@ describe('publishRefresh fact-check (refreshed blog bodies)', () => {
       { action_type: 'refresh_existing_page' },
     )).rejects.toMatchObject({ statusCode: 422, message: expect.stringMatching(/legacy \.md file — an MDX component \(<InlineCTA>\)/) });
     expect(gh.createBranch).not.toHaveBeenCalled();
+    // Quoted attribute text renders no component — the refresh proceeds (Codex #3646 r39).
+    const attrText = 'Refreshed body.\n\n<div title="<InlineCTA />">text</div>\n\nMore prose.';
+    expect((await AstroPublisher.publishRefresh(
+      { type: 'draft', file_path: MD_PATH, page_url: 'https://www.wavespestcontrol.com/dollar-spot-venice/', body: attrText, frontmatter: {} },
+      { action_type: 'refresh_existing_page' },
+    )).pr_number).toBe(50);
     // The same component INSIDE the fence is a code sample — the refresh proceeds.
     const fenced = 'Refreshed body.\n\n```html\n<!-- example only -->\n<InlineCTA />\n```\n\nMore prose.';
     const result = await AstroPublisher.publishRefresh(

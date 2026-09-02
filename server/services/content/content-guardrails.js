@@ -292,7 +292,6 @@ function opensDefinitelyHidden(tag) {
 // `title="display:none example"` or `display: 'nonetheless'` is not hidden
 // (#3593 r1). String and literal-expression values both count; the value
 // may quote the keyword (style={{ display: 'none' }}, GH r30).
-const HIDDEN_STYLE_KEYWORD_RE = /(?:^|[^a-z0-9_-])display\s*:\s*['"`]?\s*none(?![a-z0-9_-])|(?:^|[^a-z0-9_-])visibility\s*:\s*['"`]?\s*hidden(?![a-z0-9_-])/i;
 function hiddenStyleValue(attrs) {
   const a = String(attrs || '');
   // The style ATTRIBUTE is located on the masked copy — a `style=` inside
@@ -312,7 +311,17 @@ function hiddenStyleValue(attrs) {
   if (hasAttrSpreadAfter(a, valueStart + rawValue.length)) return false;
   const ch = rawValue[0];
   const val = (ch === '"' || ch === "'" || ch === '`' || ch === '{') ? rawValue.slice(1, -1) : rawValue;
-  return HIDDEN_STYLE_KEYWORD_RE.test(val);
+  // CSS applies the LAST declaration of a property (astro parity, Codex
+  // #508 r6): "display:none; display:inline" is visible.
+  return lastStyleValue(val, 'display') === 'none' || lastStyleValue(val, 'visibility') === 'hidden';
+}
+// Final value of a CSS property in a style string or JSX style-object
+// spelling (token-bounded; the value may be quoted).
+function lastStyleValue(val, prop) {
+  const re = new RegExp(`(?:^|[^a-z0-9_-])${prop}\\s*['"]?\\s*:\\s*['"\`]?\\s*([a-z-]+)`, 'gi');
+  let m; let last = null;
+  while ((m = re.exec(val)) !== null) last = m[1].toLowerCase();
+  return last;
 }
 
 function opensHiddenContent(tag) {
@@ -1926,7 +1935,14 @@ function isExactTagAt(text, start, name) {
 // {true}; Codex #3646 r36).
 // A child expression that renders NOTHING: an empty string or a boolean/
 // nullish literal, with optional comment trivia around it.
-const NON_RENDERING_CHILD_RE = new RegExp('\\{' + '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*' + '(?:([\'"`])\\1|true|false|null|undefined)' + '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*' + '\\}', 'g');
+// An ARRAY whose slots are all non-rendering (or elided) renders nothing
+// either ({[]}, {[null]}, {[false, '']}; Codex #3646 r39).
+const NON_RENDERING_CHILD_RE = (() => {
+  const trivia = '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*';
+  const lit = "(?:''|\"\"|``|true|false|null|undefined)"; // no backreference — the array branch repeats the group
+  const arr = '\\[' + trivia + '(?:' + lit + '?' + trivia + ',' + trivia + ')*' + '(?:' + lit + trivia + ')?' + '\\]';
+  return new RegExp('\\{' + trivia + '(?:' + lit + '|' + arr + ')' + trivia + '\\}', 'g');
+})();
 function affiliateLinkTextIsEmpty(masked, strView, start, attrs) {
   if (attrs.trimEnd().endsWith('/')) return true;
   const openEnd = start + '<AffiliateLink'.length + attrs.length; // index of '>'
@@ -1955,9 +1971,9 @@ function affiliateLinkTextIsEmpty(masked, strView, start, attrs) {
           text += visible.slice(last, tg.start); last = tg.end + 1;
         }
         text += visible.slice(last);
-        // Comment trivia around the literal ({false /* note */}) renders
-        // nothing either (Codex #508 r5).
-        return !text.replace(NON_RENDERING_CHILD_RE, '').trim();
+        // Comment trivia around the literal ({false /* note */}) and
+        // fragment delimiters (<></>) render nothing either (Codex #508 r5/r6).
+        return !text.replace(/<>|<\/>/g, '').replace(NON_RENDERING_CHILD_RE, '').trim();
       }
     } else {
       const a = tagAttrsAt(masked, t.index);
@@ -2054,8 +2070,20 @@ function staticallyHiddenAttrs(attrs) {
     cls = a.literal !== null ? a.literal : staticStringOfExpr(a.expr);
   }
   if (cls === null) return false;
-  if (!/(?:^|\s)(?:hidden|invisible|sr-only)(?=\s|$)/.test(cls)) return false;
-  return !/\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item|not-sr-only|visible)\b/.test(cls);
+  return classListStaticallyHidden(cls);
+}
+// A class list hides at EVERY viewport when any hiding utility present
+// lacks the breakpoint reset that undoes ITS property (astro parity,
+// Codex #508 r5/r6): `hidden` (display) ↔ md:block/flex/…; `invisible`
+// (visibility) ↔ md:visible; `sr-only` ↔ md:not-sr-only. Only VIEWPORT
+// breakpoints prove responsive visibility.
+const HIDING_UTILITY_RESETS = [
+  [/(?:^|\s)hidden(?=\s|$)/, /\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/],
+  [/(?:^|\s)invisible(?=\s|$)/, /\b(?:sm|md|lg|xl|2xl):visible\b/],
+  [/(?:^|\s)sr-only(?=\s|$)/, /\b(?:sm|md|lg|xl|2xl):not-sr-only\b/],
+];
+function classListStaticallyHidden(cls) {
+  return HIDING_UTILITY_RESETS.some(([hide, reset]) => hide.test(cls) && !reset.test(cls));
 }
 function blankStaticHiddenClassElements(text) {
   const s = String(text || '');
@@ -2474,7 +2502,9 @@ function tolerantStaticJson(text) {
     // JSON — carried through as a sentinel and resolved with JS semantics
     // (an object property with an undefined value is ABSENT; an array slot
     // stays undefined) so the container is still validated (Codex #3646 r38).
-    const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/([:\[,]\s*)undefined(?=\s*[,\]}])/g, '$1"\\u0000undefined"').replace(/,\s*([\]}])/g, '$1'))).join('');
+    // An array ELISION ([, x]) is an undefined slot too (Codex #3646 r39);
+    // a trailing comma is not.
+    const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/([:\[,]\s*)undefined(?=\s*[,\]}])/g, '$1"\\u0000undefined"').replace(/([\[,])(\s*)(?=,)/g, '$1$2"\\u0000undefined"').replace(/,\s*([\]}])/g, '$1'))).join('');
     return { value: resolveUndefinedSentinels(JSON.parse(keyed)) };
   } catch (_) { return undefined; }
 }
@@ -3064,6 +3094,10 @@ function isLiteralExpression(expr) {
       i += 1;
       continue;
     }
+    // Lexer-valid comments are trivia, not executable syntax — a
+    // supported static container may carry them (Codex #3646 r39).
+    if (ch === '/' && body[i + 1] === '*') { const e = body.indexOf('*/', i + 2); if (e === -1) return false; i = e + 2; continue; }
+    if (ch === '/' && body[i + 1] === '/') { while (i < n && body[i] !== '\n') i += 1; continue; }
     if ('[]{},:'.includes(ch)) { i += 1; continue; }
     if (/[-+]/.test(ch) && /\d/.test(body[i + 1] || '')) { i += 1; continue; }
     if (/\d/.test(ch)) { while (i < n && /[\d._eE+-]/.test(body[i])) i += 1; continue; }
@@ -6521,6 +6555,7 @@ module.exports = {
   hasUnpreservedRawTable,
   extractRawMarkdownTables,
   blankNonRenderedMarkdown,
+  maskJsxAttrQuotes,
   blankComments,
   blankNonRenderedMarkdownWithDepths,
   // certainty-only hidden-text blanker — the completion gate judges HTML

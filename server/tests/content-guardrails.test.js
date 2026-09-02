@@ -938,6 +938,25 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('comments inside static species literals are not executable; sparse arrays; empty-array/fragment children; paired responsive resets; last style declaration wins (Codex #3646 r39, #508 r6)', () => {
+    withAffiliateEnv(() => {
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      const codes = (b) => guardrails.evaluate({ body: wrap(b), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }).findings.map((f) => f.code);
+      expect(codes("<SpiderIdBoard species={[{name:'x', /* note */ risk:'nuisance', where:'x', hunt:'x', eggSac:'x'}]} />")).toEqual([]);
+      expect(codes("<SpiderIdBoard species={[{name:'x', // note\n risk:'nuisance', where:'x', hunt:'x', eggSac:'x'}]} />")).toEqual([]);
+      expect(codes("<SpiderIdBoard species={[,{name:'x',risk:'invalid',where:'x',hunt:'x',eggSac:'x'}]} />")).toContain('INVALID_SPIDERIDBOARD_PROPS');
+      expect(codes("<SpiderIdBoard species={[{name:'x',risk:'nuisance',where:'x',hunt:'x',eggSac:'x'},,]} />")).toContain('INVALID_SPIDERIDBOARD_PROPS');
+      expect(codes("<SpiderIdBoard species={[{name:'x',risk:'nuisance',where:'x',hunt:'x',eggSac:'x'},]} />")).toEqual([]);
+      const at = (tag) => `Intro.\n\n## Sec\n\n[quote](/quote/) ${tag}`;
+      for (const kids of ['{[]}', '{[null]}', "{[false, '']}", '{[ , ]}', '<></>', '<>{null}</>', '<span class="hidden md:visible">Buy</span>', '<span class="invisible md:block">Buy</span>', '<span class="hidden sr-only md:block">Buy</span>', '<span style="display:inline; display:none">Buy</span>']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      for (const kids of ['{["Buy"]}', '<span class="hidden md:block">Buy</span>', '<span style="display:none; display:inline">Buy</span>', '<span style="visibility:hidden; visibility:visible">Buy</span>']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+    });
+  });
+
   test('spread wrappers hide their CTA (astro parity, Codex #3646 r28)', () => {
     withAffiliateEnv(() => {
       const b = `Intro.\n\n## Sec\n\n<div {...props}>[Quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
