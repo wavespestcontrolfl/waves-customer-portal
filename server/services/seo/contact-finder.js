@@ -218,6 +218,15 @@ function extractEmails(html, domain) {
 //     finalUrl + contentType kept (a 404 at the final URL is still a resolved
 //     host). Still a GET (many hosts reject HEAD); the body stream is
 //     cancelled/aborted, never consumed.
+// Resolves to `fallback` if `promise` has not settled within `ms`. The
+// underlying work is not cancelled (a hung getaddrinfo cannot be), but the
+// caller moves on — which is what keeps a sweep from pinning its lock.
+function withDeadline(promise, ms, fallback) {
+  let timer;
+  const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(fallback), ms); });
+  return Promise.race([Promise.resolve(promise).catch(() => fallback), deadline]).finally(() => clearTimeout(timer));
+}
+
 async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS, resolveHostFn = hostResolvesPublic, maxRedirects = 2, resolveOnly = false } = {}) {
   let current = url;
   let redirectHops = 0;
@@ -228,8 +237,14 @@ async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT
     try { u = new URL(current); } catch { return fail(0, false, 'invalid_url'); }
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return fail(0, true, 'unsupported_protocol');
     if (isBlockedHostname(u.hostname)) return fail(0, true, 'blocked_host');
-    const pub = await resolveHostFn(u.hostname);
-    if (pub === null) return fail(0, false, 'dns_error'); // lookup failed: retryable, not a private-address verdict
+    // The preflight is BOUNDED by the same ceiling as the fetch: dns.lookup
+    // has no timeout of its own, and it runs before the abort timer below is
+    // armed — a resolver that stops answering would otherwise hang this call
+    // forever, and with it every sweep that awaits it (the investigator's
+    // hourly run held its lock for good on one such host, 2026-09-02).
+    // A timed-out lookup is `dns_error`: retryable, never a verdict.
+    const pub = await withDeadline(resolveHostFn(u.hostname), timeoutMs, null);
+    if (pub === null) return fail(0, false, 'dns_error'); // lookup failed or timed out: retryable, not a private-address verdict
     if (!pub) return fail(0, true, 'blocked_host');
 
     const controller = new AbortController();
