@@ -520,6 +520,10 @@ async function markEstimateManuallyAccepted({
       price_locked_at: now,
       price_locked_by: 'manual_accept',
       pricing_authority: 'LOCKED',
+      // Durable at-lock evidence for the pricing-authority gate (#3750):
+      // the authority the price carried when locked, stamped from the
+      // column in this same UPDATE.
+      estimate_data: trx.raw("jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{pricingAuthorityAtLock}', to_jsonb(UPPER(COALESCE(pricing_authority, 'NULL'))))"),
     };
     if (!estimate.sent_at) updates.sent_at = now;
 

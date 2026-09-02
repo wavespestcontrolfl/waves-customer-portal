@@ -349,6 +349,9 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
       onetime_total: built?.oneTimeTotal || null,
       status: 'draft',
       source: 'email_inquiry',
+      // Same stamp as the lead-webhook draft: an engine-generated price is
+      // SERVER; a parked / manual-review draft stays unstamped.
+      pricing_authority: built?.automation?.status === 'generated' ? 'SERVER' : null,
       service_interest: readiness.serviceInterest || null,
       lead_source: 'email',
       token: crypto.randomBytes(16).toString('hex'),

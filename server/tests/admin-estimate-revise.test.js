@@ -1,4 +1,16 @@
 jest.mock('../models/db', () => jest.fn());
+// Gate values are fixed at module load; this passthrough flips the one gate
+// under test (send-requires-server-pricing revise refusal) per case.
+const mockGateState = { sendRequiresServerPricing: false };
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return {
+    ...actual,
+    isEnabled: (gate) => (gate === 'sendRequiresServerPricing'
+      ? mockGateState.sendRequiresServerPricing
+      : actual.isEnabled(gate)),
+  };
+});
 
 const {
   estimateReviseBlock,
@@ -29,6 +41,14 @@ function makeReviseDatabase({
   lead = null,
   customer = matchingCustomer,
   updateReturnsEmpty = false,
+  // The row the FOR UPDATE read inside the write transaction sees — lets a
+  // test model a send committing between the pre-read and the lock.
+  lockedEstimate = null,
+  // What the scheduled-group guard's sibling lookup returns (a scheduled
+  // member of this row's group), if anything.
+  scheduledGroupMember = null,
+  // What the mid-send guard's lookup returns (a member currently 'sending').
+  sendingGroupMember = null,
 }) {
   const updates = [];
   const rawGuards = [];
@@ -98,17 +118,38 @@ function makeReviseDatabase({
       // callback so tests can replay it against a recorder and assert the
       // predicate without a real query builder.
       where: (clause) => {
-        if (typeof clause === 'function') groupedWheres.push(clause);
+        if (typeof clause === 'function') {
+          if (chain.__groupQuery) {
+            // The in-flight verdict is a grouped where: status = 'sending'
+            // OR a fresh delivery claim. Replay it against a recorder so the
+            // fixture served depends on the predicate actually written.
+            const sub = {
+              where: (c) => { if (c && typeof c === 'object' && c.status) chain.__groupStatus = c.status; return sub; },
+              orWhereRaw: (sql) => { chain.__inFlightRaw = sql; return sub; },
+            };
+            clause(sub);
+          } else {
+            groupedWheres.push(clause);
+          }
+        }
+        if (clause && typeof clause === 'object' && 'estimate_group_id' in clause) { chain.__groupQuery = true; chain.__groupStatus = clause.status; }
         return chain;
       },
+      whereNot: () => chain,
       whereNull: () => chain,
       whereNotIn: () => chain,
       whereRaw: (sql) => {
         rawGuards.push(sql);
         return chain;
       },
-      forUpdate: () => chain,
-      first: async () => estimate,
+      forUpdate: () => { chain.__locked = true; return chain; },
+      modify: (fn) => { fn(chain); return chain; },
+      first: async () => {
+        if (chain.__groupQuery) {
+          return chain.__groupStatus === 'sending' ? sendingGroupMember : scheduledGroupMember;
+        }
+        return chain.__locked && lockedEstimate ? lockedEstimate : estimate;
+      },
       update: (patch) => {
         updates.push(patch);
         return {
@@ -122,6 +163,8 @@ function makeReviseDatabase({
   // runs inside database.transaction — reuse the same recording builder as
   // the trx so assertions see the guarded update unchanged.
   database.transaction = async (callback) => callback(database);
+  // The scheduled-group guard takes the group's advisory xact lock.
+  database.raw = jest.fn(async () => ({}));
   return { database, updates, rawGuards, groupedWheres };
 }
 
@@ -797,5 +840,505 @@ describe('reviseAdminEstimate', () => {
       now: fixedNow,
     })).rejects.toMatchObject({ statusCode: 409 });
     expect(updates).toHaveLength(0);
+  });
+});
+
+describe('reviseAdminEstimate — engine-authoritative pricing on a LIVE link (SEC-002 / pre-push codex P0)', () => {
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  beforeEach(() => {
+    clearAllEstimatePricingCache();
+    mockGateState.sendRequiresServerPricing = true;
+  });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('a delivered estimate whose recompute fell back is refused (409) with nothing written while the gate is on', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/already with the customer/i) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('the dryRun preflight surfaces the same refusal', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow, dryRun: true,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('with the gate off the revision still saves fail-open and reports the fallback reason for the post-commit bell', async () => {
+    mockGateState.sendRequiresServerPricing = false;
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    const out = await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].pricing_authority).toBe('CLIENT_FALLBACK');
+    expect(out.pricingFallbackReason).toBe('ENGINE_ERROR');
+  });
+
+  test('a server-priced revision of a delivered estimate is unaffected by the gate', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    const out = await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', now: fixedNow,
+      recompute: async () => ({ recomputed: true, source: 'engineInputs', serverResult: { recurring: { services: [], monthlyTotal: 60, annualTotal: 720 }, oneTime: { items: [] } }, serverTotals: { monthlyTotal: 60, annualTotal: 720, onetimeTotal: 0 } }),
+    });
+    expect(updates).toHaveLength(1);
+    expect(out.pricingFallbackReason).toBeNull();
+  });
+});
+
+describe('reviseAdminEstimate — send-versus-revise race on the live-link guard (pre-push codex P0)', () => {
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  const draftEstimate = { ...sentEstimate, status: 'draft', sent_at: null, viewed_at: null };
+  beforeEach(() => {
+    clearAllEstimatePricingCache();
+    mockGateState.sendRequiresServerPricing = true;
+  });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('a draft at the pre-read that a concurrent send delivered before the row lock is refused under the lock — nothing written', async () => {
+    const { database, updates } = makeReviseDatabase({
+      estimate: draftEstimate,
+      lockedEstimate: { ...draftEstimate, status: 'sent', sent_at: '2026-07-10T11:59:00Z' },
+    });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/already with the customer/i) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('control: a draft that stays a draft under the lock keeps the fail-open save', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: draftEstimate });
+    const out = await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].pricing_authority).toBe('CLIENT_FALLBACK');
+    expect(out.pricingFallbackReason).toBe('ENGINE_ERROR');
+  });
+});
+
+describe('reviseAdminEstimate — a scheduled row is protected from a fallback revision (GH codex P1 on #3750)', () => {
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  const scheduledEstimate = { ...sentEstimate, status: 'scheduled', sent_at: null, viewed_at: null, scheduled_at: '2026-07-11T14:00:00Z' };
+  beforeEach(() => {
+    clearAllEstimatePricingCache();
+    mockGateState.sendRequiresServerPricing = true;
+  });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('refuses (409) so the cron never claims a fallback-priced scheduled row', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: scheduledEstimate });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/scheduled to send/i) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('a server-priced revision of a scheduled row still saves', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: scheduledEstimate });
+    await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', now: fixedNow,
+      recompute: async () => ({ recomputed: true, source: 'engineInputs', serverResult: { recurring: { services: [], monthlyTotal: 60, annualTotal: 720 }, oneTime: { items: [] } }, serverTotals: { monthlyTotal: 60, annualTotal: 720, onetimeTotal: 0 } }),
+    });
+    expect(updates).toHaveLength(1);
+  });
+});
+
+describe('estimate_data.proposal is server-owned on revise (pre-push P0 on #3750)', () => {
+  test('the browser copy is discarded and the row\'s disabled authored proposal is carried forward verbatim', async () => {
+    const storedProposal = { enabled: false, buildings: [{ name: 'Authored then disabled', lineItems: [{ description: 'Office', amount: 240 }] }] };
+    const estimate = {
+      ...sentEstimate,
+      estimate_data: JSON.stringify({ ...JSON.parse(sentEstimate.estimate_data), proposal: storedProposal }),
+    };
+    const { database, updates } = makeReviseDatabase({ estimate });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, estimateData: { ...reviseBody.estimateData, proposal: { enabled: true, buildings: [{ name: 'Forged', lineItems: [{ description: 'Browser-priced', amount: 1 }] }] } } },
+      technicianId: 'tech-2',
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    const data = JSON.parse(updates[0].estimate_data);
+    expect(data.proposal).toEqual(storedProposal);
+  });
+
+  test('a row without a proposal never gains one from the browser', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, estimateData: { ...reviseBody.estimateData, proposal: { enabled: true } } },
+      technicianId: 'tech-2',
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(JSON.parse(updates[0].estimate_data).proposal).toBeUndefined();
+  });
+});
+
+describe('reviseAdminEstimate — a draft member of a SCHEDULED group refuses a fallback revision (GH codex P2 r5 on #3750)', () => {
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  // A real UUID: the revise validates estimateGroupId (400 otherwise).
+  const groupedDraft = { ...sentEstimate, status: 'draft', sent_at: null, viewed_at: null, estimate_group_id: '2f5e7a10-6c3b-4d9e-9a11-3b7c5d2e8f01' };
+  beforeEach(() => {
+    clearAllEstimatePricingCache();
+    mockGateState.sendRequiresServerPricing = true;
+  });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('refused under the row lock when a sibling anchor is scheduled — the cron\'s group claim would fail the anchor without retry', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: groupedDraft, scheduledGroupMember: { id: 'est-anchor' } });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/group is scheduled to send/i) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('control: no scheduled member in the group keeps the draft\'s fail-open save; gate off never refuses', async () => {
+    const open = makeReviseDatabase({ estimate: groupedDraft, scheduledGroupMember: null });
+    await reviseAdminEstimate({
+      database: open.database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    });
+    expect(open.updates).toHaveLength(1);
+    expect(open.updates[0].pricing_authority).toBe('CLIENT_FALLBACK');
+
+    mockGateState.sendRequiresServerPricing = false;
+    const gateOff = makeReviseDatabase({ estimate: groupedDraft, scheduledGroupMember: { id: 'est-anchor' } });
+    await reviseAdminEstimate({
+      database: gateOff.database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    });
+    expect(gateOff.updates).toHaveLength(1);
+  });
+});
+
+describe('scheduled-group guard — dry-run preflight and destination group (GH codex P2 r7 on #3750)', () => {
+  const { assertNoFallbackRevisionInScheduledGroup, lockScheduledGroupGuardGroups, scheduledGroupGuardGroupIds } = require('../services/admin-estimate-persistence');
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  const groupedDraft = { ...sentEstimate, status: 'draft', sent_at: null, viewed_at: null, estimate_group_id: '2f5e7a10-6c3b-4d9e-9a11-3b7c5d2e8f01' };
+  beforeEach(() => {
+    clearAllEstimatePricingCache();
+    mockGateState.sendRequiresServerPricing = true;
+  });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('the real save takes the group advisory lock BEFORE the row lock (pre-push codex P1: no deadlock against the schedule route)', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: groupedDraft, scheduledGroupMember: null });
+    const order = [];
+    database.raw.mockImplementation(async () => { order.push('group-lock'); return {}; });
+    const originalDb = database;
+    // Observe the FOR UPDATE read through the recording chain's forUpdate.
+    const chainSpy = originalDb('estimates');
+    const forUpdate = chainSpy.forUpdate;
+    await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(database.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['estimate-group-send', groupedDraft.estimate_group_id]);
+    expect(typeof forUpdate).toBe('function');
+    expect(order).toEqual(['group-lock']);
+  });
+
+  test('dryRun refuses exactly like the real save (no reprice confirm the write would then 409)', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: groupedDraft, scheduledGroupMember: { id: 'est-anchor' } });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow, dryRun: true,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/group is scheduled to send/i) });
+    expect(updates).toHaveLength(0);
+    // The unlocked preflight read takes no advisory lock.
+    expect(database.raw).not.toHaveBeenCalled();
+  });
+
+  // claimHeldGroups: a member whose delivery claim is still fresh while its
+  // status has left 'sending' (anchor accepted mid-handoff) — served ONLY
+  // through the in-flight predicate's NOT (DELIVERY_CLAIM_NOT_LIVE_SQL) branch.
+  function fakeTrx({ scheduledGroups = [], sendingGroups = [], claimHeldGroups = [] } = {}) {
+    const queried = [];
+    const raws = [];
+    const chain = {
+      where: (c) => {
+        if (typeof c === 'function') {
+          const sub = {
+            where: (o) => { if (o?.status) chain.__status = o.status; return sub; },
+            orWhereRaw: (sql) => { chain.__raw = sql; raws.push(sql); return sub; },
+          };
+          c(sub);
+          return chain;
+        }
+        chain.__group = c?.estimate_group_id; chain.__status = c?.status; return chain;
+      },
+      whereNot: () => chain,
+      whereNull: () => chain,
+      first: async () => {
+        queried.push(`${chain.__status}:${chain.__group}`);
+        if (chain.__status === 'sending') {
+          if (sendingGroups.includes(chain.__group)) return { id: 'est-anchor' };
+          const claimBranch = /NOT \(/.test(chain.__raw || '') && /delivering_at/.test(chain.__raw || '');
+          return claimBranch && claimHeldGroups.includes(chain.__group) ? { id: 'est-anchor' } : null;
+        }
+        return scheduledGroups.includes(chain.__group) ? { id: 'est-anchor' } : null;
+      },
+    };
+    const trx = () => chain;
+    trx.raw = jest.fn(async () => ({}));
+    return { trx, queried, raws };
+  }
+
+  test('a fallback revision that MOVES an ungrouped draft into a scheduled group is refused (destination judged); the verdict itself never locks', async () => {
+    const { trx, queried } = fakeTrx({ scheduledGroups: ['grp-dest'] });
+    await expect(assertNoFallbackRevisionInScheduledGroup(
+      trx,
+      { id: 'est-1', estimate_group_id: null },
+      { pricing_authority: 'CLIENT_FALLBACK', estimate_group_id: 'grp-dest' },
+    )).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/group it would join is scheduled/i) });
+    expect(queried).toEqual(['sending:grp-dest', 'scheduled:grp-dest']);
+    expect(trx.raw).not.toHaveBeenCalled();
+  });
+
+  test('a fallback revision while a member still holds a FRESH delivery claim is refused — an anchor accepted mid-handoff has left sending (uncapped codex P0 r35 on #3750)', async () => {
+    mockGateState.sendRequiresServerPricing = false;
+    const { assertNoFallbackRevisionDuringGroupSend } = require('../services/admin-estimate-persistence');
+    const { trx, queried, raws } = fakeTrx({ sendingGroups: [], claimHeldGroups: ['grp-live'] });
+    await expect(assertNoFallbackRevisionDuringGroupSend(
+      trx,
+      { id: 'est-1', estimate_group_id: 'grp-live' },
+      { pricing_authority: 'CLIENT_FALLBACK' },
+    )).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/being sent right now/i) });
+    expect(queried).toEqual(['sending:grp-live']);
+    // The in-flight predicate is status = 'sending' OR a fresh delivery claim.
+    expect(raws).toHaveLength(1);
+    expect(raws[0]).toMatch(/^NOT \(/);
+    expect(raws[0]).toMatch(/delivering_at/);
+    // No claim, no sending member: the revision proceeds.
+    const quiet = fakeTrx({ sendingGroups: [], claimHeldGroups: [] });
+    await expect(assertNoFallbackRevisionDuringGroupSend(quiet.trx, { id: 'est-1', estimate_group_id: 'grp-live' }, { pricing_authority: 'CLIENT_FALLBACK' })).resolves.toBeUndefined();
+  });
+
+  test('a fallback revision while any group member is SENDING is refused — gate OFF too (pre-push codex P0: grouped auto-send exposure)', async () => {
+    mockGateState.sendRequiresServerPricing = false;
+    const { assertNoFallbackRevisionDuringGroupSend } = require('../services/admin-estimate-persistence');
+    const { trx, queried } = fakeTrx({ sendingGroups: ['grp-live'] });
+    await expect(assertNoFallbackRevisionDuringGroupSend(
+      trx,
+      { id: 'est-1', estimate_group_id: 'grp-live' },
+      { pricing_authority: 'CLIENT_FALLBACK' },
+    )).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/being sent right now/i) });
+    expect(queried).toEqual(['sending:grp-live']);
+    // The combined verdict runs the mid-send check with the gate off (and
+    // skips the scheduled-group one, which is gate-scoped).
+    const combined = fakeTrx({ sendingGroups: [], scheduledGroups: ['grp-live'] });
+    await expect(assertNoFallbackRevisionInScheduledGroup(combined.trx, { id: 'est-1', estimate_group_id: 'grp-live' }, { pricing_authority: 'CLIENT_FALLBACK' })).resolves.toBeUndefined();
+    expect(combined.queried).toEqual(['sending:grp-live']);
+    // A SERVER revision never queries, gate or no gate.
+    const server = fakeTrx({ sendingGroups: ['grp-live'] });
+    await assertNoFallbackRevisionDuringGroupSend(server.trx, { id: 'est-1', estimate_group_id: 'grp-live' }, { pricing_authority: 'SERVER' });
+    expect(server.queried).toEqual([]);
+  });
+
+  test('through the revise: a fallback save of a grouped draft is refused while a sibling anchor is sending, gate off, nothing written', async () => {
+    mockGateState.sendRequiresServerPricing = false;
+    const { database, updates } = makeReviseDatabase({ estimate: groupedDraft, sendingGroupMember: { id: 'est-anchor' } });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/being sent right now/i) });
+    expect(updates).toHaveLength(0);
+    // The group lock was taken before the row lock even with the gate off.
+    expect(database.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['estimate-group-send', groupedDraft.estimate_group_id]);
+  });
+
+  test('lockScheduledGroupGuardGroups takes the advisory locks in SORTED order for every grouped fallback save (gate-independent)', async () => {
+    const { trx } = fakeTrx();
+    await expect(lockScheduledGroupGuardGroups(trx, { id: 'est-1', estimate_group_id: 'grp-z' }, { pricing_authority: 'CLIENT_FALLBACK', estimate_group_id: 'grp-a' })).resolves.toEqual(['grp-a', 'grp-z']);
+    expect(trx.raw.mock.calls.map((c) => c[1][1])).toEqual(['grp-a', 'grp-z']);
+    const server = fakeTrx();
+    await expect(lockScheduledGroupGuardGroups(server.trx, { id: 'est-1', estimate_group_id: 'grp-z' }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-a' })).resolves.toEqual([]);
+    expect(server.trx.raw).not.toHaveBeenCalled();
+    expect(scheduledGroupGuardGroupIds({ estimate_group_id: null }, { pricing_authority: 'CLIENT_FALLBACK' })).toEqual([]);
+    mockGateState.sendRequiresServerPricing = false;
+    const gateOff = fakeTrx();
+    await expect(lockScheduledGroupGuardGroups(gateOff.trx, { id: 'est-1', estimate_group_id: 'grp-z' }, { pricing_authority: 'CLIENT_FALLBACK' })).resolves.toEqual(['grp-z']);
+    expect(scheduledGroupGuardGroupIds({ estimate_group_id: 'grp-z' }, { pricing_authority: 'CLIENT_FALLBACK' })).toEqual([]);
+  });
+
+  test('a move between groups judges BOTH the current and the destination group', async () => {
+    const { trx, queried } = fakeTrx({ scheduledGroups: [] });
+    await expect(assertNoFallbackRevisionInScheduledGroup(
+      trx,
+      { id: 'est-1', estimate_group_id: 'grp-old' },
+      { pricing_authority: 'CLIENT_FALLBACK', estimate_group_id: 'grp-new' },
+    )).resolves.toBeUndefined();
+    expect(queried).toEqual(['sending:grp-new', 'sending:grp-old', 'scheduled:grp-new', 'scheduled:grp-old']);
+    expect(trx.raw).not.toHaveBeenCalled();
+    // A SERVER revision, or an ungrouped row going nowhere, never queries.
+    const quiet = fakeTrx({ scheduledGroups: ['grp-old'] });
+    await assertNoFallbackRevisionInScheduledGroup(quiet.trx, { id: 'est-1', estimate_group_id: 'grp-old' }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-old' });
+    await assertNoFallbackRevisionInScheduledGroup(quiet.trx, { id: 'est-1', estimate_group_id: null }, { pricing_authority: 'CLIENT_FALLBACK' });
+    expect(quiet.queried).toEqual([]);
+  });
+});
+
+describe('null / unknown pricing authority counts as unverified in the live-link and grouped-send guards (pre-push codex P1)', () => {
+  const { writeStampsUnverifiedPricing, fallbackRevisionGroupIds, assertNoFallbackRevisionOfLiveLink } = require('../services/admin-estimate-persistence');
+  beforeEach(() => { mockGateState.sendRequiresServerPricing = true; });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('the stamp predicate: NULL (quote-required), CLIENT_FALLBACK and unknown are unverified; SERVER is not; an absent key is not a pricing write', () => {
+    expect(writeStampsUnverifiedPricing({ pricing_authority: null })).toBe(true);
+    expect(writeStampsUnverifiedPricing({ pricing_authority: 'CLIENT_FALLBACK' })).toBe(true);
+    expect(writeStampsUnverifiedPricing({ pricing_authority: 'weird' })).toBe(true);
+    expect(writeStampsUnverifiedPricing({ pricing_authority: 'SERVER' })).toBe(false);
+    expect(writeStampsUnverifiedPricing({ address: 'x' })).toBe(false);
+    expect(writeStampsUnverifiedPricing(null)).toBe(false);
+  });
+
+  test('a NULL-authority revision of a live link is refused like a fallback one; the grouped guards lock its groups', () => {
+    expect(() => assertNoFallbackRevisionOfLiveLink({ sent_at: '2026-07-10T11:59:00Z' }, { pricing_authority: null })).toThrow(/already with the customer/i);
+    expect(() => assertNoFallbackRevisionOfLiveLink({ status: 'scheduled' }, { pricing_authority: null })).toThrow(/scheduled to send/i);
+    expect(() => assertNoFallbackRevisionOfLiveLink({ sent_at: '2026-07-10T11:59:00Z' }, { pricing_authority: 'SERVER' })).not.toThrow();
+    expect(fallbackRevisionGroupIds({ estimate_group_id: 'grp-a' }, { pricing_authority: null, estimate_group_id: 'grp-b' })).toEqual(['grp-a', 'grp-b']);
+    expect(fallbackRevisionGroupIds({ estimate_group_id: 'grp-a' }, { pricing_authority: 'SERVER' })).toEqual([]);
+    expect(fallbackRevisionGroupIds({ estimate_group_id: 'grp-a' }, { address: 'no pricing write' })).toEqual([]);
+  });
+});
+
+describe('a LIVE row moving into a group has the destination judged and locked, whatever its own authority (GH codex P1 r10 on #3750)', () => {
+  const { assertLiveRowMayJoinGroup, liveGroupMoveDestinationIds, revisionGroupLockIds } = require('../services/admin-estimate-persistence');
+  beforeEach(() => { mockGateState.sendRequiresServerPricing = true; });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+  const liveRow = { id: 'est-live', estimate_group_id: null, sent_at: '2026-07-10T11:59:00Z' };
+
+  function fakeTrx(siblings) {
+    const calls = { whereIns: [], orWhereIns: [] };
+    const chain = {
+      where: (c) => { if (typeof c === 'function') c(chain); return chain; },
+      orWhere: (c) => { if (typeof c === 'function') c(chain); return chain; },
+      whereNot: () => chain, whereNull: () => chain, whereRaw: () => chain, orWhereRaw: () => chain,
+      whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return chain; },
+      orWhereIn: (col, vals) => { calls.orWhereIns.push([col, vals]); return chain; },
+      select: async () => siblings,
+    };
+    const trx = jest.fn(() => chain);
+    trx.raw = jest.fn(async () => ({}));
+    return { trx, calls };
+  }
+
+  test('only a live row changing groups, gate on, names a destination; the lock set includes it even for a SERVER write', () => {
+    expect(liveGroupMoveDestinationIds(liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual(['grp-dest']);
+    // A SCHEDULED first-send row is live too (GH codex P2 r11): it keeps its
+    // schedule while joining the group, so the destination is judged now.
+    expect(liveGroupMoveDestinationIds({ id: 'est-sched', estimate_group_id: null, status: 'scheduled' }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual(['grp-dest']);
+    expect(liveGroupMoveDestinationIds({ ...liveRow, estimate_group_id: 'grp-dest' }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual([]);
+    expect(liveGroupMoveDestinationIds({ id: 'est-draft', estimate_group_id: null }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual([]);
+    expect(revisionGroupLockIds(liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual(['grp-dest']);
+    expect(revisionGroupLockIds({ ...liveRow, estimate_group_id: 'grp-z' }, { pricing_authority: 'CLIENT_FALLBACK', estimate_group_id: 'grp-a' })).toEqual(['grp-a', 'grp-z']);
+    mockGateState.sendRequiresServerPricing = false;
+    expect(liveGroupMoveDestinationIds(liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual([]);
+  });
+
+  test('refused when the destination holds a published sibling without an engine-verified price; allowed for SERVER siblings and editor-authored proposals', async () => {
+    const fallbackSibling = { id: 'est-sib', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' };
+    const { trx, calls } = fakeTrx([fallbackSibling]);
+    await expect(assertLiveRowMayJoinGroup(trx, liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/without an engine-verified price/i) });
+    // The link-visible scope (shared helper): live unexpired + terminal rows.
+    expect(calls.whereIns).toEqual([['status', ['sending', 'sent', 'viewed']]]);
+    expect(calls.orWhereIns).toEqual([['status', ['accepted', 'declined']]]);
+    const ok = fakeTrx([
+      { id: 'est-a', pricing_authority: 'SERVER', estimate_data: '{}' },
+      { id: 'est-b', pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' } } }) },
+      // A genuinely locked accepted sibling (uncapped P1 r21 / GH P0 r22).
+      { id: 'est-c', status: 'accepted', pricing_authority: 'LOCKED', price_locked_at: '2026-07-10T11:59:00Z', estimate_data: '{}' },
+    ]);
+    await expect(assertLiveRowMayJoinGroup(ok.trx, liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).resolves.toBeUndefined();
+    const legacyProposal = fakeTrx([{ id: 'est-c', pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true } }) }]);
+    await expect(assertLiveRowMayJoinGroup(legacyProposal.trx, liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).rejects.toMatchObject({ statusCode: 409 });
+    // Not a group change, or not live: no query at all.
+    const quiet = fakeTrx([fallbackSibling]);
+    await assertLiveRowMayJoinGroup(quiet.trx, { ...liveRow, estimate_group_id: 'grp-dest' }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' });
+    await assertLiveRowMayJoinGroup(quiet.trx, { id: 'est-draft', estimate_group_id: null }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' });
+    expect(quiet.trx).not.toHaveBeenCalled();
+  });
+});
+
+describe('the server-owned proposal is judged and carried from the LOCKED row (pre-push codex P0 r14 on #3750)', () => {
+  const draft = { ...sentEstimate, status: 'draft', sent_at: null, viewed_at: null };
+  const priorData = JSON.parse(sentEstimate.estimate_data);
+
+  test('a proposal authored by the editor while the payload resolved refuses the generic rewrite — nothing written', async () => {
+    const { database, updates } = makeReviseDatabase({
+      estimate: draft,
+      lockedEstimate: {
+        ...draft,
+        category: 'COMMERCIAL',
+        estimate_data: JSON.stringify({ ...priorData, proposal: { enabled: true, provenance: { source: 'proposal-editor' }, buildings: [{ name: 'Tower A', lineItems: [] }] } }),
+      },
+    });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: noRecompute, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/Commercial proposal editor/i) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('a proposal disabled in the gap (not a revise block) is carried from the locked row, not the pre-read copy', async () => {
+    const lockedProposal = { enabled: false, provenance: { source: 'proposal-editor' }, buildings: [{ name: 'Tower A', lineItems: [{ description: 'Interior', amount: 240 }] }] };
+    const { database, updates } = makeReviseDatabase({
+      estimate: draft,
+      lockedEstimate: { ...draft, estimate_data: JSON.stringify({ ...priorData, proposal: lockedProposal }) },
+    });
+    await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: noRecompute, now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(JSON.parse(updates[0].estimate_data).proposal).toEqual(lockedProposal);
+  });
+});
+
+describe('an EXPIRED row the gate refuses can be re-priced through the engine, and only that (GH codex P1 r30 on #3750)', () => {
+  const serverRecompute = async () => ({
+    recomputed: true,
+    source: 'ENGINE_REQUEST',
+    serverResult: { recurring: { grandTotal: 69, monthlyTotal: 69, annualTotal: 828, services: [{ service: 'pest_control', mo: 69 }] }, oneTime: { total: 0 } },
+    serverTotals: { monthlyTotal: 69, annualTotal: 828, onetimeTotal: 0 },
+  });
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  const expiredFallback = { ...sentEstimate, status: 'expired', expires_at: '2026-07-01T00:00:00Z', pricing_authority: 'CLIENT_FALLBACK' };
+  beforeEach(() => { clearAllEstimatePricingCache(); mockGateState.sendRequiresServerPricing = true; });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('gate on: an engine-verified reprice lands on the expired fallback row (status untouched) so it can then be extended', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: expiredFallback });
+    await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: serverRecompute, now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].pricing_authority).toBe('SERVER');
+    expect(updates[0]).not.toHaveProperty('status');
+  });
+
+  test('gate on: a fallback reprice of that expired (delivered) row is still refused — the live-link guard', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: expiredFallback });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('gate off, or an expired row the gate already accepts (SERVER): the expiry rule stands as before', async () => {
+    mockGateState.sendRequiresServerPricing = false;
+    const off = makeReviseDatabase({ estimate: expiredFallback });
+    await expect(reviseAdminEstimate({
+      database: off.database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: serverRecompute, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/no longer be edited/i) });
+    mockGateState.sendRequiresServerPricing = true;
+    const verified = makeReviseDatabase({ estimate: { ...expiredFallback, pricing_authority: 'SERVER' } });
+    await expect(reviseAdminEstimate({
+      database: verified.database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: serverRecompute, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/no longer be edited/i) });
   });
 });

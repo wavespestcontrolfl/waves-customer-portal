@@ -21,6 +21,7 @@ const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
 const { isEnabled } = require('../config/feature-gates');
+const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
 
@@ -69,6 +70,14 @@ const EstimateAutoRenew = {
       for (const est of stale) {
         try {
           if (estimateOptedOutOfAutoRenew(est)) continue;
+          // Engine-authoritative pricing gate (#3750, GH codex P1 r13): a
+          // renewal re-emails the estimate link — never for a delivered row
+          // the engine never verified while the gate is on. Not renewed
+          // either: the operator re-saves it through the engine first.
+          if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, est))) {
+            logger.info(`[est-auto-renew] skip ${est.id}: pricing-authority-not-server`);
+            continue;
+          }
           const newExpiry = new Date(Date.now() + RENEWAL_DAYS * 86400000);
           await db('estimates').where({ id: est.id }).update({
             expires_at: newExpiry,

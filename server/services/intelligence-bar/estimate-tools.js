@@ -2027,6 +2027,9 @@ async function createPendingEstimate(input) {
       monthly_total: monthly,
       annual_total: annual,
       onetime_total: onetime,
+      // Priced by the server reprice (generateEstimate) — the explicit
+      // SERVER stamp the send gate requires (pre-push codex P1 on #3750).
+      pricing_authority: 'SERVER',
       waveguard_tier: tier,
       token,
       expires_at: expiresAt,
@@ -2818,6 +2821,10 @@ function agentEstimatePayload(input, preview, existingData = {}, accountPricing 
       },
     },
     fields: {
+      // Every Agent Estimate row (fresh draft and agent-owned revision) is
+      // priced by the server reprice — the explicit SERVER stamp the send gate
+      // requires (pre-push codex P1 on #3750).
+      pricing_authority: 'SERVER',
       address: input.address,
       customer_name: input.customerName,
       customer_phone: input.customerPhone || null,

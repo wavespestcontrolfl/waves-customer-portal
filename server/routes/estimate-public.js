@@ -10377,6 +10377,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       let nextEstimateData = acceptedEstDataForPricing && typeof acceptedEstDataForPricing === 'object'
         ? { ...acceptedEstDataForPricing }
         : null;
+      // Durable evidence for the LOCKED stamp above (uncapped codex P1 r20 on
+      // #3750): the authority this price carried when it was locked, read
+      // from the row this CAS update locks — the pricing-authority gate
+      // recognizes a LOCKED sibling only through it.
+      nextEstimateData = { ...(nextEstimateData || {}), pricingAuthorityAtLock: String(estimate.pricing_authority || 'NULL').toUpperCase() };
       if (nextEstimateData) {
         // Freeze the RENDERED setup fee at acceptance (PR #3476, Codex
         // r10 P1): a fee-less stored snapshot is repaired WITH the fee at
@@ -15875,6 +15880,19 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     const DEDUPE_OPEN = (b) => b.whereNull('extension_requested_at')
       .orWhere('extension_requested_at', '<', db.raw("NOW() - interval '24 hours'"));
 
+    // Engine-authoritative pricing gate (#3750; uncapped codex P0 r19): a
+    // row (or group link) the verdict refuses is INELIGIBLE here — judged
+    // before the auto-grant claim so nothing is burned, and answered with the
+    // same generic 404 as every other ineligible/unknown token (no
+    // row-existence oracle; docs/public-route-contracts.md). The admin
+    // extension keeps extendEstimate's explicit 409.
+    {
+      const { gatedSendAuthorityPredicateApplies } = require('../services/pricing-authority-gate');
+      const { extensionDeliverableUnderGate } = require('../services/estimate-extension');
+      if (gatedSendAuthorityPredicateApplies() && !(await extensionDeliverableUnderGate(db, estimate))) {
+        return res.status(404).json({ error: 'Estimate not found' });
+      }
+    }
     // Step 1 — try to claim THE lifetime auto-grant. One conditional UPDATE
     // checks the 24h dedupe AND the unburned cap AND records BOTH stamps, so
     // the burn is atomic with the claim: concurrent POSTs can't double-grant,
@@ -24409,6 +24427,16 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
+    }
+    // Engine-authoritative pricing gate (#3750, GH codex P1 r25): this send
+    // re-delivers the estimate link (and a PDF that links back to it), so a
+    // row — or group link — the shared verdict refuses answers the family's
+    // generic 404, before either provider path.
+    {
+      const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
+      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+        return res.status(404).json({ error: 'Estimate not found' });
+      }
     }
     const serviceKey = String(req.body?.service || '');
     const channel = String(req.body?.channel || '');
