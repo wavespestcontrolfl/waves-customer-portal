@@ -628,6 +628,17 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
     expect(directive('COMPARISON_UNKNOWN_COMPETITOR')).toMatch(/remove it only from the <ComparisonTable>/);
   });
 
+  test('FORBIDDEN_CTA_WORDING spells out the passing anchor shape and keeps the conversion link', () => {
+    const directive = buildRetryDirectives({
+      findings: [{ severity: 'P1', code: 'FORBIDDEN_CTA_WORDING', message: 'CTA link anchor "request a quote" violates the CTA-wording rule' }],
+    })[1];
+    expect(directive).toContain('BEFORE the word estimate/quote');
+    expect(directive).toContain('"Get a Pest Control Estimate"');
+    expect(directive).toContain('never drop the conversion link');
+    expect(directive).toContain('[Gate reported: CTA link anchor "request a quote"');
+    expect(directive).not.toContain('do not repeat it');
+  });
+
   test('composed brief carries retry_directives inside voice_constraints when gate_retry is present', () => {
     const builder = new ContentBriefBuilder();
     const brief = builder._composeBrief({
