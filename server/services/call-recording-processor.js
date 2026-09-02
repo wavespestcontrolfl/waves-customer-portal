@@ -6247,6 +6247,10 @@ const CallRecordingProcessor = {
    */
   async processRecording(callSid, opts = {}) {
     const processingStartedAt = new Date();
+    // Per-stage wall clock for this pass, stamped into
+    // metadata.processing_timings at finalization so "which stage is slow"
+    // is answerable from the row instead of from log archaeology.
+    const stageTimings = {};
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) throw new Error(`Call not found: ${callSid}`);
     // Captured BEFORE the claim rewrites processing_status. This — not
@@ -6504,6 +6508,23 @@ const CallRecordingProcessor = {
     // the retry path instead of wedging the row at 'processing'.
     const claimedRow = await db('call_log').where({ id: call.id }).first('metadata');
     if (claimedRow) call.metadata = claimedRow.metadata;
+    // A customer link set by a PERSON (admin relink/unlink — metadata.
+    // customer_link_override) outranks everything this pass would resolve
+    // from the transcript: it seeds the pre-linked customer, the phantom
+    // guard and the name-mismatch reconciliation stand down, and the Step 4
+    // checkpoint writes the override back. Without this a Reprocess undid
+    // the office's correction on every run.
+    const customerLinkOverride = (() => {
+      try {
+        const meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+        const o = meta?.customer_link_override;
+        return o && typeof o === 'object' && 'customer_id' in o ? o : null;
+      } catch { return null; }
+    })();
+    if (customerLinkOverride) {
+      call.customer_id = customerLinkOverride.customer_id || null;
+      logger.info(`[call-proc] ${maskSid(callSid)}: honouring operator customer link (${customerLinkOverride.customer_id ? 'linked' : 'unlinked'})`);
+    }
     const contactPhone = resolveCallContactPhone(call);
     // Forwarding-masked call: the inbound leg recorded one of our own internal
     // numbers (a tracking number, or the staff cell it forwarded to) as the caller,
@@ -6527,7 +6548,7 @@ const CallRecordingProcessor = {
     // fallbacks (customerId || call.customer_id) from resurrecting the phantom; the
     // call then falls through to real phone-based resolution, or stays unkeyed when
     // fully masked. (Cleanup of the already-created phantom rows is handled separately.)
-    if (call.customer_id && !isOutboundCall(call) && TWILIO_NUMBERS.isInternalNumber(call.from_phone)) {
+    if (call.customer_id && !customerLinkOverride && !isOutboundCall(call) && TWILIO_NUMBERS.isInternalNumber(call.from_phone)) {
       const linked = await db('customers').where({ id: call.customer_id }).select('phone').first().catch(() => null);
       if (linked && TWILIO_NUMBERS.isInternalNumber(linked.phone)) {
         logger.warn(`[call-proc] ${maskSid(callSid)}: pre-linked customer ${call.customer_id} is keyed on an internal number (${maskPhone(linked.phone)}) — phantom from forwarding-masked linking; treating call as unlinked`);
@@ -6594,7 +6615,9 @@ const CallRecordingProcessor = {
     let recordingNotReady = false;
 
     if (call.recording_url) {
+      const transcribeStartedAt = Date.now();
       const result = await transcribeRecording(call.recording_url, { call, contactPhone, quarantine: true });
+      stageTimings.transcription_ms = Date.now() - transcribeStartedAt;
       transcription = result.transcription;
       recordingNotReady = result.notReady === true;
       contactPassTranscript = result.contactPassTranscript || null;
@@ -6741,7 +6764,9 @@ const CallRecordingProcessor = {
             source: 'fresh_call_log',
           },
         };
-        await db('call_log').where({ id: call.id }).update({
+        // Token-fenced (post-transcription awaits): the pass that now owns
+        // the call scrubs, stamps and quarantines for itself.
+        const fallbackStored = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
           // Persist the scrubbed text, not just the local copy — a legacy
           // PAN-bearing row would otherwise stay exposed to every
           // persisted-row consumer (Codex #2676 round-1 P1). Detection is
@@ -6760,6 +6785,7 @@ const CallRecordingProcessor = {
           })),
           updated_at: new Date(),
         });
+        if (fallbackStored === 0) return abandonToPeer('the Twilio fallback transcript write');
         if (fallbackScrub.count + structuredScrub.count > 0) {
           await quarantineCardRecording(call, { source: 'fallback_heal' });
           call.recording_url = null;
@@ -6779,7 +6805,7 @@ const CallRecordingProcessor = {
             source: 'cached_call_log',
           },
         };
-        await db('call_log').where({ id: call.id }).update({
+        const cachedStored = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
           transcription, // scrubbed — see the fresh-row twin above
           ...(cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
@@ -6792,6 +6818,7 @@ const CallRecordingProcessor = {
           })),
           updated_at: new Date(),
         });
+        if (cachedStored === 0) return abandonToPeer('the cached Twilio transcript write');
         if (cachedScrub.count + cachedStructuredScrub.count > 0) {
           await quarantineCardRecording(call, { source: 'fallback_heal' });
           call.recording_url = null;
@@ -6972,7 +6999,9 @@ const CallRecordingProcessor = {
 
     let extracted;
     try {
+      const extractStartedAt = Date.now();
       extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames, priorCall });
+      stageTimings.extraction_v1_ms = Date.now() - extractStartedAt;
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       // Increment in SQL, not from the in-memory row: the stale-reclaim path
@@ -7017,6 +7046,7 @@ const CallRecordingProcessor = {
     let v2AddressValidation = null;
     if (CALL_EXTRACTION_V2_ENABLED) {
       try {
+        const v2StartedAt = Date.now();
         v2Result = await extractCallDataV2(transcription, contactPhone, {
           callStartedAt: call.created_at,
           callId: call.id,
@@ -7038,6 +7068,7 @@ const CallRecordingProcessor = {
             v2AddressValidation = { status: 'api_unavailable', error: avErr.message };
           }
         }
+        stageTimings.extraction_v2_ms = Date.now() - v2StartedAt;
         const v2Update = {
           ai_extraction_enriched: v2Result.extraction ? JSON.stringify(v2Result.extraction) : null,
           ai_extraction_validation_errors: v2Result.errors ? JSON.stringify(v2Result.errors) : null,
@@ -7049,15 +7080,25 @@ const CallRecordingProcessor = {
           ai_extraction_prompt_version: v2PromptVersion,
           updated_at: new Date(),
         };
-        await db('call_log').where({ id: call.id }).update(v2Update);
-        logger.info(`[call-proc-v2] Shadow extraction stored for ${callSid}: status=${v2Result.status}`);
+        // Token-fenced: this write lands right after the longest provider
+        // await in the pass. A worker whose heartbeats failed (the pool
+        // exhaustion of 2026-08-29) loses its claim to a peer and later
+        // resumes here — unfenced, its stale extraction overwrote the
+        // peer's, with a prompt/model provenance the peer's route decision
+        // never saw.
+        const v2Stored = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update(v2Update);
+        if (v2Stored === 0) {
+          logger.warn(`[call-proc-v2] V2 extraction persist for ${maskSid(callSid)} matched no rows — ownership lost`);
+        } else {
+          logger.info(`[call-proc-v2] Shadow extraction stored for ${callSid}: status=${v2Result.status}`);
+        }
       } catch (err) {
         logger.error(`[call-proc-v2] Shadow extraction failed for ${callSid}: ${err.message}`);
         // Stamp provenance even on a thrown exception so this failure is
         // attributable to the current extractor — otherwise the promotion
         // readiness gate (which scopes by model+prompt) silently drops
         // current-deploy crashes from the schema-pass denominator.
-        await db('call_log').where({ id: call.id }).update({
+        await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
           v2_extraction_status: 'parse_failed',
           ai_extraction_validation_errors: JSON.stringify([{ message: err.message }]),
           ai_extraction_model: CALL_EXTRACTION_ROUTE.primary.model,
@@ -7066,6 +7107,12 @@ const CallRecordingProcessor = {
         });
       }
     }
+    // The V2 dispatch is the longest await this pass makes before its first
+    // side effect. A pass that lost its claim during it must stop HERE — the
+    // fenced writes above already no-op, but everything below (address
+    // recovery, customer resolution, the lead mint) would still spend
+    // provider budget and race the peer that now owns the call.
+    if (!(await stillOwnsClaim())) return abandonToPeer('the V2 extraction persist');
 
     // Non-new-lead natures must not mint a CUSTOMER: the create branch only
     // checks name/phone/voicemail/spam, and V2-primary adoption can supply a
@@ -7410,11 +7457,15 @@ const CallRecordingProcessor = {
       // the call log NOW (non-terminal — the row stays claimed as 'processing')
       // so the call reads as a voicemail even if a later step fails, and mirror
       // it to the unified inbox thread exactly like the skip path does.
-      await db('call_log').where({ id: call.id }).update({
+      // Token-fenced, and the pass stops on a miss: the unified-thread
+      // mirror below is a side effect the peer that now owns the call will
+      // perform itself.
+      const voicemailStamped = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
         answered_by: 'voicemail',
         call_outcome: 'voicemail',
         updated_at: new Date(),
       });
+      if (voicemailStamped === 0) return abandonToPeer('the voicemail channel stamp');
       await updateUnifiedVoiceMessage(
         { ...call, transcription, answered_by: 'voicemail' },
         { body: transcription, answered_by: 'voicemail' }
@@ -7824,6 +7875,9 @@ const CallRecordingProcessor = {
             // not the raw model spelling (codex P2). Best-effort: a failed
             // rewrite leaves the pre-adoption blob, which is the old behavior.
             await db('call_log').where({ id: call.id })
+              // Token-fenced (post-Google-AV await): a superseded pass must
+              // not re-persist ITS blob over the owning pass's.
+              .where('processing_token', procToken)
               .update({ ai_extraction_enriched: JSON.stringify(v2Extraction) })
               .catch((e) => logger.warn(`[call-proc-v2] enriched-blob re-persist after AV adoption failed: ${e.code || e.name || 'db_error'}`));
           }
@@ -8365,7 +8419,9 @@ const CallRecordingProcessor = {
     let newsletterCandidate = null;
     let createdCustomerFromCall = false;
 
-    if (customerId && extracted.first_name && phone) {
+    // An operator-set link is not re-litigated against the transcript name:
+    // the person who set it heard the call.
+    if (customerId && extracted.first_name && phone && !customerLinkOverride) {
       const currentCustomer = await db('customers').where({ id: customerId }).first().catch(() => null);
       if (currentCustomer && customerPhoneMatches(phone, currentCustomer) && !extractedNameMatchesCustomer(extracted, currentCustomer)) {
         const namedCustomer = await findCustomerForCallContact(phone, extracted).catch((e) => {
@@ -9366,7 +9422,8 @@ const CallRecordingProcessor = {
       .where({ id: call.id })
       .where('processing_token', procToken)
       .update({
-      customer_id: customerId || call.customer_id,
+      // The operator's link wins over anything this pass resolved.
+      customer_id: customerLinkOverride ? (customerLinkOverride.customer_id || null) : (customerId || call.customer_id),
       // Call-creation provenance rides the SAME durable write that links
       // the customer (Codex #3084 r24): customer_id persisted ⇒ marker
       // persisted, so a recovery run can never see a call-created customer
@@ -11654,7 +11711,8 @@ const CallRecordingProcessor = {
         // same program the appointment books. Fail-open: booking proceeds
         // on the in-memory value regardless.
         try {
-          await db('call_log').where({ id: call.id }).update({
+          // Token-fenced like the checkpoint that first wrote ai_extraction.
+          await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
             ai_extraction: JSON.stringify(extracted),
             updated_at: new Date(),
           });
@@ -14502,12 +14560,29 @@ const CallRecordingProcessor = {
     // (codex P1).
     if (customerId && !(await stillOwnsClaim())) return abandonToPeer('the customer timeline entry');
     if (customerId) {
-      await db('customer_interactions').insert({
-        customer_id: customerId,
-        interaction_type: 'call',
-        subject: `Inbound call — ${extracted.matched_service || extracted.requested_service || 'General inquiry'}`,
-        body: extracted.call_summary || `Call from ${phone}. ${extracted.pain_points || ''}`,
-      }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
+      // One timeline entry per CALL, not per pass: a deliberate Reprocess is
+      // a supported operation, and every one of them was adding another
+      // "Inbound call" row to the customer's timeline. The entry is keyed on
+      // the call_log id in its metadata; an existing entry is left alone so
+      // an office note attached to it survives too.
+      const timelineExists = await db('customer_interactions')
+        .where({ customer_id: customerId, interaction_type: 'call' })
+        .whereRaw("metadata ->> 'call_log_id' = ?", [String(call.id)])
+        .first('id')
+        .catch(() => null);
+      if (!timelineExists) {
+        await db('customer_interactions').insert({
+          customer_id: customerId,
+          interaction_type: 'call',
+          subject: `Inbound call — ${extracted.matched_service || extracted.requested_service || 'General inquiry'}`,
+          body: extracted.call_summary || `Call from ${phone}. ${extracted.pain_points || ''}`,
+          metadata: JSON.stringify({
+            call_log_id: call.id,
+            twilio_call_sid: call.twilio_call_sid || null,
+            processing_generation: procGeneration,
+          }),
+        }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
+      }
     }
 
     // The synopsis and CSR scoring below each await a provider call and then
@@ -14930,7 +15005,10 @@ const CallRecordingProcessor = {
         generated_at: new Date().toISOString(),
       };
 
-      await db('call_log').where({ id: call.id }).update({
+      // Token-fenced: this lands after the CSR-scoring provider await, and a
+      // check-then-write alone left the window a superseded pass could
+      // overwrite the owning pass's validation record through.
+      await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
         ai_validation: JSON.stringify(validationPayload),
         ai_validation_model: v2ExtractionForAudit?.meta?.extraction_model || CALL_EXTRACTION_ROUTE.primary.model,
         ai_validation_prompt_version: v2ExtractionForAudit?.meta?.extraction_prompt_version || PROMPT_HASH,
@@ -14963,7 +15041,22 @@ const CallRecordingProcessor = {
           // Address unverifiable / caller-not-owner / missing surname, or a
           // customer-less recovery lead that failed to persist → open the call for
           // human review instead of letting it look fully processed.
-          ...(bridgeNeedsConfirmation.length || finalStatus === 'lead_creation_failed' ? { review_status: 'open' } : {}),
+          // customer_creation_failed joins its lead twin here: it used to be
+          // a terminal status with a log line and nothing else — no review
+          // flag, no card, no sweep — the one honest-failure state nobody
+          // could see.
+          ...(bridgeNeedsConfirmation.length || finalStatus === 'lead_creation_failed' || finalStatus === 'customer_creation_failed'
+            ? { review_status: 'open' } : {}),
+          metadata: db.raw(
+            "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)",
+            [JSON.stringify({
+              ...stageTimings,
+              total_ms: Date.now() - processingStartedAt.getTime(),
+              generation: procGeneration,
+              started_at: processingStartedAt.toISOString(),
+              finished_at: new Date().toISOString(),
+            })],
+          ),
           updated_at: new Date(),
         });
       // The non-lead verdict's attribution retire becomes durable HERE,
@@ -15165,6 +15258,20 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] Skipped final status write for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
     } else if (finalStatus === 'customer_creation_failed') {
       logger.warn(`[call-proc] Marked ${callSid} customer_creation_failed — required customer fields were incomplete`);
+      // The card is the only surface this failure gets (its lead twin files
+      // one at the point of failure); the open-row unique index dedupes a
+      // reprocess that fails the same way.
+      try {
+        await db('triage_items').insert(buildTriageItem({
+          callLogId: call.id,
+          flag: 'customer_creation_failed',
+          extraction: { meta: { call_summary: extracted.call_summary || null } },
+        }))
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore();
+      } catch (triageErr) {
+        logger.warn(`[call-proc] customer_creation_failed triage item insert skipped for ${maskSid(callSid)}: ${triageErr.message}`);
+      }
     }
 
     // Zero-triage layers, fenced on finalization: finalized === 0 means a
@@ -15617,6 +15724,23 @@ const CallRecordingProcessor = {
       db.raw("COUNT(*) FILTER (WHERE ai_extraction IS NOT NULL AND ai_extraction::text LIKE '%appointment_confirmed\": true%') as appointments"),
       db.raw("COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND recording_url IS NOT NULL) as last_7d"),
       db.raw("COUNT(*) FILTER (WHERE processing_status = 'processed' AND customer_id IS NOT NULL AND ai_extraction IS NOT NULL AND ai_extraction::text NOT LIKE '%\"is_spam\": true%' AND ai_extraction::text NOT LIKE '%\"is_voicemail\": true%') as leads_extracted"),
+      // Operational truth for the pipeline — the states an operator must be
+      // able to see without a SQL console. `processing` is a live claim;
+      // `stalled_claims` are claims whose beat (or claim start, for rows
+      // claimed before the heartbeat column existed) went quiet past the
+      // sweep's own reclaim window; `failed` is every honest failure state
+      // together; `retrying` is the subset the sweep will still pick up.
+      db.raw("COUNT(*) FILTER (WHERE processing_status = 'processing') as processing"),
+      db.raw(`COUNT(*) FILTER (WHERE processing_status = 'processing' AND ${reclaimableClaim(LEGACY_CLAIM_QUIET_MINUTES)}) as stalled_claims`),
+      db.raw("COUNT(*) FILTER (WHERE processing_status IN ('no_transcription', 'extraction_failed', 'customer_creation_failed', 'lead_creation_failed')) as failed"),
+      db.raw(`COUNT(*) FILTER (WHERE processing_status = 'no_transcription' OR (processing_status = 'extraction_failed' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} AND created_at > NOW() - INTERVAL '7 days')) as retrying`),
+      db.raw("COUNT(*) FILTER (WHERE review_status IN ('open', 'in_progress')) as review_open"),
+      db.raw("COUNT(*) FILTER (WHERE metadata -> 'additional_recordings' IS NOT NULL) as parked_recordings"),
+      // Age of the oldest recorded call that has not reached a terminal
+      // state — the number the stall watchdog alerts on, readable here.
+      db.raw("EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE NULLIF(btrim(recording_url), '') IS NOT NULL AND (processing_status IS NULL OR processing_status IN ('pending', 'processing')) AND COALESCE(recording_duration_seconds, duration_seconds, 0) > 10))) / 60 as oldest_unfinished_minutes"),
+      db.raw("percentile_cont(0.5) WITHIN GROUP (ORDER BY (metadata -> 'processing_timings' ->> 'total_ms')::numeric) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND metadata -> 'processing_timings' ->> 'total_ms' IS NOT NULL) as p50_pass_ms_7d"),
+      db.raw("percentile_cont(0.5) WITHIN GROUP (ORDER BY (metadata -> 'processing_timings' ->> 'transcription_ms')::numeric) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND metadata -> 'processing_timings' ->> 'transcription_ms' IS NOT NULL) as p50_transcription_ms_7d"),
     );
 
     // Source analytics: calls grouped by receiving number
@@ -15636,6 +15760,15 @@ const CallRecordingProcessor = {
       appointments: parseInt(totals.appointments || 0),
       last7d: parseInt(totals.last_7d || 0),
       leadsExtracted: parseInt(totals.leads_extracted || 0),
+      processing: parseInt(totals.processing || 0),
+      stalledClaims: parseInt(totals.stalled_claims || 0),
+      failed: parseInt(totals.failed || 0),
+      retrying: parseInt(totals.retrying || 0),
+      reviewOpen: parseInt(totals.review_open || 0),
+      parkedRecordings: parseInt(totals.parked_recordings || 0),
+      oldestUnfinishedMinutes: totals.oldest_unfinished_minutes == null ? null : Math.round(Number(totals.oldest_unfinished_minutes)),
+      p50PassMs7d: totals.p50_pass_ms_7d == null ? null : Math.round(Number(totals.p50_pass_ms_7d)),
+      p50TranscriptionMs7d: totals.p50_transcription_ms_7d == null ? null : Math.round(Number(totals.p50_transcription_ms_7d)),
       sourceBreakdown: sourceBreakdown.map(s => ({ number: s.to_phone, count: parseInt(s.call_count) })),
     };
   },
