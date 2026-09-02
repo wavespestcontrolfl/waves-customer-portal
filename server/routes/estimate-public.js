@@ -1584,23 +1584,18 @@ function resolveRecurringFirstVisitAmountFromFrequency(frequency = {}, { prefMon
   return total > 0 ? total : null;
 }
 
-function resolveRecurringInvoiceFirstVisitAmount({
-  recurringFirstVisitAmount = null,
-  effectiveBillingCadence = null,
-  monthlyTotal = null,
-} = {}) {
+// The invoice-mode first invoice bills the RESOLVED per-application amount
+// the accept hands in — nothing else. The former fallbacks (the cadence
+// amount, then a synthesized monthly×3 "quarter") billed the monthly display
+// rate of a monthly-billed tier as if it were a per-application charge, or a
+// fabricated figure when the visit price was unresolved (pre-push P0 on
+// #3751). Unresolved now returns null and the draft refuses.
+function resolveRecurringInvoiceFirstVisitAmount({ recurringFirstVisitAmount = null } = {}) {
   const firstVisitAmount = Number(recurringFirstVisitAmount);
   if (Number.isFinite(firstVisitAmount) && firstVisitAmount > 0) {
     return Math.round(firstVisitAmount * 100) / 100;
   }
-  const cadenceAmount = Number(effectiveBillingCadence?.amount);
-  if (Number.isFinite(cadenceAmount) && cadenceAmount > 0) {
-    return Math.round(cadenceAmount * 100) / 100;
-  }
-  const monthly = Number(monthlyTotal);
-  return Number.isFinite(monthly) && monthly > 0
-    ? Math.round(monthly * 3 * 100) / 100
-    : null;
+  return null;
 }
 
 function estimateAcceptError(message, status = 422) {
@@ -1795,14 +1790,14 @@ function buildEstimateInvoiceModeDraft({
   }
 
   const monthly = roundInvoiceAmount(effectiveMonthlyTotal ?? estimate.monthly_total ?? estimate.monthlyTotal ?? 0) || 0;
-  const firstVisitInvoiceAmount = resolveRecurringInvoiceFirstVisitAmount({
-    recurringFirstVisitAmount,
-    effectiveBillingCadence,
-    monthlyTotal: monthly,
-  });
+  const firstVisitInvoiceAmount = resolveRecurringInvoiceFirstVisitAmount({ recurringFirstVisitAmount });
   const amount = roundInvoiceAmount(firstVisitInvoiceAmount);
   if (!(amount > 0)) {
-    throw estimateAcceptError('Invoice-mode recurring acceptance requires a billable first-visit amount.');
+    // Refuse rather than invoice the monthly display rate or a synthesized
+    // amount (pre-push P0 on #3751): the accept resolves the per-application
+    // price (first-application amount, else the tier's per-application
+    // price) and an unresolved one is a call-the-office program.
+    throw estimateAcceptError('Invoice-mode recurring acceptance requires a resolved per-application amount — please call the office to confirm this program\'s pricing.', 409);
   }
   const svcType = recurringInvoiceServiceLabel(recurringSvcList);
   const cadenceLabel = String(effectiveBillingCadence?.frequencyLabel || selectedFrequency?.label || 'Recurring').toLowerCase();
@@ -1822,8 +1817,11 @@ function buildEstimateInvoiceModeDraft({
     const recurringAnnual = Number(manualDiscountItemization?.recurringAnnual) || 0;
     const perApplication = Number(manualDiscountItemization?.perApplication) || 0;
     if (!(recurringAnnual > 0) && !(perApplication > 0)) return 0;
+    // A monthly-billed tier is invoiced PER APPLICATION here (never the
+    // monthly figure — owner ruling 2026-09-01), so its credit slice is the
+    // per-application slice, not annual/12 (pre-push P0 on #3751).
     const billingKey = String(selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || '').toLowerCase();
-    const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : billingKey === 'monthly' ? 1 : null;
+    const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : null;
     if (intervalMonths != null && recurringAnnual > 0) {
       return Math.round(((recurringAnnual * intervalMonths) / 12) * 100) / 100;
     }
@@ -11201,9 +11199,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // figure (its gross+discount lines then rebuild it, total unchanged).
           // Single-service keeps the raw resolver value — its ladder already
           // nets the credit into the amount.
-          recurringFirstVisitAmount: acceptPlanCreditSlice
+          // A monthly-billed service tier has NO first-visit resolver value
+          // (both are null by design) — bill the tier-aware per-application
+          // price the visit row carries (acceptVisitEstimatedPrice) and let
+          // the draft refuse when even that is unresolved, instead of the
+          // draft's old fallback to the monthly display rate (pre-push P0).
+          recurringFirstVisitAmount: (acceptPlanCreditSlice
             ? (firstApplicationInvoiceAmount ?? recurringFirstVisitAmount)
-            : recurringFirstVisitAmount,
+            : recurringFirstVisitAmount) ?? visitEstimatedPrice,
           effectiveBillingCadence,
           selectedFrequency,
           manualDiscountItemization: acceptManualDiscountItemization,

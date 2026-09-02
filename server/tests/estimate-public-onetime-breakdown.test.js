@@ -4243,6 +4243,59 @@ describe('public estimate one-time breakdown', () => {
     expect(none.amount).toBe(89);
   });
 
+  test('invoice-mode recurring accept of a monthly-billed tier bills the resolved per-application price, never the monthly display rate (pre-push P0 on #3751)', () => {
+    const monthlyTier = { key: 'monthly', billingFrequencyKey: 'monthly', label: 'Monthly' };
+    const draft = buildEstimateInvoiceModeDraft({
+      estimate: { id: 5 },
+      estData: {},
+      treatAsOneTime: false,
+      effectiveMonthlyTotal: 34,
+      // The accept resolved the tier's per-application price (annual ÷ visits).
+      recurringFirstVisitAmount: 102,
+      recurringSvcList: [{ service: 'pest_control', name: 'Pest Control', mo: 34 }],
+      effectiveBillingCadence: { frequencyKey: 'monthly', frequencyLabel: 'Monthly', amount: 34, visitChargeLabel: 'Charged after each application' },
+      selectedFrequency: monthlyTier,
+    });
+    expect(draft.amount).toBe(102);
+    expect(draft.lineItems).toEqual([expect.objectContaining({ unit_price: 102 })]);
+
+    // The labeled credit slice on that invoice is the PER-APPLICATION slice,
+    // not annual/12 — the tier is invoiced per application.
+    const itemized = buildEstimateInvoiceModeDraft({
+      estimate: { id: 6 },
+      estData: {},
+      treatAsOneTime: false,
+      effectiveMonthlyTotal: 34,
+      recurringFirstVisitAmount: 102,
+      recurringSvcList: [{ service: 'pest_control', name: 'Pest Control', mo: 34 }],
+      effectiveBillingCadence: { frequencyKey: 'monthly', frequencyLabel: 'Monthly', amount: 34, visitChargeLabel: 'Charged after each application' },
+      selectedFrequency: monthlyTier,
+      manualDiscountItemization: { label: 'Neighbor discount', perApplication: 10, recurringAnnual: 40 },
+    });
+    expect(itemized.amount).toBe(102);
+    expect(itemized.lineItems).toEqual([
+      expect.objectContaining({ unit_price: 112 }),
+      expect.objectContaining({ _kind: 'discount', unit_price: -10 }),
+    ]);
+
+    // Unresolved per-application price: refused (409), never the $34 cadence
+    // figure and never a synthesized quarter.
+    const unresolved = () => buildEstimateInvoiceModeDraft({
+      estimate: { id: 7 },
+      estData: {},
+      treatAsOneTime: false,
+      effectiveMonthlyTotal: 34,
+      recurringFirstVisitAmount: null,
+      recurringSvcList: [{ service: 'pest_control', name: 'Pest Control', mo: 34 }],
+      effectiveBillingCadence: { frequencyKey: 'monthly', frequencyLabel: 'Monthly', amount: 34, visitChargeLabel: 'Charged after each application' },
+      selectedFrequency: monthlyTier,
+    });
+    expect(unresolved).toThrow(/resolved per-application amount/);
+    let thrown = null;
+    try { unresolved(); } catch (err) { thrown = err; }
+    expect(thrown?.status).toBe(409);
+  });
+
   test('Bora-Care plus a positive billable adjustment is NOT treated as Bora-Care-only', () => {
     // A positive one_time_adjustment (or any unrecognized positive charge) is a
     // real billable line — unlike the negative member discount it must NOT switch
@@ -6022,7 +6075,7 @@ describe('public estimate one-time breakdown', () => {
     expect(resolveRecurringFirstVisitAmountFromFrequency(completeFrequency, { services })).toBe(178.8);
   });
 
-  test('recurring invoice-mode invoices prefer the accepted first-visit amount', () => {
+  test('recurring invoice-mode invoices bill ONLY the resolved first-visit amount — no cadence or monthly×3 fallback (pre-push P0 on #3751)', () => {
     expect(resolveRecurringInvoiceFirstVisitAmount({
       recurringFirstVisitAmount: 219.6,
       effectiveBillingCadence: { amount: 350.1 },
@@ -6031,10 +6084,11 @@ describe('public estimate one-time breakdown', () => {
     expect(resolveRecurringInvoiceFirstVisitAmount({
       effectiveBillingCadence: { amount: 350.1 },
       monthlyTotal: 116.7,
-    })).toBe(350.1);
+    })).toBeNull();
     expect(resolveRecurringInvoiceFirstVisitAmount({
       monthlyTotal: 116.7,
-    })).toBe(350.1);
+    })).toBeNull();
+    expect(resolveRecurringInvoiceFirstVisitAmount({ recurringFirstVisitAmount: 0 })).toBeNull();
   });
 
   test('selected-frequency preference discounts respect the VERSIONED pest monthly floor', () => {
