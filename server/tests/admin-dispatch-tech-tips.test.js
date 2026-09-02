@@ -170,13 +170,16 @@ describe('GET /:serviceId/tech-tips', () => {
       { irrigation_system: true, watering_days: [], irrigation_run_minutes: null, irrigation_inches_per_week: '', irrigation_zones: null, rain_sensor: null },
       // the column default (20260401000084) is not customer-entered data
       { irrigation_system: true, rain_sensor: false, irrigation_confirmed_fields: [] },
+      // turf-profile entries share the ledger but say nothing about a schedule
+      { irrigation_confirmed_fields: ['turf_grass', 'turf_county'] },
+      { irrigation_confirmed_fields: '["turf_county"]' },
       null,
     ]) {
       mockDbCurrent = scriptedDb({ service: SERVICE, prefs, calls: [] });
       const res = await invoke({ serviceId: 'svc-1' });
       expect(res.body.conditions).toEqual({ irrigation_on_file: false });
     }
-    for (const prefs of [{ rain_sensor: true }, { irrigation_zones: 6 }, { irrigation_inches_per_week: 1 }, { irrigation_confirmed_fields: ['wateringDays'] }]) {
+    for (const prefs of [{ rain_sensor: true }, { irrigation_zones: 6 }, { irrigation_inches_per_week: 1 }, { irrigation_system_type: 'rotor' }, { irrigation_confirmed_fields: ['turf_grass', 'watering_days'] }, { irrigation_confirmed_fields: '["rain_sensor"]' }]) {
       mockDbCurrent = scriptedDb({ service: SERVICE, prefs, calls: [] });
       const res = await invoke({ serviceId: 'svc-1' });
       expect(res.body.conditions).toEqual({ irrigation_on_file: true });

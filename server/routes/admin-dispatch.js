@@ -39,6 +39,11 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
 const { tipsForVisit, freezeTechTips } = require('../services/service-report/tip-library');
 const { gateEnvValue } = require('../config/feature-gates');
+const {
+  IRRIGATION_SIZING_FIELDS,
+  RAIN_SENSOR_CONFIRMED_FIELD,
+  parseConfirmedFields,
+} = require('../services/irrigation-schedule-confirmation');
 const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
@@ -1970,15 +1975,19 @@ function techTipsGateOn() {
 // "Irrigation on file" for the portal tip = the customer has entered any of
 // the settings the tip asks for. Empty strings, empty arrays and nulls
 // don't count; the irrigation_system flag never does.
+const IRRIGATION_ON_FILE_CONFIRMED = new Set([...IRRIGATION_SIZING_FIELDS, RAIN_SENSOR_CONFIRMED_FIELD]);
 function irrigationSettingsOnFile(prefs) {
   if (!prefs) return false;
   const present = (v) => v != null && v !== '' && !(Array.isArray(v) && v.length === 0);
   // rain_sensor defaults to false on every row (20260401000084), so only an
-  // explicit true is customer-entered; confirmed fields are an explicit save.
-  return ['watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_zones']
+  // explicit true is customer-entered. The confirmation ledger is shared
+  // with turf-profile entries (turf_grass / turf_county) that say nothing
+  // about a watering schedule — only the irrigation sizing fields and the
+  // rain sensor count as an explicit save.
+  return [...IRRIGATION_SIZING_FIELDS, 'irrigation_zones']
     .some((key) => present(prefs[key]))
     || prefs.rain_sensor === true
-    || (Array.isArray(prefs.irrigation_confirmed_fields) && prefs.irrigation_confirmed_fields.length > 0);
+    || parseConfirmedFields(prefs.irrigation_confirmed_fields).some((f) => IRRIGATION_ON_FILE_CONFIRMED.has(f));
 }
 
 // GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
@@ -2040,7 +2049,7 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       // 20260828000002 — proves nothing about the schedule the tip asks for).
       svc.customer_id
         ? db('property_preferences').where({ customer_id: svc.customer_id })
-          .first('watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_zones', 'rain_sensor', 'irrigation_confirmed_fields')
+          .first('watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_system_type', 'irrigation_zones', 'rain_sensor', 'irrigation_confirmed_fields')
           .catch(() => null)
         : null,
     ]);
