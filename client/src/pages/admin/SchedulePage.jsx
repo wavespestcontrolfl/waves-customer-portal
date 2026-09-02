@@ -7037,6 +7037,16 @@ export function typedFieldValueConflicts(schemaType, values) {
 // definition: chips keep only allowlisted tokens, selects must match an
 // option, counts must be digit-only. Free-text fields keep anything.
 // Mutates and returns `restored`.
+// Values a typed treatment-area field accepts: its own options plus this
+// lane's legacy generic chips (the server enforces the same set), so a
+// pre-typed draft's generic list migrates only what the lane can publish —
+// a palm or tree & shrub draft carrying pest chips drops them instead of
+// 422-ing at completion (local audit P1 on #3701).
+export function acceptedTypedAreaValues(areas, field, findingsType = null) {
+  const legacy = legacyCompletionAreas.categories[legacyCompletionAreas.byFindingsType[findingsType]] || [];
+  const accepted = new Set([...(Array.isArray(field?.options) ? field.options : []), ...legacy]);
+  return (Array.isArray(areas) ? areas : []).filter((area) => accepted.has(area));
+}
 export function pruneRestoredFindingsValues(restored, fields, findingsType = null) {
   const values = restored && typeof restored === "object" ? restored : {};
   if (!Array.isArray(fields)) return values;
@@ -7058,13 +7068,10 @@ export function pruneRestoredFindingsValues(restored, fields, findingsType = nul
       // Treatment-area fields also keep this lane's legacy generic chips —
       // a pre-typed draft's generic list migrates into them — but never
       // another lane's areas or free text; the server enforces the same rule.
-      const controlledFallback = TREATMENT_AREA_FIELD_KEYS.includes(field.key)
-        ? new Set(legacyCompletionAreas.categories[legacyCompletionAreas.byFindingsType[findingsType]] || [])
-        : null;
-      const kept = String(raw || "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => field.options.includes(s) || (controlledFallback && controlledFallback.has(s)));
+      const parts = String(raw || "").split(",").map((s) => s.trim()).filter(Boolean);
+      const kept = TREATMENT_AREA_FIELD_KEYS.includes(field.key)
+        ? acceptedTypedAreaValues(parts, field, findingsType)
+        : parts.filter((s) => field.options.includes(s));
       if (kept.length) values[key] = kept.join(", ");
       else delete values[key];
     } else if (
@@ -10781,10 +10788,11 @@ export function CompletionPanel({
     if (!areasTreatedHidden) return;
     if (areasServiced.length) {
       if (typedTreatmentArea?.key) {
+        const migrated = acceptedTypedAreaValues(areasServiced, typedTreatmentArea, typedFindingsSchema?.type);
         setFindingsValues((current) => (
-          parseApplicationAreas(current?.[typedTreatmentArea.key]).length
+          parseApplicationAreas(current?.[typedTreatmentArea.key]).length || !migrated.length
             ? current
-            : { ...current, [typedTreatmentArea.key]: areasServiced.join(", ") }
+            : { ...current, [typedTreatmentArea.key]: migrated.join(", ") }
         ));
       }
       setAreasServiced([]);
@@ -10796,7 +10804,7 @@ export function CompletionPanel({
           : prev
       ));
     }
-  }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea?.key]);
+  }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea, typedFindingsSchema?.type]);
   // Default pest tank mix (owner 2026-08-29): recurring general-pest and
   // pest re-service completions open with Taurus SC + Talstar P + the
   // non-ionic surfactant already on the Products list, totals prefilled

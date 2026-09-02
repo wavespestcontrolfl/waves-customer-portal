@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   completionAreasForTypedFindings,
+  acceptedTypedAreaValues,
   labelsPresentInMarkerNotes,
   productAreaChoices,
   pruneRestoredFindingsValues,
@@ -69,6 +70,13 @@ describe("termite posted-notice pre-submit mirror", () => {
 });
 
 describe("typed area ownership", () => {
+  it("migrates only values the typed lane can publish", () => {
+    const palm = { key: "areas_treated", options: ["Front landscape palms", "Other"] };
+    expect(acceptedTypedAreaValues(["Front yard", "Front landscape palms", "Kitchen"], palm, "palm_injection"))
+      .toEqual(["Front landscape palms"]);
+    const termite = { key: "areas_treated", options: ["Foundation perimeter"] };
+    expect(acceptedTypedAreaValues(["Bait stations", "Kitchen"], termite, "termite_treatment")).toEqual(["Bait stations"]);
+  });
   it("keeps this lane's migrated legacy chips but drops other lanes and free text", () => {
     const field = { key: "areas_treated", type: "chips", options: ["Foundation perimeter"] };
     expect(pruneRestoredFindingsValues(
