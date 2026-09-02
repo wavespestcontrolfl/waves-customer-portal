@@ -1,4 +1,89 @@
 {
   "version": 1,
-  "products": []
+  "products": [
+    {
+      "product_id": "ks-adjustable-door-sweep",
+      "status": "active",
+      "risk_class": "green",
+      "merchant": "amazon",
+      "display_name": "KS Hardware adjustable double-bubble exterior door sweep (36 in)",
+      "product_category": "exclusion",
+      "approved_affiliate_url": "https://www.amazon.com/dp/B07TFW5R2H?tag=wavespestcont-20",
+      "plain_url": "https://www.amazon.com/dp/B07TFW5R2H",
+      "allowed_post_types": ["protocol", "diagnostic", "seasonal"],
+      "allowed_placements": ["primary-rec", "alt-rec"],
+      "owner_approved_at": "2026-09-01",
+      "notes": "Pilot article: nonchemical prevention — sealing the door gap that lets ants, roaches and lizards in. Green: exclusion material."
+    },
+    {
+      "product_id": "stuff-it-copper-mesh",
+      "status": "active",
+      "risk_class": "green",
+      "merchant": "amazon",
+      "display_name": "Stuff-It copper mesh exclusion roll",
+      "product_category": "exclusion",
+      "approved_affiliate_url": "https://www.amazon.com/dp/B004G6YL5E?tag=wavespestcont-20",
+      "plain_url": "https://www.amazon.com/dp/B004G6YL5E",
+      "allowed_post_types": ["protocol", "diagnostic", "seasonal"],
+      "allowed_placements": ["primary-rec", "alt-rec"],
+      "owner_approved_at": "2026-09-01",
+      "notes": "Pilot article: nonchemical prevention — stuffing weep holes, pipe penetrations and roof-line gaps against rodents and roaches. Green: exclusion material (never rusts, unlike steel wool)."
+    },
+    {
+      "product_id": "acurite-glass-rain-gauge",
+      "status": "active",
+      "risk_class": "green",
+      "merchant": "amazon",
+      "display_name": "AcuRite 00810A2 glass rain gauge",
+      "product_category": "measurement",
+      "approved_affiliate_url": "https://www.amazon.com/dp/B001G1C70S?tag=wavespestcont-20",
+      "plain_url": "https://www.amazon.com/dp/B001G1C70S",
+      "allowed_post_types": ["protocol", "diagnostic", "seasonal", "by-grass-type"],
+      "allowed_placements": ["primary-rec", "alt-rec"],
+      "owner_approved_at": "2026-09-01",
+      "notes": "Pilot article: lawn/irrigation measurement — knowing actual rainfall before running the irrigation timer (SWFL wet-season fungus and chinch-bug stress both track water). Green: gauge."
+    },
+    {
+      "product_id": "xlux-soil-moisture-meter",
+      "status": "active",
+      "risk_class": "green",
+      "merchant": "amazon",
+      "display_name": "XLUX soil moisture meter (battery-free probe)",
+      "product_category": "measurement",
+      "approved_affiliate_url": "https://www.amazon.com/dp/B014MJ8J2U?tag=wavespestcont-20",
+      "plain_url": "https://www.amazon.com/dp/B014MJ8J2U",
+      "allowed_post_types": ["protocol", "diagnostic", "seasonal", "by-grass-type"],
+      "allowed_placements": ["primary-rec", "alt-rec"],
+      "owner_approved_at": "2026-09-01",
+      "notes": "Pilot article: lawn/irrigation measurement — reading root-zone moisture instead of guessing (overwatering drives fungus, dollar spot and grub-friendly turf). Green: gauge."
+    },
+    {
+      "product_id": "orbit-sprinkler-catch-cups",
+      "status": "active",
+      "risk_class": "green",
+      "merchant": "amazon",
+      "display_name": "Orbit 26251 sprinkler catch cups (irrigation audit set)",
+      "product_category": "measurement",
+      "approved_affiliate_url": "https://www.amazon.com/dp/B00CBZB8U8?tag=wavespestcont-20",
+      "plain_url": "https://www.amazon.com/dp/B00CBZB8U8",
+      "allowed_post_types": ["protocol", "diagnostic", "seasonal", "by-grass-type"],
+      "allowed_placements": ["primary-rec", "alt-rec"],
+      "owner_approved_at": "2026-09-01",
+      "notes": "Pilot article: lawn/irrigation measurement — a DIY catch-cup audit to find dry zones and uneven coverage before blaming pests or disease. Green: gauge."
+    },
+    {
+      "product_id": "police-security-inspector-penlight",
+      "status": "active",
+      "risk_class": "green",
+      "merchant": "amazon",
+      "display_name": "Police Security Inspector 120-lumen LED penlight",
+      "product_category": "field-tool",
+      "approved_affiliate_url": "https://www.amazon.com/dp/B01MT3HABJ?tag=wavespestcont-20",
+      "plain_url": "https://www.amazon.com/dp/B01MT3HABJ",
+      "allowed_post_types": ["protocol", "diagnostic", "seasonal"],
+      "allowed_placements": ["primary-rec", "alt-rec"],
+      "owner_approved_at": "2026-09-01",
+      "notes": "Pilot article: field-tool/equipment — a homeowner walk-around inspection of entry points, weep holes and cabinet voids (the technician's pocket light). Green: tool."
+    }
+  ]
 }
