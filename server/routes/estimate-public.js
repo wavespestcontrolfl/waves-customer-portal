@@ -11049,6 +11049,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           };
           if (visitEstimatedPrice != null && Number.isFinite(Number(visitEstimatedPrice))) {
             updates.estimated_price = Number(visitEstimatedPrice);
+          } else if (!treatAsOneTime) {
+            // Unresolved (or prepay-covered) recurring acceptance: the adopted
+            // row must not keep a price unrelated to THIS estimate — a stale
+            // estimated_price would bill at completion and would also satisfy
+            // the §3.7 completeness check below that should be ringing
+            // (pre-push codex P0). Cleared explicitly, never omitted.
+            updates.estimated_price = null;
           }
           // T&S tier accepts adopting an existing (non-held) appointment:
           // stamp the accepted tier's catalog identity (see
