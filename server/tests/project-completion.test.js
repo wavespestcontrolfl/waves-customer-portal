@@ -754,3 +754,17 @@ test('service record insert freezes the report line when the column exists, and 
   const withoutCol = buildServiceRecordInsert({ ...base, serviceRecordCols: { scheduled_service_id: true } });
   expect(withoutCol).not.toHaveProperty('service_line');
 });
+
+test('project completion update fills a missing report line from the record identity and leaves a stamped one alone', () => {
+  const base = {
+    project: { id: 'project-1', project_type: 'wdo_inspection', title: 'WDO', project_date: '2026-05-21', report_token: '0123456789abcdef0123456789abcdef' },
+    profile: { completionMode: 'project_required', portalVisibility: 'token_only', portalAttachPolicy: 'recurring_customer' },
+    serviceRecordCols: { structured_notes: true, service_line: true },
+  };
+  const filled = buildServiceRecordProjectCompletionUpdate({ ...base, serviceRecord: { id: 'rec-1', service_type: 'Termite', service_line: null } });
+  expect(filled.service_line).toBe('termite');
+  const kept = buildServiceRecordProjectCompletionUpdate({ ...base, serviceRecord: { id: 'rec-1', service_type: 'Termite', service_line: 'pest' } });
+  expect(kept).not.toHaveProperty('service_line');
+  const noCol = buildServiceRecordProjectCompletionUpdate({ ...base, serviceRecordCols: { structured_notes: true }, serviceRecord: { id: 'rec-1', service_type: 'Termite', service_line: null } });
+  expect(noCol).not.toHaveProperty('service_line');
+});

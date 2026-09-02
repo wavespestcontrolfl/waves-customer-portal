@@ -533,6 +533,11 @@ function buildServiceRecordProjectCompletionUpdate({
   }
   if (serviceRecordCols.completion_source) update.completion_source = 'project_completion';
   if (serviceRecordCols.protocol_defaults_used) update.protocol_defaults_used = false;
+  // Fill-if-absent on a re-completion: a record created before the line was
+  // stamped at insert gets the same frozen verdict (pre-push codex P1).
+  if (serviceRecordCols.service_line && !serviceRecord.service_line && serviceRecord.service_type) {
+    update.service_line = detectServiceLine(serviceRecord.service_type);
+  }
   if (serviceRecordCols.service_data) {
     update.service_data = serializeJsonb({
       ...existingServiceData,

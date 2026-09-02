@@ -419,6 +419,7 @@ async function submitRecap({
         ...(serviceRecordCols.service_tier_source ? ['service_tier_source'] : []),
         ...(serviceRecordCols.service_id ? ['service_id'] : []),
         ...(serviceRecordCols.service_type ? ['service_type'] : []),
+        ...(serviceRecordCols.service_line ? ['service_line'] : []),
       );
 
     // Tier/provenance/callback snapshot — the SAME shared builder the heavy
@@ -608,6 +609,11 @@ async function submitRecap({
         technician_notes: note || null,
         status: 'completed',
         ...snapshotBackfill,
+        // Fill-if-absent: a record created before the line was stamped at
+        // insert gets the same frozen verdict (pre-push codex P1).
+        ...(serviceRecordCols.service_line && !existing.service_line
+          ? { service_line: detectServiceLine(existing.service_type || svc.service_type || 'Pest Control') }
+          : {}),
         ...(mergedServiceData ? { service_data: mergedServiceData } : {}),
         ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
         ...smsClaim,

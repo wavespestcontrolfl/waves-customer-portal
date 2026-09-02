@@ -154,6 +154,7 @@ function makeKnex(store) {
             status: latest.status || null,
             service_id: latest.service_id || null,
             service_type: latest.service_type || null,
+            service_line: latest.service_line ?? null,
           }
           : undefined;
       }
@@ -1285,5 +1286,17 @@ describe('pest-recap: freeze identity (GH codex r2 P2)', () => {
     expect(result.ok).toBe(true);
     expect(store.records).toHaveLength(1);
     expect(store.records[0].service_line).toBe('pest'); // 'Quarterly Pest Control' → pest line
+  });
+
+  test('a re-completion of a record with no line fills it (and leaves a stamped one alone)', async () => {
+    const store = { serviceStatus: 'scheduled', records: [{ id: 'rec-old', recap_sms_sent_at: null, structured_notes: null, service_type: 'Lawn Care Visit', service_line: null }] };
+    const knex = makeKnex(store);
+    const args = { serviceId: SERVICE_ID, actorType: 'tech', actorId: 'tech-1', technicianNotes: 'Done.', products: [], customerRecap: 'Service complete.', sendSms: false, knex };
+    expect((await submitRecap(args)).ok).toBe(true);
+    expect(store.recordUpdates.some((u) => u.service_line === 'lawn')).toBe(true); // the RECORD's own identity, not the visit label
+    store.records[0].service_line = 'lawn';
+    store.recordUpdates = [];
+    expect((await submitRecap(args)).ok).toBe(true);
+    expect(store.recordUpdates.some((u) => Object.prototype.hasOwnProperty.call(u, 'service_line'))).toBe(false);
   });
 });
