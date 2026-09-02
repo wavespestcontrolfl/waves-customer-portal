@@ -1372,6 +1372,17 @@ const DICTATION_AUDIO_TYPES = new Map([
   ['audio/wav', 'clip.wav'],
 ]);
 const DICTATION_MAX_BYTES = 15 * 1024 * 1024;
+// Paid transcription: cap clips per staff bucket (same key as every other
+// paid-LLM limiter — rate-limit-key.js) so a stuck retry loop cannot bill
+// unbounded. 40 clips / 15 min is far above one tech's honest cadence.
+const dictationLimiter = require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many dictation clips — type your notes for now' },
+});
 const DICTATION_TRANSCRIPTION_PROMPT = `Transcribe a pest control technician's dictated field notes for Waves Pest Control (Southwest Florida): areas treated, pests found, products and application rates, follow-up recommendations. Keep product names, numbers, and units exactly as spoken. Do not summarize or add commentary.`;
 const dictationUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: DICTATION_MAX_BYTES } });
 
@@ -1401,7 +1412,7 @@ router.post('/:id/dictation', async (req, res, next) => {
     if (!(await loadOwnedServiceOr403(req, res))) return undefined;
     return next();
   } catch (err) { return next(err); }
-}, (req, res, next) => {
+}, dictationLimiter, (req, res, next) => {
   dictationUpload.single('audio')(req, res, (err) => {
     if (!err) return next();
     if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Recording too large (15 MB max)' });
@@ -1416,7 +1427,7 @@ router.post('/:id/dictation', async (req, res, next) => {
       return res.status(415).json({ error: `Unsupported audio type: ${baseType || 'unknown'}` });
     }
 
-    const { transcribeWithOpenAI } = require('../services/call-recording-processor');
+    const { transcribeWithOpenAI, isImplausibleTranscript } = require('../services/call-recording-processor');
     const result = await transcribeWithOpenAI(req.file.buffer, {
       model: process.env.OPENAI_DICTATION_MODEL || 'gpt-4o-transcribe',
       prompt: DICTATION_TRANSCRIPTION_PROMPT,
@@ -1427,6 +1438,14 @@ router.post('/:id/dictation', async (req, res, next) => {
     // Audit line carries who/what/size only — never the transcript.
     logger.info(`[tech-dictation] service=${req.params.id} tech=${req.technicianId} bytes=${req.file.buffer.length} type=${baseType} ok=${Boolean(result)} chars=${text.length}`);
     if (!result) return res.status(502).json({ error: 'Transcription unavailable — type your notes instead' });
+    // Same hallucination guard as call recordings: far more characters than
+    // the clip's seconds can hold is a fabricated transcript, not notes. The
+    // client reports the recorded duration; unknown → the guard fails open.
+    const durationSeconds = Number(req.body?.duration_seconds) || 0;
+    if (isImplausibleTranscript(text, durationSeconds)) {
+      logger.warn(`[tech-dictation] implausible transcript rejected service=${req.params.id} chars=${text.length} seconds=${durationSeconds}`);
+      return res.status(502).json({ error: 'Transcription looked unreliable — try again or type your notes' });
+    }
     return res.json({ text });
   } catch (err) { return next(err); }
 });

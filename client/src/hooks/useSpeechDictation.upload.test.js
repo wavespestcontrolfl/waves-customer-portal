@@ -79,6 +79,7 @@ describe("useSpeechDictation upload fallback", () => {
     expect(opts.body).toBeInstanceOf(FormData);
     const file = opts.body.get("audio");
     expect(file.name).toBe("dictation.webm");
+    expect(opts.body.get("duration_seconds")).toMatch(/^\d+$/);
     expect(alert).not.toHaveBeenCalled();
   });
 

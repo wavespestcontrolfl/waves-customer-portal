@@ -73,7 +73,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const supported = mode !== null;
 
   const uploadClip = useCallback(
-    async (blob) => {
+    async (blob, durationSeconds) => {
       const token = localStorage.getItem("waves_admin_token");
       if (!token || !blob || !blob.size) return;
       setUploading(true);
@@ -82,6 +82,10 @@ export default function useSpeechDictation(onTranscript, options = {}) {
         const type = (blob.type || "audio/webm").split(";")[0];
         const ext = type.includes("mp4") ? "mp4" : type.includes("ogg") ? "ogg" : type.includes("wav") ? "wav" : type.includes("mpeg") ? "mp3" : "webm";
         form.append("audio", blob, `dictation.${ext}`);
+        // Recorded seconds feed the server's transcript plausibility guard.
+        if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
+          form.append("duration_seconds", String(Math.round(durationSeconds)));
+        }
         const r = await fetch(
           `${API_BASE}/tech/services/${encodeURIComponent(uploadServiceId)}/dictation`,
           { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form },
@@ -123,6 +127,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     );
     const rec = new window.MediaRecorder(stream, mimeType ? { mimeType } : undefined);
     const chunks = [];
+    const startedAt = Date.now();
     rec.ondataavailable = (ev) => {
       if (ev.data && ev.data.size) chunks.push(ev.data);
     };
@@ -131,7 +136,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       recorderRef.current = null;
       setListening(false);
       const blob = new Blob(chunks, { type: rec.mimeType || mimeType || "audio/webm" });
-      uploadClip(blob);
+      uploadClip(blob, (Date.now() - startedAt) / 1000);
     };
     rec.onerror = () => {
       stream.getTracks().forEach((t) => t.stop());

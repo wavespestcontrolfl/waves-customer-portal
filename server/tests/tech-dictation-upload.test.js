@@ -10,6 +10,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const mockTranscribe = jest.fn();
+const mockImplausible = jest.fn(() => false);
 const mockFirst = jest.fn();
 
 jest.mock('../models/db', () => {
@@ -19,6 +20,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/call-recording-processor', () => ({
   transcribeWithOpenAI: (...args) => mockTranscribe(...args),
+  isImplausibleTranscript: (...args) => mockImplausible(...args),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
@@ -53,9 +55,10 @@ async function withServer(fn) {
   try { return await fn(baseUrl); } finally { await new Promise((r) => server.close(r)); }
 }
 
-function clip(baseUrl, { token = 'tech', type = 'audio/webm;codecs=opus', bytes = 'opus-bytes' } = {}) {
+function clip(baseUrl, { token = 'tech', type = 'audio/webm;codecs=opus', bytes = 'opus-bytes', seconds } = {}) {
   const form = new FormData();
   form.append('audio', new Blob([bytes], { type }), 'dictation.webm');
+  if (seconds !== undefined) form.append('duration_seconds', String(seconds));
   return fetch(`${baseUrl}/api/tech/services/svc-1/dictation`, {
     method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form,
   });
@@ -76,6 +79,7 @@ describe('tech dictation upload', () => {
     process.env.OPENAI_API_KEY = 'test-key';
     mockFirst.mockResolvedValue({ id: 'svc-1', technician_id: 'tech-1' });
     mockTranscribe.mockResolvedValue({ text: '  Treated the exterior perimeter. ', provider: 'openai' });
+    mockImplausible.mockReturnValue(false);
   });
   afterAll(() => {
     if (original === undefined) delete process.env.GATE_TECH_DICTATION_UPLOAD;
@@ -134,6 +138,27 @@ describe('tech dictation upload', () => {
       const miss = await clip(baseUrl);
       expect(miss.status).toBe(502);
       expect((await miss.json()).text).toBeUndefined();
+    });
+  });
+
+  test('shared plausibility guard: recorded seconds reach it and an implausible transcript is refused', async () => {
+    await withServer(async (baseUrl) => {
+      const ok = await clip(baseUrl, { seconds: 12 });
+      expect(ok.status).toBe(200);
+      expect(mockImplausible).toHaveBeenCalledWith('Treated the exterior perimeter.', 12);
+      mockImplausible.mockReturnValue(true);
+      const bad = await clip(baseUrl, { seconds: 1 });
+      expect(bad.status).toBe(502);
+      expect((await bad.json()).text).toBeUndefined();
+    });
+  });
+
+  test('paid endpoint is rate-limited per caller bucket', async () => {
+    await withServer(async (baseUrl) => {
+      let last;
+      for (let i = 0; i < 41; i += 1) last = await clip(baseUrl);
+      expect(last.status).toBe(429);
+      expect(mockTranscribe.mock.calls.length).toBeLessThanOrEqual(40);
     });
   });
 });
