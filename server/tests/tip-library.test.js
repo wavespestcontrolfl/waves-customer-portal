@@ -170,6 +170,13 @@ describe('freezeTechTips', () => {
     for (const bad of [undefined, null, 'x', 42, ['light_warm_bulbs'], { ids: 'light_warm_bulbs' }]) {
       expect(freezeTechTips(bad).tips).toEqual([]);
     }
+    // a non-string custom value is ignored, never stringified into copy
+    for (const custom of [{ text: 'x' }, ['Flip the mats.'], 42, true]) {
+      expect(freezeTechTips({ ids: ['light_warm_bulbs'], custom })).toEqual({
+        tips: [expect.objectContaining({ id: 'light_warm_bulbs', source: 'library' })],
+        dropped: [],
+      });
+    }
   });
 });
 

@@ -406,7 +406,9 @@ function freezeTechTips(input) {
   const dropped = [];
   // Never truncated: an over-long line is rejected as `too_long` so the
   // tech rewrites it, rather than a silently shortened sentence printing.
-  const custom = String(input.custom || '').replace(/\s+/g, ' ').trim();
+  // Only a string is a custom line — a malformed array/object must never be
+  // stringified into customer-facing text ("[object Object]").
+  const custom = typeof input.custom === 'string' ? input.custom.replace(/\s+/g, ' ').trim() : '';
   if (custom) {
     // One sentence, one slot: a value carrying several sentences would be
     // several tips under one cap entry. customerCopyViolations also runs
