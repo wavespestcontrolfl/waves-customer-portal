@@ -288,10 +288,12 @@ describe('lead identity corpus — shape and PII hygiene', () => {
   test('names come from the synthetic vocabulary; every address declares itself fictional', () => {
     for (const c of CASES) {
       for (const rec of [c.a, c.b]) {
-        // Hygiene normalization REJECTS letters outside the Latin script
-        // instead of erasing them (namePart, the resolver's normalizer,
-        // strips them — `Marisol 王小明` would otherwise pass as `marisol`).
-        const latinOnly = (v) => /^[\p{Script=Latin}\p{M}\s'’.-]+$/u.test(String(v));
+        // Hygiene normalization REJECTS what namePart (the resolver's
+        // normalizer) would ERASE: the synthetic vocabulary is ASCII, so a
+        // structured name may hold only ASCII letters plus spaces,
+        // apostrophes, periods and hyphens — `Marisol 王小明` and `Marisol Ł`
+        // both fail instead of collapsing to `marisol`.
+        const latinOnly = (v) => /^[A-Za-z][A-Za-z\s'’.-]*$/.test(String(v).trim());
         if (rec.first_name) {
           const ok = latinOnly(rec.first_name) && SYNTHETIC_FIRST_NAMES.has(namePart(rec.first_name));
           expect({ id: c.id, first_name: rec.first_name, ok })
@@ -335,7 +337,9 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     // punctuation is stripped, be EXACTLY a synthetic address: ASCII local
     // part from the allowlist at a reserved example.com domain. Anything
     // else is treated as a real address and fails.
-    const str = String(text);
+    // NFKC first: fullwidth letters, digits, `＠` and punctuation (`（ ）`)
+    // fold to their ASCII forms, so every rule below sees one spelling.
+    const str = String(text).normalize('NFKC');
     for (const raw of str.split(/\s+/)) {
       if (!raw.includes('@')) continue;
       const word = raw.replace(/^[^\p{L}\p{N}"[]+|[^\p{L}\p{N}\]]+$/gu, '');
@@ -351,7 +355,7 @@ describe('lead identity corpus — shape and PII hygiene', () => {
       while (/\p{Nd}/u.test(String.fromCodePoint(z - 1))) z -= 1;
       return String((ch.codePointAt(0) - z) % 10);
     };
-    const normalized = String(text)
+    const normalized = str
       .replace(/\p{Nd}/gu, (ch) => (/[0-9]/.test(ch) ? ch : asciiDigit(ch)))
       .replace(/[\u2010-\u2015\u2212]/g, '-').replace(/[\u00A0\u2007\u202F]/g, ' ');
     for (const run of normalized.match(/\+?\d[\d\s().\/-]{5,}\d/g) || []) {
