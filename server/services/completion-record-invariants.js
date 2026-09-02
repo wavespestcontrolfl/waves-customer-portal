@@ -166,17 +166,21 @@ const CANONICAL_SIBLING = `
 // inferred source) never exempts a report and only exempts a notice when its
 // application-log default is false — that default is name/category
 // inference in JS, so the sweep keeps the conservative "owed" there.
+// The numeric casts sit inside CASE guards: PostgreSQL does not promise
+// short-circuit evaluation of AND, so a malformed `"v":"bad"` reaching the
+// cast would raise and take BOTH artifact detectors down instead of
+// falling to the catalog (pre-push P1).
 const FROZEN_SNAPSHOT_VALID = `
                        jsonb_typeof(canonical.snap) = 'object'
-                       AND jsonb_typeof(canonical.snap->'v') = 'number'
-                       AND (canonical.snap->>'v')::numeric = 1
+                       AND CASE WHEN jsonb_typeof(canonical.snap->'v') = 'number'
+                                THEN (canonical.snap->>'v')::numeric = 1 ELSE false END
                        AND jsonb_typeof(canonical.snap->'requiresServiceReport') = 'boolean'
                        AND jsonb_typeof(canonical.snap->'requiresApplicationLog') = 'boolean'
                        AND jsonb_typeof(canonical.snap->'requiresCustomerSignature') = 'boolean'
                        AND jsonb_typeof(canonical.snap->'requiresCustomerNotice') = 'boolean'
                        AND jsonb_typeof(canonical.snap->'requiresLicense') = 'boolean'
-                       AND jsonb_typeof(canonical.snap->'requiredPhotoCount') = 'number'
-                       AND (canonical.snap->>'requiredPhotoCount')::numeric >= 0
+                       AND CASE WHEN jsonb_typeof(canonical.snap->'requiredPhotoCount') = 'number'
+                                THEN (canonical.snap->>'requiredPhotoCount')::numeric >= 0 ELSE false END
                        AND jsonb_typeof(canonical.snap->'source') = 'string'
                        AND canonical.snap->>'source' <> ''`;
 const CATALOG_NOT_OWED = Object.freeze({

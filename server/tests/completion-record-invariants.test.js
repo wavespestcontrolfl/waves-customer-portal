@@ -79,8 +79,11 @@ describe('PREDICATES registry', () => {
     expect(notOwed).toContain("NOT IN ('', 'default', 'inferred_v1', 'fallback_inference')");
     // Strict snapshot twin of frozenCloseoutRequirements: NUMERIC v=1 (a
     // string "1" is rejected there too) + every boolean typed.
-    expect(_private.FROZEN_SNAPSHOT_VALID).toContain("jsonb_typeof(canonical.snap->'v') = 'number'");
-    expect(_private.FROZEN_SNAPSHOT_VALID).toContain("(canonical.snap->>'v')::numeric = 1");
+    // Casts are CASE-guarded by the type check (AND does not short-circuit
+    // in PostgreSQL; a malformed value must fall to the catalog, not raise).
+    expect(_private.FROZEN_SNAPSHOT_VALID).toMatch(/CASE WHEN jsonb_typeof\(canonical\.snap->'v'\) = 'number'\s+THEN \(canonical\.snap->>'v'\)::numeric = 1 ELSE false END/);
+    expect(_private.FROZEN_SNAPSHOT_VALID).toMatch(/CASE WHEN jsonb_typeof\(canonical\.snap->'requiredPhotoCount'\) = 'number'\s+THEN \(canonical\.snap->>'requiredPhotoCount'\)::numeric >= 0 ELSE false END/);
+    expect(_private.FROZEN_SNAPSHOT_VALID).not.toMatch(/AND \(canonical\.snap->>'(v|requiredPhotoCount)'\)::numeric/);
     expect(_private.FROZEN_SNAPSHOT_VALID).not.toContain("->>'v' = '1'");
     for (const f of ['requiresServiceReport', 'requiresApplicationLog', 'requiresCustomerSignature', 'requiresCustomerNotice', 'requiresLicense']) {
       expect(_private.FROZEN_SNAPSHOT_VALID).toContain(`jsonb_typeof(canonical.snap->'${f}') = 'boolean'`);
