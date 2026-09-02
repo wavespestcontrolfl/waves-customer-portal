@@ -120,18 +120,27 @@ export default function CallTranscriptSync({
   const active = activeSegmentIndex(list, currentMs);
   const activeRef = useRef(null);
 
+  // Scroll only the transcript list, never the page: scrollIntoView walks
+  // every ancestor and would drag the viewport back to the playing call
+  // while the operator reads another row.
+  const listRef = useRef(null);
   useEffect(() => {
     const el = activeRef.current;
-    if (!el || typeof el.scrollIntoView !== "function") return;
-    el.scrollIntoView({ block: "nearest" });
+    const list = listRef.current;
+    if (!el || !list) return;
+    const top = el.offsetTop - list.offsetTop;
+    const bottom = top + el.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
   }, [active]);
 
   if (!list.length) return null;
 
   return (
     <ol
+      ref={listRef}
       className={cn(
-        "m-0 p-0 list-none max-h-72 overflow-y-auto",
+        "relative m-0 p-0 list-none max-h-72 overflow-y-auto",
         className,
       )}
       aria-label="Transcript, click a line to seek the recording there"

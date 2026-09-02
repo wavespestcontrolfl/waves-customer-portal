@@ -340,7 +340,17 @@ export default function CallLogTabV2() {
   const loadSeqRef = useRef(0);
   const playerRefFor = (id) => (handle) => {
     if (handle) playerRefs.current.set(id, handle);
-    else playerRefs.current.delete(id);
+    else {
+      // The player unmounted (row filtered out): a remount starts unloaded,
+      // so its old position must not light a transcript line.
+      playerRefs.current.delete(id);
+      setPlaybackById((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }
   };
   // Parsed once per fetch, not per playback tick: every timeupdate rerenders
   // the list, and parsing 200 structured transcripts on each tick would
