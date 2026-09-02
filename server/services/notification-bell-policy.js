@@ -86,6 +86,7 @@ const OVERRIDABLE_CATEGORIES = [
   'job_application',
   'estimate_converted',
   'estimate_measurement_review',
+  'estimate_hot_view',
   'estimate_change_request',
   'alert',
   'system',
