@@ -41,10 +41,13 @@ function fakeKnex(db, { missingTables = [], missingColumns = [] } = {}) {
         });
       },
       async first() { return rows().find((r) => preds.every((p) => p(r))); },
-      async update(patch) {
+      async update(patch, returning) {
         const hits = rows().filter((r) => preds.every((p) => p(r)));
-        hits.forEach((r) => Object.assign(r, patch));
-        return hits.length;
+        if (db._raceOnce) { const race = db._raceOnce; db._raceOnce = null; race(db); }
+        const live = hits.filter((r) => preds.every((p) => p(r)));
+        live.forEach((r) => Object.assign(r, patch));
+        if (returning) return live.map((r) => { const o = {}; returning.forEach((c) => { o[c] = r[c]; }); return o; });
+        return live.length;
       },
       async insert(row) { db[table] = db[table] || []; db[table].push({ ...row }); return [1]; },
       async del() {
@@ -83,6 +86,16 @@ describe('20260902000020 backfill service_records.service_line', () => {
       service_type: 'Quarterly Pest Control Service', service_line: 'pest', ids: ['r1', 'r2'],
     });
     expect(st.stamped).toHaveLength(4);
+  });
+
+  test('ledgers only the ids the CAS write touched — a row a concurrent writer filled is never cleared by down()', async () => {
+    const db = seedDb();
+    db._raceOnce = (d) => { d.service_records.find((r) => r.id === 'r2').service_line = 'pest'; }; // writer wins r2 between scan and write
+    await migration.up(fakeKnex(db));
+    expect(state(db).stamped.find((s) => s.service_type === 'Quarterly Pest Control Service').ids).toEqual(['r1']);
+    await migration.down(fakeKnex(db));
+    expect(row(db, 'r1').service_line).toBeNull();
+    expect(row(db, 'r2').service_line).toBe('pest'); // theirs, kept
   });
 
   test('idempotent: a re-run stamps nothing new and keeps the ledger', async () => {

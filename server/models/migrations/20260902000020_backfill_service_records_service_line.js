@@ -53,11 +53,15 @@ exports.up = async function up(knex) {
   for (const [label, ids] of byLabel) {
     const line = detectServiceLine(label);
     if (!line) continue;
-    const count = await knex('service_records')
+    // Ledger only the ids the CAS write actually touched (RETURNING): a row
+    // a concurrent writer filled between scan and write is theirs, and
+    // down() must never clear it (pre-push codex P1).
+    const updated = await knex('service_records')
       .whereIn('id', ids)
       .whereNull('service_line')
-      .update({ service_line: line });
-    if (count) state.stamped.push({ service_type: label, service_line: line, ids });
+      .update({ service_line: line }, ['id']);
+    const stampedIds = (Array.isArray(updated) ? updated : []).map((r) => (r && typeof r === 'object' ? r.id : r)).filter(Boolean);
+    if (stampedIds.length) state.stamped.push({ service_type: label, service_line: line, ids: stampedIds });
   }
 
   if (await knex.schema.hasTable('system_settings')) {
