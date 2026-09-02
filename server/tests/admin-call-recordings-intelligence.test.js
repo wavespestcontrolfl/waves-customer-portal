@@ -199,8 +199,11 @@ describe('POST /calls/:id/adopt-recording', () => {
     // The row leaves "processed": its transcript/extraction describe the old
     // audio, and NULL puts it back in the sweep if the immediate pass defers.
     expect(swap.patch).toMatchObject({ recording_sid: PARKED, recording_url: 'https://api.twilio.com/x/RE2.mp3', recording_duration_seconds: 80, transcription_status: 'pending', processing_status: null });
-    const remaining = JSON.parse(swap.patch.metadata.bindings[0]);
-    expect(remaining).toEqual([expect.objectContaining({ recording_sid: CURRENT, parked_because: 'replaced_by_operator' })]);
+    // Rewritten against the current array: the chosen SID is removed in SQL,
+    // the replaced recording appended.
+    expect(swap.patch.metadata.sql).toContain("WHERE e ->> 'recording_sid' <> ?");
+    expect(swap.patch.metadata.bindings[0]).toBe(PARKED);
+    expect(JSON.parse(swap.patch.metadata.bindings[1])).toEqual([expect.objectContaining({ recording_sid: CURRENT, parked_because: 'replaced_by_operator' })]);
     // Fenced to the row this request read: the recording being replaced and
     // the parked entry being adopted must both still be there.
     const fenceClauses = swap.wheres.map((w) => JSON.stringify(w));
@@ -214,7 +217,12 @@ describe('POST /calls/:id/adopt-recording', () => {
     const OTHER = 'RE' + '3'.repeat(32);
     const row = call();
     row.metadata.additional_recordings.push({ recording_sid: OTHER, recording_url: 'https://api.twilio.com/x/RE3.mp3', recording_duration_seconds: 20, received_at: 'T2', parked_because: 'write_contended' });
-    const updates = mockDb([row]);
+    // The post-swap re-read: the chosen entry gone, OTHER and the replaced one present.
+    const afterSwap = { metadata: { additional_recordings: [
+      { recording_sid: OTHER, recording_url: 'https://api.twilio.com/x/RE3.mp3', parked_because: 'write_contended' },
+      { recording_sid: CURRENT, recording_url: 'https://api.twilio.com/x/RE1.mp3', parked_because: 'replaced_by_operator' },
+    ] } };
+    const updates = mockDb([row, afterSwap]);
     processor.processRecording.mockResolvedValue({ success: true, callSid: SID });
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });

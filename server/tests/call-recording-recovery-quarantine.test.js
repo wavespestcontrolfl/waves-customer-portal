@@ -13,7 +13,11 @@ jest.mock('../models/db', () => {
   builder.whereRaw = jest.fn(() => builder);
   builder.first = jest.fn(async () => state.call);
   builder.update = jest.fn(async () => 1);
+  builder.forUpdate = jest.fn(() => builder);
   const db = jest.fn(() => builder);
+  // The quarantine stamp runs under a row lock in a transaction; the fake
+  // hands the same builder back.
+  db.transaction = jest.fn(async (fn) => fn(db));
   db.raw = jest.fn((sql) => sql);
   db.__state = state;
   db.__builder = builder;

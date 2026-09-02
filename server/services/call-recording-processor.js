@@ -512,7 +512,14 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
   let alreadyQuarantined = false;
   let listedEntries = [];
   try {
-    const row = await db('call_log').where({ id: call.id }).first('transcription_metadata');
+    // The owed-SID set is read, changed and written under a row lock: two
+    // quarantines of different recordings on one call (the webhook does
+    // the incoming recording, then the row's own) must not race the
+    // read-modify-write and drop each other's SID — for an incoming
+    // recording that sits in no metadata list, that SID is the only thing
+    // recovery can retry.
+    await db.transaction(async (trx) => {
+    const row = await trx('call_log').where({ id: call.id }).forUpdate().first('transcription_metadata');
     // jsonb columns come back as OBJECTS from Postgres, strings from mocks/
     // sqlite — handle both or a quarantine would clobber the provider/source
     // metadata instead of merging (Codex #2676 round-4 P2).
@@ -560,10 +567,11 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
     // whole call's.
     const owed = owedSids.size > 0;
     nextMeta.recording_quarantined = !owed && (twilioDeleted || meta.recording_quarantined === true);
-    await db('call_log').where({ id: call.id }).update({
+    await trx('call_log').where({ id: call.id }).update({
       recording_url: null,
       transcription_metadata: JSON.stringify(nextMeta),
       updated_at: new Date(),
+    });
     });
   } catch (err) {
     logger.error(`[call-proc] PAN quarantine: call_log strip failed for call ${call.id}: ${err.message}`);

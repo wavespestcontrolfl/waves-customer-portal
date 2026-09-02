@@ -322,16 +322,14 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     if (panQuarantined) {
       return quarantinedResponse(res, await quarantineParked(), 'This call is PAN-quarantined; recordings are never re-attached.');
     }
-    const remaining = parked.filter((r) => r.recording_sid !== wanted);
-    if (call.recording_sid) {
-      remaining.push({
-        recording_sid: call.recording_sid,
-        recording_url: call.recording_url,
-        recording_duration_seconds: call.recording_duration_seconds ?? null,
-        received_at: null,
-        parked_because: 'replaced_by_operator',
-      });
-    }
+    // The recording being replaced stays in the parked list as evidence.
+    const replaced = call.recording_sid ? [{
+      recording_sid: call.recording_sid,
+      recording_url: call.recording_url,
+      recording_duration_seconds: call.recording_duration_seconds ?? null,
+      received_at: null,
+      parked_because: 'replaced_by_operator',
+    }] : [];
     const swapped = await db('call_log')
       .where({ id: call.id })
       .whereRaw("processing_status IS DISTINCT FROM 'processing'")
@@ -359,9 +357,15 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         // fields are replaced — never a processed row whose audio does not
         // match its intelligence.
         processing_status: null,
+        // The parked list is rewritten against the CURRENT array — the
+        // chosen entry removed, the replaced recording appended — never
+        // from this request's snapshot, so a callback that parked another
+        // recording between the read and this write keeps its entry.
         metadata: db.raw(
-          "jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}', ?::jsonb, true), '{adopted_recording}', ?::jsonb, true)",
-          [JSON.stringify(remaining), JSON.stringify({ recording_sid: chosen.recording_sid, by: req.technicianId || null, at: new Date().toISOString(), previous_recording_sid: call.recording_sid || null })],
+          "jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}',"
+          + " (SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata -> 'additional_recordings', '[]'::jsonb)) e WHERE e ->> 'recording_sid' <> ?) || ?::jsonb, true),"
+          + " '{adopted_recording}', ?::jsonb, true)",
+          [chosen.recording_sid, JSON.stringify(replaced), JSON.stringify({ recording_sid: chosen.recording_sid, by: req.technicianId || null, at: new Date().toISOString(), previous_recording_sid: call.recording_sid || null })],
         ),
         updated_at: new Date(),
       });
@@ -390,7 +394,15 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
       // as a review item; any other callback-parked entry keeps the card
       // open, retargeted to it, so it does not vanish from the inbox with no
       // operator decision recorded.
-      const stillForReview = remaining.filter((r) => r.parked_because !== 'replaced_by_operator');
+      // Read the list as it is NOW (the swap rewrote it against the current
+      // row, and a callback may have parked more since).
+      const after = await db('call_log').where({ id: call.id }).first('metadata').catch(() => null);
+      let nowParked = [];
+      try {
+        const m = typeof after?.metadata === 'string' ? JSON.parse(after.metadata) : (after?.metadata || {});
+        nowParked = Array.isArray(m.additional_recordings) ? m.additional_recordings : [];
+      } catch { nowParked = []; }
+      const stillForReview = nowParked.filter((r) => r && r.parked_because !== 'replaced_by_operator' && r.recording_sid !== chosen.recording_sid);
       const openCard = db('triage_items')
         .where({ call_log_id: call.id, reason_code: 'additional_recording' })
         .whereIn('status', ['open', 'in_progress']);
