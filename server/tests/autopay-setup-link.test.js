@@ -471,6 +471,8 @@ describe('completion tail (page POST + webhook)', () => {
     mockTableHandlers.payment_methods = { first: () => null };
     await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
     expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(1756800000 * 1000) }));
+    // The consent dedupe keys on the same authorization moment.
+    expect(mockHasConsentSnapshotForVariant).toHaveBeenLastCalledWith('cust-1', 'pm_new', expect.objectContaining({ since: new Date(1756800000 * 1000) }));
     mockEnrollConsentedMethod.mockClear();
     mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING }) };
     await completeAutopaySetupCaptureFromWebhook({ ...GOOD_SI, created: 1756800000 });

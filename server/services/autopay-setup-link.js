@@ -543,7 +543,12 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
     // earlier enrollment the customer may since have opted out of) must not
     // suppress the fresh checkbox authorization; only retries of THIS
     // request (rows at/after the link's mint) dedupe.
-    const since = request.created_at ? new Date(request.created_at) : null;
+    // Keyed on the AUTHORIZATION moment (the SetupIntent's creation) when
+    // known — a re-authorization on the same link after an opt-out is a new
+    // event with a new intent; the link's mint is only the fallback.
+    const since = authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime())
+      ? authorizedAt
+      : (request.created_at ? new Date(request.created_at) : null);
     const alreadyRecorded = await ConsentService.hasConsentSnapshotForVariant(request.customer_id, stripePaymentMethodId, {
       methodType: consentMethodType,
       ...(since && !Number.isNaN(since.getTime()) ? { since } : {}),
