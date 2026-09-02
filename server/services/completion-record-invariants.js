@@ -55,9 +55,26 @@ const BEFORE_TODAY_ET = `ss.scheduled_date < ${TODAY_ET}`;
 // - scheduled_services.completed_at tracking stamp: migration 20260422000009,
 //   no backfill (readers treat those NULLs as supported legacy data).
 // - completionSmsStatus marker + service_report_deliveries ledger: mid-2026.
+// - service_records.report_view_token: migration 20260401000021, no backfill.
+// Cutovers key on WHEN THE COMPLETION HAPPENED (the job_status_history
+// transition to 'completed', or the record's write time), never on the
+// visit's scheduled_date — the status route and a modern backfill can
+// complete an arbitrarily old visit on today's code and owe today's markers
+// (codex P2 r3/r4).
 const RECORD_FK_SINCE = '2026-04-27';
 const TRACKING_STAMP_SINCE = '2026-04-22';
+const REPORT_TOKEN_SINCE = '2026-04-01';
 const COMMS_MARKER_SINCE = '2026-07-01';
+
+// The visit was transitioned to 'completed' on or after `since` (the
+// canonical job-status ledger every completion rail writes through
+// transitionJobStatus). A visit with no such transition row is legacy.
+const COMPLETED_TRANSITION_SINCE = (since) => `
+      EXISTS (
+        SELECT 1 FROM job_status_history h
+         WHERE h.job_id = ss.id
+           AND h.to_status = 'completed'
+           AND h.transitioned_at >= '${since}'::date)`;
 
 // completionSmsStatus values closeout-status.js classifies as done or
 // not_required (a settled outcome); everything else is pending or failed.
@@ -115,13 +132,13 @@ function aggregate(matchSql) {
 
 const PREDICATES = Object.freeze({
   completed_visit_without_record: {
-    label: `Completed visits (since the ${RECORD_FK_SINCE} record FK, before today) with no service_records row`,
+    label: `Visits completed (per job_status_history) since the ${RECORD_FK_SINCE} record FK, before today, with no service_records row`,
     href: '/admin/dispatch',
     sql: aggregate(`
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
-           AND ss.scheduled_date >= '${RECORD_FK_SINCE}'::date
+           AND ${COMPLETED_TRANSITION_SINCE(RECORD_FK_SINCE)}
            AND ${BEFORE_TODAY_ET}
            AND NOT EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id)`),
   },
@@ -163,6 +180,7 @@ const PREDICATES = Object.freeze({
                   WHERE sr.scheduled_service_id = ss.id
                     AND ${OWES_CUSTOMER_ARTIFACT}
                     AND COALESCE(sr.structured_notes->'closeoutRequirements'->>'requiresServiceReport', 'true') <> 'false'
+                    AND sr.created_at >= '${REPORT_TOKEN_SINCE}'::date
                     AND ${COMPLETED_MARKER_AT} < now() - interval '2 hours')
            AND NOT EXISTS (
                  SELECT 1 FROM service_records tok
@@ -170,23 +188,20 @@ const PREDICATES = Object.freeze({
                     AND tok.report_view_token IS NOT NULL)`),
   },
   completed_visit_without_completed_at: {
-    label: `Completed visits (before today) whose completed_at is NULL although their record was written after the ${TRACKING_STAMP_SINCE} tracker stamp shipped`,
+    label: `Visits completed (per job_status_history) since the ${TRACKING_STAMP_SINCE} tracker stamp shipped, before today, whose completed_at is NULL`,
     href: '/admin/dispatch',
-    // The cutover keys on the RECORD's write time, not the visit date: a
-    // modern backfill of a pre-tracking visit runs on today's code and owes
-    // the stamp (codex P2 r3); only records written before the migration
-    // are legacy.
+    // The cutover keys on the completion TRANSITION time, not the visit
+    // date or the record's creation: a modern backfill of a pre-tracking
+    // visit, or a recap re-completing an old FK-healed record, runs on
+    // today's code and owes the stamp (codex P2 r3/r4).
     sql: aggregate(`
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
            AND ss.completed_at IS NULL
            AND ${BEFORE_TODAY_ET}
-           AND EXISTS (
-                 SELECT 1 FROM service_records sr
-                  WHERE sr.scheduled_service_id = ss.id
-                    AND sr.status = 'completed'
-                    AND sr.created_at >= '${TRACKING_STAMP_SINCE}'::date)`),
+           AND ${COMPLETED_TRANSITION_SINCE(TRACKING_STAMP_SINCE)}
+           AND EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND sr.status = 'completed')`),
   },
   // Confirmed notice = a TERMINAL completionSmsStatus on ANY sibling —
   // the closeout-status.js comms vocabulary's done / not_required outcomes
@@ -272,7 +287,7 @@ module.exports = {
   PREDICATE_KEYS,
   runPredicate,
   _private: {
-    SAMPLE, RECORD_FK_SINCE, TRACKING_STAMP_SINCE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET,
+    SAMPLE, RECORD_FK_SINCE, TRACKING_STAMP_SINCE, REPORT_TOKEN_SINCE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, COMPLETED_TRANSITION_SINCE,
     OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES,
     COMPLETED_MARKER_AT, INCOMPLETE_FOLLOWUP_GRACE_DAYS, aggregate,
   },
