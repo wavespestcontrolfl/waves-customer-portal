@@ -63,7 +63,7 @@ describe('getOpsQueue', () => {
       // A live heartbeat beats an old start: still pending, not stalled.
       { id: 'c5', from_phone: '+15550000105', direction: 'inbound', processing_status: 'processing', processing_started_at: ago(45), processing_heartbeat_at: ago(1), created_at: ago(50) },
       { id: 'c2', from_phone: '+15550000101', direction: 'inbound', processing_status: null, updated_at: ago(1), created_at: ago(1) },
-      { id: 'c3', from_phone: '+15550000102', direction: 'outbound', processing_status: 'extraction_failed', extraction_attempts: 3, created_at: ago(90) },
+      { id: 'c3', from_phone: '+15550009999', to_phone: '+15550000102', direction: 'outbound', processing_status: 'extraction_failed', extraction_attempts: 3, created_at: ago(90) },
     ];
     fixtures.content_email_approvals = [
       { id: 'ea-1', token: 'EA-1a2b3c4d', kind: 'named_competitor_review', status: 'awaiting_reply', email_sent_at: ago(10), created_at: ago(10) },
@@ -102,6 +102,7 @@ describe('getOpsQueue', () => {
       ['c3', 'failed'], ['c1', 'parked'], ['c2', 'pending'], ['c5', 'pending'],
     ]);
     expect(by.calls.items[1].detail).toMatch(/stalled in processing/);
+    expect(by.calls.items[0].title).toBe('Outbound call · +15550000102'); // the far end, not the Waves number
     expect(by.calls.items.find((i) => i.id === 'c5').status).toBe('pending');
 
     expect(by.content.items).toEqual([expect.objectContaining({ id: 'opp-1', status: 'parked', title: 'Best ant bait for lanais', detail: 'parked: affiliate review' })]);
@@ -161,7 +162,8 @@ describe('getOpsQueue scan cap', () => {
     expect(ib.truncated).toBe(true);
     expect(ib.total).toBe(200);
     const content = q.lanes.find((l) => l.key === 'content');
-    expect(content).toMatchObject({ total: 150, parked: 1, truncated: true });
+    expect(content).toMatchObject({ total: 150, parked: 150, truncated: true });
+    expect(q.totals.parked).toBeGreaterThanOrEqual(150);
     expect(q.totals.truncated).toBe(true);
   });
 });

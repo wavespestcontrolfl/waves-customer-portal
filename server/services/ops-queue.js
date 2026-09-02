@@ -116,7 +116,7 @@ async function laneCallProcessing() {
     // newest-first cap would hide exactly the rows this lane exists for.
     .orderByRaw('COALESCE(processing_heartbeat_at, processing_started_at, updated_at, created_at) ASC')
     .limit(SCAN_LIMIT)
-    .select('id', 'from_phone', 'direction', 'processing_status', 'processing_heartbeat_at', 'processing_started_at', 'updated_at', 'created_at', 'extraction_attempts', 'recording_url', 'recording_duration_seconds', 'duration_seconds', 'transcription', 'transcription_metadata');
+    .select('id', 'from_phone', 'to_phone', 'direction', 'processing_status', 'processing_heartbeat_at', 'processing_started_at', 'updated_at', 'created_at', 'extraction_attempts', 'recording_url', 'recording_duration_seconds', 'duration_seconds', 'transcription', 'transcription_metadata');
   // One stall definition, the watchdog's (grace window, live-claim heartbeat,
   // alert ceiling, eligibility) — the tab must never disagree with the bell.
   const stalledIds = new Set(computeStalledCalls(rows).map((r) => r.id));
@@ -133,7 +133,8 @@ async function laneCallProcessing() {
     }
     return {
       id: r.id,
-      title: `${r.direction === 'outbound' ? 'Outbound' : 'Inbound'} call · ${r.from_phone || 'unknown number'}`,
+      // The far end: to_phone on an outbound call, from_phone inbound.
+      title: `${r.direction === 'outbound' ? 'Outbound' : 'Inbound'} call · ${(r.direction === 'outbound' ? r.to_phone : r.from_phone) || 'unknown number'}`,
       status,
       detail,
       at: iso(r.created_at),
@@ -160,7 +161,9 @@ async function laneContentParks() {
   // per-status counts alongside — use them for the true total.
   const exact = Number(result?.counts?.pending_review);
   const total = Number.isFinite(exact) ? Math.max(exact, items.length) : items.length;
-  return finish(items, { truncated: total > items.length, total });
+  // Every pending_review row is a park, so the exact count IS the parked
+  // count — not just the page that was listed.
+  return { ...finish(items, { truncated: total > items.length, total }), parked: total };
 }
 
 async function laneEmailApprovals() {
