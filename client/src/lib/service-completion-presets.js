@@ -18,6 +18,7 @@ const specialtyPreset = (serviceKey, groupLabels) => {
       options: group.options.map(option),
     })),
     observationExclusions: spec.exclusions || [],
+    findingActionExclusions: spec.findingActionExclusions || [],
     protocols: spec.protocols,
     workState: spec.workState || null,
   };
@@ -137,11 +138,18 @@ export function exclusiveProtocolSelectionConflict(selectedLabels, protocols) {
 // sit beside a performed action or a different no-work explanation, and an
 // exclusive action cannot sit beside a completed-work finding.
 export function specialtyFindingActionConflict(preset, observations, actionLabels) {
-  const workState = preset?.workState;
-  if (!workState) return null;
+  if (!preset) return null;
   const byLabel = new Map((preset.protocols || []).map((action) => [action.label, action]));
   const actions = (Array.isArray(actionLabels) ? actionLabels : []).filter((label) => byLabel.has(label));
   const findings = Array.isArray(observations) ? observations : [];
+  // Pest lanes: a no-evidence / inactive finding cannot sit beside a treatment
+  // of active pests (codex P2 r11 #3701).
+  for (const { value, excludesActions } of preset.findingActionExclusions || []) {
+    const clash = findings.includes(value) && actions.find((label) => excludesActions.includes(label));
+    if (clash) return `“${value}” cannot be paired with action “${clash}”.`;
+  }
+  const workState = preset.workState;
+  if (!workState) return null;
   const noWorkFindings = findings.filter((value) => Object.prototype.hasOwnProperty.call(workState.noWork, value));
   const performed = actions.find((label) => byLabel.get(label).exclusive !== true);
   if (noWorkFindings.length && performed) {

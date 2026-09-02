@@ -360,7 +360,7 @@ const CUSTOMER_FIELD_LABELS = {
   disease_pressure: 'Disease pressure',
   turf_issues: 'Issues observed',
   irrigation_mowing: 'Irrigation & mowing notes',
-  spot_treatment_areas: 'Spot-treated areas',
+  spot_treatment_areas: 'Areas treated',
   inspection_type: 'Inspection type',
   findings_observed: 'What we observed',
   access_limitations: 'Inspection access notes',
@@ -1052,10 +1052,12 @@ function requiredFindingsFieldsFor(type, { companion = false } = {}) {
   return extra.length ? [...base, ...extra] : base;
 }
 
-const AREA_SCOPES = require('../../../shared/treatment-area-scopes.json');
+const LEGACY_COMPLETION_AREAS = require('../../../shared/legacy-completion-areas.json');
 
 const TREATMENT_AREA_FIELD_KEYS = ['areas_treated', 'spot_treatment_areas', 'treatment_zones'];
-const CONTROLLED_AREA_LABELS = new Set([...AREA_SCOPES.interior, ...AREA_SCOPES.exterior, ...AREA_SCOPES.unscoped]);
+function legacyAreasForFindingsType(type) {
+  return new Set(LEGACY_COMPLETION_AREAS.categories[LEGACY_COMPLETION_AREAS.byFindingsType[type]] || []);
+}
 
 function validateTypedFindings({ type, values, expectedType, enforceRequired = false, companion = false } = {}) {
   const errors = [];
@@ -1096,12 +1098,12 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     // chips and multi_select both store a comma-joined selection —
     // every element must come from the field's options so an off-list
     // string can't reach the immutable customer-facing snapshot. Treatment-
-    // area fields additionally accept labels from the other controlled area
-    // vocabularies (shared/treatment-area-scopes.json): a draft saved before
-    // a lane gained its typed area field migrates the generic completion
-    // chips into it. Free text stays rejected (local audit P1 on #3701).
+    // area fields additionally accept THIS lane's legacy generic chips
+    // (shared/legacy-completion-areas.json): a draft saved before the lane
+    // gained its typed area field migrates the generic completion list into
+    // it. Another lane's areas and free text stay rejected (codex P2 r11).
     if ((field.type === 'chips' || field.type === 'multi_select') && Array.isArray(field.options) && field.options.length) {
-      const controlledFallback = TREATMENT_AREA_FIELD_KEYS.includes(field.key) ? CONTROLLED_AREA_LABELS : null;
+      const controlledFallback = TREATMENT_AREA_FIELD_KEYS.includes(field.key) ? legacyAreasForFindingsType(type) : null;
       const parts = String(value).split(',').map((s) => s.trim()).filter(Boolean);
       for (const part of parts) {
         if (!field.options.includes(part) && !(controlledFallback && controlledFallback.has(part))) {

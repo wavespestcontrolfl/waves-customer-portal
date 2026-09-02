@@ -68,11 +68,18 @@ function validateSpecialtyObservationCombination(serviceKey, values) {
 // exclusive action cannot sit beside a completed-work finding. Mirrored by
 // specialtyFindingActionConflict on the client for selection-time feedback.
 function specialtyFindingActionConflict(spec, observations, actionLabels) {
-  const workState = spec?.workState;
-  if (!workState) return null;
+  if (!spec) return null;
   const byLabel = new Map((spec.protocols || []).map((action) => [action.label, action]));
   const actions = (Array.isArray(actionLabels) ? actionLabels : []).filter((label) => byLabel.has(label));
   const findings = Array.isArray(observations) ? observations : [];
+  // Pest lanes: a no-evidence / inactive finding cannot sit beside a treatment
+  // of active pests (codex P2 r11 #3701).
+  for (const { value, excludesActions } of spec.findingActionExclusions || []) {
+    const clash = findings.includes(value) && actions.find((label) => excludesActions.includes(label));
+    if (clash) return `“${value}” cannot be paired with action “${clash}”.`;
+  }
+  const workState = spec.workState;
+  if (!workState) return null;
   const noWorkFindings = findings.filter((value) => Object.prototype.hasOwnProperty.call(workState.noWork, value));
   const performed = actions.find((label) => byLabel.get(label).exclusive !== true);
   if (noWorkFindings.length && performed) {

@@ -512,7 +512,9 @@ export default function ServiceReportDocument({ data, token }) {
   // non-chemical treatment (heat, steam) — the live report honors both, so
   // the permanent PDF must keep the same re-entry and aftercare content. The
   // products list and the schematic stay tied to actual application rows.
-  const hasActualTreatment = data.treatmentPerformed === true || data.applicationMade === true || applications.some(isProductApplication);
+  // null verdicts mean the product load failed: fail closed on precautions.
+  const hasActualTreatment = data.treatmentPerformed === true || data.applicationMade === true
+    || data.applicationMade === null || applications.some(isProductApplication);
 
   // …and the schematic additionally requires a REAL product application: a
   // bait cartridge placed under bait_placement with zone IDs is a monitoring

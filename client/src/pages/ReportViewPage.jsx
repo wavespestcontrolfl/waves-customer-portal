@@ -783,7 +783,13 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   const context = data.dynamicContext || {};
   const reentry = context.reentry || {};
   const targets = Array.isArray(reentry.targets) ? reentry.targets : [];
-  const pendingTarget = latestPendingReentryTarget(targets, nowMs);
+  // Server verdict for any visit (specialty inspection-only closeouts
+  // included): treatmentPerformed === false means nothing was treated —
+  // chemical or not — so no branch may claim "we treated" or a drying
+  // countdown (codex P1 r11 #3701). null (product load failed) and legacy
+  // payloads without the field keep the treatment presentation.
+  const noTreatmentVisit = data.treatmentPerformed === false;
+  const pendingTarget = noTreatmentVisit ? null : latestPendingReentryTarget(targets, nowMs);
   const pendingReadyText = pendingTarget
     ? (mode === 'live'
       ? `Ready in ${formatDuration(Date.parse(pendingTarget.readyAt) - nowMs)}`
@@ -838,7 +844,9 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
         : `${primaryFinding.title || 'Activity was noted'}${primaryFinding.recommendation ? ` ${primaryFinding.recommendation}` : ''}`,
       completedLine: completedAreas
         ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}`
-        : (reserviceNotPerformed ? (reservice.completedFallback || 'No application was made today.') : 'Service areas completed today.'),
+        : (reserviceNotPerformed
+          ? (reservice.completedFallback || 'No application was made today.')
+          : (noTreatmentVisit ? 'No application was made today.' : 'Service areas completed today.')),
       detail: pendingText
         ? 'Keep pets and people away from treated zones until they are ready. We also included the recommended next step below.'
         : (reserviceNotPerformed
@@ -847,7 +855,9 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
           ? (reservice.outcome === 'incomplete'
             ? 'The visit could not be completed — we documented what we found and included the recommended next step below.'
             : 'No application was made on this visit — we documented what we found and included the recommended next step below.')
-          : 'We treated the documented area today and included the recommended next step below.'),
+          : (noTreatmentVisit
+            ? 'No application was made on this visit — we documented what we found and included the recommended next step below.'
+            : 'We treated the documented area today and included the recommended next step below.')),
     };
   }
 
@@ -907,7 +917,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
     };
   }
 
-  if (context.pressureTrend?.direction === 'down') {
+  if (context.pressureTrend?.direction === 'down' && !noTreatmentVisit) {
     return {
       heading: 'pest pressure is trending down!',
       status: allReady ? 'Ready now' : 'Service complete',
@@ -2495,6 +2505,8 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
           applicationMade={data.applicationMade === true
+            // null = product load failed: keep the application presentation
+            || data.applicationMade === null
             || (data.applications || []).some(isProductApplication)}
           live={mode === 'live'}
           weeklyRainIn={data.serviceLine === 'lawn'

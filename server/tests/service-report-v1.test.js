@@ -499,6 +499,29 @@ describe('service report v1', () => {
       expect(normalized).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
     });
 
+    test('the dynamic re-entry context drops targets for a declared no-treatment closeout', () => {
+      const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
+      const base = {
+        id: 'svc-1',
+        started_at: '2026-05-16T13:00:00.000Z',
+        ended_at: '2026-05-16T13:20:00.000Z',
+        areas_serviced: JSON.stringify(['Eaves / soffit']),
+        advisory: { exterior_reentry_min: 30, interior_reentry_min: 0 },
+        structured_notes: { protocolActionScopesCompleted: [
+          { label: 'Inspection and identification only', scope: 'exterior', treatmentApplied: false },
+        ] },
+      };
+      const now = new Date('2026-05-16T13:25:00.000Z');
+      expect(buildReentryContextFromRecord({ ...base, applications: [] }, now)).toBeUndefined();
+      // Unknown evidence keeps the stored target; a spray row proves treatment.
+      expect(buildReentryContextFromRecord({ ...base, applications: [], applicationsLoadFailed: true }, now)?.targets)
+        .toHaveLength(1);
+      expect(buildReentryContextFromRecord({ ...base, applications: [{ application_method: 'perimeter_spray' }] }, now)?.targets)
+        .toHaveLength(1);
+      expect(buildReentryContextFromRecord({ ...base, applications: [{ application_method: 'bait_placement' }] }, now)?.targets)
+        .toHaveLength(1);
+    });
+
     test('a declared no-treatment closeout zeros both re-entry targets when nothing was applied', () => {
       const inspectionOnly = {
         areas_serviced: JSON.stringify(['Eaves / soffit', 'Attic']),

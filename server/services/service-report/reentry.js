@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const { DEFAULT_TIME_ZONE, formatReadyTime, normalizeDate } = require('./time-format');
 const { normalizeAdvisoryForTreatmentScope, parseJsonObject, resolveTracedExteriorZone } = require('./report-data');
+const { isSprayApplicationMethod } = require('./service-line-configs');
 
 function addMinutes(date, minutes) {
   return new Date(date.getTime() + (minutes * 60 * 1000));
@@ -44,6 +45,20 @@ function buildReentrySummary(targets, now, timeZone = DEFAULT_TIME_ZONE) {
     .join('. ') + '.';
 }
 
+// Read-time application verdict for the dynamic context — the same rule the
+// report payload publishes as applicationMade. A caller may hand it in
+// (record.treatmentEvidence); otherwise it is derived from the loaded product
+// rows: a spray-class method is evidence, a failed load or product rows with
+// only non-spray methods (bait, station, injection — product identity is not
+// loaded here) leave it unknown, and no rows at all means none (codex P1 r11
+// #3701). Unknown never zeroes anything.
+function reentryTreatmentEvidence(record, applications) {
+  if (record?.treatmentEvidence !== undefined) return record.treatmentEvidence;
+  if (record?.applicationsLoadFailed) return undefined;
+  if (applications.some((app) => isSprayApplicationMethod(app.application_method || app.method || app.applicationMethod))) return true;
+  return applications.length ? undefined : false;
+}
+
 function buildReentryContextFromRecord(record, now = new Date()) {
   const applications = Array.isArray(record?.applications) ? record.applications : [];
   // The anchor must be a real clock time: date-only service_date parses to
@@ -66,6 +81,7 @@ function buildReentryContextFromRecord(record, now = new Date()) {
       // legacy record with a stored exterior timer and a trace keeps it
       // under the explicit-exterior rule (codex P1 #3007 r5).
       zones: record?.tracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
+      treatmentEvidence: reentryTreatmentEvidence(record, applications),
     },
   );
   const exteriorMin = numericMinutes(advisory.exterior_reentry_min);
@@ -91,16 +107,17 @@ function buildReentryContextFromRecord(record, now = new Date()) {
 async function buildReentryContext({ record, now = new Date(), knex = db } = {}) {
   if (!record?.id) return undefined;
   let applications = Array.isArray(record.applications) ? record.applications : null;
+  let applicationsLoadFailed = record.applicationsLoadFailed === true;
   if (!applications) {
     applications = await knex('service_products')
       .where({ service_record_id: record.id })
       .select('id', 'applied_at', 'created_at', 'application_area', 'application_method', 'targets')
-      .catch(() => []);
+      .catch(() => { applicationsLoadFailed = true; return []; });
   }
   const tracedExteriorZone = record.tracedExteriorZone !== undefined
     ? record.tracedExteriorZone
     : await resolveTracedExteriorZone(record, knex);
-  return buildReentryContextFromRecord({ ...record, applications, tracedExteriorZone }, now);
+  return buildReentryContextFromRecord({ ...record, applications, applicationsLoadFailed, tracedExteriorZone }, now);
 }
 
 module.exports = {

@@ -57,6 +57,7 @@ import {
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
 import AREA_SCOPES from "../../../../shared/treatment-area-scopes.json";
+import legacyCompletionAreas from "../../../../shared/legacy-completion-areas.json";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { Mic, MicOff } from "lucide-react";
@@ -84,7 +85,6 @@ import {
 } from "../../components/schedule/cardLinkStatus";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
 const TREATMENT_AREA_FIELD_KEYS = ["areas_treated", "spot_treatment_areas", "treatment_zones"];
-const CONTROLLED_AREA_LABELS = new Set([...AREA_SCOPES.interior, ...AREA_SCOPES.exterior, ...AREA_SCOPES.unscoped]);
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const D = {
@@ -219,89 +219,10 @@ function baseUnitOf(unit) {
   const u = String(unit || "");
   return u.includes("/") ? u.split("/")[0] : u;
 }
-export const AREAS_BY_SERVICE = {
-  pest: [
-    "Perimeter",
-    "Garage",
-    "Kitchen",
-    "Bathrooms",
-    "Bedrooms",
-    "Living areas",
-    "Laundry / utility room",
-    "Pantry",
-    "Entry points",
-    "Eaves / soffits",
-    "Attic",
-    "Crawlspace",
-    "Lanai / pool cage",
-    "Yard",
-    "Fence line",
-    "Trash area",
-    // Landscape treatment surfaces on a general-pest visit (owner
-    // 2026-08-29): ornamental plantings and the mulched bedding areas
-    // around them. Labels never contain commas (comma-joined per product).
-    "Ornamentals",
-    "Bedding areas",
-  ],
-  // Bed bug is an interior treatment — yard/fence chips read wrong on its
-  // closeout (owner 2026-07-31, untype lane). Vocabulary carries over the
-  // retired typed form's treatment surfaces. Labels never contain commas
-  // (the per-product area field comma-joins selections).
-  bed_bug: [
-    "Primary bedroom",
-    "Guest bedroom",
-    "Living room",
-    "Mattress & box spring",
-    "Bed frame & headboard",
-    "Baseboards",
-    "Furniture & upholstery",
-    "Closets",
-    "Adjacent rooms",
-  ],
-  lawn: [
-    "Front yard",
-    "Back yard",
-    "Side yards",
-    "Landscape beds",
-    "Thin / stressed turf areas",
-    "Bare / damaged turf areas",
-    "Along driveway / sidewalk",
-    "Slope / drainage area",
-  ],
-  // Termite and mosquito previously fell back to the pest room list
-  // (Kitchen/Bathrooms/Trash area on a bait-station visit). Vocabularies
-  // are service-native; labels never contain commas (comma-joined per
-  // product) — owner directive 2026-08-27.
-  termite: [
-    "Foundation perimeter",
-    "Bait stations",
-    "Garage / slab edge",
-    "Crawlspace",
-    "Attic",
-    "Exterior walls",
-    "Wood contact points",
-    "Interior slab penetrations",
-    "Plumbing penetrations",
-    "Expansion joints",
-    "Wall void",
-    "Localized activity area",
-    "Attic framing",
-    "Exposed wood framing",
-  ],
-  mosquito: [
-    "Yard vegetation",
-    "Shrubs & landscape beds",
-    "Under deck / patio",
-    "Fence line",
-    "Standing water areas",
-    "Property perimeter",
-    "Screened enclosure",
-    "Pool deck / seating area",
-    "Gutters / drains",
-    "Planters / bromeliads",
-    "Mosquito station location",
-  ],
-};
+// Legacy generic "Areas treated" chips per service category — shared with the
+// server (typed area fields accept these as migrated values) via
+// shared/legacy-completion-areas.json.
+export const AREAS_BY_SERVICE = legacyCompletionAreas.categories;
 // Per-product treatment areas are multi-select but stored as ONE
 // comma-joined string in the existing applicationArea field
 // ("Kitchen, Bathrooms") so drafts, the submit payload, and the
@@ -7116,7 +7037,7 @@ export function typedFieldValueConflicts(schemaType, values) {
 // definition: chips keep only allowlisted tokens, selects must match an
 // option, counts must be digit-only. Free-text fields keep anything.
 // Mutates and returns `restored`.
-export function pruneRestoredFindingsValues(restored, fields) {
+export function pruneRestoredFindingsValues(restored, fields, findingsType = null) {
   const values = restored && typeof restored === "object" ? restored : {};
   if (!Array.isArray(fields)) return values;
   const fieldByKey = new Map(fields.map((f) => [f.key, f]));
@@ -7134,11 +7055,11 @@ export function pruneRestoredFindingsValues(restored, fields) {
       (field.type === "chips" || field.type === "multi_select")
       && Array.isArray(field.options)
     ) {
-      // Treatment-area fields also keep labels from the other controlled
-      // area vocabularies — a pre-typed draft's generic chips migrate into
-      // them — but never free text; the server enforces the same rule.
+      // Treatment-area fields also keep this lane's legacy generic chips —
+      // a pre-typed draft's generic list migrates into them — but never
+      // another lane's areas or free text; the server enforces the same rule.
       const controlledFallback = TREATMENT_AREA_FIELD_KEYS.includes(field.key)
-        ? CONTROLLED_AREA_LABELS
+        ? new Set(legacyCompletionAreas.categories[legacyCompletionAreas.byFindingsType[findingsType]] || [])
         : null;
       const kept = String(raw || "")
         .split(",")
@@ -12032,7 +11953,7 @@ export function CompletionPanel({
         : {};
     if (typedFindingsSchema?.fields) {
       const prePruneFindings = JSON.stringify(restoredFindings);
-      pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields);
+      pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields, typedFindingsSchema.type);
       if (JSON.stringify(restoredFindings) !== prePruneFindings) restorePruned = true;
       setFindingsValues(restoredFindings);
       setTypedActivityScore(
@@ -12102,7 +12023,7 @@ export function CompletionPanel({
             ? { ...saved.values }
             : {};
           const prePruneCompanion = JSON.stringify(preValues);
-          const values = pruneRestoredFindingsValues(preValues, schema.fields || []);
+          const values = pruneRestoredFindingsValues(preValues, schema.fields || [], schema.type);
           if (JSON.stringify(values) !== prePruneCompanion) restorePruned = true;
           const chips = Array.isArray(saved.chips)
             ? saved.chips.filter((chip) =>

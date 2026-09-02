@@ -346,6 +346,15 @@
         ]
       }
     ],
+    "findingActionExclusions": [
+      {
+        "value": "No active fire ants observed",
+        "excludesActions": [
+          "Individual mound treatment",
+          "Two-step treatment: broadcast plus mound treatment"
+        ]
+      }
+    ],
     "protocols": [
       {
         "label": "Inspection only",
@@ -551,6 +560,28 @@
         ]
       }
     ],
+    "findingActionExclusions": [
+      {
+        "value": "Inactive or abandoned nest",
+        "excludesActions": [
+          "Exposed nest treated",
+          "Void nest treated",
+          "Ground nest treated",
+          "Treatment followed by nest removal",
+          "Honey bee colony eradication performed"
+        ]
+      },
+      {
+        "value": "Inactive",
+        "excludesActions": [
+          "Exposed nest treated",
+          "Void nest treated",
+          "Ground nest treated",
+          "Treatment followed by nest removal",
+          "Honey bee colony eradication performed"
+        ]
+      }
+    ],
     "protocols": [
       {
         "label": "Inspection and identification only",
@@ -668,6 +699,29 @@
           "11–20 nests",
           "More than 20 nests",
           "Exact count not practical"
+        ]
+      }
+    ],
+    "findingActionExclusions": [
+      {
+        "value": "No current evidence observed",
+        "excludesActions": [
+          "Active nests treated",
+          "Active nests treated and removed"
+        ]
+      },
+      {
+        "value": "Inactive or abandoned nests",
+        "excludesActions": [
+          "Active nests treated",
+          "Active nests treated and removed"
+        ]
+      },
+      {
+        "value": "Empty nest remnants",
+        "excludesActions": [
+          "Active nests treated",
+          "Active nests treated and removed"
         ]
       }
     ],

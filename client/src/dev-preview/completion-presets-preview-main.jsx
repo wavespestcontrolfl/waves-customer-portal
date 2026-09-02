@@ -60,7 +60,7 @@ function Preview() {
 
         <label style={styles.label}>Areas treated</label>
         <ProjectFindingFieldInput
-          field={{ key: 'areas', label: 'Areas treated', type: 'multi_select', options: preset.areas.map((value) => ({ value, label: value })) }}
+          field={{ key: 'areas', label: 'Areas treated', type: 'multi_select', options: preset.areas }}
           id="preview-areas"
           name="areas"
           value={areas.join(', ')}

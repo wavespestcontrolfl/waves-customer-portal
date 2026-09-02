@@ -47,6 +47,16 @@ describe("specialty pest completion configuration", () => {
       .toBe(exclusiveProtocolProductConflict(single, preset.protocols, 1));
   });
 
+  test("no-evidence findings reject active-pest treatments with the same message on both sides", () => {
+    const mud = SERVICE_COMPLETION_PRESETS.mud_dauber_removal;
+    const msg = specialtyFindingActionConflict(mud, ["No current evidence observed"], ["Active nests treated"]);
+    expect(msg).toContain("cannot be paired with action");
+    expect(validateSpecialtyClosureCombination("mud_dauber_removal", {
+      observations: ["No current evidence observed"], actions: ["Active nests treated"],
+    })).toBe(msg);
+    expect(specialtyFindingActionConflict(mud, ["Active mud nests"], ["Active nests treated"])).toBeNull();
+  });
+
   test("work-state findings reject contradictory protocol actions on both sides", () => {
     const dethatching = SERVICE_COMPLETION_PRESETS.dethatching;
     const plugging = SERVICE_COMPLETION_PRESETS.plugging;

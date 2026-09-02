@@ -69,12 +69,13 @@ describe("termite posted-notice pre-submit mirror", () => {
 });
 
 describe("typed area ownership", () => {
-  it("keeps migrated controlled area chips but drops free text from pre-chip drafts", () => {
+  it("keeps this lane's migrated legacy chips but drops other lanes and free text", () => {
     const field = { key: "areas_treated", type: "chips", options: ["Foundation perimeter"] };
     expect(pruneRestoredFindingsValues(
-      { areas_treated: "Garage, Foundation perimeter, Rear addition slab" }, [field],
-    )).toEqual({ areas_treated: "Garage, Foundation perimeter" });
-    expect(pruneRestoredFindingsValues({ areas_treated: "Rear addition slab" }, [field])).toEqual({});
+      { areas_treated: "Bait stations, Foundation perimeter, Primary bedroom, Rear addition slab" }, [field], "termite_treatment",
+    )).toEqual({ areas_treated: "Bait stations, Foundation perimeter" });
+    expect(pruneRestoredFindingsValues({ areas_treated: "Rear addition slab" }, [field], "termite_treatment")).toEqual({});
+    expect(pruneRestoredFindingsValues({ areas_treated: "Bait stations" }, [field])).toEqual({});
   });
   it("promotes the typed areas into the canonical completion scope", () => {
     expect(completionAreasForTypedFindings({

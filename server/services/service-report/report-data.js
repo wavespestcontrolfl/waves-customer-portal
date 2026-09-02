@@ -4002,6 +4002,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // Treatment occurred, chemical or not — the aftercare/precaution gate for
   // the PDF; applicationMade stays the pesticide-application verdict.
   const treatmentPerformed = readTimeSprayEvidence || structuredActionScope(service).hasNonChemicalTreatment;
+  // Published verdicts: true when evidence exists, false only when the product
+  // load succeeded and nothing was recorded, null when the load failed —
+  // clients keep the fail-closed treatment presentation on null (codex P1 r11).
+  const applicationMadeVerdict = readTimeSprayEvidence ? true : (productsLoadFailed ? null : false);
+  const treatmentPerformedVerdict = treatmentPerformed ? true : (productsLoadFailed ? null : false);
   const storedAdvisory = parseJsonObject(service.advisory);
   // Legacy no-spray termite records (bait/monitoring/inspection completed
   // before the 0/0 rule) persisted the old 30/120 line defaults, and the
@@ -4104,8 +4109,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceType: service.service_type,
     serviceDisplayName: linkedServiceName,
     serviceDate: service.service_date,
-    applicationMade: readTimeSprayEvidence,
-    treatmentPerformed,
+    applicationMade: applicationMadeVerdict,
+    treatmentPerformed: treatmentPerformedVerdict,
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,
@@ -5084,8 +5089,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceLine,
     serviceLineDisplay: config.displayName,
     serviceDate: service.service_date,
-    applicationMade: readTimeSprayEvidence,
-    treatmentPerformed,
+    applicationMade: applicationMadeVerdict,
+    treatmentPerformed: treatmentPerformedVerdict,
     coverageServiceType: coverageServiceType(serviceLine),
     technicianName,
     technician: {

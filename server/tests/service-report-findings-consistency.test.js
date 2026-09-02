@@ -10,11 +10,22 @@ function validate(type, values) {
 }
 
 describe('editable service-report findings consistency', () => {
-  test('treatment-area fields accept migrated controlled chips but reject free text', () => {
+  test('treatment-area fields accept this lane\'s migrated legacy chips but reject other lanes and free text', () => {
+    const legacy = require('../../shared/legacy-completion-areas.json');
+    const optionsOf = (type, key) => PROJECT_TYPES[type].findingsFields.find((f) => f.key === key).options;
     // A pre-typed draft migrates the generic completion chips into the typed
-    // area field; those labels are controlled vocabulary from another lane.
-    expect(validate('termite_treatment', { areas_treated: 'Garage, Foundation perimeter' }).errors).toEqual([]);
-    expect(validate('one_time_pest_treatment', { areas_treated: 'Laundry / utility room' }).errors).toEqual([]);
+    // area field; a legacy label the field itself does not list still passes.
+    const termiteLegacyOnly = legacy.categories.termite.find((a) => !optionsOf('termite_treatment', 'areas_treated').includes(a));
+    expect(termiteLegacyOnly).toBeTruthy();
+    expect(validate('termite_treatment', { areas_treated: `${termiteLegacyOnly}, Foundation perimeter` }).errors).toEqual([]);
+    const pestLegacyOnly = legacy.categories.pest.find((a) => !optionsOf('one_time_pest_treatment', 'areas_treated').includes(a));
+    expect(pestLegacyOnly).toBeTruthy();
+    expect(validate('one_time_pest_treatment', { areas_treated: pestLegacyOnly }).errors).toEqual([]);
+    // Another lane's controlled area is not this lane's vocabulary.
+    expect(validate('one_time_lawn_treatment', { spot_treatment_areas: 'Primary bedroom' }).errors)
+      .toEqual(['Invalid value for spot_treatment_areas: Primary bedroom']);
+    expect(validate('bed_bug', { areas_treated: 'Front lawn' }).errors)
+      .toEqual(['Invalid value for areas_treated: Front lawn']);
     expect(validate('termite_treatment', { areas_treated: 'Rear addition slab' }).errors)
       .toEqual(['Invalid value for areas_treated: Rear addition slab']);
     expect(validate('one_time_lawn_treatment', {

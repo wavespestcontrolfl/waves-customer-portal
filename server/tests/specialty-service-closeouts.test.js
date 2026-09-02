@@ -27,6 +27,12 @@ describe('specialty service closeout vocabulary', () => {
         expect(excludes.length).toBeGreaterThan(0);
         excludes.forEach((other) => expect(allowed.has(other)).toBe(true));
       }
+      const actionLabels = new Set(spec.protocols.map((action) => action.label));
+      for (const { value, excludesActions } of spec.findingActionExclusions || []) {
+        expect(allowed.has(value)).toBe(true);
+        expect(excludesActions.length).toBeGreaterThan(0);
+        excludesActions.forEach((label) => expect(actionLabels.has(label)).toBe(true));
+      }
       if (spec.workState) {
         const exclusive = new Set(spec.protocols.filter((action) => action.exclusive === true).map((action) => action.label));
         expect(exclusive.size).toBeGreaterThan(0);
@@ -165,6 +171,24 @@ describe('specialty service closeout vocabulary', () => {
     expect(validateSpecialtyObservationCombination('mud_dauber_removal', [
       'Inactive or abandoned nests', '4–10 nests',
     ])).toBeNull();
+  });
+
+  test('rejects no-evidence or inactive findings beside treatment of active pests', () => {
+    expect(validateSpecialtyClosureCombination('mud_dauber_removal', {
+      observations: ['No current evidence observed'], actions: ['Active nests treated'],
+    })).toBe('“No current evidence observed” cannot be paired with action “Active nests treated”.');
+    expect(validateSpecialtyClosureCombination('bee_wasp_removal', {
+      observations: ['Inactive'], actions: ['Void nest treated'],
+    })).toBe('“Inactive” cannot be paired with action “Void nest treated”.');
+    expect(validateSpecialtyClosureCombination('fire_ant', {
+      observations: ['No active fire ants observed'], actions: ['Individual mound treatment'],
+    })).toBe('“No active fire ants observed” cannot be paired with action “Individual mound treatment”.');
+    expect(validateSpecialtyClosureCombination('mud_dauber_removal', {
+      observations: ['Inactive or abandoned nests'], actions: ['Inactive nests removed'],
+    })).toBeNull();
+    expect(validateSpecialtyClosureCombination('fire_ant', {
+      observations: ['No active fire ants observed'], actions: ['Broadcast bait application'],
+    })).toBeNull();
   });
 
   test('accepts consistent work state and lanes without work-state rules', () => {
