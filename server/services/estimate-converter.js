@@ -2423,6 +2423,20 @@ function assertLegacyMonthlyTermiteConvertible({
   throw err;
 }
 
+// One source of copy for the unresolved-fee bell. With a first-application
+// amount invoiced by the acceptance — the converter's own standard invoice,
+// or the public route's mint (it rewrites the deferred payload with its
+// amount; GH codex P1 r7 on #3751) — staff are pointed at LATER
+// applications only; otherwise they are told no first invoice exists.
+function perApplicationFeeUnresolvedBody(estimateId, firstApplicationAmount = 0) {
+  const lead = 'Estimate #' + estimateId + ' converted to per-application billing, but the per-application charge could not be derived from the accepted plan (no billing cadence or visit count on the quote). ';
+  const amount = Number(firstApplicationAmount);
+  if (amount > 0) {
+    return lead + 'The first application ($' + amount.toFixed(2) + ') is invoiced by this acceptance; later applications will complete with no billable amount until the fee is set — set the per-application price or re-quote.';
+  }
+  return lead + 'No first-application invoice was created by this acceptance, and applications will complete with no billable amount until the fee is set — invoice the first application by hand and set the per-application price, or re-quote.';
+}
+
 function estimateOperatorSetupFeeWaived(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
   return data?.operatorPriceAdjustment?.waiveSetupFee === true;
@@ -4495,7 +4509,7 @@ const EstimateConverter = {
       perApplicationFeeNotification = {
         type: 'billing',
         title: 'Per-application fee not set on a new per-application customer',
-        body: `Estimate #${estimateId} converted to per-application billing, but the per-application charge could not be derived from the accepted plan (no billing cadence or visit count on the quote). No first-application invoice was created by this acceptance, and applications will complete with no billable amount until the fee is set — invoice the first application by hand and set the per-application price, or re-quote.`,
+        body: perApplicationFeeUnresolvedBody(estimateId),
         options: {
           icon: '\u{1F4B3}',
           link: '/admin/customers',
@@ -6107,7 +6121,7 @@ const EstimateConverter = {
       // first-application amount on the way, point them at LATER
       // applications only.
       if (perApplicationFeeNotification && Number(standardFirstApplicationAmount) > 0) {
-        perApplicationFeeNotification.body = `Estimate #${estimateId} converted to per-application billing, but the per-application charge could not be derived from the accepted plan (no billing cadence or visit count on the quote). The first application (${Number(standardFirstApplicationAmount).toFixed(2)}) is invoiced by this acceptance; later applications will complete with no billable amount until the fee is set — set the per-application price or re-quote.`;
+        perApplicationFeeNotification.body = perApplicationFeeUnresolvedBody(estimateId, standardFirstApplicationAmount);
       }
       const setupFeeApplies = billingTerm === 'standard'
         ? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringServicesForConversion, estimateData })
@@ -7235,3 +7249,4 @@ module.exports.resolveConvertedPerApplicationFee = resolveConvertedPerApplicatio
 module.exports.assertPerApplicationAddOnPriced = assertPerApplicationAddOnPriced;
 module.exports.legacyFlatMonthlyTermiteUnit = legacyFlatMonthlyTermiteUnit;
 module.exports.assertLegacyMonthlyTermiteConvertible = assertLegacyMonthlyTermiteConvertible;
+module.exports.perApplicationFeeUnresolvedBody = perApplicationFeeUnresolvedBody;

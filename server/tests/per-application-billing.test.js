@@ -1029,3 +1029,21 @@ describe('legacy count-less termite units — refused before acceptance, never c
     expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, billingModeColumnsExist: false })).not.toThrow();
   });
 });
+
+describe('perApplicationFeeUnresolvedBody — one copy for the bell, aware of a first-application invoice (GH codex P1 r7)', () => {
+  const { perApplicationFeeUnresolvedBody } = EstimateConverter;
+
+  test('no first invoice: staff invoice the first application by hand and set the price', () => {
+    const body = perApplicationFeeUnresolvedBody('est-9');
+    expect(body).toMatch(/Estimate #est-9 converted to per-application billing/);
+    expect(body).toMatch(/No first-application invoice was created/);
+    expect(body).toMatch(/invoice the first application by hand/);
+  });
+
+  test('a first application invoiced by the acceptance: named with a currency symbol; staff set the price for LATER applications only', () => {
+    const body = perApplicationFeeUnresolvedBody('est-9', 102);
+    expect(body).toMatch(/The first application \(\$102\.00\) is invoiced by this acceptance/);
+    expect(body).not.toMatch(/by hand/);
+    expect(perApplicationFeeUnresolvedBody('est-9', 0)).toMatch(/No first-application invoice/);
+  });
+});

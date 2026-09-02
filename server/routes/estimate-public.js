@@ -11610,6 +11610,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             billingTerm,
             recurringServices: conversionRecurringServices,
           });
+          // The converter ran with skipSetupInvoice and no firstApplicationAmount,
+          // so its deferred unresolved-fee bell cannot know THIS route is about
+          // to invoice the first application — rewrite the payload with the
+          // amount minted here, or staff would be told to invoice it by hand a
+          // second time (GH codex P1 r7 on #3751).
+          if (shouldCreateStandardDraftInvoice && includesFirstApplicationLine && standardConversionResult?.perApplicationFeeNotification) {
+            standardConversionResult.perApplicationFeeNotification.body = EstimateConverter.perApplicationFeeUnresolvedBody(estimate.id, standardFirstApplicationAmount);
+          }
           // Disclosed rodent bait-station setup (owner 2026-08-29; codex
           // #3591 r3 P1): a non-member's accepted estimate carries a
           // one-time rodent_bait_setup row that the standard invoice must
