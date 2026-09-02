@@ -1,6 +1,6 @@
 ---
 name: waves-db
-description: Use whenever running knex commands, writing or reviewing migrations, writing raw SQL or backfills, querying the prod DB from a local machine, or writing any SQL/knex WHERE clause involving timestamps. Covers the DB traps that have each caused real incidents — wrong knexfile discovery, the ET/timestamptz window leak, edited-in-place migrations, unverified raw SQL, prod access from local, and the schema traps that produce wrong answers.
+description: Use for any knex command, migration, raw SQL or backfill, prod DB query from a local machine, or timestamp WHERE clause — the DB traps that have each caused real incidents.
 ---
 
 # Waves DB rules
@@ -133,6 +133,13 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
 - Any new raw SQL destined for prod is executed read-only against prod
   BEFORE the PR merges. Never trust column names/types from migration
   files — verify against the live schema (see traps below).
+- This covers knex column identifiers too, not just `db.raw()`: jest mock
+  builders accept ANY string in `.select()`/`.where()`/joins, so a fully
+  green suite proves nothing about column names. Every new column reference
+  on a table gets its query shape run once against a real Postgres (local
+  `waves_portal` or read-only prod) — `.select('sv.service_name')` against
+  a column named `name` shipped green through 33k mocked tests and 500'd
+  live cancel flows (#3671 r6, six files).
 - `db.raw()` with request-derived input must use `?` placeholders; string
   interpolation is a SQL-injection P0 (AGENTS.md).
 
@@ -172,6 +179,10 @@ prevent the runtime write (#3328 r3 P1).
   `member_since` is canonical; `customer_since` is dead.
 - `referrals.id` is a UUID even though migration 000054 reads `increments`
   (a dead hasTable-guarded no-op). Migration text lies; prod schema doesn't.
+- `services` (the catalog) names its display column `name`, NOT
+  `service_name` — when downstream code reads `row.service_name` off a
+  join, select `sv.name as service_name`. (`service_key` IS the real key
+  column.)
 - `scheduled_services.status` is gated by a CHECK constraint — a new status
   string without a migration extending the CHECK throws at runtime and CI
   won't catch it (AGENTS.md P0).

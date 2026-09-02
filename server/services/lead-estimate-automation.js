@@ -319,6 +319,32 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   };
 }
 
+function rodentEligibilityFreeze(item = {}) {
+  if (String(item?.service || '').toLowerCase() !== 'rodent_bait') return {};
+  // EXPLICIT posture booleans for new-model rows (codex #3591 r45 local
+  // P0): the default qualifying/discountable posture must survive the
+  // mirror too, or the replay signal reads null and a later flag flip
+  // re-prices the sent quote. Legacy rows keep the negative-only stamps.
+  const newModel = item.perApplicationBilled === true || Number(item.stations) > 0 || item.pricingBasis === 'RODENT_BAIT_BRACKET';
+  const nonQualifying = item.tierQualifier === false || item.countsTowardWaveGuardTier === false;
+  const pctExcluded = item.excludeFromPctDiscount === true || item.discountable === false || item.waveGuardDiscountEligible === false;
+  if (newModel) {
+    return {
+      tierQualifier: !nonQualifying,
+      countsTowardWaveGuardTier: !nonQualifying,
+      excludeFromPctDiscount: pctExcluded,
+      waveGuardDiscountEligible: !pctExcluded,
+      ...(pctExcluded ? { discountable: false, discountEligible: false } : {}),
+    };
+  }
+  return {
+    ...(nonQualifying ? { tierQualifier: false, countsTowardWaveGuardTier: false } : {}),
+    ...(item.excludeFromPctDiscount === true || item.discountable === false
+      ? { excludeFromPctDiscount: true, discountable: false, waveGuardDiscountEligible: false, discountEligible: false }
+      : {}),
+  };
+}
+
 function compactLineItem(item = {}) {
   return {
     service: item.service,
@@ -366,6 +392,19 @@ function compactLineItem(item = {}) {
     // would clamp a v2 automated draft's opt-outs at the lower v1 floor
     // (codex #2966 r6 P1 — same contract as the quote-wizard mirror).
     pricingVersion: item.pricingVersion ?? undefined,
+    // Rodent bait new-model provenance (codex #3591 r9 P0): the saved-
+    // estimate replay treats a rodent row WITHOUT these as a pre-realignment
+    // legacy plan (pinned monthly, no tier count, no %). Every compact
+    // persisted shape must carry them — same contract as the quote-wizard
+    // mirror (public-quote.js) and the wizard draft mirror (estimate-public).
+    perApplicationBilled: item.perApplicationBilled === true ? true : undefined,
+    stations: Number(item.stations) > 0 ? Number(item.stations) : undefined,
+    pricingBasis: item.pricingBasis ?? undefined,
+    // The rodent row's LIVE eligibility posture at generation (codex #3591
+    // r23 P1): a draft generated with tier_qualifier off / the % exclusion
+    // on must keep reading that way when viewed or accepted later, never be
+    // reinterpreted under whatever policy is live then.
+    ...rodentEligibilityFreeze(item),
     quoteRequired: item.quoteRequired || item.requiresManualReview || item.requiresMeasurement || false,
     reason: item.reason || item.manualReviewReason || item.manualReviewReasons?.[0] || null,
   };

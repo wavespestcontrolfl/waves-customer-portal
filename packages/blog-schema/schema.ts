@@ -7,6 +7,43 @@
 // does not match the recorded upstream-checksum.txt.
 
 import { z } from 'zod';
+// The registry is read as JSON (not via ../affiliate-registry/index.ts): this
+// file is VENDORED into the admin portal, where the sibling package is the
+// CommonJS index.js and only registry.json is shared at the same relative
+// path — a .ts import would leave the vendored copy unloadable.
+import affiliateRegistryJson from '../affiliate-registry/registry.json' with { type: 'json' };
+
+type AffiliateRegistryRow = {
+  product_id?: string; status?: string; risk_class?: string;
+  allowed_post_types?: string[]; allowed_placements?: string[];
+};
+const AFFILIATE_ROWS: AffiliateRegistryRow[] = Array.isArray((affiliateRegistryJson as { products?: unknown }).products)
+  ? ((affiliateRegistryJson as { products: AffiliateRegistryRow[] }).products)
+  : [];
+const AFFILIATE_PRODUCT_IDS: ReadonlySet<string> = new Set(
+  AFFILIATE_ROWS.map((r) => r?.product_id).filter((id): id is string => typeof id === 'string'),
+);
+// A duplicated id never resolves (fail closed — mirrors the registry resolver).
+function getAffiliateProduct(id: string): AffiliateRegistryRow | null {
+  const rows = AFFILIATE_ROWS.filter((r) => r?.product_id === id);
+  return rows.length === 1 ? rows[0] : null;
+}
+// Mirrors PROTECTED_POST_TYPES in ../affiliate-registry/index.ts (pinned by test).
+const AFFILIATE_PROTECTED_POST_TYPES = ['location', 'cost', 'decision', 'comparison', 'case-study'] as const;
+// Waves' own dialable lines (schema-local: this file is vendored into the
+// portal and cannot import src/data/waves-offices.ts — the test pins this
+// set to WAVES_HUB_CITY_PHONES). An <InlineCTA tel> may only dial one of
+// these; the portal mirror consults its full owned-number config.
+export const WAVES_OWNED_PHONES: ReadonlySet<string> = new Set([
+  '9413187612', '9412975749', '9412972817', '9412972606', '9412973337', '9412402066',
+]);
+function isWavesTel(v: string): boolean {
+  const digits = String(v || '').replace(/^tel:/i, '').replace(/\D/g, '');
+  // Dialable shape first: the dialer places the WHOLE string, so a padded
+  // number that merely ENDS in an owned line must not pass.
+  if (!(digits.length === 10 || (digits.length === 11 && digits[0] === '1'))) return false;
+  return WAVES_OWNED_PHONES.has(digits.slice(-10));
+}
 import { SERVICE_AREAS } from './service-areas.ts';
 
 // ─────────────────────────────────────────────────────────────
@@ -58,6 +95,11 @@ export const disclosureType = z.enum([
   'pricing-transparency',
   'service-area-limits',
   'regulatory',
+  // Post carries <AffiliateLink> components; BlogPostLayout renders the FTC
+  // affiliate disclosure block above the body from this type (owner
+  // monetization pilot 2026-08-31). Biconditional with the component —
+  // see validateAffiliateUsage.
+  'affiliate',
   'none',
 ]);
 
@@ -274,7 +316,19 @@ export const COMPONENT_NAMES = [
   'SeasonalPressureChart',
   'HomeZoneMap',
   'PestEvidenceGrid',
+  'SpiderIdBoard',
   'AppPhone',
+  // Mid-article service CTA card (src/components/blog/InlineCTA.astro) —
+  // registered in BlogPostLayout since its creation but never cataloged, so
+  // the gate rejected every post that used it. Cataloged 2026-08-31 because
+  // the affiliate placement rule ("service CTA before product recs")
+  // references it.
+  'InlineCTA',
+  // Affiliate product link resolved from packages/affiliate-registry at
+  // build time (owner monetization pilot 2026-08-31). Props are validated
+  // below; usage rules (≤3, disclosure, CTA-first, hub-only) live in
+  // validateAffiliateUsage.
+  'AffiliateLink',
 ] as const;
 
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
@@ -295,6 +349,39 @@ export type ComponentName = (typeof COMPONENT_NAMES)[number];
 const confidenceEnum = z.enum(['high', 'medium', 'low']);
 
 export const componentPropSchemas = {
+  AffiliateLink: z.object({
+    product: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9-]*$/, 'product must be a kebab-case registry id')
+      .refine(
+        (id) => AFFILIATE_PRODUCT_IDS.has(id),
+        'unknown affiliate product — add it to packages/affiliate-registry/registry.json first (any status; inactive rows render as plain links)',
+      ),
+    placement: z.string().regex(/^[a-z0-9-]+$/, 'placement must be a static kebab-case id (e.g. primary-rec)'),
+  }),
+  InlineCTA: z.object({
+    headline: z.string().optional(),
+    description: z.string().optional(),
+    ctaLabel: z.string().optional(),
+    // Rendered as an anchor href: root-relative path or https URL only —
+    // never an executable scheme (javascript:, data:, vbscript:).
+    ctaHref: z
+      .string()
+      .refine((v) => {
+        if (/^\/(?!\/)[A-Za-z0-9._~\-/]*(?:[?#][A-Za-z0-9._~\-/?#=&%+]*)?$/.test(v) && !/(^|\/)\.\.(\/|$)/.test(v)) return true;
+        if (!/^https:\/\//i.test(v)) return false;
+        try { const u = new URL(v); return u.protocol === 'https:' && !!u.hostname && !/[\s"'<>]/.test(v); } catch { return false; }
+      }, 'ctaHref must be a well-formed root-relative path (no dot segments) or an https URL')
+      .optional(),
+    phone: z.string().optional(),
+    tel: z.string()
+      .regex(/^(?:tel:)?\+?(?=(?:\D*\d){7})[\d\-().\s]{7,20}$/, 'tel must be a phone number with at least 7 digits (optionally tel:-prefixed)')
+      // The prop renders a tap-to-call target — only a Waves line may be
+      // dialed, with or without the tel: prefix (Codex #3646 r41).
+      .refine((v) => isWavesTel(v), 'tel must dial a Waves line (the hub office/GBP numbers) — never a third-party number')
+      .optional(),
+    eyebrow: z.string().optional(),
+  }),
   BottomLineBox: z.object({
     verdict: z.string().min(1),
     recommendation: z.string().min(1),
@@ -364,6 +451,41 @@ export const componentPropSchemas = {
       .optional(),
     caption: z.string().optional(),
   }),
+  // Southwest Florida spider identification board — the SWFL species set is
+  // baked in, so it renders standalone with zero props (all props are
+  // overrides). Every card carries where/hunt/eggSac because those three
+  // facts are what decide the treatment plan.
+  SpiderIdBoard: z.object({
+    title: z.string().min(1).optional(),
+    eyebrow: z.string().min(1).optional(),
+    species: z
+      .array(
+        z.object({
+          name: z.string().min(1),
+          sciName: z.string().min(1).optional(),
+          risk: z.enum(['beneficial', 'nuisance', 'medical']),
+          glyph: z.enum(['orb', 'tangle', 'crevice', 'hunter']).optional(),
+          where: z.string().min(1),
+          hunt: z.string().min(1),
+          eggSac: z.string().min(1),
+          // Citation URL — rendered straight into href, so it gets the same
+          // URL validation as frontmatter `canonical` rather than a bare
+          // non-empty check (a missing protocol would ship a broken source
+          // link on a card whose whole job is being verifiable).
+          source: z
+            .object({
+              label: z.string().min(1),
+              // Rendered as a citation anchor: https only, never an executable scheme.
+              url: z.url().refine((u) => /^https:\/\//i.test(u), 'citation url must be https'),
+            })
+            .optional(),
+        }),
+      )
+      .min(1)
+      .optional(),
+    footnote: z.string().optional(),
+    caption: z.string().optional(),
+  }),
   AppPhone: z.object({
     src: imagePath,
     alt: z.string().min(1),
@@ -388,6 +510,14 @@ export const componentPropSchemas = {
       .min(1)
       .optional(),
     caption: z.string().optional(),
+    // Non-pest seasonal quantities (e.g. irrigation demand) reuse the
+    // band chart; these override the pest-specific eyebrow, screen-reader
+    // metric noun and peak summary. Omitted = the pest defaults.
+    eyebrow: z.string().min(1).optional(),
+    metric: z.string().min(1).optional(),
+    legendNormal: z.string().min(1).optional(),
+    legendPeak: z.string().min(1).optional(),
+    peakSummary: z.string().min(1).optional(),
   }),
   // "Where we inspect & treat" schematic — default zone list baked in;
   // renders standalone with zero props (all props are overrides).
@@ -508,9 +638,1188 @@ export function validateMarkdownComponents(
   };
 }
 
+// ─────────────────────────────────────────────────────────────
+// Affiliate usage rules (owner monetization pilot 2026-08-31)
+//
+// Deterministic placement contract for posts carrying <AffiliateLink>:
+// affiliate is FALLBACK monetization, so the Waves service CTA stays
+// primary and the reader's question is answered before any product
+// appears. The admin portal's content-guardrails enforces the same rules
+// on autonomous drafts; this is the astro-side gate for hand-authored
+// posts (publish:post). Code blocks are stripped before scanning.
+// ─────────────────────────────────────────────────────────────
+
+export const AFFILIATE_LINK_MAX_PER_POST = 3;
+
+// Length-preserving blanker for balanced `{…}` MDX expressions, quote-aware
+// inside tags (an attribute value like title="a {b}" is not an expression)
+// and tolerant of nested braces. Unbalanced braces are left alone.
+// Non-rendered Markdown CODE, length-preserving: backtick AND tilde fences,
+// inline code, and CommonMark indented (4-space / tab) code lines — none of
+// it renders as prose, so none of it may satisfy a structural rule.
+// Fenced-code intervals via a container-aware line scan (ported from the
+// portal's proven blanker — the fence rules the sibling regexes could not
+// express): fences open inside blockquotes ("> ```md") and as/under list
+// items ("- ~~~html"), close on a same-char >=length fence AT their
+// container, END WITH their container (a fence opened in a blockquote or
+// list item stops when content leaves that container — never running to
+// EOF past it), and an unclosed TOP-LEVEL fence runs to EOF (CommonMark).
+function fencedCodeIntervals(raw: string): Array<[number, number]> {
+  const intervals: Array<[number, number]> = [];
+  let pos = 0; let openCh: string | null = null; let openLen = 0; let start = 0; let openDepth = 0; let openListIndent = 0;
+  // Ambient list tracking as a STACK of containers ({content column, quote
+  // depth}): when an inner item dedents away, the PARENT's content column
+  // must survive (a fence at the outer item's column is still list content,
+  // never top-level — a scalar reset made an unclosed nested fence mask to
+  // EOF and hide real components: fail open).
+  const listStack: Array<{ col: number; depth: number }> = [];
+  const topCol = () => (listStack.length ? listStack[listStack.length - 1].col : 0);
+  const topDepth = () => (listStack.length ? listStack[listStack.length - 1].depth : 0);
+  let prevBlank = true;
+  for (const line of raw.split('\n')) {
+    const quotePrefix = (line.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/) || [''])[0];
+    const depth = (quotePrefix.match(/>/g) || []).length;
+    const strippedLine = depth > 0 ? line.slice(quotePrefix.length) : line;
+    const blank = strippedLine.trim() === '';
+    const indent = (strippedLine.match(/^ */) || [''])[0].length;
+    if (openCh && !blank && (depth < openDepth || indent < openListIndent)) {
+      intervals.push([start, Math.max(start, pos - 1)]);
+      openCh = null;
+    }
+    if (openCh) {
+      // CommonMark: a closing fence may be indented at most 3 spaces
+      // relative to its container (the list content column for a fence
+      // inside an item; 0 at top level) — a 4-space-indented run is code
+      // CONTENT and the fence stays open.
+      const close = strippedLine.match(/^( *)(`{3,}|~{3,})\s*$/);
+      // A closer must sit at the OPENER's blockquote depth: inside a fence
+      // opened at "> ~~~", a "> > ~~~" line is literal fence CONTENT (the
+      // extra ">" is text), never the close (CommonMark).
+      if (close && depth === openDepth && close[2][0] === openCh && close[2].length >= openLen && close[1].length <= openListIndent + 3) { intervals.push([start, pos + line.length]); openCh = null; prevBlank = true; /* a closed fence ends the block — the next line can start any list */ }
+    } else {
+      // A THEMATIC BREAK (spaced or not: * * *, - - -, ___) outranks a list
+      // marker and ends the ambient list (Codex #504 r26).
+      const themBreak = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(strippedLine);
+      let marker = themBreak ? null : strippedLine.match(/^ *(?:[-*+]|\d{1,9}[.)])\s+/);
+      if (themBreak) { while (listStack.length && listStack[listStack.length - 1].depth === depth) listStack.pop(); }
+      // CommonMark: an ordered marker interrupts a paragraph only when it
+      // starts at 1 — "Paragraph\n2. ~~~" is paragraph TEXT, and treating
+      // it as an item would open a fence that swallows rendered components.
+      if (marker && /\d/.test(marker[0]) && !/^ *1[.)]/.test(strippedLine) && !prevBlank && listStack.length === 0) marker = null;
+      const markerIndent = marker ? (marker[0].match(/^ */) || [''])[0].length : 0;
+      if (!blank && depth < topDepth()) { while (listStack.length && listStack[listStack.length - 1].depth > depth) listStack.pop(); }
+      if (marker && markerIndent <= (depth === topDepth() ? topCol() : 0) + 3) {
+        // A sibling/outer marker pops inner items whose content column it
+        // sits left of; a deeper marker nests. Markers SHARING a line
+        // ("- - item") open nested containers — each inner marker's
+        // content column stacks on the previous (Codex #504 r28).
+        while (listStack.length && listStack[listStack.length - 1].depth === depth && listStack[listStack.length - 1].col > markerIndent) listStack.pop();
+        let colBase = 0;
+        let mm: RegExpMatchArray | null = marker;
+        let rest = strippedLine;
+        while (mm) {
+          colBase += mm[0].length;
+          listStack.push({ col: colBase, depth });
+          rest = rest.slice(mm[0].length);
+          mm = rest.match(/^(?:[-*+]|\d{1,9}[.)])\s+/);
+        }
+      } else if (!blank && depth === topDepth() && indent < topCol() && (prevBlank || /^ {0,3}(?:#{1,6}\s|>|(?:-{3,}|_{3,}|\*{3,})\s*$)/.test(strippedLine))) {
+        // An interrupting block (ATX heading, blockquote, thematic break)
+        // ends the list even with no blank line before it (Codex #504 r24).
+        // Dedent pops only the containers it leaves — parents whose content
+        // column the line still satisfies remain.
+        while (listStack.length && listStack[listStack.length - 1].depth === depth && listStack[listStack.length - 1].col > indent) listStack.pop();
+      }
+      let afterMarker = strippedLine;
+      if (marker) { let mm2 = afterMarker.match(/^ *(?:[-*+]|\d{1,9}[.)])\s+/); while (mm2) { afterMarker = afterMarker.slice(mm2[0].length); mm2 = afterMarker.match(/^(?:[-*+]|\d{1,9}[.)])\s+/); } }
+      const opener = strippedLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
+        || (marker ? afterMarker.match(/^ *(`{3,}|~{3,})(.*)$/) : null)
+        // A continuation fence at a nested item's content column (>= 4
+        // absolute spaces) is still a fence once the list indent is
+        // stripped (CommonMark) — the absolute {0,3} match cannot see it.
+        || (!marker && depth === topDepth() && topCol() > 0 && indent >= topCol()
+          ? strippedLine.slice(topCol()).match(/^ {0,3}(`{3,}|~{3,})(.*)$/) : null);
+      if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) {
+        if (!marker && depth === topDepth() && indent < topCol()) { while (listStack.length && listStack[listStack.length - 1].depth === depth && listStack[listStack.length - 1].col > indent) listStack.pop(); }
+        openCh = opener[1][0]; openLen = opener[1].length; start = pos;
+        openDepth = depth;
+        openListIndent = marker ? marker[0].length : (depth === topDepth() ? topCol() : 0);
+      }
+      prevBlank = blank;
+    }
+    pos += line.length + 1;
+  }
+  if (openCh) intervals.push([start, raw.length]);
+  return intervals;
+}
+
+function blankNonRenderedCode(src: string): string {
+  // Fences (container-aware, unclosed-runs-to-container-end/EOF) — see
+  // fencedCodeIntervals above.
+  const chars = src.split('');
+  for (const [a, b] of fencedCodeIntervals(src)) {
+    for (let k = a; k < Math.min(b, src.length); k += 1) if (chars[k] !== '\n') chars[k] = ' ';
+  }
+  let out = chars.join('');
+  // Inline code spans: opener and closer are EQUAL-length backtick runs
+  // (CommonMark) — a 4-run never closes against part of a 5-run. Scanned
+  // on the ATTR-MASKED view: a backtick inside a quoted JSX attribute is
+  // an inert character, never a span delimiter that could pair across a
+  // real component (Codex #504 r25).
+  {
+    let spanView = maskJsxAttrQuotes(out);
+    // Backticks inside MDX expressions are JS TEMPLATE delimiters, not
+    // markdown code spans (Codex #3646 r31) — blank them from the scan
+    // view so they never pair across an expression's content.
+    {
+      const cv = spanView.split('');
+      let d = 0;
+      for (let k2 = 0; k2 < spanView.length; k2 += 1) {
+        const c2 = spanView[k2];
+        if (c2 === '{') d += 1;
+        else if (c2 === '}') { if (d > 0) d -= 1; }
+        else if (c2 === '`' && d > 0) cv[k2] = ' ';
+      }
+      spanView = cv.join('');
+    }
+    const spanChars = out.split('');
+    const spanRe = /(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g;
+    let sm2: RegExpExecArray | null;
+    while ((sm2 = spanRe.exec(spanView)) !== null) {
+      for (let k = sm2.index; k < sm2.index + sm2[0].length; k += 1) if (spanChars[k] !== '\n') spanChars[k] = ' ';
+    }
+    out = spanChars.join('');
+  }
+  // An indented code line follows a blank line (or another code line) —
+  // measured RELATIVE to the ambient list content column (CommonMark
+  // strips the marker indent first): "- Product" then a blank then a
+  // 4-space "<AffiliateLink …>" is LIST CONTENT the renderer emits, code
+  // only from the item's column + 4 (Codex #3646 r21 P1).
+  const lines = out.split('\n');
+  let prevBlankOrCode = true;
+  const listCols: number[] = [];
+  const col = () => (listCols.length ? listCols[listCols.length - 1] : 0);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const blank = line.trim() === '';
+    let eIndent = 0;
+    for (const ch of (line.match(/^[ \t]*/) || [''])[0]) eIndent += ch === '\t' ? 4 - (eIndent % 4) : 1; // tab = next 4-column stop (CommonMark), not a fixed width
+    let marker = line.match(/^( *)(?:[-*+]|\d{1,9}[.)])\s+/);
+    // An ordered marker interrupts a paragraph only when it starts at 1
+    // (CommonMark) — "Paragraph\n2. text" is continuation text and must
+    // not open a phantom container that unblanks following code.
+    if (marker && /\d/.test(marker[0]) && !/^ *1[.)]/.test(line) && !prevBlankOrCode && listCols.length === 0) marker = null;
+    // An interrupting block (heading/blockquote/thematic break) ends the
+    // list with no blank line needed (Codex #504 r29).
+    if (!blank && /^ {0,3}(?:#{1,6}\s|>|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(line)) { listCols.length = 0; marker = null; }
+    if (marker && marker[1].length <= col() + 3 && eIndent < col() + 4) {
+      while (listCols.length && listCols[listCols.length - 1] > marker[1].length) listCols.pop();
+      // Markers sharing a line ("- - item") nest — stack every column
+      // (Codex #504 r29).
+      let colBase = 0;
+      let mm: RegExpMatchArray | null = marker;
+      let rest = line;
+      while (mm) {
+        colBase += mm[0].length;
+        listCols.push(colBase);
+        rest = rest.slice(mm[0].length);
+        mm = rest.match(/^(?:[-*+]|\d{1,9}[.)])\s+/);
+      }
+    } else if (!blank && eIndent < col() && prevBlankOrCode) {
+      while (listCols.length && listCols[listCols.length - 1] > eIndent) listCols.pop();
+    }
+    if (!blank && prevBlankOrCode && eIndent >= col() + 4) {
+      lines[i] = ' '.repeat(line.length);
+      prevBlankOrCode = true;
+    } else {
+      prevBlankOrCode = blank;
+    }
+  }
+  return lines.join('\n');
+}
+
+// HTML/MDX comment blanking that ignores comment DELIMITERS inside quoted
+// attribute values: <div title="<!--"> is inert text and must not pair
+// with a later --> and swallow real components (Codex #504 r23). The scan
+// runs on the attr-masked view; blanking applies to the source.
+function blankNonRenderedComments(src: string): string {
+  // Expression STRINGS are inert too: {'<!--'}<TypoWidget />{'-->'} must
+  // not pair across a real component (Codex #504 r24).
+  const view = blankExpressionStrings(maskJsxAttrQuotes(src));
+  const out = src.split('');
+  const re = /\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(view)) !== null) {
+    for (let k = m.index; k < m.index + m[0].length; k += 1) if (out[k] !== '\n') out[k] = ' ';
+  }
+  return out.join('');
+}
+
+// Standard JS string-escape decoder — returns the REAL runtime value so
+// validation never judges a different string than JS produces; null for
+// escapes outside the supported set (legacy octal) so those stay opaque
+// (Codex #3646 r26).
+function decodeJsStaticString(raw: string): string | null {
+  let out = '';
+  for (let i = 0; i < raw.length; i += 1) {
+    const c = raw[i];
+    if (c !== '\\') { out += c; continue; }
+    const n = raw[i + 1];
+    i += 1;
+    if (n === undefined) return null;
+    if (n === 'n') out += '\n';
+    else if (n === 't') out += '\t';
+    else if (n === 'r') out += '\r';
+    else if (n === 'b') out += '\b';
+    else if (n === 'f') out += '\f';
+    else if (n === 'v') out += '\v';
+    else if (n === '0' && !/[0-9]/.test(raw[i + 1] || '')) out += '\0';
+    else if (n === 'x') {
+      const hex = raw.slice(i + 1, i + 3);
+      if (!/^[0-9a-fA-F]{2}$/.test(hex)) return null;
+      out += String.fromCharCode(parseInt(hex, 16)); i += 2;
+    } else if (n === 'u') {
+      if (raw[i + 1] === '{') {
+        const close = raw.indexOf('}', i + 2);
+        const hex = close === -1 ? '' : raw.slice(i + 2, close);
+        if (!/^[0-9a-fA-F]{1,6}$/.test(hex)) return null;
+        const cp = parseInt(hex, 16);
+        if (cp > 0x10FFFF) return null; // out-of-range code point — fromCodePoint would THROW and abort the gate (Codex #504 r32)
+        out += String.fromCodePoint(cp); i = close;
+      } else {
+        const hex = raw.slice(i + 1, i + 5);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
+        out += String.fromCharCode(parseInt(hex, 16)); i += 4;
+      }
+    } else if (/[1-9]/.test(n)) return null; // legacy octal — unsupported
+    else if (n === '\n') { /* line continuation */ }
+    else out += n; // identity escape
+  }
+  return out;
+}
+
+// The static string VALUE of a {'…'}/{"…"} expression, JS-decoded; null
+// for anything else (dynamic, unsupported escapes).
+function staticExprString(expr: string | null): string | null {
+  if (!expr) return null;
+  const m = STATIC_EXPR_STRING_RE.exec(expr);
+  if (!m) return null;
+  return decodeJsStaticString(m[1] !== undefined ? m[1] : (m[2] !== undefined ? m[2] : ''));
+}
+const STATIC_EXPR_STRING_RE = /^\{\s*'((?:[^'\\]|\\.)*)'\s*\}$|^\{\s*"((?:[^"\\]|\\.)*)"\s*\}$/;
+
+// Keywords after which a `/` starts a REGEX, not division (return /x/,
+// case /x/: …) — the last-identifier check both lexers share.
+const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'do', 'else', 'instanceof', 'yield', 'await', 'new', 'break', 'continue']);
+// A `)` closing one of these keywords' condition puts the lexer back at
+// STATEMENT position — `if (ok) /x/.test(y)` starts a regex, not division.
+const CONTROL_FLOW_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'with']);
+// Keywords after which a { is an OBJECT literal (return {}); blocks
+// follow else/do even though those allow regexes after them.
+const OBJECT_CONTEXT_KEYWORDS = new Set(['return', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'instanceof', 'yield', 'await', 'new', 'throw']);
+
+// Index of the `}` closing the expression whose `{` is at `i` (-1 if
+// unbalanced). Honors JS literals so their content can't end it early:
+// strings ({'a}b'}), REGEX literals ({/"}/.test(x)} — a regex quote or
+// brace is not syntax; operator-position `/` starts one, char-class
+// aware), and // and /* */ comments.
+function closeOfExpressionAt(src: string, i: number): number {
+  let depth = 0; let q: string | null = null; let prevSig = ''; let word = ''; let wordDot = false; let prevWord = ''; let pendingWordBreak = false;
+  const parenCtl: boolean[] = [];
+  // Brace KINDS: a statement block's `}` returns to statement position (a /
+  // after `if (ok) {}` is a regex); an object literal's `}` is an operand
+  // (Codex #504 r26).
+  const braceKind: boolean[] = []; // true = object literal
+  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || (OBJECT_CONTEXT_KEYWORDS.has(word) && !wordDot);
+  for (let j = i; j < src.length; j += 1) {
+    const c = src[j];
+    if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; prevSig = c; word = ''; continue; }
+    if (depth > 0 && c === '/' && src[j + 1] === '/') { while (j < src.length && src[j] !== '\n') j += 1; continue; }
+    if (depth > 0 && c === '/' && src[j + 1] === '*') { const e = src.indexOf('*/', j + 2); if (e === -1) return -1; j = e + 1; continue; }
+    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
+      let k = j + 1; let inClass = false; let closed = -1;
+      for (; k < src.length && src[k] !== '\n'; k += 1) {
+        const d = src[k];
+        if (d === '\\') { k += 1; continue; }
+        if (inClass) { if (d === ']') inClass = false; continue; }
+        if (d === '[') { inClass = true; continue; }
+        if (d === '/') { closed = k; break; }
+      }
+      if (closed > 0) { j = closed; prevSig = '/'; continue; }
+    }
+    if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
+    if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
+    if (c === '(') { parenCtl.push((CONTROL_FLOW_KEYWORDS.has(word) && !wordDot) || (word === 'await' && prevWord === 'for')); prevSig = '('; word = ''; continue; } // obj.if(…) is a member CALL, not control flow
+    if (c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
+    if (/[A-Za-z0-9_$]/.test(c)) { if (pendingWordBreak) { prevWord = word; word = ''; pendingWordBreak = false; } if (word === '') wordDot = prevSig === '.'; word += c; } else if (/\s/.test(c)) { if (word) pendingWordBreak = true; } else { word = ''; prevWord = ''; pendingWordBreak = false; } // whitespace completes a word (for await); obj.return is a property
+    if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener
+  }
+  return -1;
+}
+
+function blankMdxExpressions(src: string, { keepJsx = true }: { keepJsx?: boolean } = {}): string {
+  const out = src.split('');
+  const blankRange = (a: number, b: number) => { for (let k = a; k <= b; k += 1) if (out[k] !== '\n') out[k] = ' '; };
+  const closeOfExpression = (i: number): number => closeOfExpressionAt(src, i);
+  // Context aware: inside a TAG quotes delimit attribute values (a brace in
+  // title="a {b}" is not an expression); in PROSE an apostrophe is text
+  // (don't / it's), so only braces matter there.
+  let i = 0; let inTag = false; let quote: string | null = null;
+  while (i < src.length) {
+    const ch = src[i];
+    if (inTag) {
+      if (quote) { if (ch === quote) quote = null; i += 1; continue; }
+      if (ch === '"' || ch === "'") { quote = ch; i += 1; continue; }
+      if (ch === '>') { inTag = false; i += 1; continue; }
+      if (ch === '{') {
+        const j = closeOfExpression(i);
+        if (j > 0) {
+          // Same keepJsx rule as prose expressions: an attr expression can
+          // carry RENDERED JSX (description={<AffiliateLink …/>}) — in the
+          // counting view its JSX survives (literals blanked); the
+          // structural view (keepJsx=false) blanks it whole.
+          const expr = src.slice(i, j + 1);
+          if (!keepJsx || !/<[A-Z]/.test(expr)) blankRange(i, j);
+          else {
+            const lexed = blankExpressionStrings(expr);
+            for (let k = i; k <= j; k += 1) if (lexed[k - i] !== src[k]) out[k] = lexed[k - i];
+          }
+          i = j + 1; continue;
+        }
+      }
+      i += 1; continue;
+    }
+    if (ch === '<' && /[A-Za-z/!]/.test(src[i + 1] || '')) { inTag = true; i += 1; continue; }
+    if (ch === '{') {
+      const j = closeOfExpression(i);
+      if (j > 0) {
+        // An expression that can render JSX ({true && <AffiliateLink …/>})
+        // keeps its JSX visible for the component scans, but its STRING
+        // LITERALS are blanked either way — {'<InlineCTA/>'} renders as
+        // text, and {'[quote](/quote/)'} must never satisfy a CTA rule.
+        const expr = src.slice(i, j + 1);
+        // keepJsx=false: an expression NEVER supplies a rendered CTA or
+        // heading, whatever it contains (regex literals, strings, JSX) —
+        // blank it whole. keepJsx=true (component counting): a JSX-bearing
+        // expression keeps its JSX so affiliate components are still
+        // counted (fail closed both ways).
+        if (!keepJsx || !/<[A-Z]/.test(expr)) blankRange(i, j);
+        else {
+          // Blank the expression's string/regex/comment literals via the
+          // shared lexer (blankExpressionStrings) — a naive quote-pairing
+          // walk would let a regex quote (/"/) pair with a later REAL
+          // attribute quote and blank a counted component's opener.
+          const lexed = blankExpressionStrings(expr);
+          for (let k = i; k <= j; k += 1) if (lexed[k - i] !== src[k]) out[k] = lexed[k - i];
+        }
+        i = j + 1; continue;
+      }
+    }
+    i += 1;
+  }
+  return out.join('');
+}
+
+// Length-preserving blank of every string AND regex literal that sits
+// inside a brace span — the BALANCING/position view: tag-shaped text
+// inside an MDX expression string ({'</div>'}) or regex ({/<div>/.test(x)})
+// is rendered TEXT, so tag scans must never count it as markup — and a
+// regex's quote character (/"/) must never be paired with a later real
+// attribute quote. Quotes outside braces (prose apostrophes, plain attr
+// values) are untouched; an unterminated literal is left alone.
+// Regex-vs-division: a `/` starts a regex only after an operator/opener
+// position (start of expression, or one of ({[,=&|!?:;+-*%~^<> and
+// whitespace-transparent) — after an identifier, number, `)`, or `]` it is
+// division and stays.
+function blankExpressionStrings(src: string): string {
+  const out = src.split('');
+  let depth = 0;
+  let prevSig = ''; // last significant char inside the current brace span
+  // Depth-0 context tracking: inside a TAG a quoted attribute value is
+  // opaque (title="{" must not open an expression — its brace once paired
+  // a later real prop quote and blanked a counted component's opener:
+  // fail open); in prose only braces matter.
+  let inTag = false; let attrQ: string | null = null; let word = ''; let wordDot = false; let prevWord = ''; let pendingWordBreak = false;
+  const parenCtl: boolean[] = [];
+  const braceKind: boolean[] = []; // true = object literal (see closeOfExpressionAt)
+  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || (OBJECT_CONTEXT_KEYWORDS.has(word) && !wordDot);
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i];
+    if (c === '\\') { i += 1; continue; }
+    if (depth === 0) {
+      // Quoted attr VALUES are blanked (quotes kept): tag-shaped text in a
+      // descendant attribute (title="</div>") must never close a wrapper
+      // in the balancing view (Codex #504 r20).
+      if (attrQ) { if (c === attrQ) { attrQ = null; } else if (out[i] !== '\n') { out[i] = ' '; } continue; }
+      if (inTag) {
+        if (c === '"' || c === "'" || c === '`') { attrQ = c; continue; }
+        if (c === '>') { inTag = false; continue; }
+        if (c === '{') { depth = 1; prevSig = '{'; continue; }
+        continue;
+      }
+      if (c === '<' && /[A-Za-z/!]/.test(src[i + 1] || '')) { inTag = true; continue; }
+      if (c === '{') { depth = 1; prevSig = '{'; continue; }
+      continue;
+    }
+    if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
+    if (c === '}') { depth -= 1; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
+    if (depth > 0 && c === '(') { parenCtl.push((CONTROL_FLOW_KEYWORDS.has(word) && !wordDot) || (word === 'await' && prevWord === 'for')); prevSig = '('; word = ''; continue; } // member calls are not control flow
+    if (depth > 0 && c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
+    if (depth > 0) {
+      if (c === '"' || c === "'" || c === '`') {
+        let j = i + 1;
+        for (; j < src.length; j += 1) { if (src[j] === '\\') { j += 1; continue; } if (src[j] === c) break; }
+        if (j < src.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; prevSig = c; word = ''; }
+        continue;
+      }
+      // Comments render nothing and may spell tag-shaped text ({true &&
+      // // <div>}) — blank the FULL comment, not just its slashes.
+      if (c === '/' && src[i + 1] === '/') {
+        let j = i;
+        while (j < src.length && src[j] !== '\n') j += 1;
+        for (let k = i; k < j; k += 1) if (out[k] !== '\n') out[k] = ' ';
+        i = j - 1; continue;
+      }
+      if (c === '/' && src[i + 1] === '*') {
+        const e = src.indexOf('*/', i + 2);
+        const j = e === -1 ? src.length : e + 2;
+        for (let k = i; k < j; k += 1) if (out[k] !== '\n') out[k] = ' ';
+        i = j - 1; continue;
+      }
+      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
+        // Regex literal: scan to the unescaped closing `/`, honoring
+        // character classes ([/] does not close).
+        let j = i + 1; let inClass = false; let closed = -1;
+        for (; j < src.length && src[j] !== '\n'; j += 1) {
+          const d = src[j];
+          if (d === '\\') { j += 1; continue; }
+          if (inClass) { if (d === ']') inClass = false; continue; }
+          if (d === '[') { inClass = true; continue; }
+          if (d === '/') { closed = j; break; }
+        }
+        if (closed > 0) { for (let k = i + 1; k < closed; k += 1) if (out[k] !== '\n') out[k] = ' '; i = closed; prevSig = '/'; continue; }
+      }
+      if (/[A-Za-z0-9_$]/.test(c)) { if (pendingWordBreak) { prevWord = word; word = ''; pendingWordBreak = false; } if (word === '') wordDot = prevSig === '.'; word += c; } else if (/\s/.test(c)) { if (word) pendingWordBreak = true; } else { word = ''; prevWord = ''; pendingWordBreak = false; } // whitespace completes a word; obj.return is a property
+      if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener; a / after return/throw/case/… IS one (word check above)
+    }
+  }
+  return out.join('');
+}
+
+// Length-preserving blanker for every element whose opening tag satisfies
+// `hidden(attrs, name)`, matched to its BALANCED closing tag (same-name
+// nesting counted, quote-aware) — a hidden <div> containing another <div>
+// is blanked to the outer close, never to the first inner one.
+// `scanSrc` (same length as `src` — every view is length-preserving) is
+// the view ATTRS are read from: predicates must see expression values
+// (style={{display:'none'}}, open={false}) that the structural view has
+// already blanked. TAG POSITIONS are walked on blankExpressionStrings(
+// scanSrc) so a quoted '</div>' inside an MDX expression never closes a
+// wrapper early and un-hides what follows it.
+function blankBalancedElements(src: string, hidden: (attrs: string, name: string) => boolean, scanSrc: string = src): string {
+  const out = src.split('');
+  const balanceSrc = blankExpressionStrings(scanSrc);
+  const openRe = /<([A-Za-z][\w-]*)\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = openRe.exec(balanceSrc)) !== null) {
+    const name = m[1];
+    const attrs = tagAttrsAt(scanSrc, m.index);
+    if (attrs === null) continue;
+    const openEnd = m.index + 1 + name.length + attrs.length; // index of '>'
+    if (attrs.trimEnd().endsWith('/')) continue; // self-closing: nothing to hide
+    if (!hidden(attrs, name.toLowerCase())) continue;
+    // Walk forward counting same-name opens/closes to the balanced close.
+    const tagRe = new RegExp(`<(\\/?)${name}\\b`, 'gi');
+    tagRe.lastIndex = openEnd + 1;
+    let depth = 1; let t: RegExpExecArray | null; let closeEnd = -1;
+    while ((t = tagRe.exec(balanceSrc)) !== null) {
+      if (t[1] === '/') { depth -= 1; if (depth === 0) { const gt = balanceSrc.indexOf('>', t.index); closeEnd = gt === -1 ? balanceSrc.length - 1 : gt; break; } }
+      else { const a = tagAttrsAt(scanSrc, t.index); if (a !== null && !a.trimEnd().endsWith('/')) depth += 1; }
+    }
+    if (closeEnd === -1) continue; // unbalanced — leave as is
+    for (let k = m.index; k <= closeEnd; k += 1) if (out[k] !== '\n') out[k] = ' ';
+    openRe.lastIndex = closeEnd + 1;
+  }
+  return out.join('');
+}
+
+// Quote-aware attribute text of the tag opening at `start` (index of `<`):
+// a `>` inside a quoted value does not end the tag. null = unterminated.
+function tagAttrsAt(src: string, start: number): string | null {
+  const m = /^<[A-Za-z][\w.]*/.exec(src.slice(start, start + 64));
+  if (!m) return null;
+  let j = start + m[0].length; let q: string | null = null;
+  for (; j < src.length; j += 1) {
+    const c = src[j];
+    if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+    if (c === '{') {
+      // An attr expression is lexed whole (regex/string/comment-aware): a
+      // `}` inside data-x={/[}]/} is regex text, not expression syntax —
+      // naive depth counting would go negative and drop the tag (leaving a
+      // hidden wrapper unblanked: fail open). Unbalanced → unterminated.
+      const e = closeOfExpressionAt(src, j);
+      if (e < 0) return null;
+      j = e; continue;
+    }
+    if (c === '>') return src.slice(start + m[0].length, j);
+  }
+  return null;
+}
+
+// Sequential, quote-aware attribute read: the QUOTED LITERAL value of the
+// attribute whose complete name is exactly `name` — null when the
+// attribute is missing, expression-valued/unquoted, or DUPLICATED (JSX
+// keeps the last value while a reader sees the first, so a duplicate can
+// never validate).
+function literalAttr(attrs: string, name: string): string | null {
+  const re = /\s*([^\s=/>"'{}]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|(\{[^{}]*\})|([^\s"'{}]+)))?/gy;
+  let value: string | null = null;
+  let seen = 0;
+  let m: RegExpExecArray | null;
+  re.lastIndex = 0;
+  while (re.lastIndex < attrs.length && (m = re.exec(attrs)) !== null) {
+    if (m[0].length === 0) break;
+    if (m[1] !== name) continue;
+    seen += 1;
+    value = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : null;
+  }
+  return seen === 1 ? value : null;
+}
+
+// Every opening tag named `name` in `src` → [{ start, attrs }] (attrs null = unterminated).
+function tagsNamed(src: string, name: string): Array<{ start: number; attrs: string | null }> {
+  const re = new RegExp(`<${name}\\b`, 'g');
+  const found: Array<{ start: number; attrs: string | null }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) found.push({ start: m.index, attrs: tagAttrsAt(src, m.index) });
+  return found;
+}
+
+// A child expression that renders NOTHING: an empty string or a boolean/
+// nullish literal, with optional comment trivia around it.
+const WHITESPACE_ENTITY_RE = /&(?:nbsp|ensp|emsp|thinsp|#0*(?:32|160|8194|8195|8201)|#x0*(?:20|a0|2002|2003|2009));?/gi;
+// An ARRAY whose slots are all non-rendering (or elided) renders nothing
+// either ({[]}, {[null]}, {[false, '']}; Codex #3646 r39).
+const NON_RENDERING_CHILD_RE = (() => {
+  const trivia = '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*';
+  const lit = "(?:'\\s*'|\"\\s*\"|`\\s*`|true|false|null|undefined)"; // whitespace-only strings render nothing visible; no backreference — the array branch repeats the group
+  const arr = '\\[' + trivia + '(?:' + lit + '?' + trivia + ',' + trivia + ')*' + '(?:' + lit + trivia + ')?' + '\\]';
+  return new RegExp('\\{' + trivia + '(?:' + lit + '|' + arr + ')' + trivia + '\\}', 'g');
+})();
+
+// A class list hides at EVERY viewport when any hiding utility present
+// lacks the breakpoint reset that undoes ITS property (Codex #508 r5/r6):
+// `hidden` (display) ↔ md:block/flex/…; `invisible` (visibility) ↔
+// md:visible; `sr-only` ↔ md:not-sr-only. Only VIEWPORT breakpoints
+// prove responsive visibility — print:/hover:/focus: variants leave the
+// element hidden in ordinary viewing.
+// An IMPORTANT hide (Tailwind 4 `hidden!`, Tailwind 3 `!hidden`) is
+// undone only by an important reset (Codex #508 r8).
+const HIDING_UTILITY_RESETS: Array<[string, string]> = [
+  ['hidden', 'block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item'],
+  ['invisible', 'visible'],
+  ['sr-only', 'not-sr-only'],
+];
+function classListStaticallyHidden(cls: string): boolean {
+  return HIDING_UTILITY_RESETS.some(([hide, resets]) => {
+    const h = new RegExp(`(?:^|\\s)(!?)${hide}(!?)(?=\\s|$)`).exec(cls);
+    if (!h) return false;
+    const reset = new RegExp(`(?:^|\\s)(?:sm|md|lg|xl|2xl):(!?)(?:${resets})(!?)(?=\\s|$)`).exec(cls);
+    if (!reset) return true;
+    return Boolean(h[1] || h[2]) && !(reset[1] || reset[2]);
+  });
+}
+
+// Definitely-hidden element predicates, shared by the structural view and
+// the AffiliateLink child check (Codex #3646 r37).
+function elementRendersHidden(attrs: string): boolean {
+  // display:none in the STYLE attribute's CSS string or JSX style object
+  // hides regardless of the hidden attribute's value — read the style
+  // attr's own value; another attr merely containing the text
+  // (aria-label={"display:none"}) is not a style.
+  if (styleHidesElement(attrs)) return true;
+  // A wrapper spread ({...props}) can inject hidden/style at render time
+  // — visibility cannot be determined, so fail closed (blank it). Only
+  // an ATTRIBUTE-position spread counts (hasJsxSpread): a {...} nested
+  // in an attr value expression never reaches the element's props.
+  if (hasJsxSpread(attrs)) return true;
+  // Duplicate hidden attributes apply LAST-WINS (JSX) — evaluated
+  // sequentially like the details `open` parser; a dynamic value fails
+  // closed (hidden).
+  return hiddenAttrRendersHidden(attrs);
+}
+function classStaticallyHidden(attrs: string): boolean {
+  // class/className read via the balanced walk: a quoted literal OR an
+  // escape-free static string expression ({'hidden'}) both resolve; a
+  // dynamic class keeps the wrapper visible (historic posture), and
+  // unparseable attrs fail closed (Codex #504 r29).
+  const walked = walkJsxAttrs(attrs);
+  if (!walked.ok) return true;
+  let cls: string | null = null;
+  for (const a of walked.list) {
+    const n = a.name.toLowerCase();
+    if (n !== 'class' && n !== 'classname') continue;
+    cls = a.literal !== null ? a.literal : staticExprString(a.expr);
+  }
+  if (cls === null) return false;
+  return classListStaticallyHidden(cls);
+}
+const NON_RENDERED_CONTAINERS = ['template', 'script', 'style', 'noscript', 'datalist'];
+
+// The component renders its CHILDREN as the anchor text: a self-closing,
+// empty, comment-only, or unclosed <AffiliateLink> ships an empty,
+// unusable product link (Codex #3646 r35). The balanced close is walked
+// on the string-blanked view (a quoted '</AffiliateLink>' inside an
+// expression never closes it early); children are judged with comments
+// and statically NON-RENDERING expressions removed — empty strings and the
+// boolean/nullish literals React drops ({false}, {null}, {undefined},
+// {true}; Codex #3646 r36).
+function affiliateLinkTextIsEmpty(src: string, strView: string, start: number, attrs: string): boolean {
+  if (attrs.trimEnd().endsWith('/')) return true;
+  const openEnd = start + '<AffiliateLink'.length + attrs.length; // index of '>'
+  const tagRe = /<(\/?)AffiliateLink(?=[\s/>])/g;
+  tagRe.lastIndex = openEnd + 1;
+  let depth = 1; let t: RegExpExecArray | null;
+  while ((t = tagRe.exec(strView)) !== null) {
+    if (t[1] === '/') {
+      depth -= 1;
+      if (depth === 0) {
+        // Hidden markup inside the link is not visible text (<span
+        // hidden>Buy</span>; Codex #3646 r37), and tag markup itself is
+        // not text — except an <img>, which renders a clickable picture.
+        const kids = src.slice(openEnd + 1, t.index).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, '');
+        const visible = blankBalancedElements(kids, (a2, name) => elementRendersHidden(a2) || classStaticallyHidden(a2)
+          || (name === 'details' && !detailsRendersOpen(a2)) || NON_RENDERED_CONTAINERS.includes(name));
+        const tagView = blankExpressionStrings(visible);
+        const tagRe2 = /<\/?([A-Za-z][\w-]*)/g;
+        let text = ''; let last = 0; let tm: RegExpExecArray | null;
+        while ((tm = tagRe2.exec(tagView)) !== null) {
+          let end: number; // index of '>'
+          if (tm[0][1] === '/') { end = tagView.indexOf('>', tm.index); if (end === -1) break; }
+          else { const a3 = tagAttrsAt(visible, tm.index); if (a3 === null) break; end = tm.index + tm[0].length + a3.length; }
+          // A self-closing element is never blanked by the balanced walk, so a
+          // HIDDEN <img> (hidden / class="hidden" / display:none) is dropped
+          // here (Codex #3646 r38).
+          const imgAttrs = visible.slice(tm.index + tm[0].length, end);
+          const keepImg = tm[1].toLowerCase() === 'img' && !(elementRendersHidden(imgAttrs) || classStaticallyHidden(imgAttrs));
+          if (!keepImg) { text += visible.slice(last, tm.index); last = end + 1; }
+          tagRe2.lastIndex = end + 1;
+        }
+        text += visible.slice(last);
+        // Comment trivia around the literal ({false /* note */}) and
+        // fragment delimiters (<></>) render nothing either (Codex #508 r5/r6).
+        // Whitespace character references (&nbsp; &#32; …) decode to
+        // whitespace the anchor cannot show either (Codex #508 r8).
+        return !text.replace(/<>|<\/>/g, '').replace(NON_RENDERING_CHILD_RE, '').replace(WHITESPACE_ENTITY_RE, ' ').trim();
+      }
+    } else {
+      const a = tagAttrsAt(src, t.index);
+      if (a !== null && !a.trimEnd().endsWith('/')) depth += 1;
+    }
+  }
+  return true; // unclosed — nothing renders
+}
+
+// A service-route path (exact route, optional ?query/#fragment).
+const SERVICE_ROUTE_PATH_RE =
+  /^\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/(?:[?#].*)?$|^\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/(?:[?#].*)?$/;
+
+// The hub's own hosts: an absolute https URL on one of these is the same
+// destination as its root-relative path (the portal's guardrails make the
+// equivalent Waves-host classification). Spoke hosts are NOT here — the
+// service routes above are hub routes, and a spoke-host spelling of one is
+// not verified to exist (fail closed).
+const WAVES_HUB_HOSTS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
+// A service-route destination: a root-relative service path, or the same
+// path spelled as an absolute https URL on a hub host.
+function isServiceCtaHref(href: string): boolean {
+  // EXACT value — no trimming: whitespace inside a destination (</quote/ >)
+  // renders an encoded, non-service URL and must fail closed.
+  const t = href;
+  if (t.startsWith('/')) return SERVICE_ROUTE_PATH_RE.test(t);
+  if (!/^https:\/\//i.test(t)) return false;
+  try {
+    const u = new URL(t);
+    if (!WAVES_HUB_HOSTS.has(u.hostname.toLowerCase().replace(/\.$/, ''))) return false;
+    // An explicit non-default port (https://hub:444/quote/) is not the hub's
+    // service destination and may be unreachable. URL normalizes :443 away on
+    // https, so any remaining port is non-default.
+    if (u.port !== '') return false;
+    return SERVICE_ROUTE_PATH_RE.test(`${u.pathname}${u.search}${u.hash}`);
+  } catch { return false; }
+}
+
+// Length-preserving mask for Markdown images. Labels may nest balanced
+// brackets (![Request [a quote]](/x/)) and destinations balanced parens —
+// a flat [^\]]* regex stops at the inner bracket and leaves `](/x/)`
+// behind for the CTA regex to false-match.
+function maskMarkdownImages(src: string): string {
+  const out = src.split('');
+  let i = 0;
+  while (i < src.length - 1) {
+    // A backslash escapes the next char: \![…](…) renders a literal `!`
+    // followed by a NORMAL link (CommonMark) — never an image opener.
+    if (src[i] === '\\') { i += 2; continue; }
+    if (src[i] !== '!' || src[i + 1] !== '[') { i += 1; continue; }
+    let depth = 1; let j = i + 2;
+    for (; j < src.length && depth > 0; j += 1) {
+      if (src[j] === '\\') { j += 1; continue; }
+      if (src[j] === '[') depth += 1;
+      else if (src[j] === ']') depth -= 1;
+    }
+    if (depth !== 0 || src[j] !== '(') { i += 2; continue; }
+    let pd = 1; let k = j + 1;
+    for (; k < src.length && pd > 0; k += 1) {
+      if (src[k] === '\\') { k += 1; continue; }
+      if (src[k] === '(') pd += 1;
+      else if (src[k] === ')') pd -= 1;
+    }
+    if (pd !== 0) { i += 2; continue; }
+    for (let t = i; t < k; t += 1) if (out[t] !== '\n') out[t] = ' ';
+    i = k;
+  }
+  return out.join('');
+}
+
+// Every REAL inline Markdown link destination in `src`: the opener must be
+// an unescaped `[` (CommonMark renders \[…](…) as literal text, which a
+// bare `](`-anchored regex would false-match), labels may nest balanced
+// brackets and destinations balanced parens (same walk as
+// maskMarkdownImages), and an optional quoted link TITLE after the
+// destination ([q](/quote/ "Request service")) is split off. Images must
+// be masked before this runs.
+function* markdownLinkDests(src: string): Generator<{ dest: string; label: string }> {
+  let i = 0;
+  while (i < src.length) {
+    if (src[i] === '\\') { i += 2; continue; }
+    if (src[i] !== '[') { i += 1; continue; }
+    let depth = 1; let j = i + 1;
+    for (; j < src.length && depth > 0; j += 1) {
+      if (src[j] === '\\') { j += 1; continue; }
+      if (src[j] === '[') depth += 1;
+      else if (src[j] === ']') depth -= 1;
+    }
+    if (depth !== 0 || src[j] !== '(') { i += 1; continue; }
+    // CommonMark: links may not NEST — a completed link inside the label
+    // ([outer [inner](/blog/)](/quote/)) wins and the outer bracket text
+    // renders literally. Step INTO the label so the inner link is the one
+    // yielded; the outer's `](…)` tail is then plain text. (Images inside
+    // labels are legal — callers mask them before this walker runs, so a
+    // masked image never trips this.)
+    if (hasCompletedMarkdownLink(src.slice(i + 1, j - 1))) { i += 1; continue; }
+    let pd = 1; let k = j + 1;
+    for (; k < src.length && pd > 0; k += 1) {
+      if (src[k] === '\\') { k += 1; continue; }
+      if (src[k] === '(') pd += 1;
+      else if (src[k] === ')') pd -= 1;
+    }
+    if (pd !== 0) { i += 1; continue; }
+    const inner = src.slice(j + 1, k - 1).trim();
+    // CommonMark destination: the first token — <>-wrapped or bare — with
+    // anything after whitespace being the (ignored) title.
+    const dm = /^<([^<>\n]*)>|^(\S+)/.exec(inner);
+    // CommonMark: anything after the destination must be a VALID quoted or
+    // parenthesized title — [q](/quote/ garbage) renders no anchor at all.
+    if (dm) {
+      const rest = inner.slice(dm[0].length).trim();
+      if (rest && !/^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\))$/.test(rest)) { i = k; continue; }
+    }
+    // Angle-bracket destinations keep INTERNAL whitespace (CommonMark:
+    // </quote/ > renders /quote/%20, never the service route) — only the
+    // syntax whitespace outside <…> is trimmed. The LABEL rides along so
+    // the CTA rule can require visible content ([](/quote/) renders an
+    // empty anchor — no funnel).
+    if (dm) yield { dest: dm[1] ?? dm[2] ?? '', label: src.slice(i + 1, j - 1) };
+    i = k;
+  }
+}
+
+function hasCompletedMarkdownLink(s: string): boolean {
+  for (const span of markdownLinkDests(s)) { void span; return true; }
+  return false;
+}
+
+// True when the (masked) prefix carries a Waves service CTA: a markdown
+// link to a service route, or an <InlineCTA> that LEADS to one — no
+// ctaHref (the component defaults to the quote page) or a quoted literal
+// service route. An InlineCTA with a dynamic or non-service destination is
+// not the required CTA (fail closed).
+function hasServiceCtaBefore(prefix: string): boolean {
+  // A Markdown IMAGE (![alt](/quote/)) renders an <img>, not a link — mask
+  // images (balanced labels/destinations) and raw <img> tags before the
+  // link test.
+  const p2 = maskMarkdownImages(prefix)
+    .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
+  // Link-shaped text inside a JSX attribute (title="[quote](/quote/)")
+  // renders no anchor — mask attr quotes for the Markdown scans only
+  // (hasInlineCtaService reads quoted ctaHref values, so it gets p2).
+  const p3 = maskJsxAttrQuotes(p2);
+  // ONE classifier for every real link destination, relative or absolute
+  // (isServiceCtaHref) — a walker over real links, never a `](`-anchored
+  // regex that escaped or residual bracket text can satisfy.
+  for (const { dest, label } of markdownLinkDests(p3)) if (label.trim() && isServiceCtaHref(dest)) return true;
+  // p3 doubles as the POSITION view for the component scan: a tag spelled
+  // inside an attribute value (<div title="<InlineCTA />">) is blanked
+  // there and never counts; attrs still read from p2.
+  return hasInlineCtaService(p2, p3);
+}
+
+// A JSX SPREAD ({...expr}) delivers props no literal-attribute scan can
+// see — a spread can override ctaHref/product/placement (or inject
+// hidden/style on a wrapper) at render time, so any tag carrying one can
+// never be validated (fail closed). ONLY a spread at ATTRIBUTE position
+// counts: a `{...}` nested inside an attr VALUE expression
+// (data-options={JSON.stringify({...{foo:1}})}) is an object spread the
+// element never receives as props — walk attrs quote/brace-aware and test
+// braces that open where an attribute would start.
+function hasJsxSpread(attrs: string): boolean {
+  const s = String(attrs || '');
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === '"' || c === "'" || c === '`') { i += 1; while (i < s.length && s[i] !== c) { if (s[i] === '\\') i += 1; i += 1; } continue; }
+    if (c !== '{') continue;
+    const attrPos = i === 0 || /\s/.test(s[i - 1]);
+    if (attrPos && /^\{(?:\s|\/\*[\s\S]*?\*\/)*\.\.\./.test(s.slice(i))) return true; // comment trivia before the ellipsis is still a spread
+    // Balance the expression with the shared string/regex/comment-aware
+    // lexer — a regex like {/\{/} must not derail the walk past a real
+    // {...spread} (Codex #504 r27); unbalanced fails closed.
+    const e = closeOfExpressionAt(s, i);
+    if (e < 0) return true;
+    i = e;
+  }
+  return false;
+}
+
+// Balanced attribute walk shared by the visibility predicates: names with
+// quoted-literal or expression values, expressions consumed whole via the
+// shared lexer (deeply nested style objects parse instead of derailing a
+// flat regex — Codex #504 r27). ok=false means unparseable residue: the
+// caller fails CLOSED. Spread spans are consumed silently (hasJsxSpread
+// owns spread policy).
+function walkJsxAttrs(attrs: string): { list: Array<{ name: string; literal: string | null; expr: string | null }>; ok: boolean } {
+  const s = String(attrs || '');
+  const list: Array<{ name: string; literal: string | null; expr: string | null }> = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /[\s/]/.test(s[i])) i += 1;
+    if (i >= s.length) break;
+    if (s[i] === '{') { const e = closeOfExpressionAt(s, i); if (e < 0) return { list, ok: false }; i = e + 1; continue; }
+    const nm = /^[^\s=/>"'{}]+/.exec(s.slice(i));
+    if (!nm) return { list, ok: false };
+    const name = nm[0];
+    i += name.length;
+    let k = i;
+    while (k < s.length && /\s/.test(s[k])) k += 1;
+    if (s[k] !== '=') { list.push({ name, literal: null, expr: null }); i = k; continue; }
+    k += 1;
+    while (k < s.length && /\s/.test(s[k])) k += 1;
+    const c = s[k];
+    if (c === '"' || c === "'") {
+      let j = k + 1;
+      while (j < s.length && s[j] !== c) j += 1;
+      if (j >= s.length) return { list, ok: false };
+      list.push({ name, literal: s.slice(k + 1, j), expr: null });
+      i = j + 1; continue;
+    }
+    if (c === '{') {
+      const e = closeOfExpressionAt(s, k);
+      if (e < 0) return { list, ok: false };
+      list.push({ name, literal: null, expr: s.slice(k, e + 1) });
+      i = e + 1; continue;
+    }
+    const um = /^[^\s"'{}>]+/.exec(s.slice(k));
+    list.push({ name, literal: null, expr: null });
+    i = k + (um ? um[0].length : 1);
+  }
+  return { list, ok: true };
+}
+
+// True when a literal `style` attribute itself hides the element —
+// display:none or visibility:hidden in a CSS string or JSX style object.
+// Unparseable attr text fails CLOSED (hidden).
+function styleHidesElement(attrs: string): boolean {
+  const walked = walkJsxAttrs(attrs);
+  if (!walked.ok) return true;
+  let styleValue: string | null = null;
+  for (const a of walked.list) if (a.name.toLowerCase() === 'style') styleValue = a.literal ?? a.expr ?? null; // last wins (JSX)
+  if (styleValue === null) return false;
+  // CSS applies the LAST declaration of a property (Codex #508 r6):
+  // "display:none; display:inline" is visible. Read the final value of
+  // each property (CSS string or JSX style-object spelling).
+  // A declaration inside a CSS comment is not a declaration (Codex #508 r8).
+  const liveStyle = styleValue.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const lastValue = (prop: string): string | null => {
+    const re = new RegExp(`(?:^|[^a-z0-9_-])${prop}\\s*['"]?\\s*:\\s*['"\`]?\\s*([a-z-]+)`, 'gi');
+    let m: RegExpExecArray | null; let last: string | null = null;
+    while ((m = re.exec(liveStyle)) !== null) last = m[1].toLowerCase();
+    return last;
+  };
+  return lastValue('display') === 'none' || lastValue('visibility') === 'hidden';
+}
+
+// Comment trivia inside a static boolean expression ({false /* note */})
+// is not part of the value (Codex #508 r8).
+function stripJsTrivia(expr: string): string {
+  return expr.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*\n/g, ' ');
+}
+
+// True when the element's `hidden` attribute renders it hidden (last-wins;
+// dynamic and unparseable fail CLOSED — over-blanking only discounts a CTA).
+function hiddenAttrRendersHidden(attrs: string): boolean {
+  const walked = walkJsxAttrs(attrs);
+  if (!walked.ok) return true;
+  let hidden = false;
+  for (const a of walked.list) {
+    if (a.name.toLowerCase() !== 'hidden') continue;
+    // ASTRO rendering semantics (Codex #3646 r31): only false/null/
+    // undefined omit the attribute — hidden="" and hidden={''}/{0} render
+    // it PRESENT, and a present boolean attribute hides.
+    if (a.expr !== null) hidden = !/^\{\s*(?:false|null|undefined)\s*\}$/.test(stripJsTrivia(a.expr));
+    else hidden = true; // any literal (even ""), bare, or unquoted value
+  }
+  return hidden;
+}
+
+// True when a <details> renders OPEN (last-wins; dynamic/unparseable fail
+// CLOSED as closed — a CTA a reader must expand for is no CTA).
+function detailsRendersOpen(attrs: string): boolean {
+  const walked = walkJsxAttrs(attrs);
+  if (!walked.ok) return false;
+  let open = false;
+  for (const a of walked.list) {
+    if (a.name.toLowerCase() !== 'open') continue;
+    // ASTRO semantics: any statically-rendered value (true, numbers,
+    // strings — "" included) leaves the attribute PRESENT → open; only
+    // false/null/undefined omit it; a dynamic expression stays closed
+    // (fail closed — a CTA behind an expandable is no CTA).
+    if (a.expr !== null) open = /^\{\s*(?:true|-?\d|['"`])/.test(stripJsTrivia(a.expr));
+    else open = true; // any literal (even ""), bare, or unquoted value
+  }
+  return open;
+}
+
+// Length-preserving mask of every quoted span inside JSX opening tags:
+// title="[quote](/quote/)" renders no anchor, so attribute text must never
+// satisfy a Markdown-link scan. Walks tags with tagAttrsAt's quote/brace
+// rules; an unterminated tag masks the quoted spans seen up to EOF.
+function maskJsxAttrQuotes(src: string): string {
+  const out = src.split('');
+  // Tags are DISCOVERED on the expression-literal-masked view: `<div` text
+  // inside a prose regex literal ({/<div"/.test(x)}) is not a tag whose
+  // quote walk may pair with a real component's prop quote (Codex #504
+  // r26); walking/masking still applies to the source offsets.
+  const discover = blankExpressionStrings(src);
+  const re = /<[A-Za-z][\w.]*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(discover)) !== null) {
+    let j = m.index + m[0].length; let q: string | null = null; let qStart = -1;
+    for (; j < src.length; j += 1) {
+      const c = src[j];
+      if (q) {
+        if (c === '\\') { j += 1; continue; }
+        if (c === q) {
+          for (let t = qStart + 1; t < j; t += 1) if (out[t] !== '\n') out[t] = ' ';
+          q = null;
+        }
+        continue;
+      }
+      if (c === '"' || c === "'" || c === '`') { q = c; qStart = j; continue; }
+      if (c === '{') {
+        // An expression-valued attribute renders no anchor text either, and
+        // its JS literals must not be mistaken for attr quotes (data={/"/}
+        // would otherwise pair the regex quote with the NEXT attribute's
+        // opener and leave that value unmasked). Lex the whole expression
+        // (regex/string/comment-aware) and blank it.
+        const e = closeOfExpressionAt(src, j);
+        if (e > 0) {
+          // JSX inside an attr EXPRESSION renders (description={<AffiliateLink …/>}
+          // is emitted by the component) — keep it visible; blank only the
+          // expression's string/regex/comment literals via the shared lexer.
+          const lexed = blankExpressionStrings(src.slice(j, e + 1));
+          for (let t = j; t <= e; t += 1) if (out[t] !== '\n' && lexed[t - j] !== src[t]) out[t] = lexed[t - j];
+          j = e; continue;
+        }
+      }
+      if (c === '>') break;
+    }
+    re.lastIndex = j;
+  }
+  return out.join('');
+}
+
+function hasInlineCtaService(prefix: string, positionView: string = prefix): boolean {
+  for (const { start, attrs } of tagsNamed(prefix, 'InlineCTA')) {
+    if (positionView[start] === ' ') continue; // attr-quoted tag text, renders nothing
+    if (attrs === null) continue; // unterminated — never counts
+    if (hasJsxSpread(attrs)) continue; // spread can override the destination
+    if (!/\bctaHref\s*=/.test(attrs)) return true;
+    const href = literalAttr(attrs, 'ctaHref'); // duplicated/dynamic → null → not counted
+    if (href && isServiceCtaHref(href)) return true;
+  }
+  return false;
+}
+
+export interface AffiliateUsageResult {
+  ok: boolean;
+  count: number;
+  blockers: string[];
+  warnings: string[];
+}
+
+export function validateAffiliateUsage(
+  body_mdx: string,
+  frontmatter: { disclosure?: { type?: string }; post_type?: string; domains?: unknown; tracking?: { domains?: unknown } },
+  opts: { fileExt?: string } = {},
+): AffiliateUsageResult {
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+  let cleaned = blankNonRenderedComments(blankNonRenderedCode(body_mdx));
+  // MDX expressions ({''}, {'[quote](/quote/)'}, {`## fake`}) render as
+  // ordinary text, never as markup — blank every balanced brace expression
+  // OUTSIDE quoted JSX attribute values (length-preserving) so structural
+  // scans (headings, CTA links, component positions) only see real source.
+  // Two views of the body: `cleaned` keeps JSX-bearing expressions so
+  // affiliate components inside them are COUNTED; `structural` blanks every
+  // expression so none can supply a CTA or heading (an expression can only
+  // ever render a component, never Markdown).
+  cleaned = blankMdxExpressions(cleaned);
+  // COUNTING view = `cleaned` from here (hidden/expandable components still
+  // count — a link inside a closed <details> renders when expanded).
+  // STRUCTURAL view (CTA/heading rules) additionally blanks hidden markup:
+  // a CTA a reader cannot see is no CTA.
+  let structural = blankMdxExpressions(cleaned, { keepJsx: false });
+  // Visibility predicates read the PRE-EXPRESSION view (code/comments
+  // blanked, expressions intact): style={{display:'none'}} and
+  // open={false} live inside expressions the structural view has already
+  // erased — evaluating them on `structural` would see neither.
+  const unmasked = blankNonRenderedComments(blankNonRenderedCode(body_mdx));
+  // Definitely-hidden markup never satisfies a reader-facing rule: elements
+  // carrying `hidden` (unless hidden={false}), an inline display:none
+  // (literal or expression-valued), or a closed <details> body — including
+  // open={false}, which renders closed — are blanked (length-preserving),
+  // on the structural view only.
+  structural = blankBalancedElements(structural, elementRendersHidden, unmasked);
+  // Tailwind's statically-hidden utilities (class="hidden" / "invisible" /
+  // "sr-only") hide just as surely as the attribute.
+  structural = blankBalancedElements(structural, classStaticallyHidden, unmasked);
+  structural = blankBalancedElements(structural, (attrs, name) => name === 'details'
+    && !detailsRendersOpen(attrs), unmasked);
+  // Inherently NON-RENDERED containers never show their content — a CTA
+  // inside one is no CTA (Codex #3646 r24 P1).
+  structural = blankBalancedElements(structural, (attrs, name) => NON_RENDERED_CONTAINERS.includes(name), unmasked);
+  // Tag-shaped text inside a quoted JSX attribute (<div title="<AffiliateLink />">)
+  // renders no component — position-check the count against the attr-masked
+  // view, like the InlineCTA scan (Codex #3646 r15 P1).
+  const cleanedAttrView = maskJsxAttrQuotes(cleaned);
+  const positions: number[] = tagsNamed(cleaned, 'AffiliateLink').map((t) => t.start).filter((p) => cleanedAttrView[p] !== ' ');
+  const count = positions.length;
+  const declared = frontmatter.disclosure?.type === 'affiliate';
+
+  // ctaHref is written straight into an anchor: an expression-valued or
+  // duplicated value cannot be validated against the https/root-relative
+  // rule, so it is a blocker in EVERY post, affiliate or not.
+  // Tags spelled inside expression STRING LITERALS ({'<InlineCTA … />'})
+  // render as text, never as components — skip any tag whose opener sits
+  // in a string span (position check against the string-blanked view;
+  // attrs still read from `unmasked` so a REAL expression-wrapped tag's
+  // quoted props stay validatable).
+  const exprStringView = blankExpressionStrings(unmasked);
+  const unmaskedAttrView = maskJsxAttrQuotes(unmasked);
+  for (const { start, attrs } of tagsNamed(unmasked, 'InlineCTA')) {
+    if (exprStringView[start] === ' ' || unmaskedAttrView[start] === ' ') continue;
+    if (attrs === null) continue;
+    if (hasJsxSpread(attrs)) {
+      blockers.push('<InlineCTA> may not carry a JSX spread ({...}) — a spread can override the destination at render time, so the CTA cannot be validated');
+      break;
+    }
+    if (/\bctaHref\s*=/.test(attrs) && literalAttr(attrs, 'ctaHref') === null) {
+      blockers.push('<InlineCTA ctaHref> must be a single quoted literal (root-relative path or https URL) — expression-valued destinations cannot be validated');
+      break;
+    }
+  }
+
+  if (count === 0) {
+    if (declared) blockers.push('disclosure.type is "affiliate" but the body contains no <AffiliateLink> — remove the disclosure or add the links');
+    return { ok: blockers.length === 0, count, blockers, warnings };
+  }
+  if (!declared) blockers.push('body contains <AffiliateLink> but frontmatter.disclosure.type is not "affiliate" (FTC material-connection disclosure is rendered from that type)');
+  if (opts.fileExt && opts.fileExt.toLowerCase() !== '.mdx') blockers.push(`<AffiliateLink> requires an .mdx post — a ${opts.fileExt} file renders the tag as literal text`);
+  if (count > AFFILIATE_LINK_MAX_PER_POST) blockers.push(`${count} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post`);
+  // Attr text is not a heading: <div title="\n## fake\n"> renders no
+  // section (Codex #3646 r25) — mask attr values before the heading scan.
+  const firstHeading = maskJsxAttrQuotes(structural).search(/^#{2,3}\s/m);
+  if (firstHeading === -1 || positions[0] < firstHeading) blockers.push('an affiliate link appears before the first section heading — answer the question first; products come later in the piece');
+  if (!hasServiceCtaBefore(structural.slice(0, positions[0]))) {
+    blockers.push('no Waves service CTA (<InlineCTA> leading to a service route, or a service/quote/calculator/city-service link) appears BEFORE the first affiliate link — the service CTA stays primary');
+  }
+  // Page-class eligibility (fail closed): the post's post_type must be one
+  // the referenced product row allows; protected local-service types never
+  // qualify. The renderer re-checks this at build time.
+  const postType = frontmatter.post_type ?? '';
+  if (!postType) blockers.push('affiliate posts must declare post_type (page-class eligibility cannot be verified)');
+  else if ((AFFILIATE_PROTECTED_POST_TYPES as readonly string[]).includes(postType)) blockers.push(`post_type "${postType}" captures local service intent — affiliate links are never allowed on it`);
+  // Each invocation's product/placement pair is checked against its row:
+  // post-type eligibility, and the row's placement allowlist (a placement
+  // the resolver would silently downgrade to a plain link is a publish
+  // blocker, not a surprise after the build).
+  // Invocations are read from the UNMASKED source so an expression-valued
+  // prop (product={"x"}, placement={p}) is seen and rejected: the registry
+  // checks only work on quoted literals, and the resolver would receive a
+  // value the gate never validated.
+  const checked = new Set<string>();
+  for (const { start, attrs } of tagsNamed(unmasked, 'AffiliateLink')) {
+    if (exprStringView[start] === ' ' || unmaskedAttrView[start] === ' ') continue; // quoted JSX/attr text renders as text
+    if (attrs !== null && hasJsxSpread(attrs)) {
+      blockers.push('<AffiliateLink> may not carry a JSX spread ({...}) — a spread can override product/placement at render time, so the invocation cannot be validated against the registry');
+      continue;
+    }
+    if (attrs !== null && affiliateLinkTextIsEmpty(unmasked, exprStringView, start, attrs)) {
+      blockers.push('<AffiliateLink> must wrap visible link text — a self-closing, empty, comment-only, or unclosed invocation renders an empty, unusable product link (the component renders its children as the anchor text)');
+    }
+    const id = attrs === null ? null : literalAttr(attrs, 'product');
+    const placement = attrs === null ? null : literalAttr(attrs, 'placement');
+    if (!id || !placement) {
+      blockers.push('every <AffiliateLink> needs exactly one quoted literal product="…" and placement="…" prop — expression-valued, missing, or DUPLICATED props cannot be validated against the registry');
+      continue;
+    }
+    const key = `${id}::${placement ?? ''}`;
+    if (checked.has(key)) continue;
+    checked.add(key);
+    const row = getAffiliateProduct(id);
+    if (!row) {
+      if (AFFILIATE_ROWS.filter((r) => r?.product_id === id).length > 1) blockers.push(`affiliate product "${id}" has duplicate registry rows — the registry must be fixed before this post can publish`);
+      continue; // unknown ids are the prop schema's blocker
+    }
+    if (row.status === 'prohibited' || row.risk_class === 'red') { blockers.push(`affiliate product "${id}" is prohibited — remove the recommendation`); continue; }
+    if (postType && !(row.allowed_post_types ?? []).includes(postType)) {
+      blockers.push(`affiliate product "${id}" is not eligible on a "${postType}" post (allowed: ${(row.allowed_post_types ?? []).join(', ') || 'none'})`);
+    }
+    if (!row.allowed_placements?.length || !row.allowed_placements.includes(placement)) {
+      blockers.push(`affiliate product "${id}" does not allow placement "${placement}" (allowed: ${(row.allowed_placements ?? []).join(', ') || 'none — the row declares no placements'})`);
+    }
+  }
+  // The publisher stamps HUB domains on every post (top-level + tracking),
+  // so hub-only means "no NON-hub domain", not "no domains at all" —
+  // otherwise every published affiliate draft would be rejected
+  // (Codex #3646 r24 P1).
+  const isHubDomain = (d: unknown) => typeof d === 'string' && WAVES_HUB_HOSTS.has(d.trim().toLowerCase().replace(/\.$/, ''));
+  const declaredDomains = ([] as unknown[])
+    .concat(Array.isArray(frontmatter.domains) ? frontmatter.domains : [])
+    .concat(Array.isArray(frontmatter.tracking?.domains) ? (frontmatter.tracking!.domains as unknown[]) : []);
+  if (declaredDomains.some((d) => !isHubDomain(d))) blockers.push('affiliate posts are hub-only during the pilot — remove spoke domains from domains/tracking.domains');
+  for (const pos of positions) {
+    const window = cleaned.slice(Math.max(0, pos - 120), pos + 200);
+    if (/\$\s?\d/.test(window)) { warnings.push('a dollar amount appears near an affiliate link — never print merchant prices; say "view current price"'); break; }
+  }
+  return { ok: blockers.length === 0, count, blockers, warnings };
+}
+
 function extractMdxComponentNames(mdx: string): Set<string> {
-  let cleaned = mdx.replace(/```[\s\S]*?```/g, '');
-  cleaned = cleaned.replace(/`[^`\n]*`/g, '');
+  // A component name spelled inside an expression string is text (same
+  // rule as extractComponentInvocations) — scan the string-blanked view.
+  const cleaned = maskJsxAttrQuotes(blankExpressionStrings(blankNonRenderedComments(blankNonRenderedCode(mdx))));
 
   const names = new Set<string>();
   const pattern = /<([A-Z][A-Za-z0-9]*)(?=[\s/>])/g;
@@ -557,7 +1866,12 @@ export interface ComponentPropValidationResult {
 export function validateMarkdownComponentProps(
   body_mdx: string,
 ): ComponentPropValidationResult {
-  const cleaned = body_mdx.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
+  // Same non-rendered-code semantics as validateAffiliateUsage (backtick AND
+  // tilde fences, inline spans, indented code) — a code example never
+  // needs valid props.
+  // Comments never render — an example in <!-- --> or {/* */} needs no
+  // valid props (same masking as validateAffiliateUsage).
+  const cleaned = blankNonRenderedComments(blankNonRenderedCode(body_mdx));
   const invocations = extractComponentInvocations(cleaned);
 
   const issues: ComponentPropIssue[] = [];
@@ -572,6 +1886,13 @@ export function validateMarkdownComponentProps(
 
     const schema = componentPropSchemas[name];
     const knownPropNames = new Set(Object.keys(schema.shape));
+    // An attribute-position SPREAD delivers props no static parser can see
+    // — the invocation can never be validated (Codex #3646 r28; the portal
+    // mirror already rejects this shape).
+    if (hasJsxSpread(inv.attrs)) {
+      issues.push({ component: name, index: idx, issue: 'invalid-value', prop: '{...}', message: `<${name}> carries a JSX spread ({...}) — its props cannot be validated against the schema` });
+      continue;
+    }
     const { simple, expressions } = parseJsxProps(inv.attrs);
 
     // Unknown-prop detection — any prop name not in the schema shape.
@@ -698,12 +2019,22 @@ interface ParsedInvocation {
 
 function extractComponentInvocations(cleaned: string): ParsedInvocation[] {
   const invocations: ParsedInvocation[] = [];
-  // Matches opening tag up to closing `>`, capturing name + raw attr string.
-  // Handles self-closing (<Foo ... />) and paired (<Foo ...>…</Foo>).
-  const pattern = /<([A-Z][A-Za-z0-9]*)((?:\s+[^>]*?)?)\s*(\/?)>/g;
+  // A tag spelled inside an expression STRING ({'<AffiliateLink />'})
+  // renders as text, never as an invocation — position-check each match
+  // against the string-blanked view (attrs still read from `cleaned` so a
+  // REAL expression-wrapped invocation's quoted props stay validatable).
+  const strView = blankExpressionStrings(cleaned);
+  const attrView = maskJsxAttrQuotes(cleaned);
+  // Attrs come from the quote/brace-aware tagAttrsAt walk — a flat [^>]*
+  // matcher truncates at a `>` inside a quoted string or JSON expression,
+  // turning a malformed prop into an "opaque" one the validator then
+  // deliberately skips (Codex #3646 r20).
+  const pattern = /<([A-Z][A-Za-z0-9]*)(?=[\s/>])/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(cleaned)) !== null) {
-    invocations.push({ name: match[1], attrs: match[2] ?? '' });
+    if (strView[match.index] === ' ' || attrView[match.index] === ' ') continue;
+    const attrs = tagAttrsAt(cleaned, match.index);
+    invocations.push({ name: match[1], attrs: attrs === null ? '' : attrs.replace(/\/\s*$/, '') });
   }
   return invocations;
 }
@@ -744,6 +2075,21 @@ function parseJsxProps(attrs: string): {
     const propName = m[1];
     if (propName in simple) continue;
     const body = extractBalancedExpression(attrs, expr.lastIndex - 1);
+    // A STATIC quoted string expression (tel={'not-a-phone'}, title={''})
+    // has a real value the schema must see (Codex #3646 r23 P1).
+    // A top-level interpolation-free TEMPLATE literal (tel={`…`}) is a
+    // static string like the quoted forms (Codex #3646 r37); `${` keeps
+    // the prop opaque.
+    const sm = body === null ? null : /^\s*'((?:[^'\\]|\\.)*)'\s*$|^\s*"((?:[^"\\]|\\.)*)"\s*$|^\s*`((?:[^`\\]|\\.)*)`\s*$/.exec(body);
+    if (sm && !(sm[3] !== undefined && hasTemplateInterpolation(sm[3]))) {
+      const raw = sm[1] ?? sm[2] ?? sm[3] ?? '';
+      // JS escape semantics ("\0" is NUL, not "0") are not implemented here
+      // — an escape-bearing string stays UNVALIDATED rather than validating
+      // a different value (Codex #504 r26).
+      const decoded = decodeJsStaticString(raw);
+      if (decoded === null) { expressions.add(propName); continue; }
+      simple[propName] = decoded; continue;
+    }
     const parsed = body === null ? undefined : tryParseStaticJson(body);
     if (parsed !== undefined) {
       simple[propName] = parsed.value;
@@ -752,31 +2098,71 @@ function parseJsxProps(attrs: string): {
     }
   }
 
+  // BARE shorthand (<SpiderIdBoard species />) — JSX passes {true}, which
+  // the string/array schemas must see and reject; scan a value-blanked
+  // view so a bare-looking word inside a quoted value never matches
+  // (Codex #3646 r22 P1).
+  // The bare view is built with ONE lexer-aware walk: quoted values blank
+  // whole, brace expressions blank BALANCED via closeOfExpressionAt (a
+  // regex quote inside one must never pair with a later real attr quote
+  // and blank an intervening bare prop — Codex #504 r27).
+  const bvChars = attrs.split('');
+  for (let bi = 0; bi < attrs.length; bi += 1) {
+    const bc = attrs[bi];
+    if (bc === '"' || bc === "'") {
+      let bj = bi + 1;
+      while (bj < attrs.length && attrs[bj] !== bc) { if (attrs[bj] === '\\') bj += 1; bj += 1; }
+      for (let bk = bi; bk <= Math.min(bj, attrs.length - 1); bk += 1) bvChars[bk] = ' ';
+      bi = bj; continue;
+    }
+    if (bc === '{') {
+      const be = closeOfExpressionAt(attrs, bi);
+      const stop = be === -1 ? attrs.length - 1 : be;
+      for (let bk = bi; bk <= stop; bk += 1) bvChars[bk] = ' ';
+      bi = stop; continue;
+    }
+  }
+  const bareView = bvChars.join('');
+  const bare = /(?:^|\s)([a-zA-Z_$][\w$]*)(?=\s|\/|$)(?!\s*=)/g;
+  while ((m = bare.exec(bareView)) !== null) {
+    const propName = m[1];
+    if (!(propName in simple) && !expressions.has(propName)) simple[propName] = true;
+  }
+
   return { simple, expressions };
 }
 
 // Given the index of an opening `{`, returns the expression text between it
-// and its balancing `}` (exclusive), honoring nested braces/brackets and
-// quoted strings. Returns null when the braces never balance (e.g. the attr
-// string was truncated by the invocation-extraction regex).
+// and its balancing `}` (exclusive). Balanced by the shared expression
+// lexer (closeOfExpressionAt) so strings, regex literals, and // or /* */
+// comments never end it early — a quote-pairing walk read `/* owner's
+// note */` as an open string and left the prop opaque (Codex #508 r1).
+// Returns null when the braces never balance (e.g. the attr string was
+// truncated by the invocation-extraction regex).
 function extractBalancedExpression(text: string, openBraceIdx: number): string | null {
-  let depth = 0;
-  let quote: '"' | "'" | null = null;
-  for (let i = openBraceIdx; i < text.length; i++) {
-    const ch = text[i];
-    if (quote) {
-      if (ch === '\\') i++; // skip escaped char inside a string
-      else if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") quote = ch;
-    else if (ch === '{' || ch === '[') depth++;
-    else if (ch === '}' || ch === ']') {
-      depth--;
-      if (depth === 0) return text.slice(openBraceIdx + 1, i);
-    }
+  const end = closeOfExpressionAt(text, openBraceIdx);
+  return end === -1 ? null : text.slice(openBraceIdx + 1, end);
+}
+
+// True when a template literal's raw text carries an UNESCAPED `${` —
+// `\${` is literal text the decoder resolves (Codex #3646 r34).
+function hasTemplateInterpolation(raw: string): boolean {
+  for (let k = 0; k < raw.length; k += 1) {
+    if (raw[k] === '\\') { k += 1; continue; }
+    if (raw[k] === '$' && raw[k + 1] === '{') return true;
   }
-  return null;
+  return false;
+}
+
+const UNDEFINED_SENTINEL = '\u0000undefined';
+function resolveUndefinedSentinels(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map((x) => (x === UNDEFINED_SENTINEL ? undefined : resolveUndefinedSentinels(x)));
+  if (v && typeof v === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) if (x !== UNDEFINED_SENTINEL) out[k] = resolveUndefinedSentinels(x);
+    return out;
+  }
+  return v;
 }
 
 // Strict JSON.parse wrapper. Wrapped result distinguishes "parsed to a
@@ -801,23 +2187,101 @@ function tryParseStaticJson(body: string): { value: unknown } | undefined {
       for (let i = 0; i < trimmed.length; i += 1) {
         const ch = trimmed[i];
         if (ch === '"') {
-          let j = i + 1;
-          while (j < trimmed.length && trimmed[j] !== '"') { if (trimmed[j] === '\\') j += 1; j += 1; }
-          out += trimmed.slice(i, j + 1);
+          // Double-quoted spans ALSO decode with JS escape semantics —
+          // an identity escape ("x\\q" → xq) is valid JSX but invalid
+          // JSON, and preserving it made the whole prop opaque
+          // (Codex #3646 r30).
+          let j = i + 1; let rawInner = '';
+          while (j < trimmed.length && trimmed[j] !== '"') {
+            if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
+            rawInner += trimmed[j]; j += 1;
+          }
+          const decodedInner = decodeJsStaticString(rawInner);
+          if (decodedInner === null) return undefined; // unsupported escape — opaque
+          out += JSON.stringify(decodedInner);
+          i = j;
+        } else if (ch === '`') {
+          // Interpolation-free template literals are static strings too
+          // (Codex #3646 r31) — decoded like the quoted forms; `${`
+          // makes the whole prop opaque.
+          let j = i + 1; let rawInner = '';
+          while (j < trimmed.length && trimmed[j] !== '`') {
+            if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
+            rawInner += trimmed[j]; j += 1;
+          }
+          if (hasTemplateInterpolation(rawInner)) return undefined;
+          const decodedInner = decodeJsStaticString(rawInner);
+          if (decodedInner === null) return undefined;
+          out += JSON.stringify(decodedInner);
           i = j;
         } else if (ch === "'") {
-          let j = i + 1; let inner = '';
+          // Single-quoted spans decode with REAL JS escape semantics —
+          // identity-stripping validated a value JS never produces
+          // ('\\beneficial' runs as backspace+eneficial; Codex #3646 r29).
+          let j = i + 1; let rawInner = '';
           while (j < trimmed.length && trimmed[j] !== "'") {
-            if (trimmed[j] === '\\') { inner += trimmed[j + 1]; j += 2; continue; }
-            inner += trimmed[j]; j += 1;
+            if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
+            rawInner += trimmed[j]; j += 1;
           }
-          out += JSON.stringify(inner);
+          const decodedInner = decodeJsStaticString(rawInner);
+          if (decodedInner === null) return undefined; // unsupported escape — the prop stays opaque
+          out += JSON.stringify(decodedInner);
           i = j;
+        } else if (ch === '/' && (trimmed[i + 1] === '*' || trimmed[i + 1] === '/')) {
+          // JS comments between static values are lexer-legal and render
+          // nothing — skipped so they never poison the JSON parse into
+          // "opaque", which left an invalid risk unvalidated (Codex #3646
+          // r33). An unterminated block comment is a build error; the
+          // prop stays opaque.
+          if (trimmed[i + 1] === '*') {
+            const end = trimmed.indexOf('*/', i + 2);
+            if (end === -1) return undefined;
+            i = end + 1;
+          } else {
+            const nl = trimmed.indexOf('\n', i + 2);
+            i = nl === -1 ? trimmed.length : nl;
+          }
         } else {
           out += ch;
         }
       }
-      return { value: JSON.parse(out.replace(/,\s*([\]}])/g, '$1')) };
+      // Ordinary JS identifier keys become quoted JSON keys — applied only
+      // OUTSIDE string spans so text inside a value ({foo: x} in a name)
+      // is never rewritten (Codex #504 r29). Trailing commas dropped the
+      // same way.
+      const segs: string[] = [];
+      let seg = '';
+      let inStr = false;
+      for (let k = 0; k < out.length; k += 1) {
+        const ch2 = out[k];
+        if (inStr) {
+          seg += ch2;
+          if (ch2 === '\\') { seg += out[k + 1] ?? ''; k += 1; continue; }
+          if (ch2 === '"') { inStr = false; segs.push(seg); seg = ''; }
+          continue;
+        }
+        if (ch2 === '"') { segs.push(seg); seg = ch2; inStr = true; continue; }
+        seg += ch2;
+      }
+      segs.push(seg);
+      // A statically computed STRING key ({['name']: 'x'}) is the plain key
+      // (Codex #3646 r40): drop the brackets around a string segment that
+      // sits between "{ [" / ", [" and "] :". Numeric computed keys resolve
+      // in the keyed pass below; anything else stays opaque.
+      for (let q = 0; q + 2 < segs.length; q += 1) {
+        if (segs[q + 1].startsWith('"') && /[{,]\s*\[\s*$/.test(segs[q]) && /^\s*\]\s*:/.test(segs[q + 2])) {
+          segs[q] = segs[q].replace(/\[\s*$/, '');
+          segs[q + 2] = segs[q + 2].replace(/^\s*\]/, '');
+        }
+      }
+      // A bare `undefined` VALUE is legal JS ({glyph: undefined}) but not
+      // JSON — carried through as a sentinel and resolved with JS semantics
+      // (an object property with an undefined value is ABSENT; an array
+      // slot stays undefined) so the container is still validated
+      // (Codex #3646 r38). An array ELISION ([, x]) is an undefined slot
+      // too (Codex #3646 r39); a trailing comma is not.
+      const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/([{,]\s*)\[\s*(\d+)\s*\]\s*:/g, '$1"$2":').replace(/([:\[,]\s*)undefined(?=\s*[,\]}])/g, '$1"\\u0000undefined"').replace(/([\[,])(\s*)(?=,)/g, '$1$2"\\u0000undefined"').replace(/,\s*([\]}])/g, '$1'))).join('');
+      return { value: resolveUndefinedSentinels(JSON.parse(keyed)) };
     } catch {
       return undefined;
     }
@@ -1488,7 +2952,7 @@ const PRE_DISCLAIMER_GLUE_RE =
 
 // A markdown list item ("- Naples", "2) Venice") — used to re-attach a
 // colon-terminated claim intro ("We serve these cities:") to each item.
-const LIST_ITEM_MARKER_RE = /^\s*(?:[-*+]|\d+[.)])\s+/;
+const LIST_ITEM_MARKER_RE = /^\s*(?:[-*+]|\d{1,9}[.)])\s+/;
 
 // A "Yes" answer that attributes the service to a county/municipal/public
 // provider (or a third-party company) — the same provider set the
@@ -1948,7 +3412,7 @@ function cityAliasSource(city: string): string {
 // must scan as one sentence. Consecutive PROSE lines likewise re-join with
 // a space (a soft-wrapped paragraph is one rendered sentence).
 const MARKDOWN_SELF_CLOSING_LINE_RE = /^\s*(?:#{1,6}\s|<\/?[A-Za-z])/;
-const MARKDOWN_CONTINUABLE_MARKER_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>\s?|\|)/;
+const MARKDOWN_CONTINUABLE_MARKER_RE = /^\s*(?:[-*+]\s|\d{1,9}[.)]\s|>\s?|\|)/;
 
 function markdownSegments(body: string): string[] {
   const segments: string[] = [];

@@ -153,6 +153,51 @@ describe('account and membership email sender', () => {
     }));
   });
 
+  test('cancellation-received keys carry the outcome class; a legacy unsuffixed send still dedupes', async () => {
+    // New requests: class-suffixed keys — a repaired retry's COMPLETED
+    // confirmation must not dedupe against the earlier partial send.
+    setDbQueues({
+      email_messages: [chain({ first: undefined })],
+      customers: [chain({ first: customer() })],
+      customer_interactions: [chain()],
+    });
+    await AccountMembershipEmail.sendCancellationReceived({
+      customerId: 'cust-1',
+      request: { id: 'req-1', category: 'cancellation', subject: 'Cancel plan', created_at: '2026-08-31' },
+      processed: true,
+    });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: 'account.cancellation_received:req-1:completed',
+    }));
+
+    jest.clearAllMocks();
+    setDbQueues({
+      email_messages: [chain({ first: undefined })],
+      customers: [chain({ first: customer() })],
+      customer_interactions: [chain()],
+    });
+    await AccountMembershipEmail.sendCancellationReceived({
+      customerId: 'cust-1',
+      request: { id: 'req-1', category: 'cancellation', subject: 'Cancel plan', created_at: '2026-08-31' },
+      processed: false,
+    });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: 'account.cancellation_received:req-1:received',
+    }));
+
+    // Legacy compat: a send recorded under the pre-deploy unsuffixed key
+    // deduped EVERY retry — existing requests keep that behavior.
+    jest.clearAllMocks();
+    setDbQueues({ email_messages: [chain({ first: { id: 'em-1' } })] });
+    const legacy = await AccountMembershipEmail.sendCancellationReceived({
+      customerId: 'cust-1',
+      request: { id: 'req-1', category: 'cancellation', subject: 'Cancel plan', created_at: '2026-08-31' },
+      processed: true,
+    });
+    expect(legacy).toEqual(expect.objectContaining({ ok: true, deduped: true, legacyKey: true }));
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('sends portal request received confirmation with request id idempotency', async () => {
     setDbQueues({
       customers: [chain({ first: customer() })],

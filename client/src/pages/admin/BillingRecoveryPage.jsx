@@ -246,7 +246,7 @@ export default function BillingRecoveryPage() {
 
   return (
     <div className="max-w-[1300px] mx-auto">
-      <AdminCommandHeader title="Billing Recovery" icon={Banknote} />
+      <AdminCommandHeader title="Billing recovery" icon={Banknote} />
       <div className="flex items-start justify-between gap-4 mb-5">
         <div>
           <p className="text-13 text-zinc-500">

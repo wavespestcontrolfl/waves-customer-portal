@@ -12,7 +12,7 @@
  * the public MCP server (/api/public/mcp) and the published pricing/quote
  * surfaces.
  *
- * Guards mirror /api/public/mcp exactly (see AGENTS.md public-route
+ * Guards mirror /api/public/mcp exactly (see docs/public-route-contracts.md
  * allowlist): GATE_A2A_PUBLIC (404 dark until deliberately flipped),
  * per-client rate limit via the shared /64-collapsing key, 64kb body cap
  * mounted ahead of the global parsers, GET → 405. No customer-PII tools

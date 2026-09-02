@@ -414,12 +414,12 @@ function SummaryRow({ label, value, strong, muted }) {
 }
 
 // ── Stripe Payment Element wrapper ─────────────────────────────────
-// "Other ways to pay" — Zelle / Venmo / PayPal under checkout (2026-08-29).
-// Collapsed by default so Stripe stays the headline path. None of the three
-// has a webhook into this system, so the block is informational: the customer
-// pays in their own app (the Venmo/PayPal links pre-fill amount + invoice
-// memo) and the invoice stays open until the payment is recorded. Rendered
-// only when the server sends `manualPayOptions` (env-driven, see
+// "Other ways to pay" — Zelle under checkout (2026-08-29; Zelle-only since
+// 2026-09-02 — Venmo and PayPal were dropped over their fees). Collapsed by
+// default so Stripe stays the headline path. Zelle has no webhook into this
+// system, so the block is informational: the customer pays from their own
+// banking app and the invoice stays open until the payment is recorded.
+// Rendered only when the server sends `manualPayOptions` (env-driven, see
 // pay-v2-helpers.js). Native data-glass markup like the rest of this page.
 const PHONE_RE = /^\+?[\d\s().-]{7,}$/;
 function formatPhoneDisplay(raw) {
@@ -431,36 +431,33 @@ function telHref(raw) {
   const d = String(raw).replace(/\D/g, '');
   return `tel:+${d.length === 10 ? `1${d}` : d}`;
 }
-function venmoPayHref(handle, amount, note) {
-  const user = String(handle).replace(/^@/, '');
-  const q = new URLSearchParams({ txn: 'pay', note });
-  if (Number(amount) > 0) q.set('amount', Number(amount).toFixed(2));
-  return `https://venmo.com/${encodeURIComponent(user)}?${q}`;
-}
-function paypalMeHref(handle, amount) {
-  const user = encodeURIComponent(String(handle).replace(/^@/, ''));
-  return Number(amount) > 0
-    ? `https://paypal.me/${user}/${Number(amount).toFixed(2)}USD`
-    : `https://paypal.me/${user}`;
-}
 
-// Brand marks — the Zelle / Venmo / PayPal logo glyphs (simple-icons path
-// data, CC0) on each app's brand-color tile. Purely decorative: the row's
-// text carries the name.
+// Brand mark — the Zelle logo glyph (simple-icons path data, CC0) on the
+// app's brand-color tile. Purely decorative: the row's text carries the name.
 const PAY_APP_MARKS = {
   zelle: { bg: '#6D1ED4', d: 'M13.559 24h-2.841a.483.483 0 0 1-.483-.483v-2.765H5.638a.667.667 0 0 1-.666-.666v-2.234a.67.67 0 0 1 .142-.412l8.139-10.382h-7.25a.667.667 0 0 1-.667-.667V3.914c0-.367.299-.666.666-.666h4.23V.483c0-.266.217-.483.483-.483h2.841c.266 0 .483.217.483.483v2.765h4.323c.367 0 .666.299.666.666v2.137a.67.67 0 0 1-.141.41l-8.19 10.481h7.665c.367 0 .666.299.666.666v2.477a.667.667 0 0 1-.666.667h-4.32v2.765a.483.483 0 0 1-.483.483Z' },
-  venmo: { bg: '#008CFF', d: 'M21.772 13.119c-.267 0-.381-.251-.38-.655 0-.533.121-1.575.712-1.575.267 0 .357.243.357.598 0 .533-.13 1.632-.689 1.632Zm.502-3.377c-1.677 0-2.405 1.285-2.405 2.658 0 1.042.421 1.874 1.693 1.874 1.717 0 2.438-1.406 2.438-2.763 0-1.025-.462-1.769-1.726-1.769Zm-3.833 0c-.558 0-.964.17-1.393.477-.154-.275-.462-.477-.932-.477-.542 0-.947.219-1.247.437l-.04-.364H13.54l-.688 4.354h1.506l.479-3.053c.129-.065.323-.154.518-.154.145 0 .267.049.267.267 0 .056-.016.145-.024.218l-.429 2.722h1.498l.478-3.053c.138-.073.324-.154.51-.154.146 0 .268.049.268.267 0 .056-.017.145-.025.218l-.429 2.722h1.499l.461-2.908c.025-.153.049-.388.049-.549 0-.582-.267-.97-1.037-.97Zm-6.871 0c-.575 0-.98.219-1.287.421l-.017-.348H8.962l-.689 4.354H9.78l.478-3.053c.13-.065.324-.154.518-.154.147 0 .268.049.268.242 0 .081-.024.227-.032.299l-.422 2.666h1.499l.462-2.908c.024-.153.049-.388.049-.549 0-.582-.268-.97-1.03-.97Zm-5.631 1.834c.041-.485.413-.824.697-.824.162 0 .299.097.299.291 0 .404-.713.533-.996.533Zm.843-1.834c-1.604 0-2.382 1.39-2.382 2.698 0 1.01.478 1.817 1.814 1.817.527 0 1.07-.113 1.418-.282l.186-1.26c-.494.25-.874.347-1.271.347-.365 0-.64-.194-.64-.687.826-.008 2.252-.347 2.252-1.453 0-.687-.494-1.18-1.377-1.18Zm-4.239.267c.089.186.146.412.146.743 0 .606-.429 1.494-.777 2.06l-.373-2.989L0 9.969l.705 4.2h1.757c.77-1.01 1.718-2.448 1.718-3.554 0-.347-.073-.622-.235-.889l-1.402.283Z' },
-  paypal: { bg: '#003087', d: 'M7.016 19.198h-4.2a.562.562 0 0 1-.555-.65L5.093.584A.692.692 0 0 1 5.776 0h7.222c3.417 0 5.904 2.488 5.846 5.5-.006.25-.027.5-.066.747A6.794 6.794 0 0 1 12.071 12H8.743a.69.69 0 0 0-.682.583l-.325 2.056-.013.083-.692 4.39-.015.087zM19.79 6.142c-.01.087-.01.175-.023.261a7.76 7.76 0 0 1-7.695 6.598H9.007l-.283 1.795-.013.083-.692 4.39-.134.843-.014.088H6.86l-.497 3.15a.562.562 0 0 0 .555.65h3.612c.34 0 .63-.249.683-.585l.952-6.031a.692.692 0 0 1 .683-.584h2.126a6.793 6.793 0 0 0 6.707-5.752c.306-1.95-.466-3.744-1.89-4.906z' },
 };
 function PayAppMark({ app, size = 32 }) {
   const spec = PAY_APP_MARKS[app];
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true" focusable="false" style={{ flexShrink: 0, display: 'block' }}>
-      <rect width="32" height="32" rx="8" fill={spec.bg} />
-      <path d={spec.d} fill="#FFFFFF" transform="translate(6 6) scale(0.8333)" />
+      {/* fill via inline style: the glass theme's `[data-glass-accent] *`
+          rule repaints fill ATTRIBUTES navy (the header cluster sits inside
+          the gold accent button); inline style keeps the brand marks. */}
+      <rect width="32" height="32" rx="8" style={{ fill: spec.bg }} />
+      <path d={spec.d} style={{ fill: '#FFFFFF' }} transform="translate(6 6) scale(0.8333)" />
     </svg>
   );
 }
+
+// Shared box treatment for the payment section (owner 2026-08-31: every
+// box — surcharge info, method tiles, card form, consent, other-ways
+// panel — wears the same soft-blue card).
+const PAY_BOX = {
+  background: '#EEF6FF',
+  border: '1px solid #BFE4F8',
+  borderRadius: RADIUS.input,
+};
 
 // Gold glass CTA (owner 2026-08-12: #04395E text on the gold accent).
 const goldChipButton = {
@@ -503,15 +500,13 @@ function CopyValueButton({ value, label, disabled = false }) {
   );
 }
 
-// Three aligned columns on every row — app | Open | Copy — so the buttons
-// line up down the panel.
+// Three aligned columns — app | Open | Copy.
 const PAY_ROW_GRID = {
   display: 'grid',
   gridTemplateColumns: 'minmax(0, 1fr) 112px 76px',
   alignItems: 'center',
   columnGap: 6,
-  padding: `${SP.sm}px 0`,
-  borderTop: '1px solid rgba(4,57,94,0.12)',
+  paddingBottom: SP.sm,
 };
 const PAY_ROW_GRID_NARROW = {
   ...PAY_ROW_GRID,
@@ -519,12 +514,11 @@ const PAY_ROW_GRID_NARROW = {
   rowGap: SP.xs,
 };
 
-// Every configured recipient in one comparable key — the recipients ride
-// env, not the invoice row, so a rotated handle arrives with an unchanged
-// invoice version and must be detected on its own.
+// The recipient rides env, not the invoice row, so a rotated recipient
+// arrives with an unchanged invoice version and must be compared on its own.
 const MANUAL_PAY_REVALIDATE_MS = 45_000;
 function recipientsKey(opts) {
-  return JSON.stringify([opts?.zelle?.recipient ?? null, opts?.venmo?.handle ?? null, opts?.paypal?.handle ?? null]);
+  return opts?.zelle?.recipient ?? null;
 }
 
 function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onInvoiceChanged }) {
@@ -541,6 +535,12 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
   // shown and copied is always the latest server truth.
   const [validated, setValidated] = useState(false);
   const validating = !validated;
+  // aria-disabled + pointer-events:none only stops the mouse — Enter on a
+  // focused anchor still navigates (pre-push P1). Drop it from the tab order
+  // and cancel activation while a fresh read is pending or has failed.
+  const anchorGuard = validating
+    ? { tabIndex: -1, onClick: (e) => e.preventDefault() }
+    : {};
   const readFresh = async () => {
     const res = await fetch(`${API_BASE}/pay/${token}`);
     const fresh = await res.json().catch(() => null);
@@ -559,7 +559,7 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
       && (version == null || freshVersion === version)
       && Number(freshAmount) === Number(amountDue)
       && recipientsKey(freshOpts) === recipientsKey(options);
-    return { fresh, freshOpts, freshAmount, unchanged };
+    return { fresh, unchanged };
   };
   const STALE_NOTICE = 'This invoice was just updated — the details above have been refreshed. Please try again.';
   // Expand / visibility / interval can overlap; only the LATEST read may
@@ -608,36 +608,6 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
     const timer = setInterval(() => { if (document.visibilityState === 'visible') run(); }, MANUAL_PAY_REVALIDATE_MS);
     return () => { document.removeEventListener('visibilitychange', onVisible); clearInterval(timer); };
   }, [open]);
-  // Version-fenced open (codex #3610 r3 P1): a delivered invoice can be
-  // edited by an admin after this page loaded, and no PaymentIntent fence
-  // exists while Stripe is unavailable/pending. Open the tab synchronously
-  // (popup blockers), re-fetch the invoice, and only then point the tab at
-  // the pre-filled transfer — if the version or amount moved, close it and
-  // refresh the page data instead.
-  const openTransfer = async (row) => {
-    setStaleNotice('');
-    // Plain `_blank` so the handle is retained (browsers honoring the
-    // `noopener` feature return null — codex r5 P2); sever `opener` on the
-    // handle itself before it is pointed anywhere.
-    const tab = typeof window !== 'undefined' ? window.open('', '_blank') : null;
-    if (tab) { try { tab.opener = null; } catch { /* cross-origin guard */ } }
-    try {
-      const { fresh, freshOpts, freshAmount, unchanged } = await readFresh();
-      if (!unchanged) {
-        if (tab) tab.close();
-        setStaleNotice(STALE_NOTICE);
-        if (fresh?.invoice) onInvoiceChanged?.(fresh);
-        return;
-      }
-      // Built from the FRESH options, never the render-time closure.
-      const url = row.buildHref(Number(freshAmount), freshOpts);
-      if (tab) tab.location.href = url;
-      else if (typeof window !== 'undefined') window.location.assign(url);
-    } catch {
-      if (tab) tab.close();
-      setStaleNotice('Could not confirm the invoice amount — check your connection and try again.');
-    }
-  };
   const [narrow, setNarrow] = useState(() => (typeof window !== 'undefined' ? window.innerWidth < 560 : false));
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -645,47 +615,21 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
-  if (!options || (!options.zelle && !options.venmo && !options.paypal)) return null;
-  const memo = `Invoice ${invoiceNumber}`;
-  const rows = [];
-  if (options.zelle?.recipient) {
-    const v = options.zelle.recipient;
-    const isPhone = PHONE_RE.test(v);
-    rows.push({
-      key: 'zelle', name: 'Zelle',
-      value: isPhone ? formatPhoneDisplay(v) : v,
-      copyValue: isPhone ? formatPhoneDisplay(v) : v,
-      hint: isPhone ? 'Send to our phone number' : 'Send to our email',
-      valueHref: isPhone ? telHref(v) : null,
-      nowrap: true,
-      // Zelle has no pay-link (it runs inside the customer's banking app);
-      // "Open Zelle" lands on Zelle's find-your-bank page.
-      href: 'https://www.zellepay.com/get-started',
-      openLabel: 'Open Zelle',
-    });
-  }
-  if (options.venmo?.handle) {
-    rows.push({
-      key: 'venmo', name: 'Venmo', value: options.venmo.handle, copyValue: options.venmo.handle,
-      hint: 'Send to', openLabel: 'Open Venmo',
-      buildHref: (amt, opts) => venmoPayHref(opts.venmo.handle, amt, memo),
-    });
-  }
-  if (options.paypal?.handle) {
-    rows.push({
-      key: 'paypal', name: 'PayPal', value: `paypal.me/${options.paypal.handle}`, copyValue: `https://paypal.me/${options.paypal.handle}`,
-      hint: 'Send to', openLabel: 'Open PayPal',
-      buildHref: (amt, opts) => paypalMeHref(opts.paypal.handle, amt),
-    });
-  }
-  const names = rows.map((r) => r.name);
-  const namesText = names.length > 1 ? `${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}` : names[0];
+  const recipient = options?.zelle?.recipient;
+  if (!recipient) return null;
+  const isPhone = PHONE_RE.test(recipient);
+  const value = isPhone ? formatPhoneDisplay(recipient) : recipient;
+  const hint = isPhone ? 'Send to our phone number' : 'Send to our email';
+  // Phone renders on its own line — inline it overflowed the 390px viewport
+  // ("Send to our phone number (941) 599-3489" clipped). Zelle has no
+  // pay-link (it runs inside the customer's banking app); "Open Zelle" lands
+  // on Zelle's find-your-bank page.
   const rowStyle = narrow ? PAY_ROW_GRID_NARROW : PAY_ROW_GRID;
   return (
     <div data-glass-clear="" className="waves-no-print" style={{ marginTop: SP.lg }}>
       <button
         type="button"
-        data-glass="chip"
+        data-glass-accent=""
         aria-expanded={open}
         aria-controls="waves-other-ways-to-pay"
         onClick={() => setOpen((v) => !v)}
@@ -699,24 +643,22 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
           gap: SP.sm,
           padding: '8px 12px',
           borderRadius: RADIUS.input,
-          border: '1px solid rgba(255,255,255,0.62)',
-          background: 'rgba(255,255,255,0.22)',
+          // Same gold glass CTA treatment as the page's other action
+          // buttons (goldChipButton) — owner 2026-08-31.
+          border: '1px solid rgba(255,238,180,0.92)',
+          background: 'rgba(240,165,0,0.38)',
           cursor: 'pointer',
           fontFamily: DOC_FONT,
           textAlign: 'left',
-          color: DOC.ink,
+          color: COLORS.glassNavy,
         }}
       >
-        <span style={{ display: 'flex', alignItems: 'center' }} aria-hidden="true">
-          {rows.map((row, i) => (
-            <span key={row.key} style={{ marginLeft: i ? -6 : 0, borderRadius: 8, boxShadow: '0 0 0 2px rgba(255,255,255,0.85)', display: 'inline-flex' }}>
-              <PayAppMark app={row.key} size={26} />
-            </span>
-          ))}
+        <span style={{ borderRadius: 8, boxShadow: '0 0 0 2px rgba(255,255,255,0.85)', display: 'inline-flex' }} aria-hidden="true">
+          <PayAppMark app="zelle" size={26} />
         </span>
         <span style={{ minWidth: 0, fontSize: FS.body, lineHeight: LH.snug, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           <span style={{ fontWeight: FW.semibold }}>Other ways to pay</span>
-          {!narrow && <span style={{ color: DOC.muted }}> — {namesText}</span>}
+          {!narrow && <span style={{ opacity: 0.75 }}> — Zelle</span>}
         </span>
         <span aria-hidden="true" style={{ display: 'inline-flex', transition: 'transform 200ms ease', transform: open ? 'rotate(180deg)' : 'none' }}>
           <Icon name="chevronDown" size={18} strokeWidth={2} />
@@ -730,57 +672,45 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
             position: 'relative',
             marginTop: SP.sm,
             padding: `${SP.md}px ${SP.sm}px`,
-            borderRadius: RADIUS.input,
-            border: '1px solid rgba(255,255,255,0.62)',
-            background: 'rgba(255,255,255,0.28)',
+            ...PAY_BOX,
           }}
         >
-          {rows.map((row, i) => (
-            <div key={row.key} style={{ ...rowStyle, ...(i === 0 ? { borderTop: 'none', paddingTop: 0 } : {}) }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: SP.sm, minWidth: 0, ...(narrow ? { gridColumn: '1 / -1' } : {}) }}>
-                <PayAppMark app={row.key} />
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: SP.xs, fontSize: FS.body, fontWeight: FW.semibold, color: DOC.ink }}>
-                    {row.name}
-                    <span style={{
-                      fontSize: FS.micro,
-                      fontWeight: FW.bold,
-                      letterSpacing: '0.08em',
-                      textTransform: 'uppercase',
-                      color: DOC.success,
-                      background: DOC.successBg,
-                      border: `1px solid ${DOC.successBorder}`,
-                      borderRadius: 999,
-                      padding: '2px 8px',
-                      lineHeight: LH.heading,
-                    }}>
-                      No fees
-                    </span>
-                  </div>
-                  <div style={{ fontSize: FS.body, color: DOC.muted, marginTop: 2, ...(row.nowrap ? { whiteSpace: 'nowrap' } : { overflowWrap: 'anywhere' }) }}>
-                    {row.hint}{' '}
-                    {row.valueHref ? (
-                      <a href={row.valueHref} aria-disabled={validating || undefined} style={{ color: DOC.ink, fontWeight: FW.medium, ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>{row.value}</a>
-                    ) : (
-                      <span style={{ color: DOC.ink, fontWeight: FW.medium }}>{row.value}</span>
-                    )}
-                  </div>
+          <div style={rowStyle}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: SP.sm, minWidth: 0, ...(narrow ? { gridColumn: '1 / -1' } : {}) }}>
+              <PayAppMark app="zelle" />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: SP.xs, fontSize: FS.body, fontWeight: FW.semibold, color: DOC.ink }}>
+                  Zelle
+                  <span style={{
+                    fontSize: FS.micro,
+                    fontWeight: FW.bold,
+                    letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                    color: DOC.success,
+                    background: DOC.successBg,
+                    border: `1px solid ${DOC.successBorder}`,
+                    borderRadius: 999,
+                    padding: '2px 8px',
+                    lineHeight: LH.heading,
+                  }}>
+                    No fees
+                  </span>
+                </div>
+                <div style={{ fontSize: FS.body, color: DOC.muted, marginTop: 2, overflowWrap: 'anywhere' }}>
+                  {hint}
+                  {isPhone ? (
+                    <a href={telHref(recipient)} aria-disabled={validating || undefined} {...anchorGuard} style={{ color: DOC.ink, fontWeight: FW.medium, display: 'block', whiteSpace: 'nowrap', ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>{value}</a>
+                  ) : (
+                    <span style={{ color: DOC.ink, fontWeight: FW.medium, display: 'block', whiteSpace: 'nowrap' }}>{value}</span>
+                  )}
                 </div>
               </div>
-              {row.buildHref ? (
-                <button type="button" data-glass-accent="" disabled={validating} style={goldChipButton} onClick={() => openTransfer(row)}>
-                  {row.openLabel}
-                </button>
-              ) : row.href ? (
-                <a href={row.href} target="_blank" rel="noopener noreferrer" data-glass-accent="" aria-disabled={validating || undefined} style={{ ...goldChipButton, ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>
-                  {row.openLabel}
-                </a>
-              ) : (
-                <span aria-hidden="true" />
-              )}
-              <CopyValueButton value={row.copyValue} label={`${row.name} address`} disabled={validating} />
             </div>
-          ))}
+            <a href="https://www.zellepay.com/get-started" target="_blank" rel="noopener noreferrer" data-glass-accent="" aria-disabled={validating || undefined} {...anchorGuard} style={{ ...goldChipButton, ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>
+              Open Zelle
+            </a>
+            <CopyValueButton value={value} label="Zelle address" disabled={validating} />
+          </div>
           {staleNotice && (
             <p role="status" style={{ margin: `0 0 ${SP.sm}px`, fontSize: FS.caption, color: DOC.danger, lineHeight: LH.body }}>{staleNotice}</p>
           )}
@@ -974,18 +904,24 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             theme: 'stripe',
             variables: {
               colorPrimary: COLORS.glassNavy,
-              colorBackground: COLORS.white,
+              // Blend the Element's panels into the PAY_BOX wrapper; the
+              // inputs themselves stay white (rules below).
+              colorBackground: '#EEF6FF',
               colorText: COLORS.navy,
               colorDanger: COLORS.red,
               fontFamily: DOC_FONT,
               borderRadius: `${RADIUS.input}px`,
               spacingUnit: '4px',
+              // Slightly smaller entry text (owner 2026-08-31); 15px keeps
+              // the 14px customer-surface floor.
+              fontSizeBase: '15px',
             },
             rules: {
               '.Input': {
                 border: '1px solid #E2E8F0',
                 boxShadow: 'none',
                 padding: '12px 14px',
+                backgroundColor: '#FFFFFF',
               },
               '.Input:focus': {
                 border: `1px solid ${DOC.navyLiteral}`,
@@ -1120,7 +1056,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             setSelectedMethod(nextMethod);
             setAwaitingConfirm(false);
             setQuoteData(null);
-            syncAmountForMethod(nextMethod);
+            // Shared switch path: withdraws unlocked consent before the
+            // sync (see switchMethodAndSyncRef).
+            switchMethodAndSyncRef.current(nextMethod);
           }
         });
 
@@ -1170,6 +1108,21 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     return url.toString();
   };
 
+  // Consent to one authorization is not consent to the other (card vs
+  // NACHA/Reg E) — EVERY method-switch path withdraws an unlocked opt-in
+  // SYNCHRONOUSLY and syncs Stripe with the withdrawn value, so the PI is
+  // never updated with the stale saveCard and a wallet confirm can't ride
+  // a flag the customer no longer sees checked (Codex P1 on #3686, rounds
+  // 6–7: the tile buttons AND Stripe's own Payment Element tabs). Held in
+  // a ref so the Element's mount-time change handler always calls the
+  // latest copy (same stale-closure hazard as onSuccessRef above).
+  const switchMethodAndSyncRef = useRef(null);
+  switchMethodAndSyncRef.current = (nextMethod) => {
+    const nextSaveCard = saveCardLocked ? !!saveCardRef.current : false;
+    if (!saveCardLocked && saveCardRef.current) onSaveCardChange?.(false);
+    syncAmountForMethod(nextMethod, nextSaveCard);
+  };
+
   const selectPaymentMethod = (methodCategory) => {
     if (!ready || processing || syncingAmount || syncingAmountRef.current || methodCategory === selectedMethod) return;
     // Clear any pending card quote when switching methods
@@ -1177,7 +1130,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     setQuoteData(null);
     selectedMethodRef.current = methodCategory;
     setSelectedMethod(methodCategory);
-    syncAmountForMethod(methodCategory);
+    switchMethodAndSyncRef.current(methodCategory);
   };
 
   // Two-step surcharge disclosure: createPaymentMethod → quote → confirm → finalize.
@@ -1474,37 +1427,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
   return (
     <div style={{ display: 'grid', gap: SP.md }}>
-      <div style={{
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: SP.sm,
-        padding: SP.md,
-        borderRadius: RADIUS.input,
-        background: '#EEF6FF',
-        border: '1px solid #BFE4F8',
-        fontSize: FS.body,
-        lineHeight: LH.body,
-        color: DOC.ink,
-      }}>
-        <span data-glass="soft" style={{
-          width: 32,
-          height: 32,
-          borderRadius: RADIUS.input,
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          flexShrink: 0,
-          background: DOC.surface,
-          color: '#065A8C',
-          border: '1px solid #BFE4F8',
-        }}>
-          <Icon name="card" size={17} strokeWidth={2} />
-        </span>
-        <span>
-          Credit cards may add up to {pct}%. You will see the exact total before payment. Debit cards, prepaid cards,
-          and bank transfers have no added card surcharge.
-        </span>
-      </div>
+      {/* Surcharge info box removed (owner 2026-08-31) — the method tile
+          and the consent's authorization text carry the surcharge terms. */}
 
       <div>
         <div style={{ ...eyebrow, marginBottom: SP.xs }}>
@@ -1524,21 +1448,24 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 style={{
                   // Segment control — deliberately NOT docButton (different
                   // anatomy: icon tile + two-line label, aria-pressed state).
-                  minHeight: 72,
+                  minHeight: 92,
                   borderRadius: RADIUS.input,
-                  border: `1px solid ${active ? DOC.navyLiteral : DOC.border}`,
-                  background: active ? DOC.soft : DOC.surface,
+                  border: `1px solid ${active ? DOC.navyLiteral : '#BFE4F8'}`,
+                  background: active ? DOC.soft : '#EEF6FF',
                   color: DOC.ink,
                   padding: SP.sm,
-                  textAlign: 'left',
+                  textAlign: 'center',
                   cursor: methodControlsDisabled ? 'not-allowed' : 'pointer',
                   opacity: methodControlsDisabled ? 0.72 : 1,
                   // Selected ring stays brand-blue (#009CDE @ 13%) — a distinct
                   // selected-state wash, not the navy focus ring.
                   boxShadow: active ? '0 0 0 3px rgba(0,156,222,0.13)' : 'none',
+                  // Icon above the label (owner 2026-08-31 — stacked tiles).
                   display: 'flex',
+                  flexDirection: 'column',
                   alignItems: 'center',
-                  gap: SP.sm,
+                  justifyContent: 'center',
+                  gap: SP.xs,
                 }}
               >
                 <span {...(active ? { 'data-glass': 'soft' } : { 'data-glass-clear': '' })} style={{
@@ -1555,8 +1482,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 }}>
                   <Icon name={method.icon} size={17} strokeWidth={2} />
                 </span>
-                <span style={{ minWidth: 0 }}>
-                  <span style={{ display: 'block', fontWeight: FW.heavy, fontSize: FS.body, marginBottom: SP.xxs }}>
+                <span style={{ minWidth: 0, textAlign: 'center' }}>
+                  {/* FW.bold, not heavy — 800 is display/eyebrow-only per
+                      the type scale; 14px labels take 700. */}
+                  <span style={{ display: 'block', fontWeight: FW.bold, fontSize: FS.body, marginBottom: SP.xxs }}>
                     {method.title}
                   </span>
                   <span style={{ display: 'block', fontSize: FS.body, color: DOC.muted, lineHeight: LH.snug }}>
@@ -1575,7 +1504,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           empty for most desktop Chrome users without a Google Pay card
           on file. That's the Stripe-recommended behavior. */}
       <div ref={expressMountRef} style={{ display: isCardFamily ? 'block' : 'none' }} />
-      <div ref={mountRef} style={{ minHeight: 90 }} />
+      <div ref={mountRef} style={{ minHeight: 90, padding: SP.md, ...PAY_BOX }} />
 
       {/* Save-payment-method opt-in. methodType drives both the headline
           and the authorization copy (ACH variant satisfies NACHA/Reg E,
@@ -1588,6 +1517,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           <SaveCardConsent
             checked={!!saveCard}
             locked={saveCardLocked}
+            collapsible
+            style={PAY_BOX}
             headline={saveCardLocked
               ? 'Payment method on file — required for recurring service'
               : undefined}
@@ -1597,6 +1528,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       )}
 
+      {/* Totals box renders only when it says something the Pay button
+          doesn't — a surcharge or funding breakdown. A bare
+          "Invoice total / Total charged" pair repeated the same figure
+          twice right above a button that states it again (owner
+          2026-08-31: the price appeared 6-7 times on one page). */}
+      {(isCardFamily && (displayedSurcharge > 0 || (quoteData && quoteData.funding !== 'credit'))) && (
       <div data-glass-clear="" style={{
         padding: SP.md,
         borderRadius: RADIUS.input,
@@ -1638,6 +1575,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           <span>{fmtCurrency(buttonAmount)}</span>
         </div>
       </div>
+      )}
 
       {elementError && (
         <div role="alert" style={{
@@ -1736,11 +1674,15 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
             theme: 'stripe',
             variables: {
               colorPrimary: COLORS.glassNavy,
-              colorBackground: COLORS.white,
+              colorBackground: '#EEF6FF',
               colorText: COLORS.navy,
               colorDanger: COLORS.red,
               fontFamily: DOC_FONT,
               borderRadius: `${RADIUS.input}px`,
+              fontSizeBase: '15px',
+            },
+            rules: {
+              '.Input': { backgroundColor: '#FFFFFF' },
             },
           },
         });
@@ -1804,10 +1746,12 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: SP.md }}>
-      <div ref={mountRef} style={{ minHeight: 90 }} />
+      <div ref={mountRef} style={{ minHeight: 90, padding: SP.md, ...PAY_BOX }} />
       <SaveCardConsent
         checked
         locked
+        collapsible
+        style={PAY_BOX}
         headline="Payment method on file — required for recurring service"
         onChange={() => {}}
         methodType={methodType}
@@ -2667,51 +2611,22 @@ export default function PayPageV2() {
           shareTitle={`Waves invoice ${invoice.invoiceNumber || ''}`.trim()}
         />
         <BrandCard padding={28}>
-          <div style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            gap: SP.md,
-            alignItems: 'flex-start',
-            flexWrap: 'wrap',
-            marginBottom: SP.lg,
-          }}>
-            <div style={{ display: 'flex', gap: SP.md, alignItems: 'flex-start', minWidth: 0 }}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ ...eyebrow, marginBottom: SP.xs }}>
-                  Invoice · {invoice.invoiceNumber}
-                </div>
-                <SerifHeading style={{ marginBottom: SP.xs }}>Review and pay</SerifHeading>
-                <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.muted, lineHeight: LH.body }}>
-                  {serviceLabel}
-                  {serviceDateLabel ? ` · ${serviceDateLabel}` : ''}
-                </p>
-              </div>
+          {/* Status pill sits left, ABOVE the heading (owner 2026-08-31:
+              badges left-aligned, status first). */}
+          <div style={{ marginBottom: SP.lg }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: SP.sm }}>
+              <StatusPill tone={isOverdue ? 'overdue' : 'due'}>
+                {invoiceStatusLabel}
+              </StatusPill>
             </div>
-            <StatusPill tone={isOverdue ? 'overdue' : 'due'}>
-              {invoiceStatusLabel}
-            </StatusPill>
+            <div style={{ ...eyebrow, marginBottom: SP.xs }}>
+              Invoice · {invoice.invoiceNumber}
+            </div>
+            <SerifHeading style={{ marginBottom: SP.xs }}>Review and pay</SerifHeading>
           </div>
 
-          <div data-glass-clear="" style={{
-            ...subtlePanel,
-            padding: SP.md,
-            marginBottom: SP.lg,
-            display: 'grid',
-            gridTemplateColumns: 'minmax(0, 1fr) auto',
-            gap: SP.lg,
-            alignItems: 'center',
-          }}>
-            <div>
-              <div style={eyebrow}>Amount due</div>
-              <div style={{ marginTop: 6, fontSize: FS.h1, lineHeight: LH.solid, fontWeight: FW.heavy, color: DOC.ink, fontFamily: DOC_FONT }}>
-                {fmtCurrency(invoice.amountDue ?? invoice.total)}
-              </div>
-              <div style={{ marginTop: SP.xs, fontSize: FS.body, color: DOC.muted, lineHeight: LH.body }}>
-                Pay securely online. Credit card surcharge, if any, is shown before payment.
-              </div>
-            </div>
-            {/* Document icon tile removed (owner 2026-07-09 — no decorative icons). */}
-          </div>
+          {/* Amount-due hero removed (owner 2026-08-31: the figure already
+              shows in the line items and on the Pay button). */}
 
             {prepayCalloutText && (
               <div style={{
@@ -2870,8 +2785,33 @@ export default function PayPageV2() {
               </div>
             )}
 
+            {/* Summary panel only renders when it carries information the
+                line items don't: an adjustment chain (discount/tax/deposit/
+                credit, with Subtotal and Total due bracketing it) or a
+                combined-balance itemization. A bare "Total due" that repeats
+                the line-item figure was removed (owner 2026-08-31). */}
+            {(() => {
+              // taxAmount alone (no isCommercial guard): a frozen
+              // commercial contract keeps its committed tax even after the
+              // customer's property_type flips residential — the tax ROW
+              // stays gated on isCommercial (pre-existing rule) but the
+              // summary must still render so Total due shows the figure
+              // actually charged (Codex P1, round 4).
+              const hasAdjustments = invoice.discountAmount > 0
+                || invoice.taxAmount > 0
+                || depositCreditTotal > 0
+                || Number(invoice.creditApplied) > 0;
+              const combinedPreviewPossible = !!(stripeSetup?.combined || (!stripeSetup && data.previousBalance?.invoices?.length));
+              // Only a SINGLE line item states the total on its own; zero
+              // items shows no figure at all and multiple items show only
+              // per-item prices — both keep Total due (Codex P2, round 5).
+              const needsTotalFallback = visibleLineItems.length !== 1;
+              if (!hasAdjustments && !combinedPreviewPossible && !needsTotalFallback) return null;
+              return (
             <div data-glass-clear="" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
-              <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
+              {hasAdjustments && (
+                <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
+              )}
               {invoice.discountAmount > 0 && (
                 <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
               )}
@@ -2884,7 +2824,9 @@ export default function PayPageV2() {
               {Number(invoice.creditApplied) > 0 && (
                 <SummaryRow label="Account credit applied" value={`− ${fmtCurrency(invoice.creditApplied)}`} />
               )}
-              <SummaryRow label="Total due" value={fmtCurrency(invoice.amountDue ?? invoice.total)} strong />
+              {(hasAdjustments || needsTotalFallback) && (
+                <SummaryRow label="Total due" value={fmtCurrency(invoice.amountDue ?? invoice.total)} strong />
+              )}
               {(() => {
                 // Combined balance payment (server-gated): itemize the other
                 // open invoices this payment also settles. Once /setup has
@@ -2930,6 +2872,8 @@ export default function PayPageV2() {
                 );
               })()}
             </div>
+              );
+            })()}
 
             {invoice.notes && (
               <div data-glass-clear="" style={{ marginBottom: SP.xl, ...subtlePanel, padding: SP.md }}>
@@ -2941,27 +2885,17 @@ export default function PayPageV2() {
             )}
 
             <div className="waves-pay-payment-panel">
+            {/* "Pay securely / amount / status" header removed (owner
+                2026-08-31: the Pay button already states the charge, the
+                top pill the status). The Secure badge stays as the
+                section's trust marker. */}
             <div style={{
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'space-between',
+              justifyContent: 'flex-start',
               gap: SP.sm,
               marginBottom: SP.md,
             }}>
-              <div>
-                <div style={{ ...eyebrow, marginBottom: 6 }}>Pay securely</div>
-                <div style={{ fontSize: FS.h2, fontWeight: FW.heavy, color: DOC.ink, lineHeight: LH.solid }}>
-                  {fmtCurrency(stripeSetup
-                    // Post-setup the PI is authoritative: combined total when
-                    // the allocation exists, the anchor alone when setup
-                    // declined to combine (codex r3 P0 — never the preview).
-                    ? (stripeSetup.combined?.total ?? invoice.amountDue ?? invoice.total)
-                    : (data.previousBalance?.combinedTotal ?? invoice.amountDue ?? invoice.total))}
-                </div>
-                <div style={{ marginTop: 6, fontSize: FS.body, color: DOC.muted }}>
-                  {invoiceStatusLabel}
-                </div>
-              </div>
               <StatusPill tone="secure">
                 <Icon name="lock" size={13} strokeWidth={2} />
                 Secure

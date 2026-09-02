@@ -17,8 +17,10 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById } = require('../services/intelligence-bar/tools');
+const crypto = require('crypto');
 const IbThreads = require('../services/intelligence-bar/threads');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
+const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -53,6 +55,7 @@ const { APIFY_OPS_TOOLS, executeApifyOpsTool } = require('../services/intelligen
 const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intelligence-bar/social-ops-tools');
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
+const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
@@ -89,6 +92,7 @@ const AGENT_ESTIMATE_WRITE_TOOL = 'create_agent_estimate_draft';
 
 // Schedule tool names for routing execution
 const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
+const CLOSEOUT_TOOL_NAMES = new Set(CLOSEOUT_TOOLS.map(t => t.name));
 const DASHBOARD_TOOL_NAMES = new Set(DASHBOARD_TOOLS.map(t => t.name));
 const SEO_TOOL_NAMES = new Set(SEO_TOOLS.map(t => t.name));
 const PROCUREMENT_TOOL_NAMES = new Set(PROCUREMENT_TOOLS.map(t => t.name));
@@ -182,6 +186,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // execute it for a technician token.
   ...HISTORY_TOOL_NAMES,
   'create_customer',
+  // Cancel plan (C3) churns accounts and moves billing — admin only, like the
+  // requireAdmin Customer 360 endpoints it mirrors.
+  'cancel_plan',
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
 
@@ -191,6 +198,8 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
 const PII_TOOL_NAMES = new Set([
   'create_customer',
   'update_property_access',
+  // cancel_plan previews/results echo the customer's name and free-text note.
+  'cancel_plan',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',
@@ -205,6 +214,9 @@ const PII_TOOL_NAMES = new Set([
   // redacted like the comms tools (codex P1 on the pinning round).
   'update_lead_status',
   'bulk_update_leads',
+  // block_sender inputs/results carry the full sender address (pre-push
+  // P1) — redact its telemetry like the comms tools.
+  'block_sender',
   'draft_sms_reply',
   'draft_sms',
   'lookup_property',
@@ -224,6 +236,22 @@ const PII_TOOL_NAMES = new Set([
   // Recall returns verbatim past conversation turns (which may embed
   // customer PII and carry taint markers) and its query is operator-typed.
   'search_ib_history',
+  // W0B proposal pins put the resolved customer name (reschedule visit,
+  // review-request recipient, estimate owner) into the model-visible tool
+  // result — redact like the other identity-bearing writes.
+  'reschedule_appointment',
+  'trigger_review_request',
+  'toggle_estimate_v2_view',
+  'toggle_show_one_time_option',
+  // The W0B bulk proposal resolves EVERY target id to the customer's full
+  // name in the model-visible result (fail-closed name listing) — taint so
+  // telemetry and thread history redact like the other bulk tools (GH r8 P1).
+  'bulk_update_customers',
+  // Their proposals now pin the resolved customer NAME into the
+  // model-visible preview (GH r8 — uuid-only cards were unreviewable), and
+  // update_customer's updates map carries emails/phones/names anyway.
+  'update_customer',
+  'create_appointment',
   AGENT_ESTIMATE_WRITE_TOOL,
   // Email tools return sender names/addresses and message bodies, and reply
   // inputs carry the drafted body — same class of PII as the comms tools.
@@ -419,16 +447,22 @@ function withCacheBreakpoint(messages) {
 
 // UI-backed write confirmation (issue #1568) is STRUCTURAL (owner rulings
 // 2026-08-30/31): NO environment value restores direct model-loop writes —
-// a config switch must never mean "turn off the safety layer". The
-// emergency control is IB_WRITES_DISABLED=true, which refuses every
-// Intelligence Bar write (proposals, /execute writes, /confirm-action
-// commits) while reads stay available; the fallback for a broken confirm
-// UI is the normal admin screen, never ungated AI execution. Read
-// per-request so it can be toggled without a restart. (GATE_IB_UI_CONFIRM
-// is retired and intentionally ignored.)
-function uiConfirmEnabled() {
-  return true;
-}
+// a config switch must never mean "turn off the safety layer". The old
+// "conversational mode" (model re-calls a write with confirmed:true after a
+// chat yes) was deleted in W0B; every gated write is proposed as a pending
+// action and commits only through /confirm-action against its frozen
+// authorization contract. The emergency control is IB_WRITES_DISABLED=true,
+// which refuses every Intelligence Bar write (proposals, /execute writes,
+// /confirm-action commits) while reads stay available; the fallback for a
+// broken confirm UI is the normal admin screen, never ungated AI execution.
+// (GATE_IB_UI_CONFIRM is retired and intentionally ignored.)
+// cancel_appointment is NOT card-confirmable (W0B): its post-commit rails
+// (late-cancel fee, invoice void via the shared status writer, inspection-
+// credit reversal) settle amounts by re-reading state after commit, so no
+// contract the card shows can be exact. Cancels happen on the Dispatch
+// screen, which owns the waiver and review controls, until a rails-binding
+// lane makes the effect set pinnable.
+const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen (fee waiver and invoice review live there). Nothing was changed.';
 
 function ibWritesDisabled() {
   return process.env.IB_WRITES_DISABLED === 'true';
@@ -503,7 +537,186 @@ function operatorAdjustmentCardLine(adj) {
     + ` [reason: ${adj.requested.internal_reason}]`;
 }
 
+// ── W0B proposal-time pins for legacy-bare writes ──────────────────────
+// Each pin is resolved the same way the executor resolves it, shown on the
+// card, hashed into the contract, and re-resolved by /confirm-action —
+// drift ⇒ preview_changed, never a commit against a target the operator
+// didn't see.
+// The executor's OWN terminal set (codex r7 on #3648): 'rescheduled' is a
+// valid, still-movable status there — listing it here as terminal refused
+// every re-move of an already-rescheduled visit that the executor accepts.
+const TERMINAL_APPOINTMENT_STATUSES_FOR_PINS = require('../services/intelligence-bar/proposal-pins').TERMINAL_APPOINTMENT_STATUSES;
+
+async function loadAppointmentPin(appointmentId) {
+  const a = await db('scheduled_services as ss')
+    .leftJoin('customers as c', 'c.id', 'ss.customer_id')
+    .where('ss.id', appointmentId)
+    .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.technician_id', 'ss.service_type', 'ss.customer_id', 'ss.visit_id', 'ss.is_recurring',
+      // Tracker-lifecycle evidence for the derived track_rewind pin field
+      // (see normalizeAppointmentPin) — the executor asserts the same
+      // fingerprint on its own full-row read.
+      'ss.track_state', 'ss.en_route_at', 'ss.arrived_at', 'ss.actual_start_time', 'ss.check_in_time', 'ss.track_sms_sent_at', 'ss.arrival_sms_sent_at',
+      'c.first_name', 'c.last_name');
+  if (!a) return null;
+  return {
+    ...normalizeAppointmentPin(a),
+    customer_name: `${a.first_name || ''} ${a.last_name || ''}`.trim() || null,
+  };
+}
+
+// Mirrors replyViaSms's own resolution order (email → customer_id → sender
+// address → typed name) so the pin is the recipient the executor would pick.
+async function resolveReplyViaSmsRecipient({ email_id, customer_name }) {
+  if (email_id) {
+    const email = await db('emails').where('id', String(email_id)).first('customer_id', 'from_address');
+    // A supplied email_id MUST resolve (GH r9 P2): the card discloses the
+    // source-email inbox update, so a missing/deleted row must refuse the
+    // proposal — never fall through to a typed name and send an SMS whose
+    // disclosed inbox effect touches zero rows.
+    if (!email) return { error: 'That email could not be found — nothing was proposed.' };
+    if (email.customer_id) {
+      const c = await db('customers').where('id', email.customer_id).first('id', 'first_name', 'last_name', 'phone');
+      if (c) return c;
+    }
+    if (email.from_address) {
+      const c = await db('customers').where('email', email.from_address).first('id', 'first_name', 'last_name', 'phone');
+      if (c) return c;
+    }
+    return null;
+  }
+  if (customer_name) return resolveCommsCustomer({ customer_name });
+  return null;
+}
+
+// Review requests are addressed by the service-contact SMS resolver, which
+// needs the full row (service-contact slots + consent artifact) — a
+// phone-only projection would silently pin the primary phone.
+async function resolveReviewRequestRecipient({ customer_id, customer_name }) {
+  let id = customer_id ? String(customer_id) : null;
+  if (!id && customer_name) {
+    const byName = await resolveCommsCustomer({ customer_name });
+    if (!byName || byName.error) return byName;
+    id = byName.id;
+  }
+  if (!id) return null;
+  const { loadReviewRecipient } = require('../services/intelligence-bar/review-tools');
+  return loadReviewRecipient(id);
+}
+
+const {
+  normalizeAppointmentPin,
+  appointmentPinFingerprint,
+  priceApprovalFingerprint,
+  emailPinFingerprint,
+} = require('../services/intelligence-bar/proposal-pins');
+
+async function loadPriceApprovalPin(approvalId) {
+  const a = await db('price_approvals as pa')
+    .leftJoin('products_catalog as p', 'p.id', 'pa.product_id')
+    .leftJoin('vendors as v', 'v.id', 'pa.vendor_id')
+    .where('pa.id', approvalId)
+    .first('pa.id', 'pa.status', 'pa.product_id', 'pa.vendor_id', 'pa.new_price', 'pa.new_quantity', 'p.name as product_name', 'v.name as vendor_name');
+  if (!a) return null;
+  return {
+    id: a.id,
+    status: a.status,
+    product_id: a.product_id,
+    // vendor_id rides in the pin so a reassigned approval is drift — the
+    // fingerprint must hash the vendor the card displayed (codex r3 P1).
+    vendor_id: a.vendor_id,
+    product_name: a.product_name || null,
+    vendor_name: a.vendor_name || null,
+    new_price: a.new_price == null ? null : Number(a.new_price),
+    new_quantity: a.new_quantity || null,
+  };
+}
+
+function estimatePinFingerprint(est, flag) {
+  return crypto.createHash('sha256').update(JSON.stringify([String(est.id), flag, est[flag] === true])).digest('hex');
+}
+
+function maskEmail(address) {
+  const [local, domain] = String(address).split('@');
+  if (!domain) return '***';
+  return `${local.slice(0, 1)}***@${domain}`;
+}
+
 function confirmationDisplayParams(toolName, params, preview) {
+  if (toolName === 'cancel_plan' && preview?.preview === true) {
+    // The card must show everything the commit will do: who, what scope,
+    // the visits coming off, the money, the effective date, whether the
+    // customer gets texted/emailed, and any recorded refund (never an
+    // automatic one).
+    const prepay = preview.prepay || null;
+    // Only the channels that CAN send (preview.confirmation_channels) — a
+    // customer with no phone must not be promised "SMS + email".
+    const channels = preview.confirmation_channels || {};
+    const reachable = [channels.sms && 'SMS', channels.email && 'email'].filter(Boolean).join(' + ');
+    return {
+      customer: preview.customer_name || params.customer_id,
+      scope: preview.whole_account ? 'whole account' : (preview.scope || []).join(', '),
+      visits_to_pull: preview.visits_to_pull,
+      tier: `${preview.tier_before || 'none'} → ${preview.tier_after || 'none'}`,
+      monthly: `${preview.monthly_before ?? '—'} → ${preview.monthly_after ?? '—'}`,
+      effective: preview.effective_date === 'end_of_coverage' ? `end of paid coverage (${preview.effective_on})` : `now (${preview.effective_on})`,
+      ...(prepay ? {
+        prepay: prepay.disposition === 'end_at_term'
+          ? `ends at term ${prepay.termEnd}; no renewal`
+          : `ended now — refund ${prepay.refund && !prepay.refund.needsManualCalc ? `$${prepay.refund.amount.toFixed(2)}` : 'needs manual calc'} recorded as an office task (not automatic)`,
+      } : {}),
+      // Per-application repricing of surviving visits (scoped cancels on the
+      // per-visit billing lane) — real charge changes the operator approves.
+      ...(Array.isArray(preview.per_app_changes) && preview.per_app_changes.length ? {
+        visit_prices: preview.per_app_changes
+          .map((r) => `${r.label || r.family} $${r.before} → $${r.after}`).join(', '),
+      } : {}),
+      // Outstanding balance stays payable through the cancel — a money fact
+      // the card must show (the dialog shows the same line).
+      ...(Number(preview.open_balance) > 0 ? {
+        open_balance: `$${Number(preview.open_balance).toFixed(2)} outstanding — remains payable`,
+      } : {}),
+      // The fee-or-waive exposure on the pulled visits (both card fee
+      // lanes) — a money fact the operator must see BEFORE confirming;
+      // unresolved lanes read fee-may-apply, never a silent no-fee.
+      ...(preview.visit_fees && (preview.visit_fees.applies || preview.visit_fees.unresolved) ? {
+        visit_fees: preview.visit_fees.total != null
+          ? `$${preview.visit_fees.total.toFixed(2)} in scheduled-visit fees on ${preview.visit_fees.visits.length} pulled visit(s) unless waived`
+          : `fee may apply to ${preview.visit_fees.visits.length} pulled visit(s) — amount unverifiable; waive or the fee rail judges at commit`,
+      } : {}),
+      waive_late_fee: preview.waive_late_fee === true,
+      send_confirmation: preview.send_confirmation !== false
+        ? (reachable || 'no phone or email on file — nothing can send')
+        : 'no customer communication',
+      ...(preview.reason_code ? { reason_code: preview.reason_code } : {}),
+      ...(preview.note ? { note: preview.note } : {}),
+      ...(preview.termite_retrieval ? { termite_stations: 'retrieval task will be raised' } : {}),
+    };
+  }
+  if ((toolName === 'trigger_review_request' || toolName === 'reply_via_sms') && preview?.pinned_recipient) {
+    return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
+  }
+  if (toolName === 'send_email_reply' && preview?.pinned_recipient) {
+    return { ...params, reply_to: preview.pinned_recipient.email_masked, subject: preview.pinned_recipient.subject || undefined };
+  }
+  if (toolName === 'approve_price' && preview?.pinned_approval) {
+    const a = preview.pinned_approval;
+    return {
+      ...params,
+      approval: `${a.product_name || 'product'}${a.vendor_name ? ` @ ${a.vendor_name}` : ''} — ${a.new_price != null ? `$${a.new_price.toFixed(2)}` : '?'}${a.new_quantity ? ` / ${a.new_quantity}` : ''} (${a.status})`,
+    };
+  }
+  if ((toolName === 'toggle_estimate_v2_view' || toolName === 'toggle_show_one_time_option') && preview?.pinned_estimate) {
+    const e = preview.pinned_estimate;
+    return {
+      ...params,
+      estimate: `${e.customer_name ? `${e.customer_name} — ` : ''}${e.token || e.id}`,
+      change: `${e.flag}: ${e.current} → ${e.next}`,
+    };
+  }
+  if (toolName === 'reschedule_appointment' && preview?.pinned_appointment) {
+    const a = preview.pinned_appointment;
+    return { ...params, appointment: `${a.service_type || 'visit'}${a.customer_name ? ` — ${a.customer_name}` : ''} on ${a.scheduled_date}${a.time_window ? ` ${a.time_window}` : ''} (${a.status})` };
+  }
   if (toolName === 'send_sms' && preview?.pinned_recipient) {
     // The card must show WHO the confirmed send goes to — the pinned
     // identity resolved at proposal time, not a raw partial name that
@@ -600,9 +813,17 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   let preview;
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
     // Two-step executors are contract-tested to be mutation-free without
-    // confirmed — run them for the rich preview.
-    preview = await executeToolByName(toolUse.name, params, null);
+    // confirmed — run them for the rich preview (on a copy: the stored
+    // params gain execution pins after this call).
+    preview = await executeToolByName(toolUse.name, { ...params }, null);
     if (isToolFailure(preview)) {
+      return { failed: true, modelResult: preview };
+    }
+    // A duplicate phone/email makes create_customer a no-op: the preview
+    // returns already_exists rather than an error, and confirming would
+    // insert nothing while the card reports Done (GH r9 P2). Refuse the
+    // card; the model relays the existing match to the operator.
+    if (toolUse.name === 'create_customer' && preview?.already_exists) {
       return { failed: true, modelResult: preview };
     }
   } else {
@@ -612,8 +833,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // name→row resolution happens NOW, so the operator approves a specific
     // pinned id and /confirm-action can never re-resolve "Smith" to a
     // different row than the card showed.
-    if (toolUse.name === 'send_sms' && !params.customer_id && !params.phone && params.customer_name) {
-      const customer = await resolveCommsCustomer({ customer_name: params.customer_name });
+    if (toolUse.name === 'send_sms' && !params.phone && (params.customer_id || params.customer_name)) {
+      // customer_id-only proposals get the SAME pin as name proposals
+      // (codex r3 P1): the card must show WHO gets this irreversible text,
+      // and the executor's fresh phone read must match the approved one.
+      const customer = await resolveCommsCustomer(
+        params.customer_id ? { customer_id: params.customer_id } : { customer_name: params.customer_name },
+      );
       // Generic error strings: a failed proposal's error is persisted in
       // tool-health telemetry, so it must not carry the typed name.
       if (!customer) return { failed: true, modelResult: { error: 'No customer matches that name.' } };
@@ -653,9 +879,273 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params.technician_name = tech.name;
       preview = { ...preview, pinned_technician: { id: tech.id, name: tech.name } };
     }
-    if (toolUse.name === 'update_lead_status' && !params.lead_id && params.lead_name) {
+    if (toolUse.name === 'create_appointment' && params.customer_id) {
+      // Booking redeems the customer's open inspection credit post-commit
+      // (tools.js redeemInspectionCreditForBooking) — a money effect the
+      // card must show and the contract must pin. Read-only projection of
+      // what the redemption would apply; fail closed if it can't be read.
+      try {
+        // The COMPLETE offer set, gate-paused offers included (pre-push P0
+        // + GH r19 P1 reconciliation): a paused offer becomes redeemable
+        // when the gate flips back on, so a card stamped credit-free over
+        // it would either orphan the promise or mint unapproved money —
+        // refuse the card whenever ANY offer exists.
+        const projected = await require('../services/inspection-credit').projectRedeemableOfferAmount(String(params.customer_id), { includePaused: true });
+        const amount = Number(projected?.amount ?? projected) || 0;
+        if (amount > 0) {
+          // The redemption is claimed post-commit by the executor (and the
+          // hourly sweep) — not pinnable to this card. Credit-bearing
+          // bookings are made where that money flow is visible.
+          return { failed: true, modelResult: { error: `This customer has $${amount.toFixed(2)} of open inspection-credit offer(s) (redemption may be gate-paused) that the confirmation card cannot pin exactly. Book it from the Schedule screen. Nothing was changed.` } };
+        }
+        params._inspection_credit_amount = 0;
+        preview = { ...preview, inspection_credit: { amount: 0 } };
+      } catch (err) {
+        return { failed: true, modelResult: { error: 'Could not verify the customer\'s inspection credit — book from the Schedule screen instead.' } };
+      }
+    }
+    if ((toolUse.name === 'update_customer' || toolUse.name === 'bulk_update_customers')
+      && params.updates && typeof params.updates === 'object') {
+      // Refuse-don't-drop (GH r20 P2): the card is built from the raw
+      // updates map, but the executors sanitize through UPDATABLE_FIELDS —
+      // an unsupported key would be DISPLAYED as an approved effect and
+      // then silently dropped at commit. Unknown keys refuse the proposal
+      // instead, naming them so the model can correct the call.
+      const { UPDATABLE_FIELDS } = require('../services/intelligence-bar/tools');
+      const unsupported = Object.keys(params.updates).filter((k) => !(k in UPDATABLE_FIELDS));
+      if (unsupported.length) {
+        return { failed: true, modelResult: { error: `These fields cannot be updated by this tool: ${unsupported.join(', ')} — nothing was proposed. Supported fields: ${Object.keys(UPDATABLE_FIELDS).join(', ')}.` } };
+      }
+    }
+    if ((toolUse.name === 'create_appointment' || toolUse.name === 'update_customer') && params.customer_id) {
+      // Name the human on the card (GH r8 P1): contract cards hide raw
+      // params, so a uuid-only effect line leaves the operator unable to
+      // tell WHO the booking/edit targets. Resolution happens NOW and the
+      // resolved name rides the contract (hash-bound); the immutable id
+      // stays the execution pin. Fail closed — an unresolvable id never
+      // reaches a confirmable card.
+      let target = null;
+      // A malformed id raises a PG uuid-cast error inside the resolver —
+      // treat it as not-found (same fail-closed refusal), like the other
+      // single-target resolutions in this block.
+      try {
+        target = await resolveCommsCustomer({ customer_id: params.customer_id });
+      } catch { target = null; }
+      if (!target || target.error || target.deleted_at) {
+        return { failed: true, modelResult: target?.error ? target : { error: 'No customer matches that id — nothing was proposed.' } };
+      }
+      preview = {
+        ...preview,
+        pinned_customer: {
+          id: String(target.id),
+          name: `${target.first_name || ''} ${target.last_name || ''}`.trim() || 'Unnamed customer',
+        },
+      };
+    }
+    if (toolUse.name === 'reschedule_appointment' && params.appointment_id) {
+      // Pin the visit being moved (W0B): the card must name the customer,
+      // service, and current date/window it is approving a move FROM, and
+      // /confirm-action refuses if the visit changed during the pending
+      // window (the executor's own read happens only after Confirm).
+      const pin = await loadAppointmentPin(String(params.appointment_id));
+      if (!pin) return { failed: true, modelResult: { error: 'Appointment not found — nothing was proposed.' } };
+      if (TERMINAL_APPOINTMENT_STATUSES_FOR_PINS.includes(String(pin.status))) {
+        return { failed: true, modelResult: { error: `This appointment is already ${pin.status} and can't be moved.` } };
+      }
+      // Grouped-visit state (GH r12 P1): the executor's own move of a
+      // grouped row detaches it and can dissolve the remaining visit
+      // (handleChildStopChanged) — effects the card never showed. Resolve
+      // membership NOW, the same way the executor's assertRowMovableAlone
+      // verdict falls: a multi-member or frozen visit refuses the proposal
+      // (the executor would refuse the move anyway); a sole-open-member
+      // visit proceeds with the detach/dissolve DISCLOSED on the card
+      // (the contract builder adds the effect line off pin.visit_id).
+      // visit_id is in the fingerprint, so a row that joins a group during
+      // the pending window drifts to preview_changed instead of executing
+      // an undisclosed group change.
+      // Collective-move gate at proposal (GH r19 P2): the executor refuses
+      // a DATE move of a recurring row outright when the gate is on — a
+      // card promising that move would be consumed just to report the
+      // refusal. Same message, surfaced before the card exists.
+      if (pin.is_recurring
+        && params.new_date && String(params.new_date) !== String(pin.scheduled_date)
+        && require('../services/rebooker').collectiveMoveGateOn()) {
+        return { failed: true, modelResult: { error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. Move it from Dispatch or the Edit appointment modal for now; Intelligence Bar series moves arrive in a follow-up. Nothing was proposed.', code: 'COLLECTIVE_MOVE_REQUIRED' } };
+      }
+      if (pin.visit_id) {
+        const VisitGroups = require('../services/visit-groups');
+        const members = await VisitGroups.openMembers(db, pin.visit_id);
+        if (members.length >= 2) {
+          return { failed: true, modelResult: { error: 'This appointment is grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or separate the services first. Nothing was proposed.' } };
+        }
+        const verdict = await VisitGroups.frozenVisitVerdict(db, pin.visit_id);
+        if (verdict.frozen) {
+          return { failed: true, modelResult: { error: 'This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it. Nothing was proposed.' } };
+        }
+      }
+      params._appointment_fingerprint = appointmentPinFingerprint(pin);
+      preview = { ...preview, pinned_appointment: pin };
+    }
+    if (toolUse.name === 'trigger_review_request' || toolUse.name === 'reply_via_sms') {
+      // Same recipient pin send_sms has (codex P1 on #3648): resolve the
+      // human the message goes to NOW, show name + last4 on the card, and
+      // let /confirm-action refuse if the resolved phone drifts.
+      const recipient = toolUse.name === 'reply_via_sms'
+        ? await resolveReplyViaSmsRecipient(params)
+        : await resolveReviewRequestRecipient(params);
+      if (!recipient) return { failed: true, modelResult: { error: 'No customer matches — nothing was proposed.' } };
+      if (recipient.error) return { failed: true, modelResult: recipient };
+      // Review requests send to the SERVICE-CONTACT SMS recipient (the
+      // centralized sender's resolver), not necessarily customers.phone —
+      // pin the number that will actually receive it (codex r5 P1).
+      const contactApi = require('../services/customer-contact');
+      const smsTarget = toolUse.name === 'trigger_review_request'
+        ? contactApi.getServiceContactSmsRecipient(recipient)
+        : null;
+      const pinPhone = smsTarget ? smsTarget.phone : recipient.phone;
+      // The resolver keeps role 'service_contact' even when it falls back to
+      // the primary's phone — a DIFFERENT number is the only reliable sign
+      // the text goes to the service contact rather than the account holder.
+      const toServiceContact = !!smsTarget && smsTarget.phone !== contactApi.getPrimaryContact(recipient).phone;
+      if (!pinPhone) return { failed: true, modelResult: { error: 'Customer has no phone number' } };
+      if (toolUse.name === 'trigger_review_request') {
+        // The FULL outreach gate stack, not just the 30-day cooldown (GH
+        // r17 P1): ReviewService.create deterministically rejects an at-cap
+        // / in-cadence / already-queued / archived / already-reviewed
+        // customer AFTER Confirm consumes the card — so every one of those
+        // must refuse the proposal now.
+        const { reviewAskBlockedReason } = require('../services/intelligence-bar/review-tools');
+        const blocked = await reviewAskBlockedReason(recipient);
+        if (blocked) {
+          return { failed: true, modelResult: { error: `${blocked} Nothing was proposed.` } };
+        }
+      }
+      params._pinned_phone = pinPhone;
+      // Canonicalize to the pinned row: the executor sends to THIS customer
+      // id, never a fresh name/email match (codex P1 on #3648).
+      params.customer_id = recipient.id;
+      if (toolUse.name === 'reply_via_sms' && params.email_id) {
+        // Source-email pin (GH r13 P2): the card also discloses the inbox
+        // update on THIS email — pin its full identity (address, subject,
+        // thread, attributed customer) so a re-synced or re-attributed row
+        // refuses at the confirm preflight and again at the executor's own
+        // read, instead of another customer's email getting the
+        // replied-via-SMS stamp.
+        const srcEmail = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
+        if (!srcEmail) return { failed: true, modelResult: { error: 'That email could not be found — nothing was proposed.' } };
+        params._pinned_email = emailPinFingerprint(srcEmail);
+      }
+      preview = {
+        ...preview,
+        pinned_recipient: {
+          customer_id: recipient.id,
+          // The card names WHO receives the text: the resolved service
+          // contact when that is the recipient, never the primary's name
+          // on the contact's phone.
+          name: (toServiceContact && smsTarget.name
+            ? smsTarget.name
+            : `${recipient.first_name || ''} ${recipient.last_name || ''}`).trim(),
+          ...(toServiceContact ? { role: 'service contact' } : {}),
+          phone_last4: String(pinPhone).replace(/\D/g, '').slice(-4) || null,
+        },
+      };
+    }
+    if (toolUse.name === 'send_email_reply' && params.email_id) {
+      const email = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
+      if (!email) return { failed: true, modelResult: { error: 'Email not found — nothing was proposed.' } };
+      if (!email.from_address) return { failed: true, modelResult: { error: 'Email has no sender address to reply to.' } };
+      // The FULL pin (address+subject+thread+customer) rides into the
+      // executor — sendEmailReply asserts it on the row it actually sends
+      // from (codex r5 P1).
+      params._pinned_email = emailPinFingerprint(email);
+      preview = {
+        ...preview,
+        // linked_customer drives the card's contact flag (GH r17 P2): a
+        // reply to a vendor/partner/unattributed email is NOT customer
+        // contact and must not claim to be.
+        pinned_recipient: { email_masked: maskEmail(email.from_address), subject: email.subject || null, linked_customer: !!email.customer_id },
+      };
+    }
+    if (toolUse.name === 'block_sender') {
+      // Existing-block state resolved at proposal (GH r17 P2): an intact
+      // same-scope block (row + Gmail filter) makes the card's promised
+      // effects a no-op — refuse instead of carding it; a row whose filter
+      // is MISSING proposes as a repair, and the contract describes exactly
+      // that (re-apply onto the existing entry, no new row).
+      // Same scope validation the executor runs (GH r21 P2): a missing/
+      // malformed scope or a protected domain refuses the proposal — never
+      // a card manualBlockSender deterministically rejects after Confirm.
+      const scope = require('../services/email/spam-blocker').validateManualBlockScope(params);
+      if (scope.error) {
+        return { failed: true, modelResult: { error: `${scope.error} Nothing was proposed.` } };
+      }
+      const { blockEmail, blockDomain } = scope;
+      if (blockEmail || blockDomain) {
+        const existing = blockEmail
+          ? await db('blocked_email_senders').where('email_address', blockEmail).first('id', 'gmail_filter_id')
+          // Pure domain rows only (pre-push r20 P1) — a legacy address row
+          // that also stored its domain must not read as a domain block.
+          : await db('blocked_email_senders').where('domain', blockDomain).whereNull('email_address').first('id', 'gmail_filter_id');
+        if (existing && existing.gmail_filter_id) {
+          // Redacted (GH r19 P1): this error is persisted verbatim into
+          // tool_health_events telemetry — never a full address.
+          const label = blockEmail
+            ? `${blockEmail.slice(0, 1)}***@${blockEmail.split('@')[1] || 'unknown'}`
+            : `@${blockDomain}`;
+          return { failed: true, modelResult: { error: `${label} is already blocked (blocklist row + Gmail filter in place) — nothing was proposed.`, already_blocked: true } };
+        }
+        if (existing) params._existing_block_repair = true;
+      }
+    }
+    if (toolUse.name === 'cancel_appointment') {
+      return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE } };
+    }
+    if (toolUse.name === 'approve_price' && params.approval_id) {
+      // The card must show WHAT price is being authorized (product, vendor,
+      // new price/quantity) — approving applies vendor pricing and
+      // recalculates the product's best price. Pin the pending row; a
+      // decided/changed approval refuses at Confirm.
+      const approval = await loadPriceApprovalPin(String(params.approval_id));
+      if (!approval) return { failed: true, modelResult: { error: 'Price approval not found — nothing was proposed.' } };
+      if (approval.status !== 'pending') {
+        return { failed: true, modelResult: { error: `This approval was already ${approval.status} — nothing to ${params.action || 'decide'}.` } };
+      }
+      params._approval_fingerprint = priceApprovalFingerprint(approval);
+      preview = { ...preview, pinned_approval: approval };
+    }
+    if ((toolUse.name === 'toggle_estimate_v2_view' || toolUse.name === 'toggle_show_one_time_option') && params.estimate_identifier) {
+      // Phone/token identifiers resolve to the NEWEST estimate at execution
+      // time, and an omitted `enabled` flips whatever the live flag is —
+      // both drift. Resolve the immutable estimate id and freeze the exact
+      // target flag value now; Confirm re-reads and refuses on drift.
+      const { resolveEstimateByIdentifier } = require('../services/intelligence-bar/estimate-tools');
+      const est = await resolveEstimateByIdentifier(params.estimate_identifier);
+      if (!est) return { failed: true, modelResult: { error: 'No estimate matches that identifier — nothing was proposed.' } };
+      const flag = toolUse.name === 'toggle_estimate_v2_view' ? 'use_v2_view' : 'show_one_time_option';
+      const current = est[flag] === true;
+      const next = typeof params.enabled === 'boolean' ? params.enabled : !current;
+      params.estimate_identifier = String(est.id);
+      params.enabled = next;
+      params._estimate_fingerprint = estimatePinFingerprint(est, flag);
+      preview = {
+        ...preview,
+        pinned_estimate: {
+          id: est.id,
+          token: est.token || null,
+          customer_name: est.customer_name || null,
+          flag,
+          current,
+          next,
+        },
+      };
+    }
+    if (toolUse.name === 'update_lead_status' && (params.lead_id || params.lead_name)) {
+      // lead_id proposals pin exactly like name proposals (codex r3 P1):
+      // the card names the lead and its CURRENT status, and the stored
+      // _expected_status refuses a transition from a state the card never
+      // showed. resolveLeadForUpdate handles both shapes.
       const lead = await resolveLeadForUpdate(params);
-      if (!lead) return { failed: true, modelResult: { error: 'No active lead matches that name.' } };
+      if (!lead) return { failed: true, modelResult: { error: params.lead_id ? 'Lead not found.' : 'No active lead matches that name.' } };
       if (lead.error) return { failed: true, modelResult: lead };
       params.lead_id = lead.id;
       params.lead_name = `${lead.first_name} ${lead.last_name || ''}`.trim();
@@ -686,7 +1176,57 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       }
       params.dry_run = false;
       params.lead_ids = matchedIds;
-      preview = { ...preview, matches: dryRun.matches, preview: dryRun.preview, action: dryRun.action };
+      // Executor-enforced exactness (codex r5): bulkUpdateLeads refuses
+      // inside its own transaction if any pinned lead left current_status.
+      params._expect_full_set = true;
+      // Every pinned lead's name for the card's "Show more" (the count and
+      // first ten alone can't distinguish two sets — codex P1 on #3648).
+      // FAIL CLOSED (codex r4): the card's complete-target list is the
+      // disclosure — every pinned id must be named, or the proposal is
+      // refused rather than falling back to a sample.
+      const allNames = Array.isArray(dryRun.all_names) ? dryRun.all_names : [];
+      if (allNames.length !== matchedIds.length) {
+        return { failed: true, modelResult: { error: 'Could not load every matched lead for the confirmation card — narrow the criteria and retry.' } };
+      }
+      preview = { ...preview, matches: dryRun.matches, preview: dryRun.preview, action: dryRun.action, all_names: allNames };
+    }
+    if (toolUse.name === 'bulk_update_customers') {
+      // Name every pinned target (codex r7 on #3648): the card hides raw
+      // params once a contract exists, so `customer_ids` alone left the
+      // operator approving opaque UUIDs. Resolve each id NOW, FAIL CLOSED
+      // if any doesn't load (same rule as bulk_update_leads all_names) —
+      // a wrong-id selection must be visible before Confirm, and the
+      // contract carries a fingerprint of the full id list.
+      // Lowercased at the boundary (GH r11 P2): PG returns uuid text in
+      // lowercase, so an uppercase id would resolve the row but then be
+      // classified missing by the case-sensitive lookup below — and the
+      // executor's skipped-set compare has the same trap. The pinned set,
+      // fingerprint, and stored params all carry the canonical form.
+      // Deduplicated (GH r13 P2): a repeated id would be listed and counted
+      // twice on the card while the executor's locked-set collapse updates
+      // the row once and reports nothing skipped — the card must show the
+      // set that is actually applied.
+      const ids = Array.isArray(params.customer_ids)
+        ? [...new Set(params.customer_ids.map((id) => String(id).trim().toLowerCase()))] : [];
+      if (!ids.length) {
+        return { failed: true, modelResult: { error: 'customer_ids is empty — nothing to update.' } };
+      }
+      // Shape-validate before querying: a malformed id in whereIn on a uuid
+      // column is a raw PG cast error (500), not a clean refusal.
+      if (ids.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id))) {
+        return { failed: true, modelResult: { error: 'One or more customer_ids are not valid ids — nothing was proposed.' } };
+      }
+      params.customer_ids = ids;
+      // Live rows only (pre-push r11 P1): a soft-deleted/merged customer
+      // must never ride a proposal — the executors refuse or skip them,
+      // but the card must not name them as approved targets either.
+      const rows = await db('customers').whereIn('id', ids).whereNull('deleted_at').select('id', 'first_name', 'last_name');
+      const nameById = new Map(rows.map((r) => [String(r.id), `${r.first_name || ''} ${r.last_name || ''}`.trim() || String(r.id)]));
+      const missing = ids.filter((id) => !nameById.has(id));
+      if (missing.length) {
+        return { failed: true, modelResult: { error: `${missing.length} of the listed customer ids do not resolve to a live customer — nothing was proposed. Re-select the customers and retry.` } };
+      }
+      preview = { ...preview, all_customer_names: ids.map((id) => nameById.get(id)) };
     }
     // create_pending_estimate with an operator price adjustment: the Confirm
     // card must show the engine anchor vs adjusted totals and any floor
@@ -716,6 +1256,19 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL) {
     params._approvedPreviewFingerprint = agentEstimatePreviewFingerprint(preview);
+  } else if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
+    // W0B execution pin for every other two-step write: the confirmed run
+    // re-resolves its target from the stored params, so pin the resolved
+    // preview and let /confirm-action refuse if a re-run resolves
+    // differently (product, stop order, record, before/after state).
+    params._two_step_preview_fingerprint = AuthorizationContract.previewFingerprint(preview);
+  }
+  // cancel_plan: pin the approved facts (visit pull, refund dollars, term,
+  // scope) into the stored action — the confirmed commit refuses with
+  // preview_changed when the live numbers no longer match the card the
+  // operator approved (a visit completed/appeared, a term edit).
+  if (toolUse.name === 'cancel_plan' && preview?.preview_fingerprint) {
+    params.preview_fingerprint = preview.preview_fingerprint;
   }
   // Phone identifiers are MUTABLE — a newer estimate for the same phone can
   // appear between preview and Confirm, and the confirmed re-resolve would
@@ -726,12 +1279,25 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     params.estimate_identifier = String(preview.estimate_id);
   }
 
+  // W0B authorization contract: the structured, server-built effect set the
+  // operator approves. Derived from the same curated display params the card
+  // lists plus the proposal-time pins — never model text — then hashed; the
+  // card echoes the hash on Confirm and the claim refuses any other.
+  const displayParams = confirmationDisplayParams(toolUse.name, params, preview);
+  const summary = summarizeProposal(toolUse.name, params, displayParams);
+  const contract = AuthorizationContract.buildContract({
+    toolName: toolUse.name, params, displayParams, preview, summary,
+  });
+  const contractHash = AuthorizationContract.contractHash(contract);
+
   const row = await PendingActions.createPendingAction({
     toolName: toolUse.name,
     params,
-    summary: summarizeProposal(toolUse.name, params, confirmationDisplayParams(toolUse.name, params, preview)),
+    summary,
     requestedBy: getAdminActorId(req),
     context,
+    contract,
+    contractHash,
   });
 
   return {
@@ -748,7 +1314,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // behind the pending-action id/hash; do not make a road user scroll
       // through raw engine JSON, evidence quotes, and property ledgers just
       // to find the dollars and review flags they are approving.
-      params: confirmationDisplayParams(toolUse.name, params, preview),
+      // `_`-prefixed pins (phone-match, expected status, fingerprints) are
+      // server-side execution guards, not disclosures — never on the card.
+      params: Object.fromEntries(Object.entries(displayParams || {}).filter(([k]) => !String(k).startsWith('_'))),
+      // The authorization contract the card renders, and the hash the card
+      // must echo on Confirm (exact-effect approval — owner ruling 8).
+      contract,
+      contract_hash: contractHash,
       expiresAt: row.expires_at,
       // Server-computed remaining ms — the client countdown anchors on
       // receipt + this, never on comparing expiresAt to the device clock
@@ -1297,10 +1869,10 @@ function getToolsForContext(context, isAdmin = false) {
   // time too, so a forced call fails closed with the rest of threads).
   const infra = isAdmin ? [...INFRA_TOOLS, ...(IbThreads.threadsEnabled() ? HISTORY_TOOLS : [])] : [];
   if (context === 'schedule' || context === 'dispatch') {
-    return [...base, ...SCHEDULE_TOOLS, ...infra];
+    return [...base, ...SCHEDULE_TOOLS, ...CLOSEOUT_TOOLS, ...infra];
   }
   if (context === 'dashboard') {
-    return [...base, ...DASHBOARD_TOOLS, ...infra];
+    return [...base, ...DASHBOARD_TOOLS, ...CLOSEOUT_TOOLS, ...infra];
   }
   if (context === 'seo' || context === 'blog') {
     return [...base, ...SEO_QUERY_TOOLS, ...infra];
@@ -1372,6 +1944,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (ESTIMATE_TOOL_NAMES.has(toolName)) {
     return executeEstimateTool(toolName, input, actionContext);
+  }
+  if (CLOSEOUT_TOOL_NAMES.has(toolName)) {
+    return executeCloseoutTool(toolName, input);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
@@ -1451,7 +2026,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (REVENUE_TOOL_NAMES.has(toolName)) {
     return executeRevenueTool(toolName, input);
   }
-  return executeTool(toolName, input);
+  return executeTool(toolName, input, actionContext);
 }
 
 const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language command center for Waves Pest Control & Lawn Care's admin portal. You help the operator (owner/admin) query, analyze, and take action on their business data.
@@ -1562,19 +2137,16 @@ router.post('/query', async (req, res, next) => {
     if (context === 'agent_estimate') {
       systemPrompt += await approvedAgentEstimateMemoryPrompt(db);
     }
-    const uiConfirmActive = uiConfirmEnabled() || context === 'agent_estimate';
-    // Write-confirmation guidance must match the active mechanism (#1568) —
-    // the gate is read per-request, so the prompt is appended per-request.
+    // Write-confirmation guidance (#1568, structural since W0/W0B): the only
+    // mechanism is the confirmation card — there is no conversational mode.
     if (context !== 'tech') {
-      systemPrompt += uiConfirmActive
-        ? `\n\nWRITE CONFIRMATION (UI mode):
+      systemPrompt += `\n\nWRITE CONFIRMATION (UI mode):
 Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT execute when you call them. Your call returns a preview, and the action appears as a confirmation card in the portal UI next to your response.
 - NEVER call the same write tool again after a pending_confirmation result — that creates a duplicate card. One call per intended action.
 - Adding confirmed: true does nothing; it is ignored. Only the operator's Confirm click on the card executes the write.
 - NEVER claim the action is done. Say it is awaiting their confirmation on the card below your message.
-- The result of a confirmed write appears in the UI, not in this conversation — if asked, suggest re-querying the data.`
-        : `\n\nWRITE CONFIRMATION (conversational mode):
-For create_customer, the route-optimization writes, and the inventory stock writes (adjust_stock, create_restock_request, update_restock_request): the first call returns a preview — show it to the operator and re-call with confirmed: true only after they approve. For all other writes: describe the change and get an explicit yes before calling the tool.`;
+- The card shows the exact effect set the operator is approving; a different target, amount, recipient, or effect is a NEW proposal — never assume an earlier approval carries over.
+- The result of a confirmed write appears in the UI, not in this conversation — if asked, suggest re-querying the data.`;
     }
     // Live page data (current date, schedule stats, etc.) is injected on the
     // current user turn by buildUserMessageContent, NOT here — appending it to
@@ -1675,9 +2247,10 @@ For create_customer, the route-optimization writes, and the inventory stock writ
           result = { error: 'Explicit confirmation is required for this action. Use the confirmed action endpoint.' };
           failed = true;
           errorMessage = result.error;
-        } else if (uiConfirmActive && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name)) {
+        } else if (UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name)) {
           // Issue #1568: gated writes are proposed, never executed, from the
-          // model loop. The confirmation id goes to the client only.
+          // model loop — unconditionally (no mode switch exists). The
+          // confirmation id goes to the client only.
           if (ibWritesDisabled()) {
             result = { error: IB_WRITES_DISABLED_MESSAGE };
             failed = true;
@@ -1880,7 +2453,7 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       // Pending write proposals for the client confirmation card. This is the
       // ONLY channel the confirmation ids travel on — the client must keep
       // them in component state, never in conversationHistory.
-      ...(uiConfirmActive ? { pendingActions: pendingProposals } : {}),
+      pendingActions: pendingProposals,
       // Return conversation history for multi-turn. Attached images are not
       // round-tripped (a text marker stands in) — keeps follow-up payloads
       // small and image bytes out of the stored history. Image and PII taint
@@ -1937,10 +2510,10 @@ router.post('/execute', async (req, res, next) => {
     if (!isToolAllowedForRole(action, req.techRole)) {
       return res.status(403).json({ error: 'This action is not available to your role' });
     }
-    if ((uiConfirmEnabled() || action === AGENT_ESTIMATE_WRITE_TOOL) && UI_GATED_WRITE_TOOL_NAMES.has(action)) {
-      // With the UI-confirm gate on, gated writes commit exclusively through
-      // /confirm-action — /execute would skip the claim, payload hash, and
-      // single-use replay protection.
+    if (UI_GATED_WRITE_TOOL_NAMES.has(action)) {
+      // Gated writes commit exclusively through /confirm-action — /execute
+      // would skip the claim, payload hash, contract hash, and single-use
+      // replay protection. Structural: no env value changes this.
       return res.status(409).json({ error: 'This write requires a confirmed pending action. Use /confirm-action with a pending_action_id.' });
     }
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && confirmed !== true) {
@@ -2009,14 +2582,30 @@ router.post('/confirm-action', async (req, res, next) => {
       return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
     }
 
-    const claim = await PendingActions.claimForConfirm(id, getAdminActorId(req));
+    // Exact-effect confirm (W0B): the card echoes the contract hash it
+    // displayed; the claim refuses any other, so the operator can only ever
+    // approve exactly the effect set they saw.
+    const contractHash = req.body?.contract_hash ? String(req.body.contract_hash).trim() : null;
+    const claim = await PendingActions.claimForConfirm(id, getAdminActorId(req), { contractHash });
     if (claim.error) {
       const status = claim.error === 'not_found' ? 404
         : claim.error === 'actor_mismatch' ? 403
-          : 409; // already_used | cancelled | expired | hash_mismatch
-      return res.status(status).json({ error: `Pending action ${claim.error.replace(/_/g, ' ')}` });
+          : 409; // already_used | cancelled | expired | hash_mismatch | contract_mismatch
+      const message = claim.error === 'contract_mismatch'
+        ? 'The confirmation card no longer matches the proposed action. Ask again to get a fresh card.'
+        : `Pending action ${claim.error.replace(/_/g, ' ')}`;
+      return res.status(status).json({ error: message });
     }
     const action = claim.action;
+    // cancel_appointment is not card-confirmable (rails not pinnable) — a
+    // pending row minted by PRE-refusal code can still be claimed for its
+    // TTL during a rolling deploy (GH r21 P1): refuse it here too, never
+    // dispatch the stored tool.
+    if (action.tool_name === 'cancel_appointment') {
+      const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE };
+      await PendingActions.recordResult(action.id, result);
+      return res.status(409).json(result);
+    }
 
     if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
       await PendingActions.recordResult(action.id, { error: 'Agent Estimate is not enabled' });
@@ -2056,7 +2645,194 @@ router.post('/confirm-action', async (req, res, next) => {
         return res.status(409).json(result);
       }
     }
+    // W0B proposal-time pins for legacy-bare writes: re-resolve exactly as
+    // the proposal did and refuse on drift before anything is dispatched.
+    {
+      // _pinned_phone / _pinned_email_address / _inspection_credit_amount
+      // stay IN execParams: the executors enforce them at the final send /
+      // insert boundary (review-tools, email-tools, tools.createAppointment).
+      // The route-level checks below are the cheap early refusal.
+      const pinnedPhone = execParams._pinned_phone;
+      const pinnedEmail = execParams._pinned_email;
+      // _appointment_fingerprint also stays: rescheduleAppointment asserts
+      // it against the row its own CAS is based on.
+      const pinnedAppointment = execParams._appointment_fingerprint;
+      let drifted = false;
+      if (pinnedPhone) {
+        const r = action.tool_name === 'reply_via_sms'
+          ? await resolveReplyViaSmsRecipient(execParams)
+          : await resolveReviewRequestRecipient(execParams);
+        const livePhone = !r || r.error ? null
+          : (action.tool_name === 'trigger_review_request'
+            ? require('../services/customer-contact').getServiceContactSmsRecipient(r).phone
+            : r.phone);
+        drifted = !r || r.error || String(livePhone || '') !== String(pinnedPhone);
+        // The card promised a NEW review request: any gate that closed
+        // during the pending window (a send from another route, a cadence
+        // start, the cap, an archive, the already-reviewed flag) makes that
+        // promise false — refuse with the same FULL stack the proposal ran
+        // (GH r17 P1).
+        if (!drifted && action.tool_name === 'trigger_review_request') {
+          const { reviewAskBlockedReason } = require('../services/intelligence-bar/review-tools');
+          drifted = !!(await reviewAskBlockedReason(r));
+        }
+      }
+      if (!drifted && pinnedEmail) {
+        const email = await db('emails').where('id', String(execParams.email_id || '')).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
+        drifted = !email || emailPinFingerprint(email) !== String(pinnedEmail);
+      }
+      // Kept in execParams: approvePrice re-verifies on ITS loaded row.
+      const pinnedApproval = execParams._approval_fingerprint;
+      if (!drifted && pinnedApproval) {
+        const a = await loadPriceApprovalPin(String(execParams.approval_id || ''));
+        drifted = !a || a.status !== 'pending' || priceApprovalFingerprint(a) !== pinnedApproval;
+      }
+      const pinnedEstimate = execParams._estimate_fingerprint;
+      delete execParams._estimate_fingerprint;
+      if (!drifted && pinnedEstimate) {
+        const { resolveEstimateByIdentifier } = require('../services/intelligence-bar/estimate-tools');
+        const est = await resolveEstimateByIdentifier(String(execParams.estimate_identifier || ''));
+        const flag = action.tool_name === 'toggle_estimate_v2_view' ? 'use_v2_view' : 'show_one_time_option';
+        drifted = !est || estimatePinFingerprint(est, flag) !== pinnedEstimate;
+        // The approved CURRENT value rides to the executor (pre-push r11
+        // P1): this check ran on an unlocked read, so the executor's write
+        // must be conditional on the state the card showed — a concurrent
+        // toggle in between otherwise turns the approved transition into a
+        // silent inversion or overwrite.
+        if (!drifted && est) execParams._expected_flag_value = !!est[flag];
+      }
+      if (!drifted && action.tool_name === 'bulk_update_leads' && Array.isArray(execParams.lead_ids)) {
+        // The card promised EVERY listed lead transitions. Re-run the match
+        // over the pinned ids; any lead that left current_status makes the
+        // set inexact — refuse instead of a silent partial update.
+        const recheck = await previewBulkLeadUpdate({
+          current_status: execParams.current_status,
+          lead_ids: execParams.lead_ids,
+          new_status: execParams.new_status,
+        });
+        const still = new Set((recheck?.matched_ids || []).map(String));
+        drifted = isToolFailure(recheck) || execParams.lead_ids.some((id) => !still.has(String(id)));
+      }
+      const pinnedCredit = execParams._inspection_credit_amount;
+      if (!drifted && pinnedCredit !== undefined && execParams.customer_id) {
+        // The booking's redemption amount the card disclosed must still hold.
+        try {
+          const projected = await require('../services/inspection-credit').projectRedeemableOfferAmount(String(execParams.customer_id), { includePaused: true });
+          drifted = (Number(projected?.amount ?? projected) || 0) !== Number(pinnedCredit);
+        } catch { drifted = true; }
+      }
+      if (!drifted && pinnedAppointment) {
+        const pin = await loadAppointmentPin(String(execParams.appointment_id || ''));
+        drifted = !pin || appointmentPinFingerprint(pin) !== pinnedAppointment;
+      }
+      if (drifted) {
+        const result = {
+          error: 'The target of this action changed after the card was shown. Ask again for a fresh confirmation card.',
+          preview_changed: true,
+        };
+        await PendingActions.recordResult(action.id, result);
+        return res.status(409).json(result);
+      }
+    }
+
     if (WRITE_TWO_STEP_TOOL_NAMES.has(action.tool_name)) {
+      // W0B execution pin: re-run the (mutation-free) preview and refuse if
+      // it no longer resolves to what the card showed.
+      const approvedTwoStep = execParams._two_step_preview_fingerprint;
+      delete execParams._two_step_preview_fingerprint;
+      if (approvedTwoStep) {
+        const livePreview = await executeToolByName(action.tool_name, { ...execParams }, techContextForExecution(req), {
+          isAdmin: req.techRole === 'admin',
+          technicianId: req.technicianId || req.technician?.id || null,
+          confirmed: false,
+        });
+        if (isToolFailure(livePreview) || AuthorizationContract.previewFingerprint(livePreview) !== approvedTwoStep) {
+          const result = {
+            error: 'What this action would do changed after the card was shown. Ask again for a fresh confirmation card.',
+            preview_changed: true,
+          };
+          await PendingActions.recordResult(action.id, result);
+          return res.status(409).json(result);
+        }
+        // The fingerprint just bound this preview to the card, so its stop
+        // sets ARE the approved ones — hand them to the executor to reassert
+        // under its locks (swap_tech_assignments, assign_technician).
+        // `_`-prefixed: never shown. Arrays (assign) or the swap's
+        // per-tech-name object of stop sets — but never the tech-route
+        // optimizer's bare `stops` COUNT (GH r14/r16): a number riding as
+        // the verified set is junk to every consumer.
+        if (Array.isArray(livePreview?.stops)
+          || (action.tool_name === 'swap_tech_assignments' && livePreview?.stops && typeof livePreview.stops === 'object')) {
+          execParams._verified_stops = livePreview.stops;
+        }
+        // Route optimizers (GH r14 P1): the verified preview's ordered
+        // sequence IS the approved plan — hand the ordered ids to the
+        // executor so it applies THAT order under the tech-day locks
+        // instead of re-running the traffic-aware optimizer, whose fresh
+        // answer can differ from what the card showed.
+        if ((action.tool_name === 'optimize_all_routes' || action.tool_name === 'optimize_tech_route')
+          && Array.isArray(livePreview?.ordered_stops) && livePreview.ordered_stops.length) {
+          execParams._verified_ordered_stops = livePreview.ordered_stops.map((s) => String(s.id));
+        }
+        // assign_technician (GH r21 P2): the fingerprint-verified preview's
+        // resolved technician ROW id rides to the executor — names are not
+        // unique, so identity is enforced by id, never by the name match.
+        if (action.tool_name === 'assign_technician' && livePreview?.would_assign_to_id) {
+          execParams._verified_tech_id = String(livePreview.would_assign_to_id);
+        }
+        // set_estimate_presentation: the verified preview's previous-name
+        // snapshot rides to the executor to re-assert under the estimate
+        // row lock (GH r10 P2) — the stable engine key would still match a
+        // row a concurrent editor relabeled after this preflight, so the
+        // executor must refuse when the names it is about to overwrite are
+        // not the ones the card approved.
+        if (Array.isArray(livePreview?.previous_names)) {
+          execParams._verified_previous_names = livePreview.previous_names;
+          // Row COUNT rides too (GH r11 P2): a row added with the same
+          // displayed name after this preflight keeps the unique-name set
+          // identical while widening what the relabel touches.
+          if (livePreview.rows_matched !== undefined) {
+            execParams._verified_rows_matched = livePreview.rows_matched;
+          }
+        }
+        // update_restock_request receive: the verified preview's stock
+        // delta rides to the executor to re-assert under the
+        // request+product row locks (GH r11 P1) — the confirmed executor
+        // re-derives the receive amount from unlocked reads, so a request
+        // or product edited after this preflight could otherwise add a
+        // different amount than the card showed.
+        if (action.tool_name === 'update_restock_request' && livePreview?.adds !== undefined) {
+          // stock_before rides too (pre-push r11 P1): the card shows exact
+          // before/after totals, so a concurrent inventory movement must
+          // refuse rather than apply the approved delta to a different
+          // starting balance.
+          execParams._verified_receive = {
+            adds: livePreview.adds,
+            unit: livePreview.unit,
+            stock_before: livePreview.stock_before,
+          };
+        }
+        // Same contract for the OTHER inventory writers (GH r12 P1):
+        // adjust_stock re-derives the movement from the freshly locked
+        // balance, and create_restock_request rereads current_stock/unit/
+        // vendor unlocked — either could apply/store values different
+        // from the card's. The verified preview's snapshot rides to the
+        // executor to re-assert under the product row lock.
+        if (action.tool_name === 'adjust_stock' && livePreview?.stock_after !== undefined) {
+          execParams._verified_adjustment = {
+            stock_before: livePreview.stock_before,
+            stock_after: livePreview.stock_after,
+            unit: livePreview.unit,
+          };
+        }
+        if (action.tool_name === 'create_restock_request' && livePreview?.preview === true) {
+          execParams._verified_request = {
+            current_stock: livePreview.current_stock ?? null,
+            unit: livePreview.unit,
+            vendor: livePreview.vendor ?? null,
+          };
+        }
+      }
       // Server-derived confirmation: the operator clicked Confirm. This is
       // the only place a confirmed flag is ever attached.
       execParams.confirmed = true;

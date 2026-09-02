@@ -29,9 +29,9 @@ export default function ActionInbox({ alerts, stale = false }) {
 
   if (!loaded || (stale && items.length === 0)) {
     return (
-      <Card className="mb-4 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
+      <Card className="mb-4 max-md:border-0 max-md:shadow-sm">
         <CardHeader className="flex items-center gap-2.5">
-          <CardTitle>Action Inbox</CardTitle>
+          <CardTitle>Action inbox</CardTitle>
           <span className="text-12 text-ink-secondary">unavailable</span>
         </CardHeader>
         <CardBody>
@@ -46,10 +46,10 @@ export default function ActionInbox({ alerts, stale = false }) {
   }
 
   return (
-    <Card className="mb-4 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
+    <Card className="mb-4 max-md:border-0 max-md:shadow-sm">
       <CardHeader className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
-          <CardTitle>Action Inbox</CardTitle>
+          <CardTitle>Action inbox</CardTitle>
           {allClear ? (
             <span
               className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium whitespace-nowrap"

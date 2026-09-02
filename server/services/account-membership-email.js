@@ -363,20 +363,56 @@ async function sendCancellationReceived({
   // tierAfter } — the account stays, so the line names what stopped and
   // what continues; never "your plan is cancelled" (ruling C-3).
   scope = null,
+  // When the cancel takes effect on a date other than the request (C3
+  // end-of-coverage), the caller names it; the request date is the fallback.
+  effectiveAt = null,
+  // End-of-coverage cancel: paid visits STAY through effectiveAt — never
+  // claim upcoming visits are off the calendar.
+  keptThrough = false,
+  // Office-waived scheduled-visit fee (C3 waiveLateFee, verified by the
+  // processor): the in-window fee clause would contradict the waiver.
+  feeWaived = false,
 } = {}) {
   if (!request?.id) return { ok: false, skipped: true, reason: 'missing_request' };
   const submittedAt = request.created_at || request.createdAt || new Date();
+  const effectiveDateLabel = displayDate(effectiveAt || submittedAt);
   const scopedLabels = scope && Array.isArray(scope.cancelled) && scope.cancelled.length ? scope.cancelled : null;
   const remainingLabels = scope && Array.isArray(scope.remaining) ? scope.remaining.filter(Boolean) : [];
   const outcomeLine = processed === true
     ? (scopedLabels
-      ? `${scopedLabels.join(' and ')} ${scopedLabels.length > 1 ? 'are' : 'is'} cancelled as of ${displayDate(submittedAt)}: those upcoming visits are off the calendar.`
+      ? `${scopedLabels.join(' and ')} ${scopedLabels.length > 1 ? 'are' : 'is'} cancelled as of ${effectiveDateLabel}: those upcoming visits are off the calendar.`
         + (remainingLabels.length
           ? ` ${remainingLabels.join(' and ')} continue${remainingLabels.length > 1 ? '' : 's'}${scope.tierAfter ? ` under WaveGuard ${scope.tierAfter}` : ''}, and AutoPay stays as it was for ${remainingLabels.length > 1 ? 'them' : 'it'}.`
           : '')
         + ' Charges for visits already completed remain payable.'
-      : `Your plan is cancelled as of ${displayDate(submittedAt)}: upcoming visits are off the calendar and autopay is off. Nothing further is charged for future service; charges for visits already completed remain payable, and a visit already inside its late-cancellation window keeps its scheduled-visit fee.`)
+      : (keptThrough
+        ? `Your plan is cancelled and will not renew. Visits already paid for stay on the calendar through ${effectiveDateLabel}; after that, nothing further is scheduled or charged, and autopay is off. Charges for visits already completed remain payable.`
+        : `Your plan is cancelled as of ${effectiveDateLabel}: upcoming visits are off the calendar and autopay is off. Nothing further is charged for future service; charges for visits already completed remain payable${feeWaived
+          ? ', and our office waived the scheduled-visit fee'
+          : ', and a visit already inside its late-cancellation window keeps its scheduled-visit fee'}.`))
     : 'Our office is closing out your plan by hand and will confirm exactly what has stopped within 1 business day.';
+  // Legacy-key compat: sends recorded before the class-suffixed key deployed
+  // live under the unsuffixed key, and the old behavior deduped EVERY retry
+  // for the request. Honor that for existing rows — the received→completed
+  // upgrade applies to new requests only. Best-effort: an unreadable table
+  // falls through to the class-keyed send.
+  if (!idempotencyKey) {
+    try {
+      const legacy = await db('email_messages')
+        .where({ idempotency_key: `account.cancellation_received:${request.id}` })
+        // Only a provider-ACCEPTED legacy send counts — the library also
+        // persists blocked/failed rows under the key, and honoring one of
+        // those would mark the channel successful while no email reached
+        // the customer.
+        .where(function accepted() {
+          this.whereNotNull('sent_at').orWhereIn('status', ['sent', 'delivered']);
+        })
+        .first('id');
+      if (legacy) return { ok: true, deduped: true, legacyKey: true };
+    } catch (probeErr) {
+      logger.warn(`[account-membership-email] legacy cancellation-key probe failed for ${request.id}: ${probeErr.message}`);
+    }
+  }
   return sendTemplate({
     customerId,
     templateKey: 'account.cancellation_received',
@@ -387,7 +423,11 @@ async function sendCancellationReceived({
       submitted_at: displayDate(submittedAt),
       outcome_line: outcomeLine,
     },
-    idempotencyKey: idempotencyKey || `account.cancellation_received:${request.id}`,
+    // The outcome class is part of the identity: a repaired retry reuses the
+    // SAME request, and its completed confirmation must not dedupe against
+    // the earlier partial "closing out by hand" send — each class sends at
+    // most once per request.
+    idempotencyKey: idempotencyKey || `account.cancellation_received:${request.id}:${processed === true ? 'completed' : 'received'}`,
     categories: ['cancellation_received'],
     metadata: {
       service_request_id: request.id,

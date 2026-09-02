@@ -1031,7 +1031,7 @@ export function ComposeView({
       <div className={PANEL_CLS}>
         {" "}
         <PanelHeader
-          title="Campaign Content"
+          title="Campaign content"
           hint="Write the message body, subject, preview text, and sender details."
           action={
             <div className="flex items-center gap-2">
@@ -1975,7 +1975,7 @@ function DigestPlanner({ onDraftFromPlan }) {
     <div className="border-hairline border-zinc-200 rounded-sm bg-zinc-50 p-3 space-y-3">
       <div className="flex items-center gap-2">
         <CalendarDays size={14} strokeWidth={1.75} className="text-ink-secondary" />
-        <span className="text-13 font-medium text-ink-primary">Digest Planner</span>
+        <span className="text-13 font-medium text-ink-primary">Digest planner</span>
       </div>
       <div className="flex items-end gap-2">
         <div className="flex-1">

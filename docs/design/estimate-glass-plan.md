@@ -86,7 +86,7 @@ microcopy under primary CTA.
 
 ## Process notes
 - `npm run check:portal-brand` before every push (client/ builds die otherwise).
-- @codex tag on PR create; merge only when codex-clean (zero findings incl. P2).
+- @codex tag on PR create; merge per the waves-ship severity gate (zero unresolved P0/P1 on the final head; P2s fixed, rebutted, or listed under Deferred P2s; P3 advisory). The original zero-findings-incl-P2 bar was retired by #3716.
 - Customer-facing design brief (`waves-customer-facing-design-brief.md`) needs an addendum:
   this theme replaces the warm-serif direction for the estimate surface (SF Pro + deep-blue
   hierarchy + gold CTAs) — owner-approved 2026-07-04.

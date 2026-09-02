@@ -2216,10 +2216,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       ),
       // Pest: attached garage modifier
       pestGarageAdj: detectAttachedGarage(rc) ? 8 : 0,
-      // Pest: tile roof modifier (rodent risk)
-      rodentRoofAdj: calcRoofRodentModifier(
-        mergeField(rc?.roofType, ai?.roofMaterial, 'UNKNOWN')
-      ),
+      // (rodentRoofAdj retired 2026-08-29 — bracket pricing ignores roof type)
       // Termite: construction vulnerability
       termiteConstructionMult: calcTermiteConstructionMult(
         mergeField(rc?.constructionMaterial, ai?.constructionVisible, 'UNKNOWN')
@@ -3066,21 +3063,6 @@ function calcConstructionModifier(material) {
     case 'CBS': return 0;          // Standard SWFL, baseline
     case 'BRICK': return -3;       // Slightly better sealed
     case 'METAL': return -5;       // Commercial, fewer entry points
-    default: return 0;
-  }
-}
-
-/**
- * Rodent: roof type modifier
- * Tile roofs = major roof rat harborage
- * Returns dollar adjustment to rodent service pricing
- */
-function calcRoofRodentModifier(roofType) {
-  switch (roofType) {
-    case 'TILE': return 15;     // Barrel tile = rat highway
-    case 'SHINGLE': return 0;   // Standard
-    case 'METAL': return -5;    // Hard to nest in
-    case 'FLAT': return -3;     // Commercial, less harborage
     default: return 0;
   }
 }
@@ -4484,6 +4466,36 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   };
 }
 
+// existingCustomerId → the account's WaveGuard-qualifying families via the
+// canonical loader (waveguard-existing-services). Empty when no customer is
+// matched; the loader is injectable for tests. Throws on lookup failure
+// (the route refuses retryably).
+// Existing-customer evidence for the estimator preview, split by purpose
+// exactly as the save splits it (codex #3591 r34 P1): the TIER list is
+// property-scoped (grouped estimate / non-primary street → only that
+// street's plans count) while the rodent SETUP-WAIVER list is account-wide.
+// Same shared resolver as admin-estimate-persistence, fed the same signals
+// the save body carries (address + group anchor) — never a client key list.
+async function resolveCalculateQualifyingEvidence(options = {}, resolver = null) {
+  const empty = { priorQualifyingServices: [], setupWaiverPriorQualifyingServices: [] };
+  const customerId = options?.existingCustomerId;
+  if (customerId == null || String(customerId).trim() === '') return empty;
+  const resolve = resolver || (async (id, scope) => {
+    const db = require('../models/db');
+    const { resolveCustomerQualifyingEvidence } = require('../services/waveguard-existing-services');
+    return resolveCustomerQualifyingEvidence(db, { customerId: id, ...scope, logger });
+  });
+  const evidence = await resolve(String(customerId), {
+    address: typeof options.address === 'string' && options.address.trim() ? options.address.trim() : null,
+    groupedEstimate: !!(options.groupWithEstimateId || options.estimateGroupId),
+  });
+  const clean = (keys) => (Array.isArray(keys) ? keys.filter((k) => typeof k === 'string' && k) : []);
+  return {
+    priorQualifyingServices: clean(evidence?.tierKeys),
+    setupWaiverPriorQualifyingServices: clean(evidence?.setupWaiverKeys),
+  };
+}
+
 router.post('/calculate-estimate', async (req, res) => {
   try {
     const { profile, selectedServices, options } = req.body;
@@ -4503,6 +4515,25 @@ router.post('/calculate-estimate', async (req, res) => {
       await pricingEngine.syncConstantsFromDB();
     }
     const v1Input = translateV2CallToV1Input(profile, selectedServices || [], options || {});
+    // Canonical qualifying families of the MATCHED account (codex #3591 r16
+    // P1): the estimator forwards only existingCustomerId (+ the quoted
+    // address / group anchor); the keys are derived server-side through the
+    // same resolver the save uses (never a client-supplied list) — the TIER
+    // list property-scoped, the rodent SETUP-WAIVER list account-wide
+    // (codex #3591 r34 P1) — so the preview prices exactly as the save-time
+    // recompute will. A lookup failure refuses (retryable) rather than
+    // previewing a different result than the save persists.
+    try {
+      const evidence = await resolveCalculateQualifyingEvidence(options || {});
+      v1Input.priorQualifyingServices = evidence.priorQualifyingServices;
+      v1Input.setupWaiverPriorQualifyingServices = evidence.setupWaiverPriorQualifyingServices;
+    } catch (lookupErr) {
+      return res.status(503).json({
+        error: 'Account service lookup is temporarily unavailable — please retry in a moment.',
+        code: 'PRIOR_SERVICES_UNAVAILABLE',
+        retryable: true,
+      });
+    }
     const v1 = pricingEngine.generateEstimate(v1Input);
     const mapped = mapV1ToLegacyShape(v1);
     res.json(mapped);
@@ -4912,6 +4943,7 @@ module.exports.performPropertyLookup = performPropertyLookup;
 module.exports.buildEnrichedProfile = buildEnrichedProfile;
 module.exports.translateV2CallToV1Input = translateV2CallToV1Input;
 module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
+module.exports.resolveCalculateQualifyingEvidence = resolveCalculateQualifyingEvidence;
 module.exports.countyCeilingStillValid = countyCeilingStillValid;
 module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;

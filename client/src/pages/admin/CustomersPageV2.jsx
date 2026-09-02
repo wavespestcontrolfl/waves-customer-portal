@@ -476,7 +476,7 @@ function QuickAddModalV2({
   onClose,
   onCreated,
   initialValues = null,
-  title = "Add Customer",
+  title = "Add customer",
 }) {
   const [form, setForm] = useState(() =>
     normalizeQuickAddInitialValues(initialValues),
@@ -1590,7 +1590,6 @@ export default function CustomersPageV2() {
           <Dialog
             open={showFilters}
             onClose={() => setShowFilters(false)}
-            style={{ zIndex: 100 }}
           >
             {" "}
             <DialogHeader onClose={() => setShowFilters(false)}>
@@ -2008,7 +2007,7 @@ export default function CustomersPageV2() {
                     <div className="bg-white border-hairline border-zinc-900 rounded-sm p-5 mt-1">
                       {" "}
                       <div className="text-13 font-medium text-ink-primary mb-3">
-                        Edit Customer
+                        Edit customer
                       </div>{" "}
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
                         {[
@@ -2319,7 +2318,7 @@ export default function CustomersPageV2() {
           open={showAddModal}
           onClose={closeAddCustomer}
           initialValues={quickAddPreset}
-          title="Add Customer"
+          title="Add customer"
           onCreated={handleQuickAddCreated}
         />
       )}

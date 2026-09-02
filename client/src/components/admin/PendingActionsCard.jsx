@@ -42,6 +42,90 @@ function paramLines(params) {
     .map(([k, v]) => [k, typeof v === "object" ? JSON.stringify(v) : String(v)]);
 }
 
+// W0B authorization contract presentation. Tier mirrors the write-gate
+// taxonomy (yellow = one Confirm, red = owner + exact-effect). Kinds group
+// the effect lines; colors are deliberately restrained — red is reserved
+// for the red tier and irreversible/contact flags, never decoration.
+const TIER_LABEL = { yellow: "Confirm to run", red: "Owner confirm — exact effects", green: "Read" };
+const KIND_LABEL = { operational: "Operations", customer: "Customer record", billing: "Billing", comms: "Messages" };
+const KIND_ORDER = ["comms", "billing", "customer", "operational"];
+
+function groupEffects(effects) {
+  const groups = new Map();
+  for (const e of effects || []) {
+    if (!groups.has(e.kind)) groups.set(e.kind, []);
+    groups.get(e.kind).push(e);
+  }
+  return KIND_ORDER.filter((k) => groups.has(k)).map((k) => [k, groups.get(k)]);
+}
+
+function ContractView({ contract, dark }) {
+  if (!contract) return null;
+  const red = contract.tier === "red";
+  const tierStyle = dark
+    ? {
+        display: "inline-block", padding: "2px 8px", borderRadius: 6, fontSize: 14, fontWeight: 600,
+        background: red ? `${D.red}22` : `${D.amber}22`, color: red ? D.red : D.amber,
+        border: `1px solid ${red ? D.red : D.amber}55`,
+      }
+    : undefined;
+  const tierClass = dark
+    ? undefined
+    : `inline-block px-2 py-0.5 rounded-sm text-[14px] font-medium border ${
+        red ? "border-alert-fg text-alert-fg" : "border-zinc-400 text-zinc-700"
+      }`;
+  return (
+    <div style={dark ? { marginBottom: 10 } : undefined} className={dark ? undefined : "mb-2.5"}>
+      <div style={dark ? { display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" } : undefined}
+        className={dark ? undefined : "flex items-center gap-2 mb-1.5 flex-wrap"}>
+        <span style={tierStyle} className={tierClass}>{TIER_LABEL[contract.tier] || contract.tier}</span>
+        {contract.irreversible && (
+          <span style={dark ? { fontSize: 14, color: D.red, fontWeight: 500 } : undefined}
+            className={dark ? undefined : "text-[14px] text-alert-fg font-medium"}>
+            Cannot be undone
+          </span>
+        )}
+        {contract.notifies_customer && (
+          <span style={dark ? { fontSize: 14, color: D.amber, fontWeight: 500 } : undefined}
+            className={dark ? undefined : "text-[14px] text-zinc-700 font-medium"}>
+            Contacts the customer
+          </span>
+        )}
+      </div>
+      {groupEffects(contract.effects).map(([kind, items]) => (
+        <div key={kind} style={dark ? { marginBottom: 6 } : undefined} className={dark ? undefined : "mb-1.5"}>
+          <div style={dark ? { fontSize: 14, color: D.muted, textTransform: "uppercase", letterSpacing: "0.04em" } : undefined}
+            className={dark ? undefined : "text-[14px] text-zinc-500 uppercase tracking-wide"}>
+            {KIND_LABEL[kind] || kind}
+          </div>
+          {items.map((e, i) => (
+            <div key={`${kind}-${i}`} style={dark ? { fontSize: 14, color: D.text, wordBreak: "break-word" } : undefined}
+              className={dark ? undefined : "text-[14px] text-zinc-800 break-words"}>
+              • {e.label}
+            </div>
+          ))}
+        </div>
+      ))}
+      {Array.isArray(contract.more_effects) && contract.more_effects.length > 0 && (
+        // Complete text of every capped/overflow line — nothing the operator
+        // approves is hidden; the summary above is just the short form.
+        <details style={dark ? { marginTop: 4 } : undefined} className={dark ? undefined : "mt-1"}>
+          <summary style={dark ? { fontSize: 14, color: D.teal, cursor: "pointer" } : undefined}
+            className={dark ? undefined : "text-[14px] text-zinc-700 cursor-pointer underline"}>
+            Show more ({contract.more_effects.length} full detail{contract.more_effects.length > 1 ? "s" : ""})
+          </summary>
+          {contract.more_effects.map((e, i) => (
+            <div key={`more-${i}`} style={dark ? { fontSize: 14, color: D.text, wordBreak: "break-word", marginTop: 4 } : undefined}
+              className={dark ? undefined : "text-[14px] text-zinc-800 break-words mt-1"}>
+              • {e.label}
+            </div>
+          ))}
+        </details>
+      )}
+    </div>
+  );
+}
+
 export default function PendingActionsCard({ actions, variant = "dark", onResolved, touchFriendly = false }) {
   // status per action id: undefined | 'confirming' | 'confirmed' | 'cancelling' | 'cancelled' | 'failed'
   const [statusById, setStatusById] = useState({});
@@ -100,9 +184,14 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     setStatus(action.id, inFlight);
     try {
       const path = decision === "confirm" ? "/admin/intelligence-bar/confirm-action" : "/admin/intelligence-bar/cancel-action";
+      // Exact-effect confirm (W0B): echo the contract hash this card rendered
+      // so the server can only commit the effect set the operator saw.
       const body = await adminFetch(path, {
         method: "POST",
-        body: JSON.stringify({ pending_action_id: action.id }),
+        body: JSON.stringify({
+          pending_action_id: action.id,
+          ...(decision === "confirm" && action.contract_hash ? { contract_hash: action.contract_hash } : {}),
+        }),
       });
       if (decision === "confirm" && body.success === false) {
         setStatus(action.id, "failed", body.result?.error || "The action could not be completed");
@@ -161,10 +250,12 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
               style={dark ? { color: D.text, fontSize: 14, fontWeight: 500, marginBottom: 6 } : undefined}
               className={dark ? undefined : "text-[14px] text-zinc-900 font-medium mb-1.5"}
             >
-              {status === "confirmed" ? "✓ " : ""}Awaiting your confirmation: {action.tool}
+              {status === "confirmed" ? "✓ " : ""}Awaiting your confirmation: {action.contract?.action_label || action.tool}
             </div>
 
-            {action.summary && (
+            <ContractView contract={action.contract} dark={dark} />
+
+            {action.summary && !action.contract && (
               <div
                 style={dark ? { fontSize: 14, color: D.text, marginBottom: 8, wordBreak: "break-word" } : undefined}
                 className={dark ? undefined : "text-[14px] text-zinc-700 mb-2 break-words"}
@@ -173,6 +264,9 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
               </div>
             )}
 
+            {/* With a contract, the effect list IS the param disclosure —
+                the raw param lines stay only for legacy payloads. */}
+            {!action.contract && (
             <div
               style={dark ? { fontSize: 14, color: D.muted, marginBottom: 10 } : undefined}
               className={dark ? undefined : "text-[14px] text-zinc-500 mb-2.5"}
@@ -183,6 +277,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                 </div>
               ))}
             </div>
+            )}
 
             {(status === "failed" || (status === "confirmed" && errorById[action.id])) && (
               <div

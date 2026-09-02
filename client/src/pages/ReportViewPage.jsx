@@ -57,6 +57,7 @@ import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
+import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -783,7 +784,13 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   const context = data.dynamicContext || {};
   const reentry = context.reentry || {};
   const targets = Array.isArray(reentry.targets) ? reentry.targets : [];
-  const pendingTarget = latestPendingReentryTarget(targets, nowMs);
+  // Server verdict for any visit (specialty inspection-only closeouts
+  // included): treatmentPerformed === false means nothing was treated —
+  // chemical or not — so no branch may claim "we treated" or a drying
+  // countdown (codex P1 r11 #3701). null (product load failed) and legacy
+  // payloads without the field keep the treatment presentation.
+  const noTreatmentVisit = data.treatmentPerformed === false;
+  const pendingTarget = noTreatmentVisit ? null : latestPendingReentryTarget(targets, nowMs);
   const pendingReadyText = pendingTarget
     ? (mode === 'live'
       ? `Ready in ${formatDuration(Date.parse(pendingTarget.readyAt) - nowMs)}`
@@ -838,7 +845,9 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
         : `${primaryFinding.title || 'Activity was noted'}${primaryFinding.recommendation ? ` ${primaryFinding.recommendation}` : ''}`,
       completedLine: completedAreas
         ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}`
-        : (reserviceNotPerformed ? (reservice.completedFallback || 'No application was made today.') : 'Service areas completed today.'),
+        : (reserviceNotPerformed
+          ? (reservice.completedFallback || 'No application was made today.')
+          : (noTreatmentVisit ? 'No application was made today.' : 'Service areas completed today.')),
       detail: pendingText
         ? 'Keep pets and people away from treated zones until they are ready. We also included the recommended next step below.'
         : (reserviceNotPerformed
@@ -847,7 +856,9 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
           ? (reservice.outcome === 'incomplete'
             ? 'The visit could not be completed — we documented what we found and included the recommended next step below.'
             : 'No application was made on this visit — we documented what we found and included the recommended next step below.')
-          : 'We treated the documented area today and included the recommended next step below.'),
+          : (noTreatmentVisit
+            ? 'No application was made on this visit — we documented what we found and included the recommended next step below.'
+            : 'We treated the documented area today and included the recommended next step below.')),
     };
   }
 
@@ -907,7 +918,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
     };
   }
 
-  if (context.pressureTrend?.direction === 'down') {
+  if (context.pressureTrend?.direction === 'down' && !noTreatmentVisit) {
     return {
       heading: 'pest pressure is trending down!',
       status: allReady ? 'Ready now' : 'Service complete',
@@ -1586,7 +1597,8 @@ function groupApplicationsByPurpose(applications = [], data = {}) {
   return Array.from(groups.values());
 }
 
-function conditionInterpretation(conditions = {}) {
+function conditionInterpretation(conditions = {}, { applicationMade = true } = {}) {
+  if (!applicationMade) return 'Weather conditions were documented for this service visit.';
   const wind = Number(conditions.wind_mph ?? conditions.wind);
   const rain = Number(conditions.rain_24h_in);
   const hasWind = Number.isFinite(wind);
@@ -2290,6 +2302,107 @@ function TechnicianVisitLine({ data }) {
   );
 }
 
+
+/* ── Tips from your tech — the note ─────────────────────────────────
+   Renders the tips frozen at completion (payload.techNote) as one quoted
+   note from the technician, under the Visit Timeline on the live report
+   (owner decisions 2026-09-01: first name only, no sign-off, varied
+   greeting — the hero already says "Hi {first}", so the note never does —
+   live only, never the PDF). The card is a data-glass section like its
+   neighbours, so the glass theme dresses it; only the quote treatment is
+   local. Greeting and opener are seeded by the record id: the same report
+   always reads the same, the next visit's reads differently. */
+const TECH_NOTE_GREETINGS = [
+  (first) => `Hey ${first},`,
+  (first) => `${first},`,
+  (first) => `Hello ${first},`,
+];
+// Neutral on purpose — to the schedule (a one-time visit has no "next
+// visit") AND to the treatment method (trapping, exclusion and bait
+// stations are not spray work): the opener gets no service context.
+const TECH_NOTE_OPENERS = {
+  1: ['One thing that will make a real difference:', 'If you do one thing this week, make it this:'],
+  2: ['Two things that will make a real difference:', 'A couple of things I’d take care of soon:'],
+  3: ['Three things that will make a real difference:', 'A few things I’d take care of soon:'],
+};
+
+export function techNoteSeed(value) {
+  let h = 0;
+  for (const ch of String(value || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h;
+}
+
+// ALL-CAPS records title-case for display, the same rule the hero uses.
+function techNoteFirstName(customerName) {
+  const raw = String(customerName || '').trim().split(/\s+/)[0] || '';
+  if (!raw) return null;
+  return raw.length > 1 && raw === raw.toUpperCase() ? raw[0] + raw.slice(1).toLowerCase() : raw;
+}
+
+export function composeTechNote({ tips = [], customerName = '', seed = 0 } = {}) {
+  const count = Math.min(Math.max(tips.length, 1), 3);
+  const first = techNoteFirstName(customerName);
+  const greeting = first ? TECH_NOTE_GREETINGS[seed % TECH_NOTE_GREETINGS.length](first) : 'Hey there,';
+  const openers = TECH_NOTE_OPENERS[count];
+  return { greeting, opener: openers[Math.floor(seed / 7) % openers.length] };
+}
+
+export function TechNoteCard({ data, mode = 'live' }) {
+  // A photo that fails to load falls back to the initial instead of a
+  // broken-image glyph beside the name (hook first: it runs on every render).
+  // The page stays mounted across /report/:token navigations, so the failure
+  // resets whenever the report or the photo URL changes.
+  const [photoBroken, setPhotoBroken] = useState(false);
+  const photoKey = `${data?.serviceRecordId || data?.token || ''}|${data?.technician?.photoUrl || ''}`;
+  useEffect(() => { setPhotoBroken(false); }, [photoKey]);
+  const note = data?.techNote;
+  const tips = Array.isArray(note?.tips) ? note.tips.filter((t) => t && t.copy) : [];
+  if (mode !== 'live' || !tips.length) return null;
+  const techFirst = String(note.technicianFirstName || '').trim();
+  const { greeting, opener } = composeTechNote({
+    tips,
+    customerName: data.customerName,
+    seed: techNoteSeed(data.serviceRecordId || data.token),
+  });
+  // The photo treatment is its own dark ship (GATE_REPORT_TECH_PHOTO →
+  // payload.techVisitCard); the note shows the initial until that gate is on.
+  const photoUrl = data.techVisitCard === true ? (data.technician?.photoUrl || null) : null;
+  const initial = (techFirst || 'W')[0].toUpperCase();
+  return (
+    <section data-glass="card" className="sr-section" id="tech-note">
+      <div className="section-eyebrow">{techFirst ? `A note from ${techFirst}` : 'A note from your technician'}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '10px 0 12px' }}>
+        {photoUrl && !photoBroken ? (
+          <img src={photoUrl} alt="" className="tech-photo" referrerPolicy="no-referrer" onError={() => setPhotoBroken(true)} style={{ width: 38, height: 38, borderRadius: '50%', objectFit: 'cover' }} />
+        ) : (
+          <div aria-hidden="true" style={{ width: 38, height: 38, borderRadius: '50%', background: 'var(--text, #04395E)', color: '#fff', display: 'grid', placeItems: 'center', fontWeight: 600, fontSize: 14 }}>{initial}</div>
+        )}
+        <div>
+          <div style={{ fontWeight: 600, color: 'var(--text, #04395E)', lineHeight: 1.3 }}>{techFirst || 'Your technician'}</div>
+          <div style={{ fontSize: 14, color: 'var(--muted, #475569)' }}>Your Waves technician</div>
+        </div>
+      </div>
+      <blockquote style={{ position: 'relative', margin: 0, padding: '4px 4px 0 22px' }}>
+        <span aria-hidden="true" style={{ position: 'absolute', left: -2, top: -14, fontSize: 56, lineHeight: 1, color: 'var(--line-strong, rgba(4,57,94,0.35))', fontFamily: 'Georgia, serif' }}>“</span>
+        <p style={{ margin: '0 0 10px', fontWeight: 600, color: 'var(--text, #04395E)' }}>{greeting}</p>
+        <p style={{ margin: '0 0 10px', lineHeight: 1.6 }}>{opener}</p>
+        {tips.map((tip, i) => (
+          <p key={`${tip.id || 'tip'}-${i}`} style={{ margin: '0 0 10px', lineHeight: 1.6 }}>
+            {tip.copy}
+            {tip.link?.path ? (
+              <>
+                {' '}
+                <a href={tip.link.path}>{tip.link.label || 'My Property'}</a>
+              </>
+            ) : null}
+            {i === tips.length - 1 ? <span aria-hidden="true" style={{ fontFamily: 'Georgia, serif', fontSize: 22, lineHeight: 0, verticalAlign: -6, marginLeft: 3, color: 'var(--line-strong, rgba(4,57,94,0.55))' }}>”</span> : null}
+          </p>
+        ))}
+      </blockquote>
+    </section>
+  );
+}
+
 function readinessSummary(context, mode = 'live', nowMsOverride) {
   const fallbackNowMs = mode === 'live' ? Date.now() : Date.parse(context?.generatedAt) || Date.now();
   const nowMs = Number.isFinite(nowMsOverride) ? nowMsOverride : fallbackNowMs;
@@ -2493,6 +2606,12 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <HeroConditions
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
+          applicationMade={data.applicationMade === true
+            // null = product load failed: keep the application presentation.
+            || data.applicationMade === null
+            // The server verdict is authoritative; row inference only backs
+            // up payloads that carry no verdict at all (local audit P1).
+            || (data.applicationMade === undefined && (data.applications || []).some(isProductApplication))}
           live={mode === 'live'}
           weeklyRainIn={data.serviceLine === 'lawn'
             // Legacy lawn payloads (no reportV2) still carry the weekly
@@ -2667,19 +2786,22 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null }) {
+function HeroConditions({ conditions, weatherCall, applicationMade = true, live = false, weeklyRainIn = null }) {
   const rows = conditionRows(conditions, { weeklyRainIn });
-  const copy = weatherCall
-    ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
-    : conditionInterpretation(conditions);
-  const { label, kind } = weatherIconInfo(conditions, weatherCall);
+  const effectiveWeatherCall = applicationMade ? weatherCall : null;
+  const copy = effectiveWeatherCall
+    ? [effectiveWeatherCall.headline, effectiveWeatherCall.body].filter(Boolean).join(' ')
+    : conditionInterpretation(conditions, { applicationMade });
+  const weatherInfo = weatherIconInfo(conditions, effectiveWeatherCall);
+  const label = applicationMade ? weatherInfo.label : 'Visit weather';
+  const { kind } = weatherInfo;
   return (
     <div className="hero-conditions">
       <div className="hero-conditions-copy">
         <div className="weather-call-title">
           <span className="weather-call-icon weather-call-icon-animated" aria-hidden="true"><AnimatedWeatherIcon kind={kind} live={live} /></span>
           <div>
-            <div className="section-eyebrow">{weatherCall ? 'Weather call' : 'Conditions at application'}</div>
+            <div className="section-eyebrow">{effectiveWeatherCall ? 'Weather call' : applicationMade ? 'Conditions at application' : 'Conditions at visit'}</div>
             <div className="weather-call-icon-label">{label}</div>
           </div>
         </div>
@@ -3317,81 +3439,30 @@ function CrossSellCard({ data, token, mode }) {
 
 // Referral card (owner-approved 2026-08-11; redesigned per owner 2026-08-13:
 // headline + button only, and the click reveals the same share module the
-// portal's Refer tab uses — code, prefilled text and email). Every word and
-// amount is COMPOSED SERVER-SIDE from live referral program settings
-// (headline/cta/shareText ride data.referral) so the card never promises a
-// benefit the program no longer grants and no dollar figure is ever
-// hardcoded client-side. Rides the same GATE_REPORT_CROSS_SELL payload —
-// dark gate keeps reports byte-identical.
+// portal's Refer tab uses — code, prefilled text and email). The card itself
+// is the shared ReferralShareCard (also on the estimate's accepted screens);
+// this wrapper owns the report-specific parts: the analytics beacon on the
+// tap, the report endpoint, and the staff-QA suppression. Rides the same
+// GATE_REPORT_CROSS_SELL payload — dark gate keeps reports byte-identical.
 function ReferralCard({ data, token, mode }) {
-  // idle → loading → open | failed. The customer's code and share copy come
-  // from POST /:token/referral-link ON THE TAP — the render payload carries
-  // only headline + CTA, because fetching the code enrolls the customer as
-  // a promoter (a durable row) and a report VIEW must never do that.
-  const [shareState, setShareState] = useState('idle');
-  const [share, setShare] = useState(null);
   const referral = data?.referral;
   if (mode !== 'live' || !referral?.headline) return null;
-  const openShare = async () => {
-    if (shareState === 'loading' || shareState === 'open') return;
-    trackReportEvent(token, 'referral_cta_clicked', {});
-    // Staff QA views never enroll the customer or fetch their code — the
-    // same suppression contract as every other report interaction.
-    if (staffViewTokens.has(token)) {
-      setShare(null);
-      setShareState('staff');
-      return;
-    }
-    setShareState('loading');
-    try {
-      const response = await fetch(`${API_BASE}/reports/${token}/referral-link`, { method: 'POST' });
-      if (!response.ok) throw new Error(`referral link ${response.status}`);
-      const body = await response.json();
-      if (!body?.code) throw new Error('referral link empty');
-      setShare(body);
-      setShareState('open');
-    } catch {
-      setShareState('failed');
-    }
-  };
-  const copyCode = async () => {
-    try { await navigator.clipboard?.writeText?.(share.code); } catch { /* clipboard unavailable */ }
+  const fetchLink = async () => {
+    const response = await fetch(`${API_BASE}/reports/${token}/referral-link`, { method: 'POST' });
+    if (!response.ok) throw new Error(`referral link ${response.status}`);
+    return response.json();
   };
   return (
-    <section data-glass="card" className="report-card cross-sell-card referral-card" data-section="referral">
-      <h2>{referral.headline}</h2>
-      {shareState === 'open' && share ? (
-        <div className="referral-share">
-          <div className="referral-code-chip">
-            <span className="referral-code">{share.code}</span>
-            <button type="button" className="referral-copy" onClick={copyCode}>Copy</button>
-          </div>
-          <div className="referral-share-row">
-            <a data-glass-accent="" className="review-cta cross-sell-cta" href={`sms:?&body=${encodeURIComponent(share.smsBody || '')}`}>Text it</a>
-            <a data-glass-accent="" className="review-cta cross-sell-cta" href={`mailto:?subject=${encodeURIComponent(share.emailSubject || '')}&body=${encodeURIComponent(share.emailBody || '')}`}>Email it</a>
-          </div>
-        </div>
-      ) : shareState === 'staff' ? (
-        <p className="cross-sell-confirm">Staff view — the share module renders for customers.</p>
-      ) : (
-        <div className="cross-sell-cta-row">
-          <button
-            type="button"
-            data-glass-accent=""
-            className="review-cta cross-sell-cta"
-            disabled={shareState === 'loading'}
-            onClick={openShare}
-          >
-            {shareState === 'loading' ? 'One moment…' : referral.cta || 'Refer a friend'}
-          </button>
-        </div>
-      )}
-      {shareState === 'failed' && (
-        <p className="cross-sell-fine cross-sell-error">
-          That didn&apos;t go through — please try again, or call (941) 297-5749.
-        </p>
-      )}
-    </section>
+    <ReferralShareCard
+      referral={referral}
+      className="report-card cross-sell-card referral-card"
+      // The beacon fires on every tap, staff QA included — the same event
+      // contract as before the extraction; only the enrolling fetch is
+      // suppressed for staff views.
+      onTap={() => trackReportEvent(token, 'referral_cta_clicked', {})}
+      staffView={staffViewTokens.has(token)}
+      fetchLink={fetchLink}
+    />
   );
 }
 
@@ -9002,6 +9073,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           />
         )}
 
+        {/* Tips from your tech — directly under the Visit Timeline (owner
+            2026-09-01). The V2-lead layouts mount their own copy after the
+            lawn timeline below; the two are exclusive on isV2LeadLayout so
+            #tech-note never duplicates. Live only. */}
+        {!isV2LeadLayout && <TechNoteCard data={data} mode={mode} />}
+
         {/* Cross-sell offer — INTERWOVEN placement (owner 2026-08-11: spaced
             through the report, not stacked at the bottom): after the visit
             story (hero / re-entry / timeline), before the findings detail.
@@ -9145,6 +9222,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 </LawnPrintContext.Provider>
               </div>
             )}
+            <TechNoteCard data={data} mode={mode} />
           </>
         )}
 

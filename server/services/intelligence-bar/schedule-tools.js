@@ -184,6 +184,60 @@ function getZone(city) {
 }
 
 
+// Applies a card-approved route_order sequence under the tech-day fence —
+// shared by both optimizers' confirmed paths (GH r14 P1). Per-row CAS: each
+// write is constrained to the date and the technician the stop was READ on;
+// any miss (row moved or reassigned since) aborts the whole rewrite
+// untouched, and an approved id missing from the fresh day set refuses with
+// preview_changed.
+async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, expectTechFor, loadEligibleIds }) {
+  const byId = new Map(services.map((s) => [String(s.id), s]));
+  if (approvedIds.some((id) => !byId.has(id))) {
+    return { error: "The day's stops changed after the card was shown — nothing was reordered. Ask again for a fresh card.", preview_changed: true };
+  }
+  const { lockTechDays } = require('../scheduling/tech-day-lock');
+  try {
+    await db.transaction(async (trx) => {
+      await lockTechDays(trx, lockKeys);
+      // Newly ADDED stops refuse too (pre-push r15 P1): the approved plan
+      // covers the complete eligible set the card showed — a geocoded stop
+      // added since the confirm preflight would sit ungoverned beside (or
+      // collide with) the approved 1..N sequence, so the eligible set must
+      // match the approved set exactly under the locks.
+      const eligible = (await loadEligibleIds(trx)).map(String);
+      const approvedSet = new Set(approvedIds);
+      if (eligible.length !== approvedIds.length || eligible.some((id) => !approvedSet.has(id))) {
+        throw Object.assign(new Error('stop set changed'), { code: 'STALE_OPTIMIZE_SET' });
+      }
+      for (let i = 0; i < approvedIds.length; i++) {
+        const expectTech = expectTechFor(byId.get(approvedIds[i])) || null;
+        const updated = await trx('scheduled_services')
+          .where('id', approvedIds[i])
+          .where('scheduled_date', date)
+          .modify((q) => (expectTech ? q.where('technician_id', expectTech) : q.whereNull('technician_id')))
+          .update({ route_order: i + 1, updated_at: new Date() });
+        if (updated !== 1) {
+          throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+        }
+      }
+    });
+  } catch (e) {
+    if (e.code === 'STALE_OPTIMIZE_SET') {
+      return { error: "The day's stops changed after the card was shown — nothing was reordered. Ask again for a fresh card.", preview_changed: true };
+    }
+    if (e.code === 'STALE_OPTIMIZE') return { error: 'Schedule changed while optimizing — please retry' };
+    throw e;
+  }
+  logger.info(`[intelligence-bar:schedule] Applied approved route order for ${date}: ${approvedIds.length} stops`);
+  return {
+    success: true,
+    date,
+    total_stops: approvedIds.length,
+    source: 'approved_plan',
+    note: 'Applied the stop order approved on the card (not re-optimized at commit).',
+  };
+}
+
 async function optimizeAllRoutes(input) {
   const { date, confirmed } = input;
   let RouteOptimizer;
@@ -210,6 +264,26 @@ async function optimizeAllRoutes(input) {
   const stopsWithCoords = services.filter(s => s.lat && s.lng);
   if (stopsWithCoords.length < 2) return { message: 'Need at least 2 geocoded stops to optimize', geocoded: stopsWithCoords.length, total: services.length };
 
+  // The card's approved sequence IS the plan (GH r14 P1): a confirmed run
+  // with the fingerprint-verified order applies exactly that order under
+  // the tech-day locks — never a fresh optimizer answer, which traffic, a
+  // transient API fallback, or a coordinate edit can change between the
+  // confirm preflight and here.
+  if (confirmed === true && Array.isArray(input._verified_ordered_stops) && input._verified_ordered_stops.length) {
+    return applyApprovedRouteOrder({
+      date,
+      approvedIds: input._verified_ordered_stops.map(String),
+      services,
+      lockKeys: services.map((s) => ({ techId: s.technician_id, date })),
+      expectTechFor: (s) => s.technician_id || null,
+      loadEligibleIds: async (trx) => (await dayStopsQuery(trx, {
+        dateStr: date,
+        excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
+        select: ['scheduled_services.id', ...guardedCoordSelects(trx)],
+      })).filter((s) => s.lat && s.lng).map((s) => s.id),
+    });
+  }
+
   const result = await RouteOptimizer.optimizeRoute(
     stopsWithCoords.map(s => ({
       id: s.id, lat: parseFloat(s.lat), lng: parseFloat(s.lng),
@@ -235,6 +309,10 @@ async function optimizeAllRoutes(input) {
     source: result.source, // 'google_routes' or 'nearest_neighbor'
     ordered_stops: (result.orderedStops || []).map((s, i) => ({
       position: i + 1,
+      // Immutable row id: the confirm fingerprint must bind WHICH visits get
+      // a new route_order, not just a name/service that another visit for
+      // the same customer could reproduce (W0B).
+      id: s.id,
       customer: s.customerName,
       service: s.serviceType,
     })),
@@ -316,6 +394,25 @@ async function optimizeTechRoute(input) {
   const stopsWithCoords = services.filter(s => s.lat && s.lng);
   if (stopsWithCoords.length < 2) return { message: 'Need at least 2 geocoded stops', geocoded: stopsWithCoords.length };
 
+  // Approved-plan application — same contract as optimize_all_routes above
+  // (GH r14 P1).
+  if (confirmed === true && Array.isArray(input._verified_ordered_stops) && input._verified_ordered_stops.length) {
+    const applied = await applyApprovedRouteOrder({
+      date,
+      approvedIds: input._verified_ordered_stops.map(String),
+      services,
+      lockKeys: [{ techId: tech.id, date }],
+      expectTechFor: () => tech.id,
+      loadEligibleIds: async (trx) => (await dayStopsQuery(trx, {
+        dateStr: date,
+        technicianId: tech.id,
+        excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
+        select: ['scheduled_services.id', ...guardedCoordSelects(trx)],
+      })).filter((s) => s.lat && s.lng).map((s) => s.id),
+    });
+    return applied.success ? { ...applied, tech: tech.name } : applied;
+  }
+
   const result = await RouteOptimizer.optimizeRoute(
     stopsWithCoords.map(s => ({
       id: s.id, lat: parseFloat(s.lat), lng: parseFloat(s.lng),
@@ -336,6 +433,10 @@ async function optimizeTechRoute(input) {
     drive_minutes: Math.round((result.totalDurationSeconds || 0) / 60),
     ordered_stops: (result.orderedStops || []).map((s, i) => ({
       position: i + 1,
+      // Immutable row id: the confirm fingerprint must bind WHICH visits get
+      // a new route_order, not just a name/service that another visit for
+      // the same customer could reproduce (W0B).
+      id: s.id,
       customer: s.customerName,
       service: s.serviceType,
     })),
@@ -382,7 +483,7 @@ async function optimizeTechRoute(input) {
 
 async function assignTechnician(input) {
   const { service_ids: serviceIds, technician_name: techName, confirmed } = input;
-  const tech = await db('technicians').whereILike('name', `%${techName}%`).first();
+  let tech = await db('technicians').whereILike('name', `%${techName}%`).first();
   if (!tech) return { error: `Technician "${techName}" not found` };
 
   const services = await db('scheduled_services')
@@ -395,6 +496,11 @@ async function assignTechnician(input) {
       'scheduled_services.service_type',
       'scheduled_services.scheduled_date',
       'scheduled_services.technician_id as current_tech_id',
+      // Grouped-visit membership rides the preview (GH r14 P1): the
+      // post-commit seam can adopt the new technician for the whole visit
+      // or detach the child — effects the card must disclose, and a
+      // membership change during the pending window must drift.
+      'scheduled_services.visit_id',
       // Canonical YYYY-MM-DD for the tech-day fence key — a JS Date
       // stringified any other way builds a key that never collides with the
       // other lock holders' keys (see tech-day-lock.js).
@@ -410,16 +516,64 @@ async function assignTechnician(input) {
     service_type: s.service_type,
     scheduled_date: s.scheduled_date,
     current_tech: s.current_tech_name || 'Unassigned',
+    ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}),
   }));
 
   if (confirmed !== true) {
     return {
       proposal: true,
       would_assign_to: tech.name,
+      // The resolved ROW id binds the fingerprint (GH r21 P2): technician
+      // names are not unique, and the executor's own name resolution is an
+      // unordered first() — the card must pin WHICH technician row gets
+      // the stops, and the executor enforces that id.
+      would_assign_to_id: String(tech.id),
       stop_count: stops.length,
       stops,
       note: `Would reassign ${stops.length} stop(s) to ${tech.name}. Re-call with confirmed:true to apply.`,
     };
+  }
+
+  // Card-approved runs enforce the pinned technician IDENTITY (GH r21
+  // P2): the name re-resolution above is an unordered match, so the
+  // approved row id is authoritative — a different row (same display
+  // name, or a replacement) refuses instead of receiving every stop.
+  if (input._verified_tech_id && String(tech.id) !== String(input._verified_tech_id)) {
+    const pinned = await db('technicians').where('id', String(input._verified_tech_id)).first();
+    if (!pinned) {
+      return { error: 'The approved technician no longer exists — nothing was reassigned. Ask again for a fresh card.', preview_changed: true };
+    }
+    tech = pinned;
+  }
+
+  // The stop/current-tech set the operator approved (`_verified_stops`, the
+  // route's fingerprint-verified re-preview) must match what this run reads
+  // — otherwise a reassignment made during the pending window is silently
+  // overwritten by a card that named the OLD assignments (GH r8 P1).
+  const approvedStops = Array.isArray(input._verified_stops) ? input._verified_stops : null;
+  const approvedDateStr = (v) => (v instanceof Date
+    ? v.toISOString().slice(0, 10)
+    : (v ? String(v).slice(0, 10) : null));
+  if (approvedStops) {
+    const approvedById = new Map(approvedStops.map((s) => [String(s.id), s]));
+    const drifted = approvedStops.length !== services.length
+      || services.some((s) => {
+        const a = approvedById.get(String(s.id));
+        // Date binds too (GH r9 P1): a stop moved to another day after the
+        // confirm re-preview would otherwise pass the tech compare, and the
+        // transaction would lock/validate the NEW day rather than the
+        // approved one.
+        return !a
+          || String(a.current_tech || 'Unassigned') !== String(s.current_tech_name || 'Unassigned')
+          || approvedDateStr(a.scheduled_date) !== s.scheduled_date_str
+          // Grouped membership binds too (GH r14 P1): a stop that joined,
+          // left, or switched grouped visits after the card was shown gets
+          // seam effects (visit adoption/detach) the card never disclosed.
+          || String(a.grouped_visit_id || '') !== String(s.visit_id || '');
+      });
+    if (drifted) {
+      return { error: 'The assignments on these stops changed after the card was shown — nothing was reassigned. Ask again for a fresh card.', preview_changed: true };
+    }
   }
 
   // Reassignment edits tech-day MEMBERSHIP on both sides (the day the stop
@@ -428,11 +582,40 @@ async function assignTechnician(input) {
   // reassign landing mid-reorder leaves the committed route_order not
   // covering the day.
   const { lockTechDays } = require('../scheduling/tech-day-lock');
-  const count = await db.transaction(async trx => {
+  let count;
+  try {
+    count = await db.transaction(async trx => {
     await lockTechDays(trx, services.flatMap(s => [
       { techId: s.current_tech_id, date: s.scheduled_date_str },
       { techId: tech.id, date: s.scheduled_date_str },
     ]));
+    // Re-assert the approved snapshot UNDER the tech-day locks (same
+    // contract as swap_tech_assignments): the pre-lock read above chose the
+    // lock keys, so any drift between it and the locked rows means the
+    // fence may not cover the real source day — refuse rather than commit
+    // an unapproved overwrite.
+    if (approvedStops) {
+      const live = await trx('scheduled_services')
+        .whereIn('id', serviceIds)
+        .forUpdate()
+        .select('id', 'technician_id', 'visit_id', db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date_str"));
+      const liveById = new Map(live.map((r) => [String(r.id), r]));
+      const changed = live.length !== services.length
+        || services.some((s) => {
+          const l = liveById.get(String(s.id));
+          return !l
+            || String(l.technician_id || '') !== String(s.current_tech_id || '')
+            || l.scheduled_date_str !== s.scheduled_date_str
+            // Same grouped-membership bind as the pre-lock compare (GH r14
+            // P1) — asserted on the rows the UPDATE itself will touch.
+            || String(l.visit_id || '') !== String(s.visit_id || '');
+        });
+      if (changed) {
+        const err = new Error('assign_set_changed');
+        err.previewChanged = true;
+        throw err;
+      }
+    }
     // route_order: null ONLY for rows whose technician actually CHANGES —
     // the old sequence number is meaningless in the day the stop joins
     // (NULL appends after the ordered run; every consumer sorts
@@ -449,18 +632,31 @@ async function assignTechnician(input) {
       .whereRaw('technician_id IS DISTINCT FROM ?', [tech.id])
       .update({ technician_id: tech.id, route_order: null, updated_at: new Date() });
     return changed + Number(alreadyOn);
-  });
+    });
+  } catch (err) {
+    if (err && err.previewChanged) {
+      return { error: 'The assignments on these stops changed after the card was shown — nothing was reassigned. Ask again for a fresh card.', preview_changed: true };
+    }
+    throw err;
+  }
 
   // Visit-group seam (visit-group-scope.md §2; codex #3590 r9): this
   // writer bypasses assignDispatchJob, so it repairs grouped membership
   // itself — a reassigned child whose tech now conflicts with its visit
   // detaches (or the visit adopts, per the helper's rules). Post-commit,
   // best-effort, no-op for ungrouped rows.
+  let groupWarning = null;
   try {
     const { handleChildStopChanged } = require('../visit-groups');
     for (const sid of serviceIds) await handleChildStopChanged(sid);
   } catch (vgErr) {
     logger.warn(`[intelligence-bar:schedule] visit-group seam failed after assign: ${vgErr.message}`);
+    // The card disclosed the grouped-visit adoption/detach for grouped
+    // stops — a failed repair leaves stale group state and must surface,
+    // never a bare Done (GH r14).
+    if (services.some((s) => s.visit_id)) {
+      groupWarning = 'Assigned, but repairing grouped-visit membership failed — one or more grouped stops may still show the old visit assignment; re-check the affected visits on the schedule.';
+    }
   }
 
   logger.info(`[intelligence-bar:schedule] Assigned ${count} services to ${tech.name}`);
@@ -470,6 +666,7 @@ async function assignTechnician(input) {
     assigned_count: count,
     technician: tech.name,
     stops,
+    ...(groupWarning ? { warning: groupWarning } : {}),
   };
 }
 
@@ -478,7 +675,7 @@ async function assignTechnician(input) {
 // (en_route/on_site) rows ARE movable, but the move must rewind the tracker
 // lifecycle (rebooker LIVE_LIFECYCLE_RESET) so stale arrival timestamps
 // don't survive onto the new date.
-const TERMINAL_MOVE_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
+const TERMINAL_MOVE_STATUSES = new Set(require('./proposal-pins').TERMINAL_APPOINTMENT_STATUSES);
 const LIVE_MOVE_STATUSES = new Set(['en_route', 'on_site']);
 
 async function moveStopsToDay(input) {
@@ -547,16 +744,47 @@ async function moveStopsToDay(input) {
   const skippedCollective = collectiveGateOn
     ? movableByDate.filter((s) => s.is_recurring === true).map((s) => ({ id: s.id, status: s.status, reason: 'collective_move_required' }))
     : [];
-  const movable = collectiveGateOn ? movableByDate.filter((s) => s.is_recurring !== true) : movableByDate;
+  const movableUngated = collectiveGateOn ? movableByDate.filter((s) => s.is_recurring !== true) : movableByDate;
+  // Grouped/frozen eligibility at PROPOSAL time too (GH r8 P1): the commit's
+  // per-stop assert (under locks) stays authoritative, but a stop already
+  // known unmovable must never ride the card's approved set only to be
+  // skipped silently after Confirm. Read-only check (no locks — the CAS pins
+  // visit_id, so a stop grouped AFTER this read drifts/misses instead);
+  // fail CLOSED per stop on an unverifiable group state.
+  const skippedGrouped = [];
+  const movable = [];
+  for (const s of movableUngated) {
+    if (!s.visit_id) { movable.push(s); continue; }
+    try {
+      const { openMembers, frozenVisitVerdict } = require('../visit-groups');
+      const members = await openMembers(db, s.visit_id);
+      if (members.length >= 2) {
+        skippedGrouped.push({ id: s.id, status: `${s.status} (grouped visit — move the stop from the schedule so the whole visit moves together)` });
+        continue;
+      }
+      const verdict = await frozenVisitVerdict(db, s.visit_id);
+      if (verdict.frozen) {
+        skippedGrouped.push({ id: s.id, status: `${s.status} (frozen grouped visit)` });
+        continue;
+      }
+      movable.push(s);
+    } catch (err) {
+      logger.warn(`[intelligence-bar:schedule] group-state preview check failed for ${s.id}: ${err.message}`);
+      skippedGrouped.push({ id: s.id, status: `${s.status} (group state unverifiable)` });
+    }
+  }
   if (!movable.length) {
     let error = 'Every movable stop\'s window has already passed today — pick a later window or a future date';
-    if (skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
+    if (skippedGrouped.length && !skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
+      error = 'Every selected stop is part of a grouped (or frozen) visit — move the stop from the schedule so the whole visit moves together';
+    } else if (skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
       error = 'Every selected stop is a recurring-plan visit — with collective moves on, move it from dispatch or Edit appointment so its later visits move with it';
     } else if (skippedUnchanged.length && !skippedElapsed.length) {
       error = 'Every selected stop is already on that date — nothing to move';
     }
     return {
       error,
+      ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
       ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
@@ -564,11 +792,50 @@ async function moveStopsToDay(input) {
     };
   }
 
+  // Evidence-only tracker rewinds ride the preview too (GH r8 P1): a
+  // non-live stop with stale tracker evidence gets its tracker fields
+  // cleared + post-commit cleanup on move (needsLifecycleRewind) — derived
+  // here so the card can disclose it and the two-step fingerprint binds it
+  // (evidence appearing during the pending window is drift, not a silent
+  // tracker release).
+  const { needsLifecycleRewind: previewNeedsRewind } = require('../rebooker');
+  // Pinned SMS recipients (GH r18 P1): with notify_customers the commit
+  // texts each stop's resolved service-contact recipient, re-resolved from
+  // a fresh customer load at send time — so the phone the operator
+  // approves must ride the preview (full number binds the fingerprint,
+  // last4 renders on the card) and be enforced at the sender's final
+  // recipient read (sendRescheduleNoticeForVisit expectedPhone).
+  const notifyPhoneByCustomer = new Map();
+  if (notifyCustomers) {
+    const contactApi = require('../customer-contact');
+    for (const s of movable) {
+      if (!s.customer_id || notifyPhoneByCustomer.has(String(s.customer_id))) continue;
+      const customerRow = await db('customers').where('id', s.customer_id).first();
+      notifyPhoneByCustomer.set(String(s.customer_id),
+        customerRow ? (contactApi.getServiceContactSmsRecipient(customerRow).phone || null) : null);
+    }
+  }
   const stops = movable.map(s => ({
     id: s.id,
     customer: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
     city: s.city,
     service_type: s.service_type,
+    // Lifecycle state rides in the preview (codex r7 on #3648): a live
+    // (en_route/on_site) stop is more than a date move — the commit resets
+    // it to confirmed and releases tech/tracker state — so the card must
+    // disclose it, and the two-step fingerprint must bind it (a stop going
+    // live during the pending window is drift, not a silent workflow kill).
+    status: s.status,
+    ...(!LIVE_MOVE_STATUSES.has(String(s.status)) && previewNeedsRewind(s) ? { track_rewind: true } : {}),
+    // Grouped-visit membership (GH r18 P1): a sole-open-member grouped
+    // stop passes eligibility, and the post-commit seam then detaches it
+    // and dissolves the empty group — the card must disclose that, and a
+    // membership change during the pending window must drift.
+    ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}),
+    ...(notifyCustomers ? {
+      notify_phone: notifyPhoneByCustomer.get(String(s.customer_id)) || null,
+      notify_phone_last4: String(notifyPhoneByCustomer.get(String(s.customer_id)) || '').replace(/\D/g, '').slice(-4) || null,
+    } : {}),
     old_date: s.scheduled_date,
     new_date: dateStr,
   }));
@@ -583,12 +850,49 @@ async function moveStopsToDay(input) {
       // committing will text the customers.
       will_text_customers: notifyCustomers,
       stops,
+      ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
       ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
       note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer the new arrival window' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
     };
+  }
+
+  // The stop set + lifecycle states the operator approved
+  // (`_verified_stops`, the route's fingerprint-verified re-preview) must
+  // match what this confirmed pass just re-read (pre-push r11 P1): the
+  // fingerprint bound the CARD, but this run's movable/status/rewind
+  // classification comes from its own fresh unlocked read — a stop that
+  // went en_route, gained rewind evidence, or moved during the pending
+  // window would otherwise get a workflow reset or tracker release the
+  // card never disclosed. Same consume-the-pin contract as
+  // assign_technician / swap_tech_assignments; the per-stop CAS below
+  // stays the read→write authority.
+  const approvedMoveStops = Array.isArray(input._verified_stops) ? input._verified_stops : null;
+  if (approvedMoveStops) {
+    const approvedById = new Map(approvedMoveStops.map((a) => [String(a.id), a]));
+    const drifted = approvedMoveStops.length !== stops.length
+      || stops.some((s) => {
+        const a = approvedById.get(String(s.id));
+        return !a
+          || String(a.status) !== String(s.status)
+          || (a.track_rewind === true) !== (s.track_rewind === true)
+          || stopDateOnly(a.old_date) !== stopDateOnly(s.old_date)
+          // Grouped membership + pinned SMS recipient bind too (GH r18
+          // P1): a stop that joined/left/switched groups, or whose
+          // resolved recipient phone changed, gets effects the card never
+          // showed. `s` here is THIS confirmed pass's re-derived stop
+          // (same builder), so both sides carry the fields.
+          || String(a.grouped_visit_id || '') !== String(s.grouped_visit_id || '')
+          || (notifyCustomers && String(a.notify_phone || '') !== String(s.notify_phone || ''));
+      });
+    if (drifted) {
+      return {
+        error: 'The stops changed after the card was shown (status, tracker evidence, or date) — nothing was moved. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
   }
 
   // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
@@ -600,96 +904,77 @@ async function moveStopsToDay(input) {
   // Committed stops whose landing block overlaps another appointment on the
   // target date (advisory — the moves stand; the result warns).
   const overlapMovedIds = [];
-  const skippedConflict = [];
   // Moved rows whose requested customer text did NOT go out — reported so
   // the operator learns the move committed but someone wasn't notified.
   const notificationFailures = [];
+  // Moved rows whose promised tech/tracker release or cleanup failed
+  // post-commit (GH r9 P1) — the card disclosed that release, so a failure
+  // surfaces as a warning, never a bare Done.
+  const lifecycleCleanupFailures = [];
+  // Moved rows whose reschedule_log audit append failed (GH r19 P2).
+  const auditFailures = [];
   let textedCount = 0;
-  for (const s of movable) {
-    const oldDate = s.scheduled_date;
-    // A live (en_route/on_site) stop being moved rewinds its tracker
-    // lifecycle exactly like the rebooker's live override does.
+  // ── Phase A: the COMPLETE approved set moves in ONE transaction
+  // (pre-push r21 P1): the exact-effects card promised one frozen effect
+  // set, so a CAS miss, a grouped/frozen refusal, or any target drift
+  // aborts EVERY move (same all-or-none contract as bulk_update_leads)
+  // instead of leaving a partially applied batch behind a Done. Per-stop
+  // lifecycle classification derives from the same read the CAS pins; the
+  // CAS rationale (status + observed schedule fields + visit_id + tracker
+  // snapshot, no FOR UPDATE) is unchanged from the per-stop version.
+  const classified = movable.map((s) => {
     const wasLive = LIVE_MOVE_STATUSES.has(String(s.status));
-    // Rewind on stale evidence too, not just live status — see
-    // needsLifecycleRewind in rebooker.js. The status flip and the history
-    // append stay keyed on wasLive; an evidence-only rewind still gets the
-    // post-commit tracker cleanup below without recording a status
-    // transition that never happened.
     const trackRewound = !wasLive && needsLifecycleRewind(s);
-    const liveReset = wasLive || trackRewound ? LIVE_LIFECYCLE_RESET : {};
-    // Compare-and-swap on the OBSERVED status + schedule fields: everything
-    // below (the wasLive classification, the lifecycle rewind, the
-    // 'confirmed' restamp) was derived from the initial read — if the stop
-    // completed, got cancelled, or went live between that read and this
-    // write, applying the stale branch by id alone would rewrite a terminal
-    // row back to 'confirmed' (or leave a now-live row unrewound). Status
-    // alone also let two ORDINARY moves of the same confirmed stop both
-    // match — the later write silently clobbered the newer date and logged
-    // from a stale snapshot. Matching the observed scheduled_date +
-    // window_start makes the later writer miss instead (knex renders a null
-    // value in the object form as IS NULL — the same contract auto-dispatch's
-    // rebooker `expect` relies on). window_end is in the predicate too: this
-    // mover never writes the window columns themselves, but it DOES stamp
-    // track_token_expires_at derived from the observed end (and classified
-    // movability + logs the window pair off the same read) — a concurrent
-    // end-resize would otherwise still match and get a token expiry computed
-    // from the stale end. Field-level CAS is the repo's established
-    // pattern for exactly this (rebooker options.expect); still deliberately
-    // NOT SELECT..FOR UPDATE. The short transaction below exists solely to
-    // hold the tech-day advisory fence (a date-move edits tech-day MEMBERSHIP
-    // on both the leaving and joining day, and the nightly reorder's
-    // membership read is only fenced against writers holding the same lock —
-    // see tech-day-lock.js); the CAS predicate remains the conflict
-    // detector. updated_at stays out of the
-    // predicate: knex never auto-touches it and not every mover stamps it
-    // (the bulk route's UPDATE doesn't), so it isn't a reliable change
-    // marker. Zero rows matched = the stop changed under us; skip it and
-    // report the conflict.
-    const observedDate = s.scheduled_date instanceof Date
-      ? s.scheduled_date.toISOString().slice(0, 10)
-      : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null);
-    const { lockTechDays } = require('../scheduling/tech-day-lock');
-    // Advisory overlap note for THIS stop, set inside the trx but reported
-    // only after the CAS commits (a missed CAS rolls back and must not warn).
-    let stopOverlapped = false;
-    let groupedSkip = null;
-    const runMoveTrx = async () => db.transaction(async trx => {
-      // Rung 1 + tech-blind probe FIRST (occupancy.js ORDERING CONTRACT:
-      // the date-wide lock precedes the tech-day fence below). A hit never
-      // blocks the move (owner ruling 2026-08-25 — staff saves warn, not
-      // block): the stop still moves and the result carries a warning.
-      // Windowless stops carry no occupancy and skip the probe; an end-less
-      // stop probes its duration-derived block (default 60), mirroring the
-      // shared predicate.
-      {
-        const probeStart = s.window_start ? String(s.window_start).slice(0, 5) : null;
-        let probeEnd = s.window_end ? String(s.window_end).slice(0, 5) : null;
-        if (probeStart && (!probeEnd || probeEnd <= probeStart)) {
-          const [h, m] = probeStart.split(':').map(Number);
-          const endMin = Math.min(h * 60 + m + (parseInt(s.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
-          probeEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
-        }
-        if (probeStart && probeEnd) {
-          const overlap = await probeSlotOverlap({
-            trx, date: dateStr, windowStart: probeStart, windowEnd: probeEnd, excludeServiceIds: [String(s.id)],
-          });
-          if (overlap.length) stopOverlapped = true;
-        }
+    return {
+      s,
+      oldDate: s.scheduled_date,
+      wasLive,
+      trackRewound,
+      liveReset: wasLive || trackRewound ? LIVE_LIFECYCLE_RESET : {},
+      observedDate: s.scheduled_date instanceof Date
+        ? s.scheduled_date.toISOString().slice(0, 10)
+        : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null),
+    };
+  });
+  const { lockTechDays } = require('../scheduling/tech-day-lock');
+  const runBatchTrx = async () => db.transaction(async (trx) => {
+    const overlappedIds = [];
+    // Rung 1 + tech-blind probes FIRST (occupancy.js ORDERING CONTRACT: the
+    // date-wide lock precedes the tech-day fence). Advisory only — a hit
+    // warns, never blocks (owner ruling 2026-08-25).
+    for (const c of classified) {
+      const s = c.s;
+      const probeStart = s.window_start ? String(s.window_start).slice(0, 5) : null;
+      let probeEnd = s.window_end ? String(s.window_end).slice(0, 5) : null;
+      if (probeStart && (!probeEnd || probeEnd <= probeStart)) {
+        const [h, m] = probeStart.split(':').map(Number);
+        const endMin = Math.min(h * 60 + m + (parseInt(s.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
+        probeEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
       }
-      await lockTechDays(trx, [
-        { techId: s.technician_id, date: observedDate },
-        { techId: s.technician_id, date: dateStr },
-      ]);
+      if (probeStart && probeEnd) {
+        const overlap = await probeSlotOverlap({
+          trx, date: dateStr, windowStart: probeStart, windowEnd: probeEnd, excludeServiceIds: [String(s.id)],
+        });
+        if (overlap.length) overlappedIds.push(s.id);
+      }
+    }
+    // ONE tech-day fence over every day this batch touches (each stop's
+    // leaving day + the joining day).
+    await lockTechDays(trx, classified.flatMap((c) => [
+      { techId: c.s.technician_id, date: c.observedDate },
+      { techId: c.s.technician_id, date: dateStr },
+    ]));
+    for (const c of classified) {
+      const s = c.s;
       // Grouped/frozen refusal under the stop lock, AFTER the tech-day
-      // fence (lock order; codex #3609 r29 P1): a grouped member moved
-      // alone strands its siblings — the whole stop moves from the board.
+      // fence (lock order; codex #3609 r29 P1) — here it ABORTS the batch.
       await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
-      return applyTrackLifecycleCas(
+      const updated = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', s.id)
           .where('status', String(s.status))
           .where({
-            scheduled_date: observedDate,
+            scheduled_date: c.observedDate,
             window_start: s.window_start ?? null,
             window_end: s.window_end ?? null,
             // Observed membership joins the CAS (codex r29): grouped-since ⇒ miss.
@@ -697,98 +982,84 @@ async function moveStopsToDay(input) {
           }),
         // Full observed tracker/lifecycle snapshot in the CAS — any
         // concurrent lifecycle or SMS-guard write must make this miss.
-        // See reschedule_appointment in tools.js.
         s,
       )
         .update({
-        scheduled_date: dateStr,
-        ...(observedDate !== dateStr ? dateExceptionStamp(s, 'admin_ib') : {}),
-        // Old day's sequence number is meaningless on the new date — NULL
-        // appends the stop after the target day's ordered run.
-        route_order: null,
-        notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
-        track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
-        // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — land a
-        // moved en_route/on_site stop back on 'confirmed' so it isn't left live
-        // on a future date, matching the rebooker's own path.
-          ...(wasLive ? { status: 'confirmed' } : {}),
-          ...liveReset,
+          scheduled_date: dateStr,
+          ...(c.observedDate !== dateStr ? dateExceptionStamp(s, 'admin_ib') : {}),
+          // Old day's sequence number is meaningless on the new date — NULL
+          // appends the stop after the target day's ordered run.
+          route_order: null,
+          notes: reason ? `${s.notes || ''}\nMoved from ${c.oldDate}: ${reason}`.trim() : s.notes,
+          track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
+          // LIVE_LIFECYCLE_RESET clears the tracker fields but not status —
+          // land a moved live stop back on 'confirmed', matching the
+          // rebooker's own path.
+          ...(c.wasLive ? { status: 'confirmed' } : {}),
+          ...c.liveReset,
           updated_at: new Date(),
         });
-    });
-    let updatedRows = 0;
-    try {
-      // Deadlock retry (codex #3609 r31 P2): this trx holds the tech-day
-      // locks and then waits on the visit stop lock inside
-      // assertRowMovableAlone, while a concurrent createOrJoinVisit holds
-      // that stop lock and waits on the same tech-day lock via
-      // alignMemberTechnician → assignDispatchJob. Postgres aborts one
-      // side with 40P01 — retry the whole transaction (locks re-acquired
-      // fresh) so the batch still lands the move or the intended
-      // grouped-row skip instead of failing the staff action.
-      for (let attempt = 0; ; attempt++) {
-        try {
-          updatedRows = await runMoveTrx();
-          break;
-        } catch (err) {
-          if (err && err.code === '40P01' && attempt < 2) {
-            stopOverlapped = false;
-            continue;
-          }
-          throw err;
-        }
+      if (updated === 0) {
+        throw Object.assign(new Error('move_set_changed'), { code: 'MOVE_SET_CHANGED', stopId: s.id });
       }
-    } catch (err) {
-      if (err && (err.code === 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' || err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED')) {
-        groupedSkip = err.code; // grouped/frozen member: skipped per-row, never aborts the batch
-      } else {
+    }
+    return overlappedIds;
+  });
+  try {
+    // Deadlock retry (codex #3609 r31 P2) around the WHOLE batch — locks
+    // re-acquired fresh on 40P01.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        overlapMovedIds.push(...await runBatchTrx());
+        break;
+      } catch (err) {
+        if (err && err.code === '40P01' && attempt < 2) {
+          overlapMovedIds.length = 0;
+          continue;
+        }
         throw err;
       }
     }
-    if (groupedSkip) {
-      skippedConflict.push({ id: s.id, status: `${s.status} (${groupedSkip === 'VISIT_FROZEN_MOVE_UNSUPPORTED' ? 'frozen grouped visit' : 'grouped visit — move the stop from the schedule'})` });
-      continue;
+  } catch (err) {
+    if (err && (err.code === 'MOVE_SET_CHANGED' || err.code === 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' || err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED')) {
+      return {
+        error: 'One of the approved stops changed (status, schedule, or grouped-visit state) while the move was pending — NOTHING was moved. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
     }
-    if (updatedRows === 0) {
-      // Best-effort re-read so the operator sees the status that blocked the
-      // move (falls back to the stale one if the row vanished).
-      let nowStatus = s.status;
-      try {
-        const row = await db('scheduled_services').where('id', s.id).first('status');
-        if (row) nowStatus = row.status;
-      } catch { /* reporting only */ }
-      skippedConflict.push({ id: s.id, status: nowStatus });
-      continue;
-    }
-    movedIds.add(s.id);
-    if (stopOverlapped) overlapMovedIds.push(s.id);
-    // Rebooker-parity side effects of the live → confirmed flip above:
-    // job_status_history audit row, tech_status release, customer tracker
-    // refresh. Best-effort: the move is committed — a side-effect failure
-    // must not report the whole batch as failed.
-    if (wasLive) {
+    throw err;
+  }
+  for (const c of classified) movedIds.add(c.s.id);
+
+  // ── Phase B: post-commit side effects per moved stop — best-effort; the
+  // batch is committed, so failures surface as warnings, never unwind it.
+  for (const c of classified) {
+    const s = c.s;
+    if (c.wasLive) {
+      // Rebooker-parity effects of the live → confirmed flip:
+      // job_status_history audit, tech_status release, tracker refresh.
       try {
         await applyLiveMoveSideEffects(db, s);
       } catch (err) {
         logger.error(`[intelligence-bar:schedule] live-move side effects failed for ${s.id}: ${err.message}`);
+        lifecycleCleanupFailures.push(s.id);
       }
-    } else if (trackRewound) {
+    } else if (c.trackRewound) {
       // Tracker rewind without a status transition: cleanup only, no
       // history row, refresh with the stop's unchanged status.
       try {
         await applyLiveMovePostCommitEffects(s, { toStatus: s.status });
       } catch (err) {
         logger.error(`[intelligence-bar:schedule] track-rewind side effects failed for ${s.id}: ${err.message}`);
+        lifecycleCleanupFailures.push(s.id);
       }
     }
     // Audit row matching the rebooker's reschedule_log conventions.
-    // Best-effort: the move is committed — a log failure must not report
-    // the whole batch as failed.
     try {
       await db('reschedule_log').insert({
         scheduled_service_id: s.id,
         customer_id: s.customer_id,
-        original_date: oldDate,
+        original_date: c.oldDate,
         new_date: dateStr,
         reason_code: 'admin',
         initiated_by: 'admin_ib',
@@ -798,8 +1069,10 @@ async function moveStopsToDay(input) {
       });
     } catch (err) {
       logger.error(`[intelligence-bar:schedule] reschedule_log insert failed for ${s.id}: ${err.message}`);
+      // The card discloses the audit append (GH r19 P2) — a failed insert
+      // surfaces in the combined warning, never a bare Done.
+      auditFailures.push(s.id);
     }
-
   }
 
   // Notification phase — runs only after EVERY approved stop has been
@@ -870,7 +1143,17 @@ async function moveStopsToDay(input) {
               });
             } else {
               const { sendRescheduleNoticeForVisit } = require('../../routes/admin-schedule');
-              const notice = await sendRescheduleNoticeForVisit(s.id, dateStr, start);
+              // The card-approved recipient phone rides to the sender's
+              // final recipient read (GH r18 P1) — a number changed after
+              // the card refuses there instead of texting an unapproved
+              // phone.
+              // The pinned value is passed even when it is null (GH r19
+              // P1): a card that showed "no SMS recipient" pins ABSENCE —
+              // a phone added after the confirm re-preview must refuse at
+              // the sender, never text a number the operator did not see.
+              const notice = await sendRescheduleNoticeForVisit(s.id, dateStr, start, {
+                expectedPhone: notifyPhoneByCustomer.get(String(s.customer_id)) ?? null,
+              });
               if (notice.sent) textedCount++;
               else notificationFailures.push({ id: s.id, reason: notice.error || 'reschedule text was not sent' });
             }
@@ -890,23 +1173,20 @@ async function moveStopsToDay(input) {
   // moved child leaves a visit that stays on the old date. Runs LAST,
   // after every query this tool issues for its own result (the helper is
   // best-effort and self-contained). No-op for ungrouped rows.
+  let moveGroupWarning = null;
   for (const movedId of movedIds) {
     try {
       await require('../visit-groups').handleChildStopChanged(movedId);
     } catch (vgErr) {
       logger.warn(`[intelligence-bar:schedule] visit-group seam failed for moved ${movedId}: ${vgErr.message}`);
+      // The card disclosed the detach/dissolve for grouped moved stops —
+      // a failed repair must surface, never a bare Done (GH r18 P1).
+      if (movable.some((s) => movedIds.has(s.id) && s.visit_id)) {
+        moveGroupWarning = 'Moved, but repairing grouped-visit membership failed — one or more grouped stops may still show the old visit; re-check the affected visits on the schedule.';
+      }
     }
   }
 
-  if (!movedStops.length) {
-    return {
-      error: 'No stops were moved — every selected stop changed concurrently (status, date, or window) while the move was pending; re-check and retry',
-      ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
-      ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
-      ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
-      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
-    };
-  }
 
   logger.info(`[intelligence-bar:schedule] Moved ${movedStops.length} stops to ${dateStr}`);
 
@@ -922,7 +1202,13 @@ async function moveStopsToDay(input) {
   const notifyNote = notifyCustomers && notificationFailures.length
     ? `Moved ${movedStops.length} stop(s), but ${notificationFailures.length} customer(s) were not texted: ${notificationFailures.map((f) => f.reason).slice(0, 3).join('; ')}${notificationFailures.length > 3 ? '…' : ''}`
     : null;
-  const combinedWarning = [overlapNote, notifyNote].filter(Boolean).join(' ');
+  const lifecycleNote = lifecycleCleanupFailures.length
+    ? `${lifecycleCleanupFailures.length} moved stop(s) committed but their technician/tracker release failed — check the tech pointer for those visits.`
+    : null;
+  const auditNote = auditFailures.length
+    ? `${auditFailures.length} moved stop(s) are missing their reschedule audit entry (the moves stand; the history append failed).`
+    : null;
+  const combinedWarning = [overlapNote, notifyNote, lifecycleNote, moveGroupWarning, auditNote].filter(Boolean).join(' ');
 
   return {
     success: true,
@@ -935,7 +1221,7 @@ async function moveStopsToDay(input) {
     ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
     ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
-    ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
+    ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
     ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
   };
 }
@@ -960,6 +1246,17 @@ async function swapTechAssignments(input) {
         [techA.name]: { current_count: aServices.length, after_swap: bServices.length },
         [techB.name]: { current_count: bServices.length, after_swap: aServices.length },
       },
+      // The exact stop sets being exchanged — counts alone can't pin the
+      // effect (one stop leaving and another joining each side keeps the
+      // counts equal). Ids + service/window let the confirm card and its
+      // fingerprint bind the actual targets (W0B).
+      stops: {
+        // grouped_visit_id rides too (GH r16 P1): the post-commit seam can
+        // adopt the new tech for a grouped visit or detach the child —
+        // membership must bind the fingerprint and the card's disclosure.
+        [techA.name]: aServices.map((s) => ({ id: s.id, service_type: s.service_type, time_window: s.time_window || null, ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}) })),
+        [techB.name]: bServices.map((s) => ({ id: s.id, service_type: s.service_type, time_window: s.time_window || null, ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}) })),
+      },
       note: `Would swap ${aServices.length} stop(s) from ${techA.name} with ${bServices.length} stop(s) from ${techB.name}. Re-call with confirmed:true to apply.`,
     };
   }
@@ -968,35 +1265,73 @@ async function swapTechAssignments(input) {
   // is nullable for unassigned stops), then redirect B's to A and the parked
   // A-set to B. Earlier code parked on a hard-coded UUID, which violated the
   // technician_id FK if the swap ever ran.
-  const aIds = aServices.map(s => s.id);
-  const bIds = bServices.map(s => s.id);
-  await db.transaction(async trx => {
-    // Tech-day fence before any membership write — both real tech-days plus
-    // the transient 'unassigned' day the A-set parks on (see
-    // tech-day-lock.js; keys must match the other holders').
-    const { lockTechDays } = require('../scheduling/tech-day-lock');
-    await lockTechDays(trx, [
-      { techId: techA.id, date },
-      { techId: techB.id, date },
-      { techId: null, date },
-    ]);
+  // The stop sets the operator approved: the route's verified re-preview
+  // (`_verified_stops`, W0B) when this is a card confirm, else this call's
+  // own pre-lock read. Reloaded and compared UNDER the tech-day locks so a
+  // concurrent move between read and lock can't swap an unseen set.
+  const sameSet = (a, b) => a.length === b.length && [...a].sort().every((v, i) => v === [...b].sort()[i]);
+  // Membership key = id + grouped-visit id (GH r16 P1): a stop that joined,
+  // left, or switched grouped visits during the pending window must refuse —
+  // the seam's adopt/detach on it was never disclosed. Handles both shapes:
+  // verified preview stops carry grouped_visit_id, fresh rows carry visit_id.
+  const memberKey = (s) => `${s.id}:${s.grouped_visit_id ? String(s.grouped_visit_id) : (s.visit_id ? String(s.visit_id) : '')}`;
+  const expectedA = (input._verified_stops?.[techA.name] || aServices).map(memberKey);
+  const expectedB = (input._verified_stops?.[techB.name] || bServices).map(memberKey);
+  let aIds = [];
+  let bIds = [];
+  const liveStops = async (trx, techId) => trx('scheduled_services')
+    .where({ scheduled_date: date, technician_id: techId })
+    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
+    .forUpdate()
+    .select('id', 'visit_id');
+  try {
+    await db.transaction(async trx => {
+      // Tech-day fence before any membership write — both real tech-days plus
+      // the transient 'unassigned' day the A-set parks on (see
+      // tech-day-lock.js; keys must match the other holders').
+      const { lockTechDays } = require('../scheduling/tech-day-lock');
+      await lockTechDays(trx, [
+        { techId: techA.id, date },
+        { techId: techB.id, date },
+        { techId: null, date },
+      ]);
+      const [liveA, liveB] = [await liveStops(trx, techA.id), await liveStops(trx, techB.id)];
+      if (!sameSet(liveA.map(memberKey), expectedA) || !sameSet(liveB.map(memberKey), expectedB)) {
+        const err = new Error('swap_set_changed');
+        err.previewChanged = true;
+        throw err;
+      }
+      aIds = liveA.map((r) => r.id);
+      bIds = liveB.map((r) => r.id);
     // route_order: null on both real reassignments — each stop's sequence
     // number belonged to its OLD tech's run; carrying it into the new tech's
     // day would interleave stale numbers (consumers append NULLs last).
-    if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
-    if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() });
-    if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() });
-  });
+      if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
+      if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() });
+      if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() });
+    });
+  } catch (err) {
+    if (err && err.previewChanged) {
+      return { error: 'The stops on one of these days changed after the card was shown — nothing was swapped. Ask again for a fresh card.', preview_changed: true };
+    }
+    throw err;
+  }
 
   // Visit-group seam (codex #3590 r9): a whole-day swap moves every child
   // but not service_visits.technician_id — run the repair per row so each
   // grouped visit either adopts the new tech (all members moved together)
   // or detaches the divergent child. Post-commit, best-effort.
+  let swapGroupWarning = null;
   try {
     const { handleChildStopChanged } = require('../visit-groups');
     for (const sid of [...aIds, ...bIds]) await handleChildStopChanged(sid);
   } catch (vgErr) {
     logger.warn(`[intelligence-bar:schedule] visit-group seam failed after swap: ${vgErr.message}`);
+    // The card disclosed the grouped-visit adoption/detach for grouped
+    // stops — a failed repair must surface, never a bare Done (GH r16 P1).
+    if ([...aServices, ...bServices].some((s) => s.visit_id)) {
+      swapGroupWarning = 'Swapped, but repairing grouped-visit membership failed — one or more grouped stops may still show the old visit assignment; re-check the affected visits on the schedule.';
+    }
   }
 
   return {
@@ -1006,6 +1341,7 @@ async function swapTechAssignments(input) {
       [techA.name]: { was: aServices.length, now: bServices.length },
       [techB.name]: { was: bServices.length, now: aServices.length },
     },
+    ...(swapGroupWarning ? { warning: swapGroupWarning } : {}),
   };
 }
 

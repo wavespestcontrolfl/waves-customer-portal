@@ -12,6 +12,13 @@
  * source-pattern guards (house style — see booking-slot-commit-validation)
  * pin the exhausted-ongoing derived scan and the unchanged fixed-plan scan.
  */
+// The alert-action extension gate resolves the completion profile through
+// the catalog; the scripted conn has none, so serve a resolved untyped
+// profile (what the real resolver synthesizes for an unknown service).
+jest.mock('../services/service-completion-profiles', () => ({
+  ...jest.requireActual('../services/service-completion-profiles'),
+  resolveCompletionProfileForScheduledService: jest.fn(async () => ({ synthesized: true, billingType: null })),
+}));
 jest.mock('../services/appointment-reminders', () => ({
   registerAppointment: jest.fn().mockResolvedValue(undefined),
   // Passthrough: these harnesses have no committed row to read back.
@@ -656,7 +663,10 @@ describe('recurring-alerts derived scan — exhausted ongoing plans (source guar
 // queries DB-honestly (whereNotIn + status/date filters applied) — so a
 // second run sees exactly what the first committed. Dates live in 2098 so
 // the honest today-or-later upcoming math never rots.
-function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow = null, clashDates = [] } = {}) {
+// `customer` = the customers row the billable-amount gate reads; null (the
+// default for the older scenarios) models an unreadable customer, which skips
+// the gate exactly as the make-recurring spawn does.
+function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow = null, clashDates = [], customer = null } = {}) {
   const state = {
     parent: {
       id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
@@ -750,10 +760,52 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
       if (op === 'insert' || op === 'insertReturning') { state.auditInserts.push(data); return [1]; }
     }
     if (table === 'activity_log') { state.activityInserts.push(data); return [1]; }
+    if (table === 'customers') return op === 'first' ? customer : [];
     return null;
   };
   return { state, handler };
 }
+
+describe('runRecurringAlertAction — billable-amount gate on extend / convert_ongoing (Codex P1)', () => {
+  beforeEach(() => jest.clearAllMocks());
+  const unpricedCustomer = { id: 5, billing_mode: null, monthly_rate: 0, waveguard_tier: null, per_application_fee: null };
+  const rows = [
+    { scheduled_date: '2098-01-15', status: 'completed' },
+    { scheduled_date: '2098-04-15', status: 'completed' },
+  ];
+  const alert = (id) => ({ id, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null });
+
+  test('extend refuses an unpriced, zero-rate plan — nothing inserted, alert left open', async () => {
+    const { state, handler } = alertActionScenario({ seriesRows: rows, customer: unpricedCustomer, alertRow: alert(60) });
+    await expect(runRecurringAlertAction(makeConn(handler), { idParam: '60', action: 'extend', count: 2, adminUserId: 'admin-1' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+    expect(state.insertedVisits).toHaveLength(0);
+    expect(state.alert.resolved_at).toBeNull();
+  });
+
+  test('convert_ongoing is gated the same way', async () => {
+    const { state, handler } = alertActionScenario({ seriesRows: rows, customer: unpricedCustomer, alertRow: alert(61) });
+    await expect(runRecurringAlertAction(makeConn(handler), { idParam: '61', action: 'convert_ongoing', count: undefined, adminUserId: 'admin-1' }))
+      .rejects.toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+    expect(state.insertedVisits).toHaveLength(0);
+  });
+
+  test('a priced plan with the create-invoice stamp extends; dues cover a rated member', async () => {
+    const priced = alertActionScenario({
+      seriesRows: rows, customer: unpricedCustomer, alertRow: alert(62),
+      parentOverrides: { estimated_price: '185.00', create_invoice_on_complete: true },
+    });
+    const out = await runRecurringAlertAction(makeConn(priced.handler), { idParam: '62', action: 'extend', count: 2, adminUserId: 'admin-1' });
+    expect(out.status).toBe(200);
+    expect(priced.state.insertedVisits).toHaveLength(2);
+    const member = alertActionScenario({
+      seriesRows: rows, alertRow: alert(63),
+      customer: { id: 5, billing_mode: 'monthly_membership', monthly_rate: 120, waveguard_tier: 'silver', per_application_fee: null },
+    });
+    await runRecurringAlertAction(makeConn(member.handler), { idParam: '63', action: 'extend', count: 2, adminUserId: 'admin-1' });
+    expect(member.state.insertedVisits).toHaveLength(2);
+  });
+});
 
 describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -981,6 +1033,23 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(out.body).toMatchObject({ success: true, created: 0, alreadyResolved: true });
     expect(state.insertedVisits).toHaveLength(0);
     expect(state.auditInserts).toHaveLength(0);
+  });
+
+  test('annual renewal decisions serialize on the cancel-plan commit lock (source guard)', () => {
+    // A renew/switch decision landing between the admin cancel's destructive
+    // wind-down and its term decision would leave a churned account with a
+    // renewing term — both writers hold the SAME per-customer advisory lock,
+    // so the decision lands before the cancel's pre-write term read (cancel
+    // refuses) or after its cancel decision (this CAS returns null).
+    const routePost = src.indexOf("router.post('/recurring-alerts/:id/action'");
+    const branch = src.slice(routePost, src.indexOf('await runRecurringAlertAction(db, {', routePost));
+    const lockAt = branch.indexOf('await acquireCancelCommitLock(termRow.customer_id)');
+    const decideAt = branch.indexOf('AnnualPrepayRenewals.recordDecision({');
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(decideAt).toBeGreaterThan(lockAt);
+    // Released in finally — a thrown decision never wedges future cancels.
+    expect(branch.indexOf('await releaseDecisionLock()')).toBeGreaterThan(decideAt);
+    expect(branch).toContain('finally');
   });
 
   test('alert actions run under the SAME per-parent maintenance lock, every dependent read after it (source guard)', () => {

@@ -779,6 +779,27 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
     expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
   });
+  it('a THROWN appt-time lookup is unresolved fee-may-apply — never a silent "no fee" the commit could contradict', async () => {
+    stubDb(holdRow);
+    mockApptTime.mockRejectedValue(new Error('lookup down'));
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: true, feeAmount: 49, unresolved: true });
+    // The helper asks for the thrown flavor — a fail-soft null would make
+    // the unresolved branch unreachable and the preview lie fee-free.
+    expect(mockApptTime).toHaveBeenCalledWith('svc1', { throwOnError: true });
+  });
+  it('rail OFF: a THROWN appt-time lookup is still fee-free — the disabled rail cannot collect, so the card must not warn or fingerprint a fee (codex GH r31 P2)', async () => {
+    process.env.ONE_TIME_CARD_HOLD = 'false';
+    stubDb(holdRow);
+    mockApptTime.mockRejectedValue(new Error('lookup down'));
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+    // Decided before the time lookup: the gate short-circuits the resolution.
+    expect(mockApptTime).not.toHaveBeenCalled();
+  });
+  it('a cleanly-null appt time stays fee-free — timeless visits are not fee prompts', async () => {
+    stubDb(holdRow);
+    mockApptTime.mockResolvedValue(null);
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+  });
 });
 
 describe('handleCardHoldCancellation — fee guardrails', () => {

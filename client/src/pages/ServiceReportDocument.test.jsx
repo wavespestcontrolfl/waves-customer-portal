@@ -842,6 +842,51 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(legacy.container.textContent).toContain(legacyRec);
   });
 
+  it('keeps re-entry and aftercare for a productless treatment action the server verified', () => {
+    const data = {
+      ...BASE_DATA,
+      applications: [],
+      applicationMade: true,
+      dynamicContext: {},
+      advisory: { pet_advisory: 'Keep pets away from the treated nest area until dry.' },
+      reportV2: { aftercare: { watering: 'No watering change is needed.', reentry: 'Re-enter once the treated void is dry.' } },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toContain('Re-enter once the treated void is dry.');
+    expect(container.textContent).toContain('Keep pets away from the treated nest area until dry.');
+    expect(container.textContent).not.toContain('Where we treated');
+  });
+
+  it('keeps aftercare for a non-chemical heat treatment without claiming an application', () => {
+    const data = {
+      ...BASE_DATA,
+      applications: [],
+      applicationMade: false,
+      treatmentPerformed: true,
+      dynamicContext: {},
+      advisory: { pet_advisory: 'Keep pets out until the treated rooms have cooled.' },
+      reportV2: { aftercare: { reentry: 'Re-enter once the rooms return to normal temperature.' } },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toContain('Re-enter once the rooms return to normal temperature.');
+    expect(container.textContent).toContain('Keep pets out until the treated rooms have cooled.');
+    expect(container.textContent).not.toContain('Where we treated');
+  });
+
+  it('a definite server no-application verdict is not overridden by an application row', () => {
+    const data = {
+      ...BASE_DATA,
+      applicationMade: false,
+      treatmentPerformed: false,
+      dynamicContext: {},
+      advisory: { pet_advisory: 'Keep pets off treated zones until dry.' },
+      reportV2: { aftercare: { reentry: 'Re-enter once dry.' } },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).not.toContain('Re-enter once dry.');
+    expect(container.textContent).not.toContain('Keep pets off treated zones until dry.');
+  });
+
   it('keeps aftercare for a legacy application that has no zone ids', () => {
     // "did treatment happen" must not inherit the map predicate's zone-id rule
     const data = {

@@ -220,6 +220,10 @@ async function loadByToken(token) {
       // this token is shared with whoever the notification reached, so the
       // account holder's name must not travel with it.
       'c.deleted_at as customer_deleted_at',
+      // Same rule as reschedule-public: only an EXPLICITLY active customer
+      // may mutate through this shared token (C4 keeps a cancelled
+      // customer's schedule read-only; anything but true is inactive).
+      'c.active as customer_active',
       't.name as tech_name',
       't.photo_url as tech_photo_url',
       't.photo_s3_key as tech_photo_s3_key',
@@ -706,9 +710,11 @@ router.get('/:token', async (req, res, next) => {
       // the customer or staff confirmed it (codex r12) — while a sibling
       // can still be confirmed (the POST fans out on any confirmed row at
       // the shown slot).
-      confirmable: visitInfo.visit
+      // An inactive/cancelled account is read-only through this token too
+      // (the POST refuses; the button must not render into that 409).
+      confirmable: svc.customer_active === true && (visitInfo.visit
         ? (visitInfo.visit.anyConfirmable && ['pending', 'confirmed'].includes(String(svc.status).toLowerCase()) && !dispatchOwnedUnreviewed(svc))
-        : (String(svc.status).toLowerCase() === 'pending' && !dispatchOwnedUnreviewed(svc)),
+        : (String(svc.status).toLowerCase() === 'pending' && !dispatchOwnedUnreviewed(svc))),
       tech: svc.technician_id
         ? { firstName: firstNameOf(svc.tech_name), photoUrl: techPhotoUrl || null, sameAsLastVisit: sameTech }
         : null,
@@ -731,7 +737,10 @@ router.get('/:token', async (req, res, next) => {
       // P1 follow-up): visitServicesFor returns {} for it, but
       // reschedule-public's groupedVisit — the CTA's destination — refuses
       // it via the shared frozen verdict; the link would be dead on arrival.
-      rescheduleToken: (dispatchOwnedUnreviewed(svc) || visitInfo.visit
+      // An inactive/cancelled account also suppresses the token (codex GH
+      // r8 P2): the CTA's destination refuses with account_inactive, so
+      // the page must render call/text guidance instead of a dead link.
+      rescheduleToken: (svc.customer_active !== true || dispatchOwnedUnreviewed(svc) || visitInfo.visit
         || (svc.visit_id && !visitInfo.visitUnknown
           && (await require('../services/visit-groups').frozenVisitVerdict(db, svc.visit_id)).frozen))
         ? null : svc.reschedule_token,
@@ -848,6 +857,17 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
   try {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
+    // The token is shared with reschedule-public, and C4's widened schedule
+    // read hands a cancelled customer their pending visit's rescheduleUrl —
+    // this consumer must apply the same explicitly-active mutation guard the
+    // reschedule routes do, or the read-only contract leaks a confirm write
+    // (codex GH r6 P1).
+    if (svc.customer_active !== true) {
+      return res.status(409).json({
+        error: "This visit can't be confirmed online anymore.",
+        code: 'NOT_CONFIRMABLE',
+      });
+    }
 
     // Grouped: the STOP's state (all members + the stop's window), same
     // derivation as the page; an unreadable membership is not confirmable.
@@ -1033,6 +1053,19 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
         }
         throw err;
       }
+    }
+    if (updated > 0) {
+      // pending → confirmed is a grouping moment (the job-status.js
+      // pendingConfirmed seam): this route bypasses transitionJobStatus for
+      // its slot-guarded CAS + atomic history row, so it runs the seam
+      // itself. Post-commit, fire-and-forget, best-effort — a grouping
+      // failure can never fail the customer's confirm. The helper
+      // self-refuses already-grouped rows, so a grouped confirm is a no-op.
+      // NOT run on the updated === 0 idempotent path: the winning writer
+      // already ran its own seam.
+      void require('../services/visit-groups').maybeGroupRow(svc.id, { createdBy: 'dispatch' }).catch((e) => {
+        logger.warn(`[appointment-public] visit-group confirm seam failed for ${svc.id}: ${e.message}`);
+      });
     }
     if (updated === 0) {
       // Losing the guarded update is not automatically an error: two taps

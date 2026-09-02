@@ -578,7 +578,7 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
 
       <Dialog open={historyOpen} onClose={() => setHistoryOpen(false)} size="lg">
         <DialogHeader>
-          <DialogTitle>Opportunity History</DialogTitle>
+          <DialogTitle>Opportunity history</DialogTitle>
         </DialogHeader>
         <DialogBody>
           {historyLoading ? (

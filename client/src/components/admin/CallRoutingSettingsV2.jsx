@@ -119,7 +119,7 @@ export default function CallRoutingSettingsV2() {
         {/* Header */}
         <div className="flex justify-between items-start mb-4 gap-3 flex-wrap">
           <div>
-            <div className="text-16 font-medium text-ink-primary">Call Routing</div>
+            <div className="text-16 font-medium text-ink-primary">Call routing</div>
             <div className="text-12 text-ink-tertiary mt-1">
               Bilingual AI voice agent that answers unanswered inbound calls (Spanish auto-detected) instead of voicemail.
             </div>

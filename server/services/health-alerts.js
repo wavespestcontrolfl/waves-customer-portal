@@ -294,6 +294,9 @@ async function executeAction(alertId, actionIndex) {
         if (!freshAlert || String(freshAlert.customer_id) !== String(customer.id)) {
           throw new Error('alert ownership changed while waiting on the comms fence (merge-undo) — re-open the alert and retry');
         }
+        // Visit groups: deliberately NOT stamped — windowless
+        // complimentary visit, refused by policy (office places, then
+        // groups).
         return trx('scheduled_services').insert({
         customer_id: customer.id,
         service_type: compServiceType,

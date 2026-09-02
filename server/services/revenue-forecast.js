@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { MONTHLY_LANE_SQL } = require('./billing-lane');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -15,6 +16,7 @@ async function getForecast() {
   const mrrResult = await db('customers')
     .where({ active: true })
     .where('monthly_rate', '>', 0)
+    .whereRaw(MONTHLY_LANE_SQL)
     .sum('monthly_rate as total')
     .first();
   const mrr = parseFloat(mrrResult.total || 0);

@@ -360,7 +360,7 @@ const CUSTOMER_FIELD_LABELS = {
   disease_pressure: 'Disease pressure',
   turf_issues: 'Issues observed',
   irrigation_mowing: 'Irrigation & mowing notes',
-  spot_treatment_areas: 'Spot-treated areas',
+  spot_treatment_areas: 'Areas treated',
   inspection_type: 'Inspection type',
   findings_observed: 'What we observed',
   access_limitations: 'Inspection access notes',
@@ -684,7 +684,7 @@ const CUSTOMER_VALUE_LABELS = {
 // state by the caller — the registry itself stays permissive.
 const REQUIRED_FINDINGS_FIELDS = {
   pest_inspection: ['severity'],
-  one_time_pest_treatment: ['activity_level'],
+  one_time_pest_treatment: ['activity_level', 'work_completed'],
   mosquito_event: ['activity_level', 'standing_water'],
   palm_injection: ['palm_condition'],
   one_time_lawn_treatment: ['lawn_condition'],
@@ -1052,6 +1052,151 @@ function requiredFindingsFieldsFor(type, { companion = false } = {}) {
   return extra.length ? [...base, ...extra] : base;
 }
 
+const LEGACY_COMPLETION_AREAS = require('../../../shared/legacy-completion-areas.json');
+
+// Typed work fields whose options record treatment. `applied` = a pesticide /
+// product application (the report's applicationMade verdict, re-entry
+// evidence); `performed` = non-chemical treatment (heat, steam, mechanical)
+// that keeps aftercare without claiming an application. Products and protocol
+// actions are optional on these lanes, so a valid productless closeout still
+// carries its treatment here (codex P1 r12 #3701). Every label is asserted to
+// exist in its field's options by the typed-treatment-evidence test.
+const TYPED_TREATMENT_OPTIONS = Object.freeze({
+  flea: { treatment_completed: {
+    applied: ['Exterior flea treatment', 'Interior flea treatment', 'Growth regulator', 'Crack / crevice treatment',
+      'Lawn treatment', 'Pet resting area treatment', 'Limited treatment'],
+    noWork: ['Inspection only'],
+  } },
+  cockroach: { work_completed: {
+    applied: ['Bait placement', 'Insect growth regulator', 'Crack & crevice treatment', 'Dust application',
+      'Flush-out treatment', 'Exterior perimeter treatment'],
+    nonSpray: ['Bait placement'],
+  } },
+  german_roach_knockdown: { treatment_completed: {
+    applied: ['Gel bait', 'Insect growth regulator', 'Crack & crevice treatment', 'Dust application',
+      'Appliance-area treatment', 'Cabinet hinge treatment', 'Plumbing penetration treatment'],
+    performed: ['Vacuum / flush-out'],
+    nonSpray: ['Gel bait'],
+  } },
+  palmetto_roach_knockdown: { treatment_completed: {
+    applied: ['Interior crack & crevice', 'Exterior perimeter treatment', 'Garage treatment', 'Attic / void treatment',
+      'Drain / moisture area treatment', 'Bait placement', 'Dust application'],
+    nonSpray: ['Bait placement'],
+  } },
+  one_time_pest_treatment: { work_completed: {
+    applied: ['Exterior perimeter application', 'Interior crack & crevice application', 'Targeted spot treatment',
+      'Bait placement', 'Insect growth regulator applied', 'Dust applied to labeled voids', 'Nest treated',
+      'Individual mound treatment', 'Broadcast lawn application', 'Treatment limited by site conditions'],
+    performed: ['Accessible nest removed', 'Mechanical removal / vacuuming'],
+    noWork: ['Inspection / identification only', 'Treatment deferred'],
+    nonSpray: ['Bait placement'],
+  } },
+  one_time_lawn_treatment: { work_completed: {
+    applied: ['Fertilizer applied', 'Weed control applied', 'Insect control applied', 'Disease control applied',
+      'Iron / micronutrients applied', 'Biostimulant applied', 'Soil amendment applied', 'Wetting agent applied',
+      'Spot treatment completed'],
+    noWork: ['Inspection completed'],
+  } },
+  mosquito_event: { treatment_completed: {
+    applied: ['Barrier treatment', 'Adulticide treatment', 'Larvicide applied', 'Resting-site treatment'],
+    noWork: ['Inspection only'],
+  } },
+  palm_injection: { work_completed: {
+    applied: ['Palm fertilizer applied', 'Liquid micronutrient treatment', 'Soil drench', 'Insect treatment',
+      'Disease treatment', 'Palm injection completed', 'Soil acidifier applied'],
+    noWork: ['Canopy / crown inspection', 'Photos taken', 'Palm flagged for monitoring'],
+    nonSpray: ['Palm injection completed'],
+  } },
+  tree_shrub: { treatments_completed: {
+    applied: ['Fertilizer', 'Palm fertilizer', 'Micronutrients', 'Insect treatment', 'Disease / fungicide treatment',
+      'Horticultural oil', 'Soil drench', 'Foliar treatment', 'Pre-emergent bed treatment', 'Weed spot treatment',
+      'Soil amendment / acidifier'],
+    noWork: ['Inspection only'],
+  } },
+  termite_treatment: { treatment_method: {
+    applied: TERMITE_LIQUID_DILUTION_METHODS,
+    // Device-only work: declared, no treatment, no dry-down — the generic
+    // termite 30/120 advisory must clear (local audit P1 on #3701).
+    noWork: ['Bait station setup', 'Cartridge replacement'],
+  } },
+  bed_bug: {
+    treatment_method: {
+      applied: ['Hybrid heat + chemical treatment', 'Chemical / IPM treatment', 'Targeted follow-up treatment',
+        'Chemical only', 'Chemical + heat', 'Steam + chemical'],
+      performed: ['Heat treatment', 'Heat only'],
+      wait: ['Heat treatment', 'Heat only'],
+      noWork: ['Inspection / monitoring only'],
+    },
+    work_completed: {
+      applied: ['Crack & crevice treatment', 'Mattress / box spring treatment', 'Bed frame treatment',
+        'Baseboard treatment', 'Furniture treatment', 'Dust application'],
+      performed: ['Steam treatment'],
+      wait: ['Steam treatment'],
+    },
+  },
+});
+
+// `noWork` = the closeout explicitly recorded inspection-only / deferred /
+// device-only work and nothing else that treats — the typed counterpart of an exclusive
+// no-treatment protocol action, so read-time normalization can clear the
+// re-entry targets (codex P1 r13 #3701). `dryDown` = an application that is
+// NOT in the field's `nonSpray` list (bait, gel, trunk injection carry no
+// dry-down concept — same rule as isSprayApplicationMethod), i.e. re-entry
+// evidence, distinct from the application verdict (codex P1 r14). `declared`
+// = any classified option was selected at all.
+function typedTreatmentEvidence(type, values) {
+  const fields = TYPED_TREATMENT_OPTIONS[type];
+  const result = { applied: false, performed: false, noWork: false, dryDown: false, declared: false, reentryWait: false };
+  if (!fields || !values || typeof values !== 'object') return result;
+  let noWorkSelected = false;
+  for (const [key, lists] of Object.entries(fields)) {
+    const selected = String(values[key] ?? '').split(',').map((part) => part.trim()).filter(Boolean);
+    const applied = selected.filter((part) => (lists.applied || []).includes(part));
+    if (applied.length) result.applied = true;
+    if (applied.some((part) => !(lists.nonSpray || []).includes(part))) result.dryDown = true;
+    if (selected.some((part) => (lists.performed || []).includes(part))) result.performed = true;
+    // `wait` = performed non-chemical work with its own waiting period (heat,
+    // steam) — the only performed-only work that keeps a re-entry timer.
+    if (selected.some((part) => (lists.wait || []).includes(part))) result.reentryWait = true;
+    if (selected.some((part) => (lists.noWork || []).includes(part))) noWorkSelected = true;
+  }
+  result.performed = result.performed || result.applied;
+  result.noWork = noWorkSelected && !result.performed;
+  result.declared = result.performed || noWorkSelected;
+  return result;
+}
+
+// Combined visits keep the primary snapshot in service_data.typedReportSnapshot
+// and companion sections in service_data.companionReportSnapshots; treatment
+// evidence is the union, and no-work only holds when every section declared it.
+function typedTreatmentEvidenceForRecord(record) {
+  let serviceData = record?.service_data;
+  if (typeof serviceData === 'string') {
+    try { serviceData = JSON.parse(serviceData); } catch { serviceData = null; }
+  }
+  const snapshots = [
+    serviceData?.typedReportSnapshot,
+    ...(Array.isArray(serviceData?.companionReportSnapshots) ? serviceData.companionReportSnapshots : []),
+  ].filter((snap) => snap && typeof snap === 'object' && snap.type);
+  const verdicts = snapshots.map((snap) => typedTreatmentEvidence(snap.type, snap.values));
+  return {
+    applied: verdicts.some((v) => v.applied),
+    performed: verdicts.some((v) => v.performed),
+    dryDown: verdicts.some((v) => v.dryDown),
+    reentryWait: verdicts.some((v) => v.reentryWait),
+    declared: verdicts.some((v) => v.declared),
+    noWork: verdicts.length > 0 && verdicts.every((v) => v.noWork),
+  };
+}
+
+// Area fields that changed from free text to chips: they also accept the
+// lane's legacy generic chips (a migrated draft). areas_inspected is included
+// for validation only — report-data never reads it as treatment scope.
+const TREATMENT_AREA_FIELD_KEYS = ['areas_treated', 'spot_treatment_areas', 'treatment_zones', 'areas_inspected'];
+function legacyAreasForFindingsType(type) {
+  return new Set(LEGACY_COMPLETION_AREAS.categories[LEGACY_COMPLETION_AREAS.byFindingsType[type]] || []);
+}
+
 function validateTypedFindings({ type, values, expectedType, enforceRequired = false, companion = false } = {}) {
   const errors = [];
   const missing = [];
@@ -1090,11 +1235,16 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     }
     // chips and multi_select both store a comma-joined selection —
     // every element must come from the field's options so an off-list
-    // string can't reach the immutable customer-facing snapshot.
+    // string can't reach the immutable customer-facing snapshot. Treatment-
+    // area fields additionally accept THIS lane's legacy generic chips
+    // (shared/legacy-completion-areas.json): a draft saved before the lane
+    // gained its typed area field migrates the generic completion list into
+    // it. Another lane's areas and free text stay rejected (codex P2 r11).
     if ((field.type === 'chips' || field.type === 'multi_select') && Array.isArray(field.options) && field.options.length) {
+      const controlledFallback = TREATMENT_AREA_FIELD_KEYS.includes(field.key) ? legacyAreasForFindingsType(type) : null;
       const parts = String(value).split(',').map((s) => s.trim()).filter(Boolean);
       for (const part of parts) {
-        if (!field.options.includes(part)) {
+        if (!field.options.includes(part) && !(controlledFallback && controlledFallback.has(part))) {
           errors.push(`Invalid value for ${field.key}: ${part}`);
         }
       }
@@ -1156,6 +1306,92 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       && values.termite_activity
       && String(values.termite_activity) !== 'Active termites present') {
       errors.push('"Live termites in station" requires termite activity "Active termites present"');
+    }
+  }
+
+  // Cross-field consistency for the general specialty treatment families.
+  // Zero/absence choices may coexist with customer-reported history or old
+  // evidence where explicitly worded that way, but never with current live
+  // activity or a positive location recorded by the technician.
+  const list = (value) => String(value || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (type === 'pest_inspection') {
+    const findings = list(values.findings_observed);
+    if (findings.includes('No live activity observed') && findings.includes('Active pest activity')) {
+      errors.push('"No live activity observed" cannot be combined with "Active pest activity"');
+    }
+  }
+  if (type === 'cockroach' && String(values.activity_level) === 'None observed') {
+    const conflicts = [
+      ...list(values.activity_locations),
+      ...list(values.evidence_observed).filter((item) => item === 'Live roaches'),
+    ];
+    if (conflicts.length) errors.push('Activity level "None observed" contradicts live cockroach activity or recorded activity locations');
+  }
+  if (type === 'mosquito_event' && String(values.activity_level) === 'None observed'
+    && list(values.activity_locations).length) {
+    errors.push('Activity locations cannot be recorded with mosquito activity level "None observed"');
+  }
+  if (type === 'bed_bug') {
+    const evidence = list(values.evidence_observed);
+    if (evidence.includes('No visible evidence') && evidence.length > 1) {
+      errors.push('"No visible evidence" cannot be combined with other bed bug evidence');
+    }
+    const activeEvidence = evidence.filter((item) => ['Live bed bugs', 'Eggs'].includes(item));
+    if (String(values.evidence_level) === 'No active signs observed' && activeEvidence.length) {
+      errors.push('"No active signs observed" contradicts live bed bugs or eggs recorded in evidence');
+    }
+    if (String(values.treatment_method) === 'Inspection / monitoring only') {
+      const inspectionOnlyWork = new Set([
+        'Encasement recommended', 'Interceptors installed', 'Adjacent rooms inspected',
+      ]);
+      const treatmentWork = list(values.work_completed)
+        .filter((item) => !inspectionOnlyWork.has(item));
+      if (treatmentWork.length) {
+        errors.push('Inspection / monitoring only cannot be combined with treatment work');
+      }
+    }
+  }
+  if (type === 'one_time_pest_treatment') {
+    const pests = list(values.pests_observed);
+    const evidence = list(values.evidence_observed);
+    const work = list(values.work_completed);
+    if (pests.includes('No pest activity observed') && pests.some((item) => !['No pest activity observed', 'Customer-reported activity only'].includes(item))) {
+      errors.push('"No pest activity observed" cannot be combined with a technician-observed pest');
+    }
+    if (evidence.includes('No evidence observed') && evidence.some((item) => !['No evidence observed', 'Customer-reported activity only'].includes(item))) {
+      errors.push('"No evidence observed" cannot be combined with positive technician-observed evidence');
+    }
+    if (String(values.activity_level) === 'None observed'
+      && (evidence.includes('Live pests observed') || evidence.includes('Active trail / foraging'))) {
+      errors.push('Activity level "None observed" contradicts current live pest evidence');
+    }
+    const activityLevel = String(values.activity_level || '');
+    if (activityLevel && activityLevel !== 'None observed'
+      && (pests.includes('No pest activity observed') || evidence.includes('No evidence observed'))) {
+      errors.push(`Activity level "${activityLevel}" contradicts no-activity or no-evidence findings`);
+    }
+    const noApplicationChoices = ['Inspection / identification only', 'Treatment deferred'];
+    const applicationChoices = work.filter((item) => ![
+      ...noApplicationChoices,
+      'Other',
+    ].includes(item));
+    if (work.some((item) => noApplicationChoices.includes(item)) && applicationChoices.length) {
+      errors.push('Inspection-only or deferred work cannot be combined with performed treatment actions');
+    }
+  }
+  if (type === 'termite_treatment') {
+    const evidence = list(values.termite_evidence);
+    if (evidence.includes('Preventive treatment — no activity observed')
+      && evidence.some((item) => ['Live termites observed', 'Active shelter tubes'].includes(item))) {
+      errors.push('Preventive treatment with no observed activity cannot be combined with active termite evidence');
+    }
+  }
+  if (type === 'palm_injection') {
+    for (const key of ['deficiency_signs', 'pest_disease_signs']) {
+      const findings = list(values[key]);
+      if (findings.includes('None observed today') && findings.length > 1) {
+        errors.push(`"None observed today" cannot be combined with other ${key === 'deficiency_signs' ? 'nutrient' : 'pest or disease'} findings`);
+      }
     }
   }
 
@@ -1635,6 +1871,27 @@ function rodentComboModuleSentences(values = {}) {
 // Only selected chips with a phrase contribute; types without an entry (or
 // with no selections) fall through to the generic fallback chain.
 const WORK_PHRASE_FIELDS = {
+  one_time_pest_treatment: {
+    field: 'work_completed',
+    phrases: {
+      'Inspection / identification only': 'completed an inspection and pest identification',
+      'Exterior perimeter application': 'treated the exterior perimeter',
+      'Interior crack & crevice application': 'treated interior cracks and crevices',
+      'Targeted spot treatment': 'completed a targeted spot treatment',
+      'Bait placement': 'placed targeted bait',
+      'Insect growth regulator applied': 'applied an insect growth regulator',
+      'Dust applied to labeled voids': 'applied dust to labeled voids',
+      'Nest treated': 'treated the located nest',
+      'Accessible nest removed': 'removed the accessible nest',
+      'Individual mound treatment': 'treated individual fire-ant mounds',
+      'Broadcast lawn application': 'completed a broadcast lawn application',
+      'Mechanical removal / vacuuming': 'completed mechanical removal and vacuuming',
+      'Monitoring devices installed or checked': 'installed or checked monitoring devices',
+      'Source reduction completed': 'completed source reduction',
+      'Treatment limited by site conditions': 'completed the work accessible under today’s site conditions',
+      'Treatment deferred': 'documented the conditions and deferred treatment',
+    },
+  },
   mosquito_event: {
     field: 'treatment_completed',
     phrases: {
@@ -4247,6 +4504,9 @@ function findBannedCustomerCopy(text) {
 }
 
 module.exports = {
+  TYPED_TREATMENT_OPTIONS,
+  typedTreatmentEvidence,
+  typedTreatmentEvidenceForRecord,
   SCHEMA_VERSION,
   BANNED_CUSTOMER_COPY,
   findBannedCustomerCopy,

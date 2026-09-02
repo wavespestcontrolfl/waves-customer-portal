@@ -1,5 +1,6 @@
 const { etDateString } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
+const { MONTHLY_LANE_SQL } = require('./billing-lane');
 
 // An active recurring account is "at risk" — i.e. its next monthly charge is
 // NOT something the business can count on landing — when any of these is
@@ -65,11 +66,20 @@ const AT_RISK_PREDICATE = `(
 // The headline-MRR population: active, non-deleted, recurring, internal/test
 // accounts excluded — shared by the breakdown and the at-risk account list so
 // their counts always reconcile.
-function mrrPopulationQuery(conn) {
+// `includeIds` unions explicitly-listed customers back into the population.
+// Sole caller: the payment-pending annual-prepay set. Those customers stay on
+// billing_mode 'per_application' until the prepay invoice is PAID
+// (stampAnnualPrepayBillingMode stamps on the pending->active transition), so
+// the lane predicate alone would drop them from `rows` BEFORE the
+// pendingSet.has() union runs — silently un-flagging every sent-but-unpaid
+// prepay account (Codex #3669 r1 P1). The union restores exactly the rows the
+// at-risk mechanism exists to count.
+function mrrPopulationQuery(conn, includeIds = []) {
   return conn('customers as c')
     .where('c.active', true)
     .whereNull('c.deleted_at')
     .where('c.monthly_rate', '>', 0)
+    .where(function laneOrPendingPrepay() { this.whereRaw(MONTHLY_LANE_SQL); if (includeIds.length) this.orWhereIn('c.id', includeIds); })
     // Exclude internal/test accounts so they never inflate MRR — the same
     // population the live trend (excludeInternalCustomers) and the snapshot use.
     .modify((qb) => {
@@ -106,29 +116,45 @@ function mrrPopulationQuery(conn) {
  *
  * @param {import('knex')} [dbConn]  Knex instance (defaults to the app db; lazy-loaded).
  * @param {string} asOf              ET calendar date (YYYY-MM-DD). Defaults to today ET.
+ * @param {string[]|null} [pendingIds] Pre-fetched payment-pending prepay ids.
+ *                                   Pass when the caller shares ONE set across
+ *                                   several population reads (the snapshot
+ *                                   writer, the dashboard, the BI snapshot) so
+ *                                   a transient lookup failure between reads
+ *                                   can't produce internally inconsistent
+ *                                   figures (Codex #3669 r4). Three states:
+ *                                   omitted/undefined = fetched here (fail-soft
+ *                                   empty); an array = used as-is; explicit
+ *                                   NULL = the caller's shared lookup FAILED —
+ *                                   degrade to no union WITHOUT refetching, so
+ *                                   sibling reads in the same response degrade
+ *                                   identically instead of independently
+ *                                   retrying to different outcomes (Codex r15).
  * @returns {Promise<{total:number, committed:number, atRisk:number, totalCount:number, atRiskCount:number}>}
  */
-async function computeMrrBreakdown(dbConn, asOf = etDateString()) {
+async function computeMrrBreakdown(dbConn, asOf = etDateString(), pendingIds = undefined) {
   // Lazy-require so the helper (and its tests) can load without pulling in
   // knex when a connection is injected.
   const conn = dbConn || require('../models/db');
   const { getPaymentPendingCustomerIds } = require('./annual-prepay-renewals');
 
-  const [rows, pendingSet] = await Promise.all([
-    mrrPopulationQuery(conn)
-      .select(
-        'c.id as id',
-        'c.monthly_rate as monthly_rate',
-        conn.raw(`(${AT_RISK_PREDICATE}) as at_risk`, [asOf, asOf]),
-      ),
-    // Sent-but-unpaid annual-prepay commitments — the cron suppresses their
-    // monthly charge while the prepay cash hasn't landed. Reuse the cron's own
-    // helper so the two definitions can't drift; fail soft to an empty set so a
-    // prepay-table hiccup never blanks the dashboard MRR tile.
-    Promise.resolve()
+  // Sent-but-unpaid annual-prepay commitments — the cron suppresses their
+  // monthly charge while the prepay cash hasn't landed. Reuse the cron's own
+  // helper so the two definitions can't drift; fail soft to an empty set so a
+  // prepay-table hiccup never blanks the dashboard MRR tile. Fetched FIRST:
+  // these customers sit on 'per_application' until the prepay is paid, so the
+  // population query needs their ids to union them past the lane predicate.
+  const pendingSet = pendingIds !== undefined
+    ? new Set((pendingIds || []).map(String))
+    : await Promise.resolve()
       .then(() => getPaymentPendingCustomerIds(asOf, conn))
-      .catch(() => new Set()),
-  ]);
+      .catch(() => new Set());
+  const rows = await mrrPopulationQuery(conn, [...pendingSet])
+    .select(
+      'c.id as id',
+      'c.monthly_rate as monthly_rate',
+      conn.raw(`(${AT_RISK_PREDICATE}) as at_risk`, [asOf, asOf]),
+    );
 
   let total = 0;
   let atRisk = 0;
@@ -172,21 +198,22 @@ async function listAtRiskMrrAccounts(dbConn, asOf = etDateString()) {
   const conn = dbConn || require('../models/db');
   const { getPaymentPendingCustomerIds } = require('./annual-prepay-renewals');
 
-  const [rows, pendingSet] = await Promise.all([
-    mrrPopulationQuery(conn)
-      .select(
-        'c.id as id',
-        'c.first_name as first_name',
-        'c.last_name as last_name',
-        'c.monthly_rate as monthly_rate',
-        conn.raw(`(${AT_RISK_SERVICE_PAUSED}) as risk_service_paused`),
-        conn.raw(`(${AT_RISK_AUTOPAY_PAUSED}) as risk_autopay_paused`, [asOf]),
-        conn.raw(`(${AT_RISK_OVERDUE}) as risk_overdue`, [asOf]),
-      ),
-    Promise.resolve()
-      .then(() => getPaymentPendingCustomerIds(asOf, conn))
-      .catch(() => new Set()),
-  ]);
+  // Same ordering rationale as computeMrrBreakdown: pending prepay ids are
+  // 'per_application' rows the lane predicate would drop, so fetch them first
+  // and union them into the population.
+  const pendingSet = await Promise.resolve()
+    .then(() => getPaymentPendingCustomerIds(asOf, conn))
+    .catch(() => new Set());
+  const rows = await mrrPopulationQuery(conn, [...pendingSet])
+    .select(
+      'c.id as id',
+      'c.first_name as first_name',
+      'c.last_name as last_name',
+      'c.monthly_rate as monthly_rate',
+      conn.raw(`(${AT_RISK_SERVICE_PAUSED}) as risk_service_paused`),
+      conn.raw(`(${AT_RISK_AUTOPAY_PAUSED}) as risk_autopay_paused`, [asOf]),
+      conn.raw(`(${AT_RISK_OVERDUE}) as risk_overdue`, [asOf]),
+    );
 
   // pg returns boolean columns as JS booleans; tolerate 't'/1 from other drivers.
   const truthy = (v) => v === true || v === 't' || v === 1;
@@ -210,4 +237,4 @@ async function listAtRiskMrrAccounts(dbConn, asOf = etDateString()) {
   return accounts;
 }
 
-module.exports = { computeMrrBreakdown, listAtRiskMrrAccounts, AT_RISK_PREDICATE };
+module.exports = { computeMrrBreakdown, listAtRiskMrrAccounts, mrrPopulationQuery, AT_RISK_PREDICATE };

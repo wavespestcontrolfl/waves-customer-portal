@@ -32,7 +32,11 @@ export function CardHeader({ className, children, ...rest }) {
 export function CardTitle({ className, children, ...rest }) {
   return (
     <h3
-      className={cn('text-12 uppercase tracking-label font-medium text-ink-secondary', className)}
+      // Card title per the consistency contract + redesign-spec type scale
+      // (`text-h3`: 14px / 500 / sentence case). The original foundation PR
+      // shipped this as a 12px uppercase overline — a drift the spec reserves
+      // for section dividers/column headers, not card titles.
+      className={cn('text-14 leading-[1.4] font-medium text-zinc-900', className)}
       {...rest}
     >
       {children}

@@ -1,13 +1,14 @@
 /**
- * GET /api/pay/:token — off-Stripe "other ways to pay" block (Zelle / Venmo).
+ * GET /api/pay/:token — off-Stripe "other ways to pay" block (Zelle only —
+ * Venmo and PayPal were dropped 2026-09-02 over their fees).
  *
  * Contract:
- *   1. Both env vars unset ⇒ NO manualPayOptions key (payload byte-identical
- *      to before the feature — the kill switch is "unset the vars").
+ *   1. ZELLE_RECIPIENT unset ⇒ NO manualPayOptions key (payload byte-identical
+ *      to before the feature — the kill switch is "unset the var").
  *   2. Set ⇒ the block rides only on a COLLECTIBLE invoice; a settled invoice
  *      never advertises somewhere to send money.
- *   3. The helper is pure: trims, normalizes the Venmo '@', and returns null
- *      when nothing is configured.
+ *   3. The helper is pure: trims and returns null when nothing is configured.
+ *      Venmo/PayPal env vars are ignored — they must never resurrect a tender.
  */
 
 jest.mock('../services/logger', () => ({
@@ -96,7 +97,7 @@ async function getPayPage(data, { customerRow } = {}) {
   return { body };
 }
 
-const ENV_KEYS = ['ZELLE_RECIPIENT', 'VENMO_HANDLE', 'PAYPAL_ME_HANDLE'];
+const ENV_KEYS = ['ZELLE_RECIPIENT', 'VENMO_HANDLE', 'PAYPAL_ME_HANDLE']; // legacy keys cleared so a stale Railway var can't leak in
 const saved = {};
 beforeEach(() => {
   ENV_KEYS.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
@@ -111,22 +112,20 @@ afterEach(() => {
 describe('manualPayOptionsFromEnv', () => {
   test('returns null when nothing is configured (kill switch)', () => {
     expect(manualPayOptionsFromEnv({})).toBeNull();
-    expect(manualPayOptionsFromEnv({ ZELLE_RECIPIENT: '   ', VENMO_HANDLE: '' })).toBeNull();
+    expect(manualPayOptionsFromEnv({ ZELLE_RECIPIENT: '   ' })).toBeNull();
   });
 
-  test('trims values and normalizes the Venmo @', () => {
-    expect(manualPayOptionsFromEnv({ ZELLE_RECIPIENT: ' pay@example.com ', VENMO_HANDLE: 'WavesPest ' }))
-      .toEqual({ zelle: { recipient: 'pay@example.com' }, venmo: { handle: '@WavesPest' } });
-    expect(manualPayOptionsFromEnv({ VENMO_HANDLE: '@WavesPest' }))
-      .toEqual({ venmo: { handle: '@WavesPest' } });
+  test('trims the Zelle recipient (email or phone)', () => {
+    expect(manualPayOptionsFromEnv({ ZELLE_RECIPIENT: ' pay@example.com ' }))
+      .toEqual({ zelle: { recipient: 'pay@example.com' } });
     expect(manualPayOptionsFromEnv({ ZELLE_RECIPIENT: '9415551234' }))
       .toEqual({ zelle: { recipient: '9415551234' } });
   });
 
-  test('PayPal.me accepts a bare handle or a pasted paypal.me URL', () => {
-    expect(manualPayOptionsFromEnv({ PAYPAL_ME_HANDLE: 'WavesPest' })).toEqual({ paypal: { handle: 'WavesPest' } });
-    expect(manualPayOptionsFromEnv({ PAYPAL_ME_HANDLE: 'https://www.paypal.me/WavesPest/25' })).toEqual({ paypal: { handle: 'WavesPest' } });
-    expect(manualPayOptionsFromEnv({ PAYPAL_ME_HANDLE: '@WavesPest' })).toEqual({ paypal: { handle: 'WavesPest' } });
+  test('ignores the retired Venmo / PayPal vars', () => {
+    expect(manualPayOptionsFromEnv({ VENMO_HANDLE: '@WavesPest', PAYPAL_ME_HANDLE: 'WavesPest' })).toBeNull();
+    expect(manualPayOptionsFromEnv({ ZELLE_RECIPIENT: 'pay@example.com', VENMO_HANDLE: '@WavesPest', PAYPAL_ME_HANDLE: 'WavesPest' }))
+      .toEqual({ zelle: { recipient: 'pay@example.com' } });
   });
 });
 
@@ -138,20 +137,16 @@ describe('GET /pay/:token manualPayOptions', () => {
 
   test('env set ⇒ block rides on a collectible invoice', async () => {
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
-    process.env.VENMO_HANDLE = 'WavesPest';
-    process.env.PAYPAL_ME_HANDLE = 'WavesPest';
     const { body } = await getPayPage(invoiceData({ status: 'overdue' }));
     expect(body.manualPayOptions).toEqual({
       zelle: { recipient: 'pay@example.com' },
-      venmo: { handle: '@WavesPest' },
-      paypal: { handle: 'WavesPest' },
       amountDue: 150,
       version: null,
     });
   });
 
   test('env set ⇒ key absent while a saved-card attempt is in flight (codex r5 P1 cross-rail fence)', async () => {
-    process.env.VENMO_HANDLE = 'WavesPest';
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const StripeService = require('../services/stripe');
     StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValueOnce(
       Object.assign(new Error('charge in progress'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }),
@@ -162,7 +157,7 @@ describe('GET /pay/:token manualPayOptions', () => {
   });
 
   test('env set ⇒ key absent when the attached PaymentIntent already collected (codex r6 P1)', async () => {
-    process.env.VENMO_HANDLE = 'WavesPest';
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const StripeService = require('../services/stripe');
     for (const status of ['succeeded', 'processing', 'requires_capture']) {
       StripeService.retrievePaymentIntent.mockResolvedValueOnce({ id: 'pi_live', status });
@@ -186,7 +181,7 @@ describe('GET /pay/:token manualPayOptions', () => {
   });
 
   test('env set ⇒ key absent when the attached PaymentIntent cannot be verified (fail closed)', async () => {
-    process.env.VENMO_HANDLE = 'WavesPest';
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const StripeService = require('../services/stripe');
     StripeService.retrievePaymentIntent.mockResolvedValueOnce(null);
     let r = await getPayPage(invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_x' }));
@@ -197,23 +192,23 @@ describe('GET /pay/:token manualPayOptions', () => {
   });
 
   test('env set ⇒ block rides beside the page\'s own still-cancelable PaymentIntent', async () => {
-    process.env.VENMO_HANDLE = 'WavesPest';
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const StripeService = require('../services/stripe');
     StripeService.retrievePaymentIntent.mockResolvedValueOnce({ id: 'pi_fresh', status: 'requires_payment_method' });
     const { body } = await getPayPage(invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_fresh' }));
-    expect(body.manualPayOptions).toMatchObject({ venmo: { handle: '@WavesPest' }, amountDue: 150 });
+    expect(body.manualPayOptions).toMatchObject({ zelle: { recipient: 'pay@example.com' }, amountDue: 150 });
     expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
   });
 
   test('env set ⇒ a non-fence error from the reconciliation check still propagates', async () => {
-    process.env.VENMO_HANDLE = 'WavesPest';
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const StripeService = require('../services/stripe');
     StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValueOnce(new Error('db down'));
     await expect(getPayPage(invoiceData({ status: 'overdue' }))).rejects.toThrow('db down');
   });
 
   test('env set ⇒ key absent on a combined-balance session (codex r2 P1)', async () => {
-    process.env.VENMO_HANDLE = 'WavesPest';
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const { isEnabled } = require('../config/feature-gates');
     const openBalance = require('../services/open-balance');
     isEnabled.mockImplementation((k) => k === 'payIncludeBalance');
@@ -230,7 +225,7 @@ describe('GET /pay/:token manualPayOptions', () => {
       if (body.previousBalance) {
         expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
       } else {
-        expect(body.manualPayOptions).toEqual({ venmo: { handle: '@WavesPest' }, amountDue: 150, version: null });
+        expect(body.manualPayOptions).toEqual({ zelle: { recipient: 'pay@example.com' }, amountDue: 150, version: null });
       }
     } finally {
       isEnabled.mockImplementation(() => false);

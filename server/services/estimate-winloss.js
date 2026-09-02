@@ -19,6 +19,7 @@
  */
 
 const db = require('../models/db');
+const logger = require('./logger');
 const { DISPOSITIONS, dispositionGroup, dispositionFromDeclineReason, expiredDispositionFor } = require('./estimate-disposition');
 const { inferEstimateServiceLines, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
 
@@ -199,7 +200,9 @@ function sentCohorts(rows, { days, nowMs }) {
     // CTA mints self-redirect to the page at mint time, stamping view
     // signals BEFORE any real delivery — for that source only a view at or
     // after the delivery anchor counts as an opened send (GH codex P2).
-    const isCtaMint = String(row.source || '') === 'service_report_cta';
+    // plan_restart shares the publish-without-delivery shape (C4): its
+    // self-serve redirect stamps view signals at mint too.
+    const isCtaMint = ['service_report_cta', 'plan_restart'].includes(String(row.source || ''));
     const viewCandidates = [ms(row.viewed_at), ms(row.last_viewed_at)]
       .filter((ts) => ts != null && (!isCtaMint || ts >= sentAt));
     const firstView = viewCandidates.length ? Math.min(...viewCandidates) : null;
@@ -257,7 +260,7 @@ function sentAnchorMs(row) {
   // deliveryState.firstDeliveredAt — the one witness a resend can't move
   // (GH codex P1: an unopened resend must keep its original cohort age).
   const firstDelivered = ms(data?.deliveryState?.firstDeliveredAt);
-  if (String(row.source || '') === 'service_report_cta') return firstDelivered;
+  if (['service_report_cta', 'plan_restart'].includes(String(row.source || ''))) return firstDelivered;
   const candidates = [firstDelivered, ms(row.sent_at), ms(row.viewed_at), ms(row.accepted_at)]
     .filter((ts) => ts != null);
   return candidates.length ? Math.min(...candidates) : null;
@@ -272,6 +275,24 @@ const SLICE_COLUMNS = [
   'lead_source', 'source', 'waveguard_tier', 'disposition', 'disposition_at',
   'decline_reason', 'service_interest', 'notes',
 ];
+
+// Estimate ids that carry the customer's "still deciding" signal. Best-effort:
+// an activity_log read failure degrades the card to "no signals", never to a
+// failed slice build.
+async function stillDecidingEstimateIds(estimateIds) {
+  const ids = (estimateIds || []).map(String).filter(Boolean);
+  if (!ids.length) return new Set();
+  try {
+    const marks = await db('activity_log')
+      .whereIn('estimate_id', ids)
+      .where({ action: 'estimate_customer_still_deciding' })
+      .select('estimate_id');
+    return new Set((Array.isArray(marks) ? marks : []).map((m) => String(m?.estimate_id || '')).filter(Boolean));
+  } catch (err) {
+    logger.warn(`[estimate-winloss] still-deciding read skipped: ${err.message}`);
+    return new Set();
+  }
+}
 
 async function winLossSlices({ days = 90 } = {}) {
   const cutoffMs = Date.now() - days * 86400000;
@@ -346,6 +367,12 @@ async function winLossSlices({ days = 90 } = {}) {
   // WaveGuard tier. Every input is a persisted column or the persisted
   // estimate_data — never today's price constants.
   const byDispositionCount = new Map();
+  // "Still deciding" — the soft-exit sheet's one-tap signal (activity_log,
+  // never an estimate write). Joined here so an expired estimate whose
+  // customer said "still deciding" can be told apart from one that went
+  // silent (GH codex P2 on #3706). Read AFTER both estimate reads.
+  const stillDecidingIds = await stillDecidingEstimateIds(rows.map((r) => r.id));
+  const stillDeciding = { signaled: 0, wonAfter: 0, lostAfter: 0, expiredViewedAfter: 0 };
   const byServiceLine = new Map();
   const byLeadSource = new Map();
   const byWaveguardTier = new Map();
@@ -363,6 +390,14 @@ async function winLossSlices({ days = 90 } = {}) {
 
     const disposition = isWon ? null : effectiveDisposition(row);
     if (disposition) byDispositionCount.set(disposition, (byDispositionCount.get(disposition) || 0) + 1);
+    if (stillDecidingIds.has(String(row.id))) {
+      stillDeciding.signaled += 1;
+      // Only a REAL loss counts as lost — converted-elsewhere and dead
+      // dispositions leave every loss metric here too (GH codex r3 P2).
+      if (isWon) stillDeciding.wonAfter += 1;
+      else if (disposition && !excludedFromRates(disposition)) stillDeciding.lostAfter += 1;
+      if (disposition === 'expired_viewed') stillDeciding.expiredViewedAfter += 1;
+    }
     // Archived rows still drop from every RATE symmetrically (archived
     // losses and wins leave together — same reasoning as PipelineAnalytics'
     // activeRows), but their classification above stays in "why we lose":
@@ -476,6 +511,7 @@ async function winLossSlices({ days = 90 } = {}) {
     byPriceBand,
     recurringBandsByFlag,
     byDisposition,
+    stillDeciding,
     byServiceLine: keyedToList(byServiceLine, (k) => SERVICE_LINE_LABELS[k] || k),
     byLeadSource: keyedToList(byLeadSource),
     byWaveguardTier: keyedToList(byWaveguardTier, (k) => (k === 'none' ? 'No bundle' : k.charAt(0).toUpperCase() + k.slice(1))),

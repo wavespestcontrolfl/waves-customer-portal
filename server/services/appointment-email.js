@@ -378,7 +378,7 @@ async function technicianFirstName(scheduledServiceId) {
 }
 
 // kind: '72h' | '24h'
-async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey } = {}) {
+async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey, cardHoldPolicyNote: cardHoldNoteOverride = null } = {}) {
   const apptTime = toDate(appointmentTime);
   const techName = await technicianFirstName(scheduledServiceId);
   const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
@@ -390,9 +390,16 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
   // '' for non-card-hold bookings; the template's callout block renders
   // nothing for an empty variable. Lazy require avoids a load cycle.
   let cardHoldPolicyNote = '';
-  try {
-    cardHoldPolicyNote = await require('./estimate-card-holds').cardHoldReminderNote(scheduledServiceId);
-  } catch { /* best-effort — the reminder must never fail on the disclosure */ }
+  // A grouped reminder passes the AGGREGATED note across every visit
+  // member (GH codex r2 P1) — a non-held claim owner must not drop a held
+  // sibling's disclosure. Null (the default) keeps the per-row resolve.
+  if (cardHoldNoteOverride != null) {
+    cardHoldPolicyNote = cardHoldNoteOverride;
+  } else {
+    try {
+      cardHoldPolicyNote = await require('./estimate-card-holds').cardHoldReminderNote(scheduledServiceId);
+    } catch { /* best-effort — the reminder must never fail on the disclosure */ }
+  }
   // Empty reschedule_url hides the template's "Reschedule appointment" CTA
   // block (renderBlocks skips a cta with no href) — never a broken button.
   const payload = is72

@@ -198,7 +198,7 @@ export function MarginCalculator() {
             letterSpacing: "0.02em",
           }}
         >
-          Margin Calculator
+          Margin calculator
         </h2>{" "}
         <button
           onClick={fetchMargins}
@@ -526,7 +526,7 @@ function SpecServicesPanel() {
       key: "rodentGuaranteeCombo",
       fn: "calculateRodentGuaranteeCombo",
       name: "Rodent Guarantee Combo",
-      desc: "Exclusion + Bait Stations + 12/24-mo guarantee. 10% bundle discount, 15–25% guarantee premium. Min $695 / $995. Auto-applies postExclusion modifier on bait stations (~28% off standalone, $55/mo floor).",
+      desc: "Exclusion + Bait Stations + 12/24-mo guarantee. No bundle discount on the bait component, 15–25% guarantee premium. Min $695 / $995. Bait stations price at the standard footprint bracket (per quarterly application, station allowance by home size) — the post-exclusion modifier was retired 2026-08-29.",
     },
   ];
   return (
@@ -559,7 +559,7 @@ function SpecServicesPanel() {
             letterSpacing: "0.02em",
           }}
         >
-          Missing-Services Pricing Spec
+          Missing-services pricing spec
         </h2>{" "}
         <span
           style={{
@@ -745,7 +745,7 @@ function PestCalibrationPanel() {
               fontFamily: ROBOTO,
             }}
           >
-            Pest Production Calibration
+            Pest production calibration
           </h2>{" "}
           <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>
             Shadow estimator minutes compared with completed job timers from
@@ -1035,8 +1035,8 @@ function PestCalibrationPanel() {
         }}
       >
         {" "}
-        <CalibrationGroup title="By Pool Cage Size" rows={poolRows} />{" "}
-        <CalibrationGroup title="By Lot Band" rows={lotRows} />{" "}
+        <CalibrationGroup title="By pool cage size" rows={poolRows} />{" "}
+        <CalibrationGroup title="By lot band" rows={lotRows} />{" "}
       </div>
       {reviewQueue.length > 0 && (
         <div

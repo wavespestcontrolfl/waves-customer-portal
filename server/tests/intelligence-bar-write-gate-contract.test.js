@@ -52,17 +52,27 @@ const TOOLS_DIR = path.join(__dirname, '..', 'services', 'intelligence-bar');
 // gate off so the suite does not depend on the ambient environment; the
 // calibrated model is covered by drive-time-calibration.test.js.
 const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
-beforeAll(() => { delete process.env.GATE_DRIVE_TIME_CALIBRATION; });
+// cancel_plan (C3) is dark behind GATE_CANCEL_FLOW_V2 — its unconfirmed
+// call 404s (a tool error, not a preview) with the gate off, so pin it ON
+// here: the contract under test is "no mutation without confirmed", which
+// only the live path can prove.
+const ORIGINAL_CANCEL_GATE = process.env.GATE_CANCEL_FLOW_V2;
+beforeAll(() => {
+  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+});
 afterAll(() => {
   if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
+  if (ORIGINAL_CANCEL_GATE === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+  else process.env.GATE_CANCEL_FLOW_V2 = ORIGINAL_CANCEL_GATE;
 });
 
 
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -116,6 +126,7 @@ const WRITE_TWO_STEP = [
   'adjust_stock',
   'create_restock_request',
   'update_restock_request',
+  'cancel_plan',
 ];
 
 // Writes blocked in the /query tool loop and executable only via /execute
@@ -245,6 +256,8 @@ const READ_ONLY = [
   'get_apify_status', 'get_social_channel_status', 'get_managed_agent_runs',
   'get_scheduled_job_health',
   'search_call_research',
+  // closeout-tools.js (#3647 follow-up): read-only surface over closeout-status.
+  'get_closeout_status', 'list_open_closeouts',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {
@@ -475,6 +488,17 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['procurement-tools', 'executeProcurementTool', 'adjust_stock', { product_name: 'Bifen', movement_type: 'restock', quantity: 32 }],
     ['procurement-tools', 'executeProcurementTool', 'create_restock_request', { product_name: 'Bifen', quantity: 128, unit: 'fl_oz' }],
     ['procurement-tools', 'executeProcurementTool', 'update_restock_request', { request_id: 'req-1', action: 'receive' }],
+    // cancel_plan's preview needs the customer to EXIST (create_customer's
+    // duplicate check needs it to be missing), so it carries its own seed —
+    // merged on top of SEED for this call only.
+    ['tools', 'executeTool', 'cancel_plan', { customer_id: '00000000-0000-0000-0000-00000000c001' }, {
+      customers: [{
+        id: '00000000-0000-0000-0000-00000000c001', first_name: 'Pat', last_name: 'Tester',
+        phone: '9415550100', email: 'pat@example.com', active: true, pipeline_stage: 'active_customer',
+        waveguard_tier: 'Silver', monthly_rate: '89.00', billing_mode: 'monthly_membership',
+        autopay_enabled: true, next_charge_date: null, termite_stations_rented: false,
+      }],
+    }],
   ];
 
   test('harness sanity: the recording db actually records mutations', async () => {
@@ -487,8 +511,10 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     expect(UNCONFIRMED_CALLS.map(c => c[2]).sort()).toEqual([...WRITE_TWO_STEP].sort());
   });
 
-  test.each(UNCONFIRMED_CALLS)('%s %s: unconfirmed %s reaches the gate, returns a preview, mutates nothing', async (mod, exec, toolName, input) => {
-    const { db, mutations } = makeRecordingDb(SEED);
+  // Every row is padded to the 5-arg shape: jest-each treats a trailing
+  // declared parameter with no row value as a done() callback.
+  test.each(UNCONFIRMED_CALLS.map((row) => (row.length === 5 ? row : [...row, null])))('%s %s: unconfirmed %s reaches the gate, returns a preview, mutates nothing', async (mod, exec, toolName, input, extraSeed) => {
+    const { db, mutations } = makeRecordingDb({ ...SEED, ...(extraSeed || {}) });
     dbMock.mockImplementation(db);
     dbMock.raw.mockImplementation(db.raw);
     dbMock.transaction.mockImplementation(db.transaction);

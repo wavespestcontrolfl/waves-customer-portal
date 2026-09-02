@@ -774,7 +774,7 @@ function ProtocolMixCard({
         <div className="px-4 py-3 border-b border-hairline border-zinc-200 bg-zinc-50">
           {" "}
           <div className="text-13 font-medium text-zinc-900">
-            Mixing Order
+            Mixing order
           </div>{" "}
         </div>{" "}
         <div className="p-4 space-y-2">
@@ -828,7 +828,7 @@ function ProductLabelsCard({ items }) {
       <div className="px-4 py-3 border-b border-hairline border-zinc-200 bg-zinc-50">
         {" "}
         <div className="text-13 font-medium text-zinc-900">
-          Product Labels
+          Product labels
         </div>{" "}
         <div className="text-11 text-ink-tertiary mt-0.5">
           Label and SDS documents for every product in this visit

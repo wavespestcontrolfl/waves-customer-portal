@@ -133,7 +133,33 @@ router.get('/recordings', async (req, res, next) => {
 router.post('/process/:callSid', async (req, res, next) => {
   try {
     const force = req.query.force === 'true' || req.body?.force === true;
-    const result = await CallRecordingProcessor.processRecording(req.params.callSid, { force });
+    // `operator` = a human pressed Process, which selects the short quiet
+    // window for a stalled claim. Distinct from `force`, which means "re-run
+    // a call that already finished" and carries its own extraction policy —
+    // conflating them made manual first runs behave like reprocesses.
+    const operator = req.query.operator === 'true' || req.body?.operator === true || force;
+    const result = await CallRecordingProcessor.processRecording(req.params.callSid, { force, operator });
+    // A blocked claim is not a completed run — surface it as a conflict so
+    // no client can render it as success (the owner's manual Process tap
+    // during the 2026-08-31 wedge got a 200 and a success toast while the
+    // call sat unprocessed). Other skip reasons (e.g. a rejected
+    // transcription) completed real work and stay 200.
+    if (result?.skipped && result?.reason === 'already_processing') {
+      // The retry window differs by caller and only the SERVER knows it: a
+      // forced run (the reprocess buttons) takes over a claim 3 quiet minutes
+      // after it stops beating, an unforced one waits the conservative 10.
+      // Telling every operator "ten minutes" cost about seven of them on a
+      // hot call in the exact recovery flow this route exists for (codex P2).
+      // The processor inspected the claim we are blocked behind and knows
+      // which window applies — a claim with no beat of its own (a legacy row,
+      // or a pod mid-rolling-deploy) keeps the conservative one whatever the
+      // caller asked for.
+      const quietMinutes = Number(result.retryAfterMinutes) || 10;
+      return res.status(409).json({
+        ...result,
+        error: `Another pass is still working this call. If it has stalled, try again about ${quietMinutes} minutes after it goes quiet.`,
+      });
+    }
     res.json(result);
   } catch (err) { next(err); }
 });

@@ -584,6 +584,11 @@ function isSchedulableOneTimeEstimateLine(line) {
   const text = `${service} ${label} ${detail}`;
 
   if (service === 'waveguard_setup') return false;
+  // Billing-only rows: the rodent bait-station setup fee is invoiced, never
+  // visited — the recurring rodent_bait row is the schedulable program. Left
+  // in, serviceCatalogMatch keys "bait station" to the quarterly bait
+  // program and Customer 360 could schedule it twice (codex #3591 r8).
+  if (service === 'rodent_bait_setup') return false;
   if (text.includes('membership_setup_fee')) return false;
   return !(text.includes('waveguard') && (text.includes('setup') || text.includes('membership')));
 }
@@ -716,7 +721,10 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // of the canonical monthly-billed key set. Resolved key covers
         // name-only legacy rows (r3).
         if (resolvedServiceKey.startsWith('commercial_')) return true;
-        const { MONTHLY_BILLED_SERVICE_KEYS } = require('./public-quote')._internals;
+        const { MONTHLY_BILLED_SERVICE_KEYS, rodentBaitLineBillsMonthly } = require('./public-quote')._internals;
+        // Legacy rodent bait plans bill monthly; 2026-08-29+ rows carry the
+        // perApplicationBilled marker and bill per application instead.
+        if (rodentBaitLineBillsMonthly({ ...line, service: resolvedServiceKey })) return true;
         return MONTHLY_BILLED_SERVICE_KEYS.has(resolvedServiceKey);
       } catch { return false; }
     })()
@@ -775,12 +783,19 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // canonical helper would fall back to the LIST rate here (its
         // discountedAnnual > 0 test). Refuse: the net totals tell the truth.
         if (acceptedAnnual === 0) return {};
+        // The rodent billing-unit marker must ride the adapter objects
+        // (codex #3591 r5 P1): rodentBaitLineBillsMonthly inside the
+        // canonical helper reads it off the LINE it receives — a fresh
+        // object without it reclassifies a new per-application rodent row
+        // as legacy monthly and returns no provenance.
+        const billingMarker = line?.perApplicationBilled === true ? { perApplicationBilled: true } : {};
         const pa = perApplicationForLine(discountedPerApp != null
           ? {
             service: resolvedServiceKey,
             perApp: discountedPerApp,
             ...cadenceFields,
             annualAfterDiscount: acceptedAnnual,
+            ...billingMarker,
           }
           : {
             service: resolvedServiceKey,
@@ -790,6 +805,7 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
             annualAfterDiscount: acceptedAnnual,
             finalAnnual: line?.finalAnnual,
             annual: line?.annual ?? line?.ann,
+            ...billingMarker,
           });
         return pa?.amount > 0 ? { perApplicationPrice: pa.amount } : {};
       } catch { return {}; }
@@ -1433,6 +1449,9 @@ function mapAnnualPrepayTerm(term) {
     prepayInvoiceStatus: term.prepay_invoice_status,
     prepayInvoiceTotal: term.prepay_invoice_total != null ? Number(term.prepay_invoice_total) : null,
     prepayInvoiceSubtotal: term.prepay_invoice_subtotal != null ? Number(term.prepay_invoice_subtotal) : null,
+    // One-time setup share inside that subtotal (immutable claim ledger) —
+    // renewal defaults subtract it (codex #3591 r72 P1).
+    prepaySetupFeeAmount: term.prepay_setup_fee_amount != null ? Number(term.prepay_setup_fee_amount) : null,
     planLabel: term.plan_label,
     monthlyRate: term.monthly_rate != null ? Number(term.monthly_rate) : null,
     prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
@@ -2387,6 +2406,41 @@ function propertyFieldOverLimit(body) {
 // requireAdmin: returns every active property address on the account — a
 // per-customer assignment must not reveal sibling addresses, and no tech
 // surface calls this (the property writes below were already admin-only).
+// Canonical WaveGuard-qualifying service families on an account (the same
+// loader estimate conversion feeds into priorQualifyingServices). The admin
+// estimator's CLIENT_FALLBACK engine reads this to decide the rodent
+// bait-station setup waiver from an OTHER qualifying family, never from the
+// account-level tier/rate (codex #3591 r13 P1: a rodent-only Bronze account
+// still owes the setup on a second rodent quote, exactly as generateEstimate
+// decides).
+router.get('/:id/waveguard-qualifying-services', requireAdmin, async (req, res, next) => {
+  try {
+    const { loadExistingQualifyingServiceKeys, resolveCustomerQualifyingEvidence } = require('../services/waveguard-existing-services');
+    // ?street= scopes the TIER evidence to the quoted address through the
+    // SAME resolver the authoritative save uses (codex #3591 r52/r54 local
+    // P1 — raw strings never reach the normalized street comparison), so
+    // the preview counts exactly the families the save will. Without a
+    // street the account-wide list serves as before (setup-waiver evidence).
+    const street = cleanOptionalText(req.query?.street) || null;
+    if (street) {
+      const evidence = await resolveCustomerQualifyingEvidence(db, {
+        customerId: req.params.id,
+        address: street,
+        logger,
+      });
+      return res.json({ keys: Array.isArray(evidence?.tierKeys) ? evidence.tierKeys : [] });
+    }
+    // No street: the client consumes this as ACCOUNT-WIDE SETUP-WAIVER
+    // evidence, so it must read like the waiver everywhere else (codex
+    // #3591 r77 P1): planGate: false (qualifying families, never the
+    // membership stamp — an unstamped qualifying row still waives) and
+    // strict (a failed read 500s retryably instead of previewing a $99 the
+    // authoritative save waives).
+    const keys = await loadExistingQualifyingServiceKeys(db, req.params.id, { strict: true, planGate: false });
+    res.json({ keys: Array.isArray(keys) ? keys : [] });
+  } catch (err) { next(err); }
+});
+
 router.get('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
     const customerProperties = require('../services/customer-properties');
@@ -2942,6 +2996,10 @@ router.get('/:id', async (req, res, next) => {
       .then((exists) => exists
         ? db('annual_prepay_terms as apt')
           .leftJoin('invoices as inv', 'apt.prepay_invoice_id', 'inv.id')
+          // The immutable one-time setup share riding the prepay invoice
+          // (codex #3591 r72 P1): renewals default from the pre-tax
+          // subtotal, and the $99 setup inside it is NOT renewal coverage.
+          .leftJoin('setup_fee_claims as sfc', 'apt.prepay_invoice_id', 'sfc.invoice_id')
           .leftJoin('scheduled_services as ss', 'apt.last_scheduled_service_id', 'ss.id')
           .where('apt.customer_id', c.id)
           .select(
@@ -2950,6 +3008,7 @@ router.get('/:id', async (req, res, next) => {
             'inv.status as prepay_invoice_status',
             'inv.total as prepay_invoice_total',
             'inv.subtotal as prepay_invoice_subtotal',
+            'sfc.amount as prepay_setup_fee_amount',
             'ss.service_type as last_scheduled_service_type',
           )
           .orderBy('apt.term_end', 'desc')
@@ -3244,6 +3303,9 @@ router.get('/:id', async (req, res, next) => {
         bankName: contract.bank_name,
       })),
       annualPrepayTerms: (annualPrepayTerms || []).map(mapAnnualPrepayTerm),
+      // Cancel-flow C3: the Customer 360 "Cancel plan…" control renders only
+      // while GATE_CANCEL_FLOW_V2 is on (its endpoints 404 otherwise).
+      cancelPlanEnabled: require('../services/cancellation-resolution').cancelFlowV2Enabled(),
       // Prefill hint for the "Record collected annual prepay" modal — which
       // estimate this prepay most credibly comes from and the amount its own
       // accept-as-prepay lane would invoice. Suggestion-only; never blocks
@@ -4423,6 +4485,29 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     const parsedAmount = parseAnnualPrepayAmount(req.body?.amount);
     if (parsedAmount.error) return res.status(400).json({ error: parsedAmount.error });
     const amount = parsedAmount.amount;
+    // Optional one-time setup (rodent bait station setup) billed on the same
+    // invoice as its own line. Relayed from the prepay-on-book preview's
+    // mintPayload; excluded from the term's coverage basis below.
+    // Whole cents with the SAME tolerance the pricing-config validator
+    // applies (79.1 * 100 is 7909.999…; strict equality would 400 a fee the
+    // preview legitimately offered — codex #3591 r29 P2), normalized to
+    // exact cents.
+    const setupFeeRaw = req.body?.setupFeeAmount;
+    const setupFeeInput = setupFeeRaw === undefined || setupFeeRaw === null ? 0 : Number(setupFeeRaw);
+    if (!Number.isFinite(setupFeeInput) || setupFeeInput < 0
+      || Math.abs(setupFeeInput * 100 - Math.round(setupFeeInput * 100)) > 1e-6) {
+      return res.status(400).json({ error: 'setupFeeAmount must be a non-negative amount in whole cents' });
+    }
+    const setupFeeAmount = Math.round(setupFeeInput * 100) / 100;
+    // The committed series the setup belongs to (prepay-on-book relays the
+    // preview's mintPayload). Required whenever a setup is billed — the mint
+    // re-derives the fee from this row and ledgers the claim against the
+    // prepay so a void/refund restores it (codex #3591 r36 P1).
+    // Absent ONLY for a NEW rodent prepay with no series root yet (codex
+    // #3591 r41 P1) — the mint then re-derives the obligation from the
+    // coverage family under its transaction (retireCoverageOnlySetupClaim)
+    // and ledgers the claim anchor-less; any other omission drifts → 409.
+    const setupScheduledServiceId = cleanOptionalText(req.body?.scheduledServiceId) || null;
 
     const parsedVisitCount = parseAnnualPrepayVisitCount(req.body?.visitCount ?? 4);
     if (parsedVisitCount.error) return res.status(400).json({ error: parsedVisitCount.error });
@@ -4431,6 +4516,37 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     const coverageCadence = cleanOptionalText(req.body?.coverageCadence || req.body?.cadence) || null;
     const coverageServiceType = cleanOptionalText(req.body?.serviceType) || 'Quarterly Pest Control';
     const planLabel = cleanOptionalText(req.body?.planLabel) || `${coverageServiceType} Annual Prepay`;
+    // Omission is not a waiver (codex #3591 r37 P1): whenever no setup is
+    // BILLED — including an anchor supplied with a zero/absent amount (codex
+    // #3591 r43 P2) — derive the setup a LIVE direct rodent series matching
+    // the coverage still owes and refuse (409, with the figure and anchor)
+    // rather than mint a prepaid year without it — the dialog re-submits
+    // with both. A lookup failure refuses retryably.
+    if (!(setupFeeAmount > 0)) {
+      let owed;
+      try {
+        owed = await require('../services/secure-appointment-plans')
+          .findDirectRodentSetupObligationForCoverage(db, { customerId: customer.id, coverageServiceType });
+      } catch (lookupErr) {
+        // Ambiguity is a permanent 409, not a retry (codex #3591 r67 P1):
+        // two owed series need the dialog to name one.
+        if (lookupErr.switchConflict) {
+          return res.status(409).json({ error: lookupErr.message, setupFeeRequired: true, ambiguousSetupSeries: lookupErr.ambiguousSetupSeries || null });
+        }
+        logger.warn(`[customers:annual-prepay] rodent setup obligation lookup failed for ${customer.id}: ${lookupErr.message}`);
+        return res.status(503).json({ error: 'Could not confirm whether this series owes a bait-station setup — retry in a moment.' });
+      }
+      if (owed) {
+        return res.status(409).json({
+          error: `This customer's ${coverageServiceType} series owes a $${owed.amount.toFixed(2)} bait-station setup (non-member) — it must ride the prepay invoice as its own line.`,
+          setupFeeRequired: true,
+          setupFeeAmount: owed.amount,
+          // null when no series exists yet — the dialog re-submits the
+          // amount alone and the mint derives from the coverage family.
+          scheduledServiceId: owed.anchorId ? String(owed.anchorId) : null,
+        });
+      }
+    }
 
     const activeTerm = await db('annual_prepay_terms')
       .where({ customer_id: customer.id })
@@ -4620,12 +4736,20 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         database: trx,
         customerId: customer.id,
         title: `${coverageServiceType} - Annual Prepay`,
-        lineItems: [{
-          description: `${coverageServiceType} - ${visitCount} prepaid application${visitCount === 1 ? '' : 's'}`,
-          quantity: 1,
-          unit_price: amount,
-          category: 'Annual prepay',
-        }],
+        lineItems: [
+          {
+            description: `${coverageServiceType} - ${visitCount} prepaid application${visitCount === 1 ? '' : 's'}`,
+            quantity: 1,
+            unit_price: amount,
+            category: 'Annual prepay',
+          },
+          ...(setupFeeAmount > 0 ? [{
+            description: 'Bait Station Setup — one-time setup fee',
+            quantity: 1,
+            unit_price: setupFeeAmount,
+            category: 'Setup fee',
+          }] : []),
+        ],
         notes: invoiceNotes,
         dueDate,
         ...(pendingCredit
@@ -4636,7 +4760,53 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       // invoices apply 0 and the ledger stays untouched). A mismatch means the
       // ledger moved under us — roll the whole mint back rather than leave a
       // credit line without dollar-for-dollar ledger backing.
+      // Server-trusted setup: re-derived from the persisted anchor (must be
+      // this customer's), ledgered against this prepay, and the series
+      // parent's per-application claim retired — the same service step the
+      // on-site switch and the secure-plan prepay run (codex #3591 r36 P1).
+      if (!(setupFeeAmount > 0)) {
+        // TOCTOU guard (codex #3591 r48 local P0): the zero/omitted-setup
+        // derivation ran BEFORE this transaction — a refund restoring a
+        // claim, or the account losing its waiving family, in the gap would
+        // mint the prepaid year without the required setup. Re-derive under
+        // the mint and abort on drift (409, like the positive path).
+        const owedNow = await require('../services/secure-appointment-plans')
+          .findDirectRodentSetupObligationForCoverage(trx, { customerId: customer.id, coverageServiceType });
+        if (owedNow) {
+          const driftErr = new Error(`This customer's ${coverageServiceType} series now owes a $${owedNow.amount.toFixed(2)} bait-station setup — refresh and retry so it rides the prepay invoice.`);
+          driftErr.switchConflict = true;
+          throw driftErr;
+        }
+      }
+      if (setupFeeAmount > 0) {
+        const plans = require('../services/secure-appointment-plans');
+        if (setupScheduledServiceId) {
+          await plans.retirePrepayOnBookSetupClaim(trx, {
+            customerId: customer.id,
+            scheduledServiceId: setupScheduledServiceId,
+            invoiceId: invoice.id,
+            amount: setupFeeAmount,
+          });
+        } else {
+          // No root yet (new rodent prepay, codex #3591 r41 P1): derive from
+          // the coverage family under this transaction; ledgered anchor-less.
+          await plans.retireCoverageOnlySetupClaim(trx, {
+            customerId: customer.id,
+            coverageServiceType,
+            invoiceId: invoice.id,
+            amount: setupFeeAmount,
+          });
+        }
+      }
       appliedDepositCredit = Number(invoice?.applied_deposit_credit) || 0;
+      // The setup line's share of the GROSS year (invoice.total is already
+      // net of the deposit credit create() applied — a net ratio undersizes
+      // the share and, on a fully-settled invoice, folds the whole setup
+      // into coverage; codex #3591 r29 P1). Tax-proportional.
+      const grossInvoiceTotal = Number(invoice.total) + appliedDepositCredit;
+      const setupShareOfTotal = setupFeeAmount > 0 && (amount + setupFeeAmount) > 0
+        ? Math.round((grossInvoiceTotal * (setupFeeAmount / (amount + setupFeeAmount))) * 100) / 100
+        : 0;
       // A requested credit that create() DECLINED to apply (customer flipped to
       // payer-billed between preview and submit — create() zeroes deposit
       // credit on payer invoices) must NOT mint the gross invoice the operator
@@ -4725,7 +4895,9 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         // estimate-accept path: the deposit is prior payment toward the same
         // year, so the net invoice total alone would understate the plan by
         // the deposit.
-        prepayAmount: Math.round((Number(invoice.total) + appliedDepositCredit) * 100) / 100,
+        // Minus the setup line's share of the total (tax-proportional): the
+        // one-time setup is not coverage and must not be split across visits.
+        prepayAmount: Math.round((Number(invoice.total) + appliedDepositCredit - setupShareOfTotal) * 100) / 100,
         termStart,
         termEnd,
         coverageServiceType,
@@ -4824,6 +4996,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
     if (err && err.chargeInPersonPayerBlocked) return res.status(400).json({ error: err.message });
     if (err && err.depositCreditUnavailable) return res.status(409).json({ error: err.message });
+    if (err && err.switchConflict) return res.status(409).json({ error: err.message });
     next(err);
   }
 });
@@ -4858,6 +5031,42 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       return res.status(400).json({
         error: `method must be one of: ${Array.from(ANNUAL_PREPAY_PAYMENT_METHODS).join(', ')}`,
       });
+    }
+
+    // The recorded-collected lane carries the SAME setup lifecycle as the
+    // draft mint (codex #3591 r50 P1): a direct non-member rodent series'
+    // prepaid term suppresses completion billing, so the $99 must ride this
+    // paid invoice as its own line and be ledgered/retired — or it is
+    // silently lost. Omission is not a waiver: derive, refuse 409 with the
+    // figure + anchor, dialog re-submits.
+    const collectedSetupRaw = req.body?.setupFeeAmount;
+    const collectedSetupInput = collectedSetupRaw === undefined || collectedSetupRaw === null ? 0 : Number(collectedSetupRaw);
+    if (!Number.isFinite(collectedSetupInput) || collectedSetupInput < 0
+      || Math.abs(collectedSetupInput * 100 - Math.round(collectedSetupInput * 100)) > 1e-6) {
+      return res.status(400).json({ error: 'setupFeeAmount must be a non-negative amount in whole cents' });
+    }
+    const collectedSetupFee = Math.round(collectedSetupInput * 100) / 100;
+    const collectedSetupAnchor = cleanOptionalText(req.body?.scheduledServiceId) || null;
+    if (!(collectedSetupFee > 0)) {
+      let owed;
+      try {
+        owed = await require('../services/secure-appointment-plans')
+          .findDirectRodentSetupObligationForCoverage(db, { customerId: customer.id, coverageServiceType });
+      } catch (lookupErr) {
+        if (lookupErr.switchConflict) {
+          return res.status(409).json({ error: lookupErr.message, setupFeeRequired: true, ambiguousSetupSeries: lookupErr.ambiguousSetupSeries || null });
+        }
+        logger.warn(`[customers:annual-prepay] rodent setup obligation lookup failed for ${customer.id}: ${lookupErr.message}`);
+        return res.status(503).json({ error: 'Could not confirm whether this series owes a bait-station setup — retry in a moment.' });
+      }
+      if (owed) {
+        return res.status(409).json({
+          error: `This customer's ${coverageServiceType} series owes a $${owed.amount.toFixed(2)} bait-station setup (non-member) — the collected total must include it as its own line.`,
+          setupFeeRequired: true,
+          setupFeeAmount: owed.amount,
+          scheduledServiceId: owed.anchorId ? String(owed.anchorId) : null,
+        });
+      }
     }
 
     const activeTerm = await db('annual_prepay_terms')
@@ -4912,6 +5121,29 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         trx, customer.id, termStart, req.body?.allowOverlap === true,
         'Customer already has an active annual prepay term through',
       );
+      // Fee-free TOCTOU guard under the trx (same posture as the draft
+      // mint, codex #3591 r48/r50): a claim restored or a waiving family
+      // lost in the gap must abort, not mint coverage-only.
+      if (!(collectedSetupFee > 0)) {
+        const owedNow = await require('../services/secure-appointment-plans')
+          .findDirectRodentSetupObligationForCoverage(trx, { customerId: customer.id, coverageServiceType });
+        if (owedNow) {
+          const driftErr = new Error(`This customer's ${coverageServiceType} series now owes a $${owedNow.amount.toFixed(2)} bait-station setup — refresh and retry so it rides the recorded prepay.`);
+          driftErr.switchConflict = true;
+          throw driftErr;
+        }
+      }
+      // The entered amount is the COLLECTED TOTAL (codex #3591 r51 P1):
+      // the setup rides INSIDE it as its own line, never on top — coverage
+      // is the remainder.
+      const collectedCoverage = collectedSetupFee > 0
+        ? Math.round((amount - collectedSetupFee) * 100) / 100
+        : amount;
+      if (!(collectedCoverage > 0)) {
+        const coverageErr = new Error(`The collected total ($${amount.toFixed(2)}) must exceed the $${collectedSetupFee.toFixed(2)} bait-station setup it includes.`);
+        coverageErr.switchConflict = true;
+        throw coverageErr;
+      }
       const invoice = await InvoiceService.create({
         database: trx,
         customerId: customer.id,
@@ -4924,9 +5156,15 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         lineItems: [{
           description: `${coverageServiceType} - ${visitCount} prepaid application${visitCount === 1 ? '' : 's'}`,
           quantity: 1,
-          unit_price: amount,
+          unit_price: collectedCoverage,
           category: 'Annual prepay',
-        }],
+        },
+        ...(collectedSetupFee > 0 ? [{
+          description: 'Bait Station Setup — one-time setup fee',
+          quantity: 1,
+          unit_price: collectedSetupFee,
+          category: 'Setup fee',
+        }] : [])],
         notes: invoiceNotes,
         dueDate: termStart,
       });
@@ -4945,16 +5183,43 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         .returning('*');
       if (!updatedInvoice) throw new Error('Annual prepay invoice could not be marked paid');
 
+      // Server-trusted setup on the recorded lane too (codex #3591 r50 P1):
+      // re-derive from the anchor (or the coverage family when none exists
+      // yet), ledger the claim against this paid prepay, retire any stamp.
+      if (collectedSetupFee > 0) {
+        const plans = require('../services/secure-appointment-plans');
+        if (collectedSetupAnchor) {
+          await plans.retirePrepayOnBookSetupClaim(trx, {
+            customerId: customer.id,
+            scheduledServiceId: collectedSetupAnchor,
+            invoiceId: updatedInvoice.id,
+            amount: collectedSetupFee,
+          });
+        } else {
+          await plans.retireCoverageOnlySetupClaim(trx, {
+            customerId: customer.id,
+            coverageServiceType,
+            invoiceId: updatedInvoice.id,
+            amount: collectedSetupFee,
+          });
+        }
+      }
+      // The setup line's tax-proportional share of the PAID total never
+      // enters the coverage basis the term slices across visits.
+      const collectedSetupShare = collectedSetupFee > 0 && amount > 0
+        ? Math.round((Number(updatedInvoice.total) * (collectedSetupFee / amount)) * 100) / 100
+        : 0;
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
       const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: customer.id,
         prepayInvoiceId: updatedInvoice.id,
         planLabel,
-        monthlyRate: Number(customer.monthly_rate || 0) || Math.round((amount / 12) * 100) / 100,
+        monthlyRate: Number(customer.monthly_rate || 0) || Math.round((collectedCoverage / 12) * 100) / 100,
         // Match the recorded payment (inserted below as updatedInvoice.total) and
         // the coverage ledger: commercial invoices add county tax, so the pretax
-        // request amount would under-credit the prepaid visits.
-        prepayAmount: Number(updatedInvoice.total),
+        // request amount would under-credit the prepaid visits. Coverage
+        // money only — the setup share is carved out.
+        prepayAmount: Math.round((Number(updatedInvoice.total) - collectedSetupShare) * 100) / 100,
         termStart,
         termEnd,
         coverageServiceType,
@@ -5113,6 +5378,47 @@ router.post('/:id/cancel-signup', requireAdmin, async (req, res, next) => {
     res.json({ success: true, ...result });
   } catch (err) {
     if (err.blockers) return res.status(409).json({ error: err.message, blockers: err.blockers });
+    next(err);
+  }
+});
+
+// ─── Cancel plan (cancel-flow C3) ────────────────────────────────────────────
+// Admin-side cancellation on the SAME engine the customer portal uses
+// (services/admin-cancellation.js). Preview = before/after facts, no writes;
+// commit = service_requests row → processor → case → confirmations. Both
+// 404 while GATE_CANCEL_FLOW_V2 is off. The Intelligence Bar `cancel_plan`
+// tool drives the same service through its own confirm boundary.
+function cancelPlanErrorResponse(res, err) {
+  if (err && err.status && err.code) {
+    return res.status(err.status).json({ error: err.message, code: err.code });
+  }
+  return null;
+}
+
+router.post('/:id/cancel-plan/preview', requireAdmin, async (req, res, next) => {
+  try {
+    const AdminCancellation = require('../services/admin-cancellation');
+    // Body spreads FIRST — the path id is authoritative; a stray customerId
+    // in a reused payload must never re-point the preview or the cancel.
+    const preview = await AdminCancellation.previewCancelPlan({ ...(req.body || {}), customerId: req.params.id });
+    res.json(preview);
+  } catch (err) {
+    if (cancelPlanErrorResponse(res, err)) return;
+    next(err);
+  }
+});
+
+router.post('/:id/cancel-plan', requireAdmin, async (req, res, next) => {
+  try {
+    const AdminCancellation = require('../services/admin-cancellation');
+    const outcome = await AdminCancellation.commitCancelPlan({
+      ...(req.body || {}),
+      customerId: req.params.id,
+      actor: { type: 'admin', userId: req.technicianId || null },
+    });
+    res.json({ success: true, ...outcome });
+  } catch (err) {
+    if (cancelPlanErrorResponse(res, err)) return;
     next(err);
   }
 });

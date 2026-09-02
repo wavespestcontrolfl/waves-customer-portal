@@ -14,11 +14,14 @@ describe("AdminCommandHeader heading hierarchy", () => {
     expect(
       screen.getByRole("heading", { level: 1, name: "Services" }),
     ).toHaveClass("text-22");
-    // Sticky on all breakpoints; below md the offset clears the shell's
-    // fixed 52px + safe-area top bar.
+    // Sticky on all breakpoints; below md the shell bar clearance lives in
+    // .admin-main's padding-top, so the offset only cancels the 16px gutter
+    // (repeating the bar height here double-counts it — floating-header bug)
+    // while tracking --vv-offset-top with the fixed bar during iOS keyboard
+    // visual-viewport pans.
     expect(container.firstChild).toHaveClass(
       "sticky",
-      "top-[calc(52px_+_env(safe-area-inset-top))]",
+      "top-[calc(var(--vv-offset-top)_-_16px)]",
       "md:top-0",
     );
     expect(container.querySelector(".border-b")).not.toBeInTheDocument();

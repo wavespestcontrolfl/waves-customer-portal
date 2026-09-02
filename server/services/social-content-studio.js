@@ -202,6 +202,11 @@ const DEFAULT_COMPETITOR_PATTERNS = [
 const CHANNELS = ['facebook', 'instagram', 'linkedin', 'gbp'];
 const AUTONOMOUS_SOURCE = 'autonomous_studio';
 
+// Origin for the versus lane's fire counter (see selectAutonomousVersusPlan).
+// Any fixed January works — it only sets the rotation's phase, so changing it
+// reshuffles which card lands on which date and must not be done casually.
+const VERSUS_SEQ_EPOCH_YEAR = 2020;
+
 const SEASONAL_AUTONOMOUS_TOPICS = {
   1: [
     { topic: 'winter pest pressure indoors', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
@@ -278,6 +283,11 @@ const PEST_VERSUS_PAIRS = [
   {
     key: 'termite_swarmer_vs_winged_ant',
     service: 'termite',
+    // Swarm-season only (ET months): FL swarms run late winter through early
+    // summer — subterranean Feb–Apr, Formosan Apr–Jun, drywood tailing into
+    // June. "Wings on the windowsill" out of season reads stale; the other
+    // termite pair (mud tubes/pellets) is year-round evidence and stays ungated.
+    months: [2, 3, 4, 5, 6],
     left: { name: 'Termite Swarmer', points: ['Straight antennae', 'Both wing pairs equal length', 'Thick, straight waist'] },
     right: { name: 'Winged Ant', points: ['Bent antennae', 'Front wings longer than back', 'Pinched waist'] },
     verdict: 'Wings on the windowsill? Check the waist first.',
@@ -1203,11 +1213,37 @@ function buildVersusDrafts(pair, city) {
 // Pure — no DB — so a selection failure can never block the campaign fallback.
 function selectAutonomousVersusPlan(now = new Date()) {
   if (!AUTONOMOUS_FLAGS.includeVersus) return null;
-  const { month, day } = etParts(now); // Eastern business date (see selectAutonomousCampaign)
+  const { year, month, day } = etParts(now); // Eastern business date (see selectAutonomousCampaign)
   if (day % 4 !== 2) return null;
 
-  const pair = PEST_VERSUS_PAIRS[(month * 7 + day) % PEST_VERSUS_PAIRS.length];
-  const city = WAVES_LOCATIONS[day % WAVES_LOCATIONS.length]?.name || 'Sarasota';
+  // Both rotations advance from a +1-per-FIRE sequence number, never from the
+  // raw day: the lane only fires when day % 4 === 2, so indexing by day pinned
+  // the city to WAVES_LOCATIONS[2] (Sarasota) forever, and the day's stride of
+  // 4 against a 6-pair bank (gcd 2) made only half the pairs reachable in a
+  // given month — the same card published up to 3x/month.
+  //
+  // The count must be of days that actually fire, not a fixed 8 slots per
+  // month: fire days are 2/6/10/14/18/22/26/30, so every month has 8 except
+  // February (no 30th) with 7. Reserving a phantom February slot skipped a
+  // sequence value and broke the cycle — 2026-02-02 and 2026-05-02 both landed
+  // on chinch-bug|Sarasota, 23 fires apart instead of the full 24.
+  const monthsBefore = (year - VERSUS_SEQ_EPOCH_YEAR) * 12 + (month - 1);
+  const februariesBefore = (year - VERSUS_SEQ_EPOCH_YEAR) + (month > 2 ? 1 : 0);
+  const seq = monthsBefore * 8 - februariesBefore + Math.floor((day - 2) / 4);
+
+  // Index the FULL bank with a fixed modulus and let an out-of-season slot
+  // yield to the (already seasonal) campaign lane. Filtering the bank first
+  // would shrink the modulus and shift the survivors' indices at every season
+  // boundary, replaying the prior month's cards within days.
+  const pair = PEST_VERSUS_PAIRS[seq % PEST_VERSUS_PAIRS.length];
+  if (pair.months && !pair.months.includes(month)) return null;
+  // The city also advances every fire, phase-shifted one slot per full pair
+  // cycle: bare seq % 4 shares a factor of 2 with the 6-pair bank, so half
+  // the pair+city combinations could never occur and identical cards would
+  // recur every 12 fires; the shift walks all 24 combinations before any
+  // repeat.
+  const pairCycle = Math.floor(seq / PEST_VERSUS_PAIRS.length);
+  const city = WAVES_LOCATIONS[(seq + pairCycle) % WAVES_LOCATIONS.length]?.name || 'Sarasota';
   const topic = `${pair.left.name} vs ${pair.right.name}`;
   const drafts = buildVersusDrafts(pair, city);
   const channels = AUTONOMOUS_FLAGS.channels;
@@ -1234,6 +1270,26 @@ function selectAutonomousVersusPlan(now = new Date()) {
       fastestRisers: FASTEST_RISER_PROFILES.slice(0, 8),
     },
   };
+}
+
+// Approval-time counterpart of the selection months gate (same posture as
+// milestonePublishBlocker): a versus draft can sit in the queue past its
+// pair's season window, and publishing it then is exactly the stale
+// off-season content the gate exists to prevent. Null = publishable.
+//
+// Seasonality is resolved from the CANONICAL bank by key, never from the
+// stored pair: run.input is a JSON snapshot frozen at selection, so a draft
+// created before `months` existed carries a pair object without it, and
+// trusting that snapshot would wave an off-season card straight through.
+// Keying off the bank also means editing a pair's season applies to drafts
+// already queued.
+function versusPublishBlocker(input, now = new Date()) {
+  const key = input?.versusPair?.key;
+  if (!key) return null;
+  const months = PEST_VERSUS_PAIRS.find((p) => p.key === key)?.months;
+  if (!Array.isArray(months) || !months.length) return null;
+  if (months.includes(etParts(now).month)) return null;
+  return 'versus pair is out of season — reject this draft so the lane can regenerate';
 }
 
 // ── Review-count milestone lane ─────────────────────────────────────────────
@@ -2204,6 +2260,20 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     if (finalPreview.suggestedLink && !publishLink) {
       logger.warn(`[social-studio] link no longer live at publish time, publishing without it: ${finalPreview.suggestedLink}`);
     }
+
+    // Versus counterpart of the liveness gate, and the LAST await before the
+    // post: the season was checked at selection, and render, uploads and the
+    // link probe (5s timeout) all sit between there and here — a run selected
+    // in the last minutes of June must not post a swarmer card in July. Placed
+    // after the probe deliberately, so no network call can widen the window
+    // again. Same re-check the approval path applies to a queued draft.
+    if (isVersusRun) {
+      const reason = versusPublishBlocker(plan);
+      if (reason) {
+        await updateAutonomousRun(run?.id, { status: 'failed', preview: finalPreview, skipReason: reason });
+        return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
+      }
+    }
     // The snapshot gates above reject cheaply; the locks close their TOCTOU —
     // the reconcile cannot stamp the source row (review runs) and the stats
     // sync cannot move the fleet count (milestone runs) between here and the post.
@@ -2775,6 +2845,14 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     if (preview.suggestedLink && !approvedLink) {
       logger.warn(`[social-studio] approval link no longer live, publishing without it: ${preview.suggestedLink}`);
     }
+    // A season-gated versus draft (e.g. termite swarmers, Feb–Jun) must not
+    // publish once its window has passed. Sits AFTER the link probe for the
+    // same reason as the direct path's copy: an approval landing seconds
+    // before ET midnight would otherwise clear the gate in June and post in
+    // July while the probe (5s timeout) ran. Keep this the last await-free
+    // gate before the publish call.
+    const versusSeasonBlock = versusPublishBlocker(input);
+    if (versusSeasonBlock) return { ok: false, status: 409, error: versusSeasonBlock };
     const withPublishLock = (fn) => (input.milestone
       ? publishWithFleetStatsLease(input, fn, run.id)
       : publishWithReviewLivenessLock(sourceReviewId, fn, { rejectConsumed: true, allowConsumedByRunId: run.id }));
@@ -3446,6 +3524,7 @@ module.exports = {
   buildVersusCardInput,
   buildVersusDrafts,
   selectAutonomousVersusPlan,
+  versusPublishBlocker,
   MILESTONE_WINDOW,
   buildMilestoneCardInput,
   buildMilestoneDrafts,

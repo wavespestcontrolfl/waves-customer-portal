@@ -83,7 +83,7 @@ const NotificationService = {
   // `bell` (admin recipients only) is an explicit site-level policy tag:
   // true always rings, false never rings — see notification-bell-policy.js.
   // It only has effect while GATE_ADMIN_BELL_POLICY is on.
-  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, connection = db }) {
+  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, bellDefault, connection = db }) {
     try {
       // Demo/internal test accounts (App Store review account) must not ring
       // the admin bell — their bounce alerts and junk service requests are
@@ -117,7 +117,7 @@ const NotificationService = {
             const allowed = await bellPolicy.bellAllowed({
               category,
               triggerKey: metadata?.triggerKey || null,
-              options: { bell },
+              options: { bell, bellDefault },
             });
             if (!allowed) {
               // Category + triggerKey only — titles/bodies carry customer
@@ -164,19 +164,48 @@ const NotificationService = {
     // both recipient types share one mechanism; no dedupeKey = unchanged
     // behavior for every existing caller. Fail closed: an unprovably-new
     // event skips the bell rather than risking a duplicate.
-    const { dedupeKey, ...createOpts } = opts;
+    // refreshOnDedupe (opt-in): when the keyed bell already exists and this
+    // emission's CONTENT differs (a retried run whose failure set changed),
+    // rewrite the standing row's title/body/metadata and surface it unread
+    // again — the office must never keep reading an obsolete error list
+    // while the response says the alert has the details. Identical content
+    // stays a plain dedupe (no re-bell).
+    // dedupeWindowMs (optional, with dedupeKey): a ROLLING window instead of
+    // forever — the key dedupes only against rows younger than the window,
+    // so a recurring signal (an estimate re-opened again tomorrow) can ring
+    // again once the window passes while two opens inside it contend on the
+    // same stable lock. One mechanism for every admin emitter (rule 15).
+    const { dedupeKey, dedupeWindowMs, refreshOnDedupe = false, ...createOpts } = opts;
     if (!dedupeKey) {
       return this.create({ recipientType: 'admin', category, title, body, ...createOpts });
     }
+    const windowMs = Number(dedupeWindowMs);
     const metadata = { ...(createOpts.metadata || {}), dedupeKey };
     try {
       const persisted = await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
-        const existing = await trx('notifications')
+        let existingQuery = trx('notifications')
           .where({ recipient_type: 'admin' })
-          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-          .first();
-        if (existing) return { notification: existing, deduped: true };
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]);
+        if (Number.isFinite(windowMs) && windowMs > 0) {
+          existingQuery = existingQuery.where('created_at', '>', trx.raw("NOW() - (? * interval '1 millisecond')", [Math.round(windowMs)]));
+        }
+        const existing = await existingQuery.first();
+        if (existing) {
+          // Compared and stored in create()'s admin form (emoji-stripped),
+          // or an emoji title would read as "changed" on every emission.
+          const nextTitle = stripEmoji(title) || title;
+          const nextBody = stripEmoji(body) || null;
+          if (refreshOnDedupe && (existing.title !== nextTitle || existing.body !== nextBody)) {
+            const existingMeta = typeof existing.metadata === 'string'
+              ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
+              : (existing.metadata || {});
+            const refreshed = { title: nextTitle, body: nextBody, metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
+            await trx('notifications').where({ id: existing.id }).update(refreshed);
+            return { notification: { ...existing, ...refreshed, metadata: { ...existingMeta, ...metadata } }, deduped: true, refreshed: true };
+          }
+          return { notification: existing, deduped: true };
+        }
         const created = await this.create({
           recipientType: 'admin', category, title, body, ...createOpts, metadata, connection: trx,
         });
@@ -187,7 +216,7 @@ const NotificationService = {
         if (!created) throw new Error('admin notification insert failed');
         return { notification: created, deduped: false };
       });
-      return { ...persisted.notification, deduped: persisted.deduped };
+      return { ...persisted.notification, deduped: persisted.deduped, ...(persisted.refreshed ? { refreshed: true } : {}) };
     } catch (err) {
       logger.warn(`[notifications] Admin notification dedupe failed: ${err.message}`);
       return null;

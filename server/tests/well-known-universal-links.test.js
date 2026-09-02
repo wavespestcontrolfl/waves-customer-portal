@@ -1,7 +1,7 @@
 /**
  * /.well-known — universal-link association files (routes/well-known.js).
  *
- * Contract (mirrored in AGENTS.md's public-route inventory):
+ * Contract (mirrored in docs/public-route-contracts.md):
  *  - Both files 404 while GATE_UNIVERSAL_LINKS is off (dark by default).
  *  - AASA additionally 404s without a team ID; assetlinks.json additionally
  *    404s without ANDROID_ASSETLINKS_SHA256 — so the gate can flip before the

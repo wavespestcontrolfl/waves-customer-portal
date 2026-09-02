@@ -49,16 +49,20 @@
  *   - follow-up:           typedFollowupObligationForCompletedSource (frozen
  *                          verdict; live profile never retro-invents one).
  *
- * Known hazard, surfaced not hidden: requirements come from the LIVE catalog
- * (there is no frozen requirement snapshot — completion-tier-snapshot freezes
- * only tier/callback). Editing a catalog row's required_photo_count flips the
- * verdict on visits closed months ago. `requirements.asOf` says so.
+ * Requirements are FROZEN-FIRST: a completion writes the resolved catalog
+ * requirements into structured_notes.closeoutRequirements
+ * (service-closeout-requirements.js), and this reader replays that snapshot
+ * — later catalog edits/renames cannot flip a frozen visit's verdict, and a
+ * frozen verdict never depends on catalog availability. Records completed
+ * before the freeze shipped (and not backfilled) still read the LIVE
+ * catalog; `requirements.asOf` distinguishes the two
+ * ('frozen_at_completion' vs 'current_catalog').
  *
  * READ-ONLY. No writes, no Stripe, no notifications, no customer comms.
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { resolveCloseoutRequirementsForJobs } = require('./service-closeout-requirements');
+const { resolveCloseoutRequirementsForJobs, frozenCloseoutRequirements } = require('./service-closeout-requirements');
 const { completionStatusForService } = require('./completion-attempts');
 const {
   completionNewestLiveInvoiceLookup,
@@ -233,7 +237,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   const customerId = visit.customer_id || null;
 
   const [
-    customerProbe, recordProbe, attemptProbe, requirementsProbe, formsProbe, packetProbe, membersProbe,
+    customerProbe, recordProbe, attemptProbe, formsProbe, packetProbe, membersProbe,
   ] = await Promise.all([
     probe('customers', unavailable, () => (customerId
       ? knex('customers').where({ id: customerId }).first(
@@ -246,14 +250,6 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
       .orderBy('created_at', 'desc')
       .select()),
     probe('service_completion_attempts', unavailable, () => completionStatusForService({ serviceId }, knex)),
-    probe('services (closeout requirements)', unavailable, async () => {
-      const map = await resolveCloseoutRequirementsForJobs([{
-        id: serviceId,
-        service_id: visit.service_id || null,
-        service_type: visit.service_type || null,
-      }], { knex, strict: true });
-      return map.get(serviceId) || null;
-    }),
     probe('job_form_submissions', unavailable, () => knex('job_form_submissions')
       .where({ scheduled_service_id: serviceId })
       .whereNotNull('completed_at')
@@ -279,7 +275,26 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   inputs.records = recordProbe.error ? null : records;
   inputs.record = (inputs.attempt?.serviceRecordId && records.find((r) => r.id === inputs.attempt.serviceRecordId)) || records[0] || null;
   inputs.recordLookupFailed = Boolean(recordProbe.error);
-  inputs.requirements = requirementsProbe.value || null;
+  // FROZEN-FIRST requirements (sequenced after the record probe on purpose):
+  // a record carrying structured_notes.closeoutRequirements replays the
+  // verdict in force at completion — no `services` probe at all, so a frozen
+  // visit's status depends on neither later catalog edits/renames nor
+  // catalog availability. Pre-freeze records keep the live-catalog read,
+  // labeled by requirements.asOf.
+  const frozenRequirements = frozenCloseoutRequirements(inputs.record ? inputs.record.structured_notes : null);
+  if (frozenRequirements) {
+    inputs.requirements = frozenRequirements;
+  } else {
+    const requirementsProbe = await probe('services (closeout requirements)', unavailable, async () => {
+      const map = await resolveCloseoutRequirementsForJobs([{
+        id: serviceId,
+        service_id: visit.service_id || null,
+        service_type: visit.service_type || null,
+      }], { knex, strict: true });
+      return map.get(serviceId) || null;
+    });
+    inputs.requirements = requirementsProbe.value || null;
+  }
   inputs.completedFormCount = formsProbe.value ? toNumber(formsProbe.value.n) : (formsProbe.error ? null : 0);
   inputs.packets = Array.isArray(packetProbe.value) ? packetProbe.value : (packetProbe.error ? null : []);
   inputs.packetMemberIds = Array.isArray(membersProbe.value)
@@ -527,6 +542,16 @@ function deriveCloseoutFacts(inputs) {
   const notes = parseJsonObjectSafe(record?.structured_notes);
   const fieldFlags = parseJsonObjectSafe(record?.field_flags);
   const requirements = inputs.requirements || null;
+  // Requirement-driven facts name where the rule lives: 'frozen_record' when
+  // it replays the completion-time snapshot, 'catalog' when the live catalog
+  // still decides (pre-freeze records). Reasons stay stable either way.
+  const requirementsRuleSource = requirements?.frozen ? 'frozen_record' : 'catalog';
+  // A backfilled snapshot's own source is the generic backfill marker; the
+  // ORIGINAL verdict provenance rides in catalogSource (GH codex r2 P2) —
+  // low-confidence classification must see through the wrapper.
+  const underlyingRequirementsSource = requirements
+    ? (requirements.catalogSource || requirements.source)
+    : null;
   const visitCompleted = Boolean(visit && COMPLETED_VISIT_STATUSES.has(String(visit.status || '').toLowerCase()));
   const visitInactive = Boolean(visit && INACTIVE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase()));
   const isBackfill = notes.backfill === true;
@@ -605,7 +630,7 @@ function deriveCloseoutFacts(inputs) {
   let application;
   if (!completed) application = awaiting();
   else if (!requirements) application = fact('unknown', 'requirements_unavailable');
-  else if (!requirements.requiresApplicationLog) application = fact('not_required', 'catalog_no_application_log', { ruleSource: 'catalog', requirementsSource: requirements.source });
+  else if (!requirements.requiresApplicationLog) application = fact('not_required', 'catalog_no_application_log', { ruleSource: requirementsRuleSource, requirementsSource: requirements.source });
   else if (!visitPerformed) {
     if ((inputs.activeApplicationCount ?? 0) > 0) {
       // Products were logged on a visit whose frozen outcome says nothing
@@ -618,7 +643,7 @@ function deriveCloseoutFacts(inputs) {
   }
   else if (inputs.activeApplicationCount == null) application = fact('unknown', 'application_history_lookup_failed');
   else if (inputs.activeApplicationCount > 0) application = fact('done', 'active_application_rows', { activeCount: inputs.activeApplicationCount, retractedCount: inputs.retractedApplicationCount ?? 0 });
-  else if (requirements.source === 'fallback_inference' && inputs.retractedApplicationCount === 0) application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0, lowConfidence: true, requirementsSource: requirements.source });
+  else if (underlyingRequirementsSource === 'fallback_inference' && inputs.retractedApplicationCount === 0) application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0, lowConfidence: true, requirementsSource: underlyingRequirementsSource });
   else if (inputs.retractedApplicationCount == null) application = fact('unknown', 'application_history_lookup_failed', { activeCount: 0, detail: 'retracted-row lookup unavailable; cannot tell empty from all-retracted' });
   else if (inputs.retractedApplicationCount > 0) application = fact('failed', 'all_application_rows_retracted', { activeCount: 0, retractedCount: inputs.retractedApplicationCount });
   else application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0 });
@@ -628,7 +653,7 @@ function deriveCloseoutFacts(inputs) {
   const requiredPhotos = requirements ? toNumber(requirements.requiredPhotoCount) : null;
   if (!completed) photos = awaiting();
   else if (!requirements) photos = fact('unknown', 'requirements_unavailable');
-  else if (!(requiredPhotos > 0)) photos = fact('not_required', 'catalog_zero_required_photos', { ruleSource: 'catalog', requirementsSource: requirements.source, actual: inputs.photoCount ?? null });
+  else if (!(requiredPhotos > 0)) photos = fact('not_required', 'catalog_zero_required_photos', { ruleSource: requirementsRuleSource, requirementsSource: requirements.source, actual: inputs.photoCount ?? null });
   else if (inputs.projectLookupFailed) photos = fact('unknown', 'projects_lookup_failed_photo_source_undecidable', { required: requiredPhotos });
   else if (inputs.photoCount == null) photos = fact('unknown', `${inputs.photoSource || 'service_photos'}_lookup_failed`, { required: requiredPhotos });
   else if (inputs.photoCount >= requiredPhotos) photos = fact('done', 'photo_count_met', { required: requiredPhotos, actual: inputs.photoCount, source: inputs.photoSource || 'service_photos' });
@@ -664,7 +689,7 @@ function deriveCloseoutFacts(inputs) {
   else if (reportRequiredByCatalog === false) {
     report = (hasReportToken || reportPublishedAt)
       ? fact('done', 'published_despite_catalog_not_required', { publishedAt: reportPublishedAt, hasToken: hasReportToken, audience: reportPosture === 'internal_only' ? 'internal' : 'customer', posture })
-      : fact('not_required', 'catalog_no_service_report', { ruleSource: 'catalog', requirementsSource: requirements.source, posture });
+      : fact('not_required', 'catalog_no_service_report', { ruleSource: requirementsRuleSource, requirementsSource: requirements.source, posture });
   } else if (hasReportToken || reportPublishedAt) {
     report = fact('done', 'report_published', {
       publishedAt: reportPublishedAt, hasToken: hasReportToken, audience: reportPosture === 'internal_only' ? 'internal' : 'customer', posture,
@@ -940,7 +965,7 @@ function deriveCloseoutFacts(inputs) {
   else if (reportDelivery.state === 'done') comms = fact('done', projectBacked ? 'project_report_delivered' : 'report_email_delivered', { channel: projectBacked ? null : 'email' });
   // Explicit catalog rule: this service owes no customer notice (evidence
   // above still wins when it exists).
-  else if (requirements && requirements.requiresCustomerNotice === false) comms = fact('not_required', 'catalog_no_customer_notice', { ruleSource: 'catalog', requirementsSource: requirements.source, completionSmsStatus: smsStatus });
+  else if (requirements && requirements.requiresCustomerNotice === false) comms = fact('not_required', 'catalog_no_customer_notice', { ruleSource: requirementsRuleSource, requirementsSource: requirements.source, completionSmsStatus: smsStatus });
   else comms = fact('unknown', 'no_comms_marker_on_record', { completionSmsStatus: smsStatus, hint: 'legacy or recap-lane record without a completionSmsStatus stamp' });
   if (requirements && completed) {
     // The catalog's requiresCustomerNotice is satisfied by the completion
@@ -976,7 +1001,7 @@ function deriveCloseoutFacts(inputs) {
   const tech = inputs.technician || null;
   if (!completed) license = awaiting();
   else if (!requirements) license = fact('unknown', 'requirements_unavailable');
-  else if (requirements.requiresLicense !== true) license = fact('not_required', 'catalog_no_license_required', { ruleSource: 'catalog', requirementsSource: requirements.source });
+  else if (requirements.requiresLicense !== true) license = fact('not_required', 'catalog_no_license_required', { ruleSource: requirementsRuleSource, requirementsSource: requirements.source });
   else if (inputs.technicianLookupFailed) license = fact('unknown', 'technicians_lookup_failed', { requiredCategory: requirements.licenseCategory || null });
   else if (!tech && inputs.applicatorFindingsId) {
     // The signer's FDACS id exists only in findings JSON — with a required
@@ -1121,9 +1146,17 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
     visitReRead: inputs.visitReRead || null,
     requirements: requirements ? {
       ...requirements,
-      // No frozen requirement snapshot exists — see header. A catalog edit
-      // retroactively changes these for historical visits.
-      asOf: 'current_catalog',
+      // 'frozen_at_completion' replays the snapshot the completion wrote;
+      // 'frozen_by_backfill' replays migration 20260831000080's honest
+      // guess (today's catalog stamped onto pre-freeze history — GH codex
+      // r1 P2: a backfill must not present as a completion-time
+      // observation); 'current_catalog' is the unfrozen fallback, where a
+      // catalog edit still retroactively changes these for historical
+      // visits.
+      asOf: requirements.frozen
+        ? (requirements.source === 'backfilled_from_live_catalog' ? 'frozen_by_backfill' : 'frozen_at_completion')
+        : 'current_catalog',
+      ...(requirements.frozen ? { frozenAt: requirements.frozenAt || null } : {}),
       // requiresCustomerSignature has NO evidence store in the schema (the
       // only "signature" columns are the tree/shrub review hash and the
       // weekly time-summary sign-off), so it cannot be evaluated here and is

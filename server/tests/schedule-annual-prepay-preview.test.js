@@ -58,6 +58,7 @@ function stubTables({
   visit = undefined,
   addonCount = 0,
   seriesCount = 4,
+  catalog = undefined,
 } = {}) {
   db.mockImplementation((table) => {
     const q = {};
@@ -76,6 +77,7 @@ function stubTables({
         return { n: addonCount };
       }
       if (table === 'scheduled_services') return isCount ? { n: seriesCount } : visit;
+      if (table === 'services') return catalog;
       return term;
     });
     return q;
@@ -143,6 +145,63 @@ describe('annual-prepay preview — pricing', () => {
     // No setup-fee claim in THIS lane: nothing here stamps pending_setup_fee,
     // so a per-visit booking never owes it and there is nothing to waive.
     expect(body.setupFee).toBeNull();
+  });
+
+  test('direct rodent bait series: the shared resolver\'s setup rides the mint payload as its own line, outside the coverage amount (codex #3591 r28)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(99);
+    try {
+      const { status, body } = await preview({ serviceType: 'Rodent Bait Stations', price: '99' });
+      expect(status).toBe(200);
+      expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        customer_id: 'cust-1', service_type: 'Rodent Bait Stations', source_estimate_id: null,
+      }));
+      expect(body.mintPayload.setupFeeAmount).toBe(99);
+      // Coverage amount = the applications only; the mint bills the setup separately.
+      expect(body.mintPayload.amount + 99).toBe(body.prepayTotal);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('committed series: plan class + setup obligation derive from the PERSISTED anchor\'s catalog identity, never the stale label (codex #3591 r33 P1)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    // Stale 'Pest Control' label, linked to the bait program.
+    stubTables({
+      visit: { ...COMMITTED_VISIT, service_type: 'Quarterly Pest Control Service', service_id: 'cat-rb', estimated_price: 99 },
+      catalog: { service_key: 'rodent_bait_quarterly', name: 'Rodent Bait Stations' },
+    });
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(99);
+    try {
+      const { status, body } = await preview({ scheduledServiceId: 'svc-1' });
+      expect(status).toBe(200);
+      expect(body.eligible).toBe(true);
+      // The resolver got the persisted identity (id), not a label fragment.
+      expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'svc-1' }));
+      expect(spy.mock.calls[0][1].service_type).toBeUndefined();
+      expect(body.mintPayload.setupFeeAmount).toBe(99);
+      // The committed anchor rides with the setup so the Customer 360 mint
+      // can re-derive it and ledger the claim (codex #3591 r36 P1).
+      expect(body.mintPayload.scheduledServiceId).toBe('svc-1');
+      // Rodent plan class: no fee-waiver incentive on this lane.
+      expect(body.setupFee).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+    // Stale bait label, repointed to trapping: no plan, no setup.
+    stubTables({
+      visit: { ...COMMITTED_VISIT, service_type: 'Rodent Bait Station Service', service_id: 'cat-trap', estimated_price: 99 },
+      catalog: { service_key: 'rodent_trapping', name: 'Rodent Trapping' },
+    });
+    const { body: trapping } = await preview({ scheduledServiceId: 'svc-1' });
+    expect(trapping.eligible).toBe(false);
+    expect(trapping.blockReason).toMatch(/isn’t available for this service/);
+  });
+
+  test('pest series: no setup line on the mint payload', async () => {
+    const { body } = await preview({});
+    expect(body.mintPayload.setupFeeAmount).toBeUndefined();
+    expect(body.mintPayload.scheduledServiceId).toBeUndefined();
   });
 
   test('the mint payload carries server-derived money + the booked visit as the coverage anchor', async () => {

@@ -264,7 +264,7 @@ export default function SocialMediaPage() {
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
       {" "}
       <AdminCommandHeader
-        title="Social Media"
+        title="Social media"
         icon={Share2}
         sections={SOCIAL_TAB_GROUPS.map((g) => ({
           key: g.key,

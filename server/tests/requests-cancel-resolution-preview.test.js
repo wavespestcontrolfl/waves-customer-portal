@@ -19,9 +19,14 @@ jest.mock('../services/account-membership-email', () => ({
   sendRequestReceived: jest.fn().mockResolvedValue(null),
   sendCancellationReceived: jest.fn().mockResolvedValue(null),
 }));
+// The portal cancellation paths serialize on the shared admin cancel lock.
+jest.mock('../services/admin-cancellation', () => ({
+  acquireCancelCommitLock: jest.fn(async () => async () => {}),
+}));
 jest.mock('../services/cancellation-processor', () => ({
   processCancellationRequest: jest.fn(),
   CHURN_REASON: 'Customer cancellation request',
+  PORTAL_CANCEL_REASON_PREFIX: 'Portal cancellation request',
   CANCELLABLE_STATUSES: ['pending', 'confirmed', 'rescheduled'],
 }));
 jest.mock('../services/cancellation-eligibility', () => ({ hasCancellableWork: jest.fn().mockResolvedValue(true) }));

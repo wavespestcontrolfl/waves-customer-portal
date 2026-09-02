@@ -15,6 +15,7 @@ module.exports = {
     '<rootDir>/tests/auth-logout-route.test.js',
     '<rootDir>/tests/customer-auth-resolve-bearer.test.js',
     '<rootDir>/tests/customer-refresh-session.test.js',
+    '<rootDir>/tests/cancelled-portal-read-access.test.js',
     '<rootDir>/tests/autopay-eligibility.test.js',
     '<rootDir>/tests/portal-ach-add-bank.test.js',
     '<rootDir>/tests/customer-pricing-ai.test.js',
@@ -22,6 +23,11 @@ module.exports = {
     '<rootDir>/tests/customer-request-photo-validation.test.js',
     '<rootDir>/tests/customer-notification-native-push.test.js',
     '<rootDir>/tests/customer-notification-push.test.js',
+    // notifyAdmin's keyed dedupe (rolling window + content refresh) — the
+    // admin half of notification-service.js, measured here since the
+    // module is in the floor's coverage set and these are its direct tests.
+    '<rootDir>/tests/notification-admin-dedupe-window.test.js',
+    '<rootDir>/tests/notification-admin-dedupe-refresh.test.js',
   ],
   collectCoverage: true,
   collectCoverageFrom: [

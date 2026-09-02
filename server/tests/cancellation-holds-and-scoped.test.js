@@ -75,7 +75,7 @@ const { startHold, runPlanHoldLifecycle } = require('../services/cancellation-re
 const { planScopedWindDown } = require('../services/cancellation-processor');
 const { etDateString } = require('../utils/datetime-et');
 
-function seed({ holds = [], customers = [], components = [], visits = [] } = {}) {
+function seed({ holds = [], customers = [], components = [], visits = [], invoices = [] } = {}) {
   mockState.tables = {
     plan_holds: holds,
     customers,
@@ -83,6 +83,7 @@ function seed({ holds = [], customers = [], components = [], visits = [] } = {})
     scheduled_services: visits,
     customer_interactions: [],
     services: [],
+    invoices,
   };
 }
 
@@ -97,7 +98,7 @@ function daysOut(n) {
 beforeEach(() => {
   mockReschedule.mockClear();
   mockSms.mockClear();
-  seed({ customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly', tier_protected_until: null }] });
+  seed({ customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership', tier_protected_until: null }] });
 });
 
 describe('startHold (ruling C-4)', () => {
@@ -110,7 +111,7 @@ describe('startHold (ruling C-4)', () => {
   test('pest can never be held; once per family per 12 months', async () => {
     await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'pest_control', resumeOn: daysOut(60) })).rejects.toMatchObject({ code: 'hold_family_invalid' });
     seed({
-      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly' }],
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership' }],
       holds: [{ id: 'h0', customer_id: 'c1', family_key: 'lawn_care', status: 'resumed', created_at: new Date() }],
     });
     await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(60) })).rejects.toMatchObject({ code: 'hold_cooldown' });
@@ -120,9 +121,20 @@ describe('startHold (ruling C-4)', () => {
     await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(60) })).rejects.toMatchObject({ code: 'hold_unattributed' });
   });
 
+  test('a rate-bearing NON-monthly lane needs no attribution — no dues to suspend (#3140)', async () => {
+    // annual_prepay carries a legacy monthly_rate but the dues cron never
+    // bills it; the old rate>0 shortcut demanded a component and blocked the
+    // hold (Codex #3669 r3 P2).
+    seed({ customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay', tier_protected_until: null }] });
+    const result = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(60) });
+    expect(result.holdId).toBeTruthy();
+    expect(mockState.tables.plan_holds[0].held_monthly_rate).toBe(null);
+    expect(Number(mockState.tables.customers[0].monthly_rate)).toBe(150); // untouched
+  });
+
   test('happy path: component suspended, scalar recomputed, tier protected, no visit spam', async () => {
     seed({
-      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly', tier_protected_until: null }],
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership', tier_protected_until: null }],
       components: [
         { customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 },
         { customer_id: 'c1', family_key: 'pest_control', monthly_rate: 60 },
@@ -143,7 +155,7 @@ describe('startHold (ruling C-4)', () => {
 describe('runPlanHoldLifecycle', () => {
   test('reminds once at ≤7 days out, resumes on the date and restores the rate', async () => {
     seed({
-      customers: [{ id: 'c1', first_name: 'Pat', phone: '+19415550000', monthly_rate: 60, billing_mode: 'monthly', tier_protected_until: daysOut(5) }],
+      customers: [{ id: 'c1', first_name: 'Pat', phone: '+19415550000', monthly_rate: 60, billing_mode: 'monthly_membership', tier_protected_until: daysOut(5) }],
       components: [
         { customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 0, source: 'plan_hold' },
         { customer_id: 'c1', family_key: 'pest_control', monthly_rate: 60 },
@@ -176,7 +188,7 @@ describe('runPlanHoldLifecycle', () => {
 describe('runPlanHoldLifecycle — notice period (codex r2)', () => {
   test('a reminder delivered late pushes the restart AND the parked visits out 7 days from delivery', async () => {
     seed({
-      customers: [{ id: 'c1', first_name: 'Pat', phone: '+19415550000', monthly_rate: 60, billing_mode: 'monthly', tier_protected_until: daysOut(2) }],
+      customers: [{ id: 'c1', first_name: 'Pat', phone: '+19415550000', monthly_rate: 60, billing_mode: 'monthly_membership', tier_protected_until: daysOut(2) }],
       components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 0, source: 'plan_hold' }],
       holds: [{ id: 'h2', customer_id: 'c1', family_key: 'lawn_care', status: 'active', resume_on: daysOut(2), held_monthly_rate: 90, reminder_sent_at: null, created_at: new Date(), moved_visits: JSON.stringify({ moved: [] }) }],
       visits: [{ id: 'v1', customer_id: 'c1', status: 'confirmed', scheduled_date: daysOut(2), service_type: 'Lawn Care Service', window_start: '08:00', window_end: '10:00' }],
@@ -206,7 +218,7 @@ describe('planScopedWindDown (ruling C-3)', () => {
   });
 
   test('fails closed on unowned scope, whole-account scope, and unattributed monthly lane', async () => {
-    seed({ customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: 150, billing_mode: 'monthly', active: true }], visits: [visitRow('lawn_care'), visitRow('pest_control')] });
+    seed({ customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: 150, billing_mode: 'monthly_membership', active: true }], visits: [visitRow('lawn_care'), visitRow('pest_control')] });
     expect((await planScopedWindDown('c1', ['mosquito'])).error).toBe('scope_not_owned');
     expect((await planScopedWindDown('c1', ['lawn_care', 'pest_control'])).error).toBe('scope_is_whole_account');
     expect((await planScopedWindDown('c1', ['lawn_care'])).error).toBe('scoped_unattributed');
@@ -214,7 +226,7 @@ describe('planScopedWindDown (ruling C-3)', () => {
 
   test('demotes the tier and reprices the remaining family from its gross', async () => {
     seed({
-      customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: 150, billing_mode: 'monthly', active: true }],
+      customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: 150, billing_mode: 'monthly_membership', active: true }],
       components: [
         { customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 },
         { customer_id: 'c1', family_key: 'pest_control', monthly_rate: 60 },
@@ -237,7 +249,7 @@ describe('planScopedWindDown (ruling C-3)', () => {
 
   test('a HELD remaining family reprices its saved hold rate, not its zeroed component', async () => {
     seed({
-      customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: 60, billing_mode: 'monthly', active: true }],
+      customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: 60, billing_mode: 'monthly_membership', active: true }],
       components: [
         { customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 0, source: 'plan_hold' },
         { customer_id: 'c1', family_key: 'pest_control', monthly_rate: 60 },
@@ -254,6 +266,25 @@ describe('planScopedWindDown (ruling C-3)', () => {
     expect(plan.scalarAfter).toBe(0);      // held family contributes 0 until resume
   });
 
+  test('a rate-bearing NON-monthly lane demotes the tier only — no attribution demand, scalar untouched (#3140)', async () => {
+    // annual_prepay / per_visit rows carry a legacy monthly_rate; the old
+    // rate>0 shortcut classified them monthly, failed closed on missing
+    // components, and rewrote their monthly_rate (Codex #3669 r3 P2).
+    seed({
+      customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: 150, billing_mode: 'annual_prepay', active: true }],
+      visits: [visitRow('lawn_care'), visitRow('pest_control')],
+    });
+    const plan = await planScopedWindDown('c1', ['lawn_care']);
+    expect(plan.ok).toBe(true); // no scoped_unattributed despite zero components
+    expect(plan.monthlyLane).toBe(false);
+    expect(plan.perApplicationLane).toBe(false);
+    expect(plan.tierAfter).toBe('Bronze');
+    // applyScopedWindDown writes monthly_rate only when plan.monthlyLane —
+    // the passthrough scalar + false flag mean the legacy rate is never touched.
+    expect(plan.scalarAfter).toBe(150);
+    expect(plan.remainingRates[0].after).toBe(null); // no monthly reprice
+  });
+
   test('per-application lane: surviving uninvoiced rows are repriced at the demoted tier', async () => {
     seed({
       customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true }],
@@ -268,5 +299,17 @@ describe('planScopedWindDown (ruling C-3)', () => {
     expect(plan.perAppRows).toHaveLength(1);
     expect(plan.perAppRows[0]).toMatchObject({ family: 'pest_control', before: 90 });
     expect(plan.perAppRows[0].after).toBeGreaterThan(90);
+    // An already-INVOICED surviving row bills at its fixed terms — the
+    // apply step skips it, so the plan (what the card shows, fingerprints,
+    // and the operator approves) must not list it as a change (codex GH
+    // r26 P1). A voided invoice does not fix the price.
+    const invoicedId = plan.perAppRows[0].id;
+    mockState.tables.invoices = [{ id: 'inv-1', scheduled_service_id: invoicedId, status: 'paid' }];
+    const fixed = await planScopedWindDown('c1', ['lawn_care']);
+    expect(fixed.ok).toBe(true);
+    expect(fixed.perAppRows).toEqual([]);
+    mockState.tables.invoices = [{ id: 'inv-1', scheduled_service_id: invoicedId, status: 'void' }];
+    const voided = await planScopedWindDown('c1', ['lawn_care']);
+    expect(voided.perAppRows).toHaveLength(1);
   });
 });

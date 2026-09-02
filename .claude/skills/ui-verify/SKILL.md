@@ -1,6 +1,6 @@
 ---
 name: ui-verify
-description: Use before requesting review on ANY PR that touches client UI (admin, customer portal, or tech portal). Render the real page, screenshot it, and check it against the goal and the design spec with vision — past UI parity bugs shipped because nobody looked at the rendered page before review.
+description: Use before requesting review on ANY PR that touches client UI — render the real page, screenshot desktop and mobile, and check it with vision against the spec.
 ---
 
 # Vision-verify UI changes before review
@@ -18,7 +18,10 @@ Codex on a UI-touching PR:
    server-rendered or backend-dependent pages, against a dev/preview DB.
 2. Screenshot at TWO widths minimum: desktop (~1440) and mobile (390 —
    Virginia and the techs live on phones). `resize_page` then
-   `take_screenshot`.
+   `take_screenshot` with a distinct `filePath` per width (e.g.
+   `<scratchpad>/desktop-1440.png`, `<scratchpad>/mobile-390.png`) —
+   without `filePath` the image is attached to the tool response only and
+   there is no file to hand to step 5.
 3. Read the screenshots with vision and check, explicitly:
    - Does the rendered result match what the task asked for?
    - Admin pages: monochrome V2 rules — `components/ui` primitives, zinc
@@ -33,7 +36,14 @@ Codex on a UI-touching PR:
 4. Interact with what you changed (click the button, open the modal, submit
    the form) — a screenshot of initial render misses broken states.
 5. Put the screenshots/findings in the PR description so the reviewer sees
-   the rendered result.
+   the rendered result. Attach the step-2 files natively: `gh pr create
+   --attach <file>` on a new PR, `gh pr edit --attach <file>` to update an
+   existing PR's description (`gh` ≥ 2.99.0; alt text via
+   `--attach './mobile-390.png#Mobile 390'`). Never a local path, a
+   base64 blob, or an external image host. If `gh --version` is below
+   2.99, write the findings in the PR body as text and say the screenshots
+   were reviewed in-session but not attached. Details and limits are in
+   waves-ship §4.
 
 ## Additional checks
 

@@ -866,6 +866,351 @@ router.post('/:id/send', async (req, res, next) => {
   }
 });
 
+// Send-time "lead with one service" (GATE_ESTIMATE_LEAD_SERVICE_SEND).
+// Scope, all deliberate: NEW residential customers only (no membership
+// evidence — a member's combined tier is theirs to keep), ungrouped, not a
+// proposal, EXACTLY two recurring lines with the non-lead one REMOVABLE per
+// the opt-out resolver (one atomic park — never a partial multi-step mix).
+// Lead = the estimator's first selected recurring service (engineRequest
+// order, else section order). Every other removable line goes through the
+// shared applyServiceMixChange rail as actor 'staff' — dry run, then commit
+// bound to that preview — so the parked lines re-enter the plan through the
+// customer's own "Add it" tap on the page. Returns the fresh row (or the
+// input row untouched when nothing applied).
+// `leadShapeRef` (from sendEstimateNow) receives the parked key the moment
+// the commit lands — before any post-commit step can fail — so compensation
+// never depends on this function returning normally.
+async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
+  const untouched = { estimate, parkedKey: null };
+  let parkedKey = null;
+  const featureGates = require('../config/feature-gates');
+  try {
+    if (!estimate) return untouched;
+    // Pending / structural restoration runs BEFORE any gate exit: a kill
+    // switch flipped after an undelivered park must never let the next send
+    // go out on the reduced totals (pre-push codex P0). Only NEW parking is
+    // gated, below.
+    const pendingRow = await db('estimates').where({ id: estimate.id }).first();
+    if (!pendingRow) return untouched;
+    let pendingData = {};
+    try { pendingData = typeof pendingRow.estimate_data === 'string' ? JSON.parse(pendingRow.estimate_data) : (pendingRow.estimate_data || {}); }
+    catch { pendingData = {}; }
+    const OptOut = require('../services/estimate-service-opt-out');
+    {
+      const parkedEvent = OptOut.staffOfferedEvents(pendingData || {})[0] || null;
+      const witnessedParkId = pendingData?.leadServiceHandoffParkId || null;
+      const unwitnessed = parkedEvent
+        && !(parkedEvent.parkId ? witnessedParkId === parkedEvent.parkId : Boolean(pendingData?.leadServiceHandoffAt));
+      // AMBIGUOUS: a provider handoff was ATTEMPTED for this very park (the
+      // pre-handoff intent stamp) but no witness landed — the customer may
+      // already hold the reduced quote, so it is neither restored nor
+      // resent; the send aborts and the office reviews (pre-push codex P1).
+      const attempt = pendingData?.leadServiceHandoffAttempt || null;
+      // A bound revert marker is CONFIRMED no-handoff (the wrapper writes it
+      // only after every channel failed and compensation failed): it wins
+      // over the attempt stamp, so a transient restore failure retries
+      // instead of stranding the estimate in review (GH codex r9 P1).
+      const boundMarker = pendingData?.leadServiceRevertPending || null;
+      const markerBound = boundMarker && parkedEvent && boundMarker.serviceKey === parkedEvent.serviceKey
+        && (!boundMarker.parkId || boundMarker.parkId === parkedEvent.parkId);
+      if (!markerBound && unwitnessed && attempt && parkedEvent.parkId && attempt.parkId === parkedEvent.parkId) {
+        await pageOfficeAmbiguousPark(estimate, parkedEvent.serviceKey).catch(() => {});
+        const abort = new Error('This estimate needs a review: an earlier send may have delivered a single-service quote whose delivery could not be confirmed. Nothing was sent.');
+        abort.statusCode = 409;
+        abort.leadServiceAbort = true;
+        throw abort;
+      }
+      const structuralPending = unwitnessed ? parkedEvent.serviceKey : null;
+      // The marker is bound to its park: a customer who restored the offer
+      // from the delivered link and then deliberately removed the same
+      // service has superseded the park, and the retry must not restore
+      // over that choice (GH codex r7 P2). A superseded marker is cleared.
+      const marker = pendingData?.leadServiceRevertPending || null;
+      let markerKey = marker?.serviceKey ? String(marker.serviceKey) : null;
+      if (markerKey && marker.parkId
+        && !(parkedEvent && parkedEvent.serviceKey === markerKey && parkedEvent.parkId === marker.parkId)) {
+        await clearLeadServiceRevertPending(estimate.id);
+        markerKey = null;
+      }
+      const pendingKey = markerKey || structuralPending;
+      if (pendingKey) {
+        const restored = await revertLeadServiceForSend(estimate.id, pendingKey, marker?.parkId || parkedEvent?.parkId || null);
+        if (!restored) {
+          const abort = new Error('This estimate is waiting on a review: an earlier undelivered send left an add-on offer unrestored. Nothing was sent.');
+          abort.statusCode = 409;
+          abort.leadServiceAbort = true;
+          throw abort;
+        }
+        try {
+          await clearLeadServiceRevertPending(estimate.id);
+        } catch (err) {
+          const abort = new Error(`Could not clear the add-on review marker (${err.message}). Nothing was sent.`);
+          abort.statusCode = 503;
+          abort.leadServiceAbort = true;
+          throw abort;
+        }
+        const restoredRow = await db('estimates').where({ id: estimate.id }).first();
+        if (!restoredRow) {
+          const abort = new Error('Estimate disappeared while restoring an add-on offer. Nothing was sent.');
+          abort.statusCode = 409;
+          abort.leadServiceAbort = true;
+          throw abort;
+        }
+        return { estimate: { ...restoredRow, status: estimate.status }, parkedKey: null };
+      }
+    }
+    // NEW parking is gated (strict opt-in, needs opt-out + add).
+    if (!featureGates.isEnabled('estimateLeadServiceSend')) return untouched;
+    if (!featureGates.isEnabled('estimateServiceOptOut') || !featureGates.isEnabled('estimateServiceAdd')) return untouched;
+    if (estimate.estimate_group_id || estimate.price_locked_at) return untouched;
+    // Frozen restart quotes (plan_restart) carry the cancellation-time
+    // families verbatim and accept validates that array — never reshape
+    // them (GH codex r5 P1).
+    if (String(estimate.source || '') === 'plan_restart') return untouched;
+    // The category COLUMN is the scope — never default a missing one to
+    // residential (same fail-closed rule as the add resolver).
+    if (String(estimate.category || '').toUpperCase() !== 'RESIDENTIAL') return untouched;
+    // The caller's object predates its own send claim (the route stamps
+    // status='sending' + updated_at before calling in), and the rail's CAS
+    // compares updated_at to the millisecond — a stale version would 409
+    // every commit and silently send the full bundle (pre-push codex P1).
+    // Work from the row as it is NOW; keep only the caller's in-flight status.
+    const claimedRow = await db('estimates').where({ id: estimate.id }).first();
+    if (!claimedRow || claimedRow.archived_at || claimedRow.price_locked_at) return untouched;
+    // Scope re-applied to the row as it is NOW: a grouping or category change
+    // between the route's read and the claim must not park one member of a
+    // multi-property group (pre-push codex P1).
+    if (claimedRow.estimate_group_id) return untouched;
+    if (String(claimedRow.category || '').toUpperCase() !== 'RESIDENTIAL') return untouched;
+    let current = { ...claimedRow, status: estimate.status };
+    let estData = {};
+    try { estData = typeof current.estimate_data === 'string' ? JSON.parse(current.estimate_data) : (current.estimate_data || {}); }
+    catch { return untouched; }
+    // Frozen restart quote, re-checked on the claimed row (source column or
+    // the planRestart blob flag the public page keys on).
+    if (String(claimedRow.source || '') === 'plan_restart' || estData?.planRestart === true) return untouched;
+    // A pending revert from an earlier undelivered send is retried BEFORE
+    // anything else; if it still fails the send aborts (the office was
+    // paged when the marker was written). Success clears the marker and the
+    // restored full bundle goes out (pre-push codex P1).
+    if (estData?.serviceOptOut) return untouched; // already shaped once — never re-park on a resend
+    // Member exclusion (security-critical, AGENTS.md): the ONE shared
+    // evidence reader (snapshot flag, priors in any carrier, recurring flag
+    // in any replay shape) PLUS a live active-plan check that fails CLOSED
+    // (a lookup error keeps the full bundle). A member's combined tier is
+    // theirs to keep.
+    if (OptOut.memberEvidenceInEstimateData(estData)) return untouched;
+    if (current.customer_id) {
+      const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
+      let activeMember = true;
+      // strict: a failed read THROWS (read as "member", i.e. never parked)
+      // instead of the helper's default "no plan" (GH codex r9 P1).
+      try { activeMember = await isActivePlanCustomer(db, current.customer_id, { strict: true }); } catch (_) { activeMember = true; }
+      if (activeMember) return untouched;
+    }
+    const estimatePublic = require('./estimate-public');
+    const bundle = await estimatePublic.buildPricingBundle(current).catch(() => null);
+    const sections = Array.isArray(bundle?.services) ? bundle.services : [];
+    const removable = OptOut.serviceOptOutRemovableKeys(estData, sections, current.waveguard_tier);
+    if (removable.size < 1) return untouched;
+    const recurringKeys = sections.filter((s) => s && s.isRecurring === true).map((s) => String(s.key || ''));
+    // EXACTLY two recurring lines: one lead, one parked. A three-line
+    // estimate would need a multi-step park that can refuse midway and send
+    // a partial mix — neither the full bundle nor the single-service quote
+    // (pre-push codex P0). Those go out as the full bundle, as today.
+    if (recurringKeys.length !== 2) return untouched;
+    // Lead: first selected recurring token in the estimator's own order —
+    // the ONLY lead provenance. v1 estimator shapes (engineInputs, no
+    // engineRequest) carry no selection order, and the renderer's section
+    // order is not a substitute: the legacy mapper lists Lawn before Pest,
+    // so falling back to it sent a pest-led Pest + Lawn quote as Lawn-only
+    // (GH codex r9 P1). No provable lead = the full bundle goes out.
+    const tokenToKey = Object.fromEntries(Object.entries(OptOut.SERVICE_OPT_OUT_KEYS)
+      .flatMap(([key, spec]) => spec.selected.map((t) => [t, key])));
+    const selectedOrder = (Array.isArray(estData.engineRequest?.selectedServices) ? estData.engineRequest.selectedServices : [])
+      .map((t) => tokenToKey[String(t).toUpperCase()]).filter(Boolean);
+    const leadKey = selectedOrder.find((k) => recurringKeys.includes(k));
+    if (!leadKey) return untouched;
+    const toPark = recurringKeys.filter((k) => k !== leadKey && removable.has(k));
+    if (toPark.length !== 1) return untouched;
+
+    for (const serviceKey of toPark) {
+      // The rail's own resolver re-runs on every step (removability shrinks
+      // as lines leave — the last recurring line is never removable).
+      const preview = await estimatePublic.applyServiceMixChange({
+        estimate: cloneEstimateRow(current), body: { serviceKey, included: false, dryRun: true }, actor: 'staff',
+      });
+      if (preview.status !== 200 || !preview.body?.previewBasis) {
+        logger.info(`[admin-estimates] lead-service send: ${serviceKey} not parked on estimate ${estimate.id} (${preview.body?.error || preview.status})`);
+        continue;
+      }
+      const commit = await estimatePublic.applyServiceMixChange({
+        estimate: cloneEstimateRow(current), body: { serviceKey, included: false, previewBasis: preview.body.previewBasis }, actor: 'staff',
+      });
+      if (commit.status !== 200) {
+        logger.warn(`[admin-estimates] lead-service send: commit for ${serviceKey} refused on estimate ${estimate.id} (${commit.body?.error || commit.status})`);
+        continue;
+      }
+      parkedKey = serviceKey;
+      if (leadShapeRef) {
+        leadShapeRef.parkedKey = serviceKey;
+        leadShapeRef.parkId = commit.body?.parkId || null;
+      }
+      // The park is COMMITTED. From here every failure must surface — a
+      // swallowed reread would deliver full-bundle in-memory content over a
+      // parked row and lose the key compensation needs (pre-push codex P1).
+      const fresh = await db('estimates').where({ id: estimate.id }).first();
+      if (!fresh) throw new Error('post-park reread found no row');
+      // Keep the caller's in-flight status (the route-level 'sending' claim)
+      // while taking every parked total from the row.
+      current = { ...fresh, status: estimate.status };
+    }
+    return parkedKey ? { estimate: current, parkedKey } : untouched;
+  } catch (err) {
+    if (err && err.leadServiceAbort) throw err;
+    if (parkedKey) {
+      // Post-commit failure: abort the send (the wrapper compensates through
+      // leadShapeRef, the route releases its claim on the throw).
+      const abort = new Error(`lead-service send: ${err.message}`);
+      abort.statusCode = 503;
+      abort.leadServiceParkedKey = parkedKey;
+      throw abort;
+    }
+    logger.warn(`[admin-estimates] lead-service send skipped for estimate ${estimate?.id}: ${err.message}`);
+    return untouched;
+  }
+}
+
+// The rail parses estimate_data and PRUNES the parsed carriers in place; when
+// Postgres hands the JSONB column back as an object, that object IS the row's
+// carrier, so a dry run would mutate the row the commit then re-reads —
+// "service_not_removable" on every commit (GH codex r3 P1). Every rail call
+// gets its own deep copy of the row.
+function cloneEstimateRow(row) {
+  if (!row || typeof row !== 'object') return row;
+  const copy = { ...row };
+  if (row.estimate_data && typeof row.estimate_data === 'object') {
+    copy.estimate_data = JSON.parse(JSON.stringify(row.estimate_data));
+  }
+  return copy;
+}
+
+// Pre-handoff INTENT stamp for a park: written before the first provider
+// call so a witness write that fails after a real handoff (then a crash
+// before finalization) leaves an unambiguous "attempted" trace — the next
+// send treats that park as ambiguous (abort + office review) instead of
+// restoring a quote the customer may already hold (pre-push codex P1). If
+// this stamp itself cannot be written, the send aborts BEFORE any provider
+// call and the wrapper's compensation restores the park.
+async function stampLeadHandoffAttempt(estimate, options) {
+  const ref = options?.leadShapeRef;
+  if (!ref || !ref.parkedKey) return;
+  await db('estimates')
+    .where({ id: estimate.id })
+    .update({
+      estimate_data: db.raw(
+        "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceHandoffAttempt}', ?::jsonb)",
+        [JSON.stringify({ parkId: String(ref.parkId || ''), at: new Date().toISOString() })],
+      ),
+    });
+}
+
+async function pageOfficeAmbiguousPark(estimate, serviceKey) {
+  const NotificationService = require('../services/notification-service');
+  await NotificationService.notifyAdmin(
+    'estimate',
+    `Estimate needs review: ${estimate.customer_name || 'customer'} — delivery of a single-service quote unconfirmed`,
+    'A send may have delivered the single-service quote but its handoff could not be recorded. Confirm what the customer received before resending.',
+    { link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id || null, serviceKey }, bell: true },
+  );
+}
+
+// DURABLE per-park handoff witness, written the moment a provider accepted a
+// message — inside the provider branch, before the next channel leg starts —
+// so a termination between the SMS and email legs can never leave a
+// delivered single-service quote looking undelivered (GH codex r5/r6 P1).
+// Idempotent per send; a failure is logged loudly and the later
+// firstDeliveredAt stamp remains the fallback witness.
+async function stampLeadHandoffWitness(estimate, options) {
+  const ref = options?.leadShapeRef;
+  if (!ref || !ref.parkedKey) return;
+  ref.delivered = true;
+  if (ref.witnessStamped) return;
+  // Three attempts; a persistent failure is logged loudly and the pre-handoff
+  // intent stamp keeps the park classified as ambiguous, never undelivered.
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const n = await db('estimates')
+        .where({ id: estimate.id })
+        .update({
+          estimate_data: db.raw(
+            "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceHandoffAt}', to_jsonb(?::text)), '{leadServiceHandoffParkId}', to_jsonb(?::text))",
+            [new Date().toISOString(), String(ref.parkId || '')],
+          ),
+        });
+      if (!n) throw new Error('zero rows updated');
+      ref.witnessStamped = true;
+      return;
+    } catch (err) {
+      logger.error(`[admin-estimates] lead-service handoff witness attempt ${attempt} failed for estimate ${estimate.id}: ${err.message}`);
+    }
+  }
+}
+
+// Compensation for a send that delivered on NO channel: the parked line is
+// restored through the same rail (actor 'staff', dry run → commit), against
+// the row as it is now. Runs after the delivery claim is released.
+async function revertLeadServiceForSend(estimateId, serviceKey, parkId = null) {
+  try {
+    const row = await db('estimates').where({ id: estimateId }).first();
+    if (!row || row.archived_at || row.price_locked_at) return false;
+    // Idempotent: the line may already be back — the customer restored it in
+    // the park-to-claim gap, or an earlier attempt restored it and stopped
+    // before clearing the marker. The estimate's own event log is the proof;
+    // restoring again would refuse forever (pre-push codex P1).
+    let parsed = {};
+    try { parsed = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {}); }
+    catch { parsed = {}; }
+    const { currentlyOptedOutKeys, staffOfferedEvents } = require('../services/estimate-service-opt-out');
+    if (!currentlyOptedOutKeys(parsed).includes(serviceKey)) {
+      logger.info(`[admin-estimates] lead-service revert: ${serviceKey} already on estimate ${estimateId}; nothing to restore`);
+      return true;
+    }
+    // Bound to the park it compensates, on the row as it is NOW: a customer
+    // who restored the offer from the delivered link and then removed the
+    // same service deliberately has superseded the park, and the line being
+    // opted out is no longer ours to restore (GH codex r9 P2 — the deferred
+    // marker retry already binds this way; the immediate path must too).
+    if (parkId) {
+      const latestStaffPark = staffOfferedEvents(parsed).find((e) => e.serviceKey === serviceKey);
+      if (!latestStaffPark || latestStaffPark.parkId !== parkId) {
+        logger.info(`[admin-estimates] lead-service revert: park ${parkId} for ${serviceKey} on estimate ${estimateId} was superseded by a later change; nothing to restore`);
+        return true;
+      }
+    }
+    const estimatePublic = require('./estimate-public');
+    const preview = await estimatePublic.applyServiceMixChange({
+      estimate: cloneEstimateRow(row), body: { serviceKey, included: true, dryRun: true }, actor: 'staff',
+    });
+    if (preview.status !== 200 || !preview.body?.previewBasis) {
+      logger.warn(`[admin-estimates] lead-service revert: preview refused for ${serviceKey} on estimate ${estimateId} (${preview.body?.error || preview.status})`);
+      return false;
+    }
+    const commit = await estimatePublic.applyServiceMixChange({
+      estimate: cloneEstimateRow(row), body: { serviceKey, included: true, previewBasis: preview.body.previewBasis }, actor: 'staff',
+    });
+    if (commit.status !== 200) {
+      logger.warn(`[admin-estimates] lead-service revert: commit refused for ${serviceKey} on estimate ${estimateId} (${commit.body?.error || commit.status})`);
+      return false;
+    }
+    logger.info(`[admin-estimates] lead-service revert: ${serviceKey} restored on estimate ${estimateId} after an undelivered send`);
+    return true;
+  } catch (err) {
+    logger.warn(`[admin-estimates] lead-service revert failed for estimate ${estimateId}: ${err.message}`);
+    return false;
+  }
+}
+
 // Shared send logic — used by both immediate send and scheduled cron
 // Multi-property group pre-flight (codex #3244 r1). Publishing the group makes
 // every sibling token publicly acceptable, so BEFORE any channel delivery:
@@ -1088,11 +1433,100 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // MUST be released on every exit — success, partial failure, or throw —
   // or legitimate linkage corrections stay blocked until the TTL expires.
   const deliveryClaimToken = crypto.randomUUID();
+  // Send-time lead service (GATE_ESTIMATE_LEAD_SERVICE_SEND) parks a line
+  // BEFORE delivery; the inner send records the parked key HERE (not only in
+  // its return value) so a throw after the park — the invalidation verdict,
+  // a provider error — still reaches the compensation below (pre-push codex
+  // P1).
+  const leadShapeRef = { parkedKey: null, delivered: false };
+  let result;
+  let thrown = null;
   try {
-    return await sendEstimateNowInner(estimate, sendMethod, options, deliveryClaimToken);
+    result = await sendEstimateNowInner(estimate, sendMethod, { ...options, leadShapeRef }, deliveryClaimToken);
+  } catch (err) {
+    thrown = err;
   } finally {
     await clearEstimateDeliveryClaim(estimate?.id, deliveryClaimToken);
   }
+  // When NO channel delivered, the customer never saw the single-service
+  // shape, so the park is compensated — the line is restored through the
+  // same rail — after the delivery claim is released (the rail's write
+  // refuses while a claim is live). `delivered` is the provider-handoff
+  // witness: a throw AFTER a successful handoff (snapshot read, status
+  // finalize) must not revert a quote the customer already holds (GH codex
+  // P1). Best-effort: a failed revert is logged and the row keeps the offer
+  // shape a resend would carry anyway.
+  // Reverts on ANY exit without a real handoff — sent:false, a throw, or a
+  // sent:true built only from suppression sentinels (r2).
+  if (leadShapeRef.parkedKey && !leadShapeRef.delivered) {
+    // Every channel conclusively failed (no throw): the attempt stamp is no
+    // longer ambiguous evidence — clear it so a later retry is a retry, not
+    // a review abort (GH codex r9 P1). Best-effort; the bound marker below
+    // wins over the stamp regardless.
+    if (!thrown && result && result.sent === false) {
+      try {
+        await db('estimates').where({ id: estimate?.id }).update({
+          estimate_data: db.raw("COALESCE(estimate_data, '{}'::jsonb) - 'leadServiceHandoffAttempt'"),
+        });
+      } catch (err) { logger.warn(`[admin-estimates] attempt-stamp clear failed for estimate ${estimate?.id}: ${err.message}`); }
+    }
+    const restored = await revertLeadServiceForSend(estimate?.id, leadShapeRef.parkedKey, leadShapeRef.parkId || null);
+    // A failed compensation is a DURABLE retry state, never a silent
+    // reshape: the marker makes the next send retry the restore first (and
+    // abort if it still fails), and the office is paged (pre-push codex P1).
+    if (!restored) await markLeadServiceRevertPending(estimate, leadShapeRef.parkedKey, leadShapeRef.parkId || null);
+  }
+  if (thrown) throw thrown;
+  return result;
+}
+
+async function markLeadServiceRevertPending(estimate, serviceKey, parkId = null) {
+  let markerWritten = false;
+  let markerError = null;
+  try {
+    await db('estimates')
+      .where({ id: estimate.id })
+      .update({
+        estimate_data: db.raw(
+          "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceRevertPending}', ?::jsonb)",
+          [JSON.stringify({ serviceKey, ...(parkId ? { parkId } : {}), at: new Date().toISOString() })],
+        ),
+        updated_at: db.fn.now(),
+      });
+    markerWritten = true;
+  } catch (err) {
+    markerError = err;
+    logger.error(`[admin-estimates] lead-service revert-pending marker failed for estimate ${estimate?.id}: ${err.message}`);
+  }
+  try {
+    const NotificationService = require('../services/notification-service');
+    await NotificationService.notifyAdmin(
+      'estimate',
+      `Estimate needs review: ${estimate.customer_name || 'customer'} — add-on offer not restored`,
+      'A send delivered on no channel and the parked service could not be restored automatically. The next send retries; check the estimate before resending.',
+      { link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id || null, serviceKey }, bell: true },
+    );
+  } catch (err) {
+    logger.error(`[admin-estimates] lead-service revert-pending bell failed for estimate ${estimate?.id}: ${err.message}`);
+  }
+  // Fail CLOSED when the durable marker could not persist (GH codex r4 P1):
+  // the send already failed; surfacing the outage is right, and the next
+  // send is still guarded structurally (a staff-parked line on a never-
+  // delivered row is treated as pending — see applyLeadServiceForSend).
+  if (!markerWritten) {
+    const err = new Error(`Send delivered on no channel and the add-on review marker could not be written (${markerError?.message || 'unknown'}). Check the estimate before resending.`);
+    err.statusCode = 503;
+    throw err;
+  }
+}
+
+async function clearLeadServiceRevertPending(estimateId) {
+  await db('estimates')
+    .where({ id: estimateId })
+    .update({
+      estimate_data: db.raw("COALESCE(estimate_data, '{}'::jsonb) - 'leadServiceRevertPending'"),
+      updated_at: db.fn.now(),
+    });
 }
 
 async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaimToken) {
@@ -1109,6 +1543,50 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   assertEstimateSendable(estimate, {
     engineReviewAcknowledged: engineReviewAcknowledgedResolved,
   });
+
+  // Send-time lead-with-one-service (GATE_ESTIMATE_LEAD_SERVICE_SEND): parks
+  // the non-lead recurring lines as staff opt-out events BEFORE any delivery
+  // so every channel carries the single-service quote. Best-effort by
+  // design — a refusal or engine miss sends the full bundle exactly as today
+  // (never a blocked send), and the row is re-read so the message text and
+  // the delivery claim below see the parked totals.
+  // The post-operator, PRE-park row is what the draft-to-send learning
+  // event must see — an automated park is not an operator edit (GH codex
+  // r9 P1).
+  const preParkEstimate = estimate;
+  const leadShape = await applyLeadServiceForSend(estimate, { leadShapeRef: options.leadShapeRef || null });
+  estimate = leadShape.estimate;
+  if (leadShape.parkedKey) {
+    // The operator acknowledged the pre-park bundle; the parked single-line
+    // quote is a DIFFERENT recompute and must clear sendability on its own —
+    // review-only output falls back to the full bundle (GH codex r9 P1).
+    let shapedSendable = true;
+    try {
+      assertEstimateSendable(estimate, { engineReviewAcknowledged: engineReviewAcknowledgedResolved });
+      let shapedData = {};
+      try { shapedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); } catch { shapedData = {}; }
+      const lines = Array.isArray(shapedData?.engineResult?.lineItems) ? shapedData.engineResult.lineItems : [];
+      // The rail's own predicate — the draft builder's flags PLUS the low
+      // pricing-confidence grade it records separately (GH codex r10 P1).
+      const { lineReviewOnly } = require('../services/estimate-service-opt-out');
+      if (lines.some((li) => li && typeof li === 'object' && lineReviewOnly(li))) shapedSendable = false;
+    } catch (_) { shapedSendable = false; }
+    if (!shapedSendable) {
+      logger.warn(`[admin-estimates] lead-service send: parked quote not sendable on estimate ${estimate.id}; restoring the full bundle`);
+      const restored = await revertLeadServiceForSend(estimate.id, leadShape.parkedKey, options.leadShapeRef?.parkId || null);
+      if (!restored) {
+        const abort = new Error('The single-service quote needs a review and the full bundle could not be restored. Nothing was sent.');
+        abort.statusCode = 409;
+        abort.leadServiceAbort = true;
+        throw abort;
+      }
+      const restoredRow = await db('estimates').where({ id: estimate.id }).first();
+      if (!restoredRow) throw Object.assign(new Error('Estimate disappeared while restoring. Nothing was sent.'), { statusCode: 409, leadServiceAbort: true });
+      estimate = { ...restoredRow, status: estimate.status };
+      leadShape.parkedKey = null;
+      if (options.leadShapeRef) { options.leadShapeRef.parkedKey = null; options.leadShapeRef.parkId = null; }
+    }
+  }
 
   // Group pre-flight runs before ANY channel delivery (see helper above).
   let claimedGroupSiblings = [];
@@ -1195,6 +1673,22 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       throw err;
     }
   }
+  // Park-to-claim gap (pre-push codex P1): the public service-mix route can
+  // commit a customer change between the park above and the claim just
+  // stamped (the claim blocks it from here on). Compose every message from
+  // the row as it is NOW, never the parked snapshot.
+  if (leadShape.parkedKey) {
+    const postClaim = await db('estimates').where({ id: estimate.id }).first();
+    if (!postClaim) {
+      const err = new Error('Estimate disappeared before delivery. Nothing was sent.');
+      err.statusCode = 409;
+      throw err;
+    }
+    estimate = { ...postClaim, status: estimate.status };
+  }
+
+  // Intent stamp BEFORE any provider call (see stampLeadHandoffAttempt).
+  if (leadShape.parkedKey) await stampLeadHandoffAttempt(estimate, options);
 
   const now = typeof options.now === 'function' ? options.now : () => new Date();
   const nextExpiresAt = estimateExpiresAt(now);
@@ -1297,6 +1791,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             // for the send result, but never a first response to the lead.
             const { isRealProviderSend } = require('../services/sms-auto-send');
             channels.sms = { ok: true, real: isRealProviderSend(result) };
+            if (channels.sms.real) await stampLeadHandoffWitness(estimate, options);
           }
         } catch (e) {
           logger.error(`Estimate SMS failed: ${e.message}`);
@@ -1383,6 +1878,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             attachments: proposalAttachments,
             proposalMode,
           });
+          if (result.ok) await stampLeadHandoffWitness(estimate, options);
           channels.email = result.ok
             ? { ok: true, provider: result.template || result.provider || 'email' }
             : { ok: false, error: result.error || 'Email send failed' };
@@ -1403,6 +1899,17 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // provider send was REAL (not a suppression sentinel); email's ok already
   // implies a real handoff.
   const stampChannels = sentChannels.filter((ch) => (ch === 'sms' ? channels.sms?.real === true : true));
+  // A REAL provider handoff succeeded: the customer holds the single-service
+  // quote, so the send-time park must NEVER be reverted from here on — even
+  // if the snapshot read or the status finalize below throws. A suppressed
+  // SMS (gate/template/owner kill) reports ok with real:false and is NOT a
+  // handoff, so it never sets this (GH codex P1 r1 + r2).
+  // Safety net: each provider branch stamps the witness the moment it
+  // succeeds (stampLeadHandoffWitness); this catches nothing new but keeps
+  // the in-memory verdict aligned with the channels.
+  if (options.leadShapeRef && stampChannels.length > 0) {
+    await stampLeadHandoffWitness(estimate, options);
+  }
   const sent = sentChannels.length > 0;
 
   if (!sent) {
@@ -1465,6 +1972,15 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       ...(firstDeliveredAt ? { firstDeliveredAt } : {}),
       ...(lastDeliveredAt ? { lastDeliveredAt } : {}),
     },
+    // The per-park handoff witness rides the finalization write too, so a
+    // transient failure of the in-branch stamp can never leave a delivered
+    // park looking undelivered once finalization lands (pre-push codex P1).
+    ...(options.leadShapeRef?.parkedKey && stampChannels.length
+      ? {
+        leadServiceHandoffAt: (lastDeliveredAt || firstDeliveredAt || now().toISOString()),
+        leadServiceHandoffParkId: String(options.leadShapeRef.parkId || ''),
+      }
+      : {}),
   };
   // Delivery outcomes must survive even if snapshot construction fails;
   // partial-send retry state is operational data, not part of pricing QA.
@@ -1531,7 +2047,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // constraint). Fail-soft: never turns a delivered send into an error.
     try {
       const { recordSentLearningEvent } = require('../services/estimate-learning');
-      await recordSentLearningEvent({ estimateId: estimate.id, sentRow: estimate });
+      await recordSentLearningEvent({ estimateId: estimate.id, sentRow: preParkEstimate });
     } catch (e) {
       logger.warn(`[admin-estimates] learning event failed for estimate ${estimate.id}: ${e.message}`);
     }
@@ -1948,6 +2464,23 @@ router.get('/source-performance', async (req, res, next) => {
   }
 });
 
+// Free-text filter for the estimates list. EVERY column here is
+// table-qualified on purpose: the list query leftJoins `technicians`, and
+// that table grew its own `address` column in the payroll-profile migration
+// (20260428000007_technicians_payroll_profile). An unqualified `address`
+// therefore compiles to a Postgres "column reference \"address\" is
+// ambiguous" error, and every admin estimate search — by name, phone, or
+// address alike — 500'd instead of returning rows. Qualify anything added
+// here, even when the column is unique on `estimates` today.
+function applyEstimateSearchFilter(query, search) {
+  const s = `%${search}%`;
+  return query.where(function () {
+    this.whereILike('estimates.customer_name', s)
+      .orWhereILike('estimates.customer_phone', s)
+      .orWhereILike('estimates.address', s);
+  });
+}
+
 // GET /api/admin/estimates — list
 router.get('/', async (req, res, next) => {
   try {
@@ -1978,12 +2511,7 @@ router.get('/', async (req, res, next) => {
       const sources = source.split(',');
       query = query.whereIn('estimates.source', sources);
     }
-    if (search) {
-      const s = `%${search}%`;
-      query = query.where(function () {
-        this.whereILike('customer_name', s).orWhereILike('customer_phone', s).orWhereILike('address', s);
-      });
-    }
+    if (search) query = applyEstimateSearchFilter(query, search);
     if (archived === 'only') query = query.whereNotNull('estimates.archived_at');
     else if (archived !== 'all') query = query.whereNull('estimates.archived_at');
 
@@ -3603,6 +4131,7 @@ router._internals = {
   estimateEmailIdempotencyKey,
   smtpFallbackAllowed,
   resolveEstimateStatusPatch,
+  applyEstimateSearchFilter,
 };
 
 module.exports = router;
@@ -3611,3 +4140,6 @@ module.exports = router;
 // builder, so a minted estimate's locked price replays exactly like a sent
 // one. Lazy-required by services to avoid load-order cycles.
 module.exports.buildEstimateSendSnapshot = buildEstimateSendSnapshot;
+module.exports.applyLeadServiceForSend = applyLeadServiceForSend;
+module.exports.revertLeadServiceForSend = revertLeadServiceForSend;
+module.exports.markLeadServiceRevertPending = markLeadServiceRevertPending;

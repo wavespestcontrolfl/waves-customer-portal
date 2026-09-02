@@ -15,12 +15,12 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
-const { CANCELLABLE_STATUSES } = require('../cancellation-eligibility');
+const { CANCELLABLE_STATUSES, LIVE_TRACK_STATES } = require('../cancellation-eligibility');
 const { familyLabel } = require('./templates');
 
 const labelOf = (key) => familyLabel(key) || String(key || '').replace(/_/g, ' ');
 
-async function buildCancellationImpact(customerId, requestedFamilies = []) {
+async function buildCancellationImpact(customerId, requestedFamilies = [], { after = null, keepVisitIds = null, keepScoped = false } = {}) {
   const { planScopedWindDown, familyOfServiceRow } = require('../cancellation-processor');
   const { inferTierFromServiceCount } = require('../self-booking-plan-sync');
 
@@ -41,19 +41,53 @@ async function buildCancellationImpact(customerId, requestedFamilies = []) {
             });
         });
     })
-    .select('s.*', 'sv.service_key', 'sv.service_name');
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
 
+  // Coverage identity for the keep-through exemption — the LIVE term's
+  // canonical covered rows (keepVisitIds, from coverageRowsForTerm), exactly
+  // like the processor's sweep. A stamp/term-id classifier is NOT coverage:
+  // a refunded prior term keeps its audit link with the stamps cleared.
+  const keepIds = after && Array.isArray(keepVisitIds) ? new Set(keepVisitIds.map(String)) : null;
   const perFamily = new Map();
+  // Rows with no WaveGuard family (commercial, rodent-led, unmatched text)
+  // have no bucket in the money table, but a WHOLE-account sweep still
+  // pulls them — their identities must reach the pulled count and the
+  // approved-facts fingerprint or Confirm removes appointments the preview
+  // never showed (and an unclassified visit appearing mid-window could not
+  // trigger preview_changed).
+  const unclassified = { upcoming: 0, pulled: 0, nextVisitDate: null, nextPulledDate: null, pulledKeys: [] };
   for (const row of rows) {
     const family = familyOfServiceRow(row);
-    if (!family) continue;
-    if (!perFamily.has(family)) perFamily.set(family, { upcoming: 0, nextVisitDate: null });
-    const slot = perFamily.get(family);
-    const upcoming = CANCELLABLE_STATUSES.includes(String(row.status)) && (String(row.scheduled_date).slice(0, 10) >= today || row.status === 'rescheduled');
+    let slot = unclassified;
+    if (family) {
+      if (!perFamily.has(family)) perFamily.set(family, { upcoming: 0, pulled: 0, nextVisitDate: null, nextPulledDate: null, pulledKeys: [] });
+      slot = perFamily.get(family);
+    }
+    const d = String(row.scheduled_date).slice(0, 10);
+    const upcoming = CANCELLABLE_STATUSES.includes(String(row.status)) && (d >= today || row.status === 'rescheduled');
     if (upcoming) {
       slot.upcoming += 1;
-      const d = String(row.scheduled_date).slice(0, 10);
       if (!slot.nextVisitDate || d < slot.nextVisitDate) slot.nextVisitDate = d;
+      // Keep-through boundary (C3 end-of-coverage): only the LIVE term's
+      // covered rows (keepIds — same set the processor keeps) are KEPT
+      // through the boundary; a mixed account's uncovered rows and a dead
+      // refunded term's audit-linked rows are pulled now. An
+      // undated/rescheduled row has no date to keep.
+      const covered = !!keepIds && keepIds.has(String(row.id));
+      const kept = after && covered && row.status !== 'rescheduled' && d <= String(after);
+      // Live/done on the track layer: the processor's sweep excludes rows
+      // whose track_state is complete / en_route / on_property (null-safe —
+      // legacy rows have no track_state) and parks them for manual review,
+      // so "visits pulled" must not count them either.
+      const trackExcluded = row.track_state != null
+        && (row.track_state === 'complete' || LIVE_TRACK_STATES.includes(row.track_state));
+      if (!kept && !trackExcluded) {
+        slot.pulled += 1;
+        if (!slot.nextPulledDate || d < slot.nextPulledDate) slot.nextPulledDate = d;
+        // Stable identity for the approved-facts fingerprint: a reschedule
+        // (same count, different date) must still read as changed facts.
+        slot.pulledKeys.push(`${row.id}:${d}`);
+      }
     }
   }
   const owned = [...perFamily.keys()];
@@ -62,9 +96,15 @@ async function buildCancellationImpact(customerId, requestedFamilies = []) {
   // here). For a whole-account selection there is nothing remaining to
   // reprice — tierAfter is null and the totals go to zero.
   const scope = (requestedFamilies || []).filter((f) => owned.includes(f));
-  const wholeAccount = !scope.length || scope.length === owned.length;
+  // keepScoped (admin repair retries): a scoped cancellation whose accepted
+  // family already lost every live row must stay SCOPED — an empty owned
+  // intersection means "nothing left to pull for that family", not a
+  // whole-account cancel of whatever remains (which would preview and
+  // fingerprint the OTHER family's visits and a tier drop to zero that the
+  // repair-only processor never performs).
+  const wholeAccount = keepScoped ? false : (!scope.length || scope.length === owned.length);
   let plan = null;
-  if (!wholeAccount) {
+  if (!wholeAccount && scope.length) {
     try {
       plan = await planScopedWindDown(customerId, scope);
       if (!plan.ok) plan = null;
@@ -113,14 +153,41 @@ async function buildCancellationImpact(customerId, requestedFamilies = []) {
   }
 
   const cancelledFamilies = wholeAccount ? owned : scope;
-  const visitsCancelled = cancelledFamilies.reduce((sum, f) => sum + (perFamily.get(f)?.upcoming || 0), 0);
-  const nextVisitCancelled = cancelledFamilies
-    .map((f) => perFamily.get(f)?.nextVisitDate)
-    .filter(Boolean)
-    .sort()[0] || null;
+  const visitsCancelled = cancelledFamilies.reduce((sum, f) => sum + (perFamily.get(f)?.pulled || 0), 0)
+    + (wholeAccount ? unclassified.pulled : 0);
+  const nextVisitCancelled = [
+    ...cancelledFamilies.map((f) => perFamily.get(f)?.nextPulledDate),
+    ...(wholeAccount ? [unclassified.nextPulledDate] : []),
+  ].filter(Boolean).sort()[0] || null;
+  // Stable identities of the visits this cancel pulls (id:date, sorted) —
+  // the approved-facts fingerprint keys on them so a reschedule or a
+  // complete-and-appear swap never slips past an unchanged count.
+  const pulledVisitKeys = [
+    ...cancelledFamilies.flatMap((f) => perFamily.get(f)?.pulledKeys || []),
+    ...(wholeAccount ? unclassified.pulledKeys : []),
+  ].sort();
 
   const tierBefore = customer.waveguard_tier || inferTierFromServiceCount(owned.length);
   const monthly = customer.monthly_rate == null ? null : Number(customer.monthly_rate);
+
+  // The processor raises the retrieval task only when ITS OWN predicate
+  // finds rental state (active Waves-owned termite stations, or the
+  // customer flag when none are mapped) — so the preview asks the same
+  // question: family scope alone promises tasks that never come, and the
+  // stale customer flag alone hides one that will (mapped stations on a
+  // whole-account cancel). Unverifiable falls back to the flag/family
+  // heuristic rather than dropping the warning.
+  let termiteRental = false;
+  if (wholeAccount || cancelledFamilies.includes('termite_bait')) {
+    try {
+      const { rentedTermiteStationState } = require('../cancellation-processor');
+      const rental = await rentedTermiteStationState(customerId);
+      termiteRental = rental.rented.length > 0 || rental.flaggedRental === true;
+    } catch (err) {
+      logger.warn(`[cancel-impact] rental-state lookup failed for ${customerId}: ${err.message}`);
+      termiteRental = customer.termite_stations_rented === true || cancelledFamilies.includes('termite_bait');
+    }
+  }
 
   return {
     families: owned.map((f) => ({
@@ -140,14 +207,21 @@ async function buildCancellationImpact(customerId, requestedFamilies = []) {
     accountMonthlyBefore: monthly,
     accountMonthlyAfter: wholeAccount ? (monthly == null ? null : 0) : (plan ? plan.scalarAfter : null),
     remaining: wholeAccount ? [] : (plan ? plan.remainingRates.map((r) => ({ key: r.family, label: labelOf(r.family), monthlyBefore: r.before, monthlyAfter: r.after })) : []),
+    // Per-application lane (scoped): the wind-down repricess every surviving
+    // uninvoiced visit — real customer charge changes the operator must see
+    // and approve (they ride the fingerprint like every displayed number).
+    perAppChanges: !wholeAccount && plan && Array.isArray(plan.perAppRows)
+      ? plan.perAppRows.map((r) => ({ id: r.id, family: r.family, label: labelOf(r.family), before: r.before, after: r.after }))
+      : [],
     visitsCancelled,
     nextVisitCancelled,
+    pulledVisitKeys,
     lateCancelFee: null,
     openBalance,
     payUrl: null,
     prepay,
     autopayOn: customer.autopay_enabled === true,
-    termiteRental: customer.termite_stations_rented === true || cancelledFamilies.includes('termite_bait'),
+    termiteRental,
     effectiveDate: today,
     billingMode: customer.billing_mode || null,
     wholeAccount,

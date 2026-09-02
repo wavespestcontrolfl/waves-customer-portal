@@ -12,18 +12,13 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { gsmSafeName } = require('../services/messaging/gsm-normalize');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
-const { processCancellationRequest } = require('../services/cancellation-processor');
+const { processCancellationRequest, PORTAL_CANCEL_REASON_PREFIX } = require('../services/cancellation-processor');
+const { sendCancellationConfirmations } = require('../services/cancellation-confirmations');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 const CancellationResolution = require('../services/cancellation-resolution');
 const { REASON_CODE_VALUES } = require('../services/cancellation-resolution/reason-codes');
 const { situationalHardStop } = require('../services/cancellation-resolution/resolve');
 const { etDateString } = require('../utils/datetime-et');
-
-function etDisplayDate(value) {
-  const at = value ? new Date(value) : new Date();
-  const safe = Number.isNaN(at.getTime()) ? new Date() : at;
-  return safe.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'long', day: 'numeric', year: 'numeric' });
-}
 
 // Shape the portal reads to render the truthful post-submit state (H0).
 // `processed` is true only when the processor reports a clean, churned run;
@@ -65,6 +60,13 @@ function cancellationOutcome(result, confirmation, effectiveAt, confirmationChan
     // visits are pulled AND the remaining plan repriced (codex r1 P2: the
     // portal showed the manual-closeout copy while the scoped SMS said done).
     processed: !!(result && result.ok && (result.churned || result.scopedWoundDown)),
+    // The server's ACTUAL churn state, independent of `processed` (codex GH
+    // #3671 r28 P1): the churn write runs FIRST, so a later best-effort
+    // step failing (an in-progress visit needing manual handling) returns
+    // churned:true, ok:false — the account is already inactive and the
+    // portal must refresh its auth snapshot even though the request is
+    // parked for office review.
+    churned: !!(result && result.churned),
     visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
     confirmation: confirmation || null,
     confirmationChannels: Array.isArray(confirmationChannels) ? confirmationChannels.filter(Boolean) : [],
@@ -223,12 +225,30 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         try {
           const recoveredScope = await committedScopeFor(dupe.id);
           if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
-          const retry = await processCancellationRequest({
-            customerId: req.customer.id,
-            reason: `Portal cancellation request ${dupe.id}`,
-            requestId: dupe.id,
-            families: recoveredScope,
-          });
+          const { acquireCancelCommitLock, adminCoverageBoundaryInForce } = require('../services/admin-cancellation');
+          // Same customer-scoped lock as the admin commit: an unlocked
+          // portal run racing an admin end_of_coverage confirm can pull the
+          // paid visits the admin sweep is deliberately keeping. Busy or
+          // unacquirable throws into this catch — the request parks for
+          // review instead of processing unlocked.
+          const releaseCancelLock = await acquireCancelCommitLock(req.customer.id);
+          let retry;
+          try {
+            // Checked INSIDE the lock: an admin end_of_coverage decision
+            // governs this account — its paid covered visits are
+            // deliberately retained, and this replay carries no boundary.
+            // The lock only serializes; a decision landing between this
+            // request's reads and the lock, or a portal row parked behind
+            // that commit, is reconciled here. Park (the durable row +
+            // alert stand; staff already own the cancel).
+            if (await adminCoverageBoundaryInForce(req.customer.id)) throw new Error('admin end-of-coverage cancellation in force — retry parked');
+            retry = await processCancellationRequest({
+              customerId: req.customer.id,
+              reason: `${PORTAL_CANCEL_REASON_PREFIX} ${dupe.id}`,
+              requestId: dupe.id,
+              families: recoveredScope,
+            });
+          } finally { await releaseCancelLock(); }
           retryOutcome = retry;
           logger.info(
             `Re-ran cancellation processing for deduped request ${dupe.id}: ok=${retry.ok}` +
@@ -291,6 +311,13 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     if (req.customerInactive) {
       const priorCancellation = await db('service_requests')
         .where({ customer_id: req.customer.id, category: 'cancellation' })
+        // PORTAL-originated only: after an admin end_of_coverage cancel the
+        // account is inactive while its prepaid visits deliberately stay
+        // scheduled — re-running the ADMIN request's whole-account scope
+        // from here (without its keepThrough/keepVisitIds boundary) would
+        // pull every retained paid visit. Admin repairs run through the
+        // admin commit path, which restores the durable boundary.
+        .where((qb) => { qb.whereNull('source').orWhereNot('source', 'admin'); })
         .orderBy('created_at', 'desc')
         .first();
       if (!priorCancellation) {
@@ -302,12 +329,24 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         // Fail closed exactly like the dedupe branch: an unrecoverable
         // scope must never widen into a whole-account churn (codex P0).
         if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
-        const retry = await processCancellationRequest({
-          customerId: req.customer.id,
-          reason: `Portal cancellation request ${priorCancellation.id}`,
-          requestId: priorCancellation.id,
-          families: recoveredScope,
-        });
+        const { acquireCancelCommitLock, adminCoverageBoundaryInForce } = require('../services/admin-cancellation');
+        // Locked like every other cancellation writer (see the dedupe
+        // branch above) — never process unlocked beside an admin commit.
+        const releaseCancelLock = await acquireCancelCommitLock(req.customer.id);
+        let retry;
+        try {
+          // Inside the lock, like the dedupe branch: a PORTAL row accepted
+          // beside an admin end_of_coverage run (parked on the busy lock,
+          // or submitted just before it) must not replay without that
+          // run's boundary.
+          if (await adminCoverageBoundaryInForce(req.customer.id)) throw new Error('admin end-of-coverage cancellation in force — retry parked');
+          retry = await processCancellationRequest({
+            customerId: req.customer.id,
+            reason: `${PORTAL_CANCEL_REASON_PREFIX} ${priorCancellation.id}`,
+            requestId: priorCancellation.id,
+            families: recoveredScope,
+          });
+        } finally { await releaseCancelLock(); }
         retryOutcome = retry;
         logger.info(
           `Re-ran cancellation processing for inactive-account retry ${priorCancellation.id}: ok=${retry.ok}` +
@@ -505,12 +544,27 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     let cancellationProcessed = false;
     if (isCancellation) {
       try {
-        cancellationResult = await processCancellationRequest({
-          customerId: req.customer.id,
-          reason: `Portal cancellation request ${request.id}`,
-          requestId: request.id,
-          families: scopedFamilies,
-        });
+        // Locked like the admin commit (shared customer-scoped advisory
+        // lock): a portal submission racing an admin end_of_coverage
+        // confirm must never pull the paid visits the admin run keeps.
+        // Busy throws into this catch — the durable request row + alert
+        // remain and the repair paths pick it up.
+        const { acquireCancelCommitLock, adminCoverageBoundaryInForce } = require('../services/admin-cancellation');
+        const releaseCancelLock = await acquireCancelCommitLock(req.customer.id);
+        try {
+          // Re-validated INSIDE the lock: this request authenticated and
+          // read the customer before the lock — an admin end_of_coverage
+          // commit finishing in that gap leaves the account churned with
+          // its paid visits deliberately retained, and this run carries no
+          // boundary. Park (the durable row + alert stand).
+          if (await adminCoverageBoundaryInForce(req.customer.id)) throw new Error('admin end-of-coverage cancellation in force — request parked');
+          cancellationResult = await processCancellationRequest({
+            customerId: req.customer.id,
+            reason: `${PORTAL_CANCEL_REASON_PREFIX} ${request.id}`,
+            requestId: request.id,
+            families: scopedFamilies,
+          });
+        } finally { await releaseCancelLock(); }
       } catch (cancelErr) {
         logger.error(`Failed to auto-process cancellation for request ${request.id}: ${cancelErr.message}`);
       }
@@ -658,87 +712,62 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       logger.error(`Failed to create admin notification for request ${request.id}: ${notifErr.message}`);
     }
 
-    // Send customer confirmation SMS. A cancellation is auto-processed, so it
-    // gets a dedicated template with cancellation-specific next steps.
+    // Customer confirmations. A cancellation is auto-processed, so it gets
+    // the dedicated truth-gated templates (SMS + email, both awaited so the
+    // response names only the channels that actually accepted) — the ONE
+    // helper the admin Cancel plan path (C3) also uses; the customer's
+    // portal submit is a customer-action entry point, so no quiet-hours
+    // hold applies (owner ruling 2026-08-29).
     const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
-    const familyLabelOf = (key) => {
-      const { familyLabel } = require('../services/cancellation-resolution/templates');
-      return (typeof familyLabel === 'function' && familyLabel(key)) || String(key || '').replace(/_/g, ' ');
-    };
     let confirmationSmsSent = false;
     let confirmationEmailSent = false;
-    try {
-      // Truth gate (H0, 2026-08-30): the processor runs synchronously above,
-      // so the customer's text must say what actually happened. A fully
-      // processed cancel gets the "done as of today" confirmation; a partial
-      // one (in-progress visit, processor error) gets the "closing out by
-      // hand" copy so nobody is told their plan is gone while an office
-      // follow-up is still owed.
-      // A scoped cancel gets its own truthful template — the account is not
-      // cancelled, only the named service(s); the rest continue.
-      const scopedProcessed = cancellationProcessed && Array.isArray(cancellationResult?.scope) && cancellationResult.scope.length > 0;
-      const smsTemplateKey = isCancellation
-        ? (cancellationProcessed
-          ? (scopedProcessed ? 'service_cancellation_scoped_confirmation' : 'service_cancellation_confirmation')
-          : 'service_cancellation_received')
-        : 'service_request_confirmation';
-      const smsVars = isCancellation
-        ? {
-            first_name: gsmSafeName(req.customer.first_name),
-            // ET date of the request — a quiet-hours hold delivers this text
-            // the next morning, so the body never says "today".
-            effective_date: etDisplayDate(request.created_at),
-            ...(scopedProcessed ? {
-              service: cancellationResult.scope.map(familyLabelOf).join(' and '),
-              remaining: (cancellationResult.remaining || []).map(familyLabelOf).join(' and ') || 'your other services',
-            } : {}),
-          }
-        : {
-            first_name: gsmSafeName(req.customer.first_name),
-            category: categoryLabel,
-            response_time: responseTime,
-          };
-      const body = await renderRequiredSmsTemplate(smsTemplateKey, smsVars, {
-        workflow: smsTemplateKey,
-        entity_type: 'service_request',
-        entity_id: request.id,
+    if (isCancellation) {
+      const confirmations = await sendCancellationConfirmations({
+        customer: req.customer,
+        request,
+        result: cancellationResult,
+        processed: cancellationProcessed,
+        urgency: validUrgency,
       });
-      const smsResult = await sendCustomerMessage({
-        to: req.customer.phone,
-        body,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'support_resolution',
-        customerId: req.customer.id,
-        identityTrustLevel: 'authenticated_portal',
-        entryPoint: 'customer_service_request',
-        metadata: {
-          original_message_type: smsTemplateKey,
-          service_request_id: request.id,
-          urgency: validUrgency,
-        },
-      });
-      confirmationSmsSent = !!smsResult.sent;
-      // No quiet-hours requeue: customer_service_request is a
-      // customer-action entry point (owner ruling 2026-08-29) — the
-      // confirmation answers the customer's own portal submit immediately,
-      // at any hour, so QUIET_HOURS_HOLD cannot surface here.
-      if (!smsResult.sent) {
-        logger.warn(`Request confirmation SMS blocked/failed for customer ${req.customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      confirmationSmsSent = confirmations.smsSent;
+      confirmationEmailSent = confirmations.emailSent;
+    } else {
+      try {
+        const body = await renderRequiredSmsTemplate('service_request_confirmation', {
+          first_name: gsmSafeName(req.customer.first_name),
+          category: categoryLabel,
+          response_time: responseTime,
+        }, {
+          workflow: 'service_request_confirmation',
+          entity_type: 'service_request',
+          entity_id: request.id,
+        });
+        const smsResult = await sendCustomerMessage({
+          to: req.customer.phone,
+          body,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'support_resolution',
+          customerId: req.customer.id,
+          identityTrustLevel: 'authenticated_portal',
+          entryPoint: 'customer_service_request',
+          metadata: {
+            original_message_type: 'service_request_confirmation',
+            service_request_id: request.id,
+            urgency: validUrgency,
+          },
+        });
+        // No quiet-hours requeue: customer_service_request is a
+        // customer-action entry point (owner ruling 2026-08-29) — the
+        // confirmation answers the customer's own portal submit immediately,
+        // at any hour, so QUIET_HOURS_HOLD cannot surface here.
+        confirmationSmsSent = !!smsResult.sent;
+        if (!smsResult.sent) {
+          logger.warn(`Request confirmation SMS blocked/failed for customer ${req.customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        }
+      } catch (smsErr) {
+        logger.error(`Failed to send confirmation SMS for request ${request.id}: ${smsErr.message}`);
       }
-    } catch (smsErr) {
-      logger.error(`Failed to send confirmation SMS for request ${request.id}: ${smsErr.message}`);
-    }
-
-    // No generic "request received" email for a cancellation: the account was
-    // just churned (active=false) and that template's CTAs link into the
-    // authenticated portal, which an inactive customer can no longer open
-    // (portal auth requires active=true). The dedicated cancellation SMS above
-    // is the confirmation — but if it couldn't be delivered (no phone,
-    // landline, opted out), the customer would otherwise get NO confirmation
-    // at all and can't see the request in the portal either, so fall back to
-    // the cancellation-safe email (no portal CTAs).
-    if (!isCancellation) {
       void AccountMembershipEmail.sendRequestReceived({
         customerId: req.customer.id,
         request,
@@ -746,30 +775,6 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }).catch((emailErr) => {
         logger.warn(`Failed to send confirmation email for request ${request.id}: ${emailErr.message}`);
       });
-    } else {
-      // A customer-initiated cancel gets BOTH the text and the email (owner
-      // ruling 2026-08-31 — the rule the non-cancellation branch already
-      // follows); the email is the durable artifact, not an SMS fallback.
-      // Awaited (not fire-and-forget) so the response can say which channel
-      // actually accepted the confirmation — a skipped/failed email must not
-      // become "an email is on its way" on the customer's screen.
-      try {
-        const emailResult = await AccountMembershipEmail.sendCancellationReceived({
-          customerId: req.customer.id,
-          request,
-          processed: cancellationProcessed,
-          ...(Array.isArray(cancellationResult?.scope) && cancellationResult.scope.length ? {
-            scope: {
-              cancelled: cancellationResult.scope.map(familyLabelOf),
-              remaining: (cancellationResult.remaining || []).map(familyLabelOf),
-              tierAfter: cancellationResult.tierAfter || null,
-            },
-          } : {}),
-        });
-        confirmationEmailSent = !!(emailResult && emailResult.ok);
-      } catch (emailErr) {
-        logger.warn(`Failed to send cancellation confirmation email for request ${request.id}: ${emailErr.message}`);
-      }
     }
 
     res.status(201).json({
@@ -893,6 +898,36 @@ router.post('/cancel-resolution', authenticate, cancelResolutionLimiter, async (
         : {}),
       ...(impact ? { impact } : {}),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/requests/restart-plan (C4, GATE_CANCEL_FLOW_V2) — a CANCELLED
+// customer asks to restart. Mints (or reuses) a normal server-priced
+// estimate for the families they cancelled and hands back its /estimate
+// path; the customer reviews and accepts it through the existing public
+// accept flow (card-first, unchanged). Customer-initiated only — nothing is
+// sent. 404 dark; 409 for an account that is not cancelled or that has no
+// plan to restart / cannot be priced online. `authenticate` admits the
+// cancelled customer here through CANCELLED_READ_ROUTES (middleware/auth).
+router.post('/restart-plan', authenticate, cancelResolutionLimiter, async (req, res, next) => {
+  try {
+    if (!CancellationResolution.cancelFlowV2Enabled()) return res.status(404).json({ error: 'Not found' });
+    if (req.customerInactive !== true) {
+      return res.status(409).json({ error: 'This plan is not cancelled.', code: 'not_cancelled' });
+    }
+    const { mintRestartEstimate } = require('../services/cancellation-resolution/restart');
+    let minted;
+    try {
+      minted = await mintRestartEstimate({ customer: req.customer });
+    } catch (err) {
+      if (err && err.restartUnavailable) {
+        return res.status(409).json({ error: err.message, code: err.code });
+      }
+      throw err;
+    }
+    res.json({ ok: true, url: minted.url, estimateId: minted.estimateId, reused: minted.reused === true });
   } catch (err) {
     next(err);
   }
@@ -1138,6 +1173,11 @@ router.get('/', authenticate, async (req, res, next) => {
 
     const requests = await db('service_requests')
       .where({ customer_id: req.customer.id })
+      // Admin-originated rows (the C3 cancel acceptance) are internal ops
+      // records: their subject embeds the staff actor and their description
+      // is the operator's free-text note — neither is customer-facing.
+      // NULL-safe: portal rows carry no source.
+      .where((qb) => { qb.whereNull('service_requests.source').orWhereNot('service_requests.source', 'admin'); })
       .leftJoin('technicians', 'service_requests.assigned_technician_id', 'technicians.id')
       .select(
         'service_requests.id',
@@ -1161,6 +1201,9 @@ router.get('/', authenticate, async (req, res, next) => {
 
     const total = await db('service_requests')
       .where({ customer_id: req.customer.id })
+      // Same admin-row exclusion as the page above — a total that counts
+      // hidden rows produces empty or phantom pages (codex GH r28 P2).
+      .where((qb) => { qb.whereNull('source').orWhereNot('source', 'admin'); })
       .count('id as count')
       .first();
 

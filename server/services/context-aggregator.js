@@ -13,8 +13,9 @@ const { arrivalWindowRange } = require('../utils/sms-time-format');
 // (admin-schedule.js:1069-1075), and 'skipped'/'no_show' are terminal — none
 // is a visit we can promise a date for. pending+confirmed are the live set
 // (545/545 upcoming in prod); en_route/on_site cover the same-day in-progress
-// case a texting customer may hit.
-const UPCOMING_SERVICE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+// case a texting customer may hit. The value lives in the canonical
+// visit-context module; the rationale above is this consumer's.
+const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
 
 // Calls the extractor affirmatively classified as not-a-real-conversation
 // with this customer — their summaries must never ground an SMS reply.

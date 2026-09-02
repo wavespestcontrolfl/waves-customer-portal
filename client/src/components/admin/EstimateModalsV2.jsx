@@ -131,7 +131,7 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
       {" "}
       <DialogHeader>
         {" "}
-        <DialogTitle>Mark as Lost</DialogTitle>{" "}
+        <DialogTitle>Mark as lost</DialogTitle>{" "}
         <div className="text-12 text-ink-secondary mt-0.5">
           {estimate.customerName}
           {estimate.address ? ` — ${estimate.address.split(",")[0]}` : ""}

@@ -1223,6 +1223,28 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     expect(withDashboards.result).toContain('No application was made on this visit');
   });
 
+  it('a server no-treatment verdict suppresses every treated claim in the live status', () => {
+    const noTreatment = {
+      applicationMade: false,
+      treatmentPerformed: false,
+      applications: [],
+      findings: [{ severity: 'high', title: 'Active nest located' }],
+      dynamicContext: {
+        reentry: { targets: [{ key: 'exterior', label: 'Exterior', durationMin: 30, readyAt: '2999-01-01T00:00:00.000Z' }] },
+        pressureTrend: { direction: 'down', customerSummary: 'Activity has decreased.' },
+      },
+    };
+    const withFinding = smartStatusSummary(noTreatment, 'static');
+    expect(withFinding.detail || '').not.toMatch(/We treated the documented area/);
+    expect(withFinding.result || '').not.toMatch(/still drying/);
+    const noFinding = smartStatusSummary({ ...noTreatment, findings: [] }, 'static');
+    expect(noFinding.result || '').not.toMatch(/still drying/);
+    expect(noFinding.detail || '').not.toMatch(/maintained the protective treatment plan/);
+    // null = product load failed: the treatment presentation stays.
+    const unknown = smartStatusSummary({ ...noTreatment, applicationMade: null, treatmentPerformed: null, findings: [], dynamicContext: { pressureTrend: noTreatment.dynamicContext.pressureTrend } }, 'static');
+    expect(unknown.detail || '').toMatch(/maintained the protective treatment plan/);
+  });
+
   it('a non-performed callback falls through the pressure-down branch to the outcome-honest copy', () => {
     const status = smartStatusSummary({
       reserviceReport: {

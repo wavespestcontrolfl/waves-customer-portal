@@ -272,7 +272,7 @@ export default function PhotoAssessmentsPage({ embedded = false, onSecondaryNav 
       <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
         <div>
           {!embedded && (
-            <h1 className="text-[22px] leading-7 text-zinc-900">Photo Assessments</h1>
+            <h1 className="text-[22px] leading-7 text-zinc-900">Photo assessments</h1>
           )}
           <p className="text-[14px] text-zinc-500 mt-0.5">
             Lawn-assessment and pest-identifier lead magnets — teaser → unlock → report → booking.

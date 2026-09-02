@@ -49,7 +49,7 @@ export const SERVICE_COPY = {
     aiBody: 'We reviewed your lot, resting zones, and mosquito pressure before pricing this plan.',
     askChips: [
       'How long does each visit last?',
-      'Pet & kid safe?',
+      'What precautions should I follow for pets and children?',
       'When does the season start?',
       'What about my pool area?',
     ],
@@ -108,12 +108,7 @@ export const SERVICE_COPY = {
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed the slab area before pricing this estimate',
     aiBody: 'We priced the pre-slab soil treatment from the measured slab area, selected product, and warranty option.',
-    askChips: [
-      'What product is used?',
-      'Do I get documentation?',
-      'What warranty is selected?',
-      'When should this be done?',
-    ],
+    askChips: [],
     priceWording: {
       dayLine: "That's about {amount}/day for this quote.",
     },
@@ -140,13 +135,37 @@ export const SERVICE_COPY = {
     aiBody: 'We priced the Bora-Care borate wood treatment from the measured attic and surface areas and the product application rate.',
     askChips: [
       'What does Bora-Care treat?',
-      'Is Bora-Care safe for pets & kids?',
+      'What precautions should I follow with Bora-Care around pets and children?',
       'What product is used for Bora-Care?',
       'When should this be done?',
     ],
     priceWording: {
       dayLine: "That's about {amount}/day for this quote.",
     },
+  },
+  wdo_inspection: {
+    headline: "Hey {first}, here's your WDO inspection quote.",
+    aiEyebrow: 'Your inspection',
+    aiTitle: 'Your WDO inspection was prepared for this property',
+    aiBody: 'This quote covers the wood-destroying organism inspection and required Florida reporting for the property shown above.',
+    askChips: [],
+    priceWording: {},
+  },
+  termite_foam: {
+    headline: "Hey {first}, here's your termite foam treatment quote.",
+    aiEyebrow: 'Your treatment plan',
+    aiTitle: 'This quote was prepared for the targeted termite treatment area',
+    aiBody: 'This is a localized foam treatment for the identified termite treatment area, not a recurring pest-control plan.',
+    askChips: ['Where will the foam be applied?', 'What does this treatment cover?', 'What precautions should I follow for this application?', 'How do I schedule the treatment?'],
+    priceWording: {},
+  },
+  trap_only: {
+    headline: "Hey {first}, here's your trap-only monitoring plan.",
+    aiEyebrow: 'Your monitoring plan',
+    aiTitle: 'This trap-only plan was prepared for your property',
+    aiBody: 'The plan separates the initial setup and inspection from the ongoing trap-monitoring service and its scheduled cadence.',
+    askChips: ['What is included in setup?', 'How often are traps checked?', 'What happens if I need an extra callback?', 'How is the monitoring plan billed?'],
+    priceWording: {},
   },
   // Commercial — grounded in standing owner terms only (no residential
   // guarantee claims); mirrors the GLASS_COMMERCIAL pack in
@@ -191,7 +210,7 @@ export const SERVICE_COPY = {
       'What is included in this plan?',
       'How do you handle ants?',
       'How does your lawn assessment tech work?',
-      'Are pets and kids safe?',
+      'What precautions should I follow for pets and children?',
     ],
     priceWording: {
       dayLine: "That's about {amount}/day for this plan.",

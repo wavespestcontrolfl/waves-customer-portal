@@ -230,7 +230,32 @@ function runUpdates(updates) {
   });
 }
 
+// One temp registry for the whole suite: the belt's merge-time recheck needs
+// an ACTIVE rain-gauge row (the vendored registry is empty by design).
+const __affReg = (() => {
+  const { mkdtempSync, writeFileSync } = require('node:fs');
+  const os = require('node:os');
+  const pathmod = require('node:path');
+  const iso = (d) => new Date(Date.now() - d * 86400000).toISOString().slice(0, 10);
+  const regPath = pathmod.join(mkdtempSync(pathmod.join(os.tmpdir(), 'affpoll-')), 'registry.json');
+  writeFileSync(regPath, JSON.stringify({ version: 1, products: [{
+    product_id: 'rain-gauge', status: 'active', risk_class: 'green', merchant: 'amazon',
+    approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20',
+    allowed_post_types: ['protocol'], allowed_placements: ['primary-rec', 'alt-rec'], owner_approved_at: iso(5),
+  }] }));
+  return regPath;
+})();
+
+// The belt reads the authoritative astro registry via gh.getFile (r15).
+const __liveRegFile = { content: require('node:fs').readFileSync(__affReg, 'utf8') };
+
 beforeEach(() => {
+  process.env.AFFILIATE_REGISTRY_PATH = __affReg;
+  require('../../packages/affiliate-registry')._resetCache();
+  // Refresh-path affiliate belt: default to a resolvable, affiliate-free
+  // target file so existing refresh-merge tests keep merging; belt tests
+  // override per case.
+  publisher.resolveExistingAstroFileForTarget.mockResolvedValue({ path: 'src/content/blog/legacy-post.md', file: { content: '---\ntitle: Legacy\n---\n\nBody.\n' } });
   // Topic-gated merges run recheck → merge inside db.transaction under an
   // advisory lock; the bare jest.fn() db grants it by default.
   db.transaction = jest.fn(async (fn) => fn(fakeTrx(true)));
@@ -256,6 +281,98 @@ afterEach(() => {
   delete process.env.AUTONOMOUS_BLOG_AUTO_MERGE;
   delete process.env.AUTONOMOUS_PR_MAX_AUTO_MERGES_PER_POLL;
   publisher.internalLinkPlanningDisabled.mockReturnValue(false);
+});
+
+describe('affiliate belt (owner ruling 2026-08-31)', () => {
+  const { affiliateBeltVerdict } = poller._internals;
+  const registryPkg = require('../../packages/affiliate-registry');
+  // The belt reads the AUTHORITATIVE astro registry via the GitHub client
+  // (Codex #3646 r15 P1) — a fake gh serves the fixture registry (or a
+  // mutated one) as the astro base registry.json.
+  const liveReg = () => JSON.parse(require('node:fs').readFileSync(__affReg, 'utf8'));
+  const ghFor = (registry) => ({ env: () => ({ defaultBranch: 'main' }), getBranchSha: async () => 'regbase1', getFile: async (path) => (path === 'packages/affiliate-registry/registry.json' && registry !== null ? { content: JSON.stringify(registry) } : null) });
+  const belt = (run, head, sha, gh = ghFor(liveReg())) => affiliateBeltVerdict(run, head, sha, gh);
+  let prevGate;
+  beforeEach(() => { prevGate = process.env.GATE_AFFILIATE_LINKS; process.env.GATE_AFFILIATE_LINKS = 'true'; });
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_AFFILIATE_LINKS; else process.env.GATE_AFFILIATE_LINKS = prevGate;
+    process.env.AFFILIATE_REGISTRY_PATH = __affReg; registryPkg._resetCache();
+  });
+
+  test('the full guardrail contract is re-run at merge time against the LIVE astro registry: unregistered-since-approval and wrong post_type withhold', async () => {
+    const body = '---\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
+    const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
+    expect((await belt(approved, body, 'headsha1')).ok).toBe(true);
+    // registry emptied ASTRO-SIDE since approval → UNREGISTERED at merge
+    // time, even though the local vendored copy still carries the row.
+    expect(await belt(approved, body, 'headsha1', ghFor({ version: 1, products: [] }))).toMatchObject({ ok: false, reason: expect.stringMatching(/UNREGISTERED_AFFILIATE_LINK/) });
+    // live registry unreadable → withheld (fail closed), never local fallback
+    expect(await belt(approved, body, 'headsha1', ghFor(null))).toMatchObject({ ok: false, reason: expect.stringMatching(/authoritative astro registry unreadable/) });
+    expect(await belt(approved, body, 'headsha1', null)).toMatchObject({ ok: false, reason: expect.stringMatching(/cannot pin the astro base/) });
+    // post_type narrowed out of eligibility since approval
+    const wrongType = body.replace('post_type: protocol', 'post_type: seasonal');
+    const approvedWrong = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body: wrongType, trust_build_approved_head_sha: 'headsha1' }) };
+    expect(await belt(approvedWrong, wrongType, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/AFFILIATE_LINK_ON_PROTECTED_PAGE/) });
+    // placement removed from the row's allowlist since approval
+    const wrongPlacement = body.replace('placement="primary-rec"', 'placement="sidebar"');
+    const approvedWp = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body: wrongPlacement, trust_build_approved_head_sha: 'headsha1' }) };
+    expect(await belt(approvedWp, wrongPlacement, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/AFFILIATE_PLACEMENT_NOT_ALLOWED/) });
+  });
+  test('the kill switch is re-checked at merge time: an approved affiliate head is withheld once GATE_AFFILIATE_LINKS is off', async () => {
+    const body = '---\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
+    const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
+    delete process.env.GATE_AFFILIATE_LINKS;
+    expect(await belt(approved, body, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/GATE_AFFILIATE_LINKS/) });
+    process.env.GATE_AFFILIATE_LINKS = '1';
+    expect((await belt(approved, body, 'headsha1')).ok).toBe(false);
+    process.env.GATE_AFFILIATE_LINKS = 'true';
+    expect((await belt(approved, body, 'headsha1')).ok).toBe(true);
+  });
+  test('a head without <AffiliateLink> passes; unreadable head fails closed', async () => {
+    expect((await belt({}, '---\ntitle: x\n---\nplain body')).ok).toBe(true);
+    expect((await belt({}, null)).ok).toBe(false);
+    // A code-fenced example is not a rendered component — an otherwise
+    // affiliate-free head must not be withheld forever (pre-push audit P1).
+    const fenced = '---\ntitle: x\n---\n\n## Sec\n\n```mdx\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n```\n\nplain body';
+    expect((await belt({}, fenced)).ok).toBe(true);
+  });
+  test('a head carrying <AffiliateLink> is withheld without the owner approval stamp and passes with it (bound to the approved draft)', async () => {
+    const body = '---\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
+    const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
+    expect((await belt({ trust_build_approved_by: null, draft_payload: JSON.stringify({ body }) }, body, 'headsha1')).ok).toBe(false);
+    expect((await belt(approved, body, 'headsha1')).ok).toBe(true);
+    expect((await belt(approved, { content: body }, 'HEADSHA1')).ok).toBe(true);
+    // Bound to the exact approved head: a later push (or no SHA) fails closed.
+    expect(await belt(approved, body, 'headsha2')).toMatchObject({ ok: false, reason: expect.stringMatching(/merge by hand/) });
+    expect((await belt(approved, body, null)).ok).toBe(false);
+    expect((await belt({ ...approved, draft_payload: JSON.stringify({ body }) }, body, 'headsha1')).ok).toBe(false);
+    // A product added on the branch AFTER approval is not approved.
+    const extra = `${body}\n<AffiliateLink product="ant-bait" placement="alt-rec">y</AffiliateLink>`;
+    expect(await belt(approved, extra, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/ant-bait/) });
+  });
+  test('an unresolvable head file fails closed; a resolved non-affiliate file passes', async () => {
+    expect((await belt({}, null)).ok).toBe(false);
+    expect((await belt({}, { content: '---\ntitle: Service page\n---\nplain' })).ok).toBe(true);
+  });
+
+  test('the registry read is PINNED: no pinnable base or a moved tip fails closed (Codex #3646 r22)', async () => {
+    const body = '---\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
+    const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
+    // gh without getBranchSha → cannot pin → withheld.
+    const noPin = { getFile: async () => __liveRegFile };
+    expect(await affiliateBeltVerdict(approved, body, 'headsha1', noPin)).toMatchObject({ ok: false, reason: expect.stringMatching(/cannot pin/) });
+    // A clean verdict carries the snapshot for the pre-merge recheck.
+    const ok = await belt(approved, body, 'headsha1');
+    expect(ok).toMatchObject({ ok: true, registryBaseSha: 'regbase1' });
+  });
+
+  test('tag-shaped text ONLY in frontmatter is not rendered affiliate material — never withheld (Codex #3646 r17)', async () => {
+    const fmOnly = '---\ntitle: x\nnote: documenting <AffiliateLink product="rain-gauge" placement="primary-rec"> here\n---\n\nplain body, no components';
+    expect((await belt({}, fmOnly)).ok).toBe(true);
+    // ...while the same tag in the BODY still requires approval.
+    const inBody = '---\ntitle: x\n---\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
+    expect((await belt({}, inBody)).ok).toBe(false);
+  });
 });
 
 describe('helpers', () => {
@@ -1092,6 +1209,79 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).toHaveBeenCalled();
     expect(topicGate.evaluateDraftTargeting.mock.calls[0][0].frontmatter.title).toBe('Flat Legacy Post');
     expect(gh.getFile.mock.calls.map((c) => c[0])).toEqual(['src/content/blog/pest-control/test-post.mdx', 'src/content/blog/pest-control/test-post.md', 'src/content/blog/test-post.mdx']);
+  });
+
+  test('affiliate belt (full polling path): a head carrying <AffiliateLink> is withheld without the owner approval stamp and merges with it (Codex PR3 r6)', async () => {
+    const affiliateFile = { content: '---\ntitle: Affiliate Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n' };
+    const arm = () => {
+      process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+      process.env.GATE_AFFILIATE_LINKS = 'true';
+      gh.getPr.mockResolvedValue(openPr());
+      pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+      pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+      pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+      publisher.assertCodexReviewClear.mockResolvedValue(true);
+      gh.mergePr.mockResolvedValue({ merged: true });
+      gh.getBranchSha.mockResolvedValue('regbase1');
+      gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/pest-control/test-post.mdx' ? affiliateFile : path === 'packages/affiliate-registry/registry.json' ? __liveRegFile : null));
+    };
+    // 1. No approval stamp → withheld, never merged.
+    arm();
+    setupDb({ pending: [makeRun({ trust_build_approved_by: null })] });
+    let res = await poller.pollPending();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(JSON.stringify(res)).toMatch(/affiliate_approval_required/);
+    // 2. Approved, and the approved draft referenced the same product → merges.
+    jest.clearAllMocks();
+    arm();
+    const base = makeRun();
+    const dp = JSON.parse(base.draft_payload);
+    setupDb({ pending: [makeRun({ trust_build_approved_by: 'adam', trust_build_approved_at: new Date(), draft_payload: JSON.stringify({ ...dp, body: affiliateFile.content, trust_build_approved_head_sha: 'headsha1' }) })] });
+    res = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalled();
+  });
+
+  test('affiliate belt on a REFRESH run inspects the resolved target file at the head: withheld without approval, merges with it; unresolvable fails closed', async () => {
+    const affiliateFile = { path: 'src/content/blog/legacy-post.mdx', file: { content: '---\ntitle: Legacy\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n' } };
+    const arm = () => {
+      process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+      process.env.GATE_AFFILIATE_LINKS = 'true';
+      gh.getPr.mockResolvedValue(openPr());
+      pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+      pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+      pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+      publisher.assertCodexReviewClear.mockResolvedValue(true);
+      gh.mergePr.mockResolvedValue({ merged: true });
+      gh.getBranchSha.mockResolvedValue('regbase1');
+      gh.getFile.mockImplementation(async (path) => (path === 'packages/affiliate-registry/registry.json' ? __liveRegFile : null));
+    };
+    const refresh = (over = {}) => makeRun({
+      action_type: 'refresh_existing_page', brief_id: 'brief-r',
+      draft_payload: JSON.stringify({ type: 'draft', frontmatter: { title: 'Refresh' }, body: 'x' }),
+      ...over,
+    });
+    const briefs = [{ id: 'brief-r', target_url: 'https://www.wavespestcontrol.com/blog/legacy-post/', target_keyword: 'k', city: 'Venice' }];
+    // 1. affiliate on the head, no approval → withheld
+    arm();
+    publisher.resolveExistingAstroFileForTarget.mockResolvedValue(affiliateFile);
+    setupDb({ pending: [refresh()], briefs });
+    let res = await poller.pollPending();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(JSON.stringify(res)).toMatch(/affiliate_approval_required/);
+    expect(publisher.resolveExistingAstroFileForTarget).toHaveBeenCalledWith('https://www.wavespestcontrol.com/blog/legacy-post/', { ref: openPr().head.ref });
+    // 2. approved at this head with the same product → merges
+    jest.clearAllMocks(); arm();
+    publisher.resolveExistingAstroFileForTarget.mockResolvedValue(affiliateFile);
+    setupDb({ pending: [refresh({ trust_build_approved_by: 'adam', trust_build_approved_at: new Date(), draft_payload: JSON.stringify({ type: 'draft', frontmatter: { title: 'Refresh' }, body: affiliateFile.file.content, trust_build_approved_head_sha: 'headsha1' }) })], briefs });
+    res = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalled();
+    // 3. unresolvable target file → fails closed
+    jest.clearAllMocks(); arm();
+    publisher.resolveExistingAstroFileForTarget.mockResolvedValue(null);
+    setupDb({ pending: [refresh()], briefs });
+    res = await poller.pollPending();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(JSON.stringify(res)).toMatch(/affiliate_approval_required/);
   });
 
   test('a same-leaf flat file under ANOTHER category is not this post (fails closed like an unreadable file)', async () => {

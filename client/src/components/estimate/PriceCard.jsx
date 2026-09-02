@@ -56,9 +56,19 @@ const SERVICE_INCLUSIONS = {
 
 // Row-level WaveGuard tags mirror the server's canonical tier membership
 // (discount-engine serviceCountsTowardWaveGuardTier over
-// WAVEGUARD.qualifyingServices) — palm/rodent lines never tag (they're
-// outside the WaveGuard plan).
-const ROW_TIER_TAG_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito']);
+// WAVEGUARD.qualifyingServices) — palm lines never tag (outside the
+// WaveGuard plan). Rodent bait joined the plan 2026-08-29 (codex #3591 r9
+// P2): its row tags ONLY when the server marked it tier-discounted
+// (waveGuardDiscountEligible — recurringServiceReceivesTierDiscount), so a
+// pinned legacy replay or a bare pre-realignment row (priced with no %)
+// never wears a tier it does not receive.
+const ROW_TIER_TAG_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito', 'rodent_bait']);
+function rowWearsTierTag(row = {}) {
+  const key = serviceKey(row);
+  if (!ROW_TIER_TAG_SERVICES.has(key)) return false;
+  if (key === 'rodent_bait') return row.waveGuardDiscountEligible === true;
+  return true;
+}
 
 function normalizedTier(value) {
   const raw = String(value || '').replace(/^WaveGuard\s+/i, '');
@@ -661,7 +671,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                 : (Number(row.visitsPerYear) > 0
                   ? `${row.visitsPerYear} applications/year`
                   : (row.displayPrice > 0 ? 'Service applications/year' : 'Billed monthly')),
-              waveGuardTier && ROW_TIER_TAG_SERVICES.has(serviceKey(row))
+              waveGuardTier && rowWearsTierTag(row)
                 ? `WaveGuard ${glass ? glassTierDisplay(normalizedTier(waveGuardTier)) : normalizedTier(waveGuardTier)}`
                 : null,
             ].filter(Boolean);

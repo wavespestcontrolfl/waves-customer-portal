@@ -21,7 +21,7 @@ const { inferEstimateServiceInterest } = require('./estimate-service-lines');
 const logger = require('./logger');
 const pricingEngine = require('./pricing-engine');
 const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
-const { loadExistingQualifyingServiceKeys, isActivePlanCustomer, isMembershipCustomerRow } = require('./waveguard-existing-services');
+const { loadExistingQualifyingServiceKeys, resolveCustomerQualifyingEvidence, isActivePlanCustomer, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { computeMembershipContext } = require('./estimate-membership-context');
 
 function errorWithStatus(message, statusCode) {
@@ -991,7 +991,13 @@ function compareClientToServer(clientTotals, serverTotals, now = () => new Date(
 // the retired minimums on a FRESH save (codex #3432 r3 P1). Stripped here
 // and re-derived server-side only under the declared persisted-replay
 // branch below — same lifecycle as treeShrubPricingKnobs.
-const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'commercialFloorsArmedServices', 'commercialFloorsArmed'];
+// setupWaiverPriorQualifyingServices is the public-quote wizard's
+// pre-pricing account lookup (codex #3591 r14) — a setup-waiver-only
+// identity the engine unions with priorQualifyingServices. Browser-supplied
+// it would forge a $99 waiver, so it is stripped like the rest; the admin
+// save re-supplies its own ACCOUNT-wide server-derived list (codex #3591
+// r15 P1 / r34 P1).
+const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'setupWaiverPriorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'commercialFloorsArmedServices', 'commercialFloorsArmed', 'rodentBaitLegacyReplay', 'rodentWaveguardPostureReplay'];
 function sanitizeClientIdentityFields(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
   for (const field of CLIENT_IDENTITY_FIELDS) delete obj[field];
@@ -1061,6 +1067,13 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // legitimately earns the perk while a one-time-only lead cannot forge it.
   v1Input = sanitizeClientIdentityFields({ ...v1Input });
   v1Input.priorQualifyingServices = priorQualifyingServices;
+  // Account-wide rodent setup-waiver evidence, server-derived by the caller
+  // alongside the property-scoped tier list (codex #3591 r34 P1); set
+  // unconditionally (empty for a non-member) so a client-claimed list can
+  // never survive into the engine.
+  v1Input.setupWaiverPriorQualifyingServices = Array.isArray(deps.setupWaiverPriorQualifyingServices)
+    ? deps.setupWaiverPriorQualifyingServices
+    : [];
   if (deps.recurringCustomer === true || priorQualifyingServices.length > 0) {
     v1Input.recurringCustomer = true;
   }
@@ -1111,6 +1124,15 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // above, and every other save prices off freshly synced live config and
   // stamps the resulting server values afterward.
   if (deps.replaySavedPricingKnobs === true) {
+    // Lawn cost floor, lawn program minimum and pest program floor. The public
+    // read path has threaded these since #2827 (savedFloorReplayOverrides);
+    // this branch did not, so an authoritative recompute resolved them from
+    // the LIVE globals and — because callers persist this result — wrote the
+    // live state over the estimate's quote-time pricingMetadata stamps. The
+    // next replay then read the overwritten stamps as the saved evidence.
+    // Same reader, same tri-state: a signal absent here means replay live.
+    Object.assign(v1Input, require('./estimate-floor-signal-replay')
+      .savedFloorReplaySignals(estimateData));
     const tsKnobs = require('./estimate-tree-shrub-knob-replay')
       .treeShrubKnobSignalForReplay(estimateData);
     if (tsKnobs) v1Input.treeShrubPricingKnobs = tsKnobs;
@@ -1122,6 +1144,15 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     // (savedFloorReplayOverrides; codex r3 P0 — never a global re-arm).
     const commercialArmed = require('./commercial-floor-replay').commercialFloorBoundServices(estimateData);
     if (commercialArmed.length) v1Input.commercialFloorsArmedServices = commercialArmed;
+    // Legacy rodent-bait price pin (codex #3591 r2 P0): same stored-row
+    // evidence the public replay uses — a pre-realignment rodent line must
+    // keep its disclosed price through this authoritative recompute too.
+    const rodentPin = require('./rodent-bait-legacy-replay').rodentBaitLegacyReplaySignal(estimateData);
+    if (rodentPin) v1Input.rodentBaitLegacyReplay = rodentPin;
+    // New-model rodent posture freeze (codex #3591 r43 P1) — same stored-row
+    // evidence the public replay injects.
+    const rodentPosture = require('./rodent-bait-legacy-replay').rodentWaveguardPostureReplaySignal(estimateData);
+    if (rodentPosture) v1Input.rodentWaveguardPostureReplay = rodentPosture;
   }
 
   try {
@@ -1192,7 +1223,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, recurringCustomer }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -1209,7 +1240,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
 
   let result;
   try {
-    result = await recomputeFn(estimateData, { now, priorQualifyingServices, recurringCustomer });
+    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer });
   } catch (error) {
     // Fail-open is for BROKEN engines only. A failClosed policy rejection
     // (gated/invalid add-on in the replay) must block the save outright —
@@ -1709,57 +1740,37 @@ async function resolveEstimateWritePayload({
   // Fail-closed to false: a lookup miss/error charges as a non-member, never
   // silently grants the perk — same posture as isActivePlanCustomer itself.
   let recurringCustomer = false;
-  // Per-property tier scoping (codex #3244 r1; owner ruling 2026-08-06: each
-  // property is its OWN WaveGuard plan at its OWN service-count tier — no
-  // combined-account bump). A grouped estimate quotes a different property on
-  // the same customer, so the account's existing services must not feed its
-  // tier context; it prices standalone. The recurring-customer 15% one-time
-  // perk below stays account-level — the person IS a recurring customer.
+  // Existing-customer evidence, split by PURPOSE (codex #3591 r34 P1) through
+  // the resolver the estimator preview shares (resolveCustomerQualifyingEvidence):
+  //   • priorQualifyingServices — the TIER context, per-property (codex #3244
+  //     r1/r5/r6; owner ruling 2026-08-06: a grouped estimate, or one quoting
+  //     a NON-primary street, prices at its own property's service count).
+  //   • setupWaiverPriorQualifyingServices — the rodent bait-station setup
+  //     waiver, ACCOUNT-wide (owner 2026-08-29: any other qualifying plan on
+  //     the account waives it, whichever address it serves).
+  // The recurring-customer 15% one-time perk below stays account-level too.
+  // A lookup failure refuses the save retryably: reading it as "no other
+  // qualifier" would persist a lower tier and an unwarranted $99 setup row
+  // for an existing member (codex #3591 r31 P1).
+  let setupWaiverPriorQualifyingServices = [];
   let groupedEstimate = !!(body.groupWithEstimateId || body.estimateGroupId);
-  // Per-property street context (codex #3244 r5+r6). The ANCHOR of a future
-  // group is saved before any group exists: an existing customer quoting a
-  // NON-primary address must already price per-property, or the anchor keeps
-  // the combined account tier forever (grouping later never reprices it).
-  // Both streets must parse cleanly to flip — parse uncertainty keeps the
-  // long-standing combined behavior for same-property requotes with
-  // formatting drift.
   let perPropertyStreetScope = null;
-  if (body.customerId && body.address) {
-    try {
-      const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
-      const custRow = await database('customers').where({ id: body.customerId }).first('address_line1', 'address_line2', 'city', 'zip');
-      const estimateStreet = normalizedEstimateStreet(body.address);
-      const customerStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
-      if (estimateStreet) {
-        perPropertyStreetScope = { estimateStreet, customerPrimaryStreet: customerStreet };
-      }
-      const { sameScopeKey } = require('./estimate-property-linkage');
-      if (!groupedEstimate && estimateStreet && customerStreet && !sameScopeKey(estimateStreet, customerStreet)) {
-        groupedEstimate = true;
-      }
-    } catch (err) {
-      logger.warn(`[admin-estimate] per-property tier address check skipped: ${err.message}`);
-    }
-  }
   if (body.customerId) {
-    if (!groupedEstimate) {
-      try {
-        priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId);
-      } catch (err) {
-        logger.warn(`[admin-estimate] prior qualifying services lookup skipped: ${err.message}`);
-      }
-    } else if (perPropertyStreetScope) {
-      // Grouped / non-primary property: qualifying services ALREADY ACTIVE at
-      // THIS property still count toward its own service-count tier (an
-      // add-on to a serviced secondary property keeps its real tier — codex
-      // #3244 r6); other properties' plans stay excluded.
-      try {
-        priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId, {
-          streetScope: perPropertyStreetScope,
-        });
-      } catch (err) {
-        logger.warn(`[admin-estimate] property-scoped qualifying services lookup skipped: ${err.message}`);
-      }
+    try {
+      const evidence = await resolveCustomerQualifyingEvidence(database, {
+        customerId: body.customerId,
+        address: body.address || null,
+        groupedEstimate,
+        logger,
+        loadKeys: loadExistingQualifyingServiceKeys,
+      });
+      priorQualifyingServices = evidence.tierKeys;
+      setupWaiverPriorQualifyingServices = evidence.setupWaiverKeys;
+      groupedEstimate = evidence.groupedEstimate;
+      perPropertyStreetScope = evidence.perPropertyStreetScope;
+    } catch (err) {
+      logger.warn(`[admin-estimate] prior qualifying services lookup failed — refusing save: ${err.message}`);
+      throw errorWithStatus('Could not confirm this customer\'s existing services. Retry the save.', 503);
     }
     try {
       recurringCustomer = await isActivePlanCustomer(database, body.customerId);
@@ -1774,6 +1785,7 @@ async function resolveEstimateWritePayload({
     now,
     recompute,
     priorQualifyingServices,
+    setupWaiverPriorQualifyingServices,
     recurringCustomer,
   });
   const totals = pricing.totals;
@@ -1791,6 +1803,15 @@ async function resolveEstimateWritePayload({
     trustedEstimateData.priorQualifyingServices = priorQualifyingServices;
   } else {
     delete trustedEstimateData.priorQualifyingServices;
+  }
+  // Same round-trip for the ACCOUNT-wide setup-waiver evidence (codex #3591
+  // r34 P1): a grouped/secondary-property rodent quote whose tier list is
+  // property-scoped must not re-add the $99 setup on a public replay when
+  // the account holds another plan. Server-derived only, like the tier list.
+  if (repricedAtServer && setupWaiverPriorQualifyingServices.length) {
+    trustedEstimateData.setupWaiverPriorQualifyingServices = setupWaiverPriorQualifyingServices;
+  } else {
+    delete trustedEstimateData.setupWaiverPriorQualifyingServices;
   }
   // Strip the client-claimed identity/recurring flags from every STORED replay
   // shape (engineInputs + engineRequest.options). extractEngineInputs replays
@@ -2107,6 +2128,16 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   }
   if (estimate?.price_locked_at) {
     return { message: 'This estimate is price-locked (accepted) and can no longer be edited.', statusCode: 409 };
+  }
+  // Customer plan-restart quotes are never revised in place (codex GH r17
+  // P1 on #3671): their scope is fixed by the cancellation attempt and
+  // their price is always today's mint (owner ruling — one honorable
+  // price). An edited copy either bricked acceptance (planRestart dropped
+  // wholesale) or, preserved, let a changed composition restart work
+  // outside the cancellation scope; blocking is the only shape that keeps
+  // both invariants.
+  if (String(estimate?.source || '') === 'plan_restart') {
+    return { message: 'This is a customer plan-restart quote — its scope is fixed by the cancellation and it always prices at the current mint. It cannot be edited in place; the customer re-taps "Restart my plan" for a fresh quote.', statusCode: 409 };
   }
   const status = String(estimate?.status || '');
   if (status === 'sending') {
