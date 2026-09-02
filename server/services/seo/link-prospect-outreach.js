@@ -155,12 +155,16 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
   // just-written draft was composed for a retired route and the transition
   // has already cleared it: report path_moved so the operator re-drafts.
   const { rows, moved } = await db.transaction(async (trx) => {
-    const written = await trx('seo_link_prospects')
-      .where({ id: prospectId, status: 'prospect' })
+    // …and on the PATH and LANE the operator drafted against: a settlement
+    // that moved the row (to a signup lane, say) between the pre-read and
+    // this write must make it miss, or a signup placement would be left
+    // `drafted` — unclaimable by the runner, refused by the send valve.
+    let write = trx('seo_link_prospects')
+      .where({ id: prospectId, status: 'prospect', link_type: prospect.link_type })
       .whereNull('outreach_sent_at')
-      .where((b) => b.whereNull('outreach_status').orWhereIn('outreach_status', ['none', 'drafted']))
-      .update(patch)
-      .returning('*');
+      .where((b) => b.whereNull('outreach_status').orWhereIn('outreach_status', ['none', 'drafted']));
+    write = prospect.path_id == null ? write.whereNull('path_id') : write.where('path_id', prospect.path_id);
+    const written = await write.update(patch).returning('*');
     if (!written || written.length === 0) return { rows: written, moved: 0 };
     const n = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: [prospectId] });
     return { rows: written, moved: n };
@@ -218,6 +222,14 @@ async function sendOutreach({ prospectId, approvedBy = 'admin' }) {
     // copy; once the row is `sending` settlement refuses to touch it.
     const moved = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: [prospectId] });
     if (moved) return { ok: false, code: 'path_moved' };
+    // zero moved is not proof of a live path: a chain settlement could not
+    // resolve (bounded hops) or refused leaves the row on a retired path —
+    // re-read and require the path it will send on to be non-superseded
+    const current = await trx('seo_link_prospects').where({ id: prospectId }).first('path_id');
+    if (current && current.path_id) {
+      const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).first('id', 'superseded_by');
+      if (!onPath || onPath.superseded_by) return { ok: false, code: 'path_moved' };
+    }
     const attemptAt = new Date();
     const claimedRows = await trx('seo_link_prospects')
       .where({ id: prospectId, outreach_status: 'drafted', status: 'prospect' })

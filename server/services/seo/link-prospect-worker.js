@@ -147,8 +147,14 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
 
     // Read-only preview (dry-run): return matching rows WITHOUT leasing them — no
     // claimed_at/claimed_by write, no lease_token — so a dry run honors its no-writes
-    // contract and never strands rows until the stale sweep.
-    if (preview) return (await base).map((r) => ({ ...r }));
+    // contract and never strands rows until the stale sweep. A live claim would
+    // SETTLE rows on superseded paths (moved, unclassified, not leased), so the
+    // preview excludes them rather than report a retired URL as claimable.
+    if (preview) {
+      const previewRows = await base.where((b) => b.whereNull('path_id').orWhereNotIn('path_id',
+        trx('seo_link_acquisition_paths').select('id').whereNotNull('superseded_by')));
+      return previewRows.map((r) => ({ ...r }));
+    }
 
     let rows = await base.forUpdate().skipLocked();
 
@@ -357,7 +363,19 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
       .update({ ...patch, attempts });
     // the lease is released — a superseded / changed path is followed in the
     // SAME transaction, even if this row is never claimed again
-    if (n) await settleReleasedPlacements([prospect_id], trx);
+    if (n) {
+      const moved = await settleReleasedPlacements([prospect_id], trx);
+      // The retry lifecycle is PATH-specific: a failure (and the retry cap it
+      // may have exhausted) belongs to the predecessor. When settlement just
+      // moved the row onto a DIFFERENT path, the successor has had no attempt
+      // yet — reopen it with a fresh count rather than leaving it terminal.
+      if (moved && outcome === 'failed') {
+        const after = await trx('seo_link_prospects').where({ id: prospect_id }).first('path_id');
+        if (after && after.path_id && after.path_id !== prospect.path_id) {
+          await trx('seo_link_prospects').where({ id: prospect_id }).whereNull('claimed_at').update({ status: 'prospect', attempts: 0, updated_at: new Date() });
+        }
+      }
+    }
     return n;
   });
 

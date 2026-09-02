@@ -92,7 +92,7 @@ test('a placement on a live path claims unchanged; preview claims settle nothing
   const row = { id: 'r1', status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40, target_domain: 'example.com', path_id: 'p-old', target_url: 'https://example.com/old-join' };
   mockStore.seo_link_prospects.push(row);
   const preview = await worker.claim({ n: 5, type: 'signup', preview: true });
-  expect(preview).toHaveLength(1);
+  expect(preview).toHaveLength(0); // a live run would settle (not lease) this row — the preview never reports its retired URL as claimable (r2)
   expect(row).toMatchObject({ path_id: 'p-old', claimed_at: null }); // read-only preview: no writes of any kind
   const claimed = await worker.claim({ n: 5, type: 'signup' });
   expect(claimed).toEqual([]); // settled, unclassified, not leased
@@ -213,7 +213,7 @@ test('a lease released through report() settles the placement onto its successor
   mockStore.seo_link_prospects.push(row);
   const rep = await worker.report({ prospect_id: 'r1', outcome: 'failed', lease_token: lease.toISOString() });
   expect(rep.ok).toBe(true);
-  expect(row).toMatchObject({ status: 'rejected', claimed_at: null, path_id: 'p-live', target_url: 'https://example.com/join', automation_policy: null }); // released AND settled in the same report
+  expect(row).toMatchObject({ status: 'prospect', attempts: 0, claimed_at: null, path_id: 'p-live', target_url: 'https://example.com/join', automation_policy: null }); // released AND settled in the same report; the terminal failure belonged to the predecessor — the successor reopens with a fresh count (r2)
 });
 
 test('an owner Watch that commits between the candidate SELECT and the lease write wins — the row is not handed out (Codex PR #3687 r30 P1)', async () => {
@@ -278,5 +278,33 @@ test('a confidence drop to zero during the lease is reconciled at release even t
   const rep = await worker.report({ prospect_id: 'r1', outcome: 'failed', lease_token: claimed.lease_token });
   expect(rep.ok).toBe(true);
   expect(row).toMatchObject({ claimed_at: null, automation_policy: null, last_classified_at: null }); // the transition ran: nothing composed on a dead route stays actionable
+});
+
+test('a read-only preview never reports a placement on a superseded path as claimable (Codex #3720 r2 P2)', async () => {
+  const old = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old', superseded_by: 'p-new', link_type: 'directory', confidence: 0.7 };
+  const live = { id: 'p-new', domain_id: 'd1', submission_url: 'https://example.com/new', superseded_by: null, link_type: 'directory', confidence: 0.7 };
+  const ok = { id: 'p-ok', domain_id: 'd2', submission_url: 'https://ok.example/add', superseded_by: null, link_type: 'directory', confidence: 0.7 };
+  mockStore.seo_link_acquisition_paths.push(old, live, ok);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40 };
+  mockStore.seo_link_prospects.push(
+    { ...base, id: 'r-old', target_domain: 'example.com', path_id: 'p-old', target_url: 'https://example.com/old' },
+    { ...base, id: 'r-ok', target_domain: 'ok.example', path_id: 'p-ok', target_url: 'https://ok.example/add' },
+  );
+  const preview = await worker.claim({ n: 5, type: 'signup', preview: true });
+  expect(preview.map((r) => r.id)).toEqual(['r-ok']); // the retired-URL row would be settled (not leased) by a live run — never previewed as claimable
+  expect(mockStore.seo_link_prospects.every((r) => r.claimed_at == null)).toBe(true); // no writes
+});
+
+test('a terminal failure reported on a superseded predecessor moves the row to the successor with a FRESH retry lifecycle (Codex #3720 r2 P1)', async () => {
+  const old = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old', superseded_by: null, link_type: 'directory', confidence: 0.7, revision: 1 };
+  const next = { id: 'p-new', domain_id: 'd1', submission_url: 'https://example.com/new', superseded_by: null, link_type: 'directory', confidence: 0.7, revision: 1 };
+  mockStore.seo_link_acquisition_paths.push(old, next);
+  const row = { id: 'r1', status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, attempts: worker.MAX_ATTEMPTS - 1, automation_policy: 'submit_free', priority: 'high', domain_rating: 40, target_domain: 'example.com', path_id: 'p-old', target_url: 'https://example.com/old', quality_signals: null };
+  mockStore.seo_link_prospects.push(row);
+  const [claimed] = await worker.claim({ n: 5, type: 'signup' });
+  old.superseded_by = 'p-new'; // the investigator retires the predecessor while the lease is held
+  const rep = await worker.report({ prospect_id: 'r1', outcome: 'failed', lease_token: claimed.lease_token });
+  expect(rep.ok).toBe(true);
+  expect(row).toMatchObject({ path_id: 'p-new', target_url: 'https://example.com/new', status: 'prospect', attempts: 0, claimed_at: null, automation_policy: null }); // the successor had no attempt: not terminal, count reset, unclassified for the classifier
 });
 
