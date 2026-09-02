@@ -905,23 +905,30 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   } = options;
 
   if (!customerId) return { synced: false, reason: 'missing_customer_id' };
+  // A bare connection runs the WHOLE sync inside one transaction under
+  // rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the tier/rate
+  // alignment is derived from the customer row and its schedule, and
+  // deriving it unlocked while a cancellation wind-down reprices the same
+  // customer would write a stale alignment over the demotion. Callers
+  // already inside a transaction take the lock below, before the row lock.
+  if (!database.isTransaction) {
+    return withCustomerCommsLock(database, customerId, (trx) => syncCustomerWaveGuardPlanFromScheduledServices({ ...options, database: trx }));
+  }
 
   const customerColumns = await columnInfo(database, 'customers');
   // Inside a transaction (seeder hook savepoint, reconcile per-candidate
   // trx), take the customer row lock so concurrent syncs on the same
   // customer serialize: whichever runs second re-reads AFTER the first
   // commits and derives its decision from the settled tier + schedule
-  // (Codex #3011 r2 — evidence-vs-write races). On a plain pool connection
-  // forUpdate is a single-statement no-op, so this changes nothing there.
+  // (Codex #3011 r2 — evidence-vs-write races). Always inside a
+  // transaction now (the bare-connection re-entry above opens one).
   // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) BEFORE the row lock:
   // the alignment below rewrites the tier and re-seeds the ledger — the
   // writes the scoped cancellation wind-down serializes on. Reentrant for
-  // the seeder / converter / admin-schedule callers that already hold it.
-  let customerQuery = database('customers').where({ id: customerId }).first();
-  if (database.isTransaction) {
-    await lockCustomerComms(database, customerId);
-    customerQuery = customerQuery.forUpdate();
-  }
+  // the seeder / converter / admin-schedule callers that already hold it
+  // (and for the bare-connection re-entry above).
+  await lockCustomerComms(database, customerId);
+  const customerQuery = database('customers').where({ id: customerId }).first().forUpdate();
   const customer = await customerQuery;
   if (!customer) return { synced: false, reason: 'customer_not_found' };
 
@@ -989,20 +996,13 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   );
 
   if (Object.keys(alignment.updates).length) {
-    const applyAlignment = async (handle) => {
-      await handle('customers').where({ id: customerId }).update(alignment.updates);
-      if (alignment.updates.monthly_rate !== undefined && alignment.planRateComponents) {
-        // Seed the detected per-plan components with the minted rate (codex
-        // #3245 r7); gate-aware error policy lives in the helper.
-        await require('./plan-rate-ledger')
-          .seedLedgerComponents(handle, customerId, alignment.planRateComponents, { source: 'plan_sync' });
-      }
-    };
-    // A caller's transaction already holds rung 6 (taken above, before the
-    // row lock); a bare connection gets a scoped transaction so the tier
-    // write and the ledger seed commit together under the key.
-    if (database.isTransaction) await applyAlignment(database);
-    else await withCustomerCommsLock(database, customerId, applyAlignment);
+    await database('customers').where({ id: customerId }).update(alignment.updates);
+    if (alignment.updates.monthly_rate !== undefined && alignment.planRateComponents) {
+      // Seed the detected per-plan components with the minted rate (codex
+      // #3245 r7); gate-aware error policy lives in the helper.
+      await require('./plan-rate-ledger')
+        .seedLedgerComponents(database, customerId, alignment.planRateComponents, { source: 'plan_sync' });
+    }
   }
 
   if (alignment.inferredTier && Object.keys(alignment.updates).length) {
