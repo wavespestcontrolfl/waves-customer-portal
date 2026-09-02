@@ -81,7 +81,7 @@ import useModalFocus from '../hooks/useModalFocus';
 import { canonicalShareUrl, shareDocumentLink } from '../components/DocumentActionBar';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
-import { etParts, formatETDate, formatETDateTime } from '../lib/timezone';
+import { addETDays, etParts, formatETDate, formatETDateTime } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
 import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
@@ -4402,7 +4402,7 @@ export function lawnProgramSeasons(visitsPerYear, now) {
   const hits = Array.from({ length: n }, (_, i) => (
     cadence.months
       ? (start + i * cadence.months) % 12
-      : etParts(new Date(at.getTime() + i * cadence.days * 86400000)).month - 1
+      : etParts(addETDays(at, i * cadence.days)).month - 1
   ));
   const first = Math.max(0, LAWN_SEASONS.findIndex((s) => s.months.includes(start)));
   return LAWN_SEASONS.map((_, i) => LAWN_SEASONS[(first + i) % LAWN_SEASONS.length]).map((s, i) => ({

@@ -24,6 +24,17 @@ describe('lawnProgramSeasons', () => {
     // Sep 1, Oct 13, Nov 24, Jan 5, Feb 16, Mar 30, May 11, Jun 22, Aug 3
     expect(counts(seasons)).toEqual({ summer: 4, fall: 2, winter: 2, spring: 1 });
   });
+  it('steps 42-day projections by ET calendar day, so a DST crossing near midnight cannot move a month', () => {
+    // 03:30Z on Feb 18 is 22:30 ET Feb 17. 42 ET days later is Mar 31 (after
+    // the Mar 8 DST change); elapsed-hours math would land 23:30 EDT Mar 31 too,
+    // but the next step from a late-evening ET anchor is where hour drift bites:
+    // 84 ET days on is May 12, and 126 is Jun 23 — all inside their months.
+    const seasons = lawnProgramSeasons(9, et('2026-02-18T03:30:00Z'));
+    expect(seasons[0].key).toBe('winter');
+    expect(seasons.reduce((a, s) => a + s.applications, 0)).toBe(9);
+    // Feb 17, Mar 31, May 12, Jun 23, Aug 4, Sep 15, Oct 27, Dec 8, Jan 19
+    expect(counts(seasons)).toEqual({ winter: 3, spring: 1, summer: 4, fall: 1 });
+  });
   it('a 42-day program starting in May puts four applications in summer (May, Jun, Jul, Sep)', () => {
     expect(counts(lawnProgramSeasons(9, et('2026-05-01T16:00:00Z')))).toEqual({ summer: 4, fall: 2, winter: 2, spring: 1 });
   });
