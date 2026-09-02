@@ -1393,7 +1393,15 @@ router.get('/:id/dictation/availability', async (req, res, next) => {
   } catch (err) { return next(err); }
 });
 
-router.post('/:id/dictation', (req, res, next) => {
+// Gate + ownership run BEFORE multer buffers the clip (pre-push P1): an
+// unauthorized or gate-off request never costs 15 MB of memory.
+router.post('/:id/dictation', async (req, res, next) => {
+  try {
+    if (!dictationUploadGateOn()) return res.status(404).json({ error: 'Dictation upload is not available' });
+    if (!(await loadOwnedServiceOr403(req, res))) return undefined;
+    return next();
+  } catch (err) { return next(err); }
+}, (req, res, next) => {
   dictationUpload.single('audio')(req, res, (err) => {
     if (!err) return next();
     if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Recording too large (15 MB max)' });
@@ -1401,8 +1409,6 @@ router.post('/:id/dictation', (req, res, next) => {
   });
 }, async (req, res, next) => {
   try {
-    if (!dictationUploadGateOn()) return res.status(404).json({ error: 'Dictation upload is not available' });
-    if (!(await loadOwnedServiceOr403(req, res))) return undefined;
     if (!req.file || !req.file.buffer?.length) return res.status(400).json({ error: 'No audio provided' });
     const baseType = dictationBaseType(req.file.mimetype);
     const filename = DICTATION_AUDIO_TYPES.get(baseType);

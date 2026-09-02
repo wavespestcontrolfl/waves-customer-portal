@@ -102,6 +102,8 @@ describe('tech dictation upload', () => {
       const denied = await clip(baseUrl, { token: 'other' });
       expect(denied.status).toBe(403);
       expect(mockTranscribe).not.toHaveBeenCalled();
+      // Refused before multer runs: the clip is never buffered (pre-push P1).
+      expect(denied.headers.get('content-type')).toMatch(/json/);
       const admin = await clip(baseUrl, { token: 'admin' });
       expect(admin.status).toBe(200);
     });
