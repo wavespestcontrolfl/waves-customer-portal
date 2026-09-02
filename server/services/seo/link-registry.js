@@ -341,6 +341,132 @@ async function ensureDomain(q, { domain, source, sourceDetail = null, sourceRef 
   return { id: row.id, domain: key, created, touched, touchId: (touchRow && touchRow.id) || null };
 }
 
+const SUPERSESSION_MAX_HOPS = 8;
+
+/**
+ * Placements follow path supersession (§3.2) — ONE mechanism, two callers:
+ *
+ *   settleRetiredPlacements(q, { pathIds, successor })   — the investigator,
+ *     right after it superseded `pathIds` into `successor` ({ id, submission_url }).
+ *   settleRetiredPlacements(q, { prospectIds })          — the worker, right
+ *     after a lease is released (report / release / expired-claim sweep):
+ *     each placement's linked path is followed along `superseded_by` to the
+ *     live successor.
+ *
+ * Only UN-LEASED placements move (`claimed_at IS NULL`): a leased one is
+ * mid-submission through the path it was claimed on and its attempt ledger
+ * names that path — it is settled when its lease clears, which is why the
+ * worker calls this at every lease release rather than waiting for a future
+ * re-investigation. The placement's EXECUTION URL (`target_url`) moves with
+ * it whenever the successor has one (the runner submits at target_url, and
+ * the board catch-up keys legacy placements on it); a URL-less successor
+ * (outreach) leaves target_url alone. Returns the number of rows moved.
+ */
+const SUCCESSOR_COLUMNS = ['id', 'superseded_by', 'submission_url', 'link_type', 'revision'];
+
+/**
+ * A moved placement takes the successor's LANE and is left UNCLASSIFIED:
+ *   - `link_type` follows the successor's path lane (the worker claims by
+ *     the placement's link_type — a directory placement superseded by an
+ *     outreach path must leave the signup lane, or the runner would execute
+ *     the retired route while the ledger names the outreach successor);
+ *   - `automation_policy` / `last_classified_at` are cleared. The policy was
+ *     classified for the OLD path; the successor's CAPTCHA / category /
+ *     account gates are only known once the weekly classifier has fetched
+ *     ITS page (a null last_classified_at puts it first in line), and until
+ *     then no runner may lease it (claim() filters on the policy). Fail
+ *     closed — never a synthesized policy from an incomplete signal.
+ */
+// Outreach state that is IN FLIGHT or AMBIGUOUS: a placement carrying it
+// never moves (a send may still be executing, or needs human
+// reconciliation) — it keeps the retired path, which nothing can claim.
+const OUTREACH_LOCKED = new Set(['sending', 'sent', 'send_error']);
+const PLACEMENT_MOVE_COLUMNS = ['id', 'path_id', 'link_type', 'outreach_status', 'outreach_sent_at', 'outreach_send_token', 'leased_path_revision'];
+
+/**
+ * The move UPDATE is OPTIMISTIC on everything the decision read: the path,
+ * the lease, and the outreach state (status, sent stamp, send token). The
+ * send path flips a draft to `sending` WITHOUT taking the lease, so a
+ * snapshot taken just before it must miss — otherwise the stale
+ * draft-clearing patch would erase the token the finalizer is about to
+ * match, leaving a sent message with no sent marker (a later duplicate).
+ */
+function observedWhere(q, row) {
+  let w = q('seo_link_prospects').where({ id: row.id }).whereNull('claimed_at');
+  for (const col of ['path_id', 'outreach_status', 'outreach_sent_at', 'outreach_send_token']) {
+    w = row[col] == null ? w.whereNull(col) : w.where(col, row[col]);
+  }
+  return w;
+}
+
+/**
+ * The patch that moves ONE placement onto `target`, or null when the move
+ * must be refused: a locked state (sending / sent / send_error, or a sent
+ * stamp) refuses any move; an unsent draft (`drafted`) is cleared with its
+ * token on every move, so the approval queue never sends a message composed
+ * for a route that no longer exists; the lane follows the successor.
+ */
+function movePatch(row, target, now) {
+  // locked outreach never moves AT ALL — same lane, other outreach lane, or
+  // signup lane: a send may be executing against the path it was claimed
+  // on, or the row awaits human reconciliation; the retired path stays
+  // (nothing can claim it) and the attempt/send stays attributed to it
+  if (OUTREACH_LOCKED.has(row.outreach_status) || row.outreach_sent_at) return null;
+  // the execution URL follows the successor; a URL-less successor (outreach)
+  // CLEARS it — the retired route must not survive as the page the outreach
+  // drafter fetches and cites, so the drafter falls back to the homepage
+  const patch = { path_id: target.id, updated_at: now, automation_policy: null, last_classified_at: null };
+  if (target.submission_url) patch.target_url = target.submission_url;
+  else if (target.id !== row.path_id) patch.target_url = null; // a real supersession onto a URL-less path; a same-path refresh leaves it
+  // an UNSENT draft was written for the path it is leaving — on EVERY move
+  // (same lane included) it is cleared with its token, so the approval
+  // endpoint can never send a message composed for a retired route
+  if (row.outreach_status === 'drafted') {
+    Object.assign(patch, { outreach_status: 'none', outreach_to_email: null, outreach_subject: null, outreach_body: null, outreach_send_token: null });
+  }
+  const nextLane = target.link_type && CLAIMABLE_LINK_TYPES.has(target.link_type) ? target.link_type : null;
+  if (nextLane && nextLane !== row.link_type) patch.link_type = nextLane;
+  return patch;
+}
+
+async function settleRetiredPlacements(q, { pathIds = null, successor = null, prospectIds = null, now = new Date() } = {}) {
+  const moveRows = async (rows, target) => {
+    let moved = 0;
+    for (const row of rows) {
+      const patch = movePatch(row, target, now);
+      if (!patch) continue;
+      moved += await observedWhere(q, row).update(patch);
+    }
+    return moved;
+  };
+  if (successor && successor.id && Array.isArray(pathIds)) {
+    if (!pathIds.length) return 0;
+    const rows = await q('seo_link_prospects').whereIn('path_id', pathIds).whereNull('claimed_at').select(...PLACEMENT_MOVE_COLUMNS);
+    return moveRows(rows || [], successor);
+  }
+  if (!Array.isArray(prospectIds) || !prospectIds.length) return 0;
+  const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').whereNotNull('path_id').select(...PLACEMENT_MOVE_COLUMNS);
+  let moved = 0;
+  for (const r of rows) {
+    let cur = await q('seo_link_acquisition_paths').where({ id: r.path_id }).first(...SUCCESSOR_COLUMNS);
+    for (let hop = 0; cur && cur.superseded_by && hop < SUPERSESSION_MAX_HOPS; hop++) {
+      cur = await q('seo_link_acquisition_paths').where({ id: cur.superseded_by }).first(...SUCCESSOR_COLUMNS);
+    }
+    if (!cur || cur.superseded_by) continue; // the chain did not resolve
+    if (cur.id === r.path_id) {
+      // same path, still live — but did it CHANGE while this placement was
+      // leased? The lease stamped the path revision it was taken on; a
+      // higher revision now (a gate change, a working-origin move, a lane
+      // shift) is a same-path transition the immediate write skipped
+      // because the row was leased: apply it at release.
+      const leasedRev = r.leased_path_revision == null ? null : Number(r.leased_path_revision);
+      if (leasedRev == null || cur.revision == null || Number(cur.revision) <= leasedRev) continue;
+    }
+    moved += await moveRows([r], cur);
+  }
+  return moved;
+}
+
 module.exports = {
   LINK_SOURCES, AGENT_STATES, DISCOVERY_PRIORITIES, ACQUISITION_TYPES, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES,
   EXPECTED_REL, EXPECTED_INDEXABILITY, EXPECTED_PERSISTENCE, RENEWAL_PERIODS, PATH_LINK_TYPES,
@@ -349,4 +475,5 @@ module.exports = {
   NEVER_TARGET_HOSTS, isNeverTargetHost,
   mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, normalizeSubmissionUrl, pathKey,
   acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain,
+  settleRetiredPlacements,
 };
