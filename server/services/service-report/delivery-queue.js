@@ -510,6 +510,9 @@ async function processDueServiceReportDeliveries({ now = new Date(), limit = CLA
 
 module.exports = {
   CLAIM_LIMIT,
+  // Shared with the ops queue so its stale-claim rule cannot drift from
+  // recoverStaleServiceReportDeliveryClaims.
+  STALE_CLAIM_MS,
   DEFAULT_MAX_ATTEMPTS,
   enqueueServiceReportV1EmailDelivery,
   nextServiceReportDeliveryAttemptAt,

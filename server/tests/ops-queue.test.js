@@ -36,6 +36,8 @@ jest.mock('../services/content/autonomous-review-queue', () => ({
   listReviewItems: (...a) => mockReviewItems(...a),
 }));
 jest.mock('../services/content/email-approvals', () => ({ EXECUTING_RECOVERY_MINUTES: 15 }));
+jest.mock('../services/service-report/delivery-queue', () => ({ STALE_CLAIM_MS: 30 * 60 * 1000 }));
+jest.mock('../services/service-report/pdf-queue', () => ({ STALE_CLAIM_MS: 30 * 60 * 1000 }));
 // The stall rule is the watchdog's; here it is a fixture: c1 is stalled.
 jest.mock('../services/intelligence-bar/authorization-contract', () => ({
   activityLabel: (name) => ({ send_sms: 'Send a text message' })[name] || String(name).replace(/_/g, ' '),
@@ -94,9 +96,14 @@ describe('getOpsQueue', () => {
     fixtures.service_report_deliveries = [
       { id: 'd1', service_record_id: 'rec-11111111', channel: 'email', status: 'queued', attempts: 0, max_attempts: 5, created_at: ago(3) },
       { id: 'd2', service_record_id: 'rec-22222222', channel: 'email', status: 'failed', attempts: 5, max_attempts: 5, failed_at: ago(30), created_at: ago(60) },
+      // Live claim inside STALE_CLAIM_MS — pending.
+      { id: 'd3', service_record_id: 'rec-44444444', channel: 'email', status: 'sending', attempts: 1, max_attempts: 5, locked_at: ago(5), created_at: ago(6) },
+      // Claim older than STALE_CLAIM_MS: orphaned (the recovery sweep's rule) — parked.
+      { id: 'd4', service_record_id: 'rec-55555555', channel: 'email', status: 'sending', attempts: 1, max_attempts: 5, locked_at: ago(45), created_at: ago(50) },
     ];
     fixtures.service_report_pdf_jobs = [
-      { id: 'p1', service_record_id: 'rec-33333333', status: 'rendering', created_at: ago(2) },
+      { id: 'p1', service_record_id: 'rec-33333333', status: 'rendering', locked_at: ago(2), created_at: ago(2) },
+      { id: 'p2', service_record_id: 'rec-66666666', status: 'rendering', locked_at: ago(40), created_at: ago(41) },
     ];
     fixtures.dispatch_alerts = [
       { id: 'da-1', severity: 'warn', payload: JSON.stringify({ source: 'typed_completion', customerName: 'Test Customer', serviceType: 'termite_retreat', suggestedFollowupDate: '2026-09-20' }), created_at: ago(500) },
@@ -139,16 +146,19 @@ describe('getOpsQueue', () => {
     expect(by.ib.items).toEqual([expect.objectContaining({ id: 'pa-1', status: 'parked', title: 'Send a text message' })]);
     expect(JSON.stringify(by.ib)).not.toContain('SECRET');
     expect(by.reports.items.map((i) => [i.id, i.status])).toEqual([
-      ['delivery:d2', 'failed'], ['pdf:p1', 'pending'], ['delivery:d1', 'pending'], // newest first within a status
+      ['delivery:d2', 'failed'], ['pdf:p2', 'parked'], ['delivery:d4', 'parked'],
+      ['pdf:p1', 'pending'], ['delivery:d1', 'pending'], ['delivery:d3', 'pending'], // newest first within a status
     ]);
+    expect(by.reports.items[1].detail).toMatch(/rendering claim older than 30 minutes/);
+    expect(by.reports.items[2].detail).toMatch(/sending claim older than 30 minutes/);
     expect(by.followups.items).toEqual([expect.objectContaining({ status: 'parked', title: 'Test Customer · termite retreat', detail: expect.stringContaining('suggested 2026-09-20') })]);
     expect(by.alerts.items.map((i) => [i.id, i.status])).toEqual([['aa-1', 'failed'], ['aa-2', 'parked'], ['aa-3', 'parked']]);
     expect(by.alerts.items[2].detail).toMatch(/snooze elapsed/);
 
     expect(by.calls).toMatchObject({ pending: 4, parked: 1, failed: 2, total: 7, error: null });
     expect(q.totals).toEqual({
-      pending: 1 + 4 + 2 + 2, // digest, c2 + c5 + c6 + c7, ea-3 + ea-4, d1 + p1
-      parked: 2 + 1 + 1 + 2 + 1 + 1 + 2, // ga4 + nightly-audit, c1, opp-1, ea-1 + ea-5, pa-1, da-1, aa-2 + aa-3
+      pending: 1 + 4 + 2 + 3, // digest, c2 + c5 + c6 + c7, ea-3 + ea-4, d1 + d3 + p1
+      parked: 2 + 1 + 1 + 2 + 1 + 2 + 1 + 2, // ga4 + nightly-audit, c1, opp-1, ea-1 + ea-5, pa-1, d4 + p2, da-1, aa-2 + aa-3
       failed: 1 + 2 + 1 + 1 + 1, // pricing, c3 + c8, ea-2, d2, aa-1
       truncated: false,
     });

@@ -21,6 +21,8 @@ const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools')
 const { computeStalledCalls, MIN_DURATION_SECONDS } = require('./call-processing-stall-watchdog');
 const { activityLabel } = require('./intelligence-bar/authorization-contract');
 const { EXECUTING_RECOVERY_MINUTES } = require('./content/email-approvals');
+const { STALE_CLAIM_MS: DELIVERY_STALE_CLAIM_MS } = require('./service-report/delivery-queue');
+const { STALE_CLAIM_MS: PDF_STALE_CLAIM_MS } = require('./service-report/pdf-queue');
 
 const ITEM_LIMIT = 25;
 const SCAN_LIMIT = 200;
@@ -271,8 +273,13 @@ async function laneIbPendingActions() {
 }
 
 async function laneReportDelivery() {
-  const dCols = ['id', 'service_record_id', 'channel', 'status', 'attempts', 'max_attempts', 'next_attempt_at', 'failed_at', 'created_at'];
-  const pCols = ['id', 'service_record_id', 'status', 'failed_at', 'created_at'];
+  const dCols = ['id', 'service_record_id', 'channel', 'status', 'attempts', 'max_attempts', 'next_attempt_at', 'failed_at', 'locked_at', 'created_at'];
+  const pCols = ['id', 'service_record_id', 'status', 'failed_at', 'locked_at', 'created_at'];
+  // Same rule as each queue's recover-stale-claims sweep: a claim (sending /
+  // rendering) whose lock is older than STALE_CLAIM_MS is orphaned — and if
+  // the sweep is down, this view is the only place it shows.
+  const staleClaim = (r, claimStatus, staleMs) => r.status === claimStatus
+    && r.locked_at && new Date(r.locked_at).getTime() <= Date.now() - staleMs;
   // Failed and open sets scanned separately so a delivery backlog can never
   // push the failures out of the page.
   const dFailed = await db('service_report_deliveries').where('status', 'failed').where('failed_at', '>', since(RECENT_DAYS)).orderBy('failed_at', 'desc').limit(SCAN_LIMIT).select(dCols);
@@ -285,17 +292,23 @@ async function laneReportDelivery() {
     ...deliveries.map((r) => ({
       id: `delivery:${r.id}`,
       title: `Report ${r.channel || 'email'} delivery · record ${String(r.service_record_id || '').slice(0, 8)}`,
-      status: r.status === 'failed' ? 'failed' : 'pending',
+      status: r.status === 'failed' ? 'failed' : staleClaim(r, 'sending', DELIVERY_STALE_CLAIM_MS) ? 'parked' : 'pending',
       detail: r.status === 'failed'
         ? `failed after ${r.attempts}/${r.max_attempts} attempts`
-        : `${r.status} · attempt ${r.attempts + 1}/${r.max_attempts}`,
+        : staleClaim(r, 'sending', DELIVERY_STALE_CLAIM_MS)
+          ? `sending claim older than ${Math.round(DELIVERY_STALE_CLAIM_MS / 60000)} minutes — orphaned, awaiting recovery`
+          : `${r.status} · attempt ${r.attempts + 1}/${r.max_attempts}`,
       at: iso(r.failed_at || r.created_at),
     })),
     ...pdfs.map((r) => ({
       id: `pdf:${r.id}`,
       title: `Report PDF · record ${String(r.service_record_id || '').slice(0, 8)}`,
-      status: r.status === 'failed' ? 'failed' : 'pending',
-      detail: r.status === 'failed' ? 'render failed' : r.status,
+      status: r.status === 'failed' ? 'failed' : staleClaim(r, 'rendering', PDF_STALE_CLAIM_MS) ? 'parked' : 'pending',
+      detail: r.status === 'failed'
+        ? 'render failed'
+        : staleClaim(r, 'rendering', PDF_STALE_CLAIM_MS)
+          ? `rendering claim older than ${Math.round(PDF_STALE_CLAIM_MS / 60000)} minutes — orphaned, awaiting recovery`
+          : r.status,
       at: iso(r.failed_at || r.created_at),
     })),
   ];
