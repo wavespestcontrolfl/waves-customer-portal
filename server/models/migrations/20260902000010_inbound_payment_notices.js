@@ -14,7 +14,7 @@
  *                parked | applied | ignored
  *   park_reason  no_match | multiple_matches | name_mismatch |
  *                possible_duplicate | sender_unverified | parse_failed |
- *                apply_failed   (NULL unless status = parked at some point)
+ *                apply_failed | stale_notice   (NULL unless status = parked at some point)
  *   match_method memo_invoice_number | amount_name | manual   (free text,
  *                documented here, not CHECK-constrained)
  */
@@ -50,7 +50,7 @@ exports.up = async function up(knex) {
     ADD CONSTRAINT inbound_payment_notices_status_check
       CHECK (status IN ('processing','auto_applied','parked','applied','ignored')),
     ADD CONSTRAINT inbound_payment_notices_park_reason_check
-      CHECK (park_reason IS NULL OR park_reason IN ('no_match','multiple_matches','name_mismatch','possible_duplicate','sender_unverified','parse_failed','apply_failed'))
+      CHECK (park_reason IS NULL OR park_reason IN ('no_match','multiple_matches','name_mismatch','possible_duplicate','sender_unverified','parse_failed','apply_failed','stale_notice'))
   `);
   // One invoice is settled by at most one notice — enforced by the DATABASE,
   // not just the matcher's read-then-write. Partial: NULL FKs are unlimited.

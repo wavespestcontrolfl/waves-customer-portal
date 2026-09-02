@@ -169,10 +169,12 @@ describe('recordManualPayment — refusal contract', () => {
     rowIsSelfPayDue.mockImplementation(async () => resolvesSelfPay);
     let paymentsInsert = null;
     let customerLock = null;
+    let payersLock = null;
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') return recorder({ first: openInvoice(lockedOver), returning: [] });
-        if (table === 'customers') { const r = recorder({ first: { id: 'cust-1' } }); customerLock = r.forUpdate; return r; }
+        if (table === 'customers') { const r = recorder({ first: { id: 'cust-1', payer_id: 'payer-9' } }); customerLock = r.forUpdate; return r; }
+        if (table === 'payers') { const r = recorder(); r.select = jest.fn(async () => []); payersLock = r.forUpdate; return r; }
         if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
         throw new Error(`unexpected trx table ${table}`);
       });
@@ -184,6 +186,7 @@ describe('recordManualPayment — refusal contract', () => {
     expect(err.message).toMatch(/no longer an open self-pay invoice/);
     // The payer-source row is LOCKED in the payment trx before the resolution, which rides the same trx.
     expect(customerLock).toHaveBeenCalled();
+    expect(payersLock).toHaveBeenCalled(); // the (possibly inactive) payer the customer points at is locked too
     if (!resolvesSelfPay) expect(rowIsSelfPayDue).toHaveBeenCalledWith('cust-1', expect.objectContaining({ id: 'inv-1' }), expect.objectContaining({ database: expect.any(Function) }));
     expect(paymentsInsert).toBeNull();
     expect(sendReceiptEmail).not.toHaveBeenCalled();

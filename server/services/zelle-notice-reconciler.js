@@ -18,7 +18,13 @@
  *   4. template not parseable           → parked `parse_failed`
  *   5. same payer + amount applied <14d → parked `possible_duplicate`
  *      (re-checked right before settlement; one invoice takes one notice —
- *      partial UNIQUE index — so two copies of one transfer never both settle)
+ *      partial UNIQUE index — so two copies of one transfer never both settle);
+ *      the matched customer already has a Zelle-paid invoice at these cents
+ *      <14d (the operator recorded the transfer by hand before the sync saw
+ *      the notice)               → parked `possible_duplicate`
+ *      notice older than 48h when first decided (a sync outage, an expired
+ *      Gmail history cursor)      → parked `stale_notice` — never auto-settled
+ *                                   against today's invoices
  *   6. exact-cent open self-pay invoices (services/open-balance.js):
  *        memo carries exactly one of them → apply (memo_invoice_number)
  *        exactly one whose customer name corroborates the payer → apply (amount_name)
@@ -54,6 +60,7 @@ const RECORDED_BY = 'zelle-notice-reconciler';
 const ZELLE_RETRY_MARK = 'zelle_notice_retry';
 const RETRY_BATCH = 25;
 const DUPLICATE_WINDOW_DAYS = 14;
+const STALE_NOTICE_MS = 48 * 60 * 60 * 1000;
 const NEAR_AMOUNT_TOLERANCE_CENTS = 500;
 
 // Same parser as the feature-gates registry entry (call-time, so unsetting
@@ -329,6 +336,21 @@ async function recentlyApplied(parsed, database = db) {
   return !!dup;
 }
 
+// The operator's own Add-payment tap leaves no notice row: a Zelle-paid
+// invoice for the SAME customer at these exact cents inside the window is
+// that transfer already recorded by hand — with recurring same-amount
+// invoices, auto-applying the notice to the next open one would settle one
+// transfer twice.
+async function directZelleRecentlyRecorded(match, amountCents) {
+  const since = new Date(Date.now() - DUPLICATE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const row = await db('invoices')
+    .where({ customer_id: match.customer_id, status: 'paid', payment_method: 'zelle' })
+    .where('paid_at', '>', since)
+    .whereRaw('ROUND((total - COALESCE(credit_applied, 0)) * 100) = ?', [amountCents])
+    .first('id');
+  return !!row;
+}
+
 function isRefusal(err) {
   return [400, 404, 409].includes(err?.statusCode);
 }
@@ -397,6 +419,12 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
 
   if (await recentlyApplied(parsed)) {
     await finishParked(notice, email, 'possible_duplicate', { candidates });
+    return true;
+  }
+  const receivedAt = new Date(notice.received_at || email.received_at || Date.now()).getTime();
+  if (Number.isFinite(receivedAt) && Date.now() - receivedAt > STALE_NOTICE_MS) {
+    logger.warn(`[zelle-notice] ${email.id} is ${Math.round((Date.now() - receivedAt) / 3600000)}h old at first decision — parking as stale_notice`);
+    await finishParked(notice, email, 'stale_notice', { candidates });
     return true;
   }
   if (truncated) {
@@ -468,8 +496,8 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
   // that both matched can only have matched the SAME single invoice, which
   // the index refused above; this catches the copy whose first check ran
   // before the other's close committed.
-  if (await recentlyApplied(parsed)) {
-    logger.warn(`[zelle-notice] notice ${notice.id}: same payer + amount applied while this copy was being matched — parking as possible_duplicate`);
+  if (await recentlyApplied(parsed) || await directZelleRecentlyRecorded(match, parsed.amountCents)) {
+    logger.warn(`[zelle-notice] notice ${notice.id}: same transfer already recorded (a copy applied meanwhile, or the operator recorded it by hand) — parking as possible_duplicate`);
     await finishParked(notice, email, 'possible_duplicate', { candidates });
     return true;
   }
@@ -524,6 +552,7 @@ module.exports = {
   settledInvoiceFor,
   zelleReference,
   DUPLICATE_WINDOW_DAYS,
+  STALE_NOTICE_MS,
   NEAR_AMOUNT_TOLERANCE_CENTS,
   isZelleReconcileEnabled,
   maybeHandleZelleNotice,

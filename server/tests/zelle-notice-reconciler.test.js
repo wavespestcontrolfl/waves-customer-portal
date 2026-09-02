@@ -74,7 +74,7 @@ function builder(table) {
   const t = tables[table] || (tables[table] = { firsts: [], returning: [], calls: [] });
   const b = {};
   const chain = (name) => { b[name] = jest.fn((...args) => { t.calls.push([name, ...args]); return b; }); };
-  ['where', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'onConflict', 'ignore', 'insert', 'join'].forEach(chain);
+  ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'onConflict', 'ignore', 'insert', 'join'].forEach(chain);
   b.forUpdate = jest.fn(() => { t.calls.push(['forUpdate']); b.locked = true; return b; });
   b.first = jest.fn(async (...args) => {
     t.calls.push(['first', ...args]);
@@ -115,6 +115,18 @@ describe('gate', () => {
     process.env.GATE_ZELLE_NOTICE_RECONCILE = 'false';
     expect(await maybeHandleZelleNotice(notice())).toBe(false);
     expect(db).not.toHaveBeenCalled();
+  });
+});
+
+describe('stale notices', () => {
+  test('a notice older than 48h at first decision (sync outage, expired history cursor) parks stale_notice with candidates — never auto-settled', async () => {
+    claimed({ id: 'notice-1', payer_name: 'Pat Doe', amount_cents: 11700, received_at: new Date(Date.now() - 3 * 24 * 3600 * 1000) });
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+    expect(await maybeHandleZelleNotice(notice({ received_at: new Date(Date.now() - 3 * 24 * 3600 * 1000) }))).toBe(true);
+    expect(recordManualPayment).not.toHaveBeenCalled();
+    const patch = closesOf('inbound_payment_notices')[0];
+    expect(patch).toMatchObject({ status: 'parked', park_reason: 'stale_notice' });
+    expect(JSON.parse(patch.candidates)).toEqual([expect.objectContaining({ invoice_id: 'inv-1', exact_amount: true })]);
   });
 });
 
@@ -205,6 +217,16 @@ describe('settlement without a held transaction (pool floor is 2)', () => {
     expect(closesOf('inbound_payment_notices')).toHaveLength(0);
   });
 
+  test('a Zelle-paid invoice for the matched customer at these cents inside the window (recorded by hand, no notice row) parks possible_duplicate', async () => {
+    claimed();
+    oneExact();
+    tables.invoices = { firsts: [{ id: 'inv-0' }], returning: [], calls: [] }; // the direct-settlement read
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    expect(recordManualPayment).not.toHaveBeenCalled();
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'possible_duplicate' });
+    expect(tables.invoices.calls).toContainEqual(['where', { customer_id: 'cust-1', status: 'paid', payment_method: 'zelle' }]);
+  });
+
   test('the duplicate check is re-run right before settling — a copy applied meanwhile parks possible_duplicate', async () => {
     claimed();
     oneExact();
@@ -260,7 +282,7 @@ describe('post-commit failures', () => {
     claimed();
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
     recordManualPayment.mockRejectedValueOnce(new Error('activity_log insert exploded'));
-    tables.invoices = { firsts: [{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid', payment_method: 'zelle', payment_recorded_by: RECORDED_BY, payment_reference: 'Pat Doe' }], returning: [], calls: [] };
+    tables.invoices = { firsts: [null, { id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid', payment_method: 'zelle', payment_recorded_by: RECORDED_BY, payment_reference: 'Pat Doe' }], returning: [], calls: [] }; // [direct-dup read, post-commit re-read]
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', matched_invoice_id: 'inv-1' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('receipt: unknown'), expect.anything());
@@ -270,7 +292,7 @@ describe('post-commit failures', () => {
     claimed();
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
     recordManualPayment.mockRejectedValueOnce(new Error('db down'));
-    tables.invoices = { firsts: [openRow()], returning: [], calls: [] };
+    tables.invoices = { firsts: [null, openRow()], returning: [], calls: [] }; // [direct-dup read, post-commit re-read]
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     const patch = closesOf('inbound_payment_notices')[0];
     expect(patch).toMatchObject({ status: 'parked', park_reason: 'apply_failed' });
@@ -466,6 +488,9 @@ describe('sync wiring', () => {
     expect(src).toMatch(/if \(!marked\) \{[\s\S]{0,200}throw err;\s*\}\s*return true;/);
     // A 0-row mark (auto_action already set by something other than the reconciler) is NOT a durable record.
     expect(src).toMatch(/startsWith\('zelle_notice'\)/);
+    // A lost retry record withholds the INCREMENTAL cursor too (fullSync already withholds on any failed message).
+    expect(src).toMatch(/if \(err\.zelleRetryLost\) cursorWithheld = true;/);
+    expect(src).toMatch(/last_history_id: cursorWithheld \? state\.last_history_id : latestHistoryId/);
     expect(src).toMatch(/if \(existing\.auto_action === ZELLE_RETRY_MARK\) \{\s*await offerZelleNotice\(/);
     expect(src).toMatch(/\(proofHandled \|\| approvalControl \|\| zelleHandled\) && await bellClaimColumnExists\(\)/);
     // The stale-claim sweep runs on every sync beside the bell sweep.

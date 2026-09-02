@@ -175,6 +175,11 @@ async function incrementalSync(state) {
 
     if (history.historyId) latestHistoryId = history.historyId;
 
+    // A Zelle notice whose retry record could not be written (err.zelleRetryLost)
+    // has NO durable trace — neither a claim nor a mark — so advancing the
+    // cursor past it would skip the payment for good. Keep the previous
+    // cursor for that run (upserts are idempotent; the next run re-lists it).
+    let cursorWithheld = false;
     for (const msgId of messageIds) {
       try {
         const parsed = await gmailClient.getMessage(msgId);
@@ -190,15 +195,16 @@ async function incrementalSync(state) {
             updated_at: new Date(),
           });
         } else {
+          if (err.zelleRetryLost) cursorWithheld = true;
           logger.warn(`[email-sync] Failed to fetch message ${msgId}: ${err.message}`);
         }
       }
     }
 
     await db('email_sync_state').where('id', state.id).update({
-      last_history_id: latestHistoryId,
+      last_history_id: cursorWithheld ? state.last_history_id : latestHistoryId,
       last_sync_at: new Date(),
-      errors: null,
+      errors: cursorWithheld ? 'incremental sync incomplete: a Zelle notice retry could not be recorded — cursor withheld, retrying next run' : null,
     });
     if (newEmails > 0) {
       await db('email_sync_state').where('id', state.id).increment('emails_synced', newEmails);
@@ -258,10 +264,12 @@ async function offerZelleNotice(email, { backfill }) {
       }
     } catch (markErr) {
       logger.error(`[email-sync] could not mark ${email.id} for Zelle retry (${markErr.message}) — failing the message so the sync retries it`);
+      err.zelleRetryLost = true;
       throw err;
     }
     if (!marked) {
       logger.error(`[email-sync] ${email.id} could not be marked for Zelle retry (auto_action already set) — failing the message so the sync retries it`);
+      err.zelleRetryLost = true;
       throw err;
     }
     return true; // marked = owned until the reconciler decides

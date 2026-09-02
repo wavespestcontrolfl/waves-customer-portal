@@ -195,11 +195,16 @@ async function recordManualPayment(id, {
     // a third acquire here would wait on itself.
     if (requireSelfPay) {
       // Lock the payer-SOURCE rows the resolution reads (customers.payer_id,
-      // the visit's payer_id / self_pay_override) so a reassignment cannot
-      // commit between this read and the paid flip. Lock order everywhere
-      // in this file: invoice → customer → visit.
-      await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id');
-      if (locked.scheduled_service_id) await trx('scheduled_services').where({ id: locked.scheduled_service_id }).forUpdate().first('id');
+      // the visit's payer_id / self_pay_override) AND the payer rows they
+      // point at (an inactive payer resolves as self-pay; a concurrent
+      // re-activation must wait) so no reassignment can commit between this
+      // read and the paid flip. Lock order: invoice → customer → visit → payer.
+      const cust = await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id', 'payer_id');
+      const visit = locked.scheduled_service_id
+        ? await trx('scheduled_services').where({ id: locked.scheduled_service_id }).forUpdate().first('id', 'payer_id')
+        : null;
+      const payerIds = [...new Set([cust?.payer_id, visit?.payer_id].filter(Boolean))];
+      if (payerIds.length) await trx('payers').whereIn('id', payerIds).orderBy('id', 'asc').forUpdate().select('id');
       const { rowIsSelfPayDue } = require('./open-balance');
       const selfPay = !locked.payer_id && !locked.payer_statement_id && await rowIsSelfPayDue(locked.customer_id, locked, { database: trx });
       if (!selfPay) return { notSelfPay: true };
