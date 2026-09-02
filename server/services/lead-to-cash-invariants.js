@@ -243,7 +243,9 @@ async function runDetectors({ now = new Date(), detectors = DETECTORS } = {}) {
       const ids = Array.isArray(out.ids) ? out.ids.map(String) : [];
       results.push({
         key: d.key, label: d.label, href: d.href, ok: out.count === 0, unavailable: false,
-        count: Number(out.count) || 0, sample: ids.slice(0, SAMPLE_IDS), truncated: ids.length > SAMPLE_IDS,
+        // A detector that already capped its sample in SQL reports the cap
+        // itself (out.truncated) — the length test alone cannot see it.
+        count: Number(out.count) || 0, sample: ids.slice(0, SAMPLE_IDS), truncated: ids.length > SAMPLE_IDS || out.truncated === true,
         detail: out.detail || null, ms: Date.now() - started,
       });
     } catch (err) {

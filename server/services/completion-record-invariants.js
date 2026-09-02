@@ -21,13 +21,16 @@
  * documents the sibling model), and the report token / completion text can
  * live on a different sibling than the row a naive scan would land on. Each
  * predicate therefore asks "does ANY sibling carry the artifact" and only
- * fails when none does.
+ * fails when none does. A project-backed visit (a project row or a
+ * project_completion sibling) is excluded from the service-report checks
+ * as a whole — its artifact and delivery live on the project report
+ * (closeout-status.js switches the entire visit to that path).
  *
- * Each predicate returns { count, ids, detail } — the adapter contract of
- * the sweep registry. ids are PII-free row ids. One SQL statement per
- * predicate: a full count plus a LIMIT-bounded id sample (the sample is
- * bounded BEFORE aggregation — array_agg over the whole match set would
- * materialise every id exactly when a backlog is largest).
+ * Each predicate returns { count, ids, truncated, detail } — the adapter
+ * contract of the sweep registry. ids are PII-free row ids. One SQL
+ * statement per predicate: a full count plus a LIMIT-bounded id sample (the
+ * sample is bounded BEFORE aggregation — array_agg over the whole match set
+ * would materialise every id exactly when a backlog is largest).
  *
  * Nothing here writes. Repairs stay with their owners: the dispatch
  * backfill path for missing records, ensureReportToken (pdf-queue.js) for
@@ -44,10 +47,16 @@ const SAMPLE = 25;
 const TODAY_ET = "(now() AT TIME ZONE 'America/New_York')::date";
 const BEFORE_TODAY_ET = `ss.scheduled_date < ${TODAY_ET}`;
 
-// The completion-SMS status marker (structured_notes.completionSmsStatus)
-// and the report delivery ledger both post-date the oldest records; the
-// comms predicate is bounded to records created after this date so legacy
-// rows without either marker are not reported as missing notifications.
+// Legacy cutovers — history before these dates cannot carry the marker
+// the predicate checks, so reporting it would be permanent noise and (for
+// the record check) could prompt a second record beside a legacy one:
+// - service_records.scheduled_service_id FK: migration 20260427000007, no
+//   backfill (pre-FK records link by the old customer/tech/date convention).
+// - scheduled_services.completed_at tracking stamp: migration 20260422000009,
+//   no backfill (readers treat those NULLs as supported legacy data).
+// - completionSmsStatus marker + service_report_deliveries ledger: mid-2026.
+const RECORD_FK_SINCE = '2026-04-27';
+const TRACKING_STAMP_SINCE = '2026-04-22';
 const COMMS_MARKER_SINCE = '2026-07-01';
 
 // completionSmsStatus values closeout-status.js classifies as done or
@@ -59,14 +68,18 @@ const TERMINAL_SMS_STATUSES = Object.freeze(['sent', 'skipped_recap_sms_already_
 // the day; this is the long tail).
 const INCOMPLETE_FOLLOWUP_GRACE_DAYS = 7;
 
-// The instant a record last became "complete" for grace-period purposes:
-// a recap-rail re-completion of an office-handoff record keeps its original
-// created_at, so created_at alone would age a freshly completed record
-// straight past the grace window (codex P2) — but the row's general
-// updated_at moves on every report/delivery/correction write and would
-// restart the window forever (codex P1). The visit's tracker stamp
-// (scheduled_services.completed_at) is the completion-specific marker.
-const COMPLETED_MARKER_AT = 'GREATEST(sr.created_at, COALESCE(ss.completed_at, sr.created_at))';
+// The instant a record last became "complete" for grace-period purposes.
+// created_at alone ages a recap-rail re-completion of an office-handoff
+// record straight past the window (codex P2); the row's general updated_at
+// moves on every report/delivery/correction write and would restart the
+// window forever (codex P1). So: the record's creation, the visit's tracker
+// stamp, or the recap claim stamp (recap_sms_sent_at — an at-most-once
+// CLAIM written at recap completion; used here only as a time marker,
+// never as delivery evidence), whichever is latest. The recap path
+// re-completing an old incomplete record advances the claim stamp even
+// though markComplete's already-complete branch preserves the old
+// completed_at (codex P2 r2).
+const COMPLETED_MARKER_AT = 'GREATEST(sr.created_at, COALESCE(ss.completed_at, sr.created_at), COALESCE(sr.recap_sms_sent_at, sr.created_at))';
 
 // A completed record that OWES the customer a report / a completion notice:
 // not a backfill, delivery not suppressed, not a project close (the project
@@ -76,6 +89,18 @@ const OWES_CUSTOMER_ARTIFACT = `
       AND COALESCE(sr.structured_notes->>'backfill', 'false') <> 'true'
       AND COALESCE(sr.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
       AND sr.completion_source IS DISTINCT FROM 'project_completion'`;
+
+// Visit-level project exclusion: a project row linked to the visit, or a
+// project_completion sibling, moves the WHOLE visit to the project report
+// path (closeout-status.js) — its token/delivery live on projects.*, so the
+// service-report predicates must not judge any sibling of such a visit.
+const VISIT_NOT_PROJECT_BACKED = `
+      NOT EXISTS (SELECT 1 FROM projects pj WHERE pj.scheduled_service_id = ss.id)
+      AND NOT EXISTS (
+            SELECT 1 FROM service_records pc
+             WHERE pc.scheduled_service_id = ss.id
+               AND (pc.completion_source = 'project_completion'
+                    OR EXISTS (SELECT 1 FROM projects pj2 WHERE pj2.service_record_id = pc.id)))`;
 
 // matchSql must SELECT `id` (text-castable) and `ord` (sort key, newest
 // first). The CTE is scanned once for the count and once for a LIMIT-bounded
@@ -90,12 +115,13 @@ function aggregate(matchSql) {
 
 const PREDICATES = Object.freeze({
   completed_visit_without_record: {
-    label: 'Completed visits (before today) with no service_records row',
+    label: `Completed visits (since the ${RECORD_FK_SINCE} record FK, before today) with no service_records row`,
     href: '/admin/dispatch',
     sql: aggregate(`
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
+           AND ss.scheduled_date >= '${RECORD_FK_SINCE}'::date
            AND ${BEFORE_TODAY_ET}
            AND NOT EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id)`),
   },
@@ -125,12 +151,13 @@ const PREDICATES = Object.freeze({
   // (closeoutRequirements.requiresServiceReport=false) exempts the record,
   // as it does in closeout-status; absent = owed (conservative).
   completed_record_without_report_token: {
-    label: 'Completed visits (>2h) that owe a customer report and have no sibling record with a report token',
+    label: 'Completed non-project visits (>2h) that owe a customer report and have no sibling record with a report token',
     href: '/admin/dispatch',
     sql: aggregate(`
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
+           AND ${VISIT_NOT_PROJECT_BACKED}
            AND EXISTS (
                  SELECT 1 FROM service_records sr
                   WHERE sr.scheduled_service_id = ss.id
@@ -143,44 +170,40 @@ const PREDICATES = Object.freeze({
                     AND tok.report_view_token IS NOT NULL)`),
   },
   completed_visit_without_completed_at: {
-    label: "Completed visits (before today) whose completed_at is NULL (tracker stamp never landed)",
+    label: `Completed visits (since the ${TRACKING_STAMP_SINCE} tracker stamp, before today) whose completed_at is NULL`,
     href: '/admin/dispatch',
     sql: aggregate(`
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
            AND ss.completed_at IS NULL
+           AND ss.scheduled_date >= '${TRACKING_STAMP_SINCE}'::date
            AND ${BEFORE_TODAY_ET}
            AND EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND sr.status = 'completed')`),
   },
   // Confirmed notice = a TERMINAL completionSmsStatus on ANY sibling —
   // the closeout-status.js comms vocabulary's done / not_required outcomes
   // only: 'sent', 'skipped_recap_sms_already_sent', 'blocked' (consent) —
-  // or a sent report email on any sibling. 'sending' and 'deferred' are
-  // pending there and stay findings once 24h old; NULL and 'failed' are
-  // findings. recap_sms_sent_at is deliberately NOT evidence: it is an
-  // at-most-once CLAIM stamped before the provider call (closeout-status.js
-  // treats an aged claim alone as unverified), so a crash can leave it set
-  // with no text sent. A frozen catalog rule saying the service owes no
-  // notice (closeoutRequirements.requiresCustomerNotice=false) exempts the
-  // record, as it does in closeout-status. Email evidence must sit on the
-  // sibling that OWNS the report artifact (its report_view_token), as
-  // closeout-status pairs delivery with the artifact record — a sent
-  // delivery on an older or suppressed sibling does not clear a newer
-  // owed notice (codex P1).
+  // or a sent report email on the sibling that OWNS the report artifact
+  // (its report_view_token), as closeout-status pairs delivery with the
+  // artifact record. 'sending' and 'deferred' are pending there and stay
+  // findings once 24h old; NULL and 'failed' are findings. A frozen catalog
+  // rule saying the service owes no notice
+  // (closeoutRequirements.requiresCustomerNotice=false) exempts the record.
   completed_record_without_comms_marker: {
-    label: 'Completed visits (>24h) that owe a completion notice and have no sibling with a terminal one (sent / recap sent / consent-blocked SMS, or sent report email)',
+    label: 'Completed non-project visits (>24h) that owe a completion notice and have no sibling with a terminal one (sent / recap sent / consent-blocked SMS, or sent report email on the artifact record)',
     href: '/admin/dispatch',
     sql: aggregate(`
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
+           AND ${VISIT_NOT_PROJECT_BACKED}
            AND EXISTS (
                  SELECT 1 FROM service_records sr
                   WHERE sr.scheduled_service_id = ss.id
                     AND ${OWES_CUSTOMER_ARTIFACT}
                     AND COALESCE(sr.structured_notes->'closeoutRequirements'->>'requiresCustomerNotice', 'true') <> 'false'
-                    AND sr.created_at >= '${COMMS_MARKER_SINCE}'::date
+                    AND ${COMPLETED_MARKER_AT} >= '${COMMS_MARKER_SINCE}'::date
                     AND ${COMPLETED_MARKER_AT} < now() - interval '24 hours')
            AND NOT EXISTS (
                  SELECT 1 FROM service_records sib
@@ -224,7 +247,9 @@ async function runPredicate(key, knex = db) {
   const row = Array.isArray(res?.rows) ? res.rows[0] : null;
   const count = Number(row?.n) || 0;
   const ids = Array.isArray(row?.sample) ? row.sample.map(String) : [];
-  return { count, ids, detail: { sampleCap: SAMPLE } };
+  // The SQL already capped the sample; the runner cannot infer truncation
+  // from ids.length alone, so say so explicitly (codex P2).
+  return { count, ids, truncated: count > ids.length, detail: { sampleCap: SAMPLE } };
 }
 
 module.exports = {
@@ -232,7 +257,8 @@ module.exports = {
   PREDICATE_KEYS,
   runPredicate,
   _private: {
-    SAMPLE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, OWES_CUSTOMER_ARTIFACT, TERMINAL_SMS_STATUSES,
+    SAMPLE, RECORD_FK_SINCE, TRACKING_STAMP_SINCE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET,
+    OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES,
     COMPLETED_MARKER_AT, INCOMPLETE_FOLLOWUP_GRACE_DAYS, aggregate,
   },
 };

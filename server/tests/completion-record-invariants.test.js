@@ -47,8 +47,8 @@ describe('PREDICATES registry', () => {
     expect(PREDICATES.completed_record_without_comms_marker.sql).toContain(_private.COMMS_MARKER_SINCE);
   });
 
-  test('grace periods age from the completion-specific marker (visit completed_at), never the row\'s general updated_at', () => {
-    expect(_private.COMPLETED_MARKER_AT).toBe('GREATEST(sr.created_at, COALESCE(ss.completed_at, sr.created_at))');
+  test('grace periods age from completion-specific markers (visit completed_at, recap claim stamp), never the row\'s general updated_at', () => {
+    expect(_private.COMPLETED_MARKER_AT).toBe('GREATEST(sr.created_at, COALESCE(ss.completed_at, sr.created_at), COALESCE(sr.recap_sms_sent_at, sr.created_at))');
     expect(_private.COMPLETED_MARKER_AT).not.toContain('updated_at');
     expect(PREDICATES.completed_record_without_report_token.sql).toContain(`${_private.COMPLETED_MARKER_AT} < now() - interval '2 hours'`);
     expect(PREDICATES.completed_record_without_comms_marker.sql).toContain(`${_private.COMPLETED_MARKER_AT} < now() - interval '24 hours'`);
@@ -74,8 +74,10 @@ describe('PREDICATES registry', () => {
     expect(comms).not.toMatch(/'sending'|'deferred'/);
     // A frozen "no customer notice owed" catalog rule exempts the record.
     expect(comms).toContain("closeoutRequirements'->>'requiresCustomerNotice', 'true') <> 'false'");
-    // An unconfirmed recap claim is not delivery evidence.
-    expect(comms).not.toContain('recap_sms_sent_at');
+    // An unconfirmed recap claim is not delivery evidence: it may only appear
+    // in the grace-window marker, never in the sibling evidence clause.
+    const evidenceClause = comms.slice(comms.indexOf('SELECT 1 FROM service_records sib'));
+    expect(evidenceClause).not.toContain('recap_sms_sent_at');
   });
 
   test('duplicates are counted within ONE completion rail; cross-rail siblings are supported history', () => {
@@ -96,12 +98,38 @@ describe('PREDICATES registry', () => {
   });
 });
 
+describe('legacy cutovers and project-backed visits', () => {
+  test('record and tracker-stamp predicates are bounded to the migrations that introduced their markers', () => {
+    expect(_private.RECORD_FK_SINCE).toBe('2026-04-27');
+    expect(_private.TRACKING_STAMP_SINCE).toBe('2026-04-22');
+    expect(PREDICATES.completed_visit_without_record.sql).toContain("ss.scheduled_date >= '2026-04-27'::date");
+    expect(PREDICATES.completed_visit_without_completed_at.sql).toContain("ss.scheduled_date >= '2026-04-22'::date");
+  });
+
+  test('service-report predicates exclude project-backed visits as a whole (project row or project_completion sibling)', () => {
+    for (const key of ['completed_record_without_report_token', 'completed_record_without_comms_marker']) {
+      const sql = PREDICATES[key].sql;
+      expect(sql).toContain(_private.VISIT_NOT_PROJECT_BACKED);
+      expect(sql).toMatch(/NOT EXISTS \(SELECT 1 FROM projects pj WHERE pj\.scheduled_service_id = ss\.id\)/);
+      expect(sql).toContain("pc.completion_source = 'project_completion'");
+    }
+  });
+});
+
 describe('runPredicate', () => {
   test('maps the single aggregate row to the sweep adapter shape', async () => {
     const knex = { raw: jest.fn(async () => ({ rows: [{ n: '3', sample: ['a', 'b', 'c'] }] })) };
     const out = await runPredicate('completed_visit_without_record', knex);
     expect(knex.raw).toHaveBeenCalledWith(PREDICATES.completed_visit_without_record.sql);
-    expect(out).toEqual({ count: 3, ids: ['a', 'b', 'c'], detail: { sampleCap: _private.SAMPLE } });
+    expect(out).toEqual({ count: 3, ids: ['a', 'b', 'c'], truncated: false, detail: { sampleCap: _private.SAMPLE } });
+  });
+
+  test('a count above the SQL sample cap is reported as truncated', async () => {
+    const knex = { raw: jest.fn(async () => ({ rows: [{ n: 100, sample: Array.from({ length: 25 }, (_, i) => `id${i}`) }] })) };
+    const out = await runPredicate('completed_visit_without_record', knex);
+    expect(out.count).toBe(100);
+    expect(out.ids).toHaveLength(25);
+    expect(out.truncated).toBe(true);
   });
 
   test('an empty aggregate is a clean pass; an unknown key throws (fail closed in the runner)', async () => {

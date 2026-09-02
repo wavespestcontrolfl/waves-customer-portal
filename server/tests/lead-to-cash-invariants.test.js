@@ -129,6 +129,17 @@ describe('runDetectors', () => {
   });
 });
 
+describe('runDetectors honors a detector-reported truncation', () => {
+  test('a SQL-capped sample with a larger count is marked truncated so composeReport prints the +N suffix', async () => {
+    const d = det('capped', async () => ({ count: 100, ids: ['a', 'b'], truncated: true }));
+    const [r] = await runDetectors({ now: NOW, detectors: [d] });
+    expect(r.truncated).toBe(true);
+    expect(r.count).toBe(100);
+    const report = composeReport([r], { now: NOW });
+    expect(report.text).toContain('a, b … +98 more');
+  });
+});
+
 describe('composeReport', () => {
   test('FIX subject counts violations and unrunnable checks; body lists OK/FAIL/?? with ids only', async () => {
     const results = await runDetectors({
@@ -346,13 +357,13 @@ describe('detector adapters', () => {
       'completed_record_without_report_token', 'completed_visit_without_completed_at',
       'completed_record_without_comms_marker', 'aged_incomplete_visit_records'];
     for (const key of keys) {
-      runPredicate.mockResolvedValueOnce({ count: 2, ids: ['a', 'b'], detail: { sampleCap: 25 } });
+      runPredicate.mockResolvedValueOnce({ count: 2, ids: ['a', 'b'], truncated: false, detail: { sampleCap: 25 } });
       const d = byKey(key);
       expect(d.label).toBe(`P ${key}`);
       expect(d.href).toBe('/admin/dispatch');
       const out = await d.run({ now: NOW });
       expect(runPredicate).toHaveBeenLastCalledWith(key);
-      expect(out).toEqual({ count: 2, ids: ['a', 'b'], detail: { sampleCap: 25 } });
+      expect(out).toEqual({ count: 2, ids: ['a', 'b'], truncated: false, detail: { sampleCap: 25 } });
     }
   });
 });
