@@ -374,6 +374,30 @@ describe('processDueJobs', () => {
   }
   const EXPIRING_RULE = { rule_key: 'expiring_engaged', enabled: true, trigger_type: 'time_sweep', priority: 40, template_key: 'estimate.engage_expiring', params: {} };
 
+  test('pricing gate (#3750): an unverified delivered row is not claimed or emailed; the job is re-dated, not skipped, so an engine re-save gets its reminder', async () => {
+    isEnabled.mockImplementation(() => true); // every gate on, the pricing gate included
+    enqueueProcessorHappyPath({ est: baseEstimate({ pricing_authority: 'CLIENT_FALLBACK' }) });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result).toEqual({ sent: 0, shadow: 0 });
+    expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+    expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ due_at: expect.any(Date) }));
+    expect(jobUpdate.payload).not.toHaveProperty('status');
+    expect(jobUpdate.payload.due_at.getTime()).toBe(NOW.getTime() + 6 * 60 * 60 * 1000);
+  });
+
+  test('gate on: an engine-verified row proceeds to the send as before', async () => {
+    isEnabled.mockImplementation(() => true);
+    enqueueProcessorHappyPath({ est: baseEstimate({ pricing_authority: 'SERVER' }) });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(1);
+    expect(followupShared.sendDualChannel).toHaveBeenCalled();
+  });
   test('sends the email, claims the ledger, marks the job done', async () => {
     enqueueProcessorHappyPath();
 
@@ -919,3 +943,4 @@ describe('processDueJobs', () => {
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'estimate-inactive' }));
   });
 });
+

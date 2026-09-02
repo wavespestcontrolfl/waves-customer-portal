@@ -34,6 +34,12 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { gatedSendAuthorityPredicateApplies, rowPassesGatedSendAuthority } = require('./pricing-authority-gate');
+// A pricing-authority block is TEMPORARY (the operator re-saves the row
+// through the engine), so the job is deferred — never made terminal — and
+// re-judged on this cadence without burning its attempts (uncapped codex P1
+// r16: a 'skipped' job is one lifecycle per estimate/rule and the promised
+// re-evaluation would never come).
+const PRICING_AUTHORITY_RECHECK_MS = 6 * 60 * 60 * 1000;
 const { sessionsForEstimate, SESSION_GAP_MINUTES } = require('./estimate-engagement-sessions');
 const { inferEstimateServiceLines } = require('./estimate-service-lines');
 const { customerConvertedSince } = require('./estimate-conversion-guard');
@@ -699,7 +705,7 @@ async function processDueBatch(now = new Date()) {
       // claim, so a delivered row the engine never verified is not prompted
       // while the gate is on. The operator re-saves it; the job is skipped.
       if (gatedSendAuthorityPredicateApplies() && !rowPassesGatedSendAuthority(est)) {
-        await markJob(job.id, 'skipped', 'pricing-authority-not-server');
+        await deferOrShadow(live, job, new Date(nowMs + PRICING_AUTHORITY_RECHECK_MS), 'pricing-authority-not-server');
         continue;
       }
       if (!(await followupShared.claimFollowupSend(est.id, rule.rule_key, rule.template_key, {
