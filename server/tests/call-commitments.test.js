@@ -138,6 +138,15 @@ describe('groundModelCommitments', () => {
     expect(out.droppedUngrounded).toBe(1);
   });
 
+  test('a naive model due_at is read as Eastern, never UTC', () => {
+    const out = groundModelCommitments([
+      { party: 'waves', kind: 'callback', description: 'Call back at nine', confidence: 0.8, due_at: '2026-09-02T09:00:00', evidence: [{ quote: 'this is the office', speaker: 'agent' }] },
+    ], TRANSCRIPT);
+    // 9 am EDT is 13:00Z.
+    expect(out.kept[0].due_at).toBe('2026-09-02T13:00:00.000Z');
+    expect(out.kept[0].due_basis).toBe('stated');
+  });
+
   test('an unknown channel or kind is coerced; a stated due_at is kept as ISO', () => {
     const out = groundModelCommitments([
       { party: 'waves', kind: 'send_paperwork', channel: 'fax', description: 'Send WDO paperwork', confidence: 0.7, due_at: '2026-09-02T09:00:00-04:00', evidence: [{ quote: 'this is the office', speaker: 'agent' }] },

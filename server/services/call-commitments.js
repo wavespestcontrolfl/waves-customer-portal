@@ -160,10 +160,12 @@ function evidenceFor(v2, paths) {
 }
 
 // ── Deterministic seeds from the V2 extraction ─────────────────────────────
+// Every timestamp that reaches a commitment — a V2 scheduling field or a
+// model-written due_at — goes through the Eastern parser: a naive
+// "2026-09-02T09:00:00" is an ET wall clock, never Railway's UTC.
 function isoOrNull(value) {
-  if (!value) return null;
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  const d = parseDueAt(value);
+  return d instanceof Date ? d.toISOString() : null;
 }
 
 // Seeds come from the V2 extraction ONLY, and only where V2 pinned a

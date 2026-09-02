@@ -194,6 +194,9 @@ Per file, with the proving test.
 - Pre-push Codex round 22 (1 P1, fixed): the commitments model pass runs
   after finalization, so it is no longer counted in the claim ceiling (six
   extraction legs again) — counting it only delayed stale-claim takeover.
+- Pre-push Codex round 23 (1 P1, fixed): every timestamp reaching a
+  commitment (model due_at, V2 scheduling fields) goes through the Eastern
+  parser — a naive string is an ET wall clock, never UTC.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 
