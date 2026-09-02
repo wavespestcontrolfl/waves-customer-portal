@@ -1234,59 +1234,6 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           tied = openTie
             || (!!priorReq && priorReq.status === 'resolved'
               && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000);
-          // An END-OF-COVERAGE cancel deliberately leaves paid visits on the
-          // calendar, so the account keeps cancellable work and the always-
-          // visible Customer 360 action could process it AGAIN once the 24h
-          // window passes. Only that case earns a longer latch (an end-now
-          // term still needs a fresh run to pull a visit created while its
-          // refund task is pending — #3727 r2). While the account has
-          // stayed churned since that run COMPLETED, the recorded case is
-          // the completed run; the age cutoff applies only after a genuine
-          // win-back. "Stayed churned" = the customer's churn stamp today
-          // is THE SAME churn event the case recorded when that run
-          // completed (snapshot.churnStampAtRun — written once by the run,
-          // untouched by request reopen/re-resolve or staff edits; #3727
-          // r2/r3). A fresh churn and an already-churned account both
-          // record the stamp they stood on; a win-back followed by a new
-          // churn restamps the customer, so the instants differ and the
-          // new cancellation processes. No recorded stamp (older cases) or
-          // no stamp on the customer proves nothing: fall through.
-          if (!tied && priorReq && priorReq.status === 'resolved'
-            && priorSnap && priorSnap.effectiveDate === 'end_of_coverage' && priorSnap.churnStampAtRun) {
-            const cust = await db('customers').where({ id: customerId }).first('pipeline_stage', 'pipeline_stage_changed_at');
-            const recorded = new Date(priorSnap.churnStampAtRun).getTime();
-            const churnedAt = cust && cust.pipeline_stage_changed_at ? new Date(cust.pipeline_stage_changed_at).getTime() : NaN;
-            tied = !!cust && cust.pipeline_stage === 'churned'
-              && Number.isFinite(recorded) && Number.isFinite(churnedAt) && churnedAt === recorded;
-            // …and only while the cancellable work is still exactly the
-            // visits that run RETAINED (the term's covered set): a visit
-            // staff scheduled since (admin-schedule inserts without touching
-            // the churn stamp) is new work the operator just asked to
-            // cancel — fall through and run the processor (#3727 r4).
-            if (tied) {
-              try {
-                // The SAME predicate the eligibility gate applies (track-
-                // state exclusion included): a live/done row the sweep would
-                // never touch is not new work and must not break the latch.
-                const { cancellableVisitIds, hasLiveBilling } = require('./cancellation-eligibility');
-                const covered = new Set((await liveCoveredKeepIds(term, customerId)).map(String));
-                const extra = (await cancellableVisitIds(customerId)).filter((id) => !covered.has(id));
-                if (extra.length) {
-                  tied = false;
-                  logger.info(`[admin-cancellation] case ${prior.id} stays churned but new cancellable work exists (${extra.join(', ')}) — processing fresh`);
-                } else if (await hasLiveBilling(customerId)) {
-                  // Billing re-armed (live dues / an armed charge on the
-                  // membership lane) while still churned is work the
-                  // processor must disarm again — same eligibility authority.
-                  tied = false;
-                  logger.info(`[admin-cancellation] case ${prior.id} stays churned but billing is live again — processing fresh`);
-                }
-              } catch (workErr) {
-                tied = false;
-                logger.warn(`[admin-cancellation] retained-work check failed for case ${prior.id}: ${workErr.message} — processing fresh`);
-              }
-            }
-          }
         } catch (tieErr) {
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
         }
@@ -1480,7 +1427,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             if (!outcome.errors.length && !repairErrors.length) {
               try {
                 const closed = await db('service_requests').where({ id: reqRow.id, status: 'new' })
-                  .update({ status: 'resolved', resolved_at: new Date(), updated_at: new Date() });
+                  .update({ status: 'resolved', updated_at: new Date() });
                 if (closed) await resolveReviewBell(reqRow.id);
                 if (!closed) {
                   // Same affected-row check as the commit path: a zero-row
@@ -1521,7 +1468,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             .where({ id: prior.service_request_id }).first('id', 'status');
           if (openReq && openReq.status === 'new') {
             const closed = await db('service_requests').where({ id: openReq.id, status: 'new' })
-              .update({ status: 'resolved', resolved_at: new Date(), updated_at: new Date() });
+              .update({ status: 'resolved', updated_at: new Date() });
             if (closed) await resolveReviewBell(openReq.id);
             else throw new Error('acceptance close updated zero rows');
           }
@@ -1981,23 +1928,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // has since left coverage (refund issued, term cancelled) — its terminal
   // facts are carried, never blanked.
   const carriedPrepay = !term && priorPrepayFacts ? priorPrepayFacts : null;
-  // The churn event this run stands on: the customer's churn stamp as it
-  // reads AFTER the processor (a fresh churn stamps now; an already-churned
-  // account keeps its older stamp). Immutable on the case, so the decided-
-  // term latch can prove "the account never left that churn" without any
-  // request-workflow timestamp (#3727 r3).
-  let churnStampAtRun = null;
-  try {
-    const postRun = await db('customers').where({ id: customerId }).first('pipeline_stage', 'pipeline_stage_changed_at');
-    if (postRun && postRun.pipeline_stage === 'churned' && postRun.pipeline_stage_changed_at) {
-      churnStampAtRun = new Date(postRun.pipeline_stage_changed_at).toISOString();
-    }
-  } catch (stampErr) {
-    logger.warn(`[admin-cancellation] churn stamp read failed for ${customerId}: ${stampErr.message}`);
-  }
   const caseSnapshotBody = {
     actor: { type: actorType, userId: actorUserId },
-    churnStampAtRun,
     effectiveDate: prepayPlan.effectiveDate,
     effectiveOn,
     waiveLateFee: input.waiveLateFee,
@@ -2142,7 +2074,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   if (processed && errors.length === 0) {
     try {
       const closed = await db('service_requests').where({ id: request.id })
-        .update({ status: 'resolved', resolved_at: new Date(), updated_at: new Date() });
+        .update({ status: 'resolved', updated_at: new Date() });
       if (!closed) throw new Error('acceptance close updated zero rows');
       await resolveReviewBell(request.id);
     } catch (closeErr) {

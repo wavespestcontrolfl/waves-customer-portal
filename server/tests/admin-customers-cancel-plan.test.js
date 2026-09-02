@@ -42,18 +42,6 @@ const mockSignupPreview = jest.fn(async () => ({ eligible: false, blockers: ['be
 jest.mock('../services/customer-offboarding', () => ({ previewCancelSignup: (...a) => mockSignupPreview(...a) }));
 jest.mock('../services/cancellation-eligibility', () => ({
   hasCancellableWork: jest.fn().mockResolvedValue(true),
-  hasLiveBilling: jest.fn().mockResolvedValue(false),
-  // Mirrors the real predicate over the fake tables (recurring anchors +
-  // upcoming cancellable rows, minus live/done track states).
-  cancellableVisitIds: jest.fn(async (customerId) => {
-    const today = new Date().toISOString().slice(0, 10);
-    const rows = (mockState.scheduled_services || []).filter((r) => r.customer_id === customerId);
-    const recurring = rows.filter((r) => r.recurring_ongoing === true);
-    const upcoming = rows.filter((r) => ['pending', 'confirmed', 'rescheduled'].includes(String(r.status))
-      && (String(r.scheduled_date) >= today || r.status === 'rescheduled')
-      && !['complete', 'en_route', 'on_property'].includes(String(r.track_state || '')));
-    return [...new Set([...recurring, ...upcoming].map((r) => String(r.id)))];
-  }),
   CANCELLABLE_STATUSES: ['pending', 'confirmed', 'rescheduled'],
   LIVE_TRACK_STATES: ['en_route', 'on_property'],
 }));
@@ -155,7 +143,7 @@ jest.mock('../models/db', () => {
 
 const express = require('express');
 const db = require('../models/db');
-const { hasCancellableWork, hasLiveBilling } = require('../services/cancellation-eligibility');
+const { hasCancellableWork } = require('../services/cancellation-eligibility');
 const { sendCancellationConfirmations } = require('../services/cancellation-confirmations');
 const NotificationService = require('../services/notification-service');
 const router = require('../routes/admin-customers');
@@ -288,9 +276,6 @@ const postCancel = async (baseUrl, body = {}) => {
 };
 
 const PROCESSED = { ok: true, cancelledCount: 3, recurrenceStopped: 2, churned: true, errors: [], keptThrough: null, lateFeeWaived: false };
-// Upcoming fixture dates relative to the suite's pinned clock (AGENTS.md:
-// no near-today literals) — jest fake timers freeze Date.now() below.
-const daysOut = (n) => new Date(Date.now() + n * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 // Frozen calendar (codex r22 P1): the annual-prepay fixtures carry literal
 // term windows (term_start 2026-03-01 → term_end 2027-02-28) that
@@ -717,130 +702,6 @@ describe('POST /:id/cancel-plan', () => {
     expect((await res.json()).code).toBe('preview_fingerprint_required');
     expect(mockState.inserted).toBeUndefined();
     expect(mockProcess).not.toHaveBeenCalled();
-  }));
-
-  test('an end-of-coverage case older than 24h stays LATCHED while the account is still in the churned state it recorded — no second case/confirmation/termite task (deferred P2 from #3666 r32)', () => withServer(async (baseUrl) => {
-    mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
-      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
-      status: 'active', renewal_decision: 'cancel',
-    }];
-    // The kept covered visits stay on the calendar — cancellable work remains
-    // (the full covered set, so the coverage-completeness guard passes).
-    mockState.scheduled_services = [
-      { id: 'cv1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-08-01' },
-      { id: 'cv2', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
-      { id: 'cv3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-12-01' },
-      { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
-    ];
-    const acceptedAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
-    // The churn event that run stood on (fresh churn seconds after acceptance).
-    const churnStamp = new Date(acceptedAt.getTime() + 20 * 1000);
-    mockState.service_requests = [{
-      id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
-      subject: 'Cancel plan (Admin (user admin-1))', description: '',
-      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' } }),
-      // Request-workflow timestamps are irrelevant to the latch: reopened
-      // and re-resolved yesterday, edited today.
-      created_at: acceptedAt, resolved_at: new Date(Date.now() - 24 * 60 * 60 * 1000), updated_at: new Date(),
-    }];
-    const snapshot = {
-      prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term',
-      churnStampAtRun: churnStamp.toISOString(),
-      outcome: { visitsPulled: 2, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'], errors: [] },
-    };
-    mockState.cancellation_cases = [{ id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed', created_at: acceptedAt, snapshot: JSON.stringify(snapshot) }];
-    mockState.customers[0].pipeline_stage = 'churned';
-    mockState.customers[0].pipeline_stage_changed_at = churnStamp;
-    const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
-    expect(body).toEqual(expect.objectContaining({ duplicate: true, caseId: 'case-old', visitsPulled: 2 }));
-    expect(mockProcess).not.toHaveBeenCalled();
-    expect(mockRaiseTermite).not.toHaveBeenCalled();
-    expect(sendCancellationConfirmations).not.toHaveBeenCalled();
-    expect((mockState.inserted || []).filter((i) => i.table === 'service_requests')).toHaveLength(0);
-    // An account ALREADY churned when that cancel ran recorded its older
-    // stamp — same event today, still latched.
-    const older = new Date(acceptedAt.getTime() - 30 * 24 * 60 * 60 * 1000);
-    mockState.cancellation_cases[0].snapshot = JSON.stringify({ ...snapshot, churnStampAtRun: older.toISOString() });
-    mockState.customers[0].pipeline_stage_changed_at = older;
-    const already = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
-    expect(already).toEqual(expect.objectContaining({ duplicate: true, caseId: 'case-old' }));
-    expect(mockProcess).not.toHaveBeenCalled();
-    // Staff scheduled a NEW, non-covered visit since (admin-schedule inserts
-    // without touching the churn stamp): new cancellable work — the
-    // operator's cancel runs fresh instead of echoing (#3727 r4).
-    mockState.scheduled_services.push({ id: 'extra', customer_id: 'cust-1', status: 'confirmed', scheduled_date: daysOut(75), non_coverage: true });
-    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', cancelledCount: 1 });
-    const fresh = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
-    expect(fresh.duplicate).toBeUndefined();
-    expect(mockProcess).toHaveBeenCalledTimes(1);
-    mockState.scheduled_services = mockState.scheduled_services.filter((r) => r.id !== 'extra');
-    // A row whose track layer says the work is LIVE is not new work (the
-    // sweep never auto-cancels it) — the latch holds (pre-push P1).
-    mockState.service_requests = [mockState.service_requests[0]];
-    mockState.service_requests[0].status = 'resolved';
-    mockState.scheduled_services.push({ id: 'live', customer_id: 'cust-1', status: 'confirmed', scheduled_date: daysOut(75), track_state: 'en_route', non_coverage: true });
-    const held = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
-    expect(held).toEqual(expect.objectContaining({ duplicate: true, caseId: 'case-old' }));
-    expect(mockProcess).toHaveBeenCalledTimes(1);
-    mockState.scheduled_services = mockState.scheduled_services.filter((r) => r.id !== 'live');
-    // Billing re-armed while still churned (live dues / armed charge) is
-    // work the processor must disarm again — falls through (pre-push P0).
-    mockState.service_requests = [mockState.service_requests[0]];
-    mockState.service_requests[0].status = 'resolved';
-    hasLiveBilling.mockResolvedValueOnce(true);
-    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', cancelledCount: 0 });
-    const rearmed = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
-    expect(rearmed.duplicate).toBeUndefined();
-    expect(mockProcess).toHaveBeenCalledTimes(2);
-    mockState.service_requests = [mockState.service_requests[0]];
-    mockState.service_requests[0].status = 'resolved';
-    // A win-back followed by a NEW churn restamps the customer — a different
-    // event from the recorded one, however soon: that cancel processes fresh.
-    mockState.customers[0].pipeline_stage_changed_at = new Date(older.getTime() + 5 * 60 * 1000);
-    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
-    await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
-    expect(mockProcess).toHaveBeenCalledTimes(3);
-    // A case recorded before the stamp existed proves nothing — processes.
-    mockState.service_requests = [mockState.service_requests[0]];
-    mockState.service_requests[0].status = 'resolved';
-    mockState.cancellation_cases = [{ id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed', created_at: acceptedAt, snapshot: JSON.stringify({ ...snapshot, churnStampAtRun: undefined }) }];
-    mockState.customers[0].pipeline_stage_changed_at = older;
-    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
-    await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
-    expect(mockProcess).toHaveBeenCalledTimes(4);
-  }));
-
-  test('the durable latch is for END-OF-COVERAGE cases only — an end-now term with a pending refund task still runs a fresh cancel for a new visit', () => withServer(async (baseUrl) => {
-    mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
-      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
-      status: 'cancelled', renewal_decision: 'cancel',
-    }];
-    // A visit created while the refund task is pending — cancellable work.
-    mockState.scheduled_services = [{ id: 'late', customer_id: 'cust-1', status: 'confirmed', scheduled_date: daysOut(30) }];
-    const acceptedAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
-    mockState.service_requests = [{
-      id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
-      subject: 'Cancel plan (Admin (user admin-1))', description: '',
-      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'now', prepayDisposition: 'end_now_refund' } }),
-      created_at: acceptedAt, resolved_at: new Date(acceptedAt.getTime() + 60 * 1000),
-    }];
-    mockState.cancellation_cases = [{
-      id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed', created_at: acceptedAt,
-      snapshot: JSON.stringify({
-        prepayTermId: 'term-1', effectiveDate: 'now', effectiveOn: '2026-08-28', prepayDisposition: 'end_now_refund',
-        churnStampAtRun: new Date(acceptedAt.getTime() + 20 * 1000).toISOString(),
-        refund: { amount: 360, needsManualCalc: false },
-        outcome: { visitsPulled: 3, scope: [], confirmationRequested: false, confirmation: null, confirmationChannels: [], errors: [] },
-      }),
-    }];
-    mockState.customers[0].pipeline_stage = 'churned';
-    mockState.customers[0].pipeline_stage_changed_at = new Date(acceptedAt.getTime() + 20 * 1000);
-    mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 1 });
-    const body = await (await postCancel(baseUrl, { effectiveDate: 'now', prepayDisposition: 'end_now_refund' })).json();
-    expect(body.duplicate).toBeUndefined();
-    expect(mockProcess).toHaveBeenCalledTimes(1);
   }));
 
   test('a HISTORICAL prepaid case never swallows a NEW cancellation — a re-won-back account processes fresh', () => withServer(async (baseUrl) => {
@@ -1315,9 +1176,6 @@ describe('POST /:id/cancel-plan', () => {
       expect(body.refund).toBeUndefined();
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
       expect(mockOpenCase.mock.calls[0][0].snapshot).toEqual(expect.objectContaining({ effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term', prepayTermId: 'term-1' }));
-      // The churn event the run stood on rides the case (the fake customer
-      // is not churned by the mocked processor, so no stamp is recorded).
-      expect(mockOpenCase.mock.calls[0][0].snapshot).toEqual(expect.objectContaining({ churnStampAtRun: null }));
       // The confirmation names the coverage end, not today.
       expect(sendCancellationConfirmations.mock.calls[0][0].effectiveAt).toMatch(/^2027-02-28/);
     }));
