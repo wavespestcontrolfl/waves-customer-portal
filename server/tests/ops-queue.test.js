@@ -135,7 +135,23 @@ describe('getOpsQueue', () => {
     const by = Object.fromEntries(q.lanes.map((l) => [l.key, l]));
     expect(by.ib.items).toHaveLength(25);
     expect(by.ib.total).toBe(40);
+    expect(by.ib.truncated).toBe(false);
+    expect(q.totals.truncated).toBe(false);
     expect(JSON.stringify(q)).not.toContain('SECRET');
+  });
+});
+
+describe('getOpsQueue scan cap', () => {
+  test('a lane that hits the scan cap reports truncated so counts read as a floor', async () => {
+    for (const k of Object.keys(fixtures)) delete fixtures[k];
+    mockJobHealth.mockResolvedValue({ jobs: [] });
+    mockReviewItems.mockResolvedValue([]);
+    fixtures.ib_pending_actions = Array.from({ length: 200 }, (_, i) => ({ id: `pa-${i}`, tool_name: 'send_sms', expires_at: ago(-5), created_at: ago(i) }));
+    const q = await getOpsQueue();
+    const ib = q.lanes.find((l) => l.key === 'ib');
+    expect(ib.truncated).toBe(true);
+    expect(ib.total).toBe(200);
+    expect(q.totals.truncated).toBe(true);
   });
 });
 

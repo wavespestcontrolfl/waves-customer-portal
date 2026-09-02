@@ -42,14 +42,21 @@ function tally(items) {
   return counts;
 }
 
-function finish(items) {
+// `truncated` = a scan hit SCAN_LIMIT, so counts are a floor, not a total;
+// the tab renders them as "200+". Cheaper and more honest than a second
+// count query per lane on a view that refreshes on demand.
+function finish(items, { truncated = false } = {}) {
   const rank = { failed: 0, parked: 1, pending: 2 };
   const sorted = [...items].sort((a, b) => {
     const r = (rank[a.status] ?? 3) - (rank[b.status] ?? 3);
     if (r !== 0) return r;
     return String(b.at || '').localeCompare(String(a.at || ''));
   });
-  return { ...tally(sorted), total: sorted.length, items: sorted.slice(0, ITEM_LIMIT) };
+  return { ...tally(sorted), total: sorted.length, truncated, items: sorted.slice(0, ITEM_LIMIT) };
+}
+
+function hitCap(rows) {
+  return Array.isArray(rows) && rows.length >= SCAN_LIMIT;
 }
 
 async function laneScheduledJobs() {
@@ -74,12 +81,18 @@ async function laneScheduledJobs() {
 }
 
 async function laneCallProcessing() {
+  // Open rows (null / pending / processing) carry NO date window — an
+  // indefinitely stalled call is exactly what this lane must surface.
+  // Only terminal failures are windowed to the recent week.
   const rows = await db('call_log')
     .whereNotNull('recording_url')
-    .where('created_at', '>', since(RECENT_DAYS))
     .where(function whereOpen() {
-      this.whereNull('processing_status')
-        .orWhereIn('processing_status', ['pending', 'processing', 'extraction_failed', 'no_transcription']);
+      this.where(function whereLive() {
+        this.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing']);
+      }).orWhere(function whereFailedRecent() {
+        this.whereIn('processing_status', ['extraction_failed', 'no_transcription'])
+          .where('created_at', '>', since(RECENT_DAYS));
+      });
     })
     // Oldest claim first: a stuck call is by definition old, and a
     // newest-first cap would hide exactly the rows this lane exists for.
@@ -112,7 +125,7 @@ async function laneCallProcessing() {
       href: '/admin/communications#tab=calls',
     };
   });
-  return finish(items);
+  return finish(items, { truncated: hitCap(rows) });
 }
 
 async function laneContentParks() {
@@ -126,7 +139,7 @@ async function laneContentParks() {
     at: iso(it.run?.completed_at || it.run?.claimed_at || it.updated_at || it.mined_at),
     href: '/admin/blog?tab=autopilot',
   }));
-  return finish(items);
+  return finish(items, { truncated: hitCap(reviews) });
 }
 
 async function laneEmailApprovals() {
@@ -149,7 +162,7 @@ async function laneEmailApprovals() {
       : r.status === 'executing' ? 'reply received, executing' : (r.email_sent_at ? 'awaiting an email reply' : 'approval email not yet sent'),
     at: iso(r.created_at),
   }));
-  return finish(items);
+  return finish(items, { truncated: hitCap(rows) });
 }
 
 async function laneIbPendingActions() {
@@ -166,7 +179,7 @@ async function laneIbPendingActions() {
     detail: `awaiting confirmation on the card${r.context ? ` · ${r.context}` : ''} · expires ${iso(r.expires_at)}`,
     at: iso(r.created_at),
   }));
-  return finish(items);
+  return finish(items, { truncated: hitCap(rows) });
 }
 
 async function laneReportDelivery() {
@@ -208,7 +221,7 @@ async function laneReportDelivery() {
       at: iso(r.failed_at || r.created_at),
     })),
   ];
-  return finish(items);
+  return finish(items, { truncated: hitCap(deliveries) || hitCap(pdfs) });
 }
 
 async function laneFollowUps() {
@@ -231,7 +244,7 @@ async function laneFollowUps() {
       href: '/admin/dispatch',
     };
   });
-  return finish(items);
+  return finish(items, { truncated: hitCap(rows) });
 }
 
 async function laneAdminAlerts() {
@@ -248,7 +261,7 @@ async function laneAdminAlerts() {
     at: iso(r.last_seen_at || r.detected_at),
     href: r.href || null,
   }));
-  return finish(items);
+  return finish(items, { truncated: hitCap(rows) });
 }
 
 const LANES = [
@@ -269,14 +282,15 @@ async function getOpsQueue() {
       return { key, label, error: null, ...r };
     } catch (err) {
       logger.warn(`[ops-queue] lane ${key} failed: ${err.message}`);
-      return { key, label, error: err.message, pending: 0, parked: 0, failed: 0, total: 0, items: [] };
+      return { key, label, error: err.message, pending: 0, parked: 0, failed: 0, total: 0, truncated: false, items: [] };
     }
   }));
   const totals = lanes.reduce((acc, l) => ({
     pending: acc.pending + l.pending,
     parked: acc.parked + l.parked,
     failed: acc.failed + l.failed,
-  }), { pending: 0, parked: 0, failed: 0 });
+    truncated: acc.truncated || l.truncated === true,
+  }), { pending: 0, parked: 0, failed: 0, truncated: false });
   return { generatedAt: new Date().toISOString(), totals, lanes };
 }
 

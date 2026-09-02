@@ -22,6 +22,11 @@ function statusTone(status) {
   return "neutral";
 }
 
+// Counts from a lane that hit its scan cap are a floor, shown as "200+".
+function count(n, truncated) {
+  return `${n}${truncated ? "+" : ""}`;
+}
+
 function ago(iso) {
   if (!iso) return "";
   const ms = Date.now() - new Date(iso).getTime();
@@ -37,7 +42,7 @@ export function StatTile({ label, value, tone }) {
   return (
     <div className="flex flex-col gap-1 px-4 py-3 border-hairline border-zinc-200 rounded-md bg-white min-w-[120px]">
       <span className="text-13 uppercase tracking-label text-ink-tertiary">{label}</span>
-      <span className={cn("text-24 font-medium tabular-nums", tone === "alert" && value > 0 ? "text-alert-fg" : "text-ink-primary")}>
+      <span className={cn("text-24 font-medium tabular-nums", tone === "alert" && parseInt(value, 10) > 0 ? "text-alert-fg" : "text-ink-primary")}>
         {value}
       </span>
     </div>
@@ -82,9 +87,9 @@ export default function AgentQueueTab({ embedded = false } = {}) {
     <div className={cn("flex flex-col gap-4", embedded ? "px-4 md:px-6 py-4" : "p-6")} aria-label="Ops queue">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="flex flex-wrap gap-3">
-          <StatTile label="Failed" value={totals.failed} tone="alert" />
-          <StatTile label="Parked" value={totals.parked} />
-          <StatTile label="Pending" value={totals.pending} />
+          <StatTile label="Failed" value={count(totals.failed, totals.truncated)} tone="alert" />
+          <StatTile label="Parked" value={count(totals.parked, totals.truncated)} />
+          <StatTile label="Pending" value={count(totals.pending, totals.truncated)} />
         </div>
         <div className="flex items-center gap-3">
           {data?.generatedAt ? (
@@ -131,9 +136,9 @@ export default function AgentQueueTab({ embedded = false } = {}) {
                   ) : null}
                 </span>
                 <span className="flex flex-wrap items-center gap-2 shrink-0">
-                  {lane.failed > 0 ? <Badge tone="alert" dot>{lane.failed} failed</Badge> : null}
-                  {lane.parked > 0 ? <Badge tone="strong" dot>{lane.parked} parked</Badge> : null}
-                  {lane.pending > 0 ? <Badge tone="neutral" dot>{lane.pending} pending</Badge> : null}
+                  {lane.failed > 0 ? <Badge tone="alert" dot>{count(lane.failed, lane.truncated)} failed</Badge> : null}
+                  {lane.parked > 0 ? <Badge tone="strong" dot>{count(lane.parked, lane.truncated)} parked</Badge> : null}
+                  {lane.pending > 0 ? <Badge tone="neutral" dot>{count(lane.pending, lane.truncated)} pending</Badge> : null}
                   <span aria-hidden className="text-13 text-ink-tertiary w-3 text-center">{open ? "▾" : "▸"}</span>
                 </span>
               </button>
@@ -169,7 +174,7 @@ export default function AgentQueueTab({ embedded = false } = {}) {
                       ))}
                       {lane.total > lane.items.length ? (
                         <li className="py-2 text-13 text-ink-tertiary">
-                          Showing {lane.items.length} of {lane.total}.
+                          Showing {lane.items.length} of {count(lane.total, lane.truncated)}.
                         </li>
                       ) : null}
                     </ul>
