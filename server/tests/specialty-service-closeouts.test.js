@@ -46,6 +46,12 @@ describe('specialty service closeout vocabulary', () => {
       spec.protocols.forEach((action) => {
         expect(['interior', 'exterior']).toContain(action.scope);
         expect(typeof action.treatmentApplied).toBe('boolean');
+        // Every non-exclusive action either applies product, performs
+        // non-chemical work, or is a monitoring / review step — never an
+        // unclassified completed action (local audit P1 on #3701).
+        if (!action.exclusive && !action.treatmentApplied && !action.treatmentPerformed) {
+          expect(action.label).toMatch(/monitor|reviewed/i);
+        }
       });
     }
   });
@@ -234,12 +240,19 @@ describe('specialty service closeout vocabulary', () => {
     expect(specialtyProtocolActionScopes('tick_control', {
       actions: ['Pet-resting or kennel-area treatment'], areas: ['Interior pet areas', 'Furniture near pet areas'],
     })).toEqual([{ label: 'Pet-resting or kennel-area treatment', scope: 'interior', treatmentApplied: true, treatmentPerformed: true }]);
+    // Completed mechanical work is treatment without a pesticide application.
+    expect(specialtyProtocolActionScopes('plugging', {
+      actions: ['Sod plugs installed at quoted spacing', 'Installation areas reviewed with customer'], areas: ['Front lawn'],
+    })).toEqual([
+      { label: 'Sod plugs installed at quoted spacing', scope: 'exterior', treatmentApplied: false, treatmentPerformed: true },
+      { label: 'Installation areas reviewed with customer', scope: 'exterior', treatmentApplied: false, treatmentPerformed: false },
+    ]);
     // Heat and steam are treatment without a pesticide application.
     expect(specialtyProtocolActionScopes('bed_bug', {
       actions: ['Heat treatment', 'Vacuuming performed'], areas: ['Primary bedroom'],
     })).toEqual([
       { label: 'Heat treatment', scope: 'interior', treatmentApplied: false, treatmentPerformed: true },
-      { label: 'Vacuuming performed', scope: 'interior', treatmentApplied: false, treatmentPerformed: false },
+      { label: 'Vacuuming performed', scope: 'interior', treatmentApplied: false, treatmentPerformed: true },
     ]);
     expect(specialtyProtocolActionScopes('general_pest', { actions: ['Anything'], areas: [] })).toBeNull();
     expect(specialtyActionScopeForAreas(['Other'], 'exterior')).toBe('exterior');

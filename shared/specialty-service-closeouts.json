@@ -61,22 +61,26 @@
       {
         "label": "Single-pass dethatching completed",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Double-pass dethatching completed",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Loose thatch collected",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Debris removed from property",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Work deferred; office follow-up required",
@@ -173,17 +177,20 @@
       {
         "label": "Sod plugs installed at quoted spacing",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Installation adjusted for site conditions",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Installed plugs watered in",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Installation areas reviewed with customer",
@@ -272,7 +279,8 @@
       {
         "label": "Standing water removed where practical",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Larvicide applied to labeled water source",
@@ -282,7 +290,8 @@
       {
         "label": "Mosquito stations installed or serviced",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Event or heavy-pressure treatment",
@@ -485,7 +494,8 @@
       {
         "label": "Vacuuming or mechanical removal",
         "scope": "interior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Treatment deferred or office review required",
@@ -607,7 +617,8 @@
       {
         "label": "Nest physically removed",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Treatment followed by nest removal",
@@ -622,7 +633,8 @@
       {
         "label": "Honey bee removal performed",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Honey bee colony eradication performed",
@@ -735,7 +747,8 @@
       {
         "label": "Inactive nests removed",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Active nests treated",
@@ -750,7 +763,8 @@
       {
         "label": "Nest remnants and accessible webbing removed",
         "scope": "exterior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Localized labeled application",
@@ -847,7 +861,8 @@
       {
         "label": "Vacuuming performed",
         "scope": "interior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Steam treatment performed",
@@ -873,7 +888,8 @@
       {
         "label": "Mattress or box-spring encasement installed",
         "scope": "interior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       },
       {
         "label": "Chemical / IPM treatment",
@@ -899,7 +915,8 @@
       {
         "label": "Treatment limited because preparation was incomplete",
         "scope": "interior",
-        "treatmentApplied": false
+        "treatmentApplied": false,
+        "treatmentPerformed": true
       }
     ]
   }
