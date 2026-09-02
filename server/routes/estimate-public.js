@@ -20928,9 +20928,12 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
   // OLD flat-monthly payloads (perTreatment/visitsPerYear null, e.g.
   // pre-flag termite monitoring) keep the display-only derivation
   // ($29.75/mo → $89.25/check) AND the monthly note: without a visit count
-  // the converter's per-application division can't run, so their accept
-  // path still bills the flat monthly and the note stays truthful for
-  // exactly the estimates it still applies to.
+  // the converter's per-application division can't run, and the monthly
+  // lane may not be opened for a new conversion (owner ruling 2026-09-01),
+  // so their accept is REFUSED with a call-the-office message
+  // (estimate-converter assertLegacyMonthlyTermiteConvertible) and the
+  // office re-issues the quote — the note stays truthful for the quote as
+  // issued, and no billing state ever contradicts it.
   let effectiveVisits = visitsPerYear;
   const billedPerApplication = !!(displayPrice && visitsPerYear);
   if (key === 'termite_bait' && !billedPerApplication && monthly != null) {

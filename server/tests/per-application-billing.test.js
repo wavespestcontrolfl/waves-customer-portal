@@ -985,3 +985,41 @@ describe('assertPerApplicationAddOnPriced — an established per-application cus
     expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, pinnedLegacyRodentOnlyPlan: true })).not.toThrow();
   });
 });
+
+describe('legacy count-less termite units — refused before acceptance, never converted against their "$X/mo" card (GH codex P0 r2/r3)', () => {
+  const { legacyFlatMonthlyTermiteUnit, assertLegacyMonthlyTermiteConvertible } = EstimateConverter;
+  const legacy = { name: 'Termite Bait', service: 'termite_bait', mo: 34, monthly: 34 };
+  const current = { name: 'Termite Bait', service: 'termite_bait', mo: 34, monthly: 34, perTreatment: 102, visitsPerYear: 4 };
+
+  test('the predicate: exactly one count-less termite line with a monthly figure', () => {
+    expect(legacyFlatMonthlyTermiteUnit([legacy], 34)).toBe(true);
+    expect(legacyFlatMonthlyTermiteUnit([current], 34)).toBe(false);
+    expect(legacyFlatMonthlyTermiteUnit([{ name: 'Pest Control', service: 'pest_control', mo: 37.33 }], 37.33)).toBe(false);
+    expect(legacyFlatMonthlyTermiteUnit([legacy, { name: 'Pest Control', service: 'pest_control', mo: 37.33 }], 71.33)).toBe(false);
+    expect(legacyFlatMonthlyTermiteUnit([legacy], 0)).toBe(false);
+    expect(legacyFlatMonthlyTermiteUnit([], 34)).toBe(false);
+  });
+
+  test('refuses the conversion (409, operational, code) with call-the-office copy — nothing booked, no billing state written', () => {
+    let caught = null;
+    try {
+      assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34 });
+    } catch (e) { caught = e; }
+    expect(caught?.statusCode).toBe(409);
+    expect(caught?.status).toBe(409);
+    expect(caught?.isOperational).toBe(true);
+    expect(caught?.code).toBe('LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE');
+    expect(caught?.message).toMatch(/nothing was booked/i);
+    expect(caught?.message).toMatch(/call the office/i);
+    expect(caught?.message).not.toMatch(/per visit/i);
+  });
+
+  test('never fires for current termite rows, other families, preserved memberships, suppressed recurring, pinned rodent, or annual prepay', () => {
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [current], monthlyRate: 34 })).not.toThrow();
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [{ name: 'Pest Control', service: 'pest_control', mo: 37.33 }], monthlyRate: 37.33 })).not.toThrow();
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, preservesExistingMembership: true })).not.toThrow();
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, suppressRecurringConversion: true })).not.toThrow();
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, pinnedLegacyRodentOnlyPlan: true })).not.toThrow();
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, billingTerm: 'prepay_annual' })).not.toThrow();
+  });
+});

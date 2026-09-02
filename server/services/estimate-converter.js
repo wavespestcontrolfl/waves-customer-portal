@@ -2371,6 +2371,49 @@ function assertPerApplicationAddOnPriced({
   throw err;
 }
 
+// A legacy flat-monthly termite-monitoring unit: the ONE recurring line is
+// termite bait with no visit count (pre-split payloads carry the flat
+// monthly only). Its customer card still discloses "Billed $X/mo"
+// (estimate-public keeps that note for exactly this shape).
+function legacyFlatMonthlyTermiteUnit(recurringServices = [], monthlyRate = 0) {
+  const rows = Array.isArray(recurringServices) ? recurringServices : [];
+  if (rows.length !== 1) return false;
+  const unit = rows[0];
+  if (recurringServiceKey(unit) !== 'termite_bait') return false;
+  if (visitsPerYearForRecurringService(unit)) return false;
+  return Number(monthlyRate) > 0;
+}
+
+// An in-flight legacy count-less termite estimate is REFUSED before any
+// billing state is written (GH codex P0 r2/r3 on #3751): no per-application
+// amount honours its disclosed monthly installments, and the monthly-dues
+// lane may not be opened for a new conversion (owner ruling 2026-09-01:
+// per application or annual prepay only) — so neither incompatible outcome
+// is committed. The office re-issues it from the current estimator, whose
+// termite rows carry a visit count and disclose the per-application price.
+// Exemptions mirror assertPerApplicationAddOnPriced: nothing recurring is
+// converted, an existing membership is preserved as-is, a pinned legacy
+// rodent plan, or an annual prepay (its term covers the year).
+function assertLegacyMonthlyTermiteConvertible({
+  recurringServices = [],
+  monthlyRate = 0,
+  preservesExistingMembership = false,
+  suppressRecurringConversion = false,
+  pinnedLegacyRodentOnlyPlan = false,
+  billingTerm = 'standard',
+} = {}) {
+  if (preservesExistingMembership || suppressRecurringConversion || pinnedLegacyRodentOnlyPlan) return;
+  if (billingTerm === 'prepay_annual') return;
+  if (!legacyFlatMonthlyTermiteUnit(recurringServices, monthlyRate)) return;
+  // Customer-facing (the public accept route returns it verbatim).
+  const err = new Error('This estimate was issued with a flat monthly termite-monitoring price that our current per-application billing can\'t honor automatically — nothing was booked. Please call the office and we\'ll re-issue it with today\'s per-application pricing.');
+  err.code = 'LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE';
+  err.isOperational = true;
+  err.status = 409;
+  err.statusCode = 409;
+  throw err;
+}
+
 function estimateOperatorSetupFeeWaived(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
   return data?.operatorPriceAdjustment?.waiveSetupFee === true;
@@ -4102,10 +4145,11 @@ const EstimateConverter = {
         ? { tier: 'none', discount: 0 } // written as the non-member 'Commercial' sentinel below
         : determineTier(combinedServiceCount, recurringServicesForConversion.length > 0);
     // A legacy count-less termite row (pre-split payload: flat monthly only)
-    // infers NO cadence on purpose: its card discloses monthly installments,
-    // so no per-application amount can be derived that honours it — the fee
-    // parks and the owner is belled (GH codex P0 r2 on #3751); the lane for
-    // those in-flight links is the owner's call.
+    // infers NO cadence on purpose: its card discloses monthly installments
+    // that no per-application amount honours, and no monthly lane may be
+    // opened for it (owner ruling 2026-09-01) — its conversion is REFUSED
+    // before any billing state is written (assertLegacyMonthlyTermite-
+    // Convertible; GH codex P0 r2/r3 on #3751).
     const inferredFrequencyKey = estimateData.customerSelection?.frequency
       || inferFrequencyKeyFromEstimateData(estimateData);
     // Combined routing only trusts the customer's REAL accepted selection —
@@ -4394,6 +4438,18 @@ const EstimateConverter = {
     assertPerApplicationAddOnPriced({
       perApplicationUnresolved,
       customer: effectiveCustomer,
+      preservesExistingMembership,
+      suppressRecurringConversion,
+      pinnedLegacyRodentOnlyPlan,
+      billingTerm,
+    });
+    // An in-flight legacy count-less termite link is refused here, before
+    // the customer update below would stamp billing_mode='per_application'
+    // with no fee against its disclosed monthly installments (GH codex P0
+    // r3 on #3751).
+    assertLegacyMonthlyTermiteConvertible({
+      recurringServices: recurringServicesForConversion,
+      monthlyRate,
       preservesExistingMembership,
       suppressRecurringConversion,
       pinnedLegacyRodentOnlyPlan,
@@ -7159,3 +7215,5 @@ module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmoun
 module.exports.applyFrozenExistingServiceExtension = applyFrozenExistingServiceExtension;
 module.exports.resolveConvertedPerApplicationFee = resolveConvertedPerApplicationFee;
 module.exports.assertPerApplicationAddOnPriced = assertPerApplicationAddOnPriced;
+module.exports.legacyFlatMonthlyTermiteUnit = legacyFlatMonthlyTermiteUnit;
+module.exports.assertLegacyMonthlyTermiteConvertible = assertLegacyMonthlyTermiteConvertible;
