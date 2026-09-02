@@ -449,12 +449,31 @@ function serviceDisplayName(service) {
   return raw || 'Waves service';
 }
 
+// Typed area fields frozen in the primary and companion snapshots — a
+// combined visit's companion (an exterior tree & shrub section beside an
+// interior pest primary) records its own treated areas there, and its
+// productless applied work is treatment evidence, so its scope must count
+// too (local audit P1 on #3701).
+const TYPED_AREA_FIELD_KEYS = ['areas_treated', 'spot_treatment_areas', 'treatment_zones'];
+function snapshotAreaValues(service = {}) {
+  const serviceData = parseJsonObject(service.service_data);
+  const snapshots = [
+    serviceData.typedReportSnapshot,
+    ...(Array.isArray(serviceData.companionReportSnapshots) ? serviceData.companionReportSnapshots : []),
+  ].filter((snap) => snap && typeof snap === 'object' && snap.values && typeof snap.values === 'object');
+  return snapshots.flatMap((snap) => TYPED_AREA_FIELD_KEYS.flatMap((key) => String(snap.values[key] ?? '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)));
+}
+
 function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
   const structured = parseJsonObject(service.structured_notes);
   const values = [
     ...parseJsonArray(service.areas_serviced),
     ...parseJsonArray(structured.areasServiced),
     ...parseJsonArray(structured.areasTreated),
+    ...snapshotAreaValues(service),
   ];
 
   for (const app of applications || []) {

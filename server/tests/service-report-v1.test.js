@@ -616,6 +616,23 @@ describe('service report v1', () => {
       })).toMatchObject({ exterior_reentry_min: 0 });
     });
 
+    test('companion snapshot treatment areas contribute scope', () => {
+      const combined = {
+        service_type: 'Quarterly Pest Control',
+        areas_serviced: JSON.stringify(['Kitchen']),
+        service_data: {
+          typedReportSnapshot: { type: 'one_time_pest_treatment', values: { areas_treated: 'Kitchen', work_completed: 'Interior crack & crevice application' } },
+          companionReportSnapshots: [{ type: 'tree_shrub', values: { areas_treated: 'Front landscape, Foundation beds', treatments_completed: 'Insect treatment' } }],
+        },
+      };
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: combined, treatmentEvidence: true }))
+        .toMatchObject({ interior_reentry_min: 120, exterior_reentry_min: 30 });
+      // Without the companion areas the same interior primary would zero the exterior side.
+      const primaryOnly = { ...combined, service_data: { typedReportSnapshot: combined.service_data.typedReportSnapshot } };
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: primaryOnly, treatmentEvidence: true }))
+        .toMatchObject({ interior_reentry_min: 120, exterior_reentry_min: 0 });
+    });
+
     test('an "Other" area on a lawn application keeps the exterior dry-down target', () => {
       const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
         service: { service_type: 'One-Time Lawn Treatment', areas_serviced: JSON.stringify(['Other']) },
