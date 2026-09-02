@@ -373,10 +373,14 @@ async function parkAdditionalRecording(row, extra) {
       .catch(() => null);
     if (anyCard) return { parked: false, quarantined: false, duplicate: true };
     // Parked earlier with no card at all (a pre-transaction row): file it.
+    // A failure here is the same failure as a rolled-back park — the
+    // recording is parked with no card — and gets the same 500 so Twilio
+    // delivers the callback again.
     await db('triage_items')
       .insert(card())
       .onConflict(db.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
-      .ignore();
+      .ignore()
+      .catch((err) => { err.parkFailed = true; throw err; });
     return { parked: false, quarantined: false, duplicate: true, cardFiled: true };
   }
   return { parked: true, quarantined: false };

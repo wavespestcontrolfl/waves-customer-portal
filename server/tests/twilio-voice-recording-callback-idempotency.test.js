@@ -442,6 +442,17 @@ describe('POST /recording-status', () => {
     expect(tables.triage_items[0]).toMatchObject({ call_log_id: 'c1', reason_code: 'additional_recording', status: 'open' });
   });
 
+  test('a retry that must file the lost card and cannot answers 500 too', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: 'processing' });
+    await post('/recording-status', recordingCallback());
+    tables.triage_items.length = 0;
+    const realImpl = db.getMockImplementation();
+    db.mockImplementation((t) => { const b = realImpl(t); if (t === 'triage_items') b.insert = () => ({ onConflict: () => ({ ignore: () => Promise.reject(new Error('deadlock detected')) }) }); return b; });
+    const res = await post('/recording-status', recordingCallback());
+    expect(res.sendStatus).toHaveBeenCalledWith(500);
+    db.mockImplementation(realImpl);
+  });
+
   test('a replace clears the old transcript, its structure and provider with the swap', async () => {
     tables.call_log.push({
       id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: null,
