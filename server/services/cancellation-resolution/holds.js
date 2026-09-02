@@ -187,9 +187,14 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
       if (priorUnderLock) throw new Error('a hold for this family was written concurrently');
       if (moved.length) {
         const liveVisits = await familyUpcomingVisits(customerId, familyKey, trx);
-        // Exactly the moved set: fewer = a wind-down cancelled some; more = a
-        // visit booked in the gap would dispatch during the hold unmoved.
-        if (liveVisits.length !== moved.length) throw new Error(`${familyKey} visits changed before the hold could be written (${liveVisits.length} live vs ${moved.length} moved)`);
+        // Exactly the moved set, by identity: a cancelled moved visit or a
+        // visit booked in the gap (which would dispatch during the hold
+        // unmoved) both refuse the hold.
+        const liveIds = liveVisits.map((v) => String(v.id)).sort();
+        const movedIds = moved.map((v) => String(v.id)).sort();
+        if (liveIds.length !== movedIds.length || liveIds.some((id, i) => id !== movedIds[i])) {
+          throw new Error(`${familyKey} visits changed before the hold could be written (live ${liveIds.join(',')} vs moved ${movedIds.join(',')})`);
+        }
       }
       const live = await trx('customers').where({ id: customerId }).first('monthly_rate', 'billing_mode', 'waveguard_tier', 'tier_protected_until');
       if (!live) throw new Error('customer vanished before the hold could be written');
@@ -417,22 +422,22 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
         await db('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
         continue;
       }
-      await db.transaction(async (trx) => {
+      const resumed = await db.transaction(async (trx) => {
         await lockCustomerComms(trx, hold.customer_id); // rung 6 — see startHold
         // Re-read under the lock (see cancelHold): the wind-down reprices a
         // held family's saved rate, and the component may have left
         // plan_hold ownership since the obsolete check above.
         const live = await trx('plan_holds').where({ id: hold.id }).first('status', 'held_monthly_rate');
-        if (!live || live.status !== 'active') return;
+        if (!live || live.status !== 'active') return false;
         if (live.held_monthly_rate != null) {
           const liveComponent = await trx('customer_plan_rates').where({ customer_id: hold.customer_id, family_key: hold.family_key }).first('source');
           if (!liveComponent || liveComponent.source !== 'plan_hold') {
             await trx('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
-            return;
+            return false;
           }
         }
         const claimed = await trx('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'resumed', resumed_at: new Date(), updated_at: new Date() });
-        if (!claimed) return;
+        if (!claimed) return false;
         if (live.held_monthly_rate != null) {
           await trx('customer_plan_rates').where({ customer_id: hold.customer_id, family_key: hold.family_key })
             .update({ monthly_rate: Number(live.held_monthly_rate), source: 'plan_hold_resume', effective_at: new Date(), updated_at: new Date() });
@@ -443,7 +448,11 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
         const others = await trx('plan_holds').where({ customer_id: hold.customer_id, status: 'active' }).whereNot({ id: hold.id }).max('resume_on as max');
         const nextProtected = others?.[0]?.max || null;
         await trx('customers').where({ id: hold.customer_id }).update({ tier_protected_until: nextProtected, updated_at: new Date() });
+        return true;
       });
+      // Only a hold the CAS actually moved to 'resumed' is reported (and
+      // noted) as resumed — an obsolete one cancelled under the lock is not.
+      if (!resumed) continue;
       try {
         await db('customer_interactions').insert({
           customer_id: hold.customer_id,
