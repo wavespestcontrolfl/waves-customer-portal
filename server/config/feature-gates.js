@@ -26,6 +26,7 @@
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
  *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
  *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
+ *   GATE_AGENT_ACTIVITY=true    (Activity tab in /admin/agents — read-only feed over existing ledgers; dark in dev AND prod)
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
@@ -2105,6 +2106,16 @@ const gates = {
   // Read at CALL time so a flip needs no redeploy.
   techDictationUpload: gateEnvValue('GATE_TECH_DICTATION_UPLOAD'),
 
+
+  // Agent Activity feed — the Activity tab in /admin/agents: one read-only
+  // timeline built from autonomous_runs, content_email_approvals,
+  // message_drafts and job_health (server/services/agent-activity.js). OFF
+  // unless set ('1' / 'true' / 'on'), in dev AND prod — gate-off answer of
+  // GET /admin/agents/activity is { available: false } and the tab shows a
+  // "not enabled" note. Kill switch: unset. This entry is for
+  // logGateStatus; the service reads gateEnvValue('GATE_AGENT_ACTIVITY')
+  // at CALL time (the techTips idiom), so a flip needs no redeploy.
+  agentActivity: gateEnvValue('GATE_AGENT_ACTIVITY'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

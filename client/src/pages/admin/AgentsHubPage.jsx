@@ -31,18 +31,20 @@
  */
 import React, { useState, useRef, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Bot, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, RefreshCw } from "lucide-react";
+import { Activity, Bot, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, RefreshCw } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import AgentOpsPage from "./AgentOpsPage";
 import AgentDecisionsPage from "./AgentDecisionsPage";
 import AgentShadowDraftsPage from "./AgentShadowDraftsPage";
 import PendingDraftsTab from "./PendingDraftsTab";
 import DataHygienePage from "./DataHygienePage";
+import AgentActivityTab from "./AgentActivityTab";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const TAB_KEY = "tab";
 const TABS = {
   OVERVIEW: "overview",
+  ACTIVITY: "activity",
   DECISIONS: "decisions",
   DRAFTS: "drafts",
   SHADOW: "shadow",
@@ -50,6 +52,9 @@ const TABS = {
 };
 const TAB_LIST = [
   { key: TABS.OVERVIEW, label: "Overview", Icon: LayoutGrid },
+  // Activity — GATE_AGENT_ACTIVITY; the tab renders a "not enabled" note
+  // while the gate is off (the endpoint answers { available: false }).
+  { key: TABS.ACTIVITY, label: "Activity", Icon: Activity },
   { key: TABS.DECISIONS, label: "Triage & Decisions", Icon: ListChecks },
   { key: TABS.DRAFTS, label: "Pending Drafts", Icon: MailCheck },
   { key: TABS.SHADOW, label: "Shadow Drafts", Icon: MessageSquareDashed },
@@ -109,7 +114,7 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName="grid-cols-2 md:grid-cols-5"
+        navGridClassName="grid-cols-2 md:grid-cols-6"
         action={
           tab === TABS.OVERVIEW
             ? {
@@ -124,6 +129,8 @@ export default function AgentsHubPage() {
       <div aria-label="Agents content" className="flex-1 min-h-0 flex flex-col">
         {tab === TABS.OVERVIEW ? (
           <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />
+        ) : tab === TABS.ACTIVITY ? (
+          <AgentActivityTab />
         ) : tab === TABS.DECISIONS ? (
           <AgentDecisionsPage embedded />
         ) : tab === TABS.DRAFTS ? (
