@@ -15249,9 +15249,14 @@ const CallRecordingProcessor = {
         // An adopted recording that this pass processed closes its review
         // card (the adopt endpoint closes it only when its immediate pass
         // succeeds; a deferred or failed one lands here on the sweep) —
-        // unless another callback-parked recording still waits.
-        try {
-          const m = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+        // unless another callback-parked recording still waits. No catch:
+        // a statement that fails inside this transaction aborts it in
+        // PostgreSQL, and swallowing the error would only turn the next
+        // statement into "current transaction is aborted" — let it roll the
+        // finalization back and retry. Only the metadata parse is guarded.
+        {
+          let m = {};
+          try { m = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {}); } catch { m = {}; }
           const adopted = m?.adopted_recording?.recording_sid || null;
           if (adopted && adopted === call.recording_sid) {
             const waiting = (Array.isArray(m.additional_recordings) ? m.additional_recordings : [])
@@ -15263,8 +15268,6 @@ const CallRecordingProcessor = {
                 .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Adopted ${adopted} processed` });
             }
           }
-        } catch (cardErr) {
-          logger.warn(`[call-proc] adoption card close skipped for ${maskSid(callSid)}: ${cardErr.message}`);
         }
       }
       if (written > 0 && finalStatus === 'processed' && customerLanded) {
