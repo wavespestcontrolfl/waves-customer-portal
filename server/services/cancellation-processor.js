@@ -274,7 +274,7 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
   // Per-application lane (codex r2 P1): each surviving UNINVOICED upcoming
   // visit carries its own tier-discounted price on the row — the demotion
   // must reprice those rows or the old bundle discount lives on forever.
-  const perAppRows = [];
+  let perAppRows = [];
   if (perApplicationLane) {
     for (const row of rows) {
       if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
@@ -288,6 +288,19 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
         primarySet: row.primary_line_price !== null && row.primary_line_price !== undefined,
         priorPrimary: row.primary_line_price,
       });
+    }
+    // An already-INVOICED visit bills at its fixed terms: applyScopedWindDown
+    // skips it, so it must not be planned — and shown, fingerprinted, and
+    // approved — as a `$before → $after` change that never happens (codex
+    // GH r26 P1). A row invoiced between preview and commit drops out of the
+    // recomputed plan and trips scoped_pricing_changed, like any drift.
+    if (perAppRows.length) {
+      const invoiced = await db('invoices')
+        .whereIn('scheduled_service_id', perAppRows.map((r) => r.id))
+        .whereNot({ status: 'void' })
+        .select('scheduled_service_id');
+      const fixed = new Set((invoiced || []).map((i) => String(i.scheduled_service_id)));
+      perAppRows = perAppRows.filter((r) => !fixed.has(String(r.id)));
     }
   }
   return {
@@ -438,9 +451,17 @@ async function processCancellationRequest({
   // Absent (portal path) the reason doubles as the note, byte-identical to
   // the old behavior.
   historyNote = null,
+  // visitReason (C3): the CUSTOMER-SAFE reason stamped on the cancelled
+  // rows (scheduled_services.cancellation_reason, read back verbatim by the
+  // public tracker for anyone holding a shared link). The admin path's
+  // `reason` carries the operator's internal note for the churn columns and
+  // must never reach those rows. Absent (portal path) the reason is used,
+  // byte-identical to the old behavior.
+  visitReason = null,
 } = {}) {
   if (!customerId) throw new Error('processCancellationRequest requires customerId');
   const cancelReason = String(reason || CHURN_REASON).slice(0, 500);
+  const rowReason = String(visitReason || cancelReason).slice(0, 500);
   const visitNote = String(historyNote || cancelReason).slice(0, 500);
   const errors = [];
   const actorType = actor && actor.type ? String(actor.type) : 'customer';
@@ -704,7 +725,7 @@ async function processCancellationRequest({
     // 'cancelled' — the reason is the surviving request-correlated
     // evidence restart's family recovery reads. Status is untouched; the
     // tracker renders reasons only on cancelled-status rows.
-    recurrenceStopped = await stopQuery.update({ recurring_ongoing: false, cancellation_reason: cancelReason, updated_at: new Date() });
+    recurrenceStopped = await stopQuery.update({ recurring_ongoing: false, cancellation_reason: rowReason, updated_at: new Date() });
   } catch (err) {
     errors.push('stop_recurrence');
     logger.error(`[cancellation-processor] failed to stop recurrence for ${customerId}: ${err.message}`);
@@ -1065,7 +1086,7 @@ async function processCancellationRequest({
     // A failure/non-ok result means the public tracker still shows the visit
     // live after the status flip above — surface it so staff repair it.
     try {
-      const trackResult = await trackTransitions.cancel(svc.id, { reason: cancelReason, actorId: null });
+      const trackResult = await trackTransitions.cancel(svc.id, { reason: rowReason, actorId: null });
       if (!trackResult || trackResult.ok !== true) {
         errors.push(`track_cancel:${svc.id}`);
         logger.error(

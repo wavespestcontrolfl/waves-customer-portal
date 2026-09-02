@@ -436,6 +436,8 @@ describe('POST /:id/cancel-plan', () => {
       // the request-id boilerplate when the operator said why. Repairs key
       // on the IMMUTABLE request-scoped marker instead.
       reason: 'price — Too expensive',
+      // The cancelled rows (and the public tracker) never carry the note.
+      visitReason: 'Service plan cancelled',
       historyNote: `Admin cancellation request ${request.id}`,
     }));
     expect(mockOpenCase).toHaveBeenCalledWith(expect.objectContaining({
@@ -955,6 +957,32 @@ describe('POST /:id/cancel-plan', () => {
     const second = await (await postCancel(baseUrl)).json();
     expect(second.requestId).toBe(first.requestId);
     expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+  }));
+
+  test('a repair retry that SILENCES the customer ratchets the opt-out onto the acceptance — a later retry from a fresh dialog stays silent', () => withServer(async (baseUrl) => {
+    // Attempt 1 accepted WITH confirmation (dialog default) and failed
+    // before sending anything.
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, errors: ['invoice_void:s1'] });
+    const first = await (await postCancel(baseUrl)).json();
+    expect(first.processed).toBe(false);
+    // The partial run's "office is finishing" note went out as requested.
+    expect(sendCancellationConfirmations).toHaveBeenCalledTimes(1);
+    sendCancellationConfirmations.mockClear();
+    // Attempt 2: the operator unticks the confirmation; the repair is still
+    // partial, so nothing closes — the choice must survive on the request.
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, errors: ['invoice_void:s1'] });
+    const second = await (await postCancel(baseUrl, { sendConfirmation: false })).json();
+    expect(second.requestId).toBe(first.requestId);
+    expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+    const ratchet = (mockState.updates || []).find((u) => u.table === 'service_requests' && u.patch.metadata);
+    expect(JSON.parse(ratchet.patch.metadata).cancel_plan.sendConfirmation).toBe(false);
+    // Attempt 3 from a fresh dialog (checkbox defaults back on) completes
+    // the repair — the silenced customer is never texted.
+    const third = await (await postCancel(baseUrl)).json();
+    expect(third.requestId).toBe(first.requestId);
+    expect(third.errors).toEqual([]);
+    expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+    expect(third.confirmationRequested).toBe(false);
   }));
 
   test('a requested confirmation a reachable channel did not accept is a surfaced failure — review bell, never a clean "Done."', () => withServer(async (baseUrl) => {
@@ -2062,6 +2090,38 @@ describe('POST /:id/cancel-plan', () => {
       expect((await res.json()).code).toBe('scoped_covers_prepaid');
       expect(mockState.inserted).toBeUndefined();
       expect(mockProcess).not.toHaveBeenCalled();
+    }));
+
+    test('an unpaid payment_pending prepay invoice for the SELECTED family refuses the scoped cancel too — paid later, it would reseed the cancelled service', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms = [{
+        id: 'term-p', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+        prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+        status: 'payment_pending', renewal_decision: null, prepay_invoice_id: 'inv-p',
+      }];
+      mockState.invoices = [{ id: 'inv-p', status: 'sent', invoice_number: 'WPC-2026-0009' }];
+      mockPlan.mockResolvedValue({ ok: true, inScope: ['pest_control'], remaining: ['lawn_care'], tierBefore: 'Silver', tierAfter: 'Bronze' });
+      const res = await post(baseUrl, '/cancel-plan/preview', { families: ['pest_control'] });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('pending_prepay_invoice');
+      const commit = await post(baseUrl, '/cancel-plan', { families: ['pest_control'], previewFingerprint: 'x' });
+      expect(commit.status).toBe(409);
+      expect((await commit.json()).code).toBe('pending_prepay_invoice');
+      expect(mockProcess).not.toHaveBeenCalled();
+      // The pending term covers a DIFFERENT family: the scoped cancel of
+      // lawn care is unaffected by it.
+      mockPlan.mockResolvedValue({ ok: true, inScope: ['lawn_care'], remaining: ['pest_control'], tierBefore: 'Silver', tierAfter: 'Bronze' });
+      const other = await post(baseUrl, '/cancel-plan/preview', { families: ['lawn_care'] });
+      expect(other.status).toBe(200);
+      expect((await other.json()).scopedSupported).toBe(true);
+      // An unreadable coverage identity could be ANY family — fail closed.
+      mockState.annual_prepay_terms[0].coverage_service_type = null;
+      const unknown = await post(baseUrl, '/cancel-plan/preview', { families: ['lawn_care'] });
+      expect(unknown.status).toBe(409);
+      expect((await unknown.json()).code).toBe('pending_prepay_invoice');
+      // Voided: nothing pending to protect.
+      mockState.invoices[0].status = 'void';
+      const voided = await post(baseUrl, '/cancel-plan/preview', { families: ['lawn_care'] });
+      expect(voided.status).toBe(200);
     }));
 
     test('a scoped cancel OUTSIDE the covered family still runs (the covered rows are provably out of scope)', () => withServer(async (baseUrl) => {

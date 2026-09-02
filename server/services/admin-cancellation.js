@@ -143,25 +143,38 @@ async function loadCustomer(customerId) {
 // decided lapse riding out its window, or several covered terms at once. A
 // shape recordDecision's guard would silently miss is REFUSED here, before
 // any write — never "processed" with the term left live.
-async function resolveLiveTerm(customerId, wholeAccount) {
-  if (!wholeAccount) return null;
-  const { coveredTermsAsOf } = require('./annual-prepay-renewals');
-  // An UNPAID payment_pending term is invisible to coveredTermsAsOf, but
-  // its standalone prepay invoice stays payable through the public link —
-  // a payment landing AFTER the churn re-activates coverage and seeds
-  // visits on a cancelled account (syncTermForInvoicePayment). Refuse
-  // until the invoice is disposed of; the invoice tools own that void.
+// An UNPAID payment_pending term is invisible to coveredTermsAsOf, but its
+// standalone prepay invoice stays payable through the public link — a
+// payment landing AFTER the cancellation re-activates the term and
+// refreshes/seeds coverage for the service just cancelled
+// (syncTermForInvoicePayment). Refuse until the invoice is disposed of; the
+// invoice tools own that void. Whole account (scope null): every pending
+// term. Scoped: only a pending term whose coverage identity is one of the
+// selected families — or whose identity cannot be read (fail closed).
+async function refusePendingPrepayInvoices(customerId, scope = null) {
   const pending = await db('annual_prepay_terms')
     .where({ customer_id: customerId, status: 'payment_pending' })
     .whereNotNull('prepay_invoice_id')
-    .select('id', 'prepay_invoice_id', 'plan_label');
+    .select('id', 'prepay_invoice_id', 'plan_label', 'coverage_service_type');
+  if (!pending.length) return;
+  const { familyOfServiceRow } = require('./cancellation-processor');
   for (const p of pending) {
+    if (Array.isArray(scope)) {
+      const identityFamily = familyOfServiceRow({ service_type: p.coverage_service_type });
+      if (identityFamily && !scope.includes(identityFamily)) continue;
+    }
     const inv = await db('invoices').where({ id: p.prepay_invoice_id }).first('id', 'status', 'invoice_number');
     if (inv && String(inv.status) !== 'void') {
       throw new CancelPlanError(409, 'pending_prepay_invoice',
         `An unpaid annual-prepay invoice (${inv.invoice_number || inv.id}${p.plan_label ? `, ${p.plan_label}` : ''}) is still payable and would re-activate coverage if paid after this cancellation. Void it from the invoice tools first.`);
     }
   }
+}
+
+async function resolveLiveTerm(customerId, wholeAccount) {
+  if (!wholeAccount) return null;
+  const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+  await refusePendingPrepayInvoices(customerId);
   // ALL still-paid terms, current AND future: a renewal is a NEW row
   // starting the day after the old term ends, so an as-of-today query would
   // dispose only the current term while the sweep pulls the paid
@@ -471,6 +484,11 @@ async function liveCoveredKeepIds(term, customerId) {
 // read also refuses).
 async function scopedCoverageConflict(customerId, scope) {
   const { coveredTermsAsOf, coverageRowsForTerm } = require('./annual-prepay-renewals');
+  // A pending, still-payable prepay invoice for a selected family is the
+  // scoped twin of the whole-account refusal: the scoped cancel would pull
+  // the family's visits and recurrence, and the payment landing later
+  // would re-activate the term and reseed the service (codex GH r26 P1).
+  await refusePendingPrepayInvoices(customerId, scope);
   // Current AND future still-paid terms — a paid successor's covered visits
   // are just as untouchable as the live term's.
   const terms = await coveredTermsAsOf(db, null)
@@ -1504,16 +1522,22 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     // No case row survived the first attempt (lost case write): the
     // acceptance itself dates the cancellation.
     if (!priorEffectiveOn && request.created_at) priorEffectiveOn = etDateString(new Date(request.created_at));
-    // A retry that ADDS the waiver ratchets it onto the durable record so a
-    // later retry keeps it even if this run's case write fails.
-    if (input.waiveLateFee && (!requestMeta || requestMeta.waiveLateFee !== true)) {
+    // A retry that ADDS the waiver, or SILENCES the customer, ratchets that
+    // choice onto the durable record so a later retry keeps it even if this
+    // run's case write fails — both ratchets are one-way in the protective
+    // direction (never charge what was waived, never text who was silenced),
+    // the same direction the dialog locks its sticky controls.
+    const ratchet = {};
+    if (input.waiveLateFee && (!requestMeta || requestMeta.waiveLateFee !== true)) ratchet.waiveLateFee = true;
+    if (input.sendConfirmation === false && (!requestMeta || requestMeta.sendConfirmation !== false)) ratchet.sendConfirmation = false;
+    if (Object.keys(ratchet).length) {
       try {
         await db('service_requests').where({ id: request.id }).update({
-          metadata: JSON.stringify({ cancel_plan: { ...(requestMeta || { scope: wholeAccount ? [] : [...scope].sort() }), waiveLateFee: true } }),
+          metadata: JSON.stringify({ cancel_plan: { ...(requestMeta || { scope: wholeAccount ? [] : [...scope].sort() }), ...ratchet } }),
           updated_at: new Date(),
         });
       } catch (metaErr) {
-        logger.warn(`[admin-cancellation] waiver ratchet failed for request ${request.id}: ${metaErr.message}`);
+        logger.warn(`[admin-cancellation] ${Object.keys(ratchet).join('/')} ratchet failed for request ${request.id}: ${metaErr.message}`);
       }
     }
   } else {
@@ -1566,6 +1590,12 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // churn classification — boilerplate here misclassifies every
       // admin-driven churn (the Pareto reads the customer columns).
       reason: reasonParts.length ? reasonParts.join(' — ') : `Admin cancellation request ${request.id}`,
+      // What the cancelled ROWS carry — and the public tracker echoes to
+      // anyone holding a shared link (track-public cancellation.reason):
+      // fixed customer-safe copy, never the operator's internal note or
+      // reason code. The note lives only on the request/case (staff) and
+      // the churn columns (reason above).
+      visitReason: 'Service plan cancelled',
       // Immutable retry marker: repairs match on THIS, never on the
       // operator's editable reason/note — a retry with a reworded note must
       // still find the first attempt's cancelled rows.

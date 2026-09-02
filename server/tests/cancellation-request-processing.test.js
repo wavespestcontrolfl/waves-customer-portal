@@ -737,6 +737,27 @@ describe('processCancellationRequest', () => {
       expect(classifyChurnReason).not.toHaveBeenCalled();
     });
   });
+  test('visitReason: the cancelled rows carry the customer-safe copy while the churn columns keep the internal reason', async () => {
+    db.__tables.scheduled_services = [
+      { id: 'v1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-02-01', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, termite_stations_rented: false }];
+    db.__tables.termite_stations = [];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+
+    const result = await processCancellationRequest({
+      customerId: 'c1', requestId: 'reqV', actor: { type: 'admin', userId: 'admin-1' },
+      reason: 'price — gate code 4471, owner travelling', visitReason: 'Service plan cancelled',
+    });
+
+    expect(result.ok).toBe(true);
+    // The public tracker echoes cancellation_reason verbatim to anyone
+    // holding a shared link: never the operator's note.
+    expect(db.__tables.scheduled_services[0].cancellation_reason).toBe('Service plan cancelled');
+    expect(db.__tables.customers[0].churn_reason_detail).toMatch(/gate code 4471/);
+  });
+
   test('raises ONE deduped office task when the churned account has Waves-owned bait stations', async () => {
     db.__tables.scheduled_services = [];
     db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, termite_stations_rented: false }];
