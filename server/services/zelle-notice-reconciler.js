@@ -27,6 +27,8 @@
  *                                   against today's invoices
  *   6. exact-cent open self-pay invoices (services/open-balance.js):
  *        memo carries exactly one of them → apply (memo_invoice_number)
+ *        memo carries several of them     → parked `multiple_matches` (never
+ *                                           falls through to name matching)
  *        exactly one whose customer name corroborates the payer → apply (amount_name)
  *        none exact                         → parked `no_match`
  *        exact but none corroborate         → parked `name_mismatch`
@@ -460,6 +462,12 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
   let matchMethod = null;
   const memoNumbers = new Set(memoInvoiceNumbers(parsed.memo));
   const byMemo = exact.filter((r) => memoNumbers.has(String(r.invoice_number).toUpperCase()));
+  if (byMemo.length > 1) {
+    // The memo names several open invoices at this amount: explicit,
+    // ambiguous identity — never fall through to name matching.
+    await finishParked(notice, email, 'multiple_matches', { candidates });
+    return true;
+  }
   if (byMemo.length === 1) {
     [match] = byMemo;
     matchMethod = 'memo_invoice_number';

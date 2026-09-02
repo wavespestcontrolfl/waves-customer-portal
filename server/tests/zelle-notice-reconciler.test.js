@@ -352,6 +352,16 @@ describe('park reasons', () => {
     expect(OpenBalance.rowIsSelfPayDue).toHaveBeenCalledWith('cust-8', expect.objectContaining({ id: 'inv-8' }));
   });
 
+  test('a memo naming SEVERAL exact-cent invoices parks multiple_matches even when the payer name corroborates exactly one', async () => {
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [
+      openRow(), openRow({ id: 'inv-2', invoice_number: 'WPC-2026-0501', customer_id: 'cust-2', customer_first_name: 'Sam', customer_last_name: 'Roe' }),
+    ]));
+    expect(await maybeHandleZelleNotice(notice({ body_text: TEXT.replace('Quarterly Service Pat D', 'WPC-2026-0500 WPC-2026-0501'), snippet: 'x' }))).toBe(true);
+    expect(recordManualPayment).not.toHaveBeenCalled();
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'multiple_matches' });
+  });
+
   test('exact amount but the customer name does not corroborate ⇒ name_mismatch', async () => {
     claimed();
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow({ customer_first_name: 'Sam', customer_last_name: 'Roe' })]));
