@@ -109,6 +109,8 @@ beforeEach(() => {
   // the estimate accept capture.
   gates.acceptAchCapture = true;
   gates.autopayCustomerSms = true;
+  // per_visit is only a supported lane while completion auto-charging is on.
+  gates.completionAutopayCharge = true;
   mockHasConsentSnapshotForVariant.mockResolvedValue(false);
   mockResolveForInvoice.mockResolvedValue(null);
   mockCustomerOnAutopay.mockResolvedValue(false);
@@ -120,7 +122,7 @@ beforeEach(() => {
   mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'card' });
   mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_new', setupIntentId: 'seti_new', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
 });
-afterAll(() => { gates.autopaySetupLink = false; gates.acceptAchCapture = false; gates.autopayCustomerSms = false; });
+afterAll(() => { gates.autopaySetupLink = false; gates.acceptAchCapture = false; gates.autopayCustomerSms = false; gates.completionAutopayCharge = false; });
 
 describe('requestAutopaySetupLink — ordered checks', () => {
   it('is inert with the gate off (nothing read, nothing minted, nothing sent)', async () => {
@@ -163,6 +165,14 @@ describe('requestAutopaySetupLink — ordered checks', () => {
       mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: mode }) };
       expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).action).toBe('link_created');
     }
+  });
+
+  it('per_visit is supported only while GATE_COMPLETION_AUTOPAY_CHARGE is on (per_application always)', async () => {
+    gates.completionAutopayCharge = false;
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'per_visit' }) };
+    expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).reason).toBe('unsupported_billing_lane');
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'per_application' }) };
+    expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).action).toBe('link_created');
   });
 
   it('auto-secures from a consented saved card (enrolls, mints no row, sends nothing)', async () => {
@@ -327,8 +337,12 @@ describe('loadAutopaySetupPageData — state machine', () => {
       expect(d).toEqual(expect.objectContaining({ state: 'secured', kind: 'customer', firstName: 'Pat', cancelFeeNote: null }));
     }
     expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completing' })).state).toBe('saving');
-    // Expiry wins over the claim state.
+    // Expiry wins over the claim state — AND over terminal success (GH r5 P0):
+    // a completed bearer link closes after its 30 days or when its customer is gone.
     expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completing', expires_at: PAST })).state).toBe('closed');
+    expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completed', expires_at: PAST })).state).toBe('closed');
+    mockTableHandlers.customers = { first: () => null };
+    expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completed' })).state).toBe('closed');
     expect(mockCreateSetupIntent).not.toHaveBeenCalled();
   });
 
@@ -440,6 +454,31 @@ describe('loadAutopaySetupPageData — state machine', () => {
 
 describe('completion tail (page POST + webhook)', () => {
   const GOOD_SI = { id: 'seti_new', status: 'succeeded', payment_method: 'pm_new', metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } };
+
+  it('re-judges the billing lane under the customer lock and enrolls on the same transaction handle; a lane moved under the lock retires the link', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
+    mockTableHandlers.payment_methods = { first: () => null };
+    mockDbTouches = [];
+    let calls = 0;
+    // First read (unlocked pre-check) supported; the locked read sees the lane moved.
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: (calls++ === 0 ? 'per_visit' : 'monthly_membership') }) };
+    const r = await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
+    expect(r.code).toBe('no_longer_needed');
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+    const lockedRead = touches('customers').find((c) => c.calls.some((x) => x[0] === 'forUpdate'));
+    expect(lockedRead).toBeTruthy();
+    const updates = touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'update').map((c) => c[1]);
+    expect(updates[updates.length - 1]).toEqual(expect.objectContaining({ status: 'expired' }));
+    // Lane still supported under the lock → enrollment runs on the trx handle
+    // and its deferred confirmation fires after commit.
+    mockDbTouches = [];
+    const sendEnrollmentConfirmation = jest.fn();
+    mockEnrollConsentedMethod.mockResolvedValue({ enrolled: true, sendEnrollmentConfirmation });
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'per_visit' }) };
+    expect(await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).toEqual({ ok: true });
+    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ dbh: expect.anything() }));
+    expect(sendEnrollmentConfirmation).toHaveBeenCalledTimes(1);
+  });
 
   it('live-verifies the intent against Stripe and runs save → consent → enroll → completed', async () => {
     mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);

@@ -160,7 +160,11 @@ export default function SecureAppointmentPage() {
   // the server confirmed completion, the save IS done — a transient
   // refetch failure must render the secured state, never an error message
   // or the card form again.
-  const refreshOrSecured = useCallback(async () => {
+  // fallback: the state to render when the refetch fails. 'secured' once
+  // the server CONFIRMED completion; 'saving' when completion is merely in
+  // progress on a standalone link (the tail can still revert — never claim
+  // success the server has not; GH Codex #3726 r5 P2).
+  const refreshOrSecured = useCallback(async (fallback = 'secured') => {
     try {
       const res = await fetch(`${API_BASE}/public/secure-card/${token}`);
       if (res.ok) {
@@ -170,13 +174,13 @@ export default function SecureAppointmentPage() {
         setState(payload.state === 'ready' ? 'ready' : payload.state);
         return;
       }
-    } catch { /* fall through to the secured fallback */ }
+    } catch { /* fall through to the fallback */ }
     // Suppress term-specific copy in the fallback (Codex #3153 r21 P2):
     // the pre-completion note may be stale (a concurrent tab can have
     // monotonically lowered/cleared the frozen terms) — secured posture
     // without quoting terms we could not refresh.
     setData((d) => (d ? { ...d, cancelFeeNote: null } : d));
-    setState('secured');
+    setState(fallback);
   }, [token]);
 
   // The disclosure version THIS tab's render carried — the server stamps
@@ -339,7 +343,9 @@ export default function SecureAppointmentPage() {
             }
           }
         }
-        await refreshOrSecured();
+        // A standalone link mid-completion falls back to "finishing up",
+        // never a success the server has not confirmed.
+        await refreshOrSecured(data?.kind === 'customer' ? 'saving' : 'secured');
         return;
       }
       // The server requires a recorded plan selection before the capture
@@ -354,7 +360,7 @@ export default function SecureAppointmentPage() {
     } finally {
       setBusy(false);
     }
-  }, [busy, complete, refresh, refreshOrSecured, pendingStickyEcho]);
+  }, [busy, complete, refresh, refreshOrSecured, pendingStickyEcho, data?.kind]);
 
   const selectPlan = useCallback(async (plan) => {
     if (planBusy) return;

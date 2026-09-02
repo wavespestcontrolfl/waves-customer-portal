@@ -58,11 +58,17 @@ function isExpired(request, now = new Date()) {
 }
 
 // Lanes whose billing IS "each completed visit is charged to the saved
-// method" — the only cadence the setup copy promises.
-const SUPPORTED_LANES = new Set(['per_visit', 'per_application']);
+// method" — the only cadence the setup copy promises. per_application
+// always auto-collects at completion; per_visit does so ONLY while
+// GATE_COMPLETION_AUTOPAY_CHARGE is on (GH Codex #3726 r5 P1: with that
+// gate off, a per-visit customer's invoice takes the pay-link flow and the
+// promise would be false).
 function billingLaneSupported(customer) {
   try {
-    return SUPPORTED_LANES.has(require('./billing-lane').resolveBillingLane(customer).mode);
+    const { mode } = require('./billing-lane').resolveBillingLane(customer);
+    if (mode === 'per_application') return true;
+    if (mode === 'per_visit') return require('../config/feature-gates').gates.completionAutopayCharge === true;
+    return false;
   } catch {
     return false;
   }
@@ -372,10 +378,11 @@ async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
     windowDisplay: null,
     cancelFeeNote: null,
   };
-  if (request.status === 'completed' || request.status === 'satisfied') return { state: 'secured', ...base };
-  // Expiry before any live state: an expired link is closed whatever its
-  // claim status (completion refuses it too).
+  // Closure checks BEFORE any terminal success (GH Codex #3726 r5 P0): a
+  // bearer link closes once its 30 days pass or its customer is gone, even
+  // when the capture completed — the contract says the GET becomes closed.
   if (isExpired(request) || !customer) return { state: 'closed', ...base };
+  if (request.status === 'completed' || request.status === 'satisfied') return { state: 'secured', ...base };
   // Mid-completion (page POST or webhook holds the claim): the intent
   // succeeded, but the tail can still revert the row — say "finishing up",
   // never "set up" (pre-push Codex P1). The card form is not re-shown
@@ -622,17 +629,45 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
       await ConsentService.linkPaymentMethodId(stripePaymentMethodId, saved.id);
     }
     const { enrollConsentedMethod } = require('./autopay-enrollment');
-    const enrollment = await enrollConsentedMethod({
-      customerId: request.customer_id,
-      paymentMethodId: saved?.id,
-      source: 'save_card_consent',
-      details: { via: PURPOSE, setup_intent_id: setupIntentId },
-      // The SetupIntent's authorization moment (GH Codex #3726 r3 P1): a
-      // retry (stale lease / webhook) after the customer turned Auto Pay
-      // OFF must not re-enable it from the stale authorization —
-      // enrollConsentedMethod refuses opted_out_after_authorization.
-      ...(authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime()) ? { authorizedAt } : {}),
+    // Lane re-judged UNDER THE CUSTOMER LOCK the enrollment itself takes
+    // (GH Codex #3726 r5 P2): the unlocked pre-check above can go stale
+    // between read and enrollment. One transaction: FOR UPDATE on the
+    // customer row, lane verdict, then enrollConsentedMethod in savepoint
+    // mode on the same handle (its own FOR UPDATE re-locks the row we hold —
+    // same transaction, no self-deadlock). Its confirmation email comes back
+    // as a closure and fires only after COMMIT (visit-lane pattern).
+    let deferredEnrollmentEmail = null;
+    const enrollment = await db.transaction(async (trx) => {
+      const locked = await trx('customers')
+        .where({ id: request.customer_id })
+        .forUpdate()
+        .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate');
+      if (!locked || !billingLaneSupported(locked)) return { enrolled: false, reason: 'lane_changed' };
+      const result = await enrollConsentedMethod({
+        customerId: request.customer_id,
+        paymentMethodId: saved?.id,
+        source: 'save_card_consent',
+        details: { via: PURPOSE, setup_intent_id: setupIntentId },
+        // The authorization moment (GH Codex #3726 r3 P1): a retry (stale
+        // lease / webhook) after the customer turned Auto Pay OFF must not
+        // re-enable it — enrollConsentedMethod refuses
+        // opted_out_after_authorization.
+        ...(authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime()) ? { authorizedAt } : {}),
+        dbh: trx,
+      });
+      deferredEnrollmentEmail = result?.sendEnrollmentConfirmation || null;
+      return result;
     });
+    if (enrollment?.enrolled && deferredEnrollmentEmail) {
+      try { deferredEnrollmentEmail(); } catch { /* best-effort */ }
+    }
+    if (!enrollment.enrolled && enrollment.reason === 'lane_changed') {
+      logger.info(`[autopay-setup-link] lane moved under the lock for customer ${request.customer_id} — retiring request ${request.id}`);
+      await db('appointment_card_requests')
+        .where({ id: request.id, status: 'completing', updated_at: claimStamp })
+        .update({ status: 'expired', updated_at: new Date() });
+      return { ok: false, code: 'no_longer_needed' };
+    }
     if (!enrollment.enrolled && enrollment.reason === 'opted_out_after_authorization') {
       // PERMANENT (pre-push Codex P1): the customer turned Auto Pay off
       // after authorizing — no retry can change that, and a retryable
