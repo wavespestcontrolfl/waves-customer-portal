@@ -1234,6 +1234,23 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           tied = openTie
             || (!!priorReq && priorReq.status === 'resolved'
               && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000);
+          // An end-of-coverage cancel deliberately leaves paid visits on the
+          // calendar, so the account keeps cancellable work and the always-
+          // visible Customer 360 action could process it AGAIN once the 24h
+          // window passes. While the account is still in the churned state
+          // THIS acceptance produced (the processor stamps
+          // pipeline_stage_changed_at moments after the acceptance row), the
+          // recorded case is the completed run; the age cutoff applies only
+          // after a genuine win-back (deferred P2 from #3666 r32).
+          if (!tied && priorReq && priorReq.status === 'resolved') {
+            const cust = await db('customers').where({ id: customerId }).first('pipeline_stage', 'pipeline_stage_changed_at');
+            const acceptedAt = new Date(priorReq.created_at).getTime();
+            const churnedAt = cust && cust.pipeline_stage_changed_at ? new Date(cust.pipeline_stage_changed_at).getTime() : NaN;
+            tied = !!cust && cust.pipeline_stage === 'churned'
+              && Number.isFinite(churnedAt)
+              && churnedAt >= acceptedAt - 60 * 1000
+              && churnedAt <= acceptedAt + 6 * 60 * 60 * 1000;
+          }
         } catch (tieErr) {
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
         }

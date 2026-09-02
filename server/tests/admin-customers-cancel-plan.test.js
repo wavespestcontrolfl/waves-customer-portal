@@ -704,6 +704,46 @@ describe('POST /:id/cancel-plan', () => {
     expect(mockProcess).not.toHaveBeenCalled();
   }));
 
+  test('an end-of-coverage case older than 24h stays LATCHED while the account is still in the churned state it produced — no second case/confirmation/termite task (deferred P2 from #3666 r32)', () => withServer(async (baseUrl) => {
+    mockState.annual_prepay_terms = [{
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+      status: 'active', renewal_decision: 'cancel',
+    }];
+    // The kept covered visits stay on the calendar — cancellable work remains
+    // (the full covered set, so the coverage-completeness guard passes).
+    mockState.scheduled_services = [
+      { id: 'cv1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-08-01' },
+      { id: 'cv2', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
+      { id: 'cv3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-12-01' },
+      { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
+    ];
+    const acceptedAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+    mockState.service_requests = [{
+      id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' } }),
+      created_at: acceptedAt, updated_at: acceptedAt,
+    }];
+    mockState.cancellation_cases = [{
+      id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed',
+      created_at: acceptedAt,
+      snapshot: JSON.stringify({
+        prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term',
+        outcome: { visitsPulled: 2, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'], errors: [] },
+      }),
+    }];
+    // The churn transition that acceptance produced, seconds after it.
+    mockState.customers[0].pipeline_stage = 'churned';
+    mockState.customers[0].pipeline_stage_changed_at = new Date(acceptedAt.getTime() + 20 * 1000);
+    const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+    expect(body).toEqual(expect.objectContaining({ duplicate: true, caseId: 'case-old', visitsPulled: 2 }));
+    expect(mockProcess).not.toHaveBeenCalled();
+    expect(mockRaiseTermite).not.toHaveBeenCalled();
+    expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+    expect((mockState.inserted || []).filter((i) => i.table === 'service_requests')).toHaveLength(0);
+  }));
+
   test('a HISTORICAL prepaid case never swallows a NEW cancellation — a re-won-back account processes fresh', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
       id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
