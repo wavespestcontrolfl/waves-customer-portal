@@ -87,7 +87,8 @@ describe('run', () => {
     expect(r.drafted).toBe(1);
     expect(worker.report).not.toHaveBeenCalled();
     // dry-run releases its lease keyed on the exact lease_token (not just id)
-    expect(worker.releaseClaims).toHaveBeenCalledWith([{ id: 'p1', lease_token: '2026-06-22T00:00:00.000Z' }]);
+    expect(worker.claim).toHaveBeenCalledWith(expect.objectContaining({ preview: true })); // read-only: a live claim would settle candidates before leasing
+    expect(worker.releaseClaims).not.toHaveBeenCalled(); // nothing was leased
     // previews are returned (for the CLI's stdout), not logged
     expect(r.samples).toHaveLength(1);
     expect(r.samples[0]).toMatchObject({ domain: 'directinspections.com', to_email: 'michael@directinspections.com' });
