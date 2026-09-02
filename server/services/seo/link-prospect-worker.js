@@ -168,12 +168,25 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // is excluded too: a live claim would refresh the URL, unclassify the row
     // and defer it (below) rather than lease it, so the preview must not show
     // it as claimable — least of all under the obsolete URL.
+    // Like the live claim, the preview batches until `limit` valid rows are
+    // collected or the candidates run out — the URL check runs after LIMIT,
+    // so a prefix of stale-URL rows must not hide valid rows below it.
     if (preview) {
-      const previewRows = await ranked(limit, []).whereNotIn('path_id', trx('seo_link_acquisition_paths').select('id').whereNotNull('superseded_by'));
-      const previewPathIds = [...new Set(previewRows.map((r) => r.path_id).filter(Boolean))];
-      const previewPaths = previewPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', previewPathIds).select('id', 'submission_url') : [];
-      const liveUrlOf = new Map(previewPaths.map((p) => [p.id, p.submission_url]));
-      return previewRows.filter((r) => { const liveUrl = r.path_id ? liveUrlOf.get(r.path_id) : null; return !(liveUrl && r.target_url !== liveUrl); }).map((r) => ({ ...r }));
+      const out = [];
+      const seen = [];
+      while (out.length < limit) {
+        const batch = await ranked(limit - out.length, seen).whereNotIn('path_id', trx('seo_link_acquisition_paths').select('id').whereNotNull('superseded_by'));
+        if (batch.length === 0) break;
+        for (const r of batch) seen.push(r.id);
+        const batchPathIds = [...new Set(batch.map((r) => r.path_id).filter(Boolean))];
+        const batchPaths = batchPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', batchPathIds).select('id', 'submission_url') : [];
+        const liveUrlOf = new Map(batchPaths.map((p) => [p.id, p.submission_url]));
+        for (const r of batch) {
+          const liveUrl = r.path_id ? liveUrlOf.get(r.path_id) : null;
+          if (!(liveUrl && r.target_url !== liveUrl)) out.push({ ...r });
+        }
+      }
+      return out;
     }
 
     // Batches until `limit` live rows are leased or the candidates run out:

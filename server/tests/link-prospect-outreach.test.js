@@ -533,10 +533,26 @@ describe('dailySendCount', () => {
         upd,
         chain({ result: [] }),
       ],
-      seo_link_acquisition_paths: [chain({ first: { id: 'path-7', revision: 4 } })],
+      seo_link_acquisition_paths: [chain({ first: { id: 'path-7', revision: 4 } }), chain({ first: { id: 'path-7', revision: 4 } })], // observed (pre-read) then locked — same revision
     });
     const res = await Outreach.saveDraft({ prospectId: 'p1', to: 'a@b.com', subject: 's', body: 'b' });
     expect(res.ok).toBe(true);
     expect(upd.update).toHaveBeenCalledWith(expect.objectContaining({ leased_path_revision: 4 }));
+  });
+
+  test('a path revised between the operator read and the locked write is not stamped → path_moved (hook P1 on 408748c29)', async () => {
+    const upd = chain({ returning: [draftedProspect({ path_id: 'path-7' })] });
+    setDbQueues({
+      seo_link_prospects: [
+        chain({ first: draftedProspect({ outreach_status: 'none', path_id: 'path-7' }) }),
+        chain({ first: { id: 'p1' } }), // prospect lock
+        upd,
+        chain({ result: [] }),
+      ],
+      seo_link_acquisition_paths: [chain({ first: { id: 'path-7', revision: 4 } }), chain({ first: { id: 'path-7', revision: 5 } })], // observed 4, locked 5
+    });
+    const res = await Outreach.saveDraft({ prospectId: 'p1', to: 'a@b.com', subject: 's', body: 'b' });
+    expect(res).toEqual({ ok: false, code: 'path_moved' });
+    expect(upd.update).not.toHaveBeenCalled();
   });
 });

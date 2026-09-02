@@ -126,6 +126,14 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
     return { ok: false, code: fresh ? 'send_in_flight' : 'needs_reconcile' };
   }
 
+  // The path the draft was composed against, as observed with the prospect
+  // above: the write below is conditioned on the LOCKED path still being at
+  // this revision, so a path change landing between this read and the lock
+  // can never label a stale draft with the new revision.
+  const observedPath = prospect.path_id
+    ? await db('seo_link_acquisition_paths').where({ id: prospect.path_id }).first('id', 'revision')
+    : null;
+
   const patch = {
     outreach_to_email: to.trim(),
     outreach_subject: subject,
@@ -164,7 +172,10 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
     // draft awaits approval — exactly like a worker's leased draft.
     if (prospect.path_id) {
       const onPath = await trx('seo_link_acquisition_paths').where({ id: prospect.path_id }).forUpdate().first('id', 'revision');
-      patch.leased_path_revision = onPath && onPath.revision != null ? Number(onPath.revision) : null;
+      const observedRev = observedPath && observedPath.revision != null ? Number(observedPath.revision) : null;
+      const lockedRev = onPath && onPath.revision != null ? Number(onPath.revision) : null;
+      if (!onPath || lockedRev !== observedRev) return { rows: [], moved: true }; // the path changed under the operator → path_moved, re-draft
+      patch.leased_path_revision = lockedRev;
     }
     // …and on the PATH and LANE the operator drafted against: a settlement
     // that moved the row (to a signup lane, say) between the pre-read and
@@ -180,6 +191,7 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
     const n = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: [prospectId] });
     return { rows: written, moved: n };
   });
+  if (moved && (!rows || rows.length === 0)) return { ok: false, code: 'path_moved' }; // refused before the write: the path changed under the operator
   if (!rows || rows.length === 0) return { ok: false, code: 'send_in_flight' };
   if (moved) {
     logger.info(`[link-outreach] draft for ${prospectId} discarded — its acquisition path moved while drafting`);

@@ -307,6 +307,8 @@ test('a read-only preview excludes a placement whose target_url lags its live pa
   const preview = await worker.claim({ n: 5, type: 'signup', preview: true });
   expect(preview.map((r) => r.id)).toEqual(['r-ok']);
   expect(mockStore.seo_link_prospects.find((r) => r.id === 'r-www')).toMatchObject({ target_url: 'https://example.com/get-listed', claimed_at: null }); // read-only: no refresh, no lease
+  // …and with the stale row filling the whole first batch (n=1, it ranks first), the preview batches on and still finds the valid row
+  expect((await worker.claim({ n: 1, type: 'signup', preview: true })).map((r) => r.id)).toEqual(['r-ok']);
 });
 
 test('a read-only preview never reports a placement on a superseded path as claimable (Codex #3720 r2 P2)', async () => {
