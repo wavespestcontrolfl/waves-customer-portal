@@ -392,7 +392,9 @@ async function recordManualPayment(id, {
     }
     if (smsLeg) {
       try {
-        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', ...(automated ? {} : { operatorInitiated: true }) });
+        // hasEmailLeg = an email sidecar actually carries the receipt — false
+        // when the automated opt-out check dropped the email leg.
+        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, ...(automated ? {} : { operatorInitiated: true }) });
         smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
       } catch (err) {
         smsResult = { ok: false, error: err.message };

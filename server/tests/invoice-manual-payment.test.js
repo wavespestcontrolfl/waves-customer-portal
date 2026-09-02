@@ -256,6 +256,7 @@ describe('recordManualPayment — settlement', () => {
     expect(out.receipt).toEqual({ email: { ok: false, error: 'email_opted_out' }, sms: { ok: true } });
     expect(sendReceiptEmail).not.toHaveBeenCalled();
     expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv-1', expect.not.objectContaining({ operatorInitiated: true }));
+    expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv-1', expect.objectContaining({ hasEmailLeg: false })); // no email sidecar actually carries the receipt
   });
 
   test('automated: a prefs lookup failure sends nothing (fail closed); the operator path never reads prefs', async () => {
