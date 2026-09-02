@@ -12,7 +12,9 @@ describe('typed treatment evidence', () => {
         const applied = lists.applied || [];
         const performed = lists.performed || [];
         const noWork = lists.noWork || [];
+        const nonSpray = lists.nonSpray || [];
         [...applied, ...performed, ...noWork].forEach((label) => expect(field.options).toContain(label));
+        nonSpray.forEach((label) => expect(applied).toContain(label));
         expect(applied.filter((label) => performed.includes(label) || noWork.includes(label))).toEqual([]);
         expect(performed.filter((label) => noWork.includes(label))).toEqual([]);
       }
@@ -33,24 +35,30 @@ describe('typed treatment evidence', () => {
 
   test('a productless typed closeout with an application-bearing option is an application', () => {
     expect(typedTreatmentEvidence('one_time_pest_treatment', { work_completed: 'Exterior perimeter application, Nest treated' }))
-      .toEqual({ applied: true, performed: true, noWork: false });
+      .toMatchObject({ applied: true, performed: true, noWork: false, dryDown: true, declared: true });
     expect(typedTreatmentEvidence('one_time_pest_treatment', { work_completed: 'Inspection / identification only' }))
-      .toEqual({ applied: false, performed: false, noWork: true });
+      .toEqual({ applied: false, performed: false, noWork: true, dryDown: false, declared: true });
+    // Bait and injection are applications but never dry-down evidence.
+    expect(typedTreatmentEvidence('one_time_pest_treatment', { work_completed: 'Bait placement' }))
+      .toEqual({ applied: true, performed: true, noWork: false, dryDown: false, declared: true });
+    expect(typedTreatmentEvidence('palm_injection', { work_completed: 'Palm injection completed' }))
+      .toEqual({ applied: true, performed: true, noWork: false, dryDown: false, declared: true });
+    expect(typedTreatmentEvidence('german_roach_knockdown', { treatment_completed: 'Gel bait, Dust application' }).dryDown).toBe(true);
     expect(typedTreatmentEvidence('one_time_pest_treatment', { work_completed: 'Inspection / identification only, Nest treated' }))
-      .toEqual({ applied: true, performed: true, noWork: false });
+      .toMatchObject({ applied: true, performed: true, noWork: false, dryDown: true, declared: true });
     expect(typedTreatmentEvidence('one_time_pest_treatment', { work_completed: 'Mechanical removal / vacuuming' }))
-      .toEqual({ applied: false, performed: true, noWork: false });
+      .toEqual({ applied: false, performed: true, noWork: false, dryDown: false, declared: true });
     expect(typedTreatmentEvidence('bed_bug', { treatment_method: 'Heat only', work_completed: 'Vacuuming completed' }))
-      .toEqual({ applied: false, performed: true, noWork: false });
+      .toEqual({ applied: false, performed: true, noWork: false, dryDown: false, declared: true });
     expect(typedTreatmentEvidence('bed_bug', { treatment_method: 'Chemical + heat' }))
-      .toEqual({ applied: true, performed: true, noWork: false });
+      .toMatchObject({ applied: true, performed: true, noWork: false, dryDown: true, declared: true });
     expect(typedTreatmentEvidence('termite_treatment', { treatment_method: 'Bait station setup' }))
-      .toEqual({ applied: false, performed: false, noWork: false });
+      .toEqual({ applied: false, performed: false, noWork: false, dryDown: false, declared: false });
     expect(typedTreatmentEvidence('termite_treatment', { treatment_method: 'Trenching' }))
-      .toEqual({ applied: true, performed: true, noWork: false });
+      .toMatchObject({ applied: true, performed: true, noWork: false, dryDown: true, declared: true });
     expect(typedTreatmentEvidence('pest_inspection', { findings_observed: 'anything' }))
-      .toEqual({ applied: false, performed: false, noWork: false });
-    expect(typedTreatmentEvidence(null, null)).toEqual({ applied: false, performed: false, noWork: false });
+      .toEqual({ applied: false, performed: false, noWork: false, dryDown: false, declared: false });
+    expect(typedTreatmentEvidence(null, null)).toEqual({ applied: false, performed: false, noWork: false, dryDown: false, declared: false });
   });
 
   test('combined visits aggregate the primary and companion snapshots', () => {
@@ -58,11 +66,11 @@ describe('typed treatment evidence', () => {
       typedReportSnapshot: { type: 'one_time_lawn_treatment', values: { work_completed: 'Inspection completed' } },
       companionReportSnapshots: [{ type: 'tree_shrub', values: { treatments_completed: 'Insect treatment' } }],
     } };
-    expect(typedTreatmentEvidenceForRecord(record)).toEqual({ applied: true, performed: true, noWork: false });
+    expect(typedTreatmentEvidenceForRecord(record)).toMatchObject({ applied: true, performed: true, noWork: false, dryDown: true, declared: true });
     expect(typedTreatmentEvidenceForRecord({ service_data: JSON.stringify({
       typedReportSnapshot: { type: 'one_time_lawn_treatment', values: { work_completed: 'Inspection completed' } },
       companionReportSnapshots: [{ type: 'tree_shrub', values: { treatments_completed: 'Inspection only' } }],
-    }) })).toEqual({ applied: false, performed: false, noWork: true });
-    expect(typedTreatmentEvidenceForRecord({ service_data: {} })).toEqual({ applied: false, performed: false, noWork: false });
+    }) })).toEqual({ applied: false, performed: false, dryDown: false, declared: true, noWork: true });
+    expect(typedTreatmentEvidenceForRecord({ service_data: {} })).toEqual({ applied: false, performed: false, dryDown: false, declared: false, noWork: false });
   });
 });

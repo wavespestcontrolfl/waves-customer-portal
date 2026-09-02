@@ -1067,25 +1067,29 @@ const TYPED_TREATMENT_OPTIONS = Object.freeze({
       'Lawn treatment', 'Pet resting area treatment', 'Limited treatment'],
     noWork: ['Inspection only'],
   } },
-  cockroach: { work_completed: { applied: [
-    'Bait placement', 'Insect growth regulator', 'Crack & crevice treatment', 'Dust application',
-    'Flush-out treatment', 'Exterior perimeter treatment',
-  ] } },
+  cockroach: { work_completed: {
+    applied: ['Bait placement', 'Insect growth regulator', 'Crack & crevice treatment', 'Dust application',
+      'Flush-out treatment', 'Exterior perimeter treatment'],
+    nonSpray: ['Bait placement'],
+  } },
   german_roach_knockdown: { treatment_completed: {
     applied: ['Gel bait', 'Insect growth regulator', 'Crack & crevice treatment', 'Dust application',
       'Appliance-area treatment', 'Cabinet hinge treatment', 'Plumbing penetration treatment'],
     performed: ['Vacuum / flush-out'],
+    nonSpray: ['Gel bait'],
   } },
-  palmetto_roach_knockdown: { treatment_completed: { applied: [
-    'Interior crack & crevice', 'Exterior perimeter treatment', 'Garage treatment', 'Attic / void treatment',
-    'Drain / moisture area treatment', 'Bait placement', 'Dust application',
-  ] } },
+  palmetto_roach_knockdown: { treatment_completed: {
+    applied: ['Interior crack & crevice', 'Exterior perimeter treatment', 'Garage treatment', 'Attic / void treatment',
+      'Drain / moisture area treatment', 'Bait placement', 'Dust application'],
+    nonSpray: ['Bait placement'],
+  } },
   one_time_pest_treatment: { work_completed: {
     applied: ['Exterior perimeter application', 'Interior crack & crevice application', 'Targeted spot treatment',
       'Bait placement', 'Insect growth regulator applied', 'Dust applied to labeled voids', 'Nest treated',
       'Individual mound treatment', 'Broadcast lawn application', 'Treatment limited by site conditions'],
     performed: ['Accessible nest removed', 'Mechanical removal / vacuuming'],
     noWork: ['Inspection / identification only', 'Treatment deferred'],
+    nonSpray: ['Bait placement'],
   } },
   one_time_lawn_treatment: { work_completed: {
     applied: ['Fertilizer applied', 'Weed control applied', 'Insect control applied', 'Disease control applied',
@@ -1101,6 +1105,7 @@ const TYPED_TREATMENT_OPTIONS = Object.freeze({
     applied: ['Palm fertilizer applied', 'Liquid micronutrient treatment', 'Soil drench', 'Insect treatment',
       'Disease treatment', 'Palm injection completed', 'Soil acidifier applied'],
     noWork: ['Canopy / crown inspection', 'Photos taken', 'Palm flagged for monitoring'],
+    nonSpray: ['Palm injection completed'],
   } },
   tree_shrub: { treatments_completed: {
     applied: ['Fertilizer', 'Palm fertilizer', 'Micronutrients', 'Insect treatment', 'Disease / fungicide treatment',
@@ -1127,20 +1132,27 @@ const TYPED_TREATMENT_OPTIONS = Object.freeze({
 // `noWork` = the closeout explicitly recorded inspection-only / deferred work
 // and nothing else that treats — the typed counterpart of an exclusive
 // no-treatment protocol action, so read-time normalization can clear the
-// re-entry targets (codex P1 r13 #3701).
+// re-entry targets (codex P1 r13 #3701). `dryDown` = an application that is
+// NOT in the field's `nonSpray` list (bait, gel, trunk injection carry no
+// dry-down concept — same rule as isSprayApplicationMethod), i.e. re-entry
+// evidence, distinct from the application verdict (codex P1 r14). `declared`
+// = any classified option was selected at all.
 function typedTreatmentEvidence(type, values) {
   const fields = TYPED_TREATMENT_OPTIONS[type];
-  const result = { applied: false, performed: false, noWork: false };
+  const result = { applied: false, performed: false, noWork: false, dryDown: false, declared: false };
   if (!fields || !values || typeof values !== 'object') return result;
   let noWorkSelected = false;
   for (const [key, lists] of Object.entries(fields)) {
     const selected = String(values[key] ?? '').split(',').map((part) => part.trim()).filter(Boolean);
-    if (selected.some((part) => (lists.applied || []).includes(part))) result.applied = true;
+    const applied = selected.filter((part) => (lists.applied || []).includes(part));
+    if (applied.length) result.applied = true;
+    if (applied.some((part) => !(lists.nonSpray || []).includes(part))) result.dryDown = true;
     if (selected.some((part) => (lists.performed || []).includes(part))) result.performed = true;
     if (selected.some((part) => (lists.noWork || []).includes(part))) noWorkSelected = true;
   }
   result.performed = result.performed || result.applied;
   result.noWork = noWorkSelected && !result.performed;
+  result.declared = result.performed || noWorkSelected;
   return result;
 }
 
@@ -1160,6 +1172,8 @@ function typedTreatmentEvidenceForRecord(record) {
   return {
     applied: verdicts.some((v) => v.applied),
     performed: verdicts.some((v) => v.performed),
+    dryDown: verdicts.some((v) => v.dryDown),
+    declared: verdicts.some((v) => v.declared),
     noWork: verdicts.length > 0 && verdicts.every((v) => v.noWork),
   };
 }

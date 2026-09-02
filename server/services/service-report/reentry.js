@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const { DEFAULT_TIME_ZONE, formatReadyTime, normalizeDate } = require('./time-format');
 const { normalizeAdvisoryForTreatmentScope, parseJsonObject, resolveTracedExteriorZone } = require('./report-data');
 const { isSprayApplicationMethod } = require('./service-line-configs');
+const { typedTreatmentEvidenceForRecord } = require('./activity-indicators');
 
 function addMinutes(date, minutes) {
   return new Date(date.getTime() + (minutes * 60 * 1000));
@@ -54,8 +55,12 @@ function buildReentrySummary(targets, now, timeZone = DEFAULT_TIME_ZONE) {
 // #3701). Unknown never zeroes anything.
 function reentryTreatmentEvidence(record, applications) {
   if (record?.treatmentEvidence !== undefined) return record.treatmentEvidence;
-  if (record?.applicationsLoadFailed) return undefined;
   if (applications.some((app) => isSprayApplicationMethod(app.application_method || app.method || app.applicationMethod))) return true;
+  // Typed closeouts record dry-down-capable work in the frozen snapshot with
+  // no product row required — the same primary + companion evidence the
+  // report payload uses (codex P1 r14 #3701).
+  if (typedTreatmentEvidenceForRecord(record).dryDown) return true;
+  if (record?.applicationsLoadFailed) return undefined;
   return applications.length ? undefined : false;
 }
 

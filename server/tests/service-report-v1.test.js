@@ -520,6 +520,19 @@ describe('service report v1', () => {
         .toHaveLength(1);
       expect(buildReentryContextFromRecord({ ...base, applications: [{ application_method: 'bait_placement' }] }, now)?.targets)
         .toHaveLength(1);
+      // A productless typed lawn application is dry-down evidence for the dynamic context too.
+      const typedLawn = {
+        id: 'svc-2', started_at: base.started_at, ended_at: base.ended_at,
+        service_type: 'One-Time Lawn Treatment',
+        advisory: { exterior_reentry_min: 30, interior_reentry_min: 0 },
+        service_data: { typedReportSnapshot: { type: 'one_time_lawn_treatment', values: { work_completed: 'Weed control applied' } } },
+      };
+      expect(buildReentryContextFromRecord({ ...typedLawn, applications: [] }, now)?.targets).toHaveLength(1);
+      expect(buildReentryContextFromRecord({
+        ...typedLawn,
+        applications: [],
+        service_data: { typedReportSnapshot: { type: 'one_time_lawn_treatment', values: { work_completed: 'Inspection completed' } } },
+      }, now)).toBeUndefined();
     });
 
     test('a declared no-treatment closeout zeros both re-entry targets when nothing was applied', () => {
@@ -569,6 +582,15 @@ describe('service report v1', () => {
         .toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
       expect(normalizeAdvisoryForTreatmentScope(advisory, { service: inspectionOnly }))
         .toMatchObject({ exterior_reentry_min: 30 });
+      // Bait-only typed work is an application but carries no dry-down: targets clear.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          service_type: 'One-Time Pest Treatment',
+          areas_serviced: JSON.stringify(['Kitchen']),
+          service_data: { typedReportSnapshot: { type: 'one_time_pest_treatment', values: { work_completed: 'Bait placement' } } },
+        },
+        treatmentEvidence: false,
+      })).toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
       const areaLessLawn = {
         service_type: 'One-Time Lawn Treatment',
         service_data: { typedReportSnapshot: { type: 'one_time_lawn_treatment', values: { work_completed: 'Weed control applied' } } },

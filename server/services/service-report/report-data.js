@@ -613,9 +613,14 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   // r13). Only the read-time caller knows the product-load verdict, so the
   // rule is gated on an explicit `false`.
   const declared = structuredActionScope(service);
-  const declaredNoTreatment = (declared.hasActions && !declared.hasTreatment && !declared.hasNonChemicalTreatment)
-    || require('./activity-indicators').typedTreatmentEvidenceForRecord(service).noWork;
-  if (treatmentEvidence === false && declaredNoTreatment) {
+  const typed = require('./activity-indicators').typedTreatmentEvidenceForRecord(service);
+  // Declared work with nothing dry-down-capable in it: inspection-only /
+  // deferred, bait-only, station-only. Non-chemical treatment (heat, steam)
+  // keeps the stored guidance on both the protocol and typed paths.
+  const declaredWork = declared.hasActions || typed.declared;
+  const keepsGuidance = declared.hasTreatment || declared.hasNonChemicalTreatment
+    || typed.dryDown || (typed.performed && !typed.applied);
+  if (treatmentEvidence === false && declaredWork && !keepsGuidance) {
     if (!sideAdjusted('interior') && normalized.interior_reentry_min != null) normalized.interior_reentry_min = 0;
     if (!sideAdjusted('exterior') && normalized.exterior_reentry_min != null) normalized.exterior_reentry_min = 0;
     return normalized;
@@ -4025,16 +4030,22 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // and protocol actions are optional there) — an application-bearing typed
   // option is treatment evidence too (codex P1 r12 #3701).
   const typedEvidence = require('./activity-indicators').typedTreatmentEvidenceForRecord(service);
+  // Dry-down (re-entry) evidence: spray-class product rows, an inferred
+  // pesticide, a treatment-applied protocol action, or a dry-down-capable typed
+  // option. Bait / gel / trunk-injection typed work is an application but never
+  // re-entry evidence (codex P1 r14 #3701).
   const readTimeSprayEvidence = applications.some((app) => isSprayApplicationMethod(app.method) || isInferredPesticideApplication(app))
     || structuredActionScope(service).hasTreatment
-    || typedEvidence.applied;
+    || typedEvidence.dryDown;
+  // Application verdict (applicationMade): any product application, dry-down or not.
+  const applicationEvidence = readTimeSprayEvidence || typedEvidence.applied;
   // Treatment occurred, chemical or not — the aftercare/precaution gate for
   // the PDF; applicationMade stays the pesticide-application verdict.
-  const treatmentPerformed = readTimeSprayEvidence || structuredActionScope(service).hasNonChemicalTreatment || typedEvidence.performed;
+  const treatmentPerformed = applicationEvidence || structuredActionScope(service).hasNonChemicalTreatment || typedEvidence.performed;
   // Published verdicts: true when evidence exists, false only when the product
   // load succeeded and nothing was recorded, null when the load failed —
   // clients keep the fail-closed treatment presentation on null (codex P1 r11).
-  const applicationMadeVerdict = readTimeSprayEvidence ? true : (productsLoadFailed ? null : false);
+  const applicationMadeVerdict = applicationEvidence ? true : (productsLoadFailed ? null : false);
   const treatmentPerformedVerdict = treatmentPerformed ? true : (productsLoadFailed ? null : false);
   const storedAdvisory = parseJsonObject(service.advisory);
   // Legacy no-spray termite records (bait/monitoring/inspection completed

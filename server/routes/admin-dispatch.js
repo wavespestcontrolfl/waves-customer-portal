@@ -5348,7 +5348,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
     // The treated areas drive the derived action scope below, so they are
     // validated against the lane first (codex P1 r13 #3701).
-    const invalidSpecialtyArea = validateSpecialtyAreas(resolvedSpecialtyServiceKey, completionAreas, {
+    // Product application areas are scope signals too (report-data
+    // scopeTextValues) — a restored product can carry a stale area the visit
+    // no longer lists, so they face the same lane check (codex P1 r14).
+    const productApplicationAreas = (Array.isArray(products) ? products : [])
+      .flatMap((prod) => String(prod?.applicationArea || prod?.area || '').split(','))
+      .map((area) => area.trim())
+      .filter(Boolean);
+    const invalidSpecialtyArea = validateSpecialtyAreas(resolvedSpecialtyServiceKey, [...completionAreas, ...productApplicationAreas], {
       enforcePresetAreas: explicitSpecialtyLane,
     });
     if (invalidSpecialtyArea) {
