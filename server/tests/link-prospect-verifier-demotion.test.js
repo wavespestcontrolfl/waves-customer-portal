@@ -21,6 +21,7 @@ function makeDb({ updateRows = 1 } = {}) {
     b.limit = jest.fn(() => Promise.resolve([]));   // reconcileFromProfile → no active row
     b.first = jest.fn(() => Promise.resolve(null)); // reconcileByDomain → no active row
     b.whereNotNull = jest.fn(() => b);
+    b.forUpdate = jest.fn(() => b);
     b.select = jest.fn(() => b);
     b.then = (res, rej) => Promise.resolve([]).then(res, rej); // release-side settlement's row read → nothing to move here
     b.select = jest.fn(() => Promise.resolve([]));

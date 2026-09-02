@@ -155,6 +155,17 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
   // just-written draft was composed for a retired route and the transition
   // has already cleared it: report path_moved so the operator re-drafts.
   const { rows, moved } = await db.transaction(async (trx) => {
+    // Lock order is prospect → path in every outreach transaction (the send
+    // does the same), so a /send racing this save cannot deadlock it.
+    await trx('seo_link_prospects').where({ id: prospectId }).forUpdate().first('id');
+    // A manual draft is BOUND to the path revision it was written against:
+    // the stamp lets the release-time reconcile and the send-time check see
+    // an in-place path change (communication terms, lane) made while the
+    // draft awaits approval — exactly like a worker's leased draft.
+    if (prospect.path_id) {
+      const onPath = await trx('seo_link_acquisition_paths').where({ id: prospect.path_id }).forUpdate().first('id', 'revision');
+      patch.leased_path_revision = onPath && onPath.revision != null ? Number(onPath.revision) : null;
+    }
     // …and on the PATH and LANE the operator drafted against: a settlement
     // that moved the row (to a signup lane, say) between the pre-read and
     // this write must make it miss, or a signup placement would be left
@@ -214,6 +225,8 @@ async function sendOutreach({ prospectId, approvedBy = 'admin' }) {
   const sendToken = randomUUID();
   const claim = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(?)', [OUTREACH_LOCK_KEY]);
+    // prospect → path lock order, same as saveDraft (settlement locks the path)
+    await trx('seo_link_prospects').where({ id: prospectId }).forUpdate().first('id');
     if ((await dailySendCount(trx)) >= cap) return { ok: false, code: 'rate_limited' };
     // Settle the drafted row BEFORE taking it in flight: its acquisition path
     // may have been superseded, revised or disproven since the draft was
@@ -228,7 +241,7 @@ async function sendOutreach({ prospectId, approvedBy = 'admin' }) {
     // …and STANDING: the draft's lease stamp was consumed when it was saved, so
     // a later disproof (confidence 0) or a human-step ruling
     // (agent_completable=false) on the same path shows up only here
-    const current = await trx('seo_link_prospects').where({ id: prospectId }).first('path_id');
+    const current = await trx('seo_link_prospects').where({ id: prospectId }).first('path_id', 'leased_path_revision');
     // an UNLINKED prospect (the registry catch-up has not linked it yet) has
     // passed no standing check at all — it is not sent until it has a path
     if (!current || !current.path_id) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
@@ -236,9 +249,14 @@ async function sendOutreach({ prospectId, approvedBy = 'admin' }) {
     // worker.claim() holds its path locks through the lease): an investigation
     // superseding or revising the path waits for this commit instead of
     // slipping in between the standing read and the CAS
-    const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'agent_completable');
+    const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'agent_completable', 'revision');
     const standing = onPath && !onPath.superseded_by && !(onPath.confidence != null && !(Number(onPath.confidence) > 0)) && onPath.agent_completable !== false;
     if (!standing) return { ok: false, code: 'path_moved' };
+    // …and the draft must still be bound to the path's CURRENT revision: a
+    // stamp that no longer matches means the path changed in place after the
+    // draft was written (terms, lane, URL) — copy composed for a route that
+    // no longer exists as such is not sent
+    if (current.leased_path_revision != null && onPath.revision != null && Number(onPath.revision) !== Number(current.leased_path_revision)) return { ok: false, code: 'path_moved' };
     const attemptAt = new Date();
     const claimedRows = await trx('seo_link_prospects')
       .where({ id: prospectId, outreach_status: 'drafted', status: 'prospect', path_id: current.path_id }) // the CAS is bound to the path whose standing was just verified

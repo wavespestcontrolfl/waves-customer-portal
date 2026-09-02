@@ -23,7 +23,7 @@ function makeDb(handlers) {
     const b = {
       where: jest.fn((...a) => { if (typeof a[0] === 'function') a[0](b); else state.wheres.push(a); return b; }),
       whereIn: jest.fn((col, vals) => { state.ins.push([col, vals]); return b; }),
-      whereNull: jest.fn((c) => { state.nulls.push(c); return b; }), whereNotNull: jest.fn(() => b), orWhere: jest.fn(() => b),
+      whereNull: jest.fn((c) => { state.nulls.push(c); return b; }), whereNotNull: jest.fn(() => b), forUpdate: jest.fn(() => b), orWhere: jest.fn(() => b),
       whereNotIn: jest.fn((col, vals) => { state.notIns.push([col, vals]); return b; }),
       whereNot: jest.fn((col, val) => { state.wheres.push(['NOT', col, val]); return b; }),
       whereRaw: jest.fn((sql, bind) => { state.raws.push([sql, bind]); return b; }),

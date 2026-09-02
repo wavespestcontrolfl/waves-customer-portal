@@ -449,7 +449,11 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
     return moveRows(rows || [], successor);
   }
   if (!Array.isArray(prospectIds) || !prospectIds.length) return 0;
-  const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').whereNotNull('path_id').select(...PLACEMENT_MOVE_COLUMNS);
+  // Lock order everywhere is prospect → path: the placement rows are locked
+  // FIRST (callers that already hold them re-lock harmlessly), then the
+  // path rows below — a save holding a prospect and a send holding a path
+  // can no longer wait on each other.
+  const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').whereNotNull('path_id').forUpdate().select(...PLACEMENT_MOVE_COLUMNS);
   const linked = (rows || []).filter((r) => r.path_id); // an un-backfilled legacy row has no path to follow
   if (!linked.length) return 0;
   // Pass 1 — resolve every chain WITHOUT locks, collecting the path ids
