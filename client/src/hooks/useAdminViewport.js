@@ -33,10 +33,13 @@ export function syncAdminViewportVars() {
   root.style.setProperty("--admin-vh", `${Math.round(height + offsetTop)}px`);
   root.style.setProperty("--vv-offset-top", `${Math.round(offsetTop)}px`);
   root.style.setProperty("--keyboard-inset", `${Math.round(keyboardInset)}px`);
-  // A soft keyboard is at least ~200px; URL-bar / toolbar changes are far
-  // smaller. The fixed mobile tab bar hides while it is open (index.css),
-  // otherwise it lifts onto the keyboard and covers the focused field.
-  root.toggleAttribute("data-keyboard-open", keyboardInset >= KEYBOARD_OPEN_MIN_PX);
+  // Keyboard-open is the scale-guarded HEIGHT reduction, not the inset:
+  // the inset also subtracts offsetTop, so as iOS pans the visual viewport
+  // to expose a lower field it shrinks toward 0 while the keyboard is still
+  // up. A soft keyboard is at least ~200px; URL-bar / toolbar changes are
+  // far smaller. The fixed mobile tab bar hides while it is open
+  // (index.css), otherwise it lifts onto the keyboard over the field.
+  root.toggleAttribute("data-keyboard-open", layoutH - height >= KEYBOARD_OPEN_MIN_PX);
 }
 
 export function clearAdminViewportVars() {

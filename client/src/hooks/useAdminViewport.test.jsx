@@ -53,6 +53,23 @@ describe("useAdminViewport", () => {
     expect(document.documentElement.hasAttribute("data-keyboard-open")).toBe(false);
   });
 
+  it("keeps keyboard-open while iOS pans the visual viewport to a lower field", () => {
+    // Same 280px keyboard, but the pan has grown to 250px: the layout-bottom
+    // inset is now only 30px, yet the keyboard is still up.
+    vi.stubGlobal("visualViewport", {
+      height: 520,
+      offsetTop: 250,
+      scale: 1,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    syncAdminViewportVars();
+    expect(
+      document.documentElement.style.getPropertyValue("--keyboard-inset"),
+    ).toBe("30px");
+    expect(document.documentElement.hasAttribute("data-keyboard-open")).toBe(true);
+  });
+
   it("does not mistake pinch zoom for a keyboard — falls back to the layout viewport", () => {
     vi.stubGlobal("visualViewport", {
       height: 400,
