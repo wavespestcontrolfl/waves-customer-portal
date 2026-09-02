@@ -63,31 +63,56 @@ test('a DATED task never touches the retire step', async () => {
   expect(out).toEqual(expect.objectContaining({ raised: true }));
 });
 
-describe('dedupe key: per TERM when a prepaid term governs the cancel, per request otherwise', () => {
+describe('dedupe key: per (TERM, churn episode, class) when a prepaid term governs the cancel, per request otherwise', () => {
   const keyOf = (i = 0) => mockNotifyAdmin.mock.calls[i][3].dedupeKey;
+  const EP = '2026-09-01T12:00:00.000Z';
 
-  test('a dated task keys on the term, class "dated"; the term and request ride in metadata', async () => {
-    await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1' });
-    expect(keyOf()).toBe('termite_station_retrieval:term:term-1:dated');
-    expect(mockNotifyAdmin.mock.calls[0][3].metadata).toEqual(expect.objectContaining({ termId: 'term-1', requestId: 'req-1', retrieveAfter: '2027-02-28' }));
+  test('a dated task keys on term + episode, class "dated"; term, episode and request ride in metadata', async () => {
+    await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: EP });
+    expect(keyOf()).toBe(`termite_station_retrieval:term:term-1:${EP}:dated`);
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata).toEqual(expect.objectContaining({ termId: 'term-1', churnEpisode: EP, requestId: 'req-1', retrieveAfter: '2027-02-28' }));
   });
 
-  test('two requests on the same term produce the SAME dated key — the repeat commit after the 24h latch raises nothing new', async () => {
-    await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1' });
-    await raiseTermiteRetrievalTask('c1', 'req-2', { retrieveAfter: '2027-02-28', termId: 'term-1' });
+  test('two requests on the same term in the same episode produce the SAME dated key — the repeat commit after the 24h latch raises nothing new', async () => {
+    await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: EP });
+    await raiseTermiteRetrievalTask('c1', 'req-2', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: EP });
     expect(keyOf(0)).toBe(keyOf(1));
   });
 
+  test('a won-back customer churning again on the same term is a NEW episode — a fresh key, never silenced by the first episode', async () => {
+    await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: EP });
+    await raiseTermiteRetrievalTask('c1', 'req-9', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: '2026-11-01T12:00:00.000Z' });
+    expect(keyOf(0)).not.toBe(keyOf(1));
+  });
+
   test('the immediate task keys on the term under its OWN class — the end_at_term → end_now transition still retires the dated row and raises "pull now"', async () => {
-    await raiseTermiteRetrievalTask('c1', 'req-2', { retrieveAfter: null, termId: 'term-1' });
-    expect(keyOf()).toBe('termite_station_retrieval:term:term-1:immediate');
+    await raiseTermiteRetrievalTask('c1', 'req-2', { retrieveAfter: null, termId: 'term-1', episodeKey: EP });
+    expect(keyOf()).toBe(`termite_station_retrieval:term:term-1:${EP}:immediate`);
     expect(mockTables.notifications[0].read_at).not.toBeNull();
     expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/supersedes the earlier dated retrieval task/);
   });
 
-  test('no term (portal / non-prepaid) keeps the per-request key byte for byte', async () => {
+  test('no term, or a term without an episode (unanchored churn), keeps the per-request key byte for byte', async () => {
     await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
-    expect(keyOf()).toBe('termite_station_retrieval:c1:req-1');
+    expect(keyOf(0)).toBe('termite_station_retrieval:c1:req-1');
     expect(mockNotifyAdmin.mock.calls[0][3].metadata.termId).toBeUndefined();
+    await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1' });
+    expect(keyOf(1)).toBe('termite_station_retrieval:c1:req-1');
+  });
+
+  test('compat: a same-episode prior request already raised this class under its REQUEST key (pre-deploy row) — nothing new is raised', async () => {
+    mockTables.notifications.push({
+      id: 'n-old', recipient_type: 'admin', read_at: null,
+      metadata: { kind: 'termite_station_retrieval', customerId: 'c1', dedupeKey: 'termite_station_retrieval:c1:req-old', retrieveAfter: '2027-02-28' },
+    });
+    const out = await raiseTermiteRetrievalTask('c1', 'req-new', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: EP, priorRequestIds: ['req-old'] });
+    expect(out).toEqual(expect.objectContaining({ raised: true, deduped: true, priorRequest: true }));
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    // A different class (immediate) is NOT covered by the dated row — and it
+    // still retires the dated rows first.
+    const imm = await raiseTermiteRetrievalTask('c1', 'req-new', { retrieveAfter: null, termId: 'term-1', episodeKey: EP, priorRequestIds: ['req-old'] });
+    expect(imm).toEqual(expect.objectContaining({ raised: true }));
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(keyOf()).toBe(`termite_station_retrieval:term:term-1:${EP}:immediate`);
   });
 });

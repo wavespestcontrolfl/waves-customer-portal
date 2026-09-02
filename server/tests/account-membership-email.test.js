@@ -198,10 +198,12 @@ describe('account and membership email sender', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test('an end-of-coverage cancellation email keys on the prepaid TERM (both outcome classes); no term keeps the request key', async () => {
+  test('an end-of-coverage cancellation email keys on (prepaid TERM, churn episode) for both outcome classes; no term / no episode keeps the request key', async () => {
     // A repeat end_of_coverage commit on the same decided term after the
     // admin latch's 24h echo window opens a NEW request — the term key is
-    // what stops the customer being told twice.
+    // what stops the customer being told twice; the episode is what lets a
+    // won-back customer who churns again be told again.
+    const EP = '2026-09-01T12:00:00.000Z';
     for (const [processed, cls] of [[true, 'completed'], [false, 'received']]) {
       jest.clearAllMocks();
       setDbQueues({
@@ -212,15 +214,26 @@ describe('account and membership email sender', () => {
       await AccountMembershipEmail.sendCancellationReceived({
         customerId: 'cust-1',
         request: { id: `req-${cls}`, category: 'cancellation', subject: 'Cancel plan', created_at: '2026-08-31' },
-        processed, keptThrough: true, prepayTermId: 'term-1',
+        processed, keptThrough: true, prepayTermId: 'term-1', termEpisodeKey: EP,
       });
       expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
-        idempotencyKey: `account.cancellation_received:term:term-1:${cls}`,
+        idempotencyKey: `account.cancellation_received:term:term-1:${EP}:${cls}`,
       }));
     }
-    // keptThrough without a resolved term, and a term without keptThrough
-    // (immediate end-now cancel): request-keyed as before.
-    for (const args of [{ keptThrough: true }, { prepayTermId: 'term-1' }]) {
+    // Compat: a same-episode prior request already sent this class under its
+    // request key (pre-deploy row) — the customer was told; nothing sends.
+    jest.clearAllMocks();
+    setDbQueues({ email_messages: [chain({ first: undefined }), chain({ first: { id: 'em-old' } })] });
+    const prior = await AccountMembershipEmail.sendCancellationReceived({
+      customerId: 'cust-1',
+      request: { id: 'req-new', category: 'cancellation', subject: 'Cancel plan', created_at: '2026-08-31' },
+      processed: true, keptThrough: true, prepayTermId: 'term-1', termEpisodeKey: EP, priorRequestIds: ['req-old'],
+    });
+    expect(prior).toEqual(expect.objectContaining({ ok: true, deduped: true, priorRequest: true }));
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    // keptThrough without a resolved term, a term without keptThrough
+    // (immediate end-now cancel), and a term without an episode: request-keyed.
+    for (const args of [{ keptThrough: true }, { prepayTermId: 'term-1', termEpisodeKey: EP }, { keptThrough: true, prepayTermId: 'term-1' }]) {
       jest.clearAllMocks();
       setDbQueues({
         email_messages: [chain({ first: undefined })],

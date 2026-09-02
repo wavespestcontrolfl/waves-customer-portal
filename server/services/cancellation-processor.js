@@ -78,7 +78,12 @@ async function rentedTermiteStationState(customerId) {
   return { rented, flaggedRental };
 }
 
-async function raiseTermiteRetrievalTask(customerId, requestId = null, { retrieveAfter = null, termId = null } = {}) {
+// termId + episodeKey + priorRequestIds come from admin-cancellation's
+// resolveTermEpisode: the task identity for a decided prepaid term is
+// (term, churn episode, class) — see the dedupeKey comment below.
+async function raiseTermiteRetrievalTask(customerId, requestId = null, {
+  retrieveAfter = null, termId = null, episodeKey = null, priorRequestIds = [],
+} = {}) {
   const { rented, flaggedRental } = await rentedTermiteStationState(customerId);
   if (!rented.length && !flaggedRental) return { raised: false, reason: 'no_rented_stations' };
   const NotificationService = require('./notification-service');
@@ -109,6 +114,27 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
       throw new Error(`dated retrieval task could not be superseded: ${supersedeErr.message}`);
     }
   }
+  const termKeyed = !!(termId && episodeKey);
+  const taskClass = retrieveAfter ? 'dated' : 'immediate';
+  // Compat for rows written before the term key shipped: an earlier request
+  // of the SAME episode raised this class of task under its request key.
+  // Matched in JS on the small per-customer row set (the key lives inside
+  // metadata).
+  if (termKeyed && Array.isArray(priorRequestIds) && priorRequestIds.length) {
+    const wanted = new Set(priorRequestIds.map((r) => `termite_station_retrieval:${customerId}:${r}`));
+    const rows = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
+      .whereRaw("metadata->>'customerId' = ?", [String(customerId)])
+      .select('id', 'metadata');
+    const prior = (rows || []).find((row) => {
+      let meta = row.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+      meta = meta || {};
+      return wanted.has(String(meta.dedupeKey || '')) && (meta.retrieveAfter ? 'dated' : 'immediate') === taskClass;
+    });
+    if (prior) return { raised: true, stationCount: count, deduped: true, priorRequest: true };
+  }
   // retrieveAfter (C3 end_of_coverage): paid termite visits stay on the
   // calendar through the coverage boundary — pulling the stations now would
   // make those visits undeliverable, so the task is DATED, never "pull now".
@@ -132,24 +158,29 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
       // never be silenced by the category allowlist.
       bell: true,
       link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
-      // Keyed on the PREPAID TERM when one governs the cancel: the admin
-      // duplicate latch only echoes a prior run for 24h, so a repeat
-      // end-of-coverage commit on the same decided term after that opens a
-      // NEW request — a request-keyed task would hand staff a second dated
-      // instruction for the same stations (same rule as the refund task,
-      // prepay_refund:term:<id>). Dated and immediate classes stay distinct:
-      // an end_at_term → end_now_refund transition must still raise "pull
-      // now" after the dated row was stamped read. No term (portal path,
-      // non-prepaid admin cancel) keeps the per-EVENT key: retries of the
-      // same request stay idempotent, while a restored customer who later
-      // cancels another rental program gets a fresh task.
-      dedupeKey: termId
-        ? `termite_station_retrieval:term:${termId}:${retrieveAfter ? 'dated' : 'immediate'}`
+      // Keyed on (PREPAID TERM, CHURN EPISODE, class) when a term governs
+      // the cancel: the admin duplicate latch only echoes a prior run for
+      // 24h, so a repeat end-of-coverage commit on the same decided term
+      // after that opens a NEW request — a request-keyed task would hand
+      // staff a second dated instruction for the same stations (same rule
+      // as the refund task, prepay_refund:term:<id>). The episode (the
+      // customer's churn stamp) keeps a WON-BACK customer who later cancels
+      // the same still-current term from being silenced by the first
+      // episode's row. Dated and immediate classes stay distinct: an
+      // end_at_term → end_now_refund transition must still raise "pull
+      // now" after the dated row was stamped read. No term / no episode
+      // (portal path, non-prepaid admin cancel, unanchored churn) keeps
+      // the per-EVENT key: retries of the same request stay idempotent,
+      // while a restored customer who later cancels another rental program
+      // gets a fresh task.
+      dedupeKey: termKeyed
+        ? `termite_station_retrieval:term:${termId}:${episodeKey}:${taskClass}`
         : `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`,
       metadata: {
         kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental,
         ...(requestId ? { requestId } : {}),
         ...(termId ? { termId } : {}),
+        ...(episodeKey ? { churnEpisode: episodeKey } : {}),
         ...(retrieveAfter ? { retrieveAfter } : {}),
       },
     }

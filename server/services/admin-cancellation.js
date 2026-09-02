@@ -691,6 +691,51 @@ async function adminCoverageBoundaryInForce(customerId) {
   return boundaries.some((r) => new Date(r.created_at).getTime() >= churnedAt - 60 * 60 * 1000);
 }
 
+// The dedupe identity for a decided prepaid term's end-of-coverage side
+// effects (dated termite task, end-of-term confirmation): the TERM plus the
+// CHURN EPISODE — the customer's pipeline_stage_changed_at once churned,
+// the same anchor adminCoverageBoundaryInForce uses. A repeat commit on the
+// same decided term inside one episode reuses the identity (no second
+// task, no second text); a customer won back and churned again gets a new
+// stamp, hence fresh side effects. priorRequestIds = earlier admin
+// end-of-coverage requests of THIS episode for THIS term, so rows written
+// before the term key shipped (request-keyed) still count as delivered.
+// Not churned / unanchored / unreadable → null episode, and every consumer
+// falls back to its request key (at-most-twice beats never telling anyone).
+async function resolveTermEpisode(customerId, term, currentRequestId = null) {
+  if (!term) return null;
+  const none = { termId: term.id, episodeKey: null, priorRequestIds: [] };
+  try {
+    const row = await db('customers').where({ id: customerId }).first('pipeline_stage', 'pipeline_stage_changed_at');
+    if (!row || row.pipeline_stage !== 'churned' || !row.pipeline_stage_changed_at) return none;
+    const churnedAt = new Date(row.pipeline_stage_changed_at);
+    if (!Number.isFinite(churnedAt.getTime())) return none;
+    const cases = await db('cancellation_cases')
+      .where({ customer_id: customerId })
+      .where('created_at', '>=', new Date(churnedAt.getTime() - 60 * 60 * 1000))
+      .select('service_request_id', 'snapshot');
+    const priorRequestIds = [];
+    for (const c of cases || []) {
+      let snap = c.snapshot;
+      if (typeof snap === 'string') { try { snap = JSON.parse(snap); } catch { snap = {}; } }
+      snap = snap || {};
+      if (String(snap.prepayTermId || '') !== String(term.id) || snap.effectiveDate !== 'end_of_coverage') continue;
+      const rid = c.service_request_id ? String(c.service_request_id) : null;
+      if (!rid || rid === String(currentRequestId || '') || priorRequestIds.includes(rid)) continue;
+      priorRequestIds.push(rid);
+    }
+    return { termId: term.id, episodeKey: churnedAt.toISOString(), priorRequestIds };
+  } catch (err) {
+    logger.warn(`[admin-cancellation] term episode lookup failed for ${customerId}: ${err.message}`);
+    return none;
+  }
+}
+const termEpisodeSendArgs = (episode) => ({
+  prepayTermId: episode ? episode.termId : null,
+  termEpisodeKey: episode ? episode.episodeKey : null,
+  priorRequestIds: episode ? episode.priorRequestIds : [],
+});
+
 // The request-scoped history note the processor stamps on every visit this
 // request cancels — the immutable retry marker (never the editable reason).
 const historyNoteFor = (requestId) => `Admin cancellation request ${requestId}`;
@@ -1363,10 +1408,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             // this the stale error echoes forever and the office never
             // gets its pull instruction.
             const datedTermite = priorSnap.effectiveDate === 'end_of_coverage';
+            const repairEpisode = await resolveTermEpisode(customerId, term, reqRow.id);
             if (hasTermiteErr && (!datedTermite || priorSnap.effectiveOn)) {
               try {
                 const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
-                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: datedTermite ? priorSnap.effectiveOn : null, termId: term.id });
+                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: datedTermite ? priorSnap.effectiveOn : null, ...repairEpisode });
                 promotedErrors = promotedErrors.filter((e) => e !== 'termite_retrieval_task');
               } catch (termiteErr) {
                 logger.warn(`[admin-cancellation] deferred termite retrieval repair failed for request ${reqRow.id}: ${termiteErr.message}`);
@@ -1395,7 +1441,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
                 effectiveAt: priorSnap.effectiveDate === 'end_of_coverage' && priorSnap.effectiveOn
                   ? `${priorSnap.effectiveOn}T12:00:00-04:00` : null,
                 keptThrough: priorSnap.effectiveDate === 'end_of_coverage',
-                prepayTermId: term.id,
+                ...termEpisodeSendArgs(repairEpisode),
                 entryPoint: 'admin_cancel_plan',
                 identityTrustLevel: 'admin_operator',
               });
@@ -1908,12 +1954,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // that did not end. Skipped on a conflict/failed disposition: that run
   // is already partial (belled), and the repair retry re-runs the
   // processor, which re-derives the pending task from live rows.
+  // Resolved AFTER the processor churned the account (the episode is its
+  // churn stamp) and before the term-keyed side effects below.
+  const termEpisode = await resolveTermEpisode(customerId, term, request.id);
   if (result && result.termiteRetrievalPending) {
     if (processed && ['ends_at_term', 'ended_now', 'decision_already_recorded'].includes(termOutcome)) {
       try {
         const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
         await raiseTermiteRetrievalTask(customerId, request.id,
-          { retrieveAfter: result.termiteRetrievalPending.retrieveAfter, termId: term.id });
+          { retrieveAfter: result.termiteRetrievalPending.retrieveAfter, ...termEpisode });
       } catch (termiteErr) {
         errors.push('termite_retrieval_task');
         logger.error(`[admin-cancellation] deferred termite retrieval task failed for request ${request.id}: ${termiteErr.message}`);
@@ -1987,10 +2036,10 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // "upcoming visits are off the calendar" copy would be false, so the
       // senders switch to the end-of-term wording.
       keptThrough: !!prepayPlan.keepThrough,
-      // The end-of-term confirmation is sent once per TERM, not per request
-      // (a repeat commit on the same decided term after the 24h latch opens
-      // a new request).
-      prepayTermId: term ? term.id : null,
+      // The end-of-term confirmation is sent once per (TERM, churn episode),
+      // not per request (a repeat commit on the same decided term after the
+      // 24h latch opens a new request) — see resolveTermEpisode.
+      ...termEpisodeSendArgs(termEpisode),
       entryPoint: 'admin_cancel_plan',
       identityTrustLevel: 'admin_operator',
     });
