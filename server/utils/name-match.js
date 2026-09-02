@@ -12,7 +12,15 @@
  * a human, never a match).
  */
 function normalizeNamePart(value) {
-  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  // Fold diacritics before stripping (NFD splits "é" into "e" + a combining
+  // mark) so "José Nuñez" and "Jose Nunez" normalize identically instead of
+  // the accented letters vanishing ("jos nuez").
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
 }
 
 // Common NANP nickname/diminutive groups — "Bob" calling from a line whose
@@ -176,29 +184,58 @@ function sameFirstName(a, b) {
   return !!variants && variants.has(b);
 }
 
-// Bank-notice payer name ("RAAKESH DUSHYANTHAN", "Pat & Sam Doe", "J. Doe",
-// "MARIA DE LA CRUZ") vs an invoice's customer. Corroborates only when the
-// customer's last name appears as a contiguous run of payer tokens AND a
-// non-overlapping contiguous run is first-name-compatible (nickname-aware),
-// so compound names on either side ("De La Cruz", "Mary Ann") still match.
-// Initials never satisfy the first-name leg; a missing customer name part
-// never corroborates (amount alone is not identity).
+// Bank-notice payer name ("RAAKESH DUSHYANTHAN", "Pat & Sam Doe", "Doe, Robert",
+// "MARIA DE LA CRUZ", "ALICE JONES & ROBERT DOE") vs an invoice's customer.
+// The line is split into PERSONS first (on "&" / "and"), and both name parts
+// must belong to the SAME person: the customer's last name must be that
+// person's surname — the trailing token run, or everything before the comma
+// in "Last, First" form — and the remaining tokens must contain a contiguous
+// run that is first-name-compatible (nickname-aware; compound "Mary Ann"
+// joins). A single-token person shares the surname of the last person on
+// the line ("Pat & Robert Doe"). Initials never satisfy the first-name leg;
+// a missing customer name part never corroborates (amount alone is not
+// identity).
+function tokensOf(text) {
+  return String(text || '').split(/\s+/).map(normalizeNamePart).filter((t) => t.length > 1);
+}
+function runsOf(tokens) {
+  const runs = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    for (let j = i + 1; j <= tokens.length; j += 1) runs.push(tokens.slice(i, j).join(''));
+  }
+  return runs;
+}
+// [{ given: [tokens], surname: [tokens] }] per person on the line.
+function personsOf(payerName) {
+  const people = String(payerName || '').split(/\s*&\s*|\s+and\s+/i).map((p) => p.trim()).filter(Boolean);
+  const parsed = people.map((person) => {
+    const comma = person.indexOf(',');
+    if (comma > -1) return { surname: tokensOf(person.slice(0, comma)), given: tokensOf(person.slice(comma + 1)), fixedSurname: true };
+    return { all: tokensOf(person) };
+  });
+  // Shared surname for single-token people: borrow the final person's.
+  const last = parsed[parsed.length - 1];
+  const borrowed = last && !last.fixedSurname && last.all && last.all.length > 1 ? last.all.slice(1) : null;
+  return parsed.map((p) => (p.all && p.all.length === 1 && borrowed ? { all: [...p.all, ...borrowed] } : p));
+}
+function personCorroborates(person, customerFirst, customerLast) {
+  if (person.fixedSurname) {
+    return person.surname.join('') === customerLast && runsOf(person.given).some((r) => sameFirstName(r, customerFirst));
+  }
+  const tokens = person.all || [];
+  // The surname is a trailing run; the given name lives in what precedes it.
+  for (let k = tokens.length - 1; k >= 1; k -= 1) {
+    if (tokens.slice(k).join('') === customerLast) {
+      if (runsOf(tokens.slice(0, k)).some((r) => sameFirstName(r, customerFirst))) return true;
+    }
+  }
+  return false;
+}
 function payerNameCorroborates(payerName, customer = {}) {
   const customerLast = normalizeNamePart(customer.last_name);
   const customerFirst = normalizeNamePart(customer.first_name);
   if (!customerLast || !customerFirst) return false;
-  const tokens = String(payerName || '')
-    .split(/[\s,&]+|\band\b/i)
-    .map(normalizeNamePart)
-    .filter((t) => t.length > 1);
-  // Every contiguous token run, joined — the unit of comparison on both sides.
-  const runs = [];
-  for (let i = 0; i < tokens.length; i += 1) {
-    for (let j = i + 1; j <= tokens.length; j += 1) runs.push({ i, j, key: tokens.slice(i, j).join('') });
-  }
-  const lastRuns = runs.filter((r) => r.key === customerLast);
-  if (!lastRuns.length) return false;
-  return lastRuns.some((last) => runs.some((r) => (r.j <= last.i || r.i >= last.j) && sameFirstName(r.key, customerFirst)));
+  return personsOf(payerName).some((person) => personCorroborates(person, customerFirst, customerLast));
 }
 
 module.exports = {
