@@ -118,6 +118,16 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(body).not.toContain('timelineExists');
   });
 
+  test('a pass that processed an adopted recording closes its review card unless another parked recording still waits', () => {
+    const at = body.indexOf("if (written > 0 && finalStatus === 'processed') {");
+    expect(at).toBeGreaterThan(-1);
+    const site = body.slice(at, at + 1200);
+    expect(site).toContain("m?.adopted_recording?.recording_sid");
+    expect(site).toContain("adopted === call.recording_sid");
+    expect(site).toContain("r.parked_because !== 'replaced_by_operator'");
+    expect(site).toContain("reason_code: 'additional_recording'");
+  });
+
   test('a customer that lands on a later pass resolves the customer_creation_failed card and clears review only when nothing else is open', () => {
     const at = body.indexOf("if (written > 0 && finalStatus === 'processed' && customerLanded) {");
     expect(at).toBeGreaterThan(-1);

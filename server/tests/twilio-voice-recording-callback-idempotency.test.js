@@ -661,6 +661,15 @@ describe('builtinTranscriptMayReplace (pure) and POST /transcription', () => {
     expect(row.transcription_model).toBe('fixture-model');
   });
 
+  test('a late built-in transcript for a recording the row no longer carries is kept out of the new recording\'s row', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_2, transcription: null, transcription_provider: null });
+    await post('/transcription', { CallSid: PARENT, RecordingSid: REC_1, TranscriptionText: 'words from the replaced audio', TranscriptionStatus: 'completed' });
+    expect(tables.call_log[0].transcription).toBeNull();
+    // The current recording's own transcript still lands.
+    await post('/transcription', { CallSid: PARENT, RecordingSid: REC_2, TranscriptionText: 'words from the current audio', TranscriptionStatus: 'completed' });
+    expect(tables.call_log[0].transcription).toBe('words from the current audio');
+  });
+
   test('the built-in transcription fills a row that has no transcript yet', async () => {
     tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, transcription: null, transcription_provider: null });
     await post('/transcription', { CallSid: PARENT, RecordingSid: REC_1, TranscriptionText: 'rough builtin text', TranscriptionStatus: 'completed' });

@@ -1990,7 +1990,7 @@ router.post('/transcription', async (req, res) => {
       // recording-status/recovery guards key on that stamp
       // (Codex #2676 round-10 P1).
       let targetRow = null;
-      const TRANSCRIPTION_COLUMNS = ['id', 'twilio_call_sid', 'transcription', 'transcription_provider', 'transcription_metadata'];
+      const TRANSCRIPTION_COLUMNS = ['id', 'twilio_call_sid', 'recording_sid', 'transcription', 'transcription_provider', 'transcription_metadata'];
       if (ParentCallSid) {
         targetRow = await db('call_log').where('twilio_call_sid', ParentCallSid).first(...TRANSCRIPTION_COLUMNS);
       }
@@ -2004,7 +2004,18 @@ router.post('/transcription', async (req, res) => {
         const panStamp = panScrub.count > 0
           ? { pan_detected: true, pan_count: panScrub.count, quarantine_source: 'twilio_transcription_webhook_pending' }
           : {};
-        if (builtinTranscriptMayReplace(targetRow)) {
+        // A built-in transcript belongs to ONE recording. Recording A's late
+        // callback after B replaced (or the office adopted) it must not put
+        // A's words on B's row — the swap cleared the transcript, so this
+        // text would land and a failed provider transcription of B would
+        // then fall back to it. Decided against the row as read and fenced
+        // in the write; the PAN stamp below still lands (A's audio is kept
+        // as evidence and its card number still quarantines).
+        const staleRecording = !!RecordingSid && !!targetRow.recording_sid && targetRow.recording_sid !== RecordingSid;
+        if (staleRecording) {
+          logger.info(`[transcription] built-in transcript for ${maskSid(targetRow.twilio_call_sid)} is for ${maskSid(RecordingSid)}, not the row's current recording — text kept out`);
+        }
+        if (!staleRecording && builtinTranscriptMayReplace(targetRow)) {
           const update = {
             transcription: scrubbedTranscription,
             transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
@@ -2033,6 +2044,11 @@ router.post('/transcription', async (req, res) => {
               this.whereNull('transcription')
                 .orWhereNull('transcription_provider')
                 .orWhere('transcription_provider', 'twilio_builtin');
+            })
+            // …and still the recording this text describes (a swap landing
+            // between the read and this write makes it skip).
+            .where(function currentRecording() {
+              if (RecordingSid) this.whereNull('recording_sid').orWhere('recording_sid', RecordingSid);
             })
             .update(update);
           if (updated > 0) matchedSid = targetRow.twilio_call_sid;

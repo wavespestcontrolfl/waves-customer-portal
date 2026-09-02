@@ -15245,6 +15245,28 @@ const CallRecordingProcessor = {
       // status it describes: filed after finalization it could outlive the
       // pass — a force reprocess repairing the call while the insert was
       // pending left a stale open card (codex P1). written > 0 is the fence.
+      if (written > 0 && finalStatus === 'processed') {
+        // An adopted recording that this pass processed closes its review
+        // card (the adopt endpoint closes it only when its immediate pass
+        // succeeds; a deferred or failed one lands here on the sweep) —
+        // unless another callback-parked recording still waits.
+        try {
+          const m = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+          const adopted = m?.adopted_recording?.recording_sid || null;
+          if (adopted && adopted === call.recording_sid) {
+            const waiting = (Array.isArray(m.additional_recordings) ? m.additional_recordings : [])
+              .some((r) => r && r.recording_sid !== adopted && r.parked_because !== 'replaced_by_operator' && (r.recording_url != null || r.delete_pending === true));
+            if (!waiting) {
+              await trx('triage_items')
+                .where({ call_log_id: call.id, reason_code: 'additional_recording' })
+                .whereIn('status', ['open', 'in_progress'])
+                .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Adopted ${adopted} processed` });
+            }
+          }
+        } catch (cardErr) {
+          logger.warn(`[call-proc] adoption card close skipped for ${maskSid(callSid)}: ${cardErr.message}`);
+        }
+      }
       if (written > 0 && finalStatus === 'processed' && customerLanded) {
         // A customer that landed on this pass repairs an earlier
         // customer_creation_failed: its card resolves, and the review flag
