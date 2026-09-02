@@ -15253,14 +15253,17 @@ export function CompletionPanel({
             {/* Lines parked from the notes when an AI draft replaced them
                 stay visible and editable here — they still submit as
                 findings / internal next steps, so the tech can correct or
-                remove them after editing the generated prose. */}
+                remove them after editing the generated prose. An edit is a
+                generation input changing, so it invalidates an installed
+                draft like every other typed edit (the watcher doesn't read
+                parked state, on purpose — see applyGeneratedReport). */}
             {parkedFound.trim() && (
               <Field label="Findings carried from your notes">
                 {" "}
                 <textarea
                   aria-label="Findings carried from your notes"
                   value={parkedFound}
-                  onChange={(e) => setParkedFound(e.target.value)}
+                  onChange={(e) => { setParkedFound(e.target.value); invalidateGeneratedReportOnTypedEdit(); }}
                   rows={2}
                   disabled={generating || photoAnalyzing}
                   style={{ ...mTextarea, opacity: generating || photoAnalyzing ? 0.55 : 1 }}
@@ -15273,7 +15276,7 @@ export function CompletionPanel({
                 <textarea
                   aria-label="Next steps carried from your notes"
                   value={parkedNext}
-                  onChange={(e) => setParkedNext(e.target.value)}
+                  onChange={(e) => { setParkedNext(e.target.value); invalidateGeneratedReportOnTypedEdit(); }}
                   rows={2}
                   disabled={generating}
                   style={{ ...mTextarea, opacity: generating ? 0.55 : 1 }}
@@ -17599,7 +17602,7 @@ export function CompletionPanel({
                 <textarea
                   aria-label="Findings carried from your notes"
                   value={parkedFound}
-                  onChange={(e) => setParkedFound(e.target.value)}
+                  onChange={(e) => { setParkedFound(e.target.value); invalidateGeneratedReportOnTypedEdit(); }}
                   rows={2}
                   disabled={generating || photoAnalyzing}
                   style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating || photoAnalyzing ? 0.55 : 1 }}
@@ -17614,7 +17617,7 @@ export function CompletionPanel({
                 <textarea
                   aria-label="Next steps carried from your notes"
                   value={parkedNext}
-                  onChange={(e) => setParkedNext(e.target.value)}
+                  onChange={(e) => { setParkedNext(e.target.value); invalidateGeneratedReportOnTypedEdit(); }}
                   rows={2}
                   disabled={generating}
                   style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating ? 0.55 : 1 }}
