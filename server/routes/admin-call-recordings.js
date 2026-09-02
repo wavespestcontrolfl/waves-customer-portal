@@ -208,10 +208,6 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
     if (customerId !== null && !UUID_RE.test(String(customerId))) return res.status(400).json({ error: 'customer_id must be a UUID or null' });
     const call = await db('call_log').where({ id: req.params.id }).first('id', 'customer_id', 'twilio_call_sid');
     if (!call) return res.status(404).json({ error: 'Call not found' });
-    if (customerId) {
-      const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id');
-      if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    }
     const override = {
       customer_id: customerId,
       previous_customer_id: call.customer_id || null,
@@ -229,6 +225,14 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
     // and a relink that commits without it would report success on a
     // half-applied correction. Any failure rolls both back and surfaces.
     const moved = await db.transaction(async (trx) => {
+      // The target is validated under its row lock IN the transaction —
+      // customers first, then call_log, the merge flow's lock order — so a
+      // merge or retirement of that customer serializes against the relink
+      // instead of landing between a check and the write (Codex r6 P2).
+      if (customerId) {
+        const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id');
+        if (!customer) return { notFound: true };
+      }
       const relinked = await trx('call_log').where({ id: call.id })
         .whereRaw("processing_status IS DISTINCT FROM 'processing'")
         .update({
@@ -259,6 +263,7 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
       }
       return { timelineRows: rows, repaired };
     });
+    if (moved?.notFound) return res.status(404).json({ error: 'Customer not found' });
     if (!moved) {
       return res.status(409).json({ error: 'A pass is still working this call. Change the customer once it finishes.', reason: 'already_processing' });
     }
@@ -376,6 +381,15 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         transcription: null,
         transcript_structured: null,
         transcription_provider: null,
+          // A rejected-transcript row was parked as 'voicemail' by
+          // transcriptRejectionUpdate — answered_by/call_outcome stamped from
+          // the audio being discarded here, and the next pass reads either
+          // as deterministic voicemail evidence and cannot reclassify the
+          // replacement as a live call . Clear them only
+          // when they came with a rejected transcript; Twilio's own dial-
+          // completion stamps (no rejection) stay.
+          answered_by: db.raw("CASE WHEN transcription_status = 'rejected' AND answered_by = 'voicemail' THEN NULL ELSE answered_by END"),
+          call_outcome: db.raw("CASE WHEN transcription_status = 'rejected' AND call_outcome = 'voicemail' THEN NULL ELSE call_outcome END"),
         // …and everything derived from it, so a deferred or failed reprocess
         // never shows the previous audio's extraction beside the new one.
         ai_extraction: null,
@@ -421,7 +435,13 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
       return res.status(409).json({ error: 'This call changed while the swap was being made (a pass claimed it, or its recordings changed). Reload and try again.', reason: 'call_changed' });
     }
     logger.info(`[call-recordings] operator adopted recording ${maskSid(chosen.recording_sid)} on call ${call.id}; reprocessing`);
-    const result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true });
+    // The pass is fenced to the recording the operator chose: between the
+    // swap above and the pass's claim the row is not load-bearing, so a
+    // fresh callback can replace the adopted SID. The processor follows the
+    // current row, so without the fence this endpoint would report the
+    // chosen recording as adopted and processed — and close its card —
+    // while the pass processed a newer one (Codex #3736 r6 P1).
+    const result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true, expectedRecordingSid: chosen.recording_sid });
     if (result?.success === true) {
       // Only a completed pass closes the review card; a deferred or failed
       // one leaves it open with the row queued for the sweep. And it closes
@@ -469,6 +489,11 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     }
     if (result?.skipped && result?.reason === 'already_processing') {
       return res.status(409).json({ ...result, adopted: chosen.recording_sid, error: 'The recording was adopted but another pass is still working this call; the sweep will process the adopted audio once it goes quiet.' });
+    }
+    if (result?.skipped && result?.reason === 'recording_changed') {
+      // The card stays open: the chosen recording was not processed, and the
+      // newer one that replaced it needs the operator's decision too.
+      return res.status(409).json({ ...result, adopted: chosen.recording_sid, error: 'The recording was adopted, but a newer recording replaced it before it could be processed; the sweep will process the current recording. Review the call again.' });
     }
     res.json({
       success: false,

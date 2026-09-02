@@ -1684,7 +1684,17 @@ router.post('/recording-status', async (req, res) => {
           // …and everything derived from that transcript: a deferred or
           // failed reprocess must not leave the old call's identity, service
           // and synopsis rendered beside the new audio.
-          Object.assign(write, { ai_extraction: null,
+          Object.assign(write, {
+          // A rejected-transcript row was parked as 'voicemail' by
+          // transcriptRejectionUpdate — answered_by/call_outcome stamped from
+          // the audio being discarded here, and the next pass reads either
+          // as deterministic voicemail evidence and cannot reclassify the
+          // replacement as a live call (Codex #3736 r6 P1). Clear them only
+          // when they came with a rejected transcript; Twilio's own dial-
+          // completion stamps (no rejection) stay.
+          answered_by: db.raw("CASE WHEN transcription_status = 'rejected' AND answered_by = 'voicemail' THEN NULL ELSE answered_by END"),
+          call_outcome: db.raw("CASE WHEN transcription_status = 'rejected' AND call_outcome = 'voicemail' THEN NULL ELSE call_outcome END"),
+          ai_extraction: null,
           ai_extraction_enriched: null,
           ai_extraction_validation_errors: null,
           v2_extraction_status: null,

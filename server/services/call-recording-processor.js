@@ -6539,6 +6539,11 @@ const CallRecordingProcessor = {
                   .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
               });
           })
+          // An operator adopting a recording claims FOR that recording: a
+          // callback that replaced it before this claim makes the claim
+          // refuse (reason recording_changed below) instead of processing
+          // audio the operator never chose (Codex #3736 r6 P1).
+          .where(function expectedRecording() { if (opts.expectedRecordingSid) this.where('recording_sid', opts.expectedRecordingSid); })
           .update({
             processing_status: 'processing',
             processing_token: procToken,
@@ -6594,6 +6599,11 @@ const CallRecordingProcessor = {
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
               .orWhereRaw(reclaimableClaim(FORCE_CLAIM_QUIET_MINUTES));
           })
+          // An operator adopting a recording claims FOR that recording: a
+          // callback that replaced it before this claim makes the claim
+          // refuse (reason recording_changed below) instead of processing
+          // audio the operator never chose (Codex #3736 r6 P1).
+          .where(function expectedRecording() { if (opts.expectedRecordingSid) this.where('recording_sid', opts.expectedRecordingSid); })
           .update({
             processing_status: 'processing',
             processing_token: procToken,
@@ -6625,6 +6635,14 @@ const CallRecordingProcessor = {
     // manual Process tap during a wedged claim returned success and the UI
     // said processed while the call sat unprocessed for 18 minutes.
     if (claimBlocked) {
+      if (opts.expectedRecordingSid) {
+        const now = await db('call_log').where({ id: call.id }).first('recording_sid').catch(() => null);
+        const currentSid = now?.recording_sid || null;
+        if (now && currentSid !== opts.expectedRecordingSid) {
+          logger.warn(`[call-proc] ${maskSid(callSid)}: expected recording ${maskSid(opts.expectedRecordingSid)} was replaced by ${maskSid(currentSid)} before the claim — not processing`);
+          return { success: false, skipped: true, reason: 'recording_changed', current_recording_sid: currentSid };
+        }
+      }
       // Which window applies depends on the claim we are blocked BEHIND: a
       // beating claim frees up after the short quiet window, but one with no
       // beat of its own — a legacy row, or a pod mid-rolling-deploy — keeps

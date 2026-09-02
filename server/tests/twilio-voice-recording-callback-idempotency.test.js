@@ -104,8 +104,15 @@ function makeDb(tables) {
   }
 
   function applyUpdate(row, patch) {
+    // SQL evaluates every expression against the row BEFORE the update.
+    const before = { ...row };
     for (const [k, v] of Object.entries(patch)) {
       if (v && v.__raw) {
+        if (v.sql.startsWith('CASE WHEN transcription_status = \'rejected\'')) {
+          // The replace path's voicemail-stamp reset.
+          row[k] = (before.transcription_status === 'rejected' && before[k] === 'voicemail') ? null : before[k];
+          continue;
+        }
         const meta = metaOf(row);
         const appended = JSON.parse(v.bindings[0]);
         if (v.sql.includes("'{superseded_recordings}'")) {
@@ -542,6 +549,26 @@ describe('POST /recording-status', () => {
     expect(row.processing_status).toBeNull();
     expect(row.transcription_status).toBe('pending');
     expect(row.metadata.superseded_recordings[0]).toMatchObject({ recording_sid: REC_1 });
+  });
+
+  test('a replace clears the voicemail stamps a REJECTED transcript produced, and keeps the ones Twilio stamped (codex #3736 gh-r6)', async () => {
+    tables.call_log.push({
+      id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 12,
+      processing_status: 'voicemail', transcription_status: 'rejected', answered_by: 'voicemail', call_outcome: 'voicemail',
+      transcription: '[Recording had no usable speech; an implausible transcription was rejected.]', metadata: null,
+    });
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    expect(tables.call_log[0]).toMatchObject({ recording_sid: REC_2, answered_by: null, call_outcome: null });
+
+    // Control: a voicemail stamped by the dial completion (no rejection) is
+    // evidence about the call, not the discarded audio — it stays.
+    tables.call_log.length = 0;
+    tables.call_log.push({
+      id: 'c2', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 12,
+      processing_status: null, transcription_status: 'pending', answered_by: 'voicemail', call_outcome: 'voicemail', transcription: null, metadata: null,
+    });
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    expect(tables.call_log[0]).toMatchObject({ recording_sid: REC_2, answered_by: 'voicemail', call_outcome: 'voicemail' });
   });
 
   test('a different recording on an unprocessed row replaces it (ring-first voicemail after the dial leg) and keeps the superseded one', async () => {

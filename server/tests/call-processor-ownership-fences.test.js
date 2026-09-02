@@ -179,3 +179,29 @@ describe('processRecording re-reads the recording it is accountable for after th
     expect(reread).toBeGreaterThan(claim);
   });
 });
+
+// An operator adopting a recording claims FOR that recording: both claim
+// writes (automatic and force) carry the expected-recording predicate, and a
+// refused claim whose recording moved reports recording_changed rather than
+// already_processing (codex #3736 gh-r6).
+describe('processRecording claims are fenced to the expected recording when one is given', () => {
+  const { body } = processRecordingBody();
+  test('both claim writes carry the expectedRecordingSid predicate', () => {
+    const fence = "if (opts.expectedRecordingSid) this.where('recording_sid', opts.expectedRecordingSid);";
+    const first = body.indexOf(fence);
+    const second = body.indexOf(fence, first + 1);
+    expect(first).toBeGreaterThan(-1);
+    expect(second).toBeGreaterThan(first);
+    // Each fence sits inside a claim chain: the next .update( after it sets processing_token.
+    for (const at of [first, second]) {
+      const upd = body.indexOf('.update(', at);
+      expect(body.slice(upd, upd + 300)).toContain('processing_token: procToken');
+    }
+  });
+  test('a blocked claim re-reads the recording and reports recording_changed when it moved', () => {
+    const blocked = body.indexOf('if (claimBlocked) {');
+    const branch = body.slice(blocked, blocked + 900);
+    expect(branch).toContain("first('recording_sid')");
+    expect(branch).toContain("reason: 'recording_changed'");
+  });
+});

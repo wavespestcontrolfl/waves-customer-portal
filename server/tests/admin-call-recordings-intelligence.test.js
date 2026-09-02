@@ -53,6 +53,7 @@ function mockDb(firstResults) {
       whereNull() { return b; },
       whereIn() { return b; },
       whereNotExists() { return b; },
+      forUpdate() { b.locked = true; return b; },
       whereRaw(sql, bindings) { b.wheres.push(['raw', sql, bindings]); return b; },
       first: () => Promise.resolve(queue.shift() ?? null),
       update: (patch) => { updates.push({ table, patch, wheres: [...b.wheres] }); return Object.assign(Promise.resolve(1), { catch: () => Promise.resolve(1) }); },
@@ -168,7 +169,7 @@ describe('PUT /calls/:id/customer', () => {
     const updates = mockDb([{ id: CALL_ID, customer_id: null, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
     // The conditional update matches no rows while processing_status = processing.
     db.mockImplementation((table) => {
-      const b = { table, wheres: [], where() { return b; }, whereNull() { return b; }, whereIn() { return b; }, whereRaw() { return b; },
+      const b = { table, wheres: [], where() { return b; }, whereNull() { return b; }, whereIn() { return b; }, whereRaw() { return b; }, forUpdate() { return b; },
         first: () => Promise.resolve(table === 'customers' ? { id: CUSTOMER_ID } : { id: CALL_ID, customer_id: null, twilio_call_sid: SID }),
         update: (patch) => { updates.push({ table, patch }); return Promise.resolve(0); } };
       return b;
@@ -180,6 +181,24 @@ describe('PUT /calls/:id/customer', () => {
       expect((await res.json()).reason).toBe('already_processing');
     });
     expect(require('../services/conversations').syncVoiceMessageForCall).not.toHaveBeenCalled();
+  });
+
+  test('validates the target customer under its row lock INSIDE the relink transaction, customers before call_log (codex #3736 gh-r6 P2)', async () => {
+    const seen = [];
+    const updates = mockDb([{ id: CALL_ID, customer_id: null, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = base(table); seen.push(b); return b; });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
+      expect(res.status).toBe(200);
+    });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    const customerRead = seen.find((b) => b.table === 'customers');
+    expect(customerRead.locked).toBe(true);
+    // Lock order: the customers read precedes the call_log write (the
+    // first call_log builder is the pre-transaction read of the call).
+    const callLogWrite = seen.filter((b) => b.table === 'call_log')[1];
+    expect(seen.indexOf(customerRead)).toBeLessThan(seen.indexOf(callLogWrite));
   });
 
   test('refuses an unknown customer and a malformed id', async () => {
@@ -225,7 +244,33 @@ describe('POST /calls/:id/adopt-recording', () => {
     expect(fenceClauses.some((w) => w.includes('"recording_sid"') && w.includes(CURRENT))).toBe(true);
     expect(fenceClauses.some((w) => w.includes('additional_recordings') && w.includes(PARKED))).toBe(true);
     expect(updates.find((u) => u.table === 'triage_items').patch.status).toBe('resolved');
-    expect(processor.processRecording).toHaveBeenCalledWith(SID, { force: true, operator: true });
+    // The pass is fenced to the chosen recording: a callback that replaces
+    // it before the claim makes the pass refuse instead of processing audio
+    // the operator never chose.
+    expect(processor.processRecording).toHaveBeenCalledWith(SID, { force: true, operator: true, expectedRecordingSid: PARKED });
+  });
+
+  test('a recording that a newer callback replaced before the pass claimed it is reported (409 recording_changed) and its card stays open (codex #3736 gh-r6)', async () => {
+    const NEWER = 'RE' + '4'.repeat(32);
+    const updates = mockDb([call()]);
+    processor.processRecording.mockResolvedValue({ success: false, skipped: true, reason: 'recording_changed', current_recording_sid: NEWER });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ reason: 'recording_changed', adopted: PARKED, current_recording_sid: NEWER });
+    });
+    expect(updates.find((u) => u.table === 'triage_items')).toBeUndefined();
+  });
+
+  test('adopting over a rejected-transcript voicemail row clears the voicemail stamps the discarded audio produced', async () => {
+    const updates = mockDb([call()]);
+    processor.processRecording.mockResolvedValue({ success: true, callSid: SID });
+    await withServer(async (base) => {
+      await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
+    });
+    const swap = updates.find((u) => u.table === 'call_log');
+    expect(swap.patch.answered_by.sql).toBe("CASE WHEN transcription_status = 'rejected' AND answered_by = 'voicemail' THEN NULL ELSE answered_by END");
+    expect(swap.patch.call_outcome.sql).toBe("CASE WHEN transcription_status = 'rejected' AND call_outcome = 'voicemail' THEN NULL ELSE call_outcome END");
   });
 
   test('with another callback-parked recording still waiting, the card stays open and is retargeted to it', async () => {
