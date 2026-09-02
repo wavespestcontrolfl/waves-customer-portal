@@ -861,6 +861,31 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('non-rendering AffiliateLink children; hidden headings; visibility read before expression blanking (Codex #3646 r36)', () => {
+    withAffiliateEnv(() => {
+      const at = (before, tag = '<AffiliateLink product="rain-gauge" placement="primary-rec">it</AffiliateLink>') => `Intro.\n\n${before}\n\n## Sec\n\nUse ${tag} here.`;
+      // Boolean/nullish child expressions render no anchor text.
+      for (const kid of ['{false}', '{null}', '{ undefined }', '{true}']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at('[quote](/quote/)', `<AffiliateLink product="rain-gauge" placement="primary-rec">${kid}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      // A hidden or spread-wrapped "## Fake" never ends the opening section.
+      const opening = (r) => r.findings.some((f) => f.code === 'EXCESSIVE_AFFILIATE_LINK_DENSITY' && /opening section/.test(f.message));
+      for (const wrap of ['<div class="hidden">\n## Fake section\n</div>', '<div {...props}>\n## Fake section\n</div>']) {
+        expect(opening(guardrails.evaluate({ body: `Intro.\n\n[quote](/quote/)\n\n${wrap}\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">it</AffiliateLink> here.\n\n## Real\n\nMore.`, frontmatter: fm() }, { targetIsBlog: true }))).toBe(true);
+      }
+      expect(opening(guardrails.evaluate({ body: 'Intro.\n\n[quote](/quote/)\n\n## Real\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">it</AffiliateLink> here.', frontmatter: fm() }, { targetIsBlog: true }))).toBe(false);
+      // open={false} renders CLOSED (no CTA); hidden={false} renders VISIBLE (CTA counts); hidden={0} is present → hidden.
+      const missing = (before) => affiliateCodes(guardrails.evaluate({ body: at(before), frontmatter: fm() }, { targetIsBlog: true })).includes('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      expect(missing('<details open={false}>[quote](/quote/)</details>')).toBe(true);
+      expect(missing('<details open={true}>[quote](/quote/)</details>')).toBe(false);
+      expect(missing('<div hidden={false}>[quote](/quote/)</div>')).toBe(false);
+      expect(missing('<div hidden={0}>[quote](/quote/)</div>')).toBe(true);
+      expect(missing('<div hidden="">[quote](/quote/)</div>')).toBe(true);
+      // A quoted tag inside an expression never opens a phantom hidden container.
+      expect(missing("{'<div hidden>'}\n\n[quote](/quote/)")).toBe(false);
+    });
+  });
+
   test('spread wrappers hide their CTA (astro parity, Codex #3646 r28)', () => {
     withAffiliateEnv(() => {
       const b = `Intro.\n\n## Sec\n\n<div {...props}>[Quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;

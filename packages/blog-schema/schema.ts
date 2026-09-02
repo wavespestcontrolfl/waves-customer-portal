@@ -1183,7 +1183,9 @@ function tagsNamed(src: string, name: string): Array<{ start: number; attrs: str
 // unusable product link (Codex #3646 r35). The balanced close is walked
 // on the string-blanked view (a quoted '</AffiliateLink>' inside an
 // expression never closes it early); children are judged with comments
-// and empty-string expressions ({''}) removed.
+// and statically NON-RENDERING expressions removed — empty strings and the
+// boolean/nullish literals React drops ({false}, {null}, {undefined},
+// {true}; Codex #3646 r36).
 function affiliateLinkTextIsEmpty(src: string, strView: string, start: number, attrs: string): boolean {
   if (attrs.trimEnd().endsWith('/')) return true;
   const openEnd = start + '<AffiliateLink'.length + attrs.length; // index of '>'
@@ -1196,7 +1198,7 @@ function affiliateLinkTextIsEmpty(src: string, strView: string, start: number, a
       if (depth === 0) {
         const children = src.slice(openEnd + 1, t.index)
           .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, '')
-          .replace(/\{\s*(['"`])\1\s*\}/g, '');
+          .replace(/\{\s*(?:(['"`])\1|true|false|null|undefined)\s*\}/g, '');
         return !children.trim();
       }
     } else {

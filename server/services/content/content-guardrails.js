@@ -255,11 +255,30 @@ function hasTrueOpenAttr(attrs) {
   return !FALSY_EXPR_RE.test(value.trim());
 }
 
+// `hidden` follows ASTRO attribute-rendering semantics (astro
+// hiddenAttrRendersHidden parity, Codex #3646 r36): only an expression
+// that is exactly false/null/undefined omits the attribute; any literal
+// (even ""), bare, or other expression renders it PRESENT and hides.
+// Last wins (JSX). Names are located on the masked copy so `hidden`
+// inside a quoted value is not an attribute.
+function hiddenAttrRendersHidden(attrs) {
+  const a = String(attrs || '');
+  const masked = maskAttrRegions(a);
+  const re = /(?:^|\s)hidden(\s*=\s*|(?=[\s>/]|$))/gi;
+  let m = null; let last = null;
+  while ((m = re.exec(masked)) !== null) last = m;
+  if (!last) return false;
+  const valueStart = /=/.test(last[1] || '') ? last.index + last[0].length : -1;
+  const value = valueStart >= 0 ? attrValueAt(a, valueStart) : undefined;
+  if (value === undefined) return true; // bare `hidden`
+  return !/^\{\s*(?:false|null|undefined)\s*\}$/.test(value.trim());
+}
+
 function opensDefinitelyHidden(tag) {
   if (HIDDEN_TAGS.has(tag.name)) return true;
   const a = tag.attrs || '';
   if ((tag.name === 'dialog' || tag.name === 'details') && !hasTrueOpenAttr(a)) return true;
-  if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
+  if (hiddenAttrRendersHidden(a)) return true;
   const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
   if (ariaM) {
     const v = ariaM[1].replace(/^[{"']|["'}]$/g, '').trim().toLowerCase();
@@ -331,16 +350,22 @@ function blankHiddenContent(str) {
 // natively hidden containers). Used where the caller must judge the text
 // as SEEN — a CTA anchor's visible wording — without discarding merely
 // styled copy.
-function blankDefinitelyHiddenContent(str) {
-  return blankContentWhere(str, opensDefinitelyHidden, { keepSummary: true });
+// `scanText` (optional, same length): the view tags are LOCATED on —
+// expression string literals blanked so {'<div hidden>'} never opens a
+// phantom container — while attrs are read from `str` at the same
+// offsets, so open={false}/hidden={false} keep their values (astro
+// blankBalancedElements parity, Codex #3646 r36).
+function blankDefinitelyHiddenContent(str, scanText = null) {
+  return blankContentWhere(str, opensDefinitelyHidden, { keepSummary: true, scanText });
 }
 // `keepSummary`: a closed <details> hides its body, but its <summary> is
 // what the reader sees — the certainty walker keeps the first summary's
 // content visible (the attribution walker stays conservative).
-function blankContentWhere(str, opens, { keepSummary = false } = {}) {
+function blankContentWhere(str, opens, { keepSummary = false, scanText = null } = {}) {
   const text = String(str || '');
   const out = text.split('');
-  const tags = [...eachTag(text)];
+  const scan = scanText === null ? text : String(scanText);
+  const tags = [...eachTag(scan)].map((t) => (scan === text ? t : { ...t, attrs: text.slice(t.start + 1 + (t.isClose ? 1 : 0) + t.name.length, t.end) }));
   // Pass 1 — every hidden container's range.
   const ranges = [];
   for (let t = 0; t < tags.length; t += 1) {
@@ -1896,7 +1921,9 @@ function isExactTagAt(text, start, name) {
 // product link (Codex #3646 r35). The balanced close is walked on the
 // string-blanked view (a quoted '</AffiliateLink>' inside an expression
 // never closes it early); children are read from the comment-blanked view
-// with empty-string expressions ({''}) removed.
+// with statically NON-RENDERING expressions removed — empty strings and
+// the boolean/nullish literals React drops ({false}, {null}, {undefined},
+// {true}; Codex #3646 r36).
 function affiliateLinkTextIsEmpty(masked, strView, start, attrs) {
   if (attrs.trimEnd().endsWith('/')) return true;
   const openEnd = start + '<AffiliateLink'.length + attrs.length; // index of '>'
@@ -1906,7 +1933,7 @@ function affiliateLinkTextIsEmpty(masked, strView, start, attrs) {
   while ((t = tagRe.exec(strView)) !== null) {
     if (t[1] === '/') {
       depth -= 1;
-      if (depth === 0) return !masked.slice(openEnd + 1, t.index).replace(/\{\s*(['"`])\1\s*\}/g, '').trim();
+      if (depth === 0) return !masked.slice(openEnd + 1, t.index).replace(/\{\s*(?:(['"`])\1|true|false|null|undefined)\s*\}/g, '').trim();
     } else {
       const a = tagAttrsAt(masked, t.index);
       if (a !== null && !a.trimEnd().endsWith('/')) depth += 1;
@@ -2049,7 +2076,12 @@ function hasServiceCtaLink(body) {
   // component, never a Markdown CTA, and must not satisfy the rule.
   // Static-hidden-class blanking runs FIRST: it must read attr
   // expressions ({'sr-only'}) before blankExpressions erases them.
-  const rendered = blankMarkdownImages(blankLinkDefinitionsAndTitles(blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(blankExpressions(blankStaticHiddenClassElements(prefix)))))))
+  // The definitely-hidden walk runs BEFORE blankExpressions: open={false}
+  // and hidden={false} are values it must read (Codex #3646 r36); tags are
+  // located on the expression-string-blanked view so a quoted tag inside
+  // an expression never opens a phantom container.
+  const ctaBase = blankComments(blankStaticHiddenClassElements(prefix));
+  const rendered = blankMarkdownImages(blankLinkDefinitionsAndTitles(blankNonRenderedMarkdown(blankExpressions(blankDefinitelyHiddenContent(ctaBase, blankExpressionStringLiterals(ctaBase, { attrValues: false }))))))
     .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
   // Attr-masked view: link- or tag-shaped text inside a JSX attribute
   // (title="[q](/quote/)", title="<InlineCTA />") renders nothing — the
@@ -2624,7 +2656,12 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   // "## fake" inside a fenced block or comment is not a section.
   // Attr text is not a heading (<div title=\"\\n## fake\\n\"> renders no
   // section — Codex #3646 r25): mask attr values before the heading scan.
-  const structureMasked = maskJsxAttrQuotes(blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(blankExpressions(String(body || ''))))));
+  // Statically hidden wrappers (class="hidden", {...props}) are blanked
+  // FIRST, as the CTA view does — an invisible "## Fake" must not end the
+  // opening section (Codex #3646 r36); the hidden walk reads attr
+  // expressions before blankExpressions erases them.
+  const structureBase = blankComments(blankStaticHiddenClassElements(String(body || '')));
+  const structureMasked = maskJsxAttrQuotes(blankNonRenderedMarkdown(blankExpressions(blankDefinitelyHiddenContent(structureBase, blankExpressionStringLiterals(structureBase, { attrValues: false })))));
   const firstHeading = structureMasked.search(/^#{2,3}\s/m);
   if (tags.some((t) => firstHeading === -1 || t.start < firstHeading)) {
     push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'opening', 'Draft places an affiliate link in the opening section (before the first section heading) — answer the reader\'s question first; product recommendations come later in the piece.');
