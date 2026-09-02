@@ -47,6 +47,10 @@ const BEFORE_TODAY_ET = "ss.scheduled_date < (now() AT TIME ZONE 'America/New_Yo
 // rows without either marker are not reported as missing notifications.
 const COMMS_MARKER_SINCE = '2026-07-01';
 
+// completionSmsStatus values closeout-status.js classifies as done or
+// not_required (a settled outcome); everything else is pending or failed.
+const TERMINAL_SMS_STATUSES = Object.freeze(['sent', 'skipped_recap_sms_already_sent', 'blocked']);
+
 // A completed record that OWES the customer a report / a completion notice:
 // not a backfill, delivery not suppressed, not a project close (the project
 // report lane owns those). Shared by the token and comms predicates.
@@ -120,16 +124,19 @@ const PREDICATES = Object.freeze({
          AND ${BEFORE_TODAY_ET}
          AND EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND sr.status = 'completed')`,
   },
-  // Confirmed notice = a settled completionSmsStatus on ANY sibling
-  // (closeout-status.js comms fact vocabulary: 'sent',
-  // 'skipped_recap_sms_already_sent', 'deferred', 'blocked', …) or a sent
-  // report email on any sibling. No marker anywhere, or only 'failed', is
-  // the finding. recap_sms_sent_at is deliberately NOT evidence: it is an
+  // Confirmed notice = a TERMINAL completionSmsStatus on ANY sibling —
+  // the closeout-status.js comms vocabulary's done / not_required outcomes
+  // only: 'sent', 'skipped_recap_sms_already_sent', 'blocked' (consent) —
+  // or a sent report email on any sibling. 'sending' and 'deferred' are
+  // pending there and stay findings once 24h old; NULL and 'failed' are
+  // findings. recap_sms_sent_at is deliberately NOT evidence: it is an
   // at-most-once CLAIM stamped before the provider call (closeout-status.js
   // treats an aged claim alone as unverified), so a crash can leave it set
-  // with no text sent.
+  // with no text sent. A frozen catalog rule saying the service owes no
+  // notice (closeoutRequirements.requiresCustomerNotice=false) exempts the
+  // record, as it does in closeout-status.
   completed_record_without_comms_marker: {
-    label: 'Completed visits (>24h) that owe a completion notice and have no sibling with a confirmed one (no/failed SMS marker, no sent report email)',
+    label: 'Completed visits (>24h) that owe a completion notice and have no sibling with a terminal one (sent / recap sent / consent-blocked SMS, or sent report email)',
     href: '/admin/dispatch',
     sql: `
       SELECT count(*)::int AS n,
@@ -140,13 +147,14 @@ const PREDICATES = Object.freeze({
                SELECT 1 FROM service_records sr
                 WHERE sr.scheduled_service_id = ss.id
                   AND ${OWES_CUSTOMER_ARTIFACT}
+                  AND COALESCE(sr.structured_notes->'closeoutRequirements'->>'requiresCustomerNotice', 'true') <> 'false'
                   AND sr.created_at >= '${COMMS_MARKER_SINCE}'::date
                   AND sr.created_at < now() - interval '24 hours')
          AND NOT EXISTS (
                SELECT 1 FROM service_records sib
                 WHERE sib.scheduled_service_id = ss.id
                   AND (
-                    COALESCE(sib.structured_notes->>'completionSmsStatus', '') NOT IN ('', 'failed')
+                    sib.structured_notes->>'completionSmsStatus' IN (${TERMINAL_SMS_STATUSES.map((s) => `'${s}'`).join(', ')})
                     OR EXISTS (
                          SELECT 1 FROM service_report_deliveries d
                           WHERE d.service_record_id = sib.id AND d.status = 'sent')))`,
@@ -166,5 +174,5 @@ async function runPredicate(key, knex = db) {
 module.exports = {
   PREDICATES,
   runPredicate,
-  _private: { SAMPLE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, OWES_CUSTOMER_ARTIFACT },
+  _private: { SAMPLE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, OWES_CUSTOMER_ARTIFACT, TERMINAL_SMS_STATUSES },
 };

@@ -51,7 +51,14 @@ describe('PREDICATES registry', () => {
     expect(token).not.toContain('report_generated_at');
     const comms = PREDICATES.completed_record_without_comms_marker.sql;
     expect(comms).toMatch(/FROM scheduled_services ss/);
-    expect(comms).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM service_records sib[\s\S]*completionSmsStatus', '\) NOT IN \('', 'failed'\)[\s\S]*service_report_deliveries d/);
+    expect(comms).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM service_records sib[\s\S]*service_report_deliveries d/);
+    // Only TERMINAL SMS outcomes clear the visit (closeout-status done /
+    // not_required); pending 'sending' / 'deferred' and 'failed' do not.
+    expect(_private.TERMINAL_SMS_STATUSES).toEqual(['sent', 'skipped_recap_sms_already_sent', 'blocked']);
+    expect(comms).toContain("completionSmsStatus' IN ('sent', 'skipped_recap_sms_already_sent', 'blocked')");
+    expect(comms).not.toMatch(/'sending'|'deferred'/);
+    // A frozen "no customer notice owed" catalog rule exempts the record.
+    expect(comms).toContain("closeoutRequirements'->>'requiresCustomerNotice', 'true') <> 'false'");
     // An unconfirmed recap claim is not delivery evidence.
     expect(comms).not.toContain('recap_sms_sent_at');
   });
