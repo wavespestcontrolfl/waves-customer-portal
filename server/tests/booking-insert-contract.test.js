@@ -318,7 +318,10 @@ function insertArgument(text) {
   const at = text.search(/\.insert\s*\(/);
   if (at === -1) return null;
   const open = text.indexOf('(', at);
-  return text.slice(open + 1, balancedParens(text, open) - 1);
+  // Only the FIRST argument is the payload — Knex's returning overload
+  // (`.insert(data, '*')`, `.insert(data, ['id'])`) must not turn a
+  // completed identifier into "data, '*'" (GH Codex r18 P2).
+  return topLevelArgs(text.slice(open + 1, balancedParens(text, open) - 1))[0] ?? '';
 }
 
 // Whether an insert ARGUMENT already passed through the contract's
@@ -460,7 +463,12 @@ function isContractCompleted(source, arg) {
     const cb = topLevelArgs(source.slice(open + 1, balancedParens(source, open) - 1))[0] || '';
     const params = /^\s*(?:async\s*)?(?:\(([^)]*)\)|([A-Za-z_$][\w$]*))\s*=>/.exec(cb) || /^\s*(?:async\s*)?function\s*[\w$]*\s*\(([^)]*)\)/.exec(cb);
     if (!params) continue;
-    const list = (params[1] ?? params[2] ?? '').split(',').map((x) => x.trim().replace(/=.*$/, '').trim());
+    const list = (params[1] ?? params[2] ?? '').split(',').map((x) => x.trim().replace(/=.*$/, '').trim()).filter(Boolean);
+    // A callback that also binds the ARRAY parameter (`(row, i, array) =>
+    // { array[i] = raw; }`) can replace completed rows through it — fail
+    // closed on that extra binding (GH Codex r18 P2). The index alone
+    // cannot mutate.
+    if (list.length > (mm[1] === 'reduce' ? 3 : 2)) return false;
     const el = mm[1] === 'reduce' ? list[1] : list[0];
     if (el && /^[A-Za-z_$][\w$]*$/.test(el) && (mutatesIdentifier(cb, el) || escapesThroughCall(cb, el))) return false;
   }
@@ -715,7 +723,7 @@ function collectInsertSites(source) {
   // (`INSERT INTO public.scheduled_services`, quoted or not; r5 P2).
   // …and PostgreSQL COPY / psql \copy INTO the table, which write rows
   // without an INSERT (GH Codex r17 P2).
-  const rawRe = /(?:INSERT\s+INTO|\bCOPY|\\copy)\s+(?:["'`]?\w+["'`]?\s*\.\s*)?["'`]?scheduled_services\b/gi;
+  const rawRe = /(?:INSERT\s+INTO|MERGE\s+INTO|\bCOPY|\\copy)\s+(?:["'`]?\w+["'`]?\s*\.\s*)?["'`]?scheduled_services\b/gi;
   let rawM;
   while ((rawM = rawRe.exec(source)) !== null) {
     // Comment mentions are not sites (the iCal script documents its own
@@ -723,7 +731,7 @@ function collectInsertSites(source) {
     // not by the line's prefix, so `/* import */ await db.raw('INSERT …')`
     // is still a site (GH Codex r16 P2). `#` covers shell/SQL tools.
     if (insideComment(source, rawM.index)) continue;
-    const verb = /^insert/i.test(rawM[0]) ? 'INSERT INTO' : 'COPY';
+    const verb = /^insert/i.test(rawM[0]) ? 'INSERT INTO' : /^merge/i.test(rawM[0]) ? 'MERGE INTO' : 'COPY';
     if (verb === 'COPY' && /\bcopy\s+(?:["'`]?\w+["'`]?\s*\.\s*)?["'`]?scheduled_services\b[^\n]*\bTO\b/i.test(source.slice(rawM.index, rawM.index + 200))) continue; // COPY … TO is an export
     site(rawM.index, `${statementPrefix(source, rawM.index)} raw:${verb} scheduled_services`, null);
   }
@@ -871,6 +879,9 @@ describe('booking insert-site contract', () => {
       expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\n${cb}\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     }
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach((row) => { if (row.status === 'x') count += 1; });\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
+    // …a callback binding the ARRAY parameter can replace rows through it → fail closed; the index alone is fine (r18 P2).
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach((row, i, array) => { array[i] = raw; });\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach((row, i) => logger.info(i, row));\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
     // …and handing the element to a helper from the callback is an escape (r14 P2), a logger is not.
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach(row => stripAttribution(row));\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach((row) => logger.info('row', row));\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
@@ -929,6 +940,9 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("// await db.raw('INSERT INTO scheduled_services (a) VALUES (1)');")).toEqual([]);
     expect(collectInsertSites("/* documents: INSERT INTO scheduled_services happens below */\nconst x = 1;")).toEqual([]);
     expect(collectInsertSites("const s = 'not // a comment'; await db.raw('INSERT INTO scheduled_services (a) VALUES (1)');")).toHaveLength(1);
+    // MERGE INTO the table is a writer too, standalone or in db.raw (r18 P2).
+    expect(collectInsertSites("MERGE INTO scheduled_services s USING staged t ON s.id = t.id WHEN NOT MATCHED THEN INSERT VALUES (t.id);")).toEqual(["raw:MERGE INTO scheduled_services"]);
+    expect(collectInsertSites("await db.raw(`MERGE INTO scheduled_services s USING staged t ON s.id = t.id WHEN NOT MATCHED THEN INSERT VALUES (t.id)`);")).toHaveLength(1);
     // COPY / \\copy INTO the table are writers; COPY … TO is an export (r17 P2).
     expect(collectInsertSites("COPY scheduled_services (customer_id) FROM STDIN;")).toEqual(["raw:COPY scheduled_services"]);
     expect(collectInsertSites("psql \"$DATABASE_URL\" -c \"\\\\copy scheduled_services from 'rows.csv'\"")).toHaveLength(1);
@@ -950,6 +964,10 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nawait trx.insert(data).into('scheduled_services');`)).toEqual([]);
     // …an ESM import of the canonical helper counts too (r17 P2)…
     expect(collectInsertSites("import { completeScheduledServiceInsert } from '../services/booking/create-scheduled-service.js';\nconst data = await completeScheduledServiceInsert(raw, opts);\nawait trx('scheduled_services').insert(data);")).toEqual([]);
+    // …Knex's returning overload keeps the payload as the FIRST argument (r18 P2)…
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nconst [row] = await trx('scheduled_services').insert(data, '*');`)).toEqual([]);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nconst [id] = await trx('scheduled_services').insert(data, ['id']);`)).toEqual([]);
+    expect(collectInsertSites("await trx('scheduled_services').insert(raw, '*');")).toHaveLength(1);
     // …but a same-named helper that is NOT the canonical module's — no
     // import, a local definition, or an import from elsewhere — launders
     // nothing (GH Codex r6 P2)…
