@@ -1871,6 +1871,23 @@ const gates = {
   // stay individually available regardless of this gate.
   prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
 
+  // Zelle payment-notice reconciler — the Gmail sync recognises Capital One
+  // "Someone sent you money with Zelle" notices (forwarded from the owner's
+  // personal inbox to contact@), matches the payer + exact amount to ONE open
+  // self-pay invoice and settles it through services/invoice-manual-payment.js
+  // — the operator's Add-payment path — INCLUDING the paid receipt (email +
+  // SMS). OWNER RULING 2026-09-02: an exact single match may mark the invoice
+  // paid and send the receipt with no human in the loop; anything else parks
+  // on the Invoices page for one-click Apply / Ignore. Money + a customer
+  // comm, so it ships dark in prod. OFF = the hook returns before any DB
+  // read and the email flows through normal classification exactly as
+  // today; the parked-notice admin routes stay live so history remains
+  // actionable after a kill. Read at CALL time (gateEnvValue) so unsetting
+  // GATE_ZELLE_NOTICE_RECONCILE on Railway is a live kill switch — the
+  // consumer (services/zelle-notice-reconciler.js) and logGateStatus must
+  // keep using this same parser.
+  zelleNoticeReconcile: isProd ? gateEnvValue('GATE_ZELLE_NOTICE_RECONCILE') : process.env.GATE_ZELLE_NOTICE_RECONCILE !== 'false',
+
   // Treatment Zone Mapper — tech traces the treated perimeter over a satellite
   // photo of the property; the traced path + snapshot replace the generic
   // schematic on the customer's service report. Gates BOTH the tech capture

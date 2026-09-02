@@ -30,6 +30,10 @@ async function enqueueReceiptDelivery({
   // fail-closed — unstamped rows are treated as machine charges and their
   // receipt text waits for the 8AM window.
   customerInitiated = false,
+  // A caller settling inside its own transaction passes it so the job row
+  // commits WITH the payment (the Zelle reconciler: a settlement whose
+  // receipt job was lost after commit would have no retry path).
+  database = db,
 } = {}) {
   if (!invoiceId) return { enqueued: false, reason: 'missing_invoice_id' };
 
@@ -45,7 +49,7 @@ async function enqueueReceiptDelivery({
     updated_at: db.fn.now(),
   };
 
-  const inserted = await db('receipt_delivery_jobs')
+  const inserted = await database('receipt_delivery_jobs')
     .insert(row)
     .onConflict(['invoice_id'])
     .ignore()

@@ -37,11 +37,15 @@ jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(a
 jest.mock('../services/project-report-hold', () => ({ scheduleHoldReleaseSweep: jest.fn() }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
 jest.mock('../services/payment-plans', () => ({ completeActivePlansForInvoice: jest.fn(async () => undefined) }));
+jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn(async () => true) }));
+jest.mock('../services/receipt-delivery-queue', () => ({ enqueueReceiptDelivery: jest.fn(async () => ({ enqueued: true })), scheduleReceiptDeliveryDrain: jest.fn() }));
 
 const db = require('../models/db');
 const StripeService = require('../services/stripe');
 const InvoiceService = require('../services/invoice');
 const { sendReceiptEmail } = require('../services/invoice-email');
+const { rowIsSelfPayDue } = require('../services/open-balance');
+const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const { recordManualPayment, VALID_PAYMENT_METHODS } = require('../services/invoice-manual-payment');
 
 function recorder({ first = null, returning = [] } = {}) {
@@ -138,6 +142,84 @@ describe('recordManualPayment — refusal contract', () => {
     expect(err.message).toMatch(/new payment session started/);
   });
 
+  test('expectedAmountCents is fenced under the invoice lock: a moved amount due → 409 and nothing written', async () => {
+    db.mockImplementation(() => recorder({ first: openInvoice() }));
+    let paymentsInsert = null;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') return recorder({ first: openInvoice({ total: '120.00' }), returning: [] }); // amount moved under the lock
+        if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 11700 }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/\$120\.00, not the \$117\.00/);
+    expect(err.amountMismatch).toEqual({ expectedCents: 11700, actualCents: 12000 });
+    expect(paymentsInsert).toBeNull();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a payer assigned on the locked row', { payer_id: 'payer-1' }, true],
+    ['a statement assigned on the locked row', { payer_statement_id: 'stmt-1' }, true],
+    ['the live payer resolution now naming a payer', {}, false],
+  ])('requireSelfPay is fenced under the invoice lock: %s → 409 and nothing written', async (_label, lockedOver, resolvesSelfPay) => {
+    db.mockImplementation(() => recorder({ first: openInvoice() }));
+    // First call = the pre-lock read (passes); second = under the lock (the race fence being tested).
+    let resolveCalls = 0;
+    rowIsSelfPayDue.mockImplementation(async () => (resolveCalls++ === 0 ? true : resolvesSelfPay));
+    let paymentsInsert = null;
+    let customerLock = null;
+    let payersLock = null;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') return recorder({ first: openInvoice(lockedOver), returning: [] });
+        if (table === 'customers') { const r = recorder({ first: { id: 'cust-1', payer_id: 'payer-9' } }); customerLock = r.forUpdate; return r; }
+        if (table === 'payers') { const r = recorder(); r.select = jest.fn(async () => []); payersLock = r.forUpdate; return r; }
+        if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 11700, requireSelfPay: true }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/no longer an open self-pay invoice/);
+    // The payer-source row is LOCKED in the payment trx before the resolution, which rides the same trx.
+    expect(customerLock).toHaveBeenCalled();
+    expect(payersLock).toHaveBeenCalled(); // the (possibly inactive) payer the customer points at is locked too
+    if (!resolvesSelfPay) expect(rowIsSelfPayDue).toHaveBeenCalledWith('cust-1', expect.objectContaining({ id: 'inv-1' }), expect.objectContaining({ database: expect.any(Function) }));
+    expect(paymentsInsert).toBeNull();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+  });
+
+  test('the Zelle predicates refuse on the PRE-LOCK read before the Stripe session is retired (a bad match never cancels a live checkout)', async () => {
+    StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_live', status: 'requires_payment_method' });
+    // amount moved before the call: 409, no PI retire, no transaction
+    db.mockImplementation(() => recorder({ first: openInvoice({ total: '120.00', stripe_payment_intent_id: 'pi_live' }) }));
+    let err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 11700, requireSelfPay: true }));
+    expect(err.statusCode).toBe(409);
+    expect(err.amountMismatch).toEqual({ expectedCents: 11700, actualCents: 12000 });
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    // payer assigned before the call: same
+    db.mockImplementation(() => recorder({ first: openInvoice({ payer_id: 'payer-1', stripe_payment_intent_id: 'pi_live' }) }));
+    err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 11700, requireSelfPay: true }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/no longer an open self-pay invoice/);
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('expectedAmountCents must be a positive integer', async () => {
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 117.5 }));
+    expect(err.statusCode).toBe(400);
+    expect(db).not.toHaveBeenCalled();
+  });
+
   test('a non-refusal error from inside the transaction is rethrown untouched', async () => {
     db.mockImplementation(() => recorder({ first: openInvoice() }));
     const sentinel = new Error('db exploded');
@@ -148,13 +230,14 @@ describe('recordManualPayment — refusal contract', () => {
 });
 
 describe('recordManualPayment — settlement', () => {
-  function settle(row) {
+  function settle(row, { prefs = null, prefsLookupFails = false } = {}) {
     const paid = { ...row, status: 'paid', payment_method: 'zelle' };
     const invoices = recorder({ first: row });
     const activity = recorder();
     db.mockImplementation((table) => {
       if (table === 'invoices') return invoices;
       if (table === 'activity_log') return activity;
+      if (table === 'notification_prefs') { const r = recorder({ first: prefs }); if (prefsLookupFails) r.first = jest.fn(async () => { throw new Error('db blip'); }); return r; }
       throw new Error(`unexpected table ${table}`);
     });
     db.transaction.mockImplementation(async (fn) => {
@@ -179,6 +262,58 @@ describe('recordManualPayment — settlement', () => {
     const descriptions = activity.insert.mock.calls.map(([r]) => r.description);
     expect(descriptions[0]).toMatch(/Manual payment recorded for WPC-2026-0400 \(\$117\.00 via zelle · ref Pat Doe\) — zelle-notice-reconciler/);
     expect(descriptions[1]).toMatch(/Receipt sent for invoice WPC-2026-0400 \(email \+ sms\)/);
+  });
+
+  test('automated: the receipt job is inserted IN the settlement transaction (opt-outs, send window, retries live in the queue), nothing sent inline', async () => {
+    settle(openInvoice());
+    const out = await recordManualPayment('inv-1', { method: 'zelle', automated: true });
+    expect(out.receipt).toEqual({ queued: true });
+    // Inserted IN the settlement transaction (database = the trx), not after commit.
+    expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).toHaveBeenCalledWith({ invoiceId: 'inv-1', source: 'zelle_notice_reconciler', customerInitiated: true, database: expect.any(Function) });
+    expect(ReceiptDeliveryQueue.enqueueReceiptDelivery.mock.invocationCallOrder[0]).toBeLessThan(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain.mock.invocationCallOrder[0]);
+    expect(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain).toHaveBeenCalled();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+    // The operator path is unchanged: inline, operator-initiated.
+    settle(openInvoice());
+    const op = await recordManualPayment('inv-1', { method: 'zelle' });
+    expect(op.receipt).toEqual({ email: { ok: true }, sms: { ok: true } });
+    expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).toHaveBeenCalledTimes(1);
+  });
+
+  test('settlementFence runs under the invoice lock on the payment trx right before the paid flip; false → 409, nothing written', async () => {
+    db.mockImplementation(() => recorder({ first: openInvoice() }));
+    let paymentsInsert = null;
+    let seenTrx = null;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') return recorder({ first: openInvoice(), returning: [] });
+        if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    // First call = pre-lock (passes), second = under the lock on the payment trx.
+    let fenceCalls = 0;
+    const fence = jest.fn(async (conn) => { if (fenceCalls++ === 0) return true; seenTrx = conn; return false; });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', settlementFence: fence }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/settlement claim was lost/);
+    expect(fence).toHaveBeenCalledTimes(2);
+    expect(fence.mock.calls[0][0]).toBe(db); // pre-lock: the plain connection
+    expect(typeof seenTrx).toBe('function'); // under the lock: the payment connection, not a third one
+    expect(paymentsInsert).toBeNull();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+  });
+
+  test('a lost claim refuses on the PRE-LOCK fence before the Stripe session is retired', async () => {
+    StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_live', status: 'requires_payment_method' });
+    db.mockImplementation(() => recorder({ first: openInvoice({ stripe_payment_intent_id: 'pi_live' }) }));
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', settlementFence: async () => false }));
+    expect(err.statusCode).toBe(409);
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 
   test('sendReceipt:false records the payment and sends nothing', async () => {
