@@ -1,6 +1,6 @@
 ---
 name: waves-billing
-description: Use when touching anything that moves or records money — Stripe flows, invoices, payments, surcharges, deposits, prepay/annual plans, autopay, refunds, WavesPay/Terminal — or when verifying a billing outcome in prod. For changing pricing VALUES (brackets, fees, discounts) use the pricing-config skill instead.
+description: Use when touching anything that moves or records money (Stripe flows, invoices, surcharges, deposits, prepay, autopay, refunds, Terminal) or verifying a billing outcome in prod. Pricing VALUES use pricing-config.
 ---
 
 # Waves Billing — money-movement invariants

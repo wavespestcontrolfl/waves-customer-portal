@@ -1,6 +1,6 @@
 ---
 name: waves-ship
-description: Use for any code change destined for a wavespestcontrolfl repo — from creating the branch/worktree through pushing, Codex review, merging, Railway deploy verification, and dark-ship gate flips. Also use when checking whether a PR is safe to merge or whether a merged PR actually landed.
+description: Use for any code change bound for a wavespestcontrolfl repo — branch/worktree through push, Codex review, merge, Railway deploy verification, and dark-ship gate flips.
 ---
 
 # Waves Ship — PR lifecycle for the portal and astro repos

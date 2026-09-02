@@ -1,6 +1,6 @@
 ---
 name: waves-llm
-description: Use when adding or modifying ANY LLM call site — choosing a model tier, calling Claude/OpenAI/Gemini, adding a cross-provider route, touching fallbacks, or changing model env vars. Covers the tier system, the DEEP helper contract, the ROUTES map, the fallback-to-Claude requirement, and the exceptions (call-recording, managed agents).
+description: Use when adding or modifying ANY LLM call site — model tiers, the DEEP helper, the ROUTES map, cross-provider fallbacks, or model env vars.
 ---
 
 # Waves LLM call sites — tiers, routing, fallbacks

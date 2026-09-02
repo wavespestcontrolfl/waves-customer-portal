@@ -1,6 +1,6 @@
 ---
 name: waves-content
-description: Use when writing or editing blog posts, hub or spoke pages, SEO metadata, GBP/social content, or working on the portal's autonomous content engine — anything that publishes words to a Waves surface. Covers the truth rules, the prohibitions registry, hub-and-spoke boundaries, and the publish gates.
+description: Use when writing or editing blog posts, hub or spoke pages, SEO metadata, GBP/social content, or the autonomous content engine — truth rules, prohibitions, hub-and-spoke boundaries, publish gates.
 ---
 
 # Waves Content — publishing rules for the hub, spokes, blog, and social
