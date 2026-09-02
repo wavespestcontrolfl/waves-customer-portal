@@ -2902,6 +2902,67 @@ describe('full run', () => {
     expect(dom.watch_recheck_at.getTime() - NOW.getTime()).toBeLessThanOrEqual(2 * 24 * 60 * 60 * 1000); // …and the selector's horizon agrees: not 30 days out
   });
 
+  // ---- Codex #3754 round 2 ----------------------------------------------
+
+  test('a composite touch wider than one pass\'s budget is covered URL by URL across passes — its tail is reached and the close waits for it (Codex #3754 r2 P1)', async () => {
+    const d = domainRow({ probe_coverage_mask: (1 << investigator.PROBE_PATHS.length) - 1 });
+    const urls = Array.from({ length: 9 }, (_, i) => `https://example.com/hint-${i}`);
+    const touch = { id: uid(), domain_id: d.id, source: 'list_import', source_detail: `csv:row-7 ${urls.join(' ')}`, source_ref: null, covered_at: null, covered_urls: null };
+    const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: [touch] });
+    const fetched = new Set();
+    const fetcher = async (url) => { fetched.add(url); return okFetch(url); };
+    const llm = async () => ({ ok: true, json: verdictOf([], 'not_reproducible') });
+    const dom = () => db._tables.seo_link_domains[0];
+    let t = NOW;
+    let passes = 0;
+    await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), now: t });
+    expect(dom().agent_state).toBe('watching'); // the tail of the touch was never offered a fetch
+    expect(touch.covered_at).toBeNull();
+    expect(JSON.parse(touch.covered_urls).length).toBeGreaterThan(0); // …but what WAS read is remembered
+    while (dom().agent_state === 'watching' && passes < 6) {
+      passes += 1;
+      t = new Date(Math.max(dom().watch_recheck_at || 0, dom().investigate_after || 0, t.getTime() + 60 * 60 * 1000));
+      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), now: t, domainIds: [d.id] });
+    }
+    expect(urls.every((u) => fetched.has(u))).toBe(true); // every embedded URL was eventually fetched
+    expect(dom().agent_state).toBe('not_reproducible'); // …and only then could the domain close
+    expect(passes).toBeGreaterThan(0);
+  });
+
+  test('paths under a watching verdict are written unleasable (confidence 0, reason in evidence) even when a refresh keeps a lane-owned state (Codex #3754 r2 P1)', async () => {
+    const d = domainRow({ agent_state: 'acquired' });
+    const db = makeDb({ seo_link_domains: [d] });
+    const closed = { ...verdictOf([modelPath()], 'watching'), watch_reason: 'applications closed until January' };
+    await investigatePaths(db, { ...runOpts(db, { llmDispatch: async () => ({ ok: true, json: closed }) }), domainIds: [d.id] });
+    const path = db._tables.seo_link_acquisition_paths[0];
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('acquired'); // the lane-owned aggregate is preserved…
+    expect(Number(path.confidence)).toBe(0); // …but nothing can lease a route that is closed today
+    expect(JSON.parse(path.investigation).watching).toBe('applications closed until January');
+  });
+
+  test('one terms attempt is reserved for a hashed agreement when un-hashed paths keep failing — a changed agreement is still re-read (Codex #3754 r2 P1)', async () => {
+    const { pathKey } = require('../services/seo/link-registry');
+    const termsFetches = [];
+    const agreement = `<html><body>Membership agreement. ${'By joining you agree to the listing terms and renewal policy. '.repeat(8)}</body></html>`;
+    const fetcher = async (url) => {
+      if (url.includes('/terms-')) { termsFetches.push(url); return url.endsWith('terms-h') ? { status: 200, finalUrl: url, contentType: 'text/html', html: agreement, blocked: false, truncated: false } : { status: 503, finalUrl: url, html: null, blocked: false, error: 'http_503' }; }
+      return okFetch(url);
+    };
+    const legal = (n) => modelPath({ submission_url: `https://example.com/join-${n}`, legal_attestation: true, legal_terms_url: `https://example.com/terms-${n}` });
+    const d = domainRow();
+    const hashed = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join-h', link_type: 'directory',
+      path_key: pathKey('paid_listing', 'https://example.com/join-h'), superseded_by: null, baseline: false, confidence: 0.7, legal_attestation: true,
+      legal_terms_url: 'https://example.com/terms-h', legal_terms_hash: 'stale-hash', last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [hashed] });
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([legal('a'), legal('b'), legal('h')]) }) }));
+    expect(termsFetches.some((u) => u.endsWith('terms-h'))).toBe(true); // the hashed agreement got its slot despite two failing un-hashed paths
+    expect(termsFetches.length).toBeLessThanOrEqual(2); // within the budget
+    expect(hashed.legal_terms_hash).not.toBe('stale-hash'); // …and was re-hashed
+  });
+
   // ---- Codex PR #3687 round 30 (carried into PR 2 of the split) ------------
 
   test('a terminal close is deferred while ANY active path was left unverified — a zero-confidence one included (Codex #3687 r30 P2)', async () => {

@@ -11,6 +11,11 @@
  * long-term park, an owner Watch or Reopen clears it, so the next
  * generation re-reads hints uncovered-first (a route can appear on a hint
  * page during the 90 days between rechecks).
+ *
+ * `covered_urls` (jsonb array of normalized URL keys) — the per-URL half of
+ * the same cursor: a composite touch can embed more host-bound URLs than
+ * one pass can fetch, so coverage accrues URL by URL across passes and
+ * covered_at is stamped once every URL has been observed. Cleared with it.
  */
 exports.up = async function up(knex) {
   const cols = await knex('seo_link_domain_sources').columnInfo();
@@ -19,8 +24,14 @@ exports.up = async function up(knex) {
       t.timestamp('covered_at');
     });
   }
+  if (!cols.covered_urls) {
+    await knex.schema.alterTable('seo_link_domain_sources', (t) => {
+      t.jsonb('covered_urls');
+    });
+  }
 };
 
 exports.down = async function down(knex) {
+  await knex.raw('ALTER TABLE seo_link_domain_sources DROP COLUMN IF EXISTS covered_urls');
   await knex.raw('ALTER TABLE seo_link_domain_sources DROP COLUMN IF EXISTS covered_at');
 };

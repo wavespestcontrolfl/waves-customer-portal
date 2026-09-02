@@ -207,6 +207,17 @@ function evidencePagesOf(path) {
 
 /** Every URL embedded in a provenance touch's detail (host-boundness is enforced by the caller). */
 const touchUrls = (t) => String((t && t.source_detail) || '').match(/https?:\/\/[^\s"'<>]+/g) || [];
+// The per-URL half of the hint cursor: normalized keys of a touch's URLs
+// already observed (definitively) this generation — jsonb in pg, a JSON
+// string in flight. A composite touch can carry more host-bound URLs than
+// one pass can fetch, so coverage accrues URL by URL across passes.
+const coveredUrlKeys = (t) => {
+  const v = t && t.covered_urls;
+  let arr = [];
+  if (Array.isArray(v)) arr = v;
+  else if (typeof v === 'string') { try { arr = JSON.parse(v); } catch { arr = []; } }
+  return new Set((Array.isArray(arr) ? arr : []).map(String));
+};
 
 function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths = [], probeOffset = 0, probeMask = 0 } = {}) {
   const seen = new Set();
@@ -242,8 +253,16 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
   const rotate = (list) => { const m = list.length || 1; const s = ((probeOffset % m) + m) % m; return [...list.slice(s), ...list.slice(0, s)]; };
   const uncoveredTouches = rotate(touches.filter((t) => !t.covered_at));
   const coveredTouches = rotate(touches.filter((t) => !!t.covered_at)); // covered ones rotate too — no fixed prefix within a generation
+  // …and WITHIN a touch the URLs not yet observed this generation go first,
+  // rotated too: a composite detail with more host-bound URLs than one
+  // pass can fetch would otherwise re-offer the same prefix every pass and
+  // never reach its tail (nor ever be covered).
   for (const t of [...uncoveredTouches, ...coveredTouches]) {
-    for (const m of touchUrls(t)) push(m);
+    const done = coveredUrlKeys(t);
+    const urls = touchUrls(t);
+    const pending = urls.filter((u) => !done.has(registry.normalizeSubmissionUrl(u)));
+    const already = urls.filter((u) => done.has(registry.normalizeSubmissionUrl(u)));
+    for (const m of [...rotate(pending), ...already]) push(m);
   }
   // The probe list is longer than what the fetch cap leaves after the
   // homepage and hints, so probes the domain has NEVER been offered (per
@@ -1000,7 +1019,7 @@ async function deferFailedDomain(db, domain, now, { claim = true, observedState 
     // claim/state guard — never a reset mask beside stale hint coverage
     await db.transaction(async (trx) => {
       const n = await trx('seo_link_domains').where(guard).update(patch);
-      if (n && patch.probe_coverage_mask === 0) await trx('seo_link_domain_sources').where({ domain_id: domain.id }).whereNotNull('covered_at').update({ covered_at: null });
+      if (n && patch.probe_coverage_mask === 0) await trx('seo_link_domain_sources').where({ domain_id: domain.id }).update({ covered_at: null, covered_urls: null });
     });
   } catch (err) {
     logger.error(`[link-investigator] defer failed for ${domain.domain}: ${err.message}`);
@@ -1095,7 +1114,7 @@ async function investigatePaths(db, {
         }
 
         const [touches, existingPaths, competitorRows] = await Promise.all([
-          db('seo_link_domain_sources').where({ domain_id: domain.id }).select('id', 'source', 'source_detail', 'source_ref', 'covered_at'),
+          db('seo_link_domain_sources').where({ domain_id: domain.id }).select('id', 'source', 'source_detail', 'source_ref', 'covered_at', 'covered_urls'),
           db('seo_link_acquisition_paths').where({ domain_id: domain.id }).whereNull('superseded_by').select('*'),
           db('seo_competitor_backlinks').whereIn('source_domain', [host, `www.${host}`]).limit(2).select('source_url'),
         ]);
@@ -1311,6 +1330,14 @@ async function investigatePaths(db, {
           .map((p) => {
             // a UUID is case-insensitive; the DB ids are lowercase
             const clean = { ...p, offhost: {}, replaces_path_id: p.replaces_path_id ? String(p.replaces_path_id).toLowerCase() : p.replaces_path_id };
+            // A `watching` verdict says the route exists but is CLOSED today
+            // (applications closed, waitlist): its paths are written so no
+            // worker can lease them — confidence 0 with the reason in the
+            // evidence — until the recheck re-investigates. The domain-state
+            // block alone is not enough: a refresh under a lane-owned state
+            // (ready_to_acquire / acquired) keeps that state, and claim()
+            // gates paths only by confidence and completability.
+            if (verdict.verdict === 'watching') { clean.confidence = 0; clean.watchClosed = verdict.watch_reason || 'closed today'; }
             for (const key of ['submission_url', 'legal_terms_url']) {
               if (clean[key] && !hostBound(host, clean[key])) {
                 clean.offhost[key] = clean[key];
@@ -1438,7 +1465,16 @@ async function investigatePaths(db, {
           const unhashed = legal.filter((p) => !hashOnFile(p));
           const hashed = legal.filter(hashOnFile);
           const start = unhashed.length ? (Number(domain.investigate_failures) || 0) % unhashed.length : 0;
-          return [...unhashed.slice(start), ...unhashed.slice(0, start), ...hashed];
+          const rotU = [...unhashed.slice(start), ...unhashed.slice(0, start)];
+          // hashed agreements rotate on the pass hour (a refresh is not a failure)
+          const hs = hashed.length ? Math.floor(now.getTime() / (60 * 60 * 1000)) % hashed.length : 0;
+          const rotH = [...hashed.slice(hs), ...hashed.slice(0, hs)];
+          // ONE attempt is reserved for a hashed agreement whenever both
+          // groups exist: un-hashed paths that keep failing must not consume
+          // the whole budget every pass, or a changed agreement behind a
+          // retained hash would never be re-read and the refresh never settle.
+          if (rotU.length >= TERMS_FETCH_BUDGET && rotH.length) return [...rotU.slice(0, TERMS_FETCH_BUDGET - 1), rotH[0], ...rotU.slice(TERMS_FETCH_BUDGET - 1), ...rotH.slice(1)];
+          return [...rotU, ...rotH];
         })();
         for (const p of legalOrder) {
           if (termsAttempted.has(p.legal_terms_url)) continue;
@@ -1530,6 +1566,7 @@ async function investigatePaths(db, {
               ...(p.submissionUnverified ? { submission_verification: p.submissionUnverified } : {}),
               ...(p.merchant_binding ? { merchant_binding_claim: p.merchant_binding, merchant_binding_verification: 'unverified_static_step3' } : {}),
               ...(Object.keys(p.offhost).length ? { offhost_urls: p.offhost } : {}),
+              ...(p.watchClosed ? { watching: p.watchClosed } : {}),
             };
             // Supersession needs DETERMINISTIC predecessor evidence, never the
             // model's word alone (the ids ride the prompt, and prompt content
@@ -1661,22 +1698,32 @@ async function investigatePaths(db, {
           // gone) this pass — stamped so the candidate order rotates past
           // it and the terminal valve knows what was never read.
           const definitiveKeys = new Set([...coverageKeys, ...goneKeys]);
-          const touchCoveredNow = (t) => {
-            const keys = touchUrls(t).filter((u) => hostBound(host, u)).map(registry.normalizeSubmissionUrl);
-            return keys.length > 0 && keys.every((k) => definitiveKeys.has(k));
-          };
           // …decided on the touches as they stand INSIDE this write
           // transaction (under the domain row lock), not the pre-fetch
           // snapshot: a hint filed while the pages were being fetched would
           // otherwise be closed over as if it had been offered a fetch.
-          const touchesNow = await trx('seo_link_domain_sources').where({ domain_id: domain.id }).select('id', 'source', 'source_detail', 'source_ref', 'covered_at');
+          const touchesNow = await trx('seo_link_domain_sources').where({ domain_id: domain.id }).select('id', 'source', 'source_detail', 'source_ref', 'covered_at', 'covered_urls');
           const hintTouches = touchesNow.filter((t) => touchUrls(t).some((u) => hostBound(host, u)));
-          const newlyCovered = hintTouches.filter((t) => !t.covered_at && touchCoveredNow(t));
-          if (newlyCovered.length) {
-            await trx('seo_link_domain_sources').whereIn('id', newlyCovered.map((t) => t.id).filter(Boolean)).update({ covered_at: now });
+          // Coverage ACCRUES per URL (covered_urls) and the touch is stamped
+          // covered_at once every host-bound URL it carries has been
+          // definitive in SOME pass of this generation — a composite touch
+          // wider than one pass's budget is covered over several passes,
+          // each one progress, none of them a close over its unread tail.
+          let hintProgress = false;
+          let hintsRemain = false;
+          for (const t of hintTouches) {
+            if (t.covered_at) continue;
+            const keys = touchUrls(t).filter((u) => hostBound(host, u)).map(registry.normalizeSubmissionUrl);
+            const prior = coveredUrlKeys(t);
+            const merged = new Set([...prior, ...keys.filter((k) => definitiveKeys.has(k))]);
+            const grew = merged.size > prior.size;
+            const complete = keys.length > 0 && keys.every((k) => merged.has(k));
+            if ((grew || complete) && t.id) {
+              await trx('seo_link_domain_sources').where({ id: t.id }).update({ covered_urls: JSON.stringify([...merged]), ...(complete ? { covered_at: now } : {}) });
+            }
+            if (grew) hintProgress = true;
+            if (!complete) hintsRemain = true;
           }
-          const hintsRemain = hintTouches.some((t) => !t.covered_at && !touchCoveredNow(t));
-          const hintProgress = newlyCovered.length > 0;
 
           // A re-investigation DISPROVES only what it actually COVERED: a
           // previously active, non-baseline path absent from this verdict is
@@ -1879,7 +1926,7 @@ async function investigatePaths(db, {
           // first, so a 90-day recheck cannot re-read the same prefix and
           // miss a tail hint that became the route in the meantime.
           if (patch.probe_coverage_mask === 0) {
-            await trx('seo_link_domain_sources').where({ domain_id: domain.id }).whereNotNull('covered_at').update({ covered_at: null });
+            await trx('seo_link_domain_sources').where({ domain_id: domain.id }).update({ covered_at: null, covered_urls: null });
           }
         });
         if (staleClaim) {
