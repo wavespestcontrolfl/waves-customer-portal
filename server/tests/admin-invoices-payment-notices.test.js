@@ -54,7 +54,7 @@ function builder(table) {
   ['where', 'whereIn', 'orderBy', 'limit'].forEach((m) => { b[m] = jest.fn((...a) => { t.calls.push([m, ...a]); return b; }); });
   b.forUpdate = jest.fn(() => { t.calls.push(['forUpdate']); b.locked = true; return b; });
   b.first = jest.fn(async () => {
-    if (b.locked) return t.locks && t.locks.length ? t.locks.shift() : { id: 'notice-1', status: 'parked' };
+    if (b.locked) return t.locks && t.locks.length ? t.locks.shift() : { id: 'notice-1', status: 'processing' };
     return t.firsts.length ? t.firsts.shift() : null;
   });
   b.select = jest.fn(async () => (t.selects.length ? t.selects.shift() : []));
@@ -107,7 +107,7 @@ describe('GET /payment-notices', () => {
 describe('POST /payment-notices/:id/apply', () => {
   const liveExact = () => OpenBalance.openSelfPayInvoicesByAmountDue.mockResolvedValueOnce([{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', total: '117.00', credit_applied: 0 }]);
 
-  test('a live exact-cent invoice: lock the row, claim, settle via recordManualPayment (Zelle, receipt email + SMS), close — all in one transaction', async () => {
+  test('a live exact-cent invoice: claim COMMITTED with the invoice + recorder, then lock the row, settle via recordManualPayment (Zelle, receipt email + SMS) and close in one transaction', async () => {
     tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [] };
     liveExact();
     await withServer(async (call) => {
@@ -120,8 +120,10 @@ describe('POST /payment-notices/:id/apply', () => {
     expect(db.transaction).toHaveBeenCalledTimes(1);
     const calls = tables.inbound_payment_notices.calls;
     const updates = calls.filter(([m]) => m === 'update').map(([, p]) => p);
-    expect(calls.map(([m]) => m).indexOf('forUpdate')).toBeLessThan(calls.map(([m]) => m).indexOf('update'));
-    expect(updates[0]).toMatchObject({ status: 'processing' });
+    // The claim is the FIRST update and precedes the lock (it commits on its own).
+    expect(calls.map(([m]) => m).indexOf('update')).toBeLessThan(calls.map(([m]) => m).indexOf('forUpdate'));
+    expect(calls[calls.findIndex(([m]) => m === 'update') - 1]).toEqual(['where', { id: 'notice-1', status: 'parked' }]);
+    expect(updates[0]).toMatchObject({ status: 'processing', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: 'Adam' });
     expect(updates[1]).toMatchObject({ status: 'applied', match_method: 'manual', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: 'Adam' });
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', {
       method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: 'Adam', sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true,
@@ -149,8 +151,8 @@ describe('POST /payment-notices/:id/apply', () => {
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
-  test('a row that is no longer parked under the lock (a concurrent Apply or Ignore won) → 409, nothing settled', async () => {
-    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [], locks: [{ id: 'notice-1', status: 'ignored' }] };
+  test('a row no longer parked at claim time (a concurrent Apply or Ignore won) → 409, nothing settled', async () => {
+    tables.inbound_payment_notices = { firsts: [parked(), { status: 'ignored' }], selects: [], updates: [0], calls: [] };
     liveExact();
     await withServer(async (call) => {
       const r = await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' });
@@ -158,7 +160,35 @@ describe('POST /payment-notices/:id/apply', () => {
       expect(r.body).toEqual({ error: 'Payment notice is ignored, not parked', status: 'ignored' });
     });
     expect(recordManualPayment).not.toHaveBeenCalled();
-    expect(tables.inbound_payment_notices.calls.some(([m]) => m === 'update')).toBe(false);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('the DB refusing the claim (another notice already holds this invoice — partial UNIQUE index) → 409, nothing settled', async () => {
+    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [] };
+    liveExact();
+    const orig = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const b = orig(table);
+      if (table === 'inbound_payment_notices') b.update = jest.fn(async () => { throw Object.assign(new Error('duplicate key'), { code: '23505' }); });
+      return b;
+    });
+    await withServer(async (call) => {
+      const r = await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' });
+      expect(r.status).toBe(409);
+      expect(r.body).toEqual({ error: 'Another payment notice is already settling this invoice' });
+    });
+    expect(recordManualPayment).not.toHaveBeenCalled();
+  });
+
+  test('a claim that is no longer processing under the lock (the stale sweep parked it) → 409, nothing settled', async () => {
+    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [], locks: [{ id: 'notice-1', status: 'parked' }] };
+    liveExact();
+    await withServer(async (call) => {
+      const r = await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' });
+      expect(r.status).toBe(409);
+      expect(r.body).toEqual({ error: 'Payment notice is parked, not processing', status: 'parked' });
+    });
+    expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
   test('missing invoiceId → 400; unknown notice → 404; not parked → 409; no amount → 400', async () => {
@@ -185,7 +215,7 @@ describe('POST /payment-notices/:id/apply', () => {
     });
     const updates = tables.inbound_payment_notices.calls.filter(([m]) => m === 'update').map(([, p]) => p);
     expect(updates[0]).toMatchObject({ status: 'processing' });
-    expect(updates[1]).toMatchObject({ status: 'parked', park_reason: 'apply_failed', apply_error: 'Invoice status changed before payment could be recorded' });
+    expect(updates[1]).toMatchObject({ status: 'parked', park_reason: 'apply_failed', apply_error: 'Invoice status changed before payment could be recorded', matched_invoice_id: null, applied_by: null });
   });
 });
 

@@ -122,6 +122,7 @@ async function finishParked(notice, email, reason, { candidates = null, applyErr
     apply_error: applyError,
     matched_invoice_id: null,
     matched_customer_id: matchedInvoice?.customer_id || null,
+    applied_by: null,
     updated_at: new Date(),
   });
   await stampEmail(email.id, `zelle_notice_parked:${reason}`);
@@ -202,8 +203,9 @@ async function recoverStaleClaims() {
   const stale = await db('inbound_payment_notices')
     .where({ status: 'processing' })
     .where('updated_at', '<', cutoff)
-    .select('id', 'email_id', 'payer_name', 'amount_cents');
+    .select('id', 'email_id', 'payer_name', 'amount_cents', 'matched_invoice_id', 'applied_by');
   for (const row of stale) {
+    if (await closeIfSettled(row)) continue;
     const took = await db('inbound_payment_notices')
       .where({ id: row.id, status: 'processing' })
       .where('updated_at', '<', cutoff)
@@ -211,6 +213,8 @@ async function recoverStaleClaims() {
         status: 'parked',
         park_reason: 'apply_failed',
         apply_error: 'The sync was interrupted before this notice was settled — check the invoice, then apply or ignore.',
+        matched_invoice_id: null,
+        applied_by: null,
         updated_at: new Date(),
       });
     if (!took) continue;
@@ -219,6 +223,39 @@ async function recoverStaleClaims() {
     await notifyOwner('Zelle payment needs review', `${row.payer_name || 'Unknown payer'} sent${row.amount_cents != null ? ` $${(row.amount_cents / 100).toFixed(2)}` : ''} — sync interrupted before settlement`, row.id);
   }
   return stale.length;
+}
+
+// The settlement is two commits: recordManualPayment's ledger transaction on
+// its own connection, then the notice close. Both settling paths COMMIT the
+// match on the claim first (matched_invoice_id + applied_by = the recorder
+// the settlement will write onto the invoice, status still processing), so a
+// close lost between the two commits leaves a claim that says exactly what
+// to look for. The invoice was verified OPEN right before the stamp, so
+// "paid, by Zelle, recorded by that recorder" can only be this settlement:
+// close the notice to match the ledger instead of parking committed money
+// as failed. False otherwise (the caller parks).
+async function closeIfSettled(row) {
+  if (!row.matched_invoice_id || !row.applied_by) return false;
+  const inv = await db('invoices').where({ id: row.matched_invoice_id })
+    .first('id', 'invoice_number', 'customer_id', 'status', 'payment_method', 'payment_recorded_by');
+  if (!inv || inv.status !== 'paid' || inv.payment_method !== 'zelle' || inv.payment_recorded_by !== row.applied_by) return false;
+  const moved = await db('inbound_payment_notices').where({ id: row.id, status: 'processing' }).update({
+    status: row.applied_by === RECORDED_BY ? 'auto_applied' : 'applied',
+    park_reason: null,
+    apply_error: null,
+    matched_customer_id: inv.customer_id,
+    applied_at: new Date(),
+    updated_at: new Date(),
+  });
+  if (!moved) return true; // closed by its own path meanwhile — nothing to park
+  logger.error(`[zelle-notice] claim ${row.id} had settled ${inv.invoice_number} but never closed — closed to match the ledger (receipt unknown)`);
+  await stampEmail(row.email_id, `zelle_notice_applied:${inv.invoice_number}`);
+  await notifyOwner(
+    'Zelle payment applied',
+    `${row.payer_name || 'Unknown payer'} · $${((row.amount_cents || 0) / 100).toFixed(2)} → ${inv.invoice_number} (closed after an interrupted sync; receipt unknown — check the invoice)`,
+    row.id,
+  );
+  return true;
 }
 
 // Cadence entry point for the email sync (every run): gate-aware, cheap
@@ -329,6 +366,25 @@ async function maybeHandleZelleNotice(email) {
     }
   }
 
+  // COMMIT the match on the claim before settling (see closeIfSettled): a
+  // close lost after the ledger commits is then recoverable by the sweep. The
+  // partial UNIQUE index on matched_invoice_id also has the DATABASE refuse
+  // two notices settling one invoice — a violation here means another copy
+  // of this transfer is already on it.
+  try {
+    await db('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
+      matched_invoice_id: match.id,
+      matched_customer_id: match.customer_id,
+      match_method: matchMethod,
+      applied_by: RECORDED_BY,
+      updated_at: new Date(),
+    });
+  } catch (err) {
+    if (err.code !== '23505') throw err;
+    await finishParked(notice, email, 'possible_duplicate', { candidates });
+    return true;
+  }
+
   // Settle and close under a ROW LOCK on the notice: the stale-claim sweep
   // and the operator's Apply both UPDATE this row and therefore wait behind
   // the lock until the settlement has committed and the row says applied /
@@ -401,6 +457,7 @@ module.exports = {
   STALE_CLAIM_MS,
   recoverStaleClaims,
   sweepStaleClaims,
+  closeIfSettled,
   DUPLICATE_WINDOW_DAYS,
   NEAR_AMOUNT_TOLERANCE_CENTS,
   isZelleReconcileEnabled,

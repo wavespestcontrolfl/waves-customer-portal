@@ -88,6 +88,8 @@ function builder(table) {
 }
 const claimed = (row = { id: 'notice-1', payer_name: 'Pat Doe', amount_cents: 11700 }) => { tables.inbound_payment_notices.returning.push([row]); };
 const updatesOf = (table) => (tables[table]?.calls || []).filter(([m]) => m === 'update').map(([, p]) => p);
+// Terminal transitions only — the committed match stamp before settlement carries no status.
+const closesOf = (table) => updatesOf(table).filter((p) => p.status);
 const insertsOf = (table) => (tables[table]?.calls || []).filter(([m]) => m === 'insert').map(([, p]) => p);
 
 beforeEach(() => {
@@ -127,7 +129,7 @@ describe('not ours', () => {
     const out = await maybeHandleZelleNotice(notice({ from_address: 'owner@gmail.com', authentication_results: 'mx.google.com; dkim=pass header.i=@gmail.com' }));
     expect(out).toBe(false);
     expect(insertsOf('inbound_payment_notices')[0]).toMatchObject({ email_id: 'email-1', status: 'processing', payer_name: 'Pat Doe', amount_cents: 11700 });
-    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'sender_unverified' });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'sender_unverified' });
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_parked:sender_unverified' });
     expect(recordManualPayment).not.toHaveBeenCalled();
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment needs review', expect.stringContaining('sender unverified'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-1' }));
@@ -150,7 +152,7 @@ describe('auto-apply', () => {
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', {
       method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: RECORDED_BY, sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true,
     });
-    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', match_method: 'amount_name', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: RECORDED_BY });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', match_method: 'amount_name', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: RECORDED_BY });
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500', classification: 'other' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('receipt: email + sms'), expect.anything());
   });
@@ -163,7 +165,7 @@ describe('auto-apply', () => {
     ]));
     expect(await maybeHandleZelleNotice(memoNotice)).toBe(true);
     expect(recordManualPayment).toHaveBeenCalledWith('inv-2', expect.objectContaining({ method: 'zelle', note: 'Zelle memo: wpc-2026-0501 lawn' }));
-    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', match_method: 'memo_invoice_number', matched_invoice_id: 'inv-2' });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', match_method: 'memo_invoice_number', matched_invoice_id: 'inv-2' });
   });
 
   test('a record-payment refusal parks apply_failed with the reason — never a silent loss', async () => {
@@ -171,7 +173,7 @@ describe('auto-apply', () => {
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
     recordManualPayment.mockRejectedValueOnce(Object.assign(new Error('A payment is already in flight (processing)'), { statusCode: 409 }));
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
-    const patch = updatesOf('inbound_payment_notices')[0];
+    const patch = closesOf('inbound_payment_notices')[0];
     expect(patch).toMatchObject({ status: 'parked', park_reason: 'apply_failed', apply_error: 'A payment is already in flight (processing)', matched_customer_id: 'cust-1' });
     expect(JSON.parse(patch.candidates)[0]).toMatchObject({ invoice_id: 'inv-1', exact_amount: true, name_match: true });
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_parked:apply_failed' });
@@ -187,7 +189,7 @@ describe('settlement under the row lock', () => {
     expect(db.transaction).toHaveBeenCalled();
     expect(tables.inbound_payment_notices.calls).toContainEqual(['forUpdate']);
     expect(recordManualPayment).not.toHaveBeenCalled();
-    expect(updatesOf('inbound_payment_notices')).toHaveLength(0);
+    expect(closesOf('inbound_payment_notices')).toHaveLength(0);
   });
 
   test('settlement serializes on a payer+amount advisory lock and re-runs the duplicate check under it', async () => {
@@ -202,7 +204,7 @@ describe('settlement under the row lock', () => {
     expect(raw[1]).toEqual(['zelle-settle:patdoe:11700']);
     expect(tables.inbound_payment_notices.calls).toContainEqual(['forUpdate']);
     expect(recordManualPayment).not.toHaveBeenCalled();
-    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'possible_duplicate' });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'possible_duplicate' });
   });
 
   test('a settlement that commits closes the row inside the same transaction', async () => {
@@ -210,8 +212,37 @@ describe('settlement under the row lock', () => {
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     const calls = tables.inbound_payment_notices.calls.map(([m]) => m);
-    expect(calls.indexOf('forUpdate')).toBeLessThan(calls.indexOf('update'));
-    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied' });
+    expect(calls.indexOf('forUpdate')).toBeLessThan(calls.lastIndexOf('update'));
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied' });
+  });
+
+  test('the match is COMMITTED on the claim before the settlement transaction opens (matched invoice + recorder), so a lost close is recoverable', async () => {
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    const calls = tables.inbound_payment_notices.calls;
+    const stampAt = calls.findIndex(([m, p]) => m === 'update' && p.matched_invoice_id === 'inv-1' && !p.status);
+    expect(stampAt).toBeGreaterThan(-1);
+    expect(calls[stampAt][1]).toMatchObject({ match_method: 'amount_name', matched_customer_id: 'cust-1', applied_by: RECORDED_BY });
+    expect(stampAt).toBeLessThan(calls.findIndex(([m]) => m === 'forUpdate'));
+    expect(calls[stampAt - 1]).toEqual(['where', { id: 'notice-1', status: 'processing' }]);
+  });
+
+  test('the DB refusing the stamp (another notice already holds this invoice — partial UNIQUE index) parks possible_duplicate, nothing settles', async () => {
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+    const orig = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const b = orig(table);
+      if (table === 'inbound_payment_notices') {
+        const realUpdate = b.update;
+        b.update = jest.fn(async (patch) => { if (patch.matched_invoice_id === 'inv-1' && !patch.status) throw Object.assign(new Error('duplicate key'), { code: '23505' }); return realUpdate(patch); });
+      }
+      return b;
+    });
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    expect(recordManualPayment).not.toHaveBeenCalled();
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'possible_duplicate', matched_invoice_id: null, applied_by: null });
   });
 });
 
@@ -222,7 +253,7 @@ describe('post-commit failures', () => {
     recordManualPayment.mockRejectedValueOnce(new Error('activity_log insert exploded'));
     tables.invoices = { firsts: [{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid', payment_recorded_by: RECORDED_BY }], returning: [], calls: [] };
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
-    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', matched_invoice_id: 'inv-1' });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', matched_invoice_id: 'inv-1' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('receipt: unknown'), expect.anything());
   });
 
@@ -232,7 +263,7 @@ describe('post-commit failures', () => {
     recordManualPayment.mockRejectedValueOnce(new Error('db down'));
     tables.invoices = { firsts: [openRow()], returning: [], calls: [] };
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
-    const patch = updatesOf('inbound_payment_notices')[0];
+    const patch = closesOf('inbound_payment_notices')[0];
     expect(patch).toMatchObject({ status: 'parked', park_reason: 'apply_failed' });
     expect(patch.apply_error).toMatch(/uncertain.*db down/);
   });
@@ -244,7 +275,7 @@ describe('park reasons', () => {
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [openRow({ id: 'inv-9', invoice_number: 'WPC-2026-0509', total: '120.00' })] : []));
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     expect(OpenBalance.openSelfPayInvoicesByAmountDue).toHaveBeenCalledWith(11700, { toleranceCents: 500 });
-    const patch = updatesOf('inbound_payment_notices')[0];
+    const patch = closesOf('inbound_payment_notices')[0];
     expect(patch).toMatchObject({ status: 'parked', park_reason: 'no_match' });
     expect(JSON.parse(patch.candidates)).toEqual([expect.objectContaining({ invoice_id: 'inv-9', amount_due_cents: 12000, exact_amount: false, name_match: true })]);
     expect(recordManualPayment).not.toHaveBeenCalled();
@@ -254,7 +285,7 @@ describe('park reasons', () => {
     claimed();
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow({ customer_first_name: 'Sam', customer_last_name: 'Roe' })]));
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
-    const patch = updatesOf('inbound_payment_notices')[0];
+    const patch = closesOf('inbound_payment_notices')[0];
     expect(patch).toMatchObject({ status: 'parked', park_reason: 'name_mismatch' });
     expect(JSON.parse(patch.candidates)[0]).toMatchObject({ invoice_id: 'inv-1', exact_amount: true, name_match: false });
     expect(recordManualPayment).not.toHaveBeenCalled();
@@ -266,7 +297,7 @@ describe('park reasons', () => {
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : page));
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     expect(OpenBalance.openSelfPayInvoicesByAmountDue).toHaveBeenCalledWith(11700, { limit: 25 });
-    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'multiple_matches' });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'multiple_matches' });
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
@@ -274,7 +305,7 @@ describe('park reasons', () => {
     claimed();
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow(), openRow({ id: 'inv-2', invoice_number: 'WPC-2026-0501' })]));
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
-    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'multiple_matches' });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'multiple_matches' });
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
@@ -285,7 +316,7 @@ describe('park reasons', () => {
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     expect(windowClause()).toBeTruthy(); // window keyed by settlement time, not email receipt
-    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'possible_duplicate' });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'possible_duplicate' });
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
@@ -294,7 +325,7 @@ describe('park reasons', () => {
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
     OpenBalance.rowIsSelfPayDue.mockResolvedValueOnce(false);
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
-    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'no_match' });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'no_match' });
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
@@ -302,7 +333,7 @@ describe('park reasons', () => {
     claimed({ id: 'notice-1', payer_name: null, amount_cents: null });
     expect(await maybeHandleZelleNotice(notice({ body_text: 'Someone sent you money with Zelle. Sign in to see details.', snippet: 'x' }))).toBe(true);
     expect(insertsOf('inbound_payment_notices')[0]).toMatchObject({ amount_cents: null, payer_name: null, status: 'processing' });
-    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'parse_failed' });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'parse_failed' });
     expect(OpenBalance.openSelfPayInvoicesByAmountDue).not.toHaveBeenCalled();
   });
 });
@@ -314,13 +345,36 @@ describe('stale claim recovery', () => {
     const orig = db.getMockImplementation();
     db.mockImplementation((table) => { const b = orig(table); if (table === 'inbound_payment_notices') { const q = tables[table].selects; b.select = jest.fn(async () => (q.length ? q.shift() : [])); } return b; });
     expect(await recoverStaleClaims()).toBe(1);
-    const patch = updatesOf('inbound_payment_notices')[0];
+    const patch = closesOf('inbound_payment_notices')[0];
     expect(patch).toMatchObject({ status: 'parked', park_reason: 'apply_failed' });
     expect(patch.apply_error).toMatch(/interrupted/);
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_parked:apply_failed' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment needs review', expect.stringContaining('interrupted'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-old' }));
+    expect(patch).toMatchObject({ matched_invoice_id: null, applied_by: null }); // frees the one-notice-per-invoice index
     // The CAS re-checks status + age so a row another pod just finished is left alone.
     expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-old', status: 'processing' }]);
+  });
+
+  test('a stale claim whose stamped invoice is paid by Zelle under the stamped recorder is CLOSED to match the ledger, never parked', async () => {
+    const stale = { id: 'notice-old', email_id: 'email-old', payer_name: 'Old Payer', amount_cents: 5000, matched_invoice_id: 'inv-7', applied_by: RECORDED_BY };
+    tables.inbound_payment_notices.selects = [[stale]];
+    tables.invoices = { firsts: [{ id: 'inv-7', invoice_number: 'WPC-2026-0507', customer_id: 'cust-7', status: 'paid', payment_method: 'zelle', payment_recorded_by: RECORDED_BY }], returning: [], calls: [] };
+    const orig = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = orig(table); if (table === 'inbound_payment_notices') { const q = tables[table].selects; b.select = jest.fn(async () => (q.length ? q.shift() : [])); } return b; });
+    expect(await recoverStaleClaims()).toBe(1);
+    expect(closesOf('inbound_payment_notices')).toEqual([expect.objectContaining({ status: 'auto_applied', park_reason: null, apply_error: null, matched_customer_id: 'cust-7' })]);
+    expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0507' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('WPC-2026-0507'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-old' }));
+  });
+
+  test('a stamped invoice settled by someone ELSE (or still open) is not ours — the claim parks apply_failed as before', async () => {
+    const stale = { id: 'notice-old', email_id: 'email-old', payer_name: 'Old Payer', amount_cents: 5000, matched_invoice_id: 'inv-7', applied_by: RECORDED_BY };
+    tables.inbound_payment_notices.selects = [[stale]];
+    tables.invoices = { firsts: [{ id: 'inv-7', status: 'paid', payment_method: 'zelle', payment_recorded_by: 'Adam' }], returning: [], calls: [] };
+    const orig = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = orig(table); if (table === 'inbound_payment_notices') { const q = tables[table].selects; b.select = jest.fn(async () => (q.length ? q.shift() : [])); } return b; });
+    expect(await recoverStaleClaims()).toBe(1);
+    expect(closesOf('inbound_payment_notices')).toEqual([expect.objectContaining({ status: 'parked', park_reason: 'apply_failed' })]);
   });
 
   test('the sync-cadence sweep is gate-aware: off ⇒ no reads', async () => {

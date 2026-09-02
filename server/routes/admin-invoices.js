@@ -701,19 +701,38 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
     if (!exact || !(await rowIsSelfPayDue(exact.customer_id, exact))) {
       return res.status(400).json({ error: 'Invoice is not an open self-pay invoice with exactly this amount due — pick an exact-amount invoice, or record the payment from the invoice itself' });
     }
-    // Claim + settle + close under a ROW LOCK on the notice: a concurrent
-    // Apply, an Ignore, or the reconciler's stale-claim sweep all UPDATE this
-    // row and wait behind the lock until the settlement has committed and the
-    // row says applied / parked — nothing can settle twice or be "recovered"
-    // mid-flight. recordManualPayment runs its own transaction on another
-    // connection and never touches this table, so no deadlock.
+    // Claim COMMITTED first (parked → processing, stamped with the invoice and
+    // the recorder this Apply writes onto it): recordManualPayment commits the
+    // ledger on its own connection, so a failure between that commit and the
+    // close below must leave a claim the reconciler's stale sweep can match
+    // to the settled invoice and close (closeIfSettled) — never a parked row
+    // inviting a second Apply for money already recorded. The partial UNIQUE
+    // index on matched_invoice_id has the DATABASE refuse two notices on one
+    // invoice.
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+    let claimed;
+    try {
+      claimed = await db('inbound_payment_notices').where({ id, status: 'parked' }).update({
+        status: 'processing', matched_invoice_id: invoiceId, matched_customer_id: exact.customer_id, applied_by: recordedBy, updated_at: db.fn.now(),
+      });
+    } catch (err) {
+      if (err.code !== '23505') throw err;
+      return res.status(409).json({ error: 'Another payment notice is already settling this invoice' });
+    }
+    if (!claimed) {
+      const current = await db('inbound_payment_notices').where({ id }).first('status');
+      return res.status(409).json({ error: `Payment notice is ${current?.status || 'gone'}, not parked`, status: current?.status || null });
+    }
+    // Settle + close under a ROW LOCK on the notice: a concurrent Apply, an
+    // Ignore, or the reconciler's stale-claim sweep all UPDATE this row and
+    // wait behind the lock until the settlement has committed and the row
+    // says applied / parked. recordManualPayment runs its own transaction on
+    // another connection and never touches this table, so no deadlock.
     const outcome = await db.transaction(async (trx) => {
       const locked = await trx('inbound_payment_notices').where({ id }).forUpdate().first('id', 'status');
-      if (!locked || locked.status !== 'parked') {
-        return { refused: { status: 409, body: { error: `Payment notice is ${locked?.status || 'gone'}, not parked`, status: locked?.status || null } } };
+      if (!locked || locked.status !== 'processing') {
+        return { refused: { status: 409, body: { error: `Payment notice is ${locked?.status || 'gone'}, not processing`, status: locked?.status || null } } };
       }
-      await trx('inbound_payment_notices').where({ id }).update({ status: 'processing', updated_at: trx.fn.now() });
       let settled;
       try {
         settled = await recordManualPayment(invoiceId, {
@@ -742,7 +761,7 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
           settled = { invoice: paid, receipt: null };
         } else {
           await trx('inbound_payment_notices').where({ id })
-            .update({ status: 'parked', park_reason: 'apply_failed', apply_error: refusal ? err.message : `Settlement outcome uncertain (${err.message}) — check the invoice before applying`, updated_at: trx.fn.now() });
+            .update({ status: 'parked', park_reason: 'apply_failed', apply_error: refusal ? err.message : `Settlement outcome uncertain (${err.message}) — check the invoice before applying`, matched_invoice_id: null, applied_by: null, updated_at: trx.fn.now() });
           return { failed: err };
         }
       }
