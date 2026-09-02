@@ -108,7 +108,7 @@
       "reason": "Public shortlink redirect — code entropy floor + per-route limiter (see public-route-gates.test.js); the limiter's custom over-limit handler serves the same 404 page and is keyed by its body digest",
       "routes": [
         "GET /l/:code",
-        "USE /l (express-rate-limit({ handler#650dff47 }))"
+        "USE /l (express-rate-limit({ handler#945948f2 }))"
       ]
     },
     {
