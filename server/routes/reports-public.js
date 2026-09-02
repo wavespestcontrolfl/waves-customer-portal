@@ -622,10 +622,7 @@ async function buildServiceReportV1ResponseData(service, token, {
           // promoter row on a public GET would be a durable write per view
           // (staff QA reads included). The card's button fetches them from
           // POST /:token/referral-link, which enrolls on the explicit tap.
-          referral = {
-            headline: 'Know someone who could use Waves?',
-            cta: 'Send My Referral Link',
-          };
+          referral = { ...require('../services/referral-share').REFERRAL_CARD_COPY };
         }
       } catch (err) {
         logger.warn(`[reports-public] referral card suppressed: ${err.message}`);
@@ -1480,72 +1477,18 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
     if (!require('../config/feature-gates').isEnabled('reportCrossSell')) {
       return res.status(404).json({ error: 'Report not found' });
     }
-    const referralEngine = require('../services/referral-engine');
-    // Same STRICT settings read as the card composer (codex #3367 PR r2):
-    // no live row / inactive program = the card should not have rendered —
+    // Enrollment + share copy live in ONE composer shared with the estimate
+    // screens (services/referral-share.js): same STRICT settings read as the
+    // card composer (codex #3367 PR r2), same per-customer enrollment with
+    // the household 23505 fallback (codex #3379 r5), same owner-voice copy.
+    // A null (inactive program) means the card should not have rendered —
     // answer as if the route doesn't exist rather than enroll anyone.
-    const settings = await referralEngine.getLiveSettings();
-    if (!settings?.program_active) {
-      return res.status(404).json({ error: 'Report not found' });
-    }
-    // enrollPromoter is strictly per-customer (codex #3379 r5: every other
-    // consumer resolves by customer_id, so the engine must not grow a
-    // second identity model). Multi-property siblings share a phone while
-    // referral_promoters.customer_phone stays unique, so a sibling
-    // profile's first tap loses the insert to that constraint (23505) —
-    // resolve the HOUSEHOLD promoter read-only instead, scoped to the same
-    // account_id (phone alone is not identity: recycled/shared numbers
-    // cross unrelated customers, and handing over a foreign code would
-    // credit rewards to the wrong account). No account-scoped match =
-    // a genuine cross-account collision → the catch's 503, manual
-    // resolution — never a guessed attribution.
-    let promoter;
-    try {
-      ({ promoter } = await referralEngine.enrollPromoter(service.customer_id));
-    } catch (err) {
-      if (err?.code !== '23505') throw err;
-      const profile = await db('customers')
-        .where({ id: service.customer_id })
-        .first('id', 'phone', 'account_id');
-      promoter = profile?.phone && profile?.account_id
-        ? await db('referral_promoters as rp')
-          .join('customers as c', 'rp.customer_id', 'c.id')
-          .where('rp.customer_phone', profile.phone)
-          .where('c.account_id', profile.account_id)
-          .first('rp.*')
-        : null;
-      if (!promoter) throw err;
-    }
-    const code = String(promoter?.referral_code || '').trim();
-    const link = referralEngine.getPromoterReferralLink(promoter, settings);
-    if (!code || !link) {
+    const share = await require('../services/referral-share').buildReferralShareForCustomer(service.customer_id);
+    if (!share) return res.status(404).json({ error: 'Report not found' });
+    if (share.unavailable) {
       return res.status(503).json({ error: 'Referral link unavailable — please try again' });
     }
-    // Share copy the CUSTOMER forwards from their own phone (not a Waves
-    // send): owner voice, no emojis, never a URL shortener. The friend's
-    // discount is mentioned only when the live settings actually grant one
-    // — template copy must never advertise a benefit the referee won't
-    // receive (same rule as the card composer). SMS body drops the URL
-    // scheme (portal-domain links render as previews without it; the email
-    // body keeps the full URL).
-    // Cents format EXACTLY (pre-push P0): referee_discount_cents supports
-    // arbitrary cent amounts, and rounding 4999 to "$50" promises a dollar
-    // the engine never credits. Whole-dollar settings keep the clean "$25".
-    const refereeCents = Math.max(0, Math.trunc(Number(settings.referee_discount_cents) || 0));
-    const refereeAmount = refereeCents % 100 === 0
-      ? `$${refereeCents / 100}`
-      : `$${(refereeCents / 100).toFixed(2)}`;
-    const offerClause = refereeCents > 0
-      ? `they'll take ${refereeAmount} off your first service with my code ${code}`
-      : `mention my code ${code} when you book`;
-    const bareLink = String(link).replace(/^https?:\/\//i, '');
-    return res.json({
-      code,
-      link,
-      smsBody: `We use Waves Pest Control and ${offerClause}. ${bareLink}`,
-      emailSubject: refereeCents > 0 ? `${refereeAmount} off Waves Pest Control` : 'Waves Pest Control',
-      emailBody: `We use Waves Pest Control and ${offerClause}.\n\n${link}`,
-    });
+    return res.json(share);
   } catch (err) {
     // err.code only, never err.message (pre-push P1): enrollPromoter inserts
     // customer_phone into a uniquely constrained column, and PG constraint

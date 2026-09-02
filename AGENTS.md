@@ -1514,6 +1514,20 @@ violations at the severity noted.
   request-body figures are ignored. Treat the gate, the lock ordering, the
   generic-404 indistinguishability, and the no-comms contract as
   security-critical.)
+  `/api/estimates/:token/referral-link` (POST; the referral card's "Send My
+  Referral Link" tap on an ACCEPTED estimate, GATE_ESTIMATE_SUCCESS_REFERRAL.
+  Same composer as the service report's tap — `services/referral-share.js`
+  (`buildReferralShareForCustomer`: strict live-settings read, per-customer
+  `enrollPromoter` with the household 23505 fallback scoped to account_id,
+  owner-voice share copy, exact-cents referee amount). The RENDER payloads
+  (/data, the accept response, the already-accepted retry) carry only the
+  static headline + CTA via `composeReferralCard`; enrollment happens on the
+  tap only, never on a read. Guards: gate with a gate-aware limiter skip
+  (dark = generic 404), token format gate, 5/min shared IPv6-safe key, the
+  durable call-side linkage verdict, full customer-viewability +
+  accepted-only + linked-customer, inactive program = 404, `err.code`-only
+  logging (PG constraint errors quote phone numbers). Treat the gate, the
+  no-enroll-on-read rule, and the PII-in-logs rule as security-critical.)
   `/api/estimates/:token/change-request` (POST; the non-decline half of the
   customer soft-exit sheet, GATE_ESTIMATE_SOFT_EXIT. `kind:'change'` parks
   ONE `service_requests` row (`requested_service='estimate_change_request'`)
