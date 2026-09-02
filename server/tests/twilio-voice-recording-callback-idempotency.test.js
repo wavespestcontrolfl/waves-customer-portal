@@ -58,6 +58,7 @@ function makeDb(tables) {
       case 'ne': return row[clause.col] !== clause.val;
       case 'null': return row[clause.col] == null;
       case 'in': return clause.vals.includes(row[clause.col]);
+      case 'notin': return !clause.vals.includes(row[clause.col]);
       case 'group': return evalGroup(row, clause.clauses);
       case 'raw': {
         const sql = clause.sql;
@@ -101,6 +102,7 @@ function makeDb(tables) {
       whereRaw(sql, bindings) { clauses.push({ type: 'raw', sql, bindings }); return sb; },
       orWhereRaw(sql, bindings) { clauses.push({ type: 'raw', sql, bindings, or: true }); return sb; },
       whereIn(col, vals) { clauses.push({ type: 'in', col, vals }); return sb; },
+      whereNotIn(col, vals) { clauses.push({ type: 'notin', col, vals }); return sb; },
       clauses,
     };
     return sb;
@@ -151,6 +153,7 @@ function makeDb(tables) {
       whereRaw(...a) { sb.whereRaw(...a); return builder; },
       orWhereRaw(...a) { sb.orWhereRaw(...a); return builder; },
       whereIn(...a) { sb.whereIn(...a); return builder; },
+      whereNotIn(...a) { sb.whereNotIn(...a); return builder; },
       whereNot(...a) { sb.whereNot(...a); return builder; },
       select() { return builder; },
       first() {
@@ -437,6 +440,38 @@ describe('POST /recording-status', () => {
     expect(row.metadata.superseded_recordings).toEqual([expect.objectContaining({ recording_sid: REC_2, superseded_by: REC_1 })]);
     jest.advanceTimersByTime(2 * 60 * 1000 + 5);
     expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
+  });
+
+  test('a replace retires the old audio\'s cards but keeps missing_unit_number open, and the review flag follows the cards (codex #3764 gh-r3 P1 + #3736 gh-r14 P2)', async () => {
+    tables.call_log.push({
+      id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 12,
+      processing_status: null, transcription: null, metadata: null, review_status: 'open',
+    });
+    tables.triage_items.push(
+      { id: 't-addr', call_log_id: 'c1', reason_code: 'address_unverified', status: 'open', payload: '{}' },
+      { id: 't-unit', call_log_id: 'c1', reason_code: 'missing_unit_number', status: 'open', payload: '{}' },
+    );
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    expect(tables.call_log[0].recording_sid).toBe(REC_2);
+    const addr = tables.triage_items.find((t) => t.id === 't-addr');
+    const unit = tables.triage_items.find((t) => t.id === 't-unit');
+    expect(addr.status).toBe('resolved');
+    expect(addr.resolution_note).toContain(`replaced by ${REC_2}`);
+    // The owed dispatch-blocking question survives the swap — a human closes it.
+    expect(unit.status).toBe('open');
+    // …so the call stays review-open.
+    expect(tables.call_log[0].review_status).toBe('open');
+  });
+
+  test('a replace whose retired cards were the last open ones clears the review flag', async () => {
+    tables.call_log.push({
+      id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 12,
+      processing_status: null, transcription: null, metadata: null, review_status: 'open',
+    });
+    tables.triage_items.push({ id: 't-addr', call_log_id: 'c1', reason_code: 'address_unverified', status: 'open', payload: '{}' });
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    expect(tables.triage_items.find((t) => t.id === 't-addr').status).toBe('resolved');
+    expect(tables.call_log[0].review_status).toBeNull();
   });
 
   test('a duplicate delivery WITHOUT ParentCallSid (voicemail on the parent) writes nothing and never takes the Studio-recovery insert path', async () => {

@@ -1753,12 +1753,25 @@ router.post('/recording-status', async (req, res) => {
         // would otherwise leave them actionable on stale evidence. The
         // additional_recording card is about the recordings themselves and
         // stays. Same transaction as the swap (Codex #3736 r10 P1).
+        // A missing_unit_number card stays too: it is an owed dispatch-
+        // blocking question that closes only on a human verdict (AGENTS.md),
+        // never because the audio changed (Codex #3764 r3 P1).
         if (n > 0 && attach.action === 'replace') {
-          await trx('triage_items')
+          const retired = await trx('triage_items')
             .where({ call_log_id: baseline.id })
-            .whereNot('reason_code', 'additional_recording')
+            .whereNotIn('reason_code', ['additional_recording', 'missing_unit_number'])
             .whereIn('status', ['open', 'in_progress'])
             .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Superseded: recording ${baseline.recording_sid || 'none'} replaced by ${RecordingSid}` });
+          // The review flag follows the cards (Codex #3736 r14 P2): with the
+          // old audio's cards retired and nothing else open, a row that was
+          // review-open (a V2-vetoed spam row, say) must not stay counted.
+          if (retired > 0) {
+            const stillOpen = await trx('triage_items')
+              .where({ call_log_id: baseline.id })
+              .whereIn('status', ['open', 'in_progress'])
+              .first('id');
+            if (!stillOpen) await trx('call_log').where({ id: baseline.id }).update({ review_status: null });
+          }
         }
         return n;
         });

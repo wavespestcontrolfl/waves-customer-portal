@@ -6703,9 +6703,15 @@ const CallRecordingProcessor = {
     // against a row whose audio (and cleared transcript) is B. From the
     // claim on, the status fence refuses every swap, so this read is the
     // recording the pass is accountable for.
+    // …and the classification stamps a swap clears with the audio (Codex
+    // #3736 r14 P1): a replace resets rejection-derived answered_by /
+    // call_outcome and transcription_status, and the deterministic voicemail
+    // check below reads them from THIS object — recording A's stale
+    // 'voicemail' stamps would force recording B into the voicemail lane.
     const claimedRow = await db('call_log').where({ id: call.id }).first(
       'metadata', 'recording_url', 'recording_sid', 'recording_duration_seconds',
       'transcription', 'transcription_provider', 'transcript_structured', 'transcription_metadata',
+      'transcription_status', 'answered_by', 'call_outcome',
     );
     let recordingChangedBeforeClaim = false;
     if (claimedRow) {
@@ -14771,10 +14777,15 @@ const CallRecordingProcessor = {
       // permanent entry (the replacement's correct insert is the one
       // ignored). The insert is therefore fenced on the processing token
       // IN the statement — a pass that no longer holds it inserts nothing.
+      // The fence LOCKS the call row (FOR UPDATE in the EXISTS): without it
+      // the statement's snapshot could still see this pass's token while a
+      // peer's reclaim is mid-commit (Codex #3736 r14 P2); the lock waits
+      // for that commit and re-evaluates the predicate against the new
+      // token, so the superseded pass inserts nothing.
       await db.raw(
         `INSERT INTO customer_interactions (customer_id, interaction_type, subject, body, metadata)
          SELECT ?, 'call', ?, ?, ?::jsonb
-         WHERE EXISTS (SELECT 1 FROM call_log WHERE id = ? AND processing_token = ?)
+         WHERE EXISTS (SELECT 1 FROM call_log WHERE id = ? AND processing_token = ? FOR UPDATE)
          ON CONFLICT ((metadata ->> 'call_log_id')) WHERE interaction_type = 'call' AND metadata ->> 'call_log_id' IS NOT NULL DO NOTHING`,
         [
           customerId,

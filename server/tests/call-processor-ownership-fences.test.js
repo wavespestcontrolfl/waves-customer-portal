@@ -88,7 +88,7 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     const at = body.indexOf('INSERT INTO customer_interactions (customer_id, interaction_type, subject, body, metadata)');
     expect(at).toBeGreaterThan(-1);
     const stmt = body.slice(at, at + 900);
-    expect(stmt).toContain('WHERE EXISTS (SELECT 1 FROM call_log WHERE id = ? AND processing_token = ?)');
+    expect(stmt).toContain('WHERE EXISTS (SELECT 1 FROM call_log WHERE id = ? AND processing_token = ? FOR UPDATE)');
     expect(stmt).toContain("ON CONFLICT ((metadata ->> 'call_log_id')) WHERE interaction_type = 'call' AND metadata ->> 'call_log_id' IS NOT NULL DO NOTHING");
     expect(stmt).toContain('call.id,\n          procToken,');
     expect(body).not.toContain('timelineExists');
@@ -108,6 +108,13 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     const after = body.slice(at, at + 2600);
     expect(after).toContain("resolution_note: `Adopted ${adopted} processed` });");
     expect(after.indexOf(".update({ review_status: null });")).toBeGreaterThan(after.indexOf("resolution_note: `Adopted ${adopted} processed` });"));
+  });
+
+  test('the post-claim refresh reloads the stamps a swap clears, and the timeline insert locks the claim row in its fence (codex #3736 gh-r14)', () => {
+    const at = body.indexOf("const claimedRow = await db('call_log').where({ id: call.id }).first(");
+    expect(at).toBeGreaterThan(-1);
+    expect(body.slice(at, at + 400)).toContain("'transcription_status', 'answered_by', 'call_outcome',");
+    expect(body).toContain('WHERE EXISTS (SELECT 1 FROM call_log WHERE id = ? AND processing_token = ? FOR UPDATE)');
   });
 
   test('a processed pass resolves an earlier lead_creation_failed card the same way (codex #3736 gh-r13)', () => {
