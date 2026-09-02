@@ -82,6 +82,16 @@ describe('TechNoteCard', () => {
     expect(render(<TechNoteCard data={payload()} mode="static" />).container).toBeEmptyDOMElement();
   });
 
+  it('shows the technician photo only behind its own gate (techVisitCard), the initial otherwise', () => {
+    const withPhoto = { technician: { name: 'Adam B.', photoUrl: 'https://cdn.example/adam.jpg', initials: 'AB' } };
+    render(<TechNoteCard data={payload({ ...withPhoto, techVisitCard: false })} mode="live" />);
+    expect(document.querySelector('#tech-note img')).toBeNull();
+    expect(screen.getByText('A')).toBeInTheDocument();
+    cleanup();
+    render(<TechNoteCard data={payload({ ...withPhoto, techVisitCard: true })} mode="live" />);
+    expect(document.querySelector('#tech-note img')).toHaveAttribute('src', 'https://cdn.example/adam.jpg');
+  });
+
   it('falls back to a generic attribution when the record carries no technician', () => {
     render(<TechNoteCard data={payload({ techNote: { tips: TIPS.slice(0, 1), technicianFirstName: null } })} mode="live" />);
     expect(screen.getByText('A note from your technician')).toBeInTheDocument();

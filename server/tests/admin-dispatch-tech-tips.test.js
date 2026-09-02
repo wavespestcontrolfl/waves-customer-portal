@@ -193,7 +193,7 @@ describe('completion freeze contract', () => {
     // …and it happens before the completion transaction / idempotency claim
     expect(reject).toBeLessThan(block.indexOf('rawIdempotencyKey'));
     // the kill switch holds on the write path too
-    expect(block).toMatch(/gateEnvValue\('GATE_TECH_TIPS'\)\s*\n?\s*\? freezeTechTips/);
+    expect(block).toMatch(/techTipsGateOn\(\)\s*\n?\s*\? freezeTechTips/);
     // ids resolve server-side — the client's copy never reaches the freeze
     expect(block).not.toMatch(/techTips\.copy|body\.techTips\.tips/);
   });

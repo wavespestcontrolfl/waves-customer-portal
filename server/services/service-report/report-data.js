@@ -5090,7 +5090,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the record froze tips. The technician's first name comes from the
     // visit's frozen technician row (owner: first name only, no sign-off);
     // the client composes the greeting from customerName.
-    techNote: featureGates.gateEnvValue('GATE_TECH_TIPS') && (protocol.techTips || []).length
+    techNote: featureGates.gateEnvValue?.('GATE_TECH_TIPS') === true && (protocol.techTips || []).length
       ? {
         tips: protocol.techTips,
         technicianFirstName: String(service.technician_first_name || '').trim()

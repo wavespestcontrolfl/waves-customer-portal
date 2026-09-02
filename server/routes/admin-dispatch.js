@@ -1961,6 +1961,12 @@ router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GATE_TECH_TIPS at call time. Suites that mock feature-gates with a partial
+// shape read this as off — today's behaviour — instead of throwing.
+function techTipsGateOn() {
+  return typeof gateEnvValue === 'function' && gateEnvValue('GATE_TECH_TIPS') === true;
+}
+
 // "Irrigation on file" for the portal tip = the customer has entered any of
 // the settings the tip asks for. Empty strings, empty arrays and nulls
 // don't count; the irrigation_system flag never does.
@@ -1983,7 +1989,7 @@ function irrigationSettingsOnFile(prefs) {
 // condition). Read-only.
 router.get('/:serviceId/tech-tips', async (req, res, next) => {
   try {
-    if (!gateEnvValue('GATE_TECH_TIPS')) return res.json({ available: false });
+    if (!techTipsGateOn()) return res.json({ available: false });
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
       .first('id', 'customer_id', 'service_type', 'scheduled_date');
@@ -5368,7 +5374,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // customer string. Ids on the wire, never copy.
     // Gated at the freeze too: with the kill switch unset a stale or crafted
     // client cannot keep the feature alive through the completion body.
-    const techTipsFreeze = gateEnvValue('GATE_TECH_TIPS')
+    const techTipsFreeze = techTipsGateOn()
       ? freezeTechTips(req.body?.techTips)
       : { tips: [], dropped: [] };
     // A custom line the customer-copy screen refuses (or one over the cap

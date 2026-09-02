@@ -10337,9 +10337,6 @@ export function CompletionPanel({
   // (codex r23). An edited draft is the tech's reviewed copy and is theirs.
   const generatedReportTextRef = useRef(null);
   const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
-  // True between applyGeneratedReport parking [Found]/[Next] note lines and
-  // the generation-inputs watcher absorbing that move (see both sites).
-  const parkedByGenerationRef = useRef(false);
   // Baseline for the generation-inputs watcher below — null means "not yet
   // initialized" (fresh mount or just-restored draft), so the first run
   // records without invalidating.
@@ -10474,6 +10471,13 @@ export function CompletionPanel({
   const [techTipsError, setTechTipsError] = useState("");
   const [selectedTipIds, setSelectedTipIds] = useState([]);
   const [customTip, setCustomTip] = useState("");
+  // Free-typed [Found]/[Next] note lines parked when an AI draft replaces
+  // the notes (parkTaggedNoteLines). Their own state, NOT the textarea
+  // state: they ground the AI draft, the recap and the photo context, but
+  // a [Next] line is technician-internal and must never reach the
+  // form-provenance recommendations field that prints on the report.
+  const [parkedFound, setParkedFound] = useState("");
+  const [parkedNext, setParkedNext] = useState("");
   const techTipsAvailable = techTipsLoading || techTips?.available === true;
   // Flips true once Generate AI report replaces the notes with clean prose.
   // Before that, the [Protocol]/[Found]/[Next] chip lines in the notes are the
@@ -11499,6 +11503,8 @@ export function CompletionPanel({
       recommendationsText.trim() ||
       selectedTipIds.length ||
       customTip.trim() ||
+      parkedFound.trim() ||
+      parkedNext.trim() ||
       nextVisitNote.trim() ||
       oneTimeRecapOnly ||
       reviewTiming !== "120" ||
@@ -11609,6 +11615,8 @@ export function CompletionPanel({
         recommendationsText,
         selectedTipIds,
         customTip,
+        parkedFound,
+        parkedNext,
         // Which deselect model the label arrays were saved under — a restored
         // post-AI-draft (no chip lines in notes) must restore as detached or
         // labelsStillInNotes would silently drop every structured selection.
@@ -11707,6 +11715,8 @@ export function CompletionPanel({
     recommendationsText,
     selectedTipIds,
     customTip,
+    parkedFound,
+    parkedNext,
     chipLinesDetached,
     aiReportUsed,
     nextVisitNote,
@@ -11919,6 +11929,8 @@ export function CompletionPanel({
         : [],
     );
     setCustomTip(restoredCustom);
+    setParkedFound(typeof savedDraft.parkedFound === "string" ? savedDraft.parkedFound : "");
+    setParkedNext(typeof savedDraft.parkedNext === "string" ? savedDraft.parkedNext : "");
     // Drafts saved before the detached-selection model lack the field → false,
     // which matches their notes still carrying the chip-marker lines.
     setChipLinesDetached(savedDraft.chipLinesDetached === true);
@@ -12367,16 +12379,12 @@ export function CompletionPanel({
     // Free-typed [Found]/[Next] lines would vanish with the notes — park
     // them (parkTaggedNoteLines) so completion, regeneration, the photo
     // context and drafts keep them.
-    const parkedFound = parkTaggedNoteLines({ notes, tag: "found", labels: selectedObservationLabels, current: observationsText });
-    const parkedNext = parkTaggedNoteLines({ notes, tag: "next", labels: selectedRecommendationLabels, current: recommendationsText });
-    if (parkedFound !== null || parkedNext !== null) {
-      // The generation-inputs watcher below sees these as post-generation
-      // edits and would clear the draft it just installed — mark the move
-      // as the draft's own so the watcher re-baselines instead.
-      parkedByGenerationRef.current = true;
-      if (parkedFound !== null) setObservationsText(parkedFound);
-      if (parkedNext !== null) setRecommendationsText(parkedNext);
-    }
+    // (Parked state is not a generation input, so this never reads as a
+    // post-generation edit to the watcher below.)
+    const nextParkedFound = parkTaggedNoteLines({ notes, tag: "found", labels: selectedObservationLabels, current: parkedFound });
+    if (nextParkedFound !== null) setParkedFound(nextParkedFound);
+    const nextParkedNext = parkTaggedNoteLines({ notes, tag: "next", labels: selectedRecommendationLabels, current: parkedNext });
+    if (nextParkedNext !== null) setParkedNext(nextParkedNext);
     setNotes(String(reportText || "").trim());
   }
   // Deselect handle after an AI draft: remove a structured selection from its
@@ -12447,10 +12455,10 @@ export function CompletionPanel({
     return lines.filter((line) => !seen.has(line.toLowerCase()) && seen.add(line.toLowerCase()));
   }
   function observationFreeText() {
-    return uniqueLines([...freeTextLines(observationsText), ...taggedNoteLines("found")]);
+    return uniqueLines([...freeTextLines(observationsText), ...freeTextLines(parkedFound), ...taggedNoteLines("found")]);
   }
   function recommendationFreeText() {
-    return uniqueLines([...freeTextLines(recommendationsText), ...taggedNoteLines("next")]);
+    return uniqueLines([...freeTextLines(recommendationsText), ...freeTextLines(parkedNext), ...taggedNoteLines("next")]);
   }
   // Single source of truth for the AI report payload + the "is there enough to
   // generate?" gate, so the two Generate buttons (mobile + desktop) and the
@@ -13597,9 +13605,14 @@ export function CompletionPanel({
       ];
       // Typed mode appends the optional recommendations textarea into the
       // existing recommendations array — no new server field.
+      // Form provenance ONLY: the route persists this as
+      // structured_notes.formRecommendations, which prints verbatim on the
+      // customer report. [Next] note lines (typed or parked) are technician-
+      // internal — the route folds the ones still in the notes into its
+      // internal merged list itself; they never travel in this field.
       const reportRecommendations = [
         ...activeSelectedLabels(selectedRecommendationLabels),
-        ...recommendationFreeText(),
+        ...freeTextLines(recommendationsText),
         ...(isTypedFindings && typedRecommendations.trim()
           ? [typedRecommendations.trim()]
           : []),
@@ -14103,12 +14116,6 @@ export function CompletionPanel({
       // response invalidates immediately (codex r38).
       if (generating) return;
       generationInputsRef.current = snapshot;
-      // Tagged note lines parked by applyGeneratedReport are part of the
-      // draft being installed, not an edit after it — re-baseline only.
-      if (parkedByGenerationRef.current) {
-        parkedByGenerationRef.current = false;
-        return;
-      }
       invalidateGeneratedReportOnTypedEdit();
     }
   }, [areasServiced, observationsText, recommendationsText,
@@ -19499,6 +19506,7 @@ function TechTipPicker({
 }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
   const [showCustom, setShowCustom] = useState(() => String(customTip || "").trim() !== "");
   // A draft restored after mount lands a non-empty customTip through the
   // prop — reveal it, so counted-and-submitted copy is never hidden from
@@ -19533,6 +19541,22 @@ function TechTipPicker({
     onChange([...selectedIds, id]);
     setQuery("");
     setOpen(false);
+    rootRef.current?.querySelector('input[role="combobox"]')?.focus();
+  }
+  // Keyboard: ArrowDown from the input enters the list; arrows move between
+  // options; Enter/Space activate the focused option (a real click); Escape
+  // returns to the input. The list stays open while focus is anywhere
+  // inside the picker (root onBlur checks relatedTarget), so tabbing into it
+  // never unmounts it.
+  function optionButtons() {
+    return [...(rootRef.current?.querySelectorAll('[role="option"]:not([disabled])') || [])];
+  }
+  function moveFocus(delta, from) {
+    const buttons = optionButtons();
+    if (!buttons.length) return;
+    const idx = buttons.indexOf(from);
+    const next = buttons[Math.min(buttons.length - 1, Math.max(0, idx + delta))];
+    next?.focus();
   }
   function remove(id) {
     onChange(selectedIds.filter((x) => x !== id));
@@ -19569,8 +19593,15 @@ function TechTipPicker({
         role="option"
         aria-selected={picked}
         disabled={picked}
-        // mousedown, not click, so the input's blur can't close the list first
-        onMouseDown={(e) => { e.preventDefault(); add(tip.id); }}
+        // pointer: keep the input's focus (no blur → no close), then the click adds;
+        // keyboard: Enter/Space fire the same click
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => add(tip.id)}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown") { e.preventDefault(); moveFocus(1, e.currentTarget); }
+          else if (e.key === "ArrowUp") { e.preventDefault(); moveFocus(-1, e.currentTarget); }
+          else if (e.key === "Escape") { e.preventDefault(); setOpen(false); rootRef.current?.querySelector('input[role="combobox"]')?.focus(); }
+        }}
         style={{ ...rowStyle, opacity: picked ? 0.55 : 1, cursor: picked ? "default" : "pointer" }}
       >
         <span>
@@ -19597,7 +19628,13 @@ function TechTipPicker({
         : "Search tips…";
 
   return (
-    <div>
+    <div
+      ref={rootRef}
+      onBlur={(e) => {
+        // close only when focus leaves the whole picker (input AND list)
+        if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false);
+      }}
+    >
       <input
         type="text"
         role="combobox"
@@ -19610,9 +19647,9 @@ function TechTipPicker({
         disabled={inactive || full}
         onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
         onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
         onKeyDown={(e) => {
           if (e.key === "Escape") { setQuery(""); setOpen(false); }
+          if (e.key === "ArrowDown") { e.preventDefault(); setOpen(true); optionButtons()[0]?.focus(); }
           if (e.key === "Enter") {
             e.preventDefault();
             const first = ranked?.[0];

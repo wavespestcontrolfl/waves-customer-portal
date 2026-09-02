@@ -2345,7 +2345,9 @@ export function TechNoteCard({ data, mode = 'live' }) {
     customerName: data.customerName,
     seed: techNoteSeed(data.serviceRecordId || data.token),
   });
-  const photoUrl = data.technician?.photoUrl || null;
+  // The photo treatment is its own dark ship (GATE_REPORT_TECH_PHOTO →
+  // payload.techVisitCard); the note shows the initial until that gate is on.
+  const photoUrl = data.techVisitCard === true ? (data.technician?.photoUrl || null) : null;
   const initial = (techFirst || 'W')[0].toUpperCase();
   return (
     <section data-glass="card" className="sr-section" id="tech-note">
