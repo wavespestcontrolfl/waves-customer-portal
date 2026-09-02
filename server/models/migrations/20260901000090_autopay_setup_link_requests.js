@@ -23,7 +23,10 @@ const TEMPLATE = {
   template_key: 'autopay_setup_link',
   name: 'Auto Pay setup link (standalone)',
   category: 'billing',
-  body: 'Hi {first_name}! Set up Auto Pay for your Waves service here: {secure_link}\nSave a card or bank account and each visit is paid automatically after it is completed. Nothing is charged today. We never take card numbers by phone. Reply STOP to opt out.',
+  // Tender-neutral on purpose: the page offers card, or card + bank only
+  // while GATE_ACCEPT_ACH_CAPTURE is on and the customer's ACH state is
+  // healthy — the text must not promise a bank option the page may not show.
+  body: 'Hi {first_name}! Set up Auto Pay for your Waves service here: {secure_link}\nSave a payment method and each visit is paid automatically after it is completed. Nothing is charged today. We never take card numbers by phone. Reply STOP to opt out.',
   variables: JSON.stringify(['first_name', 'secure_link']),
   is_active: false,
   sort_order: 33,

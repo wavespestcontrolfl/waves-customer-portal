@@ -46,15 +46,19 @@ jest.mock('../services/payer', () => ({ resolveForInvoice: (...a) => mockResolve
 const mockCustomerOnAutopay = jest.fn(async () => false);
 jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: (...a) => mockCustomerOnAutopay(...a) }));
 const mockFindConsentedChargeableCard = jest.fn(async () => null);
-const mockHasEnrollmentScopedConsent = jest.fn(async () => false);
+const mockHasConsentSnapshotForVariant = jest.fn(async () => false);
 const mockRecordConsent = jest.fn(async () => ({ id: 'consent-1' }));
 const mockLinkPaymentMethodId = jest.fn(async () => {});
 jest.mock('../services/payment-method-consents', () => ({
   findConsentedChargeableCard: (...a) => mockFindConsentedChargeableCard(...a),
-  hasEnrollmentScopedConsent: (...a) => mockHasEnrollmentScopedConsent(...a),
+  hasConsentSnapshotForVariant: (...a) => mockHasConsentSnapshotForVariant(...a),
   recordConsent: (...a) => mockRecordConsent(...a),
   linkPaymentMethodId: (...a) => mockLinkPaymentMethodId(...a),
 }));
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return { ...actual, isEnabled: (name) => (name === 'autopayCustomerSms' ? actual.gates.autopayCustomerSms === true : actual.isEnabled(name)) };
+});
 const mockEnrollConsentedMethod = jest.fn(async () => ({ enrolled: true }));
 jest.mock('../services/autopay-enrollment', () => ({ enrollConsentedMethod: (...a) => mockEnrollConsentedMethod(...a) }));
 const mockRetrieveSetupIntent = jest.fn();
@@ -101,18 +105,19 @@ beforeEach(() => {
   // Bank on the standalone link rides the SAME ACH-capture kill switch as
   // the estimate accept capture.
   gates.acceptAchCapture = true;
+  gates.autopayCustomerSms = true;
+  mockHasConsentSnapshotForVariant.mockResolvedValue(false);
   mockResolveForInvoice.mockResolvedValue(null);
   mockCustomerOnAutopay.mockResolvedValue(false);
   mockFindConsentedChargeableCard.mockResolvedValue(null);
   mockEnrollConsentedMethod.mockResolvedValue({ enrolled: true });
   mockSendCustomerMessage.mockResolvedValue({ sent: true });
   mockRenderTemplate.mockResolvedValue('Hi Pat! Set up Auto Pay: https://x/secure/tok');
-  mockHasEnrollmentScopedConsent.mockResolvedValue(false);
   mockSavePaymentMethod.mockResolvedValue({ id: 'pm-row-1', method_type: 'card' });
   mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'card' });
   mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_new', setupIntentId: 'seti_new', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
 });
-afterAll(() => { gates.autopaySetupLink = false; gates.acceptAchCapture = false; });
+afterAll(() => { gates.autopaySetupLink = false; gates.acceptAchCapture = false; gates.autopayCustomerSms = false; });
 
 describe('requestAutopaySetupLink — ordered checks', () => {
   it('is inert with the gate off (nothing read, nothing minted, nothing sent)', async () => {
@@ -217,6 +222,24 @@ describe('requestAutopaySetupLink — link minting and delivery', () => {
     }));
     const calls = touches('appointment_card_requests').flatMap((c) => c.calls);
     expect(calls.find((c) => c[0] === 'update')[1]).toEqual(expect.objectContaining({ sent_at: expect.any(Date) }));
+  });
+
+  it('sms: GATE_AUTOPAY_CUSTOMER_SMS off is surfaced as autopay_sms_gate_off (link still returned, nothing sent)', async () => {
+    gates.autopayCustomerSms = false;
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+    expect(r.reason).toBe('autopay_sms_gate_off');
+    expect(r.secureUrl).toMatch(/\/secure\//);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('sms: a failed sent_at stamp after an accepted send still reports sent (never a duplicate-inviting failure)', async () => {
+    mockTableHandlers.appointment_card_requests = {
+      first: () => null,
+      update: (chain, patch) => { if (patch.sent_at) throw new Error('db blip'); return 1; },
+    };
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+    expect(r.action).toBe('sent');
+    expect(r.secureUrl).toMatch(/\/secure\//);
   });
 
   it('sms: an inactive template is a dark lever — the link exists but nothing sends', async () => {
@@ -369,6 +392,29 @@ describe('completion tail (page POST + webhook)', () => {
     const claimChain = chains.find((c) => c.calls.some((x) => x[0] === 'update' && x[1].status === 'completing'));
     const claimStamp = claimChain.calls.find((x) => x[0] === 'update')[1].updated_at;
     expect(completedChain.calls.find((x) => x[0] === 'where')[1]).toEqual({ id: 'req-1', status: 'completing', updated_at: claimStamp });
+  });
+
+  it('records a FRESH consent row per authorization event: a prior consent for the method does not suppress it, a retry of this request does', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
+    mockTableHandlers.payment_methods = { first: () => ({ id: 'pm-row-old', customer_id: 'cust-1', method_type: 'card' }) };
+    const created = new Date('2026-09-01T12:00:00Z');
+    mockHasConsentSnapshotForVariant.mockResolvedValue(false);
+    await completeAutopaySetupCapture({ request: { ...PENDING, created_at: created }, setupIntentId: 'seti_new' });
+    expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_new', expect.objectContaining({ methodType: 'card', since: created }));
+    expect(mockRecordConsent).toHaveBeenCalledTimes(1);
+    mockRecordConsent.mockClear();
+    mockHasConsentSnapshotForVariant.mockResolvedValue(true);
+    await completeAutopaySetupCapture({ request: { ...PENDING, created_at: created }, setupIntentId: 'seti_new' });
+    expect(mockRecordConsent).not.toHaveBeenCalled();
+  });
+
+  it('mints a card-only generation instead of replaying a SUCCEEDED bank-capable intent once bank is no longer offered (GH #3726 r1 P0)', async () => {
+    gates.acceptAchCapture = false;
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_bank', client_secret: 'cs_bank', status: 'succeeded', payment_method: 'pm_b', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_card', setupIntentId: 'seti_card', paymentMethodTypes: ['card'], status: 'requires_payment_method' });
+    const d = await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_bank' });
+    expect(d.setupIntentId).toBe('seti_card');
+    expect(d.paymentMethodTypes).toEqual(['card']);
   });
 
   it('records the ACH consent variant when the saved method is a bank account', async () => {

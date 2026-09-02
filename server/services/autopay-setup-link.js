@@ -186,6 +186,11 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
     }
 
     if (!customer.phone) return skip('no_customer_phone', linkMeta);
+    // Third lever, surfaced instead of silently blocked in the pipeline
+    // (GH Codex #3726 r1 P1): original_message_type 'autopay_setup_link'
+    // classifies as an Auto Pay customer SMS, which sendCustomerMessage
+    // refuses unless GATE_AUTOPAY_CUSTOMER_SMS is on.
+    if (!require('../config/feature-gates').isEnabled('autopayCustomerSms')) return skip('autopay_sms_gate_off', linkMeta);
     const { renderTemplate } = require('./appointment-card-request');
     const body = await renderTemplate({ first_name: customer.first_name || 'there', secure_link: secureUrl }, TEMPLATE_KEY);
     if (!body) return skip('template_inactive', linkMeta);
@@ -209,9 +214,15 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
       return skip('send_outcome_uncertain', linkMeta);
     }
     if (!result?.sent) return skip(result?.reason || 'send_blocked', linkMeta);
-    await db('appointment_card_requests')
-      .where({ id: request.id })
-      .update({ sent_at: new Date(), updated_at: new Date() });
+    // The text is OUT — a failed sent_at stamp must not read as a failed
+    // send (an operator retry would text twice; GH Codex #3726 r1 P2).
+    try {
+      await db('appointment_card_requests')
+        .where({ id: request.id })
+        .update({ sent_at: new Date(), updated_at: new Date() });
+    } catch (stampErr) {
+      logger.warn(`[autopay-setup-link] sent_at stamp failed for request ${request.id} (text already sent): ${stampErr.message}`);
+    }
     logger.info(`[autopay-setup-link] link texted to customer ${customerId} (request ${request.id}, trigger ${trigger})`);
     return { requested: true, action: 'sent', reason: 'sent', ...linkMeta };
   } catch (err) {
@@ -239,10 +250,12 @@ async function mintOrReplaySetupIntent(request) {
         && existing.metadata?.purpose === PURPOSE
         && String(existing.metadata?.request_id) === String(request.id)
         && ['requires_payment_method', 'requires_confirmation', 'requires_action', 'processing', 'succeeded'].includes(existing.status)
-        // A SUCCEEDED bank-capable intent is still replayed: the page
-        // renders it and completion judges the captured tender (a bank
-        // then refuses bank_not_allowed; a card completes).
-        && (!bankNoLongerOffered || existing.status === 'succeeded')) {
+        // A bank-capable intent is never replayed once bank is no longer
+        // offered — a SUCCEEDED bank intent would otherwise be immutable
+        // and every refresh would loop on bank_not_allowed (GH Codex #3726
+        // r1 P0); the card-only generation below gives the customer a way
+        // to finish with a card.
+        && !bankNoLongerOffered) {
         return {
           clientSecret: existing.client_secret,
           setupIntentId: existing.id,
@@ -449,7 +462,17 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
       });
     }
     const ConsentService = require('./payment-method-consents');
-    if (!(await ConsentService.hasEnrollmentScopedConsent(request.customer_id, stripePaymentMethodId))) {
+    // One ledger row per AUTHORIZATION EVENT (GH Codex #3726 r1 P1): a
+    // consent recorded for this method before this link was minted (an
+    // earlier enrollment the customer may since have opted out of) must not
+    // suppress the fresh checkbox authorization; only retries of THIS
+    // request (rows at/after the link's mint) dedupe.
+    const since = request.created_at ? new Date(request.created_at) : null;
+    const alreadyRecorded = await ConsentService.hasConsentSnapshotForVariant(request.customer_id, stripePaymentMethodId, {
+      methodType: saved?.method_type || 'card',
+      ...(since && !Number.isNaN(since.getTime()) ? { since } : {}),
+    });
+    if (!alreadyRecorded) {
       // The page rendered the locked consent for the tender the customer
       // picked (card or ACH variant) before confirmSetup.
       await ConsentService.recordConsent({

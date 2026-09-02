@@ -929,10 +929,13 @@ function ElectronicAuthorizationContractV2({
         `/admin/customers/${customer.id}/autopay-setup-link`,
         { method: "POST", body: JSON.stringify({ delivery }) },
       );
+      let copied = false;
       if (result?.action === "link_created" && result.secureUrl) {
-        try { await navigator.clipboard.writeText(result.secureUrl); } catch { /* clipboard unavailable — the URL still shows below */ }
+        try { await navigator.clipboard.writeText(result.secureUrl); copied = true; } catch { copied = false; }
       }
-      setSetupLinkResult(result);
+      // Never claim "copied" when the clipboard write failed — the URL is
+      // rendered below either way.
+      setSetupLinkResult({ ...result, copied });
       if (result?.action === "auto_secured") await onRefresh?.();
     } catch (err) {
       setSetupLinkResult({ action: "skipped", reason: err.message || "request_failed" });

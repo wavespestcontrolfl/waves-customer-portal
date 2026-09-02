@@ -55,9 +55,12 @@ export function describeCardRequestResult(result) {
   if (result.action === 'auto_secured') return { tone: 'good', text: 'Card already on file — Auto Pay enrolled, no text needed' };
   // Standalone Auto Pay setup link (Customers page): inline delivery hands
   // the link back instead of texting.
-  if (result.action === 'link_created') return { tone: 'good', text: 'Auto Pay setup link ready — copied to clipboard' };
+  if (result.action === 'link_created') {
+    return { tone: 'good', text: result.copied ? 'Auto Pay setup link copied to clipboard' : 'Auto Pay setup link ready — copy it from below' };
+  }
   const reason = String(result.reason || '');
   if (reason === 'customer_not_found') return { tone: 'bad', text: 'Customer not found' };
+  if (reason === 'autopay_sms_gate_off') return { tone: 'muted', text: 'Auto Pay texts are switched off (GATE_AUTOPAY_CUSTOMER_SMS) — copy the link instead' };
   if (reason.startsWith('enrollment_refused')) return { tone: 'bad', text: 'Saved card could not be enrolled — check the customer\'s payment methods' };
   if (reason === 'send_blocked' || reason === 'request_failed') return { tone: 'bad', text: 'Send failed — check Communications' };
   if (reason === 'payer_billed' || reason === 'payer_check_uncertain') {
