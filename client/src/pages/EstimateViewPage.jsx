@@ -78,6 +78,7 @@ import {
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
 import useModalFocus from '../hooks/useModalFocus';
+import { canonicalShareUrl, shareDocumentLink } from '../components/DocumentActionBar';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { etParts, formatETDate, formatETDateTime } from '../lib/timezone';
@@ -151,6 +152,7 @@ const SECTION_KICKER_STYLE = {
 const BOOKING_SECTION_ID = 'estimate-booking-section';
 const PRICE_SECTION_ID = 'estimate-price-section';
 const PAYMENT_SECTION_ID = 'estimate-payment-section';
+const ASK_SECTION_ID = 'estimate-ask-section';
 const REVIEW_SECTION_ID = 'estimate-review-section';
 
 function scrollToPriceSection() {
@@ -160,6 +162,11 @@ function scrollToPriceSection() {
 
 function scrollToBookingSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(BOOKING_SECTION_ID) : null;
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function scrollToAskSection() {
+  const el = typeof document !== 'undefined' ? document.getElementById(ASK_SECTION_ID) : null;
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -1105,6 +1112,68 @@ const ESTIMATE_ASK_PROMPTS = [
   'Who is Waves?',
 ];
 
+// Returning-visitor strip (GATE_ESTIMATE_RETURN_VISIT). Renders only when the
+// payload carries `returnVisit` (second or later VISIT, sessionized server-
+// side). Every change line is server-named from a durable stamp; the strip
+// never says "something changed" on its own — and never claims "nothing
+// changed" either (pre-push codex P1: only two stamps are recognized, so an
+// empty list proves nothing). The empty state just says the page is current. "Text this to someone" is the
+// CUSTOMER'S share sheet (navigator.share, else an sms: draft on their phone)
+// — never a Waves-sent message.
+// `showAsk` — the page passes whether an Ask Waves bar actually renders on
+// this presentation: regulated certificate surfaces (WDO / pre-treatment)
+// carry no ask bar by contract, and the review-before-booking branch renders
+// none, so the action would scroll nowhere (GH codex P1 on #3708).
+export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, showAsk = true }) {
+  if (!returnVisit || Number(returnVisit.visitNumber) < 2) return null;
+  const lastDate = returnVisit.lastVisitAt ? new Date(returnVisit.lastVisitAt) : null;
+  const lastDisplay = lastDate && !Number.isNaN(lastDate.getTime())
+    ? formatETDate(lastDate, { month: 'long', day: 'numeric' })
+    : null;
+  const changes = Array.isArray(returnVisit.changes) ? returnVisit.changes.filter((c) => c && c.label) : [];
+  const since = lastDisplay ? ` since ${lastDisplay}` : '';
+  // The page's ONE share mechanism (DocumentActionBar's), with the sms:
+  // draft as this control's fallback: canonical origin + pathname, so an
+  // ?intent=accept or staff-preview marker never rides the shared link (GH
+  // codex r6 P1). The href is the same canonical sms: draft for a plain tap.
+  const pageUrl = typeof window !== 'undefined' ? canonicalShareUrl() : '';
+  const smsHref = `sms:?&body=${encodeURIComponent(pageUrl)}`;
+  const share = async (e) => {
+    e.preventDefault();
+    await shareDocumentLink({ title: 'My Waves estimate', fallback: 'sms', skipWebShareInNativeShell: true });
+  };
+  const actionStyle = {
+    background: 'none', border: 'none', padding: '6px 10px', fontSize: 14, fontWeight: 600,
+    color: COLORS.glassNavy, textDecoration: 'underline', cursor: 'pointer',
+  };
+  return (
+    <section data-glass="card" aria-label="Another look" style={{ ...estimateCard(), display: 'grid', gap: 8 }}>
+      {/* Estimate-level wording, never "you": the link may be opened by a
+          spouse or bookkeeper after the share action, and views carry no
+          viewer identity (GH codex P2 on #3708). */}
+      <div style={{ ...HEADER_EYEBROW_STYLE }}>Another look</div>
+      {changes.length ? (
+        <>
+          <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+            This is visit {returnVisit.visitNumber} to this estimate &mdash; here&rsquo;s what&rsquo;s changed on it{since}:
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 20, fontSize: 16, color: COLORS.glassNavy, lineHeight: 1.5 }}>
+            {changes.map((c, i) => <li key={`${c.kind}-${c.at || i}`}>{c.label}</li>)}
+          </ul>
+        </>
+      ) : (
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+          This is visit {returnVisit.visitNumber} to this estimate{lastDisplay ? ` (the last one was ${lastDisplay})` : ''} &mdash; the estimate below is current as of today.
+        </div>
+      )}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
+        <a href={smsHref} onClick={share} style={actionStyle}>Text this to someone</a>
+        {showAsk ? <button type="button" onClick={onAsk} style={actionStyle}>Ask a question</button> : null}
+      </div>
+    </section>
+  );
+}
+
 export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'recurring', chips }) {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
@@ -1156,7 +1225,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   }, [asking, askToken, question, selectedFrequency, serviceMode, token]);
 
   return (
-    <section style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
+    <section id={ASK_SECTION_ID} style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
       <div>
         <div style={{
           fontSize: 12,
@@ -5202,7 +5271,11 @@ function EstimateViewPageInner() {
   // aborts whichever load is in flight, not just the mount-time one.
   const lifetimeAbortRef = useRef(null);
 
-  const loadEstimate = useCallback(async ({ preserveSelection = false } = {}) => {
+  // countView: keep the refresh UI semantics (no skeleton) but let the server
+  // COUNT this open — the revived fetch after an expired-screen extension is
+  // a real visit, and tagging it refresh=1 would leave the returning-visitor
+  // projection one session behind (GH codex P2 on #3708).
+  const loadEstimate = useCallback(async ({ preserveSelection = false, countView = false } = {}) => {
     const signal = lifetimeAbortRef.current?.signal;
     const isRefresh = initialViewCountedRef.current;
     // Refreshes keep the loaded UI on screen instead of dropping back to the
@@ -5211,7 +5284,7 @@ function EstimateViewPageInner() {
     if (!isRefresh) setLoading(true);
     setLoadError(false);
     const params = [];
-    if (isRefresh) params.push('refresh=1');
+    if (isRefresh && !countView) params.push('refresh=1');
     if (pdfDocumentMode) {
       params.push('mode=pdf');
       if (pdfDocPin) params.push(`dpin=${encodeURIComponent(pdfDocPin)}`);
@@ -5261,7 +5334,16 @@ function EstimateViewPageInner() {
     // same ordering rule — before setData) so the commercial copy pack and
     // the residential fallback can never render torn on one paint.
     setCommercialGlass(body?.cta?.commercialGlass === true);
-    setData(body);
+    // A refresh belongs to the sitting already on screen: the server withholds
+    // returnVisit on a refresh it cannot prove is inside a recorded sitting
+    // (a tab left open past the session gap), and the strip must not vanish
+    // mid-session for that — carry the loaded projection forward (GH codex
+    // r6 P2). A fresh open always takes the server's word.
+    // Never on a payload that turned terminal (declined via the sheet, accepted,
+    // expired): the server's active-only eligibility wins there (GH codex r8 P2).
+    setData((prev) => (isRefresh && prev?.returnVisit && !body.returnVisit && body?.cta?.terminalState == null
+      ? { ...body, returnVisit: prev.returnVisit }
+      : body));
     setLoading(false);
     const defaultServiceMode = body?.estimate?.defaultServiceMode || body?.pricing?.defaultServiceMode;
     const isOneTimeOnly = body?.estimate?.isOneTimeOnly === true || defaultServiceMode === 'one_time';
@@ -6456,10 +6538,11 @@ function EstimateViewPageInner() {
             // up until /data actually 200s (then the live estimate renders
             // in place); on failure nothing changes and the card—with its
             // success copy and retry button—survives. The server counts the
-            // revived estimate's first real view regardless (?refresh=1 is
-            // only honored once viewed_at is set).
+            // revived estimate's open as a real view: countView keeps the
+            // refresh UI but omits ?refresh=1, so the returning-visitor
+            // projection sees this sitting (GH codex P2 on #3708).
             initialViewCountedRef.current = true;
-            loadEstimate().catch(() => {});
+            loadEstimate({ countView: true }).catch(() => {});
           }}
         />
       </Page>
@@ -7187,6 +7270,13 @@ function EstimateViewPageInner() {
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
         {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+        {/* Returning-visitor strip: the server projects it for any accept-active
+            row, which includes quote-required presentations that land here
+            (GH codex P2 on #3708). The Ask action follows this branch's own
+            ask-bar condition below. */}
+        {data.returnVisit
+          ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={showAskBar && !isRegulatedCertificateSurface} />
+          : null}
         {/* Commercial proposal: the what-happens-next card sits directly under
             the hero identity block (owner 2026-08-08) — at the bottom it
             repeated the hero's "your formal proposal is ready" and read as a
@@ -7327,6 +7417,9 @@ function EstimateViewPageInner() {
           subline={fillGlassTokens(glassPack?.heroSub) || null}
         />
         {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+        {/* aiPanelBlock below renders the Ask bar on this branch (regulated
+            certificate surfaces excepted), so the action follows that. */}
+        {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
@@ -7351,6 +7444,8 @@ function EstimateViewPageInner() {
       />
 
       {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+
+      {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
         <SlotIssueBanner

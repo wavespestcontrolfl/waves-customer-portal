@@ -15080,6 +15080,11 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       label,
       included,
       mode,
+      // Provenance is persisted at the source: the caller's actor —
+      // 'customer' for the public tap, 'staff' for the send-time park — so
+      // the returning-visitor strip and the send-time recovery can tell
+      // them apart (merge of #3708 + #3711; a hardcoded 'customer' here
+      // overwrote every staff park — pre-push codex P0).
       actor,
       ...(parkId ? { parkId } : {}),
       at: new Date().toISOString(),
@@ -24707,6 +24712,13 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // ?mode=pdf by hand still counts as the view it is (unlike the refresh
     // param above, no public input can dodge first-view tracking).
     const verifiedPdfRenderPass = isPdfRenderPass && docRenderPin !== null;
+    // Whether THIS request is represented in estimate_views: an internal
+    // refresh belongs to the sitting that was already counted; a fresh open
+    // counts only once its row actually lands. The returning-visitor
+    // projection below refuses to run otherwise — it would treat the last
+    // stored session as current and report a visit number one too low (GH
+    // codex P2 on #3708).
+    let currentViewRecorded = isInternalRefresh;
     if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && shouldCountView(req, ip, estimate)) {
       // ONE transaction for the aggregate counter + the per-open row: written
       // separately, a failure of either half leaves view_count permanently
@@ -24728,6 +24740,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
             user_agent: ua || null,
           });
         });
+        currentViewRecorded = true;
       } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
 
       // Engagement-engine hook — same contract as the legacy HTML view
@@ -25174,8 +25187,46 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // include-when-present so every other response stays byte-identical.
     const successReferral = await estimateReferralCardFor(estimate);
 
+    // Returning-visitor strip (GATE_ESTIMATE_RETURN_VISIT). Include-when-TRUE
+    // only: gate on, a live accept-active row, never a staff draft preview or
+    // the headless document pass. The current open's estimate_views row was
+    // inserted above (before this composition), so the sessionizer already
+    // counts this visit; an internal ?refresh=1 re-fetch inserts nothing and
+    // still lands inside the current session. Best-effort: a sessionizer
+    // failure never breaks the customer-facing endpoint.
+    let returnVisitBlock = {};
+    if (featureGates.isEnabled('estimateReturnVisit') && !adminDraftPreview && !isPdfRenderPass
+      && currentViewRecorded && isEstimateAcceptActive(estimate)) {
+      try {
+        const { sessionsForEstimate } = require('../services/estimate-engagement-sessions');
+        const { buildReturnVisitPayload } = require('../services/estimate-return-visit');
+        const sessions = await sessionsForEstimate(estimate.id);
+        // An internal refresh must belong to a RECORDED sitting: if the
+        // initial open's view row never landed, a later preference/booking
+        // refresh would otherwise project from the last historical session
+        // as though it were current (GH codex r6 P2). Proof = the latest
+        // session is still inside the session gap right now.
+        if (isInternalRefresh) {
+          const { SESSION_GAP_MINUTES } = require('../services/estimate-engagement-sessions');
+          const latest = sessions[sessions.length - 1];
+          const latestEnd = latest?.endedAt ? new Date(latest.endedAt).getTime() : 0;
+          if (!latestEnd || Date.now() - latestEnd > SESSION_GAP_MINUTES * 60000) {
+            throw Object.assign(new Error('refresh outside a recorded sitting'), { skipReturnVisit: true });
+          }
+        }
+        const returnVisit = buildReturnVisitPayload({
+          sessions,
+          extensionAutoGrantedAt: estimate.extension_auto_granted_at || null,
+        });
+        if (returnVisit) returnVisitBlock = { returnVisit };
+      } catch (e) {
+        if (!e?.skipReturnVisit) logger.warn(`[estimate-data] return-visit projection skipped: ${e.message}`);
+      }
+    }
+
     res.json({
       ...(propertyGroup ? { propertyGroup } : {}),
+      ...returnVisitBlock,
       ...(successReferral ? { referral: successReferral } : {}),
       // Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): the page draws
       // the strip from visitsPerYear already in the section payload, so this
