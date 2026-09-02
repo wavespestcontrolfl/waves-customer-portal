@@ -272,7 +272,10 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
         metadata: { autopay_setup_request_id: request.id, trigger, original_message_type: TEMPLATE_KEY },
       });
     } catch (sendErr) {
-      logger.error(`[autopay-setup-link] send outcome UNCERTAIN for customer ${customerId}: ${sendErr.message}`);
+      // Provider errors can echo the destination number — never log PII
+      // (pre-push Codex P1): keep the error class/code, redact digit runs.
+      const safe = String(sendErr?.code || sendErr?.name || 'error') + ': ' + String(sendErr?.message || '').replace(/\+?\d[\d\s().-]{6,}\d/g, '[redacted]');
+      logger.error(`[autopay-setup-link] send outcome UNCERTAIN for customer ${customerId}: ${safe}`);
       return skip('send_outcome_uncertain', linkMeta);
     }
     if (!result?.sent) return skip(result?.reason || 'send_blocked', linkMeta);
