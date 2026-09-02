@@ -216,6 +216,20 @@ async function confirmationChannelAvailability(customer) {
       } catch (err) { logger.warn(`channel availability: notification prefs read failed for ${customer.id}: ${err.message}`); }
     }
   }
+  if (channels.email) {
+    // The SAME suppression authority the send consults (email-template-
+    // library blocks a bounced / spam-complaint / do-not-email address
+    // before SendGrid): the card must not promise an email the commit
+    // deterministically blocks (codex GH r28 P2). Resolved against the
+    // cancellation template so group-scoped suppressions match the send;
+    // an unseeded template still catches the global types.
+    try {
+      const EmailTemplateLibrary = require('./email-template-library');
+      const template = await EmailTemplateLibrary.loadTemplateByKey('account.cancellation_received');
+      const suppression = await EmailTemplateLibrary.activeSuppressionFor(template || {}, customer.email, null);
+      if (suppression) channels.email = false;
+    } catch (err) { logger.warn(`channel availability: email suppression read failed for ${customer.id}: ${err.message}`); }
+  }
   return channels;
 }
 

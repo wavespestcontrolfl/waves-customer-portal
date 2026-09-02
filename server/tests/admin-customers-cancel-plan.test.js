@@ -1671,6 +1671,36 @@ describe('POST /:id/cancel-plan', () => {
       expect((await after.json()).code).not.toBe('pending_prepay_invoice');
     }));
 
+    test('a pending prepay invoice that SURFACES during the wind-down parks the run for the office — never a clean churn with coverage still re-activatable', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms = [];
+      // Estimate acceptance lands mid-run (it takes no cancel lock): the
+      // processor's turn is where the term appears.
+      mockProcess.mockImplementationOnce(async () => {
+        mockState.annual_prepay_terms = [{
+          id: 'term-late', customer_id: 'cust-1', term_start: '2026-09-01', term_end: '2027-08-31', plan_label: 'Annual Pest',
+          prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+          status: 'payment_pending', renewal_decision: null, prepay_invoice_id: 'inv-late',
+        }];
+        mockState.invoices = [{ id: 'inv-late', status: 'sent', invoice_number: 'WPC-2026-0042' }];
+        return { ...PROCESSED };
+      });
+      const body = await (await postCancel(baseUrl)).json();
+      expect(body.processed).toBe(true);
+      expect(body.errors).toEqual(['pending_prepay_invoice_appeared']);
+      // Partial: belled, acceptance stays open for the retry after the void.
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(mockState.service_requests[0].status).toBe('new');
+      // The office voids the invoice (the void handler cancels the
+      // never-paid term with it); the repair retry closes clean.
+      mockState.invoices[0].status = 'void';
+      mockState.annual_prepay_terms = [];
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 0 });
+      const retry = await (await postCancel(baseUrl)).json();
+      expect(retry.requestId).toBe(body.requestId);
+      expect(retry.errors).toEqual([]);
+      expect(mockState.service_requests[0].status).toBe('resolved');
+    }));
+
     test('a multi-family retry matches the acceptance on the REQUESTED scope — ownership normalization must not open a second request', () => withServer(async (baseUrl) => {
       mockState.service_requests = [{
         id: 'req-multi', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',

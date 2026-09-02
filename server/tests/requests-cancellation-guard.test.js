@@ -13,7 +13,10 @@ jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
 // portal JWT) is entered by flipping this before the request.
 let mockAuthInactive = false;
 jest.mock('../middleware/auth', () => ({
-  authenticate: (req, _res, next) => next(),
+  authenticate: (req, _res, next) => {
+    req.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '+15550000000' };
+    next();
+  },
   authenticateAllowInactive: (req, _res, next) => {
     req.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '+15550000000' };
     req.customerInactive = mockAuthInactive;
@@ -83,8 +86,8 @@ function builderFor(table) {
         where(col, op, val) { current.push(colCond(col, op, val)); return group; },
         orWhere(col, op, val) { disjuncts.push(current); current = [colCond(col, op, val)]; return group; },
         // The inactive retry's portal-origin predicate (source IS NULL OR source <> 'admin').
-        whereNull(col) { current.push((r) => r[col] == null); return group; },
-        orWhereNot(col, val) { disjuncts.push(current); current = [(r) => r[col] !== val]; return group; },
+        whereNull(col) { const c = String(col).split('.').pop(); current.push((r) => r[c] == null); return group; },
+        orWhereNot(col, val) { const c = String(col).split('.').pop(); disjuncts.push(current); current = [(r) => r[c] !== val]; return group; },
       };
       criteria.call(group, group); // knex hands the builder as `this` AND the first argument
       disjuncts.push(current);
@@ -110,7 +113,8 @@ function builderFor(table) {
     b[method] = jest.fn(() => b);
   }
   b.first = jest.fn(async () => rows()[0] || null);
-  b.count = jest.fn(() => b);
+  // count(...).first() → the filtered row count, so GET / total is real.
+  b.count = jest.fn(() => ({ first: async () => ({ count: String(rows().length) }) }));
   b.insert = jest.fn((row) => ({
     returning: jest.fn(async () => {
       const inserted = { id: `req-${(mockState.service_requests_inserted ??= []).length + 1}`, created_at: new Date().toISOString(), ...row };
@@ -156,6 +160,20 @@ beforeEach(() => {
 });
 
 afterEach(() => jest.clearAllMocks());
+
+describe('GET /api/requests', () => {
+  test('the total excludes the hidden admin-originated rows exactly like the page — no phantom pages', () => withServer(async (baseUrl) => {
+    mockState.service_requests = [
+      { id: 'r-portal', customer_id: 'cust-1', category: 'pest_issue', subject: 'Ants', status: 'new', source: null, created_at: new Date() },
+      { id: 'r-admin', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel Lawn Care (Admin (user admin-1))', description: 'gate code 4471', status: 'new', source: 'admin', created_at: new Date() },
+    ];
+    const res = await fetch(`${baseUrl}/api/requests`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.requests.map((r) => r.id)).toEqual(['r-portal']);
+    expect(body.total).toBe(1);
+  }));
+});
 
 describe('POST /api/requests cancellation guard', () => {
   test('nothing to cancel → 400 nothing_to_cancel, no insert, processor never runs', () => withServer(async (baseUrl) => {

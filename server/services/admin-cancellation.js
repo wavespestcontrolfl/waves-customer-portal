@@ -151,12 +151,12 @@ async function loadCustomer(customerId) {
 // invoice tools own that void. Whole account (scope null): every pending
 // term. Scoped: only a pending term whose coverage identity is one of the
 // selected families — or whose identity cannot be read (fail closed).
-async function refusePendingPrepayInvoices(customerId, scope = null) {
+async function findPendingPrepayInvoice(customerId, scope = null) {
   const pending = await db('annual_prepay_terms')
     .where({ customer_id: customerId, status: 'payment_pending' })
     .whereNotNull('prepay_invoice_id')
     .select('id', 'prepay_invoice_id', 'plan_label', 'coverage_service_type');
-  if (!pending.length) return;
+  if (!pending.length) return null;
   const { familyOfServiceRow } = require('./cancellation-processor');
   for (const p of pending) {
     if (Array.isArray(scope)) {
@@ -164,11 +164,17 @@ async function refusePendingPrepayInvoices(customerId, scope = null) {
       if (identityFamily && !scope.includes(identityFamily)) continue;
     }
     const inv = await db('invoices').where({ id: p.prepay_invoice_id }).first('id', 'status', 'invoice_number');
-    if (inv && String(inv.status) !== 'void') {
-      throw new CancelPlanError(409, 'pending_prepay_invoice',
-        `An unpaid annual-prepay invoice (${inv.invoice_number || inv.id}${p.plan_label ? `, ${p.plan_label}` : ''}) is still payable and would re-activate coverage if paid after this cancellation. Void it from the invoice tools first.`);
-    }
+    if (inv && String(inv.status) !== 'void') return { term: p, invoice: inv };
   }
+  return null;
+}
+
+async function refusePendingPrepayInvoices(customerId, scope = null) {
+  const hit = await findPendingPrepayInvoice(customerId, scope);
+  if (!hit) return;
+  const { term: p, invoice: inv } = hit;
+  throw new CancelPlanError(409, 'pending_prepay_invoice',
+    `An unpaid annual-prepay invoice (${inv.invoice_number || inv.id}${p.plan_label ? `, ${p.plan_label}` : ''}) is still payable and would re-activate coverage if paid after this cancellation. Void it from the invoice tools first.`);
 }
 
 async function resolveLiveTerm(customerId, wholeAccount) {
@@ -1618,6 +1624,26 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   }
   const processed = !!(result && result.ok && (result.churned || result.scopedWoundDown));
   if (result && Array.isArray(result.errors)) errors.push(...result.errors);
+  // The pending-invoice refusal above is a preflight: annual-prepay term
+  // creation (estimate acceptance → estimate-converter / renewals attach)
+  // does not take the cancel lock, so a term can appear between that read
+  // and the end of the wind-down and stay payable on the churned account
+  // (codex GH r28 P1). Re-read at the boundary: a term that surfaced is an
+  // exception the office resolves (void the invoice, then retry closes) —
+  // never a clean run leaving coverage re-activatable. Unreadable = same
+  // exception (fail closed on a money hazard).
+  if (processed) {
+    try {
+      const surfaced = await findPendingPrepayInvoice(customerId, wholeAccount ? null : scope);
+      if (surfaced) {
+        errors.push('pending_prepay_invoice_appeared');
+        logger.error(`[admin-cancellation] pending prepay invoice ${surfaced.invoice.id} (term ${surfaced.term.id}) surfaced during the wind-down for request ${request.id} — void it, then retry`);
+      }
+    } catch (recheckErr) {
+      errors.push('pending_prepay_invoice_appeared');
+      logger.error(`[admin-cancellation] pending prepay recheck failed after the wind-down for request ${request.id}: ${recheckErr.message}`);
+    }
+  }
   // Approved-facts reconcile after the sweep (codex r8 P2, r10 P2): the
   // recurrence stop's straggler re-sweep can catch an occurrence minted
   // after the fingerprint check — correctly cancelled (its series is

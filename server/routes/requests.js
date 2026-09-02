@@ -1201,6 +1201,9 @@ router.get('/', authenticate, async (req, res, next) => {
 
     const total = await db('service_requests')
       .where({ customer_id: req.customer.id })
+      // Same admin-row exclusion as the page above — a total that counts
+      // hidden rows produces empty or phantom pages (codex GH r28 P2).
+      .where((qb) => { qb.whereNull('source').orWhereNot('source', 'admin'); })
       .count('id as count')
       .first();
 
