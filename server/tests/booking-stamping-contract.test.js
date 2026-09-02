@@ -307,6 +307,15 @@ describe('gate ON — catalog-identity snapshot completion', () => {
     // No cadence evidence → the generic bridge, as before.
     const once = await run({ ...BASE, service_type: 'Pest Control' }, catalog);
     expect(once.service_id).toBe('svc-once');
+    // The cadence-derived name goes through the alias bridge too: a catalog
+    // restored by the cadence-rename migration's down() carries the
+    // pre-rename spelling (GH Codex r16 P1).
+    const { CADENCE_CONVENTION_RENAMES } = require('../config/service-name-aliases');
+    const restored = CADENCE_CONVENTION_RENAMES.find(([, to]) => to === 'Monthly Lawn Care Service');
+    expect(restored).toBeTruthy();
+    const rolledBack = [{ id: 'svc-lawn-old', name: restored[0], service_key: 'lawn_monthly', category: 'lawn' }];
+    const lawn = await run({ ...BASE, service_type: 'Lawn Care', recurring_pattern: 'monthly_nth_weekday' }, rolledBack);
+    expect(lawn.service_id).toBe('svc-lawn-old');
   });
 
   test('ambiguous name → no stamp (enrichment never guesses)', async () => {

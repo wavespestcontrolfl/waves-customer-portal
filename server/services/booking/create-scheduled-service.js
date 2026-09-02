@@ -100,11 +100,14 @@ async function resolveCatalogIdentity(conn, insertData) {
   // through — names exactly one current catalog row. That mapping is
   // decisive and runs BEFORE the generic suffix expansion, which would
   // otherwise land a recurring row on the one-time service (GH Codex r15
-  // P1).
+  // P1) — and the cadence-derived name then goes through the SAME
+  // candidate expansion as any label, so a catalog restored by the
+  // cadence-rename migration's down() (its rollback aliases) still
+  // resolves (GH Codex r16 P1).
   const { serviceNameCandidates } = require('../service-completion-profiles');
   const { legacyCatalogName } = require('../../config/service-name-aliases');
   const cadenceName = legacyCatalogName(name, insertData.recurring_pattern);
-  const candidates = (cadenceName ? [cadenceName] : serviceNameCandidates(name)).map((c) => c.toLowerCase());
+  const candidates = serviceNameCandidates(cadenceName || name).map((c) => c.toLowerCase());
   if (!candidates.length) return null;
   const hits = await stable(live(conn('services'))
     .whereRaw(`LOWER(name) IN (${candidates.map(() => '?').join(', ')})`, candidates))

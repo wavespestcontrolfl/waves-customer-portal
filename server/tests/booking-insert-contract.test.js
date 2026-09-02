@@ -142,7 +142,10 @@ function walk(dir, out = []) {
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name)) continue;
       walk(path.join(dir, entry.name), out);
-    } else if (entry.name.endsWith('.js')) {
+    } else if (/\.(?:js|mjs|cjs|sh|sql)$/.test(entry.name)) {
+      // Shell and SQL tools are production write surfaces too (ops/agents
+      // holds a .sh tool today) — their raw `INSERT INTO scheduled_services`
+      // is scanned like a knex.raw (GH Codex r16 P2).
       out.push(path.join(dir, entry.name));
     }
   }
@@ -156,6 +159,37 @@ function walk(dir, out = []) {
 function fingerprintOf(scope) {
   const m = scope.match(/^[\s\S]*?\.insert\s*\(\s*(\{|[A-Za-z0-9_.$]+(\([^)]*\))?)?/);
   return (m ? m[0] : scope).replace(/\s+/g, ' ').trim();
+}
+
+// Whether position `index` lies inside a comment (`//`, `/* */`, a
+// `--` SQL comment, or a `#` line comment for shell tools), walking the
+// source from the top with strings skipped so a `//` inside a string
+// literal doesn't open a phantom comment.
+function insideComment(source, index) {
+  let i = 0;
+  while (i < index) {
+    const ch = source[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i += 1;
+      while (i < source.length && source[i] !== ch) { if (source[i] === '\\') i += 1; i += 1; }
+      i += 1;
+      continue;
+    }
+    if (source.startsWith('//', i) || source.startsWith('--', i) || (ch === '#' && (i === 0 || source[i - 1] === '\n' || /\s/.test(source[i - 1])))) {
+      const nl = source.indexOf('\n', i);
+      if (nl === -1 || nl > index) return true;
+      i = nl + 1;
+      continue;
+    }
+    if (source.startsWith('/*', i)) {
+      const end = source.indexOf('*/', i + 2);
+      if (end === -1 || end + 2 > index) return true;
+      i = end + 2;
+      continue;
+    }
+    i += 1;
+  }
+  return false;
 }
 
 // Advance past whitespace and // and /* */ comments.
@@ -639,10 +673,10 @@ function collectInsertSites(source) {
   let rawM;
   while ((rawM = rawRe.exec(source)) !== null) {
     // Comment mentions are not sites (the iCal script documents its own
-    // insert in prose).
-    const lineStart = source.lastIndexOf('\n', rawM.index - 1) + 1;
-    const line = source.slice(lineStart, rawM.index);
-    if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
+    // insert in prose) — judged at the MATCH position by a tokenizer walk,
+    // not by the line's prefix, so `/* import */ await db.raw('INSERT …')`
+    // is still a site (GH Codex r16 P2). `#` covers shell/SQL tools.
+    if (insideComment(source, rawM.index)) continue;
     site(rawM.index, `${statementPrefix(source, rawM.index)} raw:INSERT INTO scheduled_services`, null);
   }
   // Builder refs, schema-qualified or not (`trx('public.scheduled_services')`),
@@ -833,6 +867,16 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("async function save(trx, data) {\n  await audit();\n  return trx\n    .insert(data)\n    .into('scheduled_services');\n}")).toEqual(["save :: return trx .insert(data) .into( table-last:scheduled_services"]);
     expect(collectInsertSites("const [row] = await trx\n  .insert(data)\n  .returning('*')\n  .table('scheduled_services');")).toEqual(["const [row] = await trx .insert(data) .returning('*') .table( table-last:scheduled_services"]);
     expect(collectInsertSites("await db.raw(`INSERT INTO scheduled_services (a) VALUES (?)`, [1]);")).toEqual(["await db.raw(` raw:INSERT INTO scheduled_services"]);
+    // A closed block comment BEFORE the statement doesn't hide it; a real
+    // comment (line, block, SQL --, shell #) does (r16 P2).
+    expect(collectInsertSites("/* booking import */ await db.raw('INSERT INTO scheduled_services (a) VALUES (1)');")).toHaveLength(1);
+    expect(collectInsertSites("// await db.raw('INSERT INTO scheduled_services (a) VALUES (1)');")).toEqual([]);
+    expect(collectInsertSites("/* documents: INSERT INTO scheduled_services happens below */\nconst x = 1;")).toEqual([]);
+    expect(collectInsertSites("const s = 'not // a comment'; await db.raw('INSERT INTO scheduled_services (a) VALUES (1)');")).toHaveLength(1);
+    // Shell / SQL tools: a psql insert is a site, a # comment is not.
+    expect(collectInsertSites('psql "$DATABASE_URL" -c "INSERT INTO scheduled_services (customer_id) VALUES (1)"')).toHaveLength(1);
+    expect(collectInsertSites('# never: INSERT INTO scheduled_services\npsql "$DATABASE_URL" -c "SELECT 1"')).toEqual([]);
+    expect(collectInsertSites('-- INSERT INTO scheduled_services is documented here\nSELECT 1;')).toEqual([]);
     // Schema-qualified forms, raw or builder, are the same table (r5 P2).
     expect(collectInsertSites("await db.raw(`INSERT INTO public.scheduled_services (a) VALUES (?)`, [1]);")).toEqual(["await db.raw(` raw:INSERT INTO scheduled_services"]);
     expect(collectInsertSites('await db.raw(\'INSERT INTO "public"."scheduled_services" (a) VALUES (?)\', [1]);')).toHaveLength(1);
