@@ -133,7 +133,11 @@ async function finishParked(notice, email, reason, { candidates = null, applyErr
 }
 
 async function finishApplied(notice, email, invoice, matchMethod, receipt) {
-  await db('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
+  // The payment has COMMITTED — the notice must say so whatever happened to
+  // the claim meanwhile (a stale-claim sweep on another pod could have parked
+  // it during a slow settlement). Verify the transition; a non-processing
+  // row is overwritten and logged, never left contradicting the ledger.
+  const moved = await db('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
     status: 'auto_applied',
     park_reason: null,
     match_method: matchMethod,
@@ -143,6 +147,14 @@ async function finishApplied(notice, email, invoice, matchMethod, receipt) {
     applied_by: RECORDED_BY,
     updated_at: new Date(),
   });
+  if (!moved) {
+    logger.error(`[zelle-notice] notice ${notice.id} was no longer processing after ${invoice.invoice_number} settled — forcing auto_applied to match the ledger`);
+    await db('inbound_payment_notices').where({ id: notice.id }).update({
+      status: 'auto_applied', park_reason: null, apply_error: null, match_method: matchMethod,
+      matched_invoice_id: invoice.id, matched_customer_id: invoice.customer_id,
+      applied_at: new Date(), applied_by: RECORDED_BY, updated_at: new Date(),
+    });
+  }
   await stampEmail(email.id, `zelle_notice_applied:${invoice.invoice_number}`);
   const legs = [receipt?.email?.ok && 'email', receipt?.sms?.ok && 'sms'].filter(Boolean).join(' + ') || 'no receipt delivered';
   await notifyOwner(

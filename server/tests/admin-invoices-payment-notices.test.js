@@ -123,6 +123,16 @@ describe('POST /payment-notices/:id/apply', () => {
     expect(tables.emails.calls.find(([m]) => m === 'update')[1]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500' });
   });
 
+  test('a claim lost during a slow settlement still closes the notice as applied (forced, logged) — the ledger wins', async () => {
+    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [1, 0, 1], calls: [] };
+    liveExact();
+    await withServer(async (call) => { expect((await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' })).status).toBe(200); });
+    const updates = tables.inbound_payment_notices.calls.filter(([m]) => m === 'update').map(([, p]) => p);
+    expect(updates).toHaveLength(3);
+    expect(updates[2]).toMatchObject({ status: 'applied', matched_invoice_id: 'inv-1' });
+    expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-1' }]);
+  });
+
   test('a stored candidate is NOT enough — the live exact-cent check decides (a ±$5 lead or a since-paid invoice is refused before any claim)', async () => {
     tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [] };
     OpenBalance.openSelfPayInvoicesByAmountDue.mockResolvedValueOnce([]); // inv-1 no longer open at 11700

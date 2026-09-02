@@ -732,19 +732,27 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
       throw err;
     }
     const { invoice, receipt } = settled;
-    await db('inbound_payment_notices')
-      .where({ id, status: 'processing' })
-      .update({
-        status: 'applied',
-        park_reason: null,
-        apply_error: null,
-        match_method: 'manual',
-        matched_invoice_id: invoiceId,
-        matched_customer_id: invoice?.customer_id || exact.customer_id,
-        applied_at: db.fn.now(),
-        applied_by: recordedBy,
-        updated_at: db.fn.now(),
-      });
+    // The payment has COMMITTED; the notice must say applied whatever
+    // happened to the claim meanwhile (a stale-claim sweep could have parked
+    // it during a slow settlement). Verify the transition and force it if
+    // lost — a notice contradicting the ledger is never reported as success
+    // silently.
+    const closePatch = {
+      status: 'applied',
+      park_reason: null,
+      apply_error: null,
+      match_method: 'manual',
+      matched_invoice_id: invoiceId,
+      matched_customer_id: invoice?.customer_id || exact.customer_id,
+      applied_at: db.fn.now(),
+      applied_by: recordedBy,
+      updated_at: db.fn.now(),
+    };
+    const closed = await db('inbound_payment_notices').where({ id, status: 'processing' }).update(closePatch);
+    if (!closed) {
+      logger.error(`[admin-invoices:payment-notices] notice ${id} lost its claim after ${invoiceId} settled — forcing applied to match the ledger`);
+      await db('inbound_payment_notices').where({ id }).update(closePatch);
+    }
     await db('emails').where({ id: notice.email_id }).update({ auto_action: `zelle_notice_applied:${invoice?.invoice_number || exact.invoice_number}`, updated_at: new Date() })
       .catch((err) => logger.warn(`[admin-invoices:payment-notices] auto_action stamp failed: ${err.message}`));
     res.json({ ok: true, invoice, receipt });

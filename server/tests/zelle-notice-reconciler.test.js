@@ -164,6 +164,22 @@ describe('auto-apply', () => {
   });
 });
 
+describe('post-settlement transition', () => {
+  test('if the claim was lost while the payment settled, the notice is still forced to auto_applied (never contradicts the ledger)', async () => {
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+    const orig = db.getMockImplementation();
+    let updates = 0;
+    db.mockImplementation((table) => { const b = orig(table); if (table === 'inbound_payment_notices') { const u = b.update; b.update = jest.fn(async (patch) => { updates += 1; await u(patch); return updates === 1 ? 0 : 1; }); } return b; });
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    const patches = updatesOf('inbound_payment_notices');
+    expect(patches).toHaveLength(2);
+    expect(patches[0]).toMatchObject({ status: 'auto_applied' });
+    expect(patches[1]).toMatchObject({ status: 'auto_applied', matched_invoice_id: 'inv-1' });
+    expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-1' }]);
+  });
+});
+
 describe('park reasons', () => {
   test('no exact-cent invoice ⇒ no_match, with the near-amount candidates for the operator', async () => {
     claimed();
