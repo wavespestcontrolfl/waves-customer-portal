@@ -42,7 +42,9 @@ jest.mock('../models/db', () => {
     };
     return q;
   };
-  return jest.fn((table) => mk(table));
+  const db = jest.fn((table) => mk(table));
+  db.transaction = async (cb) => cb(db); // the registry action writes its generation reset atomically
+  return db;
 });
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => next(),

@@ -409,14 +409,18 @@ router.patch('/registry/:id', async (req, res, next) => {
     // condition rides the UPDATE and a zero count means the race (or a
     // delete) was lost — never overwrite it: a domain-only flip would
     // contradict the placements and authority behind it.
-    const n = await db('seo_link_domains')
-      .where({ id: domain.id }).whereNotIn('agent_state', ['ready_to_acquire', 'acquiring', 'acquired'])
-      .update(patch);
-    // a new generation (Watch park, Reopen) releases the provenance-hint
-    // cursor with the probe mask — hints are re-read uncovered-first
-    if (n && patch.probe_coverage_mask === 0) {
-      await db('seo_link_domain_sources').where({ domain_id: domain.id }).whereNotNull('covered_at').update({ covered_at: null });
-    }
+    // A new generation (Watch park, Reopen) is ONE atomic write: the domain
+    // state/mask and the provenance-hint cursor (covered_at) reset together,
+    // so a failure can never leave a reset mask beside stale hint coverage.
+    const n = await db.transaction(async (trx) => {
+      const updated = await trx('seo_link_domains')
+        .where({ id: domain.id }).whereNotIn('agent_state', ['ready_to_acquire', 'acquiring', 'acquired'])
+        .update(patch);
+      if (updated && patch.probe_coverage_mask === 0) {
+        await trx('seo_link_domain_sources').where({ domain_id: domain.id }).whereNotNull('covered_at').update({ covered_at: null });
+      }
+      return updated;
+    });
     if (!n) {
       const current = await db('seo_link_domains').where({ id: domain.id }).first('agent_state');
       if (!current) return res.status(404).json({ error: 'not found' });

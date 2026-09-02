@@ -995,9 +995,13 @@ async function deferFailedDomain(db, domain, now, { claim = true, observedState 
     // mandate.
     const guard = { id: domain.id, agent_state: observedState || (claim ? 'investigating' : domain.agent_state) };
     if (claim && !observedState && claimToken) guard.investigate_claim_token = claimToken;
-    const n = await db('seo_link_domains').where(guard).update(patch);
-    // a long-term park concludes the generation for the hint cursor too
-    if (n && patch.probe_coverage_mask === 0) await db('seo_link_domain_sources').where({ domain_id: domain.id }).whereNotNull('covered_at').update({ covered_at: null });
+    // ONE transaction: a long-term park concludes the generation for the
+    // domain (mask) AND the provenance-hint cursor together, under the same
+    // claim/state guard — never a reset mask beside stale hint coverage
+    await db.transaction(async (trx) => {
+      const n = await trx('seo_link_domains').where(guard).update(patch);
+      if (n && patch.probe_coverage_mask === 0) await trx('seo_link_domain_sources').where({ domain_id: domain.id }).whereNotNull('covered_at').update({ covered_at: null });
+    });
   } catch (err) {
     logger.error(`[link-investigator] defer failed for ${domain.domain}: ${err.message}`);
   }
