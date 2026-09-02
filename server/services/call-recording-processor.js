@@ -525,14 +525,15 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
     // SID is saved for recovery's incomplete-quarantine retry (round-13
     // P1). A delete that succeeded clears a matching saved SID.
     const deleteIncomplete = !!sid && !twilioDeleted;
-    const nextMeta = {
-      ...meta,
-      pan_detected: true,
-      recording_quarantined: deleteIncomplete ? false : (twilioDeleted || meta.recording_quarantined === true),
-      quarantine_source: meta.quarantine_source || source,
-      ...(deleteIncomplete ? { quarantine_recording_sid: sid } : {}),
-    };
-    if (twilioDeleted && nextMeta.quarantine_recording_sid === sid) delete nextMeta.quarantine_recording_sid;
+    const nextMeta = { ...meta, pan_detected: true, quarantine_source: meta.quarantine_source || source };
+    if (deleteIncomplete) nextMeta.quarantine_recording_sid = sid;
+    else if (twilioDeleted && nextMeta.quarantine_recording_sid === sid) delete nextMeta.quarantine_recording_sid;
+    // Complete only while NO recording's delete is still owed: a saved retry
+    // SID for another recording (an earlier failure) keeps the row
+    // incomplete even when this delete succeeded, so recovery still retries
+    // that SID instead of reading one success as the whole call's.
+    const owed = !!nextMeta.quarantine_recording_sid;
+    nextMeta.recording_quarantined = !owed && (twilioDeleted || meta.recording_quarantined === true);
     await db('call_log').where({ id: call.id }).update({
       recording_url: null,
       transcription_metadata: JSON.stringify(nextMeta),

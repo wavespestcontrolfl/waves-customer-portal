@@ -199,6 +199,21 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(tombs).toEqual([LATE]);
   });
 
+  test('a saved retry SID for another recording keeps the quarantine incomplete even when this delete succeeds', async () => {
+    const processor = require('../services/call-recording-processor');
+    const OWED = 'REowed00000000000000000000000001';
+    const NOW_DELETED = 'REmain0000000000000000000000007';
+    db.__builder.update.mockClear();
+    db.__state.call = {
+      id: 'c-owed', recording_url: 'https://api.twilio.com/m.mp3', recording_sid: NOW_DELETED, metadata: {},
+      transcription_metadata: { pan_detected: true, recording_quarantined: false, quarantine_recording_sid: OWED, pan_notified: true },
+    };
+    const out = await processor.quarantineCardRecording(db.__state.call, { source: 'recording_status_post_quarantine' });
+    expect(out.twilioDeleted).toBe(true);
+    const stamp = db.__builder.update.mock.calls.map((c) => c[0]).find((patch) => patch.transcription_metadata);
+    expect(JSON.parse(stamp.transcription_metadata)).toMatchObject({ recording_quarantined: false, quarantine_recording_sid: OWED });
+  });
+
   test('an unstamped call still proceeds into the Twilio lookup', async () => {
     const processor = require('../services/call-recording-processor');
     db.__state.call = { id: 'c-clean', recording_url: null, transcription_metadata: null };

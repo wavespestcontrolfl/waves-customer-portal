@@ -389,9 +389,14 @@ describe('POST /recording-status', () => {
     expect(row.recording_sid).toBe(REC_1);
     expect(metaOf(row).additional_recordings).toBeUndefined();
     expect(tables.triage_items).toHaveLength(0);
-    expect(processor.quarantineCardRecording).toHaveBeenCalledTimes(1);
-    expect(processor.quarantineCardRecording).toHaveBeenCalledWith(
+    // The incoming recording AND the row's own (with every parked one) go.
+    expect(processor.quarantineCardRecording).toHaveBeenCalledTimes(2);
+    expect(processor.quarantineCardRecording).toHaveBeenNthCalledWith(1,
       expect.objectContaining({ id: 'c1', recording_sid: REC_2, recording_url: `${URL_2}.mp3` }),
+      { source: 'recording_status_post_quarantine_park' },
+    );
+    expect(processor.quarantineCardRecording).toHaveBeenNthCalledWith(2,
+      expect.objectContaining({ id: 'c1', recording_sid: REC_1 }),
       { source: 'recording_status_post_quarantine_park' },
     );
   });
@@ -443,6 +448,8 @@ describe('POST /recording-status', () => {
       expect.objectContaining({ id: 'c1', recording_sid: REC_1 }),
       { source: 'recording_status_post_quarantine' },
     );
+    // …then the row as it is (its own recording and every parked one).
+    expect(processor.quarantineCardRecording).toHaveBeenCalledTimes(2);
     expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
   });
 

@@ -309,10 +309,16 @@ async function parkAdditionalRecording(row, extra) {
     const now = await db('call_log').where({ id: row.id }).first('transcription_metadata');
     if (isPanQuarantinedRow(now)) {
       logger.warn(`[recording-status] recording ${maskSid(entry.recording_sid)} for ${maskSid(row.twilio_call_sid)} arrived as the call was PAN-quarantined — deleting instead of parking`);
-      await require('../services/call-recording-processor').quarantineCardRecording(
+      const processor = require('../services/call-recording-processor');
+      // The incoming recording first (its failure state must be saved), then
+      // the row as it is — its CURRENT recording, the audio the card may
+      // have been heard on, and every parked one.
+      await processor.quarantineCardRecording(
         { ...row, recording_sid: entry.recording_sid, recording_url: entry.recording_url },
         { source: 'recording_status_post_quarantine_park' },
       ).catch((e) => logger.error(`[recording-status] post-quarantine parked recording delete failed: ${e.message}`));
+      await processor.quarantineCardRecording(row, { source: 'recording_status_post_quarantine_park' })
+        .catch((e) => logger.error(`[recording-status] post-quarantine current recording delete failed: ${e.message}`));
       return { parked: false, quarantined: true };
     }
   }
@@ -1656,7 +1662,8 @@ router.post('/recording-status', async (req, res) => {
           .catch((e) => logger.warn(`[recording-status] missed-call supersede failed for ${maskSid(matchedSid)}: ${e.message}`));
       } else if (quarantinedMatch) {
         logger.warn(`[recording-status] recording ${maskSid(RecordingSid)} arrived for PAN-quarantined call ${maskSid(quarantinedMatch.twilio_call_sid)} — deleting instead of attaching`);
-        await require('../services/call-recording-processor').quarantineCardRecording(
+        const qProcessorDelete = require('../services/call-recording-processor');
+        await qProcessorDelete.quarantineCardRecording(
           {
             ...quarantinedMatch,
             // The recording that JUST arrived is RecordingSid — preferring
@@ -1668,6 +1675,10 @@ router.post('/recording-status', async (req, res) => {
           },
           { source: 'recording_status_post_quarantine' },
         ).catch((e) => logger.error(`[recording-status] post-quarantine recording delete failed: ${e.message}`));
+        // …and the row's own recording plus every parked one (a 404 on an
+        // already-deleted one is a complete delete, never a retry).
+        await qProcessorDelete.quarantineCardRecording(quarantinedMatch, { source: 'recording_status_post_quarantine' })
+          .catch((e) => logger.error(`[recording-status] post-quarantine current recording delete failed: ${e.message}`));
         // The masked transcript is still a REAL transcript — extraction /
         // lead / appointment processing must run for this call (Codex #2676
         // round-9 P1). Processed IMMEDIATELY (round-11 P1): there is no CDN
