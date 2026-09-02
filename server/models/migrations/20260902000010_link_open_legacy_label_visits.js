@@ -92,13 +92,15 @@ exports.up = async function up(knex) {
   const alreadyLinked = new Set(state.linked.map((l) => l.id));
   state.linked = [...state.linked];
 
-  // Share-lock the catalog for the migration's transaction (knex runs
-  // migrations transactionally), the same stability the booking contract's
-  // resolveCatalogIdentity holds through its insert: a rename/archive/
-  // duplicate-name insert cannot commit between this scan and the visit
-  // updates below (GH codex r2 P2). The per-row CAS stays as the second
-  // line for environments running migrations without a transaction.
-  const catalog = await knex('services').forShare().select('id', 'name', 'service_key', 'is_active', 'is_archived');
+  // Serialize catalog writes for the migration's transaction (knex runs
+  // migrations transactionally) — the same lock 20260825000011 /
+  // 20260829000021 take: SHARE ROW EXCLUSIVE conflicts with concurrent
+  // INSERT/UPDATE/DELETE on services, so a rename, archive OR a new
+  // duplicate-name row cannot commit between this scan and the visit
+  // updates below (GH codex r2/r3 P2 — a row-level FOR SHARE cannot fence
+  // inserts). The per-row CAS stays as the second line.
+  await knex.raw('LOCK TABLE services IN SHARE ROW EXCLUSIVE MODE');
+  const catalog = await knex('services').select('id', 'name', 'service_key', 'is_active', 'is_archived');
   const cols = [
     'id', 'service_type',
     ...(hasSnapshotCol ? ['service_key_snapshot'] : []),

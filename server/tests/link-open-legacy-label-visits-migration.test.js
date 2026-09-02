@@ -65,7 +65,6 @@ function fakeKnex(db, { missingTables = [], missingColumns = [], catalogEditDuri
         return q;
       },
       whereNull(col) { preds.push((r) => r[col] == null); return q; },
-      forShare() { db._forShare = (db._forShare || 0) + 1; return q; },
       whereRaw(sql, bindings) {
         const m = /^EXISTS \(SELECT 1 FROM services WHERE id = \? AND service_key = \? AND is_active = true AND is_archived IS NOT TRUE AND LOWER\(name\) IN \(((?:\?, )*\?)\)\) AND NOT EXISTS \(SELECT 1 FROM services WHERE id <> \? AND LOWER\(name\) IN \(((?:\?, )*\?)\)\)$/.exec(sql);
         if (!m) throw new Error(`fake whereRaw: ${sql}`);
@@ -108,6 +107,7 @@ function fakeKnex(db, { missingTables = [], missingColumns = [], catalogEditDuri
     };
     return q;
   };
+  knex.raw = async (sql) => { db._raw = (db._raw || []).concat([sql]); return { rows: [] }; };
   knex.schema = {
     hasTable: async (t) => !missingTables.includes(t),
     hasColumn: async (t, c) => !missingColumns.includes(`${t}.${c}`),
@@ -134,7 +134,7 @@ describe('20260902000010 link open legacy-label visits through the shared bridge
     expect(row(db, 'v-done').service_id).toBeNull(); // terminal = history
     expect(row(db, 'v-linked').service_id).toBe('svc-pq');
     expect(row(db, 'v-combo').service_id).toBeNull();
-    expect(db._forShare).toBe(1); // catalog scan share-locked for the transaction
+    expect(db._raw).toEqual(['LOCK TABLE services IN SHARE ROW EXCLUSIVE MODE']); // catalog writes serialized for the transaction
     const st = state(db);
     expect(st.linked.map((l) => l.id).sort()).toEqual(['v-agree', 'v-cad', 'v-cad-m', 'v-suffix']);
     expect(st.linked.find((l) => l.id === 'v-agree').service_key_snapshot).toBeNull();
