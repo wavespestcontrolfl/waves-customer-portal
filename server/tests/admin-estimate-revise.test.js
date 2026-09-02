@@ -44,6 +44,9 @@ function makeReviseDatabase({
   // The row the FOR UPDATE read inside the write transaction sees — lets a
   // test model a send committing between the pre-read and the lock.
   lockedEstimate = null,
+  // What the scheduled-group guard's sibling lookup returns (a scheduled
+  // member of this row's group), if anything.
+  scheduledGroupMember = null,
 }) {
   const updates = [];
   const rawGuards = [];
@@ -114,8 +117,10 @@ function makeReviseDatabase({
       // predicate without a real query builder.
       where: (clause) => {
         if (typeof clause === 'function') groupedWheres.push(clause);
+        if (clause && typeof clause === 'object' && 'estimate_group_id' in clause) chain.__groupQuery = true;
         return chain;
       },
+      whereNot: () => chain,
       whereNull: () => chain,
       whereNotIn: () => chain,
       whereRaw: (sql) => {
@@ -123,7 +128,10 @@ function makeReviseDatabase({
         return chain;
       },
       forUpdate: () => { chain.__locked = true; return chain; },
-      first: async () => (chain.__locked && lockedEstimate ? lockedEstimate : estimate),
+      first: async () => {
+        if (chain.__groupQuery) return scheduledGroupMember;
+        return chain.__locked && lockedEstimate ? lockedEstimate : estimate;
+      },
       update: (patch) => {
         updates.push(patch);
         return {
@@ -952,5 +960,40 @@ describe('estimate_data.proposal is server-owned on revise (pre-push P0 on #3750
     });
     expect(updates).toHaveLength(1);
     expect(JSON.parse(updates[0].estimate_data).proposal).toBeUndefined();
+  });
+});
+
+describe('reviseAdminEstimate — a draft member of a SCHEDULED group refuses a fallback revision (GH codex P2 r5 on #3750)', () => {
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  // A real UUID: the revise validates estimateGroupId (400 otherwise).
+  const groupedDraft = { ...sentEstimate, status: 'draft', sent_at: null, viewed_at: null, estimate_group_id: '2f5e7a10-6c3b-4d9e-9a11-3b7c5d2e8f01' };
+  beforeEach(() => {
+    clearAllEstimatePricingCache();
+    mockGateState.sendRequiresServerPricing = true;
+  });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('refused under the row lock when a sibling anchor is scheduled — the cron\'s group claim would fail the anchor without retry', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: groupedDraft, scheduledGroupMember: { id: 'est-anchor' } });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/group is scheduled to send/i) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('control: no scheduled member in the group keeps the draft\'s fail-open save; gate off never refuses', async () => {
+    const open = makeReviseDatabase({ estimate: groupedDraft, scheduledGroupMember: null });
+    await reviseAdminEstimate({
+      database: open.database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    });
+    expect(open.updates).toHaveLength(1);
+    expect(open.updates[0].pricing_authority).toBe('CLIENT_FALLBACK');
+
+    mockGateState.sendRequiresServerPricing = false;
+    const gateOff = makeReviseDatabase({ estimate: groupedDraft, scheduledGroupMember: { id: 'est-anchor' } });
+    await reviseAdminEstimate({
+      database: gateOff.database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    });
+    expect(gateOff.updates).toHaveLength(1);
   });
 });

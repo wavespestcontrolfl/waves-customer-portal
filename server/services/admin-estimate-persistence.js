@@ -2161,6 +2161,29 @@ function assertNoFallbackRevisionOfLiveLink(row, writeFields) {
   );
 }
 
+// A DRAFT member of a group whose anchor is SCHEDULED is a live link in
+// waiting (GH codex P2 r5 on #3750): the cron's group claim publishes every
+// active sibling and refuses a fallback one, failing the anchor without a
+// retry. So a fallback revision of such a member is refused like a live
+// link's. Runs on the LOCKED row inside the write transaction; the schedule
+// route locks the sibling rows FOR UPDATE inside its own scheduling
+// transaction, so the two serialize and this read is never stale.
+async function assertNoFallbackRevisionInScheduledGroup(trx, row, writeFields) {
+  if (!row?.estimate_group_id) return;
+  if (String(writeFields?.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return;
+  if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return;
+  const scheduledMember = await trx('estimates')
+    .where({ estimate_group_id: row.estimate_group_id, status: 'scheduled' })
+    .whereNot({ id: row.id })
+    .whereNull('archived_at')
+    .first('id');
+  if (!scheduledMember) return;
+  throw errorWithStatus(
+    'The pricing engine could not verify this revision and this property\'s multi-property group is scheduled to send — nothing was saved. Fix the inputs and try again, or unschedule the group first.',
+    409,
+  );
+}
+
 // Statuses a revise can never touch. Acceptance locks the price and spins up
 // downstream records; declined/expired are closed; `sending` means a send is
 // mid-flight (editing under it would race the sender's pre-send read into a
@@ -2628,6 +2651,7 @@ async function reviseAdminEstimate({
     // row live, and the fallback revision must lose to it — the throw rolls
     // this transaction back with nothing written.
     assertNoFallbackRevisionOfLiveLink(lockedPrior, writeFields);
+    await assertNoFallbackRevisionInScheduledGroup(trx, lockedPrior, writeFields);
     // Protocol keys re-applied from the LOCKED row (codex P0, PR #3304 GH
     // r8c): writeFields.estimate_data was built from the pre-read
     // snapshot, so a delivery claim or an invalidation marker recorded
@@ -2746,3 +2770,4 @@ module.exports = {
   preserveClickMintMarkersAcrossRevise,
 };
 module.exports.stripClientProposal = stripClientProposal;
+module.exports.assertNoFallbackRevisionInScheduledGroup = assertNoFallbackRevisionInScheduledGroup;

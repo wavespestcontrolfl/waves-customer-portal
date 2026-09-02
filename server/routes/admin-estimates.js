@@ -348,15 +348,19 @@ function assertAutoSendPricingAuthority(row = {}) {
 // Sibling enumeration mirrors the claim exactly (active, unlocked,
 // unarchived). Returns the first blocking sibling with the code the claim
 // would have raised, or null.
-async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false } = {}) {
+// `forUpdate`: lock the sibling rows for the caller's transaction (the
+// schedule route), so a concurrent revision of a sibling serializes against
+// the scheduling write instead of slipping between this read and it.
+async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false, forUpdate = false } = {}) {
   if (!estimate?.estimate_group_id) return null;
-  const siblings = await database('estimates')
+  let query = database('estimates')
     .where({ estimate_group_id: estimate.estimate_group_id })
     .whereNot({ id: estimate.id })
     .whereNull('archived_at')
     .whereNull('price_locked_at')
-    .whereIn('status', ['draft', 'scheduled', 'send_failed'])
-    .select('id', 'status', 'category', 'pricing_authority', 'estimate_data');
+    .whereIn('status', ['draft', 'scheduled', 'send_failed']);
+  if (forUpdate) query = query.forUpdate();
+  const siblings = await query.select('id', 'status', 'category', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
     const authority = String(sibling.pricing_authority || '').toUpperCase();
     if (authority === 'SERVER') continue;
@@ -939,46 +943,65 @@ router.post('/:id/send', async (req, res, next) => {
       }
       // Grouped schedule: every active sibling must clear the pricing-
       // authority gate NOW, not when the cron's group claim refuses it
-      // hours later with nobody watching (GH codex P2 on #3750).
-      const blockingSibling = await findGroupSiblingBlockingSend(estimate);
-      if (blockingSibling) {
+      // hours later with nobody watching (GH codex P2 on #3750) — and the
+      // check is ATOMIC with the schedule write (GH codex P2 r5): the
+      // sibling rows are locked FOR UPDATE under the group's advisory lock
+      // inside the same transaction as the anchor's scheduling UPDATE, so a
+      // concurrent revision that would stamp a sibling CLIENT_FALLBACK
+      // either committed first (this schedule refuses it) or waits for this
+      // commit (and is then refused by the scheduled-group guard in
+      // admin-estimate-persistence assertNoFallbackRevisionInScheduledGroup).
+      // The claim itself mirrors the immediate-send path below: the
+      // assertEstimateSendable check above ran on a stale read, and writing
+      // status='scheduled' unconditionally could clobber an in-flight
+      // 'sending' row (its guarded sent-write then misses and the cron
+      // re-sends — duplicate customer texts) or overwrite a concurrent
+      // accept (money-bearing state lost, and the row re-enters the send
+      // pipeline on a committed conversion).
+      const scheduleOutcome = await db.transaction(async (trx) => {
+        if (estimate.estimate_group_id) {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['estimate-group-send', String(estimate.estimate_group_id)],
+          );
+        }
+        const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, forUpdate: true });
+        if (blockingSibling) return { blockingSibling };
+        const claimed = await trx('estimates')
+          .where({ id: estimate.id })
+          .whereNull('price_locked_at')
+          // Archived rows can never re-enter the send pipeline (codex P0,
+          // PR #3304): a stale scheduling request racing an invalidation
+          // must not restore status='scheduled' on the archived draft.
+          .whereNull('archived_at')
+          .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
+          // Same pricing-authority re-assertion as the immediate-send claim
+          // (pre-push codex P1): a revision stamping CLIENT_FALLBACK between
+          // the pre-read check and this UPDATE must lose the race with a 409
+          // here, not report "scheduled" and have the cron burn retries.
+          .modify((q) => {
+            if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SERVER_PRICING_AUTHORITY_SQL);
+          })
+          .update({
+            status: 'scheduled',
+            scheduled_at: scheduledTime,
+            send_method: sendMethod,
+            expires_at: estimateExpiresAt(() => scheduledTime),
+            scheduled_send_attempts: 0,
+            last_send_error: null,
+            updated_at: trx.fn.now(),
+          });
+        return { claimed };
+      });
+      if (scheduleOutcome.blockingSibling) {
+        const { blockingSibling } = scheduleOutcome;
         return res.status(blockingSibling.statusCode).json({
           error: `Grouped estimate ${blockingSibling.sibling.id} has no engine-verified price — re-save it from the estimate tool before scheduling this group (the scheduled send publishes every property together).`,
           code: blockingSibling.code,
           siblingEstimateId: blockingSibling.sibling.id,
         });
       }
-      // Atomic claim, mirroring the immediate-send path below. The
-      // assertEstimateSendable check above ran on a stale read: writing
-      // status='scheduled' unconditionally could clobber an in-flight
-      // 'sending' row (its guarded sent-write then misses and the cron
-      // re-sends — duplicate customer texts) or overwrite a concurrent
-      // accept (money-bearing state lost, and the row re-enters the send
-      // pipeline on a committed conversion).
-      const scheduledClaim = await db('estimates')
-        .where({ id: estimate.id })
-        .whereNull('price_locked_at')
-        // Archived rows can never re-enter the send pipeline (codex P0,
-        // PR #3304): a stale scheduling request racing an invalidation
-        // must not restore status='scheduled' on the archived draft.
-        .whereNull('archived_at')
-        .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
-        // Same pricing-authority re-assertion as the immediate-send claim
-        // (pre-push codex P1): a revision stamping CLIENT_FALLBACK between
-        // the pre-read check and this UPDATE must lose the race with a 409
-        // here, not report "scheduled" and have the cron burn retries.
-        .modify((q) => {
-          if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SERVER_PRICING_AUTHORITY_SQL);
-        })
-        .update({
-          status: 'scheduled',
-          scheduled_at: scheduledTime,
-          send_method: sendMethod,
-          expires_at: estimateExpiresAt(() => scheduledTime),
-          scheduled_send_attempts: 0,
-          last_send_error: null,
-          updated_at: db.fn.now(),
-        });
+      const scheduledClaim = scheduleOutcome.claimed;
       if (!scheduledClaim) {
         return res.status(409).json({
           error: 'This estimate is mid-send, already accepted, or locked — refresh and retry.',

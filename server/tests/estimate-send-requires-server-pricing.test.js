@@ -315,8 +315,9 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
   const { findGroupSiblingBlockingSend } = adminEstimatesRouter._internals;
   const anchor = { id: 'est-anchor', estimate_group_id: 'grp-1', pricing_authority: 'SERVER', estimate_data: '{}' };
   function fakeDatabase(rows) {
-    const calls = { wheres: [], whereNots: [], whereNulls: [], whereIns: [] };
+    const calls = { wheres: [], whereNots: [], whereNulls: [], whereIns: [], forUpdate: false };
     const builder = {
+      forUpdate: () => { calls.forUpdate = true; return builder; },
       where: (c) => { calls.wheres.push(c); return builder; },
       whereNot: (c) => { calls.whereNots.push(c); return builder; },
       whereNull: (c) => { calls.whereNulls.push(c); return builder; },
@@ -343,6 +344,13 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
     expect(calls.whereNots).toEqual([{ id: 'est-anchor' }]);
     expect(calls.whereNulls).toEqual(['archived_at', 'price_locked_at']);
     expect(calls.whereIns).toEqual([['status', ['draft', 'scheduled', 'send_failed']]]);
+    expect(calls.forUpdate).toBe(false);
+  });
+
+  test('forUpdate locks the sibling rows for the caller\'s scheduling transaction (GH codex P2 r5)', async () => {
+    const { database, calls } = fakeDatabase([]);
+    expect(await findGroupSiblingBlockingSend(anchor, { database, forUpdate: true })).toBeNull();
+    expect(calls.forUpdate).toBe(true);
   });
 
   test('gate on: a CLIENT_FALLBACK sibling blocks with the claim\'s code (409); a NULL stamp blocks as NOT_SERVER', async () => {

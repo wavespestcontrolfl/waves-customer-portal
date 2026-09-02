@@ -17,6 +17,10 @@ jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
+  // The schedule claim runs inside a transaction (sibling preflight locked
+  // FOR UPDATE + the anchor UPDATE, GH codex P2 r5 on #3750) — same
+  // recording builder as the trx.
+  mockDb.transaction = jest.fn(async (callback) => callback(mockDb));
   return mockDb;
 });
 jest.mock('../middleware/admin-auth', () => ({
