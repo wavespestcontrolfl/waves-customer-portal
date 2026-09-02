@@ -1178,6 +1178,47 @@ function tagsNamed(src: string, name: string): Array<{ start: number; attrs: str
   return found;
 }
 
+// Definitely-hidden element predicates, shared by the structural view and
+// the AffiliateLink child check (Codex #3646 r37).
+function elementRendersHidden(attrs: string): boolean {
+  // display:none in the STYLE attribute's CSS string or JSX style object
+  // hides regardless of the hidden attribute's value — read the style
+  // attr's own value; another attr merely containing the text
+  // (aria-label={"display:none"}) is not a style.
+  if (styleHidesElement(attrs)) return true;
+  // A wrapper spread ({...props}) can inject hidden/style at render time
+  // — visibility cannot be determined, so fail closed (blank it). Only
+  // an ATTRIBUTE-position spread counts (hasJsxSpread): a {...} nested
+  // in an attr value expression never reaches the element's props.
+  if (hasJsxSpread(attrs)) return true;
+  // Duplicate hidden attributes apply LAST-WINS (JSX) — evaluated
+  // sequentially like the details `open` parser; a dynamic value fails
+  // closed (hidden).
+  return hiddenAttrRendersHidden(attrs);
+}
+function classStaticallyHidden(attrs: string): boolean {
+  // class/className read via the balanced walk: a quoted literal OR an
+  // escape-free static string expression ({'hidden'}) both resolve; a
+  // dynamic class keeps the wrapper visible (historic posture), and
+  // unparseable attrs fail closed (Codex #504 r29).
+  const walked = walkJsxAttrs(attrs);
+  if (!walked.ok) return true;
+  let cls: string | null = null;
+  for (const a of walked.list) {
+    const n = a.name.toLowerCase();
+    if (n !== 'class' && n !== 'classname') continue;
+    cls = a.literal !== null ? a.literal : staticExprString(a.expr);
+  }
+  if (cls === null) return false;
+  if (!/(?:^|\s)(?:hidden|invisible|sr-only)(?=\s|$)/.test(cls)) return false;
+  // Responsively-visible wrappers (class="hidden md:block") stay: mask
+  // only elements hidden at EVERY breakpoint.
+  // Only VIEWPORT breakpoints prove responsive visibility — print:/
+  // hover:/focus: variants leave the element hidden in ordinary viewing.
+  return !/\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(cls);
+}
+const NON_RENDERED_CONTAINERS = ['template', 'script', 'style', 'noscript', 'datalist'];
+
 // The component renders its CHILDREN as the anchor text: a self-closing,
 // empty, comment-only, or unclosed <AffiliateLink> ships an empty,
 // unusable product link (Codex #3646 r35). The balanced close is walked
@@ -1196,10 +1237,24 @@ function affiliateLinkTextIsEmpty(src: string, strView: string, start: number, a
     if (t[1] === '/') {
       depth -= 1;
       if (depth === 0) {
-        const children = src.slice(openEnd + 1, t.index)
-          .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, '')
-          .replace(/\{\s*(?:(['"`])\1|true|false|null|undefined)\s*\}/g, '');
-        return !children.trim();
+        // Hidden markup inside the link is not visible text (<span
+        // hidden>Buy</span>; Codex #3646 r37), and tag markup itself is
+        // not text — except an <img>, which renders a clickable picture.
+        const kids = src.slice(openEnd + 1, t.index).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, '');
+        const visible = blankBalancedElements(kids, (a2, name) => elementRendersHidden(a2) || classStaticallyHidden(a2)
+          || (name === 'details' && !detailsRendersOpen(a2)) || NON_RENDERED_CONTAINERS.includes(name));
+        const tagView = blankExpressionStrings(visible);
+        const tagRe2 = /<\/?([A-Za-z][\w-]*)/g;
+        let text = ''; let last = 0; let tm: RegExpExecArray | null;
+        while ((tm = tagRe2.exec(tagView)) !== null) {
+          let end: number; // index of '>'
+          if (tm[0][1] === '/') { end = tagView.indexOf('>', tm.index); if (end === -1) break; }
+          else { const a3 = tagAttrsAt(visible, tm.index); if (a3 === null) break; end = tm.index + tm[0].length + a3.length; }
+          if (tm[1].toLowerCase() !== 'img') { text += visible.slice(last, tm.index); last = end + 1; }
+          tagRe2.lastIndex = end + 1;
+        }
+        text += visible.slice(last);
+        return !text.replace(/\{\s*(?:(['"`])\1|true|false|null|undefined)\s*\}/g, '').trim();
       }
     } else {
       const a = tagAttrsAt(src, t.index);
@@ -1569,50 +1624,15 @@ export function validateAffiliateUsage(
   // (literal or expression-valued), or a closed <details> body — including
   // open={false}, which renders closed — are blanked (length-preserving),
   // on the structural view only.
-  structural = blankBalancedElements(structural, (attrs) => {
-    // display:none in the STYLE attribute's CSS string or JSX style object
-    // hides regardless of the hidden attribute's value — read the style
-    // attr's own value; another attr merely containing the text
-    // (aria-label={"display:none"}) is not a style.
-    if (styleHidesElement(attrs)) return true;
-    // A wrapper spread ({...props}) can inject hidden/style at render time
-    // — visibility cannot be determined, so fail closed (blank it). Only
-    // an ATTRIBUTE-position spread counts (hasJsxSpread): a {...} nested
-    // in an attr value expression never reaches the element's props.
-    if (hasJsxSpread(attrs)) return true;
-    // Duplicate hidden attributes apply LAST-WINS (JSX) — evaluated
-    // sequentially like the details `open` parser; a dynamic value fails
-    // closed (hidden).
-    return hiddenAttrRendersHidden(attrs);
-  }, unmasked);
+  structural = blankBalancedElements(structural, elementRendersHidden, unmasked);
   // Tailwind's statically-hidden utilities (class="hidden" / "invisible" /
   // "sr-only") hide just as surely as the attribute.
-  structural = blankBalancedElements(structural, (attrs) => {
-    // class/className read via the balanced walk: a quoted literal OR an
-    // escape-free static string expression ({'hidden'}) both resolve; a
-    // dynamic class keeps the wrapper visible (historic posture), and
-    // unparseable attrs fail closed (Codex #504 r29).
-    const walked = walkJsxAttrs(attrs);
-    if (!walked.ok) return true;
-    let cls: string | null = null;
-    for (const a of walked.list) {
-      const n = a.name.toLowerCase();
-      if (n !== 'class' && n !== 'classname') continue;
-      cls = a.literal !== null ? a.literal : staticExprString(a.expr);
-    }
-    if (cls === null) return false;
-    if (!/(?:^|\s)(?:hidden|invisible|sr-only)(?=\s|$)/.test(cls)) return false;
-    // Responsively-visible wrappers (class="hidden md:block") stay: mask
-    // only elements hidden at EVERY breakpoint.
-    // Only VIEWPORT breakpoints prove responsive visibility — print:/
-    // hover:/focus: variants leave the element hidden in ordinary viewing.
-    return !/\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(cls);
-  }, unmasked);
+  structural = blankBalancedElements(structural, classStaticallyHidden, unmasked);
   structural = blankBalancedElements(structural, (attrs, name) => name === 'details'
     && !detailsRendersOpen(attrs), unmasked);
   // Inherently NON-RENDERED containers never show their content — a CTA
   // inside one is no CTA (Codex #3646 r24 P1).
-  structural = blankBalancedElements(structural, (attrs, name) => ['template', 'script', 'style', 'noscript', 'datalist'].includes(name), unmasked);
+  structural = blankBalancedElements(structural, (attrs, name) => NON_RENDERED_CONTAINERS.includes(name), unmasked);
   // Tag-shaped text inside a quoted JSX attribute (<div title="<AffiliateLink />">)
   // renders no component — position-check the count against the attr-masked
   // view, like the InlineCTA scan (Codex #3646 r15 P1).
@@ -1981,9 +2001,12 @@ function parseJsxProps(attrs: string): {
     const body = extractBalancedExpression(attrs, expr.lastIndex - 1);
     // A STATIC quoted string expression (tel={'not-a-phone'}, title={''})
     // has a real value the schema must see (Codex #3646 r23 P1).
-    const sm = body === null ? null : /^\s*'((?:[^'\\]|\\.)*)'\s*$|^\s*"((?:[^"\\]|\\.)*)"\s*$/.exec(body);
-    if (sm) {
-      const raw = sm[1] ?? sm[2] ?? '';
+    // A top-level interpolation-free TEMPLATE literal (tel={`…`}) is a
+    // static string like the quoted forms (Codex #3646 r37); `${` keeps
+    // the prop opaque.
+    const sm = body === null ? null : /^\s*'((?:[^'\\]|\\.)*)'\s*$|^\s*"((?:[^"\\]|\\.)*)"\s*$|^\s*`((?:[^`\\]|\\.)*)`\s*$/.exec(body);
+    if (sm && !(sm[3] !== undefined && hasTemplateInterpolation(sm[3]))) {
+      const raw = sm[1] ?? sm[2] ?? sm[3] ?? '';
       // JS escape semantics ("\0" is NUL, not "0") are not implemented here
       // — an escape-bearing string stays UNVALIDATED rather than validating
       // a different value (Codex #504 r26).
@@ -2045,6 +2068,16 @@ function extractBalancedExpression(text: string, openBraceIdx: number): string |
   return end === -1 ? null : text.slice(openBraceIdx + 1, end);
 }
 
+// True when a template literal's raw text carries an UNESCAPED `${` —
+// `\${` is literal text the decoder resolves (Codex #3646 r34).
+function hasTemplateInterpolation(raw: string): boolean {
+  for (let k = 0; k < raw.length; k += 1) {
+    if (raw[k] === '\\') { k += 1; continue; }
+    if (raw[k] === '$' && raw[k + 1] === '{') return true;
+  }
+  return false;
+}
+
 // Strict JSON.parse wrapper. Wrapped result distinguishes "parsed to a
 // value" (including null) from "not statically parseable" (undefined).
 function tryParseStaticJson(body: string): { value: unknown } | undefined {
@@ -2089,14 +2122,7 @@ function tryParseStaticJson(body: string): { value: unknown } | undefined {
             if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
             rawInner += trimmed[j]; j += 1;
           }
-          // Only an UNESCAPED `${` interpolates — `\${` is literal text
-          // the decoder resolves (Codex #3646 r34).
-          let interp = false;
-          for (let k = 0; k < rawInner.length; k += 1) {
-            if (rawInner[k] === '\\') { k += 1; continue; }
-            if (rawInner[k] === '$' && rawInner[k + 1] === '{') { interp = true; break; }
-          }
-          if (interp) return undefined;
+          if (hasTemplateInterpolation(rawInner)) return undefined;
           const decodedInner = decodeJsStaticString(rawInner);
           if (decodedInner === null) return undefined;
           out += JSON.stringify(decodedInner);

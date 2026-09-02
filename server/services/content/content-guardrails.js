@@ -1933,7 +1933,20 @@ function affiliateLinkTextIsEmpty(masked, strView, start, attrs) {
   while ((t = tagRe.exec(strView)) !== null) {
     if (t[1] === '/') {
       depth -= 1;
-      if (depth === 0) return !masked.slice(openEnd + 1, t.index).replace(/\{\s*(?:(['"`])\1|true|false|null|undefined)\s*\}/g, '').trim();
+      if (depth === 0) {
+        // Definitely-hidden and statically-hidden-class markup inside the
+        // link is not visible text (<span hidden>Buy</span>; Codex #3646
+        // r37), and tag markup itself is not text — except an <img>,
+        // which renders a picture the reader can click.
+        // Tags are located on the expression-string-blanked view so a
+        // quoted tag ({'</b>'}) is rendered TEXT, not markup.
+        const kids = blankStaticHiddenClassElements(masked.slice(openEnd + 1, t.index));
+        const visible = blankDefinitelyHiddenContent(kids, blankExpressionStringLiterals(kids, { attrValues: false }));
+        let text = ''; let last = 0;
+        for (const tg of eachTag(blankExpressionStringLiterals(visible))) { if (tg.name === 'img') continue; text += visible.slice(last, tg.start); last = tg.end + 1; }
+        text += visible.slice(last);
+        return !text.replace(/\{\s*(?:(['"`])\1|true|false|null|undefined)\s*\}/g, '').trim();
+      }
     } else {
       const a = tagAttrsAt(masked, t.index);
       if (a !== null && !a.trimEnd().endsWith('/')) depth += 1;
@@ -1962,7 +1975,7 @@ function collectAffiliateLinkTags(text) {
   // strView blanks expression strings AND quoted attr display text, so
   // neither counts; attr-expression JSX survives it.
   const tags = [];
-  const masked = blankNonRenderedMarkdown(blankComments(String(text || '')));
+  const masked = blankNonRenderedMarkdown(String(text || ''));
   const strView = blankExpressionStringLiterals(masked);
   const re = /<AffiliateLink(?=[\s/>])/g;
   let m;
@@ -2196,10 +2209,22 @@ function decodeJsStaticString(raw) {
   }
   return out;
 }
+// True when a template literal's raw text carries an UNESCAPED `${` —
+// `\${` is literal text the decoder resolves (Codex #3646 r34).
+function hasTemplateInterpolation(raw) {
+  for (let k = 0; k < raw.length; k += 1) {
+    if (raw[k] === '\\') { k += 1; continue; }
+    if (raw[k] === '$' && raw[k + 1] === '{') return true;
+  }
+  return false;
+}
+// A top-level interpolation-free template literal (tel={`…`}) is a static
+// string like the quoted forms (Codex #3646 r37); `${` keeps it opaque.
 function staticStringOfExpr(expr) {
-  const m = /^\{\s*'((?:[^'\\]|\\.)*)'\s*\}$|^\{\s*"((?:[^"\\]|\\.)*)"\s*\}$/.exec(String(expr || ''));
+  const m = /^\{\s*'((?:[^'\\]|\\.)*)'\s*\}$|^\{\s*"((?:[^"\\]|\\.)*)"\s*\}$|^\{\s*`((?:[^`\\]|\\.)*)`\s*\}$/.exec(String(expr || ''));
   if (!m) return null;
-  return decodeJsStaticString(m[1] !== undefined ? m[1] : m[2]);
+  if (m[3] !== undefined && hasTemplateInterpolation(m[3])) return null;
+  return decodeJsStaticString(m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]);
 }
 
 // Every attribute name with its quoted-literal value (null when
@@ -2255,7 +2280,7 @@ function inlineCtaHrefValid(v) {
   try { const u = new URL(v); return u.protocol === 'https:' && !!u.hostname && !/[\s"'<>]/.test(v); } catch { return false; }
 }
 function inlineCtaContractFinding(body) {
-  const text = blankNonRenderedMarkdown(blankComments(String(body || '')));
+  const text = blankNonRenderedMarkdown(String(body || ''));
   // {'<InlineCTA ctaHref={dynamic} />'} is rendered TEXT — a tag whose
   // opener sits inside an expression string never validates (astro
   // contract-loop parity; Codex #3646 r11 P1).
@@ -2359,14 +2384,7 @@ function tolerantStaticJson(text) {
           if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
           rawInner += trimmed[j]; j += 1;
         }
-        // Only an UNESCAPED `${` interpolates — `\${` is literal text the
-        // decoder resolves (Codex #3646 r34).
-        let interp = false;
-        for (let k = 0; k < rawInner.length; k += 1) {
-          if (rawInner[k] === '\\') { k += 1; continue; }
-          if (rawInner[k] === '$' && rawInner[k + 1] === '{') { interp = true; break; }
-        }
-        if (interp) return undefined;
+        if (hasTemplateInterpolation(rawInner)) return undefined;
         const decodedInner = decodeJsStaticString(rawInner);
         if (decodedInner === null) return undefined;
         out += JSON.stringify(decodedInner);
@@ -2445,7 +2463,7 @@ function spiderSpeciesRowsValid(rows) {
   return true;
 }
 function spiderIdBoardContractFinding(body) {
-  const text = blankNonRenderedMarkdown(blankComments(String(body || '')));
+  const text = blankNonRenderedMarkdown(String(body || ''));
   const strView = blankExpressionStringLiterals(text);
   const attrView = maskJsxAttrQuotes(text);
   // Direct position scan — nested invocations validate (Codex #3646 r22).
@@ -3751,7 +3769,10 @@ function blankNonRenderedMarkdownWithDepths(text) {
   // REAL comment in the same stretch is still stripped.
   let afterComments = '';
   {
-    const commentRe = /<!--[\s\S]*?(?:-->|$)|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre\s*>/gi;
+    // MDX comments tolerate whitespace inside the braces ({ /* x */ }) —
+    // the same span blankComments matches, so callers that dropped that
+    // fence-blind pre-pass (Codex #3646 r33/r37) lose no coverage.
+    const commentRe = /<!--[\s\S]*?(?:-->|$)|\{\s*\/\*[\s\S]*?\*\/\s*\}|<pre\b[\s\S]*?<\/pre\s*>/gi;
     let last = 0;
     let cm;
     while ((cm = commentRe.exec(raw)) !== null) {
@@ -4954,7 +4975,7 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
   // — masked before route collection (attr VALUES kept: href/src/ctaHref
   // are read from them; display-text matches are position-filtered in
   // collectInternalDestinations). (Codex #3646 r22 P1.)
-  const text = blankExpressionStringLiterals(blankNonRenderedMarkdown(blankComments(String(body || ''))), { attrValues: false });
+  const text = blankExpressionStringLiterals(blankNonRenderedMarkdown(String(body || '')), { attrValues: false });
   if (!text.trim()) return null;
   const allowed = new Set(ALLOWED_INTERNAL_LINKS);
   for (const link of Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []) {
@@ -6333,7 +6354,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // route that lived only in a fenced/commented example of the prior
     // body grants no exemption for a newly RENDERED occurrence (Codex
     // #3646 r19 P1).
-    for (const { norm } of collectInternalDestinations(blankExpressionStringLiterals(blankNonRenderedMarkdown(blankComments(refreshPriorBody)), { attrValues: false }))) {
+    for (const { norm } of collectInternalDestinations(blankExpressionStringLiterals(blankNonRenderedMarkdown(refreshPriorBody), { attrValues: false }))) {
       refreshExemptRoutes.set(norm, (refreshExemptRoutes.get(norm) || 0) + 1);
     }
   }

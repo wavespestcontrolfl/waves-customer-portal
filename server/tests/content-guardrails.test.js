@@ -886,6 +886,34 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('fence-aware comment pass in the component scanners; hidden-only link children; top-level template props (Codex #3646 r37)', () => {
+    withAffiliateEnv(() => {
+      const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+      const fence = '```html\n<!-- example\n```\n';
+      // A "<!--" inside a fenced sample is code — the real component after
+      // the fence is still seen by every component scanner.
+      expect(guardrails.affiliateProductIdsIn(`${fence}<AffiliateLink product="rain-gauge" placement="primary-rec">Buy</AffiliateLink>\n-->`)).toEqual(['rain-gauge']);
+      expect(codesOf(guardrails.evaluate({ body: `Intro.\n\n## Sec\n\n${fence}<InlineCTA tel="-------" />\n-->\n\nMore.`, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+      expect(codesOf(guardrails.evaluate({ body: `Intro.\n\n## Sec\n\n${fence}<SpiderIdBoard species="x" />\n-->\n\nMore.`, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+      // A whitespace-padded MDX comment still hides its component from the scanners.
+      expect(guardrails.affiliateProductIdsIn('{ /* <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink> */ }')).toEqual([]);
+      // Hidden-only children are not visible link text; a visible span or an image is.
+      const at = (tag) => `Intro.\n\n## Sec\n\n[quote](/quote/) ${tag}`;
+      for (const kids of ['<span hidden>Buy</span>', '<span class="sr-only">Buy</span>', '<span style="display:none">Buy</span>', '<span></span>']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      for (const kids of ['<span>Buy</span>', '<img src="/images/blog/x/body-1.webp" alt="rain gauge" />', '<b>Buy</b> now']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      // A top-level interpolation-free template literal is a static string.
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel={`not-a-phone`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+      expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel={`(941) 599-3489`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
+      expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={`oops`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+      expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel={`${x}`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
+    });
+  });
+
   test('spread wrappers hide their CTA (astro parity, Codex #3646 r28)', () => {
     withAffiliateEnv(() => {
       const b = `Intro.\n\n## Sec\n\n<div {...props}>[Quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
