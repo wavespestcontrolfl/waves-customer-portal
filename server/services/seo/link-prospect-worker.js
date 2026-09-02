@@ -185,7 +185,11 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // at confidence 0); neither is a route a worker may act on, whatever
     // policy the placement still carries.
     const pathIds = [...new Set(rows.map((r) => r.path_id).filter(Boolean))];
-    const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'superseded_by', 'confidence', 'submission_url', 'revision', 'agent_completable') : [];
+    // …read FOR UPDATE: the path rows stay locked through the lease write, so an
+    // investigation superseding or revising one of them waits for this commit
+    // (its settlement then finds the leased row's stamp) instead of the claim
+    // handing Hermes a path/URL that changed between this read and the lease
+    const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).forUpdate().select('id', 'superseded_by', 'confidence', 'submission_url', 'revision', 'agent_completable') : [];
     // …nor one the investigator marked NOT agent-completable: its contract
     // requires a human step (plan §6.3), and the outreach lane has no policy
     // filter that would otherwise stop Hermes from leasing it
