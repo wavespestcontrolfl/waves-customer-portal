@@ -100,6 +100,10 @@
     { "name": "createServer", "module": "http", "appOnly": true,
       "what": "wraps the app as a request listener; registers no routes; must receive THE APP (the scanned root)" },
     { "name": "setupExpressErrorHandler", "module": "@sentry/node", "appOnly": true,
-      "what": "appends Sentry's error-capture middleware; registers no routes; must receive THE APP" }
+      "what": "appends Sentry's error-capture middleware; registers no routes; must receive THE APP" },
+    { "name": "attachSockets", "module": "server/sockets/index.js", "serverHandle": true,
+      "what": "Socket.IO server on the http handle — serves the /socket.io/ Engine.IO handshake (JWT-gated at connection); no Express routes" },
+    { "name": "attachVoiceRelay", "module": "server/services/voice-agent/relay-server.js", "serverHandle": true,
+      "what": "ElevenLabs voice-agent WebSocket relay on the http handle; upgrade-only listener, no Express routes" }
   ]
 }

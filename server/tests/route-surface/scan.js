@@ -1193,7 +1193,25 @@ class ModuleAnalysis {
       const passed = resolvedArgs.filter((n) => this.routers.has(n) || APP_IDENTIFIERS.has(n));
       const hasFnArg = call.arguments.some((a) => a && a.type === 'Identifier'
         && (this.bindings.get(this.canonName(a.name)) || {}).kind === 'function');
-      if (!passed.length && !importedArgs.length && !hasFnArg) continue;
+      // A CONSTRUCTED SERVER HANDLE (http.createServer(app) result) carries
+      // the whole served surface — a consumer attaching listeners to it
+      // (Socket.IO, a voice relay) must be registry-reviewed.
+      const isServerHandle = (name) => {
+        const hb = this.bindings.get(this.canonName(name));
+        if (!hb || hb.kind !== 'call' || !hb.node || hb.node.type !== 'CallExpression') return false;
+        const hc = hb.node.callee;
+        let e = null;
+        if (hc && hc.type === 'MemberExpression' && !hc.computed && hc.property.type === 'Identifier') {
+          if (isRequireCall(hc.object)) e = this.scanner.registry.lookupRouterConsumer(this.resolveModule(hc.object.arguments[0].value) || hc.object.arguments[0].value, hc.property.name);
+          else if (hc.object.type === 'Identifier') {
+            const rb = this.cleanBinding(this.canonName(hc.object.name));
+            if (rb && rb.kind === 'require') e = this.scanner.registry.lookupRouterConsumer(rb.module === null ? rb.spec : rb.module, hc.property.name);
+          }
+        }
+        return Boolean(e && e.appOnly);
+      };
+      const handleArgs = call.arguments.filter((a) => a && a.type === 'Identifier' && isServerHandle(a.name)).map((a) => a.name);
+      if (!passed.length && !importedArgs.length && !hasFnArg && !handleArgs.length) continue;
       const c = call.callee;
       const consumerOk = (entry) => {
         if (!entry) return false;
@@ -1216,6 +1234,9 @@ class ModuleAnalysis {
             }
           }
         }
+        if (handleArgs.length && !entry.serverHandle && !entry.appOnly) {
+          this.pushSweepProblem(`${this.loc(call)}: ${entry.name} received the constructed server handle (${handleArgs.join(', ')}) without a serverHandle review — listeners attached there serve surface the scanner never walks`);
+        }
         if (entry.appOnly && importedArgs.length) {
           // An IMPORTED binding handed to an app-only consumer may be a
           // second exported app — judged in the sweep once mounted surface
@@ -1232,10 +1253,18 @@ class ModuleAnalysis {
         if (ob && ob.kind === 'require'
           && consumerOk(this.scanner.registry.lookupRouterConsumer(ob.module === null ? ob.spec : ob.module, c.property.name))) continue;
       }
+      if (c.type === 'MemberExpression' && !c.computed && c.property.type === 'Identifier'
+        && isRequireCall(c.object)
+        && consumerOk(this.scanner.registry.lookupRouterConsumer(this.resolveModule(c.object.arguments[0].value) || c.object.arguments[0].value, c.property.name))) {
+        continue; // require('./x').attachY(handle) — reviewed inline consumer
+      }
       if (c.type === 'Identifier') {
         const b = this.bindings.get(c.name);
         if (b && b.kind === 'requireMember'
           && consumerOk(this.scanner.registry.lookupRouterConsumer(b.module === null ? b.spec : b.module, b.name))) continue;
+      }
+      if (handleArgs.length) {
+        this.pushSweepProblem(`${this.loc(call)}: constructed server handle ${handleArgs.join(', ')} passed to an unanalysed function — listeners attached there serve surface the scanner never walks; add a reviewed serverHandle routerConsumers entry`);
       }
       if (passed.length) {
         const msg = `${this.loc(call)}: ${passed.join(', ')} passed to an unanalysed function — the scanner cannot see routes the helper may register; register routes at module top level (or add a reviewed routerConsumers entry for a helper proven not to register routes)`;
@@ -1473,6 +1502,18 @@ class ModuleAnalysis {
       // known; converted to a plain alias post-walk when it names a router.
       this.setBinding(name, { kind: 'memberAlias', node: init, topLevel });
     } else {
+      // `router || null` / `cond ? router : x` — a wrapped initializer that
+      // references a known router can BE that router at runtime; the scanner
+      // cannot prove which, so it refuses the shape.
+      if (init && (init.type === 'LogicalExpression' || init.type === 'ConditionalExpression')) {
+        let wrapped = null;
+        walk(init, (n) => {
+          if (!wrapped && n.type === 'Identifier' && this.routers.has(this.canonName(n.name))) wrapped = n.name;
+        }, { topLevel: false, conds: [], src: this.src });
+        if (wrapped) {
+          this.problems.push(`${this.loc(init)}: router ${wrapped} wrapped in an expression the scanner cannot resolve — alias the router directly`);
+        }
+      }
       // The initializer NODE is retained: a static() root bound to a template
       // or binary expression keeps its real source in the identity.
       this.setBinding(name, { kind: 'other', node: init || null, topLevel });
@@ -1674,7 +1715,7 @@ class ModuleAnalysis {
    * function it references (cycle-safe) — a stable wrapper cannot hide an
    * edited helper behind an unchanged identity.
    */
-  bodyDigest(fnNode) {
+  bodyDigest(fnNode, depth = 0) {
     const seen = new Set();
     const parts = [];
     const visitFn = (fn) => {
@@ -1685,6 +1726,25 @@ class ModuleAnalysis {
         if (n.type !== 'Identifier') return;
         const b = this.bindings.get(this.canonName(n.name));
         if (b && b.kind === 'function' && b.node) visitFn(b.node);
+        else if (depth < 4 && b && (b.kind === 'require' || b.kind === 'requireMember')
+          && b.module !== null && this.scanner.exists(b.module)) {
+          // An IMPORTED helper's body is identity too — fold its digest in
+          // (transitively via ITS module; unanalyzable imports poison the
+          // digest with a fail-closed marker).
+          try {
+            const m = this.scanner.peekModule(b.module);
+            let target = null;
+            if (b.kind === 'requireMember') {
+              const exp = m.exportLookup(b.name);
+              if (exp.kind === 'ident') target = m.bindings.get(m.canonName(exp.name));
+            } else if (m.exportCandidate) {
+              target = m.bindings.get(m.canonName(m.exportCandidate));
+            }
+            if (target && target.kind === 'function' && target.node) {
+              parts.push(`${b.module}#${m.bodyDigest(target.node, depth + 1)}`);
+            }
+          } catch { parts.push(`<unanalyzable:${b.module}>`); }
+        }
       }, { topLevel: false, conds: [], src: this.src });
     };
     visitFn(fnNode);
@@ -1905,7 +1965,10 @@ class ModuleAnalysis {
               // its full source into the identity — repointing the directory
               // anywhere in the expression forces allowlist re-review.
               desc = `${arg.name} = ${predicateLabel(this.src.slice(b.node.start, b.node.end))}`;
-            } else desc = `${arg.name} = <unresolved>`;
+            } else {
+              desc = `${arg.name} = <unresolved>`;
+              this.scanner.problems.push(`${this.loc(arg)}: static root ${arg.name} cannot be resolved to an identity-bound value — bind it to a literal or an initializer the scanner can capture`);
+            }
           }
           // The OPTIONS are identity too: dotfiles/index/extensions widen
           // what anonymous requests can retrieve, so changing them must
@@ -1922,6 +1985,9 @@ class ModuleAnalysis {
                 // classify runs after Scanner.module() copied m.problems —
                 // report on the scanner directly so the finding survives.
                 this.scanner.problems.push(`${this.loc(opt)}: static options object ${opt.name} is mutated after its initializer — inline the final options so the identity captures them`);
+              }
+              if (!ob || !ob.node) {
+                this.scanner.problems.push(`${this.loc(opt)}: static options ${opt.name} cannot be resolved to an identity-bound value — bind it to a literal object the scanner can capture`);
               }
               desc += `, ${opt.name} = ${ob && ob.node ? predicateLabel(this.src.slice(ob.node.start, ob.node.end)) : '<unresolved>'}`;
             } else {
@@ -2039,7 +2105,7 @@ class GuardRegistry {
     // registering routes on it (http.createServer, Sentry's error handler).
     this.routerConsumers = (Array.isArray(json.routerConsumers) ? json.routerConsumers : []).map((r) => {
       if (!r.name || !r.module) throw new Error(`routerConsumers entry missing name/module: ${JSON.stringify(r)}`);
-      return { name: r.name, module: r.module, appOnly: Boolean(r.appOnly) };
+      return { name: r.name, module: r.module, appOnly: Boolean(r.appOnly), serverHandle: Boolean(r.serverHandle) };
     });
   }
 

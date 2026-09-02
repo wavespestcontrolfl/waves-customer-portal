@@ -227,6 +227,41 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
   });
 });
 
+describe('guard exemptions — runtime set equals the registry entry', () => {
+  const registry = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, GUARD_REGISTRY_FILE), 'utf8'));
+
+  // A guard with `exempts` has TWO views of the same decision: the runtime
+  // set that actually skips auth, and the registry list the scanner credits.
+  // A path added to one without the other is a public route the allowlist
+  // test would never see, so the two are compared mechanically here. The
+  // runtime shape is fixed by convention — a `new Set([...literals])` named
+  // <NAME>_PUBLIC_PATHS and a single `req.method === '<VERB>'` test inside
+  // the guard body — and anything else fails closed.
+  test('every exempting guard derives its registry exempts from its runtime set', () => {
+    const exempting = registry.guards.filter((g) => Array.isArray(g.exempts) && g.exempts.length);
+    expect(exempting.map((g) => g.name)).toEqual(['adminAuthenticateExceptOauthCallback']);
+    for (const g of exempting) {
+      const src = fs.readFileSync(path.join(REPO_ROOT, g.module), 'utf8');
+      const setDecl = src.match(/const\s+([A-Z_]+_PUBLIC_PATHS)\s*=\s*new\s+Set\(\[([^\]]*)\]\)/);
+      expect({ guard: g.name, runtimeSetFound: Boolean(setDecl) }).toEqual({ guard: g.name, runtimeSetFound: true });
+      const [, setName, inner] = setDecl;
+      const paths = [...inner.matchAll(/'([^']+)'|"([^"]+)"/g)].map((m) => m[1] || m[2]);
+      const nonLiteral = inner.replace(/'[^']+'|"[^"]+"|[\s,]/g, '');
+      expect({ guard: g.name, nonLiteralEntries: nonLiteral }).toEqual({ guard: g.name, nonLiteralEntries: '' });
+      // The set must never be mutated after construction (aliased or not).
+      expect(src.match(new RegExp(`\\b${setName}\\b`, 'g')).length).toBe(2); // declaration + .has()
+      expect(src).not.toMatch(new RegExp(`${setName}\\.(add|delete|clear)\\b`));
+      const body = src.match(new RegExp(`function\\s+${g.name}\\s*\\([^)]*\\)\\s*\\{([\\s\\S]*?)\\n\\}`));
+      expect({ guard: g.name, bodyFound: Boolean(body) }).toEqual({ guard: g.name, bodyFound: true });
+      const methods = [...body[1].matchAll(/req\.method\s*===\s*'([A-Z]+)'/g)].map((m) => m[1]);
+      expect({ guard: g.name, methods }).toEqual({ guard: g.name, methods: ['GET'] });
+      expect(body[1]).toMatch(new RegExp(`${setName}\\.has\\(req\\.path\\)`));
+      const derived = methods.flatMap((m) => paths.map((pth) => `${m} ${pth}`)).sort();
+      expect({ guard: g.name, exempts: [...g.exempts].sort() }).toEqual({ guard: g.name, exempts: derived });
+    }
+  });
+});
+
 describe('scanner semantics — fail closed (virtual app fixtures)', () => {
   const REGISTRY = {
     guards: [
@@ -2377,6 +2412,75 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
       ].join('\n'),
     });
     expect(ok.problems).toEqual([]);
+  });
+
+  test("an IMPORTED helper's body joins a responder's digest", () => {
+    const files = (helperBody) => ({
+      'server/index.js': app([
+        "const { dispatch } = require('./services/dispatch');",
+        'function responder(req, res, next) { return dispatch(req, res, next); }',
+        "app.use('/a', responder);",
+      ].join('\n')),
+      'server/services/dispatch.js': [
+        `function dispatch(req, res, next) { ${helperBody} }`,
+        'module.exports = { dispatch };',
+      ].join('\n'),
+    });
+    const a = scanOf(files('next();')).publicRoutes.find((r) => r.path === '/a');
+    const b = scanOf(files('res.json({ leak: 1 });')).publicRoutes.find((r) => r.path === '/a');
+    expect(a.extra).toMatch(/responder#[0-9a-f]{8}/);
+    expect(a.extra).not.toBe(b.extra);
+  });
+
+  test('a SHORT-CIRCUIT-wrapped router alias (router || null) is rejected', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'const api = router || null;',
+        "api.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('wrapped in an expression the scanner cannot resolve'))).toBe(true);
+  });
+
+  test('a constructed SERVER HANDLE passed to an unreviewed function is a problem', () => {
+    const mk = (routerConsumers) => new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers },
+      files: {
+        'server/index.js': app([
+          "const http = require('http');",
+          "const { attach } = require('./services/sockets');",
+          'const httpServer = http.createServer(app);',
+          'attach(httpServer);',
+          'httpServer.listen(3000);',
+        ].join('\n')),
+        'server/services/sockets.js': [
+          'function attach(server) { /* engine-io listeners */ }',
+          'module.exports = { attach };',
+        ].join('\n'),
+      },
+    }).scan();
+    const bare = mk([{ name: 'createServer', module: 'http', appOnly: true }]);
+    expect(bare.problems.some((p) => p.includes('server handle httpServer passed to an unanalysed function'))).toBe(true);
+    const reviewed = mk([
+      { name: 'createServer', module: 'http', appOnly: true },
+      { name: 'attach', module: 'server/services/sockets.js', serverHandle: true },
+    ]);
+    expect(reviewed.problems).toEqual([]);
+  });
+
+  test('an UNRESOLVED static root is a problem, never a stable identity', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "let root = 'public';",
+        "root = 'private';",
+        "app.use('/files', express.static(root));",
+      ].join('\n')),
+    });
+    expect(res.problems.some((p) => p.includes('cannot be resolved to an identity-bound value'))).toBe(true);
   });
 
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {

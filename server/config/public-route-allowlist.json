@@ -22,13 +22,13 @@
       "routes": [
         "USE / (inline function#3396049a)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
-        "USE /api/pay/statement (inline function#bfb9d708)",
-        "USE /api/public/a2a (inline function#c83bf902)",
-        "USE /api/public/careers (inline function#5fabd682)",
-        "USE /api/public/lawn-assessment (inline function#936ad1a2)",
-        "USE /api/public/mcp (inline function#132b2662)",
+        "USE /api/pay/statement (inline function#a0a80342)",
+        "USE /api/public/a2a (inline function#8312fe8a)",
+        "USE /api/public/careers (inline function#a3b3df24)",
+        "USE /api/public/lawn-assessment (inline function#5d37a393)",
+        "USE /api/public/mcp (inline function#abfffb5f)",
         "USE /api/public/pest-forecast (inline function#a972e744)",
-        "USE /api/public/pest-identifier (inline function#a4afb014)",
+        "USE /api/public/pest-identifier (inline function#39eceddc)",
         "USE /api/public/secure-card (inline function#8abc12e6)"
       ]
     },
@@ -166,7 +166,7 @@
     {
       "router": "server/routes/estimate-public.js",
       "mount": "/api/estimates",
-      "reason": "Public estimate viewer + accept/decline flow by unguessable token (format-gated, rate-limited; the AGENTS.md estimate-public contract)",
+      "reason": "Public estimate viewer + accept/decline flow by unguessable token (format-gated, rate-limited; the AGENTS.md estimate-public contract). change-request (#3706), referral-link (#3710) and service-opt-out (#3684) are the same token contract, each rate-limited and dark behind its own GATE_ESTIMATE_* flag",
       "routes": [
         "GET /api/estimates/:token",
         "GET /api/estimates/:token/data",
@@ -174,15 +174,18 @@
         "GET /api/estimates/:token/service-details/:serviceKey/pdf",
         "GET /api/estimates/:token/warranty-comparison/pdf",
         "POST /api/estimates/:token/bundle-inquiry",
+        "POST /api/estimates/:token/change-request",
         "POST /api/estimates/:token/extension-request",
         "POST /api/estimates/:token/measurement-review",
+        "POST /api/estimates/:token/referral-link",
         "POST /api/estimates/:token/service-details/send",
         "PUT /api/estimates/:token/accept",
         "PUT /api/estimates/:token/bond",
         "PUT /api/estimates/:token/decline",
         "PUT /api/estimates/:token/interior-service",
         "PUT /api/estimates/:token/preferences",
-        "PUT /api/estimates/:token/select-tier"
+        "PUT /api/estimates/:token/select-tier",
+        "PUT /api/estimates/:token/service-opt-out"
       ]
     },
     {
@@ -424,7 +427,7 @@
       "mount": "/api/public/lawn-assessment",
       "reason": "Public AI lawn assessment funnel (rate-limited lead-gen intake per its AGENTS.md contract); the USE entry is the router's 404-when-dark gate (always next() or 404)",
       "routes": [
-        "USE /api/public/lawn-assessment (inline function#8974fc2a)",
+        "USE /api/public/lawn-assessment (inline function#a8c5c49e)",
         "POST /api/public/lawn-assessment/:id/claim",
         "POST /api/public/lawn-assessment/analyze"
       ]
@@ -557,7 +560,7 @@
       "mount": "/api/pay/statement",
       "reason": "Tokenized account-statement payment page from customer comms; the USE entry is the router's 404-when-dark gate (always next() or 404)",
       "routes": [
-        "USE /api/pay/statement (inline function#52f03366)",
+        "USE /api/pay/statement (inline function#1a82455e)",
         "GET /api/pay/statement/:token",
         "POST /api/pay/statement/:token/finalize",
         "POST /api/pay/statement/:token/quote",
