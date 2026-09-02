@@ -165,7 +165,7 @@ function fingerprintOf(scope) {
 // `--` SQL comment, or a `#` line comment for shell tools), walking the
 // source from the top with strings skipped so a `//` inside a string
 // literal doesn't open a phantom comment.
-function insideComment(source, index) {
+function insideComment(source, index, sql = false) {
   let i = 0;
   while (i < index) {
     const ch = source[i];
@@ -175,7 +175,9 @@ function insideComment(source, index) {
       i += 1;
       continue;
     }
-    if (source.startsWith('//', i) || source.startsWith('--', i) || (ch === '#' && (i === 0 || source[i - 1] === '\n' || /\s/.test(source[i - 1])))) {
+    // `--` and `#` open comments only in SQL/shell inputs — in JavaScript
+    // `count--` is a decrement, not a comment (GH Codex r20 P2).
+    if (source.startsWith('//', i) || (sql && (source.startsWith('--', i) || (ch === '#' && (i === 0 || source[i - 1] === '\n' || /\s/.test(source[i - 1])))))) {
       const nl = source.indexOf('\n', i);
       if (nl === -1 || nl > index) return true;
       i = nl + 1;
@@ -425,8 +427,7 @@ function isContractCompleted(source, arg) {
   // data;`) could be mutated under that name, which the check above can't
   // see — fail closed (GH Codex r9 P2). Reads of a property, spreads and
   // call arguments are not escapes.
-  const escaped = new RegExp(`\\b(?!${text}\\b)[A-Za-z_$][\\w$]*\\s*=(?![=>])\\s*${text}\\b\\s*(?=[;,)\\]}]|\\n|$)`);
-  if (escaped.test(source)) return false;
+  if (escapesToBinding(source, text)) return false;
   // Passing the tracked object to a CALL is an escape too — a helper can
   // mutate it (`stripAttribution(data)`) — unless the callee is on the
   // known non-mutating list (GH Codex r11 P2).
@@ -444,7 +445,7 @@ function isContractCompleted(source, arg) {
     const body = source[at] === '{'
       ? source.slice(at, balancedBraces(source, at))
       : source.slice(at, statementEnd(source, at));
-    if (mutatesIdentifier(body, binding) || escapesThroughCall(body, binding)) return false;
+    if (mutatesIdentifier(body, binding) || escapesThroughCall(body, binding) || escapesToBinding(body, binding)) return false;
   }
   // A method called ON the tracked value is a mutation unless it is a
   // known read-only one — `rows.unshift(raw)` / `splice` / `fill` would
@@ -470,9 +471,17 @@ function isContractCompleted(source, arg) {
     // cannot mutate.
     if (list.length > (mm[1] === 'reduce' ? 3 : 2)) return false;
     const el = mm[1] === 'reduce' ? list[1] : list[0];
-    if (el && /^[A-Za-z_$][\w$]*$/.test(el) && (mutatesIdentifier(cb, el) || escapesThroughCall(cb, el))) return false;
+    if (el && /^[A-Za-z_$][\w$]*$/.test(el) && (mutatesIdentifier(cb, el) || escapesThroughCall(cb, el) || escapesToBinding(cb, el))) return false;
   }
   return true;
+}
+
+// Whether `id` escapes into another binding (`const alias = id;` /
+// `alias = id`) — a mutation under that name can't be tracked, so the
+// completed value is no longer certified (GH Codex r9 P2; applied to
+// callback and for…of elements too — r20 P2).
+function escapesToBinding(text, id) {
+  return new RegExp(`\\b(?!${id}\\b)[A-Za-z_$][\\w$]*\\s*=(?![=>])\\s*${id}\\b\\s*(?=[;,)\\]}]|\\n|$)`).test(text);
 }
 
 // Whether `id` is passed as a direct argument to a call that is not on
@@ -714,7 +723,7 @@ function walkLinks(source, i, seed) {
 // a variable first (`const visits = trx('scheduled_services'); await
 // visits.insert(...)`) is followed through the alias: every later
 // `<alias>.insert(` in the file counts as a site (GH Codex #3702 r4 P2).
-function collectInsertSites(source) {
+function collectInsertSites(source, { sql = false } = {}) {
   const out = [];
   // A site whose payload came out of the completion helper is compliant —
   // it is what a bespoke adopter looks like — and is not reported.
@@ -734,7 +743,7 @@ function collectInsertSites(source) {
     // insert in prose) — judged at the MATCH position by a tokenizer walk,
     // not by the line's prefix, so `/* import */ await db.raw('INSERT …')`
     // is still a site (GH Codex r16 P2). `#` covers shell/SQL tools.
-    if (insideComment(source, rawM.index)) continue;
+    if (insideComment(source, rawM.index, sql)) continue;
     const verb = /^insert/i.test(rawM[0]) ? 'INSERT INTO' : /^merge/i.test(rawM[0]) ? 'MERGE INTO' : 'COPY';
     if (verb === 'COPY' && /\bcopy\s+(?:["'`]?\w+["'`]?\s*\.\s*)?["'`]?scheduled_services\b[^\n]*\bTO\b/i.test(source.slice(rawM.index, rawM.index + 200))) continue; // COPY … TO is an export
     site(rawM.index, `${statementPrefix(source, rawM.index)} raw:${verb} scheduled_services`, null);
@@ -806,6 +815,35 @@ function collectInsertSites(source) {
   return out;
 }
 
+// The contract module's wrapper is certified only while (a) it completes
+// its payload with the pinned statement, (b) every write to `data` between
+// completion and insert is a certified one — increments included
+// (GH Codex r20 P2) — and (c) `data` escapes to nothing but the inserts.
+function certifiedWrapperViolations(moduleSource) {
+  const out = [];
+  if (moduleSource.split(CONTRACT_MODULE_CERTIFIED_COMPLETION).length !== 2) {
+    out.push(`the certified wrapper no longer completes its payload with exactly \`${CONTRACT_MODULE_CERTIFIED_COMPLETION}\` — the certified insert sites would insert something else.`);
+  }
+  const wrapperAt = moduleSource.indexOf('async function createScheduledService');
+  const wrapper = wrapperAt === -1 ? '' : moduleSource.slice(wrapperAt, moduleSource.indexOf('\nmodule.exports', wrapperAt));
+  const prop = '\\bdata\\s*(?:\\.\\s*[A-Za-z_$][\\w$]*|\\[[^\\]]*\\])+';
+  const writeRe = new RegExp(
+    `${prop}\\s*(?:[-+*/%|&^]|\\*\\*|\\?\\?|\\|\\||&&)?=(?![=>])[^;\\n]*;?`
+    + `|${prop}\\s*(?:\\+\\+|--)[^;\\n]*;?`
+    + `|(?:\\+\\+|--)\\s*${prop}[^;\\n]*;?`
+    + '|\\bdelete\\s+data\\b[^;\\n]*;?'
+    + '|\\bObject\\s*\\.\\s*assign\\s*\\(\\s*data\\b[^;\\n]*;?',
+    'g',
+  );
+  for (const w of wrapper.match(writeRe) || []) {
+    if (!CONTRACT_MODULE_CERTIFIED_WRITES.includes(w.trim())) out.push(`the certified wrapper writes to its completed payload in an uncertified way (\`${w.trim()}\`) — the certified insert sites would insert something other than the helper's output.`);
+  }
+  if (wrapper && (escapesThroughCall(wrapper, 'data') || escapesToBinding(wrapper, 'data'))) {
+    out.push('the certified wrapper hands its completed payload to something other than the certified inserts.');
+  }
+  return out;
+}
+
 function relRepo(file) {
   return path.relative(REPO_ROOT, file).split(path.sep).join('/');
 }
@@ -830,7 +868,7 @@ describe('booking insert-site contract', () => {
   const found = new Map(); // repo-relative path -> fingerprint multiset
   for (const file of files) {
     const rel = relRepo(file);
-    const sites = collectInsertSites(fs.readFileSync(file, 'utf8'));
+    const sites = collectInsertSites(fs.readFileSync(file, 'utf8'), { sql: /\.(?:sql|sh)$/.test(file) });
     if (sites.length > 0) found.set(rel, sites);
   }
 
@@ -884,6 +922,9 @@ describe('booking insert-site contract', () => {
       expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\n${cb}\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     }
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach((row) => { if (row.status === 'x') count += 1; });\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
+    // …an alias of the callback element (or a for…of element) is an escape (r20 P2)…
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach(row => { const alias = row; alias.source_action = null; });\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nfor (const row of rows) {\n  const alias = row;\n  alias.status = 'x';\n}\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     // …a callback binding the ARRAY parameter can replace rows through it → fail closed; the index alone is fine (r18 P2).
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach((row, i, array) => { array[i] = raw; });\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach((row, i) => logger.info(i, row));\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
@@ -958,9 +999,12 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("psql \"$DATABASE_URL\" -c \"\\\\copy scheduled_services from 'rows.csv'\"")).toHaveLength(1);
     expect(collectInsertSites("COPY scheduled_services TO '/tmp/out.csv';")).toEqual([]);
     // Shell / SQL tools: a psql insert is a site, a # comment is not.
-    expect(collectInsertSites('psql "$DATABASE_URL" -c "INSERT INTO scheduled_services (customer_id) VALUES (1)"')).toHaveLength(1);
-    expect(collectInsertSites('# never: INSERT INTO scheduled_services\npsql "$DATABASE_URL" -c "SELECT 1"')).toEqual([]);
-    expect(collectInsertSites('-- INSERT INTO scheduled_services is documented here\nSELECT 1;')).toEqual([]);
+    expect(collectInsertSites('psql "$DATABASE_URL" -c "INSERT INTO scheduled_services (customer_id) VALUES (1)"', { sql: true })).toHaveLength(1);
+    expect(collectInsertSites('# never: INSERT INTO scheduled_services\npsql "$DATABASE_URL" -c "SELECT 1"', { sql: true })).toEqual([]);
+    expect(collectInsertSites('-- INSERT INTO scheduled_services is documented here\nSELECT 1;', { sql: true })).toEqual([]);
+    // …while in JavaScript `--` is a decrement, never a comment (r20 P2).
+    expect(collectInsertSites("count--; await db.raw('INSERT INTO scheduled_services (a) VALUES (1)');")).toHaveLength(1);
+    expect(collectInsertSites("--count; await db.raw('INSERT INTO scheduled_services (a) VALUES (1)');")).toHaveLength(1);
     // Schema-qualified forms, raw or builder, are the same table (r5 P2).
     expect(collectInsertSites("await db.raw(`INSERT INTO public.scheduled_services (a) VALUES (?)`, [1]);")).toEqual(["await db.raw(` raw:INSERT INTO scheduled_services"]);
     expect(collectInsertSites('await db.raw(\'INSERT INTO "public"."scheduled_services" (a) VALUES (?)\', [1]);')).toHaveLength(1);
@@ -1030,25 +1074,26 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("await trx('scheduled_services').where({ id }).update({ a: 1 });\nawait trx('lead_activities').insert({ b: 2 });")).toEqual([]);
   });
 
+  test('the certified-wrapper check sees every write shape, increments included (self-check)', () => {
+    const real = fs.readFileSync(path.join(REPO_ROOT, CONTRACT_MODULE), 'utf8');
+    expect(certifiedWrapperViolations(real)).toEqual([]);
+    for (const write of ['data.retry_count++;', '++data.retry_count;', 'data.retry_count--;', 'data.source_action = null;', 'delete data.source_action;', 'Object.assign(data, extra);']) {
+      const tampered = real.replace(CONTRACT_MODULE_CERTIFIED_COMPLETION, `${CONTRACT_MODULE_CERTIFIED_COMPLETION}\n  ${write}`);
+      expect(certifiedWrapperViolations(tampered).length).toBeGreaterThan(0);
+    }
+    const escaped = real.replace(CONTRACT_MODULE_CERTIFIED_COMPLETION, `${CONTRACT_MODULE_CERTIFIED_COMPLETION}\n  const alias = data;`);
+    expect(certifiedWrapperViolations(escaped).length).toBeGreaterThan(0);
+    const swapped = real.replace(CONTRACT_MODULE_CERTIFIED_COMPLETION, 'const data = insertData;');
+    expect(certifiedWrapperViolations(swapped).length).toBeGreaterThan(0);
+  });
+
   test('no NEW or MODIFIED scheduled_services insert sites outside the booking contract', () => {
     const violations = [];
     for (const [rel, sites] of found) {
       if (rel === CONTRACT_MODULE) {
         const extra = multisetMissing(sites, CONTRACT_MODULE_CERTIFIED_SITES);
         if (extra.length) violations.push(`${rel}: insert site(s) [${extra.join(' | ')}] beyond the certified wrapper — every insert in the contract module must be of completeScheduledServiceInsert's output, inside createScheduledService.`);
-        const moduleSource = fs.readFileSync(path.join(REPO_ROOT, CONTRACT_MODULE), 'utf8');
-        if (moduleSource.split(CONTRACT_MODULE_CERTIFIED_COMPLETION).length !== 2) {
-          violations.push(`${rel}: the certified wrapper no longer completes its payload with exactly \`${CONTRACT_MODULE_CERTIFIED_COMPLETION}\` — the certified insert sites would insert something else.`);
-        }
-        const wrapperAt = moduleSource.indexOf('async function createScheduledService');
-        const wrapper = wrapperAt === -1 ? '' : moduleSource.slice(wrapperAt, moduleSource.indexOf('\nmodule.exports', wrapperAt));
-        const writeRe = /\bdata\s*(?:\.\s*[A-Za-z_$][\w$]*|\[[^\]]*\])+\s*(?:[-+*/%|&^]|\*\*|\?\?|\|\||&&)?=(?![=>])[^;\n]*;?|\bdelete\s+data\b[^;\n]*;?|\bObject\s*\.\s*assign\s*\(\s*data\b[^;\n]*;?/g;
-        for (const w of wrapper.match(writeRe) || []) {
-          if (!CONTRACT_MODULE_CERTIFIED_WRITES.includes(w.trim())) violations.push(`${rel}: the certified wrapper writes to its completed payload in an uncertified way (\`${w.trim()}\`) — the certified insert sites would insert something other than the helper's output.`);
-        }
-        if (wrapper && (escapesThroughCall(wrapper, 'data') || /\b(?!data\b)[A-Za-z_$][\w$]*\s*=(?![=>])\s*data\b\s*(?=[;,)\]}]|\n|$)/.test(wrapper))) {
-          violations.push(`${rel}: the certified wrapper hands its completed payload to something other than the certified inserts.`);
-        }
+        for (const v of certifiedWrapperViolations(fs.readFileSync(path.join(REPO_ROOT, CONTRACT_MODULE), 'utf8'))) violations.push(`${rel}: ${v}`);
         continue;
       }
       const frozen = FROZEN_LEGACY_INSERT_SITES_2026_09[rel];
