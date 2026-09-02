@@ -35,6 +35,7 @@ jest.mock('../services/invoice-manual-payment', () => ({
   recordManualPayment: jest.fn(async (id) => ({ invoice: { id, invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid' }, receipt: { email: { ok: true }, sms: { ok: true } } })),
   retireOpenPaymentIntentBeforeSettlement: jest.fn(async () => null),
 }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => undefined) }));
 jest.mock('../services/open-balance', () => ({
   openSelfPayInvoicesByAmountDue: jest.fn(async () => []),
   rowIsSelfPayDue: jest.fn(async () => true),
@@ -44,6 +45,7 @@ const express = require('express');
 const db = require('../models/db');
 const { requireAdmin } = require('../middleware/admin-auth');
 const { recordManualPayment } = require('../services/invoice-manual-payment');
+const NotificationService = require('../services/notification-service');
 const OpenBalance = require('../services/open-balance');
 const router = require('../routes/admin-invoices');
 
@@ -51,11 +53,12 @@ let tables;
 function builder(table) {
   const t = tables[table] || (tables[table] = { firsts: [], selects: [], updates: [], calls: [] });
   const b = {};
-  ['where', 'whereIn', 'orderBy', 'limit'].forEach((m) => { b[m] = jest.fn((...a) => { t.calls.push([m, ...a]); return b; }); });
+  ['where', 'whereIn', 'whereRaw', 'orderBy', 'limit'].forEach((m) => { b[m] = jest.fn((...a) => { t.calls.push([m, ...a]); return b; }); });
   b.forUpdate = jest.fn(() => { t.calls.push(['forUpdate']); b.locked = true; return b; });
   b.first = jest.fn(async () => {
     if (b.locked) return t.locks && t.locks.length ? t.locks.shift() : { id: 'notice-1', status: 'processing' };
-    return t.firsts.length ? t.firsts.shift() : null;
+    const v = t.firsts.length ? t.firsts.shift() : null;
+    return typeof v === 'function' ? v(t) : v;
   });
   b.select = jest.fn(async () => (t.selects.length ? t.selects.shift() : []));
   b.update = jest.fn(async (patch) => { t.calls.push(['update', patch]); return t.updates.length ? t.updates.shift() : 1; });
@@ -122,8 +125,9 @@ describe('POST /payment-notices/:id/apply', () => {
     const updates = calls.filter(([m]) => m === 'update').map(([, p]) => p);
     expect(calls[calls.findIndex(([m]) => m === 'update') - 1]).toEqual(['where', { id: 'notice-1', status: 'parked' }]);
     const closeAt = calls.findIndex(([m, p]) => m === 'update' && p.status === 'applied');
-    expect(calls[closeAt - 1]).toEqual(['where', { id: 'notice-1', status: 'processing' }]);
-    expect(updates[0]).toMatchObject({ status: 'processing', match_method: 'manual', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: 'Adam' });
+    expect(updates[0]).toMatchObject({ status: 'processing', match_method: 'manual', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: 'Adam', claim_token: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+    // Every later write on the notice is fenced by that token.
+    expect(calls[closeAt - 1]).toEqual(['where', { id: 'notice-1', status: 'processing', claim_token: updates[0].claim_token }]);
     expect(updates[1]).toMatchObject({ status: 'applied', match_method: 'manual', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: 'Adam' });
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', {
       method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: 'Adam', sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true,
@@ -180,8 +184,36 @@ describe('POST /payment-notices/:id/apply', () => {
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
-  test('a close that finds the claim already swept (settlement slower than the window) forces applied to match the ledger', async () => {
-    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [1, 0], calls: [] }; // claim ok, CAS close lost
+  test('a Zelle-paid invoice for this customer at these cents inside the window (no notice row) refuses Apply — unless the notice was parked as possible_duplicate (the operator overriding)', async () => {
+    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [] };
+    tables.invoices = { firsts: [{ id: 'inv-0' }], selects: [], updates: [], calls: [] };
+    liveExact();
+    await withServer(async (call) => {
+      const r = await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' });
+      expect(r.status).toBe(409);
+      expect(r.body.error).toMatch(/already recorded for this customer within 14 days/);
+    });
+    expect(recordManualPayment).not.toHaveBeenCalled();
+    expect(tables.inbound_payment_notices.calls.some(([m]) => m === 'update')).toBe(false);
+    // possible_duplicate park: the operator IS the override — no ledger read at all.
+    tables.inbound_payment_notices = { firsts: [parked({ park_reason: 'possible_duplicate' })], selects: [], updates: [], calls: [] };
+    tables.invoices = { firsts: [{ id: 'inv-0' }], selects: [], updates: [], calls: [] };
+    liveExact();
+    await withServer(async (call) => { expect((await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' })).status).toBe(200); });
+    expect(tables.invoices.calls).toHaveLength(0);
+  });
+
+  test('a lost close with a DIFFERENT token (the notice was reclaimed) never consumes the new claim — surfaced for review, 200 (the ledger committed)', async () => {
+    tables.inbound_payment_notices = { firsts: [parked(), { claim_token: 'tok-someone-else', status: 'processing' }], selects: [], updates: [1, 0], calls: [] };
+    liveExact();
+    await withServer(async (call) => { expect((await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' })).status).toBe(200); });
+    const updates = tables.inbound_payment_notices.calls.filter(([m]) => m === 'update').map(([, p]) => p);
+    expect(updates).toHaveLength(2); // claim + the failed CAS close; no forced write
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment needs review', expect.stringContaining('reclaimed'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-1:late' }));
+  });
+
+  test('a close that finds the claim already swept (settlement slower than the window, OUR token still on the row) forces applied to match the ledger', async () => {
+    tables.inbound_payment_notices = { firsts: [parked(), (t) => ({ claim_token: t.calls.find(([m, p]) => m === 'update' && p.claim_token)[1].claim_token, status: 'parked' })], selects: [], updates: [1, 0], calls: [] }; // claim ok, CAS close lost
     liveExact();
     await withServer(async (call) => {
       const r = await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' });
@@ -210,7 +242,7 @@ describe('POST /payment-notices/:id/apply', () => {
 describe('POST /payment-notices/:id/apply — post-commit failure', () => {
   test('a non-refusal error after the ledger committed closes the notice as applied (receipt unknown) and returns 200', async () => {
     tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [] };
-    tables.invoices = { firsts: [{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid', payment_method: 'zelle', payment_recorded_by: 'Adam', payment_reference: 'Pat Doe' }], selects: [], updates: [], calls: [] };
+    tables.invoices = { firsts: [null, { id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid', payment_method: 'zelle', payment_recorded_by: 'Adam', payment_reference: 'Pat Doe' }], selects: [], updates: [], calls: [] }; // [direct-dup read, post-commit re-read]
     OpenBalance.openSelfPayInvoicesByAmountDue.mockResolvedValueOnce([{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', total: '117.00', credit_applied: 0 }]);
     recordManualPayment.mockRejectedValueOnce(new Error('receipt stamp exploded'));
     await withServer(async (call) => {
@@ -226,7 +258,7 @@ describe('POST /payment-notices/:id/apply — post-commit failure', () => {
 describe('POST /payment-notices/:id/apply — post-commit failure, not ours', () => {
   test('a paid invoice under the same recorder but a different tender / reference is NOT this settlement — parks apply_failed (uncertain), 500 surfaces', async () => {
     tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [] };
-    tables.invoices = { firsts: [{ id: 'inv-1', status: 'paid', payment_method: 'check', payment_recorded_by: 'Adam', payment_reference: 'Pat Doe' }], selects: [], updates: [], calls: [] };
+    tables.invoices = { firsts: [null, { id: 'inv-1', status: 'paid', payment_method: 'check', payment_recorded_by: 'Adam', payment_reference: 'Pat Doe' }], selects: [], updates: [], calls: [] }; // [direct-dup read, post-commit re-read]
     OpenBalance.openSelfPayInvoicesByAmountDue.mockResolvedValueOnce([{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', total: '117.00', credit_applied: 0 }]);
     recordManualPayment.mockRejectedValueOnce(new Error('db blip'));
     await withServer(async (call) => {

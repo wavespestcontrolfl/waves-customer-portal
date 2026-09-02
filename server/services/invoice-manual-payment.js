@@ -9,7 +9,8 @@
  * Contract (unchanged from the route):
  *   recordManualPayment(invoiceId, { method, reference, note, recordedBy,
  *                                    sendReceipt = true, via = 'both',
- *                                    expectedAmountCents, requireSelfPay })
+ *                                    expectedAmountCents, requireSelfPay,
+ *                                    automated })
  *     → { invoice, receipt }   receipt = { email, sms } | null
  *
  * expectedAmountCents (optional, the Zelle notice reconciler): the amount the
@@ -25,6 +26,13 @@
  * caller's check and the paid flip would otherwise settle another billing
  * party's invoice with the homeowner's transfer. Refuses with a 409 and
  * writes nothing.
+ *
+ * automated (optional, the Zelle reconciler's auto-settlement): nobody tapped
+ * a button, so the receipt honors the customer's opt-outs exactly like the
+ * automatic receipt queue (receipt-delivery-queue.js): payment_receipt=false
+ * skips both legs ('receipt_opted_out'), email_enabled=false skips the email
+ * leg ('email_opted_out'), a prefs lookup failure skips both (fail closed);
+ * the SMS leg is not operator-initiated. Operator paths leave it false.
  *
  * Refusals throw an Error carrying `statusCode` (400 / 404 / 409) and
  * `isOperational`; the lost-race 409 also carries `currentStatus`. Anything
@@ -87,6 +95,7 @@ async function recordManualPayment(id, {
   via = 'both',
   expectedAmountCents = null,
   requireSelfPay = false,
+  automated = false,
 } = {}) {
   if (expectedAmountCents != null && !(Number.isSafeInteger(expectedAmountCents) && expectedAmountCents > 0)) {
     throw refusal(400, 'expectedAmountCents must be a positive integer number of cents');
@@ -361,12 +370,29 @@ async function recordManualPayment(id, {
   let smsResult = null;
   if (sendReceipt) {
     const { sendReceiptEmail } = require('./invoice-email');
-    if (via === 'email' || via === 'both') {
+    let emailLeg = via === 'email' || via === 'both';
+    let smsLeg = via === 'sms' || via === 'both';
+    if (automated) {
+      // Same predicate as the automatic receipt queue; a lookup failure must
+      // NOT read as "no opt-out".
+      let lookupFailed = false;
+      const prefs = await db('notification_prefs').where({ customer_id: updatedInvoice.customer_id }).first().catch(() => { lookupFailed = true; return null; });
+      const skipBoth = lookupFailed ? 'receipt prefs lookup failed' : prefs?.payment_receipt === false ? 'receipt_opted_out' : null;
+      if (skipBoth) {
+        emailResult = emailLeg ? { ok: false, error: skipBoth } : null;
+        smsResult = smsLeg ? { ok: false, error: skipBoth } : null;
+        emailLeg = false; smsLeg = false;
+      } else if (prefs?.email_enabled === false && emailLeg) {
+        emailResult = { ok: false, error: 'email_opted_out' };
+        emailLeg = false;
+      }
+    }
+    if (emailLeg) {
       emailResult = await sendReceiptEmail(id).catch((err) => ({ ok: false, error: err.message }));
     }
-    if (via === 'sms' || via === 'both') {
+    if (smsLeg) {
       try {
-        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', operatorInitiated: true });
+        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', ...(automated ? {} : { operatorInitiated: true }) });
         smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
       } catch (err) {
         smsResult = { ok: false, error: err.message };

@@ -347,7 +347,12 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
     // never re-plays old notices against today's invoices. The reconciler's
     // sweep re-offers the same rows on every sync regardless; the claim is
     // at-most-once (email_id UNIQUE), so neither path can decide twice.
-    if (existing.auto_action === ZELLE_RETRY_MARK) {
+    // Also re-offer an existing row that is still UNCLASSIFIED with no
+    // auto_action: the state a propagated hook throw leaves (the retry mark
+    // could not be written, the cursor was withheld, Gmail re-listed it).
+    // Every normally-processed email is classified, so this replays nothing
+    // historical; the reconciler's own 48h stale guard parks any old notice.
+    if (existing.auto_action === ZELLE_RETRY_MARK || (existing.auto_action == null && existing.classification == null)) {
       await offerZelleNotice({ ...existing, authentication_results: parsed.authentication_results || existing.authentication_results }, { backfill });
     }
     const labelIds = parsed.label_ids || [];

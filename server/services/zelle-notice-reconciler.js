@@ -37,12 +37,16 @@
  *      flight, lost race, …) parks `apply_failed` with the reason.
  *
  * At-most-once: the inbound_payment_notices row is claimed FIRST (email_id
- * UNIQUE, status 'processing') and only the claimant decides; a second sync
- * of the same message can never apply twice. The notice row + emails.
+ * UNIQUE, status 'processing', a fresh claim_token) and only the claimant
+ * decides; a second sync of the same message can never apply twice. Every
+ * settle / close / park update requires the claim_token, so a worker whose
+ * claim was swept and RECLAIMED by the operator can never consume the new
+ * claim. The notice row + emails.
  * auto_action stamp + the payments ledger row from recordManualPayment are
  * the audit trail. Silent on success (category 'payment' is bell-silent by
  * default); a parked notice raises the same silent feed row for the owner.
  */
+const { randomUUID } = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
@@ -138,7 +142,7 @@ async function notifyOwner(title, body, noticeId, { needsReview = false } = {}) 
 }
 
 async function finishParked(notice, email, reason, { candidates = null, applyError = null, matchedInvoice = null } = {}) {
-  await db('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
+  await db('inbound_payment_notices').where({ id: notice.id, status: 'processing', claim_token: notice.claim_token }).update({
     status: 'parked',
     park_reason: reason,
     candidates: candidates ? JSON.stringify(candidates) : null,
@@ -165,7 +169,7 @@ async function finishApplied(notice, email, invoice, matchMethod, receipt) {
   // settlement slower than STALE_CLAIM_MS). CAS on `processing`; a
   // non-processing row is overwritten and logged, never left contradicting
   // the ledger.
-  const moved = await db('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
+  const moved = await db('inbound_payment_notices').where({ id: notice.id, status: 'processing', claim_token: notice.claim_token }).update({
     status: 'auto_applied',
     park_reason: null,
     match_method: matchMethod,
@@ -176,12 +180,30 @@ async function finishApplied(notice, email, invoice, matchMethod, receipt) {
     updated_at: new Date(),
   });
   if (!moved) {
-    logger.error(`[zelle-notice] notice ${notice.id} was no longer processing after ${invoice.invoice_number} settled — forcing auto_applied to match the ledger`);
-    await db('inbound_payment_notices').where({ id: notice.id }).update({
-      status: 'auto_applied', park_reason: null, apply_error: null, match_method: matchMethod,
-      matched_invoice_id: invoice.id, matched_customer_id: invoice.customer_id,
-      applied_at: new Date(), applied_by: RECORDED_BY, updated_at: new Date(),
-    });
+    // Either the sweep parked OUR claim (token unchanged — force the row to
+    // match the ledger) or an operator RECLAIMED the notice after the sweep
+    // (new token — their claim is theirs; never consume it). The reclaim
+    // case is surfaced loudly: the transfer settled this invoice while the
+    // operator may be applying it elsewhere.
+    const current = await db('inbound_payment_notices').where({ id: notice.id }).first('claim_token', 'status');
+    if (current && current.claim_token === notice.claim_token) {
+      logger.error(`[zelle-notice] notice ${notice.id} was ${current.status} after ${invoice.invoice_number} settled — forcing auto_applied to match the ledger`);
+      await db('inbound_payment_notices').where({ id: notice.id, claim_token: notice.claim_token }).update({
+        status: 'auto_applied', park_reason: null, apply_error: null, match_method: matchMethod,
+        matched_invoice_id: invoice.id, matched_customer_id: invoice.customer_id,
+        applied_at: new Date(), applied_by: RECORDED_BY, updated_at: new Date(),
+      });
+    } else {
+      logger.error(`[zelle-notice] notice ${notice.id} was RECLAIMED (${current?.status || 'gone'}) before ${invoice.invoice_number}'s late settlement closed — leaving the new claim alone`);
+      await stampEmail(email.id, `zelle_notice_applied:${invoice.invoice_number}`);
+      await notifyOwner(
+        'Zelle payment needs review',
+        `${notice.payer_name} · $${(notice.amount_cents / 100).toFixed(2)} settled ${invoice.invoice_number} in a late sync AFTER the notice was reclaimed — verify the notice was not applied to a second invoice`,
+        `${notice.id}:late`,
+        { needsReview: true },
+      );
+      return { status: 'auto_applied', invoiceNumber: invoice.invoice_number, reclaimed: true };
+    }
   }
   await stampEmail(email.id, `zelle_notice_applied:${invoice.invoice_number}`);
   const legs = receipt === null ? 'unknown — check the invoice' : ([receipt?.email?.ok && 'email', receipt?.sms?.ok && 'sms'].filter(Boolean).join(' + ') || 'no receipt delivered');
@@ -207,6 +229,7 @@ async function claimNotice(email, parsed) {
       memo: parsed?.memo || null,
       received_at: email.received_at || new Date(),
       status: 'processing',
+      claim_token: randomUUID(),
       candidates: null,
     })
     .onConflict('email_id')
@@ -230,11 +253,11 @@ async function recoverStaleClaims() {
   const stale = await db('inbound_payment_notices')
     .where({ status: 'processing' })
     .where('updated_at', '<', cutoff)
-    .select('id', 'email_id', 'payer_name', 'amount_cents', 'matched_invoice_id', 'applied_by');
+    .select('id', 'email_id', 'payer_name', 'amount_cents', 'matched_invoice_id', 'applied_by', 'claim_token');
   for (const row of stale) {
     if (await closeIfSettled(row)) continue;
     const took = await db('inbound_payment_notices')
-      .where({ id: row.id, status: 'processing' })
+      .where({ id: row.id, status: 'processing', claim_token: row.claim_token })
       .where('updated_at', '<', cutoff)
       .update({
         status: 'parked',
@@ -265,7 +288,7 @@ async function closeIfSettled(row) {
   if (!row.matched_invoice_id || !row.applied_by) return false;
   const inv = await settledInvoiceFor(row.matched_invoice_id, { recordedBy: row.applied_by, reference: zelleReference(row.payer_name) });
   if (!inv) return false;
-  const moved = await db('inbound_payment_notices').where({ id: row.id, status: 'processing' }).update({
+  const moved = await db('inbound_payment_notices').where({ id: row.id, status: 'processing', claim_token: row.claim_token }).update({
     status: row.applied_by === RECORDED_BY ? 'auto_applied' : 'applied',
     park_reason: null,
     apply_error: null,
@@ -464,7 +487,7 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
   // of this transfer is already on it.
   let stamped;
   try {
-    stamped = await db('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
+    stamped = await db('inbound_payment_notices').where({ id: notice.id, status: 'processing', claim_token: notice.claim_token }).update({
       matched_invoice_id: match.id,
       matched_customer_id: match.customer_id,
       match_method: matchMethod,
@@ -517,6 +540,9 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
       // Re-checks payer / statement / live payer resolution on the locked
       // invoice — a reassignment after exactOpenInvoices() refuses.
       requireSelfPay: true,
+      // Nobody is tapping a button: the receipt honors the customer's
+      // payment_receipt / email_enabled opt-outs like the automatic queue.
+      automated: true,
     });
   } catch (err) {
     // A statusCode-shaped refusal settled nothing. Anything else may have
@@ -549,6 +575,7 @@ module.exports = {
   recoverStaleClaims,
   sweepStaleClaims,
   closeIfSettled,
+  directZelleRecentlyRecorded,
   settledInvoiceFor,
   zelleReference,
   DUPLICATE_WINDOW_DAYS,

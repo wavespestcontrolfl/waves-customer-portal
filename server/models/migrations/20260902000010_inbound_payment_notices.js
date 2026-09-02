@@ -39,6 +39,7 @@ exports.up = async function up(knex) {
     t.jsonb('candidates');                   // operator dropdown: exact-amount first, then near-amount
     t.text('apply_error');                   // recordManualPayment refusal text when park_reason = apply_failed
     t.timestamp('applied_at', { useTz: true });
+    t.uuid('claim_token');                   // ownership generation: minted on every claim (sync insert, operator Apply); every settle/close/park update requires it so a stale worker never consumes a reclaimed claim
     t.string('applied_by', 120);             // 'zelle-notice-reconciler' | operator name — stamped at CLAIM time with the recorder the settlement writes (lost-close recovery), cleared on park
     t.timestamps(true, true);
     t.index('status');

@@ -208,13 +208,14 @@ describe('recordManualPayment — refusal contract', () => {
 });
 
 describe('recordManualPayment — settlement', () => {
-  function settle(row) {
+  function settle(row, { prefs = null, prefsLookupFails = false } = {}) {
     const paid = { ...row, status: 'paid', payment_method: 'zelle' };
     const invoices = recorder({ first: row });
     const activity = recorder();
     db.mockImplementation((table) => {
       if (table === 'invoices') return invoices;
       if (table === 'activity_log') return activity;
+      if (table === 'notification_prefs') { const r = recorder({ first: prefs }); if (prefsLookupFails) r.first = jest.fn(async () => { throw new Error('db blip'); }); return r; }
       throw new Error(`unexpected table ${table}`);
     });
     db.transaction.mockImplementation(async (fn) => {
@@ -239,6 +240,32 @@ describe('recordManualPayment — settlement', () => {
     const descriptions = activity.insert.mock.calls.map(([r]) => r.description);
     expect(descriptions[0]).toMatch(/Manual payment recorded for WPC-2026-0400 \(\$117\.00 via zelle · ref Pat Doe\) — zelle-notice-reconciler/);
     expect(descriptions[1]).toMatch(/Receipt sent for invoice WPC-2026-0400 \(email \+ sms\)/);
+  });
+
+  test('automated: payment_receipt=false skips BOTH receipt legs (receipt_opted_out) — the reconciler never emails an opted-out customer', async () => {
+    settle(openInvoice(), { prefs: { payment_receipt: false } });
+    const out = await recordManualPayment('inv-1', { method: 'zelle', automated: true });
+    expect(out.receipt).toEqual({ email: { ok: false, error: 'receipt_opted_out' }, sms: { ok: false, error: 'receipt_opted_out' } });
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+  });
+
+  test('automated: email_enabled=false skips the email leg only; the SMS leg is not operator-initiated', async () => {
+    settle(openInvoice(), { prefs: { email_enabled: false } });
+    const out = await recordManualPayment('inv-1', { method: 'zelle', automated: true });
+    expect(out.receipt).toEqual({ email: { ok: false, error: 'email_opted_out' }, sms: { ok: true } });
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv-1', expect.not.objectContaining({ operatorInitiated: true }));
+  });
+
+  test('automated: a prefs lookup failure sends nothing (fail closed); the operator path never reads prefs', async () => {
+    settle(openInvoice(), { prefsLookupFails: true });
+    const out = await recordManualPayment('inv-1', { method: 'zelle', automated: true });
+    expect(out.receipt).toEqual({ email: { ok: false, error: 'receipt prefs lookup failed' }, sms: { ok: false, error: 'receipt prefs lookup failed' } });
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    settle(openInvoice(), { prefs: { payment_receipt: false } });
+    const op = await recordManualPayment('inv-1', { method: 'zelle' });
+    expect(op.receipt).toEqual({ email: { ok: true }, sms: { ok: true } });
   });
 
   test('sendReceipt:false records the payment and sends nothing', async () => {

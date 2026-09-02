@@ -79,14 +79,15 @@ function builder(table) {
   b.first = jest.fn(async (...args) => {
     t.calls.push(['first', ...args]);
     if (b.locked) return t.locks && t.locks.length ? t.locks.shift() : { id: 'notice-1', status: 'processing' };
-    return t.firsts.length ? t.firsts.shift() : null;
+    const v = t.firsts.length ? t.firsts.shift() : null;
+    return typeof v === 'function' ? v(t) : v;
   });
   b.select = jest.fn(async () => []);
   b.update = jest.fn(async (patch) => { t.calls.push(['update', patch]); return t.updates && t.updates.length ? t.updates.shift() : 1; });
   b.returning = jest.fn(async () => (t.returning.length ? t.returning.shift() : []));
   return b;
 }
-const claimed = (row = { id: 'notice-1', payer_name: 'Pat Doe', amount_cents: 11700 }) => { tables.inbound_payment_notices.returning.push([row]); };
+const claimed = (row = { id: 'notice-1', payer_name: 'Pat Doe', amount_cents: 11700 }) => { tables.inbound_payment_notices.returning.push([{ claim_token: 'tok-1', ...row }]); };
 const updatesOf = (table) => (tables[table]?.calls || []).filter(([m]) => m === 'update').map(([, p]) => p);
 // Terminal transitions only — the committed match stamp before settlement carries no status.
 const closesOf = (table) => updatesOf(table).filter((p) => p.status);
@@ -167,7 +168,7 @@ describe('auto-apply', () => {
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     expect(OpenBalance.openSelfPayInvoicesByAmountDue).toHaveBeenCalledWith(11700, { limit: 25 });
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', {
-      method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: RECORDED_BY, sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true,
+      method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: RECORDED_BY, sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true, automated: true,
     });
     expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', match_method: 'amount_name', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: RECORDED_BY });
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500', classification: 'other' });
@@ -244,7 +245,7 @@ describe('settlement without a held transaction (pool floor is 2)', () => {
     const calls = tables.inbound_payment_notices.calls;
     const closeAt = calls.findIndex(([m, p]) => m === 'update' && p.status === 'auto_applied');
     expect(closeAt).toBeGreaterThan(-1);
-    expect(calls[closeAt - 1]).toEqual(['where', { id: 'notice-1', status: 'processing' }]);
+    expect(calls[closeAt - 1]).toEqual(['where', { id: 'notice-1', status: 'processing', claim_token: 'tok-1' }]);
   });
 
   test('the match is COMMITTED on the claim before settling (matched invoice + recorder), so a lost close is recoverable', async () => {
@@ -255,8 +256,34 @@ describe('settlement without a held transaction (pool floor is 2)', () => {
     const stampAt = calls.findIndex(([m, p]) => m === 'update' && p.matched_invoice_id === 'inv-1' && !p.status);
     expect(stampAt).toBeGreaterThan(-1);
     expect(calls[stampAt][1]).toMatchObject({ match_method: 'amount_name', matched_customer_id: 'cust-1', applied_by: RECORDED_BY });
-    expect(calls[stampAt - 1]).toEqual(['where', { id: 'notice-1', status: 'processing' }]);
+    expect(calls[stampAt - 1]).toEqual(['where', { id: 'notice-1', status: 'processing', claim_token: 'tok-1' }]);
     expect(stampAt).toBeLessThan(calls.findIndex(([m, p]) => m === 'update' && p.status === 'auto_applied'));
+    // The claim itself minted the token.
+    expect(insertsOf('inbound_payment_notices')[0].claim_token).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  test('a lost close with OUR token still on the row (the sweep parked a slow settlement) is forced to match the ledger', async () => {
+    claimed();
+    oneExact();
+    tables.inbound_payment_notices.updates = [1, 0]; // stamp ok, CAS close lost
+    tables.inbound_payment_notices.firsts.push(null, null, { claim_token: 'tok-1', status: 'parked' }); // dup pre, dup pre-settle, re-read
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    const calls = tables.inbound_payment_notices.calls;
+    const forcedAt = calls.findIndex(([m, p]) => m === 'update' && p.status === 'auto_applied' && p.apply_error === null);
+    expect(forcedAt).toBeGreaterThan(-1);
+    expect(calls[forcedAt - 1]).toEqual(['where', { id: 'notice-1', claim_token: 'tok-1' }]);
+  });
+
+  test('a lost close with a DIFFERENT token (the operator reclaimed the notice) never consumes the new claim — surfaced for review instead', async () => {
+    claimed();
+    oneExact();
+    tables.inbound_payment_notices.updates = [1, 0];
+    tables.inbound_payment_notices.firsts.push(null, null, { claim_token: 'tok-operator', status: 'processing' });
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    expect(closesOf('inbound_payment_notices').filter((p) => p.status === 'auto_applied')).toHaveLength(1); // only the failed CAS attempt
+    expect(tables.inbound_payment_notices.calls).not.toContainEqual(['where', { id: 'notice-1', claim_token: 'tok-1' }]); // the forced-close path never ran
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment needs review', expect.stringContaining('reclaimed'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-1:late', bellDefault: true }));
+    expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500' });
   });
 
   test('the DB refusing the stamp (another notice already holds this invoice — partial UNIQUE index) parks possible_duplicate, nothing settles', async () => {
@@ -401,7 +428,7 @@ describe('owner surfacing under the bell policy', () => {
 
 describe('stale claim recovery', () => {
   test('a processing row older than the window is parked apply_failed for the operator, stamped and surfaced; the sweep runs on every notice', async () => {
-    tables.inbound_payment_notices.selects = [[{ id: 'notice-old', email_id: 'email-old', payer_name: 'Old Payer', amount_cents: 5000 }]];
+    tables.inbound_payment_notices.selects = [[{ id: 'notice-old', email_id: 'email-old', payer_name: 'Old Payer', amount_cents: 5000, claim_token: 'tok-old' }]];
     // builder.select is a plain mock — feed the stale row through it
     const orig = db.getMockImplementation();
     db.mockImplementation((table) => { const b = orig(table); if (table === 'inbound_payment_notices') { const q = tables[table].selects; b.select = jest.fn(async () => (q.length ? q.shift() : [])); } return b; });
@@ -413,17 +440,18 @@ describe('stale claim recovery', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment needs review', expect.stringContaining('interrupted'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-old' }));
     expect(patch).toMatchObject({ matched_invoice_id: null, applied_by: null }); // frees the one-notice-per-invoice index
     // The CAS re-checks status + age so a row another pod just finished is left alone.
-    expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-old', status: 'processing' }]);
+    expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-old', status: 'processing', claim_token: 'tok-old' }]);
   });
 
   test('a stale claim whose stamped invoice is paid by Zelle under the stamped recorder is CLOSED to match the ledger, never parked', async () => {
-    const stale = { id: 'notice-old', email_id: 'email-old', payer_name: 'Old Payer', amount_cents: 5000, matched_invoice_id: 'inv-7', applied_by: RECORDED_BY };
+    const stale = { id: 'notice-old', email_id: 'email-old', payer_name: 'Old Payer', amount_cents: 5000, matched_invoice_id: 'inv-7', applied_by: RECORDED_BY, claim_token: 'tok-old' };
     tables.inbound_payment_notices.selects = [[stale]];
     tables.invoices = { firsts: [{ id: 'inv-7', invoice_number: 'WPC-2026-0507', customer_id: 'cust-7', status: 'paid', payment_method: 'zelle', payment_recorded_by: RECORDED_BY, payment_reference: 'Old Payer' }], returning: [], calls: [] };
     const orig = db.getMockImplementation();
     db.mockImplementation((table) => { const b = orig(table); if (table === 'inbound_payment_notices') { const q = tables[table].selects; b.select = jest.fn(async () => (q.length ? q.shift() : [])); } return b; });
     expect(await recoverStaleClaims()).toBe(1);
     expect(closesOf('inbound_payment_notices')).toEqual([expect.objectContaining({ status: 'auto_applied', park_reason: null, apply_error: null, matched_customer_id: 'cust-7' })]);
+    expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-old', status: 'processing', claim_token: 'tok-old' }]);
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0507' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('WPC-2026-0507'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-old' }));
   });
@@ -491,7 +519,7 @@ describe('sync wiring', () => {
     // A lost retry record withholds the INCREMENTAL cursor too (fullSync already withholds on any failed message).
     expect(src).toMatch(/if \(err\.zelleRetryLost\) cursorWithheld = true;/);
     expect(src).toMatch(/last_history_id: cursorWithheld \? state\.last_history_id : latestHistoryId/);
-    expect(src).toMatch(/if \(existing\.auto_action === ZELLE_RETRY_MARK\) \{\s*await offerZelleNotice\(/);
+    expect(src).toMatch(/if \(existing\.auto_action === ZELLE_RETRY_MARK \|\| \(existing\.auto_action == null && existing\.classification == null\)\) \{\s*await offerZelleNotice\(/);
     expect(src).toMatch(/\(proofHandled \|\| approvalControl \|\| zelleHandled\) && await bellClaimColumnExists\(\)/);
     // The stale-claim sweep runs on every sync beside the bell sweep.
     expect(src).toMatch(/sweepUnclaimedCustomerEmailBells\(\)[\s\S]{0,600}require\('\.\.\/zelle-notice-reconciler'\)\.sweepStaleClaims\(\)/);

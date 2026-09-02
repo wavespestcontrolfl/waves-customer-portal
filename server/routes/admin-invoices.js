@@ -1,4 +1,5 @@
 const express = require('express');
+const { randomUUID } = require('crypto');
 const router = express.Router();
 const multer = require('multer');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -710,10 +711,20 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
     // index on matched_invoice_id has the DATABASE refuse two notices on one
     // invoice.
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+    // The transfer may already be on the ledger with no notice row (the
+    // operator's own Add-payment tap, or a late sync settlement after this
+    // notice was swept): a Zelle-paid invoice for this customer at these
+    // cents inside the window refuses — unless the notice was parked as
+    // possible_duplicate, which is exactly the operator overriding that.
+    const { directZelleRecentlyRecorded, zelleReference } = require('../services/zelle-notice-reconciler');
+    if (notice.park_reason !== 'possible_duplicate' && await directZelleRecentlyRecorded(exact, notice.amount_cents)) {
+      return res.status(409).json({ error: 'A Zelle payment at this amount was already recorded for this customer within 14 days — check the customer\'s invoices; if this is a second transfer, record it from the invoice and ignore this notice' });
+    }
+    const claimToken = randomUUID();
     let claimed;
     try {
       claimed = await db('inbound_payment_notices').where({ id, status: 'parked' }).update({
-        status: 'processing', match_method: 'manual', matched_invoice_id: invoiceId, matched_customer_id: exact.customer_id, applied_by: recordedBy, updated_at: db.fn.now(),
+        status: 'processing', claim_token: claimToken, match_method: 'manual', matched_invoice_id: invoiceId, matched_customer_id: exact.customer_id, applied_by: recordedBy, updated_at: db.fn.now(),
       });
     } catch (err) {
       if (err.code !== '23505') throw err;
@@ -730,7 +741,7 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
     // Ignore requires `parked` (409 now), the reconciler's sweep leaves a
     // fresh processing claim alone, and the close below is a CAS on
     // `processing` — a lost close is recovered by closeIfSettled.
-    const zelleRef = require('../services/zelle-notice-reconciler').zelleReference(notice.payer_name);
+    const zelleRef = zelleReference(notice.payer_name);
     let settled;
     try {
       settled = await recordManualPayment(invoiceId, {
@@ -762,13 +773,13 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
         logger.error(`[admin-invoices:payment-notices] ${invoiceId} settled but a later step threw (${err.message}) — closing notice ${id} as applied, receipt unknown`);
         settled = { invoice: paid, receipt: null };
       } else {
-        await db('inbound_payment_notices').where({ id, status: 'processing' })
+        await db('inbound_payment_notices').where({ id, status: 'processing', claim_token: claimToken })
           .update({ status: 'parked', park_reason: 'apply_failed', apply_error: refusal ? err.message : `Settlement outcome uncertain (${err.message}) — check the invoice before applying`, matched_invoice_id: null, applied_by: null, updated_at: db.fn.now() });
         throw err;
       }
     }
     const { invoice, receipt } = settled;
-    const closed = await db('inbound_payment_notices').where({ id, status: 'processing' }).update({
+    const closed = await db('inbound_payment_notices').where({ id, status: 'processing', claim_token: claimToken }).update({
       status: 'applied',
       park_reason: null,
       apply_error: null,
@@ -780,13 +791,24 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
       updated_at: db.fn.now(),
     });
     if (!closed) {
-      // The ledger committed; a sweep parked the claim during a settlement
-      // slower than its window. Force the row to match the ledger.
-      logger.error(`[admin-invoices:payment-notices] notice ${id} was no longer processing after ${invoiceId} settled — forcing applied to match the ledger`);
-      await db('inbound_payment_notices').where({ id }).update({
-        status: 'applied', park_reason: null, apply_error: null, match_method: 'manual', matched_invoice_id: invoiceId,
-        matched_customer_id: invoice?.customer_id || exact.customer_id, applied_at: db.fn.now(), applied_by: recordedBy, updated_at: db.fn.now(),
-      });
+      // The ledger committed. Our token still on the row = the sweep parked
+      // our claim during a slow settlement → force the row to match the
+      // ledger. A different token = someone reclaimed the notice → leave
+      // their claim alone and surface it.
+      const current = await db('inbound_payment_notices').where({ id }).first('claim_token', 'status');
+      if (current && current.claim_token === claimToken) {
+        logger.error(`[admin-invoices:payment-notices] notice ${id} was ${current.status} after ${invoiceId} settled — forcing applied to match the ledger`);
+        await db('inbound_payment_notices').where({ id, claim_token: claimToken }).update({
+          status: 'applied', park_reason: null, apply_error: null, match_method: 'manual', matched_invoice_id: invoiceId,
+          matched_customer_id: invoice?.customer_id || exact.customer_id, applied_at: db.fn.now(), applied_by: recordedBy, updated_at: db.fn.now(),
+        });
+      } else {
+        logger.error(`[admin-invoices:payment-notices] notice ${id} was RECLAIMED (${current?.status || 'gone'}) before ${invoiceId}'s settlement closed — leaving the new claim alone`);
+        await require('../services/notification-service').notifyAdmin('payment', 'Zelle payment needs review',
+          `${notice.payer_name || 'Unknown payer'} · $${(notice.amount_cents / 100).toFixed(2)} settled ${invoice?.invoice_number || invoiceId} AFTER the notice was reclaimed — verify it was not applied to a second invoice`,
+          { link: '/admin/invoices', dedupeKey: `zelle-notice:${id}:late`, metadata: { noticeId: id }, bellDefault: true })
+          .catch((e) => logger.warn(`[admin-invoices:payment-notices] owner notification failed: ${e.message}`));
+      }
     }
     await db('emails').where({ id: notice.email_id }).update({ auto_action: `zelle_notice_applied:${invoice?.invoice_number || exact.invoice_number}`, updated_at: new Date() })
       .catch((err) => logger.warn(`[admin-invoices:payment-notices] auto_action stamp failed: ${err.message}`));
