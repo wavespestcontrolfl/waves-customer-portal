@@ -723,6 +723,10 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
           recordedBy,
           sendReceipt: true,
           via: 'both',
+          // Atomic with the paid flip: the exact-cent check above is advisory
+          // (dropdown truth); the fence under the invoice lock is what
+          // guarantees the ledger records the notice's amount or nothing.
+          expectedAmountCents: notice.amount_cents,
         });
       } catch (err) {
         // A statusCode-shaped refusal settled nothing. Anything else may have

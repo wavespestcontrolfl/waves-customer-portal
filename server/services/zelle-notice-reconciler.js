@@ -332,6 +332,9 @@ async function maybeHandleZelleNotice(email) {
         recordedBy: RECORDED_BY,
         sendReceipt: true,
         via: 'both',
+        // Fenced under the invoice lock: the ledger records exactly the
+        // notice's amount or nothing.
+        expectedAmountCents: parsed.amountCents,
       });
     } catch (err) {
       // A statusCode-shaped refusal settled nothing. Anything else may have

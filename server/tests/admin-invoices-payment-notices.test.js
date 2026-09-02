@@ -124,7 +124,7 @@ describe('POST /payment-notices/:id/apply', () => {
     expect(updates[0]).toMatchObject({ status: 'processing' });
     expect(updates[1]).toMatchObject({ status: 'applied', match_method: 'manual', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: 'Adam' });
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', {
-      method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: 'Adam', sendReceipt: true, via: 'both',
+      method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: 'Adam', sendReceipt: true, via: 'both', expectedAmountCents: 11700,
     });
     expect(tables.emails.calls.find(([m]) => m === 'update')[1]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500' });
   });

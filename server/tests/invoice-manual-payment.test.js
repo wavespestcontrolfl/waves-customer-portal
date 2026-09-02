@@ -138,6 +138,32 @@ describe('recordManualPayment — refusal contract', () => {
     expect(err.message).toMatch(/new payment session started/);
   });
 
+  test('expectedAmountCents is fenced under the invoice lock: a moved amount due → 409 and nothing written', async () => {
+    db.mockImplementation(() => recorder({ first: openInvoice() }));
+    let paymentsInsert = null;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') return recorder({ first: openInvoice({ total: '120.00' }), returning: [] }); // amount moved under the lock
+        if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 11700 }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/\$120\.00, not the \$117\.00/);
+    expect(err.amountMismatch).toEqual({ expectedCents: 11700, actualCents: 12000 });
+    expect(paymentsInsert).toBeNull();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+  });
+
+  test('expectedAmountCents must be a positive integer', async () => {
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 117.5 }));
+    expect(err.statusCode).toBe(400);
+    expect(db).not.toHaveBeenCalled();
+  });
+
   test('a non-refusal error from inside the transaction is rethrown untouched', async () => {
     db.mockImplementation(() => recorder({ first: openInvoice() }));
     const sentinel = new Error('db exploded');
