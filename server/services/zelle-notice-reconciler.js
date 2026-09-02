@@ -228,12 +228,16 @@ async function sweepStaleClaims() {
   return recoverStaleClaims();
 }
 
+// The window starts when the MONEY WAS RECORDED (applied_at — both the
+// reconciler and the operator's Apply stamp it), never the email's receipt
+// time: a notice applied late would otherwise fall out of the window by its
+// old timestamp and let a delayed duplicate settle a second invoice.
 async function recentlyApplied(parsed, database = db) {
   const since = new Date(Date.now() - DUPLICATE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const dup = await database('inbound_payment_notices')
     .where({ payer_name_norm: normalizeNamePart(parsed.payerName), amount_cents: parsed.amountCents })
     .whereIn('status', ['auto_applied', 'applied'])
-    .where('received_at', '>', since)
+    .where('applied_at', '>', since)
     .first('id');
   return !!dup;
 }

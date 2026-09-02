@@ -281,8 +281,10 @@ describe('park reasons', () => {
   test('same payer + amount already applied within the window ⇒ possible_duplicate, even with a clean single match', async () => {
     claimed();
     tables.inbound_payment_notices.firsts.push({ id: 'notice-0' }); // the duplicate-guard read
+    const windowClause = () => tables.inbound_payment_notices.calls.find(([m, col, op]) => m === 'where' && op === '>' && col === 'applied_at');
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    expect(windowClause()).toBeTruthy(); // window keyed by settlement time, not email receipt
     expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'possible_duplicate' });
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
