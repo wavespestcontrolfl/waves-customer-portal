@@ -97,6 +97,20 @@ describe("useSpeechDictation upload fallback", () => {
     expect(result.current.uploading).toBe(false);
   });
 
+  it("a second tap while the permission prompt is open does not open a second stream", async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ available: true }) });
+    let resolveStream;
+    navigator.mediaDevices.getUserMedia.mockImplementation(() => new Promise((r) => { resolveStream = r; }));
+    const { result } = renderHook(() => useSpeechDictation(vi.fn(), { uploadServiceId: "svc-1" }));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    act(() => { result.current.toggle(); });
+    act(() => { result.current.toggle(); });
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
+    await act(async () => { resolveStream({ getTracks: () => [track] }); });
+    await waitFor(() => expect(result.current.listening).toBe(true));
+    expect(FakeRecorder.instances).toHaveLength(1);
+  });
+
   it("never touches the upload path when SpeechRecognition exists", async () => {
     window.webkitSpeechRecognition = class { start() {} stop() {} abort() {} };
     const { result } = renderHook(() => useSpeechDictation(vi.fn(), { uploadServiceId: "svc-1" }));

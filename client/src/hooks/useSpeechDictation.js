@@ -31,6 +31,9 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const [uploadAvailable, setUploadAvailable] = useState(false);
   const recognitionRef = useRef(null);
   const recorderRef = useRef(null);
+  // True from the first tap until getUserMedia settles: a second tap in that
+  // window must not open a second stream nobody can stop.
+  const startingRef = useRef(false);
   // Keep the latest callback without re-creating `toggle` each render.
   const onTranscriptRef = useRef(onTranscript);
   onTranscriptRef.current = onTranscript;
@@ -113,12 +116,20 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       }
       return;
     }
-    if (uploading) return;
+    if (uploading || startingRef.current) return;
+    startingRef.current = true;
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
+      startingRef.current = false;
       alert(`Microphone unavailable: ${e?.message || e}`);
+      return;
+    }
+    if (!mountedRef.current) {
+      // Unmounted while the permission prompt was open — release the mic.
+      stream.getTracks().forEach((t) => t.stop());
+      startingRef.current = false;
       return;
     }
     const preferred = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
@@ -146,6 +157,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     };
     recorderRef.current = rec;
     rec.start();
+    startingRef.current = false;
     setListening(true);
   }, [uploadClip, uploading]);
 
@@ -199,8 +211,11 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // Stop an in-progress session if the consumer unmounts (e.g. the completion
   // modal closes mid-dictation) so the mic isn't left recording and stale
   // callbacks can't fire against an unmounted notes setter.
+  const mountedRef = useRef(true);
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       const rec = recognitionRef.current;
       if (rec) {
         rec.onresult = null;
