@@ -5,6 +5,7 @@ const sendgrid = require('../sendgrid-mail');
 const { wrapEmail, formatDate, plainText } = require('../email-template');
 const EmailTemplateLibrary = require('../email-template-library');
 const { buildReportV1Data } = require('./report-data');
+const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
 const {
   enqueuePdfRenderRetry,
   getOrRenderServiceReportPdf,
@@ -440,7 +441,10 @@ async function loadServiceRecord(recordId) {
       db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
       'technicians.name as technician_name',
     )
-    .first();
+    .first()
+    // Frozen identity overlays the join so the email's greeting, "at City,
+    // ST" line, and technician name match the report it links to.
+    .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
 }
 
 async function sendServiceReportV1Email(recordId, {

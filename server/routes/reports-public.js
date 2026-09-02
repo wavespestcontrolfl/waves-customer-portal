@@ -36,6 +36,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
 const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
@@ -1839,7 +1840,11 @@ router.get('/:token', async (req, res, next) => {
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
         'technicians.photo_s3_key as technician_photo_s3_key')
-      .first();
+      .first()
+      // Frozen identity (report-identity-snapshot.js) overlays the live join
+      // HERE, before the filename, the canonical lawn pin, and the cache
+      // signature read the row — not only inside the builder.
+      .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
 
@@ -2093,7 +2098,8 @@ router.get('/:token/map.svg', async (req, res, next) => {
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
         'technicians.photo_s3_key as technician_photo_s3_key')
-      .first();
+      .first()
+      .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
 
     if (!service || service.report_template_version !== 'service_report_v1') {
       return res.status(404).json({ error: 'Report not found' });
@@ -2164,7 +2170,8 @@ router.get('/:token/data', async (req, res, next) => {
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
         'technicians.photo_s3_key as technician_photo_s3_key')
-      .first();
+      .first()
+      .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
     serviceRecordId = service.id;

@@ -116,8 +116,13 @@ function makeKnex(store) {
         // seeding store.legacyLedgerRows.
         : table === 'property_application_history'
           ? jest.fn(() => Promise.resolve(store.legacyLedgerRows || []))
-          : jest.fn().mockReturnThis(),
+          // The report identity snapshot's batch catalog read — a test
+          // opts in by seeding store.snapshotCatalogRows.
+          : table === 'products_catalog'
+            ? jest.fn(() => Promise.resolve(store.snapshotCatalogRows || []))
+            : jest.fn().mockReturnThis(),
       forUpdate: jest.fn().mockReturnThis(),
+      forShare: jest.fn().mockReturnThis(),
       // Only service_records advertises its columns — the customers
       // columnInfo probe still throws, keeping the tier snapshot in its
       // legacy (empty) shape for these tests.
@@ -144,6 +149,10 @@ function makeKnex(store) {
       // The ledger-sync catalog resolution (name ilike) — a test opts in
       // by seeding store.catalogRow.
       if (table === 'products_catalog') return store.catalogRow;
+      // The report identity snapshot's in-trx customer / technician reads —
+      // a test opts in by seeding store.customerRow / store.technicianRow.
+      if (table === 'customers') return store.customerRow;
+      if (table === 'technicians') return store.technicianRow;
       if (table === 'service_records') {
         const latest = store.records[store.records.length - 1];
         return latest
@@ -164,7 +173,7 @@ function makeKnex(store) {
     q.insert = jest.fn((row) => {
       if (table === 'service_records') {
         const id = `rec-${store.records.length + 1}`;
-        store.records.push({ id, recap_sms_sent_at: row.recap_sms_sent_at || null, structured_notes: row.structured_notes || null, service_line: row.service_line ?? null });
+        store.records.push({ id, recap_sms_sent_at: row.recap_sms_sent_at || null, structured_notes: row.structured_notes || null, service_line: row.service_line ?? null, service_data: row.service_data || null });
         return { returning: jest.fn().mockResolvedValue([{ id }]) };
       }
       if (table === 'service_products') {
@@ -281,6 +290,65 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(second.smsError).toBe('duplicate_suppressed');
     // Both reference the same record.
     expect(second.recordId).toBe(first.recordId);
+  });
+
+  test('a recap-created record freezes the report identity snapshot from in-trx reads (codex P2 #3742)', async () => {
+    const store = {
+      serviceStatus: 'scheduled',
+      records: [],
+      customerRow: { first_name: 'Pat', last_name: 'Jones', address_line1: '200 Palm Ave', city: 'Parrish', state: 'FL', zip: '34219', latitude: '27.5', longitude: '-82.5' },
+      technicianRow: { name: 'Alex Benson' },
+    };
+    const knex = makeKnex(store);
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Treated kitchen + garage.',
+      products: [{ product_name: 'Termidor' }],
+      customerRecap: 'Service complete.',
+      sendSms: false,
+      knex,
+    });
+    expect(result.ok).toBe(true);
+    const inserted = JSON.parse(store.records[0].service_data);
+    expect(inserted.reportIdentitySnapshot).toMatchObject({
+      version: 1,
+      serviceTitle: 'Quarterly Pest Control',
+      customer: { firstName: 'Pat', lastName: 'Jones' },
+      address: { line1: '200 Palm Ave', city: 'Parrish', state: 'FL', zip: '34219' },
+      mapCenter: { lat: 27.5, lng: -82.5 },
+    });
+    // No technician_id on this visit → the leg is omitted, not blanked.
+    expect(inserted.reportIdentitySnapshot.technicianName).toBeUndefined();
+  });
+
+  test('a recap that completes an existing record freezes facts for RETAINED products too; an already-completed record is left alone (codex #3742 r4)', async () => {
+    const CAT_ID = '11111111-1111-4111-8111-111111111111';
+    const base = {
+      serviceStatus: 'completed',
+      priorProductRows: [{ id: 'sp-1', product_id: CAT_ID.toUpperCase(), product_name: 'Termidor' }],
+      snapshotCatalogRows: [{ id: CAT_ID, name: 'Termidor', category: 'insecticide', product_type: 'pesticide', epa_reg_number: '7969-210', approved_for_service_report: true }],
+      customerRow: { first_name: 'Pat', last_name: 'Jones', address_line1: '200 Palm Ave' },
+    };
+    const submit = (knex) => submitRecap({ serviceId: SERVICE_ID, actorType: 'tech', actorId: 'tech-1', technicianNotes: 'x', products: [], customerRecap: 'Done.', sendSms: false, knex });
+    const snapshotsWritten = (store) => (store.recordUpdates || [])
+      .map((u) => (typeof u.service_data === 'string' ? JSON.parse(u.service_data) : null))
+      .filter((d) => d && d.reportIdentitySnapshot)
+      .map((d) => d.reportIdentitySnapshot);
+
+    // This recap IS the completion (existing row 'incomplete'); a
+    // non-authoritative empty submit keeps the recorded product.
+    const store = { ...base, records: [{ id: 'rec-old', recap_sms_sent_at: null, status: 'incomplete' }] };
+    expect((await submit(makeKnex(store))).ok).toBe(true);
+    const [snapshot] = snapshotsWritten(store);
+    expect(snapshot.productFacts[CAT_ID]).toMatchObject({ epaRegNumber: '7969-210' });
+    expect(snapshot.customer).toEqual({ firstName: 'Pat', lastName: 'Jones' });
+
+    // Same submit against a record that was ALREADY completed: nothing frozen.
+    const store2 = { ...base, records: [{ id: 'rec-done', recap_sms_sent_at: null, status: 'completed' }] };
+    expect((await submit(makeKnex(store2))).ok).toBe(true);
+    expect(snapshotsWritten(store2)).toEqual([]);
   });
 
   test('a recap that did not text can still send later (complete-now, text-later)', async () => {
