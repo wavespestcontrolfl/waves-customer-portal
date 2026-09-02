@@ -61,6 +61,13 @@ function clip(baseUrl, { token = 'tech', type = 'audio/webm;codecs=opus', bytes 
   });
 }
 
+describe('call-recording-processor production surface', () => {
+  test('exports transcribeWithOpenAI on the module itself, not only _test (pre-push P1)', () => {
+    const real = jest.requireActual('../services/call-recording-processor');
+    expect(typeof real.transcribeWithOpenAI).toBe('function');
+  });
+});
+
 describe('tech dictation upload', () => {
   const original = process.env.GATE_TECH_DICTATION_UPLOAD;
   beforeEach(() => {

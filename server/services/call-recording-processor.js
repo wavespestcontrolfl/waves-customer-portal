@@ -15878,9 +15878,6 @@ CallRecordingProcessor._test = {
   shouldHoldLeadEmailEnrollment,
   mintEmailReviewCardsFenced,
   transcribeRecording,
-  // Buffer-in transcriber for uploaded field dictation (tech-track
-  // /dictation): same OpenAI call + PAN scrub the call path uses.
-  transcribeWithOpenAI,
   extractCallDataV2,
   CALL_EXTRACTION_ROUTE,
   normalizeOpenAISegments,
@@ -15921,6 +15918,10 @@ CallRecordingProcessor._test = {
 // same transcriber + same hallucination guard the live path uses, so a
 // backfilled transcript can never be lower-integrity than a live one.
 CallRecordingProcessor.transcribeRecording = transcribeRecording;
+// Buffer-in transcriber for uploaded field dictation (tech-track
+// /dictation, NOT test-only): same OpenAI call + PAN scrub the call path
+// uses, so a dictated note can never be lower-integrity than a call.
+CallRecordingProcessor.transcribeWithOpenAI = transcribeWithOpenAI;
 CallRecordingProcessor.isImplausibleTranscript = isImplausibleTranscript;
 CallRecordingProcessor.quarantineCardRecording = quarantineCardRecording;
 CallRecordingProcessor.scrubStructuredTranscript = scrubStructuredTranscript;
