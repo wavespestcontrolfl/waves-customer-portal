@@ -34,19 +34,23 @@ const check = (table, name, expr) => `ALTER TABLE ${table} ADD CONSTRAINT ${name
 const inSet = (col, arr, { nullable = false } = {}) => (nullable ? `${col} IS NULL OR ${col} IN (${quoted(arr)})` : `${col} IN (${quoted(arr)})`);
 
 exports.up = async function up(knex) {
-  if (!(await knex.schema.hasTable('seo_link_acquisition_paths'))) return;
-  const cols = await knex('seo_link_acquisition_paths').columnInfo();
-  if (!cols.currency) {
-    await knex.schema.alterTable('seo_link_acquisition_paths', (t) => {
-      t.string('currency').notNullable().defaultTo('unknown');
-    });
-    await knex.raw(check('seo_link_acquisition_paths', 'seo_link_acquisition_paths_currency_check', inSet('currency', CURRENCIES)));
-  }
-  if (!cols.fee_scope) {
-    await knex.schema.alterTable('seo_link_acquisition_paths', (t) => {
-      t.string('fee_scope');
-    });
-    await knex.raw(check('seo_link_acquisition_paths', 'seo_link_acquisition_paths_fee_scope_check', inSet('fee_scope', FEE_SCOPES, { nullable: true })));
+  // The two tables are guarded INDEPENDENTLY: a missing paths table must not
+  // skip the domain columns (knex would still record the migration as run,
+  // and the investigator would query columns that never landed).
+  if (await knex.schema.hasTable('seo_link_acquisition_paths')) {
+    const cols = await knex('seo_link_acquisition_paths').columnInfo();
+    if (!cols.currency) {
+      await knex.schema.alterTable('seo_link_acquisition_paths', (t) => {
+        t.string('currency').notNullable().defaultTo('unknown');
+      });
+      await knex.raw(check('seo_link_acquisition_paths', 'seo_link_acquisition_paths_currency_check', inSet('currency', CURRENCIES)));
+    }
+    if (!cols.fee_scope) {
+      await knex.schema.alterTable('seo_link_acquisition_paths', (t) => {
+        t.string('fee_scope');
+      });
+      await knex.raw(check('seo_link_acquisition_paths', 'seo_link_acquisition_paths_fee_scope_check', inSet('fee_scope', FEE_SCOPES, { nullable: true })));
+    }
   }
   if (await knex.schema.hasTable('seo_link_domains')) {
     const domCols = await knex('seo_link_domains').columnInfo();
