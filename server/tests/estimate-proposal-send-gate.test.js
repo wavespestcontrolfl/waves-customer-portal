@@ -132,6 +132,9 @@ describe('assertEstimateSendable proposal exemption', () => {
     status: 'sent',
     token: 'tok-proposal-test',
     monthly_total: 583,
+    // PUT /:id/proposal stamps category='COMMERCIAL' in the same UPDATE that
+    // writes the proposal — the exemption's provenance (GH codex P1 on #3750).
+    category: 'COMMERCIAL',
     estimate_data: {
       proposal: { enabled: true, buildings: [{ name: 'Tower A', lineItems: [] }] },
       // mimic what a send snapshot leaves behind

@@ -278,9 +278,22 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
 // the pre-read check in assertEstimateSendable and by the send CLAIMS, which
 // re-assert it as a WHERE predicate so a revision that stamps CLIENT_FALLBACK
 // between the check and the claim loses the race instead of being delivered.
+// An AUTHORED proposal by PROVENANCE, not by the blob alone: PUT /:id/proposal
+// is the only path that turns a row into a commercial proposal and it stamps
+// category='COMMERCIAL' in the same UPDATE (the generic create/revise never
+// writes category — and since #3750 never persists a browser proposal
+// either). A legacy row whose browser-supplied proposal.enabled survived an
+// older generic save carries no such stamp and gets NO exemption — from the
+// pricing-authority gate, its telemetry, or the manual-review gate (GH codex
+// P1 on #3750).
+function isAuthoredProposalRow(estimate = {}) {
+  if (String(estimate.category || '').toUpperCase() !== 'COMMERCIAL') return false;
+  return parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true;
+}
+
 function sendRequiresServerPricingFor(estimate = {}) {
   if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return false;
-  return parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled !== true;
+  return !isAuthoredProposalRow(estimate);
 }
 // The ONE authority predicate every send claim re-asserts — gated manual
 // sends and every automated send alike: the explicit SERVER stamp, fail
@@ -304,7 +317,7 @@ function shadowLogFallbackDelivery(estimate = {}, { handoff = true } = {}) {
   if (!handoff) return false;
   const authority = String(estimate.pricing_authority || '').toUpperCase();
   if (authority === 'SERVER') return false;
-  if (parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true) return false;
+  if (isAuthoredProposalRow(estimate)) return false;
   if (require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return false;
   logger.warn(`[pricing-authority] shadow: estimate ${estimate.id} is being delivered with pricing authority ${authority || 'NULL'} (GATE_SEND_REQUIRES_SERVER_PRICING off)`);
   return true;
@@ -343,7 +356,7 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
     .whereNull('archived_at')
     .whereNull('price_locked_at')
     .whereIn('status', ['draft', 'scheduled', 'send_failed'])
-    .select('id', 'status', 'pricing_authority', 'estimate_data');
+    .select('id', 'status', 'category', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
     const authority = String(sibling.pricing_authority || '').toUpperCase();
     if (authority === 'SERVER') continue;
@@ -421,7 +434,7 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   // at the gate rather than only scrubbing stored flags: the send snapshot
   // re-derives quoteRequired:true from proposal.enabled (via buildPricingBundle
   // → attachQuoteRequirement), which would otherwise re-block every resend.
-  const isAuthoredProposal = parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true;
+  const isAuthoredProposal = isAuthoredProposalRow(estimate);
   if (!isAuthoredProposal && estimateDataHasQuoteRequirement(estimate.estimate_data || estimate.estimateData)) {
     const err = new Error('Quote-required estimates need manual review before they can be sent to the customer.');
     err.statusCode = 400;
@@ -4338,6 +4351,7 @@ router._internals = {
   clearStaleProposalDelivery,
   assertEstimateSendable,
   sendRequiresServerPricingFor,
+  isAuthoredProposalRow,
   shadowLogFallbackDelivery,
   SERVER_PRICING_AUTHORITY_SQL,
   assertAutoSendPricingAuthority,
