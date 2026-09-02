@@ -115,7 +115,13 @@ describe('processRecording call_log writes are ownership-fenced', () => {
 
   test('customer_creation_failed opens review and files its card — it is no longer a silent terminal', () => {
     expect(body).toContain("finalStatus === 'customer_creation_failed'\n            ? { review_status: 'open' } : {}");
-    expect(body).toContain("flag: 'customer_creation_failed',");
+    // The card is filed INSIDE the finalization transaction, fenced by the
+    // status write it describes — never after the token is cleared.
+    const cardAt = body.indexOf("flag: 'customer_creation_failed',");
+    expect(cardAt).toBeGreaterThan(-1);
+    expect(body.slice(cardAt - 400, cardAt)).toContain("if (written > 0 && finalStatus === 'customer_creation_failed') {");
+    expect(body.slice(cardAt - 400, cardAt)).toContain("await trx('triage_items').insert(buildTriageItem({");
+    expect(body.indexOf("return written;", cardAt)).toBeGreaterThan(cardAt);
     const gates = fs.readFileSync(require.resolve('../services/call-routing-gates'), 'utf8');
     expect(gates).toContain("customer_creation_failed: 'customer_field_conflict',");
     expect(gates).toContain("additional_recording: 'service_unknown',");

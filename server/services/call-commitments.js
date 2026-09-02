@@ -806,8 +806,11 @@ async function buildCallOutcomes(conn, call) {
   const customerId = call.customer_id || lead?.customer_id || null;
   if (customerId || lead?.estimate_id) {
     const estimates = await conn('estimates')
+      // After the call only — a reused lead can carry an estimate from an
+      // earlier call, which is not this call's outcome.
+      .where('created_at', '>', after)
       .where(function scope() {
-        if (customerId) this.orWhere(function c() { this.where('customer_id', customerId).where('created_at', '>', after); });
+        if (customerId) this.orWhere('customer_id', customerId);
         if (lead?.estimate_id) this.orWhere('id', lead.estimate_id);
       })
       .orderBy('created_at', 'asc')

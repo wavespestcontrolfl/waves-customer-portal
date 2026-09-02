@@ -144,6 +144,10 @@ Per file, with the proving test.
 - Pre-push Codex round 7 (1 P1, fixed): the late built-in transcription's
   PAN stamp merges into the row's CURRENT `transcription_metadata` in SQL
   (jsonb concatenation) instead of serializing the snapshot it read.
+- Pre-push Codex round 8 (2 P1s, fixed): "After the call" estimates require
+  `created_at` after the call even when reached through the lead; the
+  `customer_creation_failed` review card is filed inside the finalization
+  transaction, fenced by the status write it describes.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 

@@ -15069,6 +15069,19 @@ const CallRecordingProcessor = {
           ),
           updated_at: new Date(),
         });
+      // The customer_creation_failed card rides the SAME transaction as the
+      // status it describes: filed after finalization it could outlive the
+      // pass — a force reprocess repairing the call while the insert was
+      // pending left a stale open card (codex P1). written > 0 is the fence.
+      if (written > 0 && finalStatus === 'customer_creation_failed') {
+        await trx('triage_items').insert(buildTriageItem({
+          callLogId: call.id,
+          flag: 'customer_creation_failed',
+          extraction: { meta: { call_summary: extracted.call_summary || null } },
+        }))
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore();
+      }
       // The non-lead verdict's attribution retire becomes durable HERE,
       // atomically with the final status (pre-push P0 r12) — never on the
       // earlier settle, whose pass could still have failed into a retry.
@@ -15267,21 +15280,7 @@ const CallRecordingProcessor = {
     if (finalized === 0) {
       logger.warn(`[call-proc] Skipped final status write for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
     } else if (finalStatus === 'customer_creation_failed') {
-      logger.warn(`[call-proc] Marked ${callSid} customer_creation_failed — required customer fields were incomplete`);
-      // The card is the only surface this failure gets (its lead twin files
-      // one at the point of failure); the open-row unique index dedupes a
-      // reprocess that fails the same way.
-      try {
-        await db('triage_items').insert(buildTriageItem({
-          callLogId: call.id,
-          flag: 'customer_creation_failed',
-          extraction: { meta: { call_summary: extracted.call_summary || null } },
-        }))
-          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-          .ignore();
-      } catch (triageErr) {
-        logger.warn(`[call-proc] customer_creation_failed triage item insert skipped for ${maskSid(callSid)}: ${triageErr.message}`);
-      }
+      logger.warn(`[call-proc] Marked ${callSid} customer_creation_failed — required customer fields were incomplete (review card filed with the status)`);
     }
 
     // Zero-triage layers, fenced on finalization: finalized === 0 means a
