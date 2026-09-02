@@ -494,8 +494,11 @@ blind, IPv6 /64-collapsed) plus per-route `ip:phone` limiters (5 and 8 per
 15 min); send-code returns ONE uniform response whether or not the number
 matches a customer, verify-code returns one uniform error for a bad code OR
 an unknown customer, logout is non-enumerating and idempotent, refresh and
-logout share a 30 per 15 min limiter. Nothing on this surface reveals
-whether a phone is on file. `/me`, `/properties`, `/select-property`
+logout share a 30 per 15 min limiter. The enforced anti-enumeration
+contract is the uniform BODY: response timing is not equalized (the Twilio
+send runs only when the number matches an active customer), so a timing
+observer can still distinguish known numbers — do not widen the claim
+beyond the body, and do not add a second observable difference. `/me`, `/properties`, `/select-property`
 require the customer JWT.
 Staff authentication (`server/routes/admin-auth.js`, mounted at
 `/api/admin/auth`): `POST /login` sits behind the same `authLimiter` (10 per
@@ -639,7 +642,14 @@ marketing site — no auth, no token, location filter + limit; reads
 `google_reviews` only).
 `/api/review/:token` (GET + POST; token-gated customer review flow — GET
 returns the review-request context by token, POST submits the customer's
-review. No auth beyond the review-request token).
+review. No auth beyond the review-request token. **Documented legacy
+exception to the baseline** (`server/routes/review-public.js`): no token
+format gate, no per-route limiter (global `/api/` limiter only), no privacy
+headers; the GET reads the request row, stamps open state, and returns
+customer name data, so malformed and high-rate probes reach the DB. This is
+remediation owed, not a pattern to copy: adding the baseline guards is a
+follow-up change, unrelated edits are not flagged for the missing guards,
+and a NEW token route must not cite this entry as precedent.)
 `/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
 `/:token/generate-review`, `/:token/go`) (review-gate; token-scoped customer
 rating flow from a review-request link — high → the nearest GBP

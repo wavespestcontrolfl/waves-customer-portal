@@ -129,8 +129,9 @@ duplicate them here; point at them.
   on `/api/receipt/:token` or `/pdf`, token rotation after payment, or auth
   on those endpoints is P0.
 - **No string-interpolated user input in `db.raw`.** Query builders are
-  parameterized; `.raw()` is not. `db.raw(\`… ${x} …\`)` where `x` comes
-  from `req.body / req.query / req.params` is SQL injection.
+  parameterized; `.raw()` is not. `db.raw(\`… ${x} …\`)` or
+  `db.raw('… ' + x + ' …')` where `x` comes from `req.body / req.query /
+  req.params` is SQL injection (`check:domain-rules` does not scan for it).
   `db.raw('… WHERE id = ?', [x])` and constant-string raw are fine.
 - **Card PAN, CVV, full SSN, or full Stripe `payment_method` objects in
   logs.** Railway logs and `errors.log` are plain text. last4 is fine; the

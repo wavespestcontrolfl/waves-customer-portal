@@ -291,10 +291,10 @@ customer copy that must not expose FRAC/IRAC/HRAC.
 3. Public report payload whitelisted — no internal scores/notes leak.
 4. Never writes `lawn_assessments` or any baseline/snapshot table.
 
-## Public-route policy compliance (AGENTS.md) — REQUIRED before/at implementation
-AGENTS.md maintains the canonical allowlist of public-by-token routes and treats
+## Public-route policy compliance (docs/public-route-contracts.md) — REQUIRED before/at implementation
+docs/public-route-contracts.md maintains the canonical inventory of public-by-token routes, and AGENTS.md treats
 **any new public route outside that list as P0**. Both public endpoints above MUST be
-added to that allowlist (AGENTS.md "Public-by-token routes" section) **in the
+added to that allowlist (its own entry in docs/public-route-contracts.md) **in the
 implementation PR**, each with an explicit contract. This is a planning commitment, not
 optional.
 
@@ -530,7 +530,7 @@ Routes (all never-block, all on the existing `tech-lawn-diagnostic.js` router un
     (name + valid email or phone; rejects null/''/false/[]), links one lead per diagnostic via
     atomic `whereNull('lead_id')` → 409 on repeat. No raw PII logged.
 
-Both public routes added to the **AGENTS.md** public-by-token allowlist (P0 gate) with contracts.
+Both public routes added to the **docs/public-route-contracts.md** public-by-token inventory (AGENTS.md P0 gate) with contracts.
 Tests: `lawn-diagnostic-public.test.js` (whitelisting no-leak, strict validation, token-gate
 404s, one-shot 409) + send-gate helper units in the route test. 54 lawn-diagnostic tests green.
 
