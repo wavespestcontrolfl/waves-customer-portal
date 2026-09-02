@@ -292,6 +292,23 @@ describe('gate ON — catalog-identity snapshot completion', () => {
     expect(byKey.service_id).toBe('svc-null');
   });
 
+  test('a bare legacy label resolves through the (label, cadence) map before generic expansion', async () => {
+    // "Pest Control" + monthly is the Monthly plan, not the one-time
+    // "Pest Control Service" the " Service" suffix would land on (GH Codex r15 P1).
+    const catalog = [
+      { id: 'svc-once', name: 'Pest Control Service', service_key: 'pest_once', category: 'pest' },
+      { id: 'svc-month', name: 'Monthly Pest Control Service', service_key: 'pest_monthly', category: 'pest' },
+      { id: 'svc-quarter', name: 'Quarterly Pest Control Service', service_key: 'pest_quarterly', category: 'pest' },
+    ];
+    const monthly = await run({ ...BASE, service_type: 'Pest Control', recurring_pattern: 'monthly' }, catalog);
+    expect(monthly.service_id).toBe('svc-month');
+    const quarterly = await run({ ...BASE, service_type: 'Pest Control', recurring_pattern: 'quarterly' }, catalog);
+    expect(quarterly.service_id).toBe('svc-quarter');
+    // No cadence evidence → the generic bridge, as before.
+    const once = await run({ ...BASE, service_type: 'Pest Control' }, catalog);
+    expect(once.service_id).toBe('svc-once');
+  });
+
   test('ambiguous name → no stamp (enrichment never guesses)', async () => {
     const dupes = [...CATALOG, { id: 'svc-3', name: 'Quarterly Pest Control', service_key: 'pest_q2', category: 'pest', is_active: true }];
     const out = await run(BASE, dupes);

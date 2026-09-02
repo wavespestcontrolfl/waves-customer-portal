@@ -70,6 +70,11 @@ const CONTRACT_MODULE_CERTIFIED_SITES = [
 // the certification pins the wrapper's completion statement, so swapping
 // it for raw input is a visible break, not a silent one (GH Codex r14 P2).
 const CONTRACT_MODULE_CERTIFIED_COMPLETION = 'const data = await completeScheduledServiceInsert(insertData, { trx, cols, source, allowNullCustomer });';
+// …and between that completion and the certified inserts, the wrapper may
+// touch `data` in exactly these ways — the idempotency stamp — and must
+// not hand it to anything else. A new intervening mutation or escape in
+// the wrapper is a visible break (GH Codex r15 P2).
+const CONTRACT_MODULE_CERTIFIED_WRITES = ['data.idempotency_key = idempotencyKey;'];
 
 // Frozen 2026-09-01 inventory (re-frozen at the origin/main merge base of
 // this PR — main reworked admin-dispatch's schedule-followup insert while
@@ -563,13 +568,15 @@ function chaseAlias(source, refIndex, site, statementText = statementPrefix(sour
   const assign = /^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])/.exec(statementText);
   if (!assign) return;
   const alias = assign[1];
-  const aliasRe = new RegExp(`\\b${alias}\\s*(?:\\.\\s*insert|\\[\\s*['"]insert['"]\\s*\\])\\s*\\(`, 'g');
+  // Every later use of the alias is followed through its COMPLETE method
+  // chain — `visits.clone().insert(data)`, `visits.where(…).insert(…)` —
+  // not just a first-link `.insert(` (GH Codex r15 P2).
+  const aliasRe = new RegExp(`(?<![.\\w$])${alias}\\b`, 'g');
   let am;
   while ((am = aliasRe.exec(source)) !== null) {
-    const open = am.index + am[0].length - 1;
-    const arg = source.slice(open + 1, balancedParens(source, open) - 1);
-    const head = (/^\s*(\{|[A-Za-z0-9_.$]+)/.exec(arg) || [, ''])[1];
-    site(am.index, `${statementPrefix(source, am.index)} alias:${alias}.insert(${head}`, arg);
+    const chain = walkLinks(source, am.index + alias.length, alias);
+    if (!/\.insert\s*\(/.test(chain)) continue;
+    site(am.index, `${statementPrefix(source, am.index)} alias:${fingerprintOf(chain)}`, insertArgument(chain));
   }
 }
 
@@ -578,10 +585,14 @@ function chaseAlias(source, refIndex, site, statementText = statementPrefix(sour
 // args>)` links repeated, trivia between links skipped (and excluded from
 // the fingerprint). null when the ref is not a call argument.
 function forwardChain(source, afterRef) {
-  let i = skipTrivia(source, afterRef);
+  const i = skipTrivia(source, afterRef);
   if (source[i] !== ')') return null;
-  i += 1;
-  let chain = "scheduled_services')";
+  return walkLinks(source, i + 1, "scheduled_services')");
+}
+
+// `.name(…)` / `['name'](…)` links from position `i`, appended to `seed`.
+function walkLinks(source, i, seed) {
+  let chain = seed;
   for (;;) {
     const j = skipTrivia(source, i);
     // `.name(` or the equivalent static bracket form `['name'](`
@@ -785,6 +796,11 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("await trx.table('scheduled_services').where({ id }).first();")).toEqual([]);
     // …a plain assignment binds the alias too (pre-push r8 P1)…
     expect(collectInsertSites("let visits;\nvisits = trx('scheduled_services');\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
+    // …and the alias's COMPLETE chain is followed (r15 P2): a refined builder
+    // that ends in insert is a site, one that ends in a read is not.
+    expect(collectInsertSites("const visits = trx('scheduled_services');\nawait visits.clone().insert(data);")).toEqual(["await alias:visits.clone().insert(data"]);
+    expect(collectInsertSites("const visits = trx('scheduled_services');\nconst [row] = await visits\n  .where({ id })\n  .insert(data)\n  .returning('*');")).toEqual(["const [row] = await alias:visits.where({ id }).insert(data"]);
+    expect(collectInsertSites("const visits = trx('scheduled_services');\nconst n = await visits.clone().count();")).toEqual([]);
     // …including an alias captured through the table-last forms (r7 P2).
     expect(collectInsertSites("const visits = trx.table('scheduled_services');\nawait doStuff();\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
     expect(collectInsertSites("const visits = trx\n  .into('scheduled_services');\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
@@ -889,6 +905,15 @@ describe('booking insert-site contract', () => {
         const moduleSource = fs.readFileSync(path.join(REPO_ROOT, CONTRACT_MODULE), 'utf8');
         if (moduleSource.split(CONTRACT_MODULE_CERTIFIED_COMPLETION).length !== 2) {
           violations.push(`${rel}: the certified wrapper no longer completes its payload with exactly \`${CONTRACT_MODULE_CERTIFIED_COMPLETION}\` — the certified insert sites would insert something else.`);
+        }
+        const wrapperAt = moduleSource.indexOf('async function createScheduledService');
+        const wrapper = wrapperAt === -1 ? '' : moduleSource.slice(wrapperAt, moduleSource.indexOf('\nmodule.exports', wrapperAt));
+        const writeRe = /\bdata\s*(?:\.\s*[A-Za-z_$][\w$]*|\[[^\]]*\])+\s*(?:[-+*/%|&^]|\*\*|\?\?|\|\||&&)?=(?![=>])[^;\n]*;?|\bdelete\s+data\b[^;\n]*;?|\bObject\s*\.\s*assign\s*\(\s*data\b[^;\n]*;?/g;
+        for (const w of wrapper.match(writeRe) || []) {
+          if (!CONTRACT_MODULE_CERTIFIED_WRITES.includes(w.trim())) violations.push(`${rel}: the certified wrapper writes to its completed payload in an uncertified way (\`${w.trim()}\`) — the certified insert sites would insert something other than the helper's output.`);
+        }
+        if (wrapper && (escapesThroughCall(wrapper, 'data') || /\b(?!data\b)[A-Za-z_$][\w$]*\s*=(?![=>])\s*data\b\s*(?=[;,)\]}]|\n|$)/.test(wrapper))) {
+          violations.push(`${rel}: the certified wrapper hands its completed payload to something other than the certified inserts.`);
         }
         continue;
       }

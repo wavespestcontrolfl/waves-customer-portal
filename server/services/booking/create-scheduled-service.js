@@ -93,8 +93,18 @@ async function resolveCatalogIdentity(conn, insertData) {
   // scoped-discount replay throws on (GH Codex r2 P1). Unique-row
   // semantics across ALL candidates: more than one DISTINCT catalog row
   // matching means ambiguity, and enrichment never guesses.
+  // A bare pre-convention label is ambiguous on its own ("Pest Control"
+  // is the one-time job, the monthly plan, or the quarterly plan); the
+  // row's recurring_pattern is the cadence evidence, and the legacy
+  // (label, cadence) map — the same one series generation resolves
+  // through — names exactly one current catalog row. That mapping is
+  // decisive and runs BEFORE the generic suffix expansion, which would
+  // otherwise land a recurring row on the one-time service (GH Codex r15
+  // P1).
   const { serviceNameCandidates } = require('../service-completion-profiles');
-  const candidates = serviceNameCandidates(name).map((c) => c.toLowerCase());
+  const { legacyCatalogName } = require('../../config/service-name-aliases');
+  const cadenceName = legacyCatalogName(name, insertData.recurring_pattern);
+  const candidates = (cadenceName ? [cadenceName] : serviceNameCandidates(name)).map((c) => c.toLowerCase());
   if (!candidates.length) return null;
   const hits = await stable(live(conn('services'))
     .whereRaw(`LOWER(name) IN (${candidates.map(() => '?').join(', ')})`, candidates))
