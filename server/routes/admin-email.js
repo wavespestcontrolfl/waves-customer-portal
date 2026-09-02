@@ -21,14 +21,20 @@ const GMAIL_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 // Gate everything except Google's OAuth callback.
 // /oauth/callback is hit by Google's redirect (no Authorization header possible)
 // All other routes require admin auth.
+// Named (not inline) so the public-route allowlist scanner can recognise it
+// as an auth guard — see server/config/route-auth-guards.json, which also
+// records the /oauth/callback exemption.
 const OAUTH_PUBLIC_PATHS = new Set(['/oauth/callback']);
-router.use((req, res, next) => {
-  if (OAUTH_PUBLIC_PATHS.has(req.path)) return next();
+function adminAuthenticateExceptOauthCallback(req, res, next) {
+  // GET only, matching the registry's exempts entry — Google's redirect is a
+  // GET; any other method (or a future sibling route) stays behind admin auth.
+  if (req.method === 'GET' && OAUTH_PUBLIC_PATHS.has(req.path)) return next();
   return adminAuthenticate(req, res, (err) => {
     if (err) return next(err);
     return requireAdmin(req, res, next);
   });
-});
+}
+router.use(adminAuthenticateExceptOauthCallback);
 
 // ============================================
 // OAuth flow

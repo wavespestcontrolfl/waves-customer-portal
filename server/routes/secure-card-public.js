@@ -127,6 +127,12 @@ router.post('/:token/complete', async (req, res) => {
         // client re-renders the plan choice.
         return res.status(409).json({ error: 'Please choose how you’d like to pay first.', code: 'plan_required' });
       }
+      if (result.code === 'bank_not_allowed') {
+        // Standalone Auto Pay link: bank capture is no longer offered for
+        // this customer (gate off / ACH state changed) — the client re-pulls
+        // the payload so a card-only intent is minted.
+        return res.status(409).json({ error: 'Bank accounts aren’t available right now — please use a card.', code: 'bank_not_allowed' });
+      }
       if (result.code === 'consent_echo_failed') {
         // The card IS saved (row completed via webhook) but the browser's
         // sticky-consent echo could not be recorded — a retryable failure.

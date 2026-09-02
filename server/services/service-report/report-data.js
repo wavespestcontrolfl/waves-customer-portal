@@ -53,6 +53,7 @@ const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
+const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
@@ -202,9 +203,56 @@ function approvedReportProductFacts(catalog = {}) {
   };
 }
 
-async function attachApprovedReportProductFacts(knex, products = []) {
-  const productIds = [...new Set((products || []).map((product) => product.product_id).filter(Boolean))];
-  if (!productIds.length) return products;
+// frozenFacts: the completion-time { [productId]: facts|null } map from the
+// record's reportIdentitySnapshot. A product id PRESENT in the map (null =
+// not approved at completion) never consults the live catalog — a later
+// approval, un-approval, label edit, or row delete must not rewrite what
+// this report says was applied. Ids absent from the map (pre-snapshot
+// records, or a product attached after the freeze) keep the live lookup.
+async function attachApprovedReportProductFacts(knex, products = [], { frozenFacts = null } = {}) {
+  const frozen = frozenFacts && typeof frozenFacts === 'object' ? frozenFacts : null;
+  // service_products.product_id is ON DELETE SET NULL: a catalog row deleted
+  // after completion leaves the applied row keyed only by its snapshot
+  // product_name, so frozen facts are also reachable by that name
+  // (codex P2).
+  const frozenByName = new Map();
+  if (frozen) {
+    for (const facts of Object.values(frozen)) {
+      const name = String(facts?.name || '').trim().toLowerCase();
+      if (name && !frozenByName.has(name)) frozenByName.set(name, facts);
+    }
+  }
+  const frozenFor = (product) => {
+    if (!frozen) return undefined;
+    const id = canonicalProductId(product?.product_id);
+    if (id && Object.prototype.hasOwnProperty.call(frozen, id)) return frozen[id];
+    if (!id) return frozenByName.get(String(product?.product_name || '').trim().toLowerCase());
+    return undefined;
+  };
+  const isFrozen = (productOrId) => {
+    const product = productOrId && typeof productOrId === 'object' ? productOrId : { product_id: productOrId };
+    return frozenFor(product) !== undefined;
+  };
+  const withFrozen = (product) => {
+    const facts = frozenFor(product);
+    if (!facts || typeof facts !== 'object') return product;
+    return {
+      ...product,
+      product_name: product.product_name || facts.name,
+      product_category: product.product_category || facts.category,
+      active_ingredient: product.active_ingredient || facts.activeIngredient,
+      epa_reg_number: product.epa_reg_number || facts.epaRegNumber,
+      approved_report_product_facts: facts,
+    };
+  };
+  const productIds = [...new Set((products || [])
+    .map((product) => product.product_id)
+    .filter((id) => id && !isFrozen(id)))];
+  if (!productIds.length) {
+    return frozen
+      ? (products || []).map((product) => (isFrozen(product) ? withFrozen(product) : product))
+      : products;
+  }
   let catalogRows = [];
   try {
     catalogRows = await knex('products_catalog')
@@ -237,12 +285,17 @@ async function attachApprovedReportProductFacts(knex, products = []) {
     // r41): a legacy row with product_id but null product_category loses
     // its class identity when this lookup fails, and downstream honesty
     // passes would treat the visit as "no corrective products applied".
-    const marked = products.slice();
+    // Frozen products keep their completion-time facts on this path too —
+    // the failure concerns only the ids that still needed the live catalog.
+    const marked = frozen
+      ? products.map((product) => (isFrozen(product) ? withFrozen(product) : product))
+      : products.slice();
     marked.catalogEnrichmentFailed = true;
     return marked;
   }
   const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
   return products.map((product) => {
+    if (isFrozen(product)) return withFrozen(product);
     const catalog = catalogById.get(String(product.product_id || ''));
     const facts = approvedReportProductFacts(catalog);
     if (!facts) return product;
@@ -2265,11 +2318,17 @@ async function resolveCanonicalLawnRender(service, knex = db) {
 // and the PDF re-renders instead of matching a stale one.
 async function loadServicePremise(service, knex = db) {
   if (service?.stamped_address_diverges !== undefined && service?.address_line1 !== undefined) return service;
+  // The premise is the FROZEN one when the record carries an identity
+  // snapshot — the cache-key lookup (a partial row) and the full render
+  // must resolve the same premise or a moved customer's lawn PDF misses
+  // its cache forever (codex P1). service_data rides along so the overlay
+  // can read the snapshot even from a partial caller row.
   const row = await knex('service_records')
     .where({ 'service_records.id': service.id })
     .leftJoin('customers', 'service_records.customer_id', 'customers.id')
     .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
     .first(
+      'service_records.service_data',
       knex.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
       knex.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
       knex.raw('COALESCE(ss.service_address_city, customers.city) as city'),
@@ -2277,7 +2336,7 @@ async function loadServicePremise(service, knex = db) {
       knex.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
     );
   if (!row) throw new Error(`service_record ${service?.id || 'unknown'}: premise unavailable for the week-plan cache key`);
-  return { ...service, ...row };
+  return applyReportIdentitySnapshot({ ...service, ...row });
 }
 
 async function lawnAssessmentPdfSignature(service, knex = db) {
@@ -2923,7 +2982,12 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   };
 }
 
-async function buildReportV1Data(service, token, knex = db, options = {}) {
+async function buildReportV1Data(joinedService, token, knex = db, options = {}) {
+  // Identity facts frozen at completion (report-identity-snapshot.js)
+  // overlay the live customer/schedule/technician join; pre-snapshot
+  // records pass through untouched (same reference).
+  const service = applyReportIdentitySnapshot(joinedService);
+  const frozenIdentity = service.report_identity_snapshot || null;
   const opts = options && typeof options === 'object' ? options : {};
   const preloadedPestPressureConfig = Object.prototype.hasOwnProperty.call(opts, 'pestPressureConfig')
     ? opts.pestPressureConfig
@@ -2956,7 +3020,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       .first('id', 'service_id', 'service_type')
       .catch(() => { scheduleRowLookupFailed = true; return null; })
     : null;
-  const linkedServiceName = String(scheduledServiceRow?.service_type || '').trim()
+  // The linked name is FROZEN at completion (reportIdentitySnapshot
+  // .serviceTitle = the locked row's service_type at that moment — the same
+  // value the ruling above selects) so an update-details service_type edit
+  // on the completed row cannot retitle the permanent report. The live
+  // lookup above still feeds the lane/profile guards below.
+  const linkedServiceName = String(frozenIdentity?.serviceTitle || '').trim()
+    || String(scheduledServiceRow?.service_type || '').trim()
     || serviceDisplayName(service);
   // Interior-only lane classification (bed bug): display labels are
   // admin-editable, so the report-time guards (stale-trace suppression,
@@ -3171,7 +3241,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     knex('termite_stations').where({ customer_id: service.customer_id }).orderBy('station_number').catch(() => []),
     knex('termite_station_checks').where({ service_record_id: service.id }).catch(() => []),
   ]);
-  const products = await attachApprovedReportProductFacts(knex, rawProducts);
+  const products = await attachApprovedReportProductFacts(knex, rawProducts, {
+    frozenFacts: frozenIdentity?.productFacts || null,
+  });
   // A failed catalog enrichment degrades class identity the same way a
   // failed base load does (codex P2 r41): rows with product_id but null
   // product_category can no longer be recognized as fungicide/herbicide,

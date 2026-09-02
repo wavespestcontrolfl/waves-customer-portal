@@ -989,6 +989,8 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
           price_locked_at: trx.fn.now(),
           price_locked_by: 'customer_accept',
           pricing_authority: 'LOCKED',
+          // Durable at-lock evidence for the pricing-authority gate (#3750).
+          estimate_data: trx.raw("jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{pricingAuthorityAtLock}', to_jsonb(UPPER(COALESCE(pricing_authority, 'NULL'))))"),
           server_computed_price: est.annual_total,
         });
       if (!locked) throw httpError(409, OFFER_CHANGED);
@@ -1289,7 +1291,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   // plan-rate review, commercial schedule) — dispatched post-commit exactly
   // like the accept route does.
   const NotificationService = require('./notification-service');
-  for (const key of ['commercialScheduleNotification', 'tierUpgradeNotification', 'planRateReviewNotification']) {
+  for (const key of ['commercialScheduleNotification', 'tierUpgradeNotification', 'planRateReviewNotification', 'perApplicationFeeNotification']) {
     const n = conversion?.[key];
     if (!n) continue;
     try {

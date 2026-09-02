@@ -2200,6 +2200,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         lead_source: sourceMeta.leadSourceName,
         lead_source_detail: sourceMeta.leadSourceDetail,
         estimate_data: estimateDataObj,
+        // Engine-priced wizard quote → explicit SERVER stamp (the send gate
+        // fails closed on anything else); a quote-on-request key carries no
+        // engine price and stays unstamped.
+        pricing_authority: keyedQuoteOnRequest ? null : 'SERVER',
       };
       // Decide + inject the frozen fee, then write — all under the caller's
       // transaction with the target draft row locked, so a booking that

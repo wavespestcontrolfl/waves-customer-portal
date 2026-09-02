@@ -26,6 +26,7 @@ const { leadIdForEstimate } = require("./estimate-lead-linkage");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
+const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require("./pricing-authority-gate");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
 const {
   assessDepositFollowUpEligibility,
@@ -149,6 +150,18 @@ function estimateOptedOutOfFollowups(est) {
 async function safetyGate(est, now = new Date(), { replay = false } = {}) {
   if (TERMINAL_STATUSES.has(est.status))
     return { skip: true, reason: `terminal-status:${est.status}` };
+  // Engine-authoritative pricing gate (#3750, GH codex P1 r12): while
+  // GATE_SEND_REQUIRES_SERVER_PRICING is on, no automated lane may nudge a
+  // customer to open or accept a price the engine never verified — a
+  // delivered CLIENT_FALLBACK / unstamped row — the same verdict the send
+  // claims apply, editor-authored proposals exempt. The operator re-saves
+  // the row through the engine; the next tick re-judges it. Runs for the
+  // deferred replay too (deferredFollowupStillEligible → this gate).
+  // Group-aware (GH codex P1 r14): the link a follow-up points at renders
+  // every viewable sibling, so a fallback sibling behind a SERVER anchor
+  // blocks the nudge too.
+  if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, est)))
+    return { skip: true, reason: "pricing-authority-not-server" };
   // Durable zero-comms opt-out (out-of-band audit P1 on #3391): publish-
   // without-delivery mints (report click-to-estimate) pre-burn the four
   // followup_* flags, but flags are resettable — an expiry extension

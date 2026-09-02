@@ -278,13 +278,31 @@ describe('public select-tier / preferences post-lock TOCTOU guard', () => {
     archived_at: null,
   };
 
+  // The select-tier ceiling (validation audit SEC-001, 2026-09-02) refuses a
+  // tier above the ENGINE-written tier before the guarded UPDATE ever runs,
+  // so the TOCTOU cases request a tier the fixture actually earns: the stored
+  // result carrier says Gold (an existing member's prior services fold in
+  // there); the row tier stays Bronze — the ceiling never reads it.
+  const goldEligibleEstimate = {
+    ...activeEstimate,
+    estimate_data: JSON.stringify({
+      baseMonthly: 100,
+      result: {
+        recurring: {
+          waveGuardTier: 'Gold',
+          services: [{ service: 'pest_control', name: 'Pest Control', mo: 100, frequency: 'quarterly' }],
+        },
+      },
+    }),
+  };
+
   // Mirrors the accept transaction's full status guard — the UPDATE refuses
   // every non-active status, not just the terminal three.
   const GUARDED_STATUSES = ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'];
 
   test('select-tier returns 409 when the conditional update hits a locked row', async () => {
     const handler = routeHandler(estimatePublicRouter, '/:token/select-tier', 'put');
-    const readBuilder = makeBuilder({ first: { ...activeEstimate } });
+    const readBuilder = makeBuilder({ first: { ...goldEligibleEstimate } });
     const writeBuilder = makeBuilder({ updateCount: 0 });
     db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder);
 
@@ -299,7 +317,7 @@ describe('public select-tier / preferences post-lock TOCTOU guard', () => {
 
   test('select-tier succeeds when the row is still unlocked', async () => {
     const handler = routeHandler(estimatePublicRouter, '/:token/select-tier', 'put');
-    const readBuilder = makeBuilder({ first: { ...activeEstimate } });
+    const readBuilder = makeBuilder({ first: { ...goldEligibleEstimate } });
     const writeBuilder = makeBuilder({ updateCount: 1 });
     db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder);
 
@@ -491,5 +509,28 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
     expect(writeBuilder.where).toHaveBeenCalledWith({ disposition: 'archived_unresolved' });
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({ error: expect.stringContaining('changed while you were unarchiving') });
+  });
+});
+
+describe('POST /:id/mark-accepted — converter pricing refusals reach the admin UI with their code (pre-push codex P1 on #3751)', () => {
+  const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
+
+  test('a coded 409 from the manual-acceptance service is serialized as { error, code }', async () => {
+    db.mockImplementation(() => makeBuilder({ first: { estimate_data: {} } }));
+    const refusal = Object.assign(
+      new Error('This estimate was issued with a flat monthly termite-monitoring price that our current per-application billing can\'t honor automatically — nothing was booked. Please call the office and we\'ll re-issue it with today\'s per-application pricing.'),
+      { statusCode: 409, code: 'LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE' },
+    );
+    markEstimateManuallyAccepted.mockRejectedValueOnce(refusal);
+    const handler = routeHandler(adminEstimatesRouter, '/:id/mark-accepted', 'post');
+    const res = makeRes();
+    const next = jest.fn();
+    await handler({ params: { id: 'est-1' }, body: {}, technicianId: 'tech-1' }, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE',
+      error: expect.stringMatching(/call the office/i),
+    }));
   });
 });

@@ -199,6 +199,17 @@ async function buildLatestEstimateLink(customerIds) {
   if (!estimate?.token) {
     return { url: null, line: '', reason: 'No open estimate on this account' };
   }
+  // Engine-authoritative pricing gate (#3750, GH codex P1 r22): the composer
+  // link is a customer send like any other. While the gate is on, the newest
+  // open estimate must pass the shared group-aware verdict — an unverified
+  // one yields NO link (never an older estimate's stale pricing) and tells
+  // the operator to re-save it through the engine first.
+  {
+    const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
+    if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+      return { url: null, line: '', reason: 'The latest open estimate has no engine-verified price — re-save it from the estimate tool before linking it' };
+    }
+  }
   const url = await shortenOrPassthrough(`${publicPortalUrl()}/estimate/${estimate.token}`, {
     kind: 'estimate',
     entityType: 'estimates',

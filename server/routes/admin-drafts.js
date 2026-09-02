@@ -259,7 +259,23 @@ async function guardClickFollowupSend(draft) {
     phone: flags.toPhone || null,
     sinceTs: flags.clicked_at || draft.created_at,
   });
-  if (verdict.ok) return null;
+  if (verdict.ok) {
+    // Engine-authoritative pricing gate (#3750, uncapped codex P1 r17 / r23):
+    // an approved click-followup draft sends the estimate link, so a
+    // delivered row the engine never verified (or a group link showing such
+    // a sibling) holds the draft — claim released, draft pending — until
+    // the operator re-saves it through the engine. Applied only AFTER the
+    // shared gate says the draft is otherwise sendable: a terminal estimate
+    // (declined / expired / archived) must reach its retirement path below,
+    // never a permanent hold nobody can clear.
+    if (estimate) {
+      const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
+      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+        return { hold: true, message: 'This estimate\'s price has no engine verification stamp — re-save it from the estimate tool before sending this follow-up (draft left pending).' };
+      }
+    }
+    return null;
+  }
   if (verdict.code === 'guard_error') return { transient: true };
 
   const retire = GATE_RETIRE[verdict.code];

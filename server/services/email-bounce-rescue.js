@@ -62,6 +62,7 @@
 const dns = require('dns').promises;
 const db = require('../models/db');
 const logger = require('./logger');
+const { deliverOpsDigest } = require('./ops-digest');
 const NotificationService = require('./notification-service');
 const MODELS = require('../config/models');
 const { callAnthropic } = require('./llm/call');
@@ -552,11 +553,18 @@ async function sendSuggestionEmail({ rescueRowId, bouncedEmail, candidate, tier,
       ? `To apply it, run from the portal repo root:\n  railway run --service Postgres node ops/agents/bounce-rescue-backfill.js --apply=${rescueRowId} --execute`
       : 'Ask the customer for a working address at the next touchpoint.',
   ].filter(Boolean).join('\n');
-  const result = await email.send({
-    to: suggestionRecipient(),
-    subject: `ACT: bounced email fix ${candidate ? 'suggested' : 'needs a human'} — ${name || bouncedEmail}`,
-    heading: 'Bounced email rescue',
-    body,
+  const subject = `ACT: bounced email fix ${candidate ? 'suggested' : 'needs a human'} — ${name || bouncedEmail}`;
+  const result = await deliverOpsDigest({
+    key: 'email-bounce-rescue',
+    subject,
+    text: body,
+    link: '/admin/customers',
+    sendEmail: () => email.send({
+      to: suggestionRecipient(),
+      subject,
+      heading: 'Bounced email rescue',
+      body,
+    }),
   });
   // email.send resolves { ok: false } instead of throwing (missing SMTP,
   // sendMail failure) — a swallowed failure here would silently strand a

@@ -84,7 +84,8 @@ describe('estimate auto-renew email automation cutover', () => {
     mockDb.__estimateQueries = [];
     mockShorten.mockResolvedValue('https://portal.example/estimate/short');
     mockIsConfigured.mockReturnValue(true);
-    mockIsEnabled.mockReturnValue(true);
+    // Every gate on — except the pricing-authority send gate (#3750).
+    mockIsEnabled.mockImplementation((key) => key !== 'sendRequiresServerPricing');
     mockProcessTrigger.mockResolvedValue({
       automation_count: 1,
       results: [{ run: { id: 'run-1', status: 'sent' } }],
@@ -145,7 +146,8 @@ describe('estimate auto-renew email automation cutover', () => {
 
     // Hydrated-jsonb shape (object, not string) opts out identically.
     jest.clearAllMocks();
-    mockIsEnabled.mockReturnValue(true);
+    // Every gate on — except the pricing-authority send gate (#3750).
+    mockIsEnabled.mockImplementation((key) => key !== 'sendRequiresServerPricing');
     mockProcessTrigger.mockResolvedValue({ automation_count: 1, results: [] });
     mockDb.__estimateQueries = [query([staleEstimate({
       id: 'estimate-optout-2',

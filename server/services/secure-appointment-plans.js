@@ -1035,7 +1035,10 @@ async function selectSecurePlan({ token, plan }) {
   if (!['per_application', 'prepay_annual'].includes(plan)) throw fail('invalid_plan');
 
   const request = await db('appointment_card_requests').where({ token }).first();
-  if (!request) throw fail('not_found');
+  // Standalone Auto Pay setup rows (kind='customer', no visit) have no plan
+  // choice — indistinguishable from an unknown token here (generic 404, no
+  // existence oracle; GH Codex #3726 r2 P0).
+  if (!request || request.kind === 'customer') throw fail('not_found');
   if (request.status === 'completed' || request.status === 'satisfied') throw fail('already_secured');
   if (request.status !== 'pending') throw fail('selection_conflict');
 

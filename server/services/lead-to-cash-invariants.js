@@ -28,6 +28,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { deliverOpsDigest } = require('./ops-digest');
 const sendgrid = require('./sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
@@ -311,10 +312,17 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
   if (!isInternalEmailRecipient(to)) return { skipped: 'recipient', results: summary };
   if (await sentRecently()) return { skipped: 'recent_send', results: summary };
   try {
-    await mailer.sendOne({
-      to, fromEmail: fromEmail(), fromName: FROM_NAME,
-      subject: report.subject, html: report.html, text: report.text,
-      categories: ['ops', 'lead-to-cash-invariants'], suppressErrorLog: true,
+    await deliverOpsDigest({
+      key: 'lead-to-cash-invariants',
+      subject: report.subject,
+      html: report.html,
+      text: report.text,
+      link: '/admin/invoices',
+      sendEmail: () => mailer.sendOne({
+        to, fromEmail: fromEmail(), fromName: FROM_NAME,
+        subject: report.subject, html: report.html, text: report.text,
+        categories: ['ops', 'lead-to-cash-invariants'], suppressErrorLog: true,
+      }),
     });
   } catch (err) {
     logger.error(`[l2c-invariants] send failed: ${scrubSentryText(err?.message || err)}`);

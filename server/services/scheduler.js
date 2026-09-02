@@ -1602,6 +1602,19 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Link intake resolver sweep failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY :20 — Link path investigator sweep (Manager v2 step 3, plan §5):
+  // ≤8 SSRF-pinned fetches + ONE WORKHORSE call per domain, batch-capped
+  // (LINK_INVESTIGATOR_BATCH, default 50). Gated by GATE_LINK_INVESTIGATOR
+  // inside the service (a dark gate makes this tick a selection-only no-op);
+  // its own session lock ('link-path-investigator') skips overlapping runs.
+  // Investigation only — never sends, pays, or leases work.
+  cron.schedule('20 * * * *', async () => {
+    try {
+      const r = await require('./seo/link-path-investigator').investigatePaths(db);
+      if (!r.gated && r.selected) logger.info(`[link-investigator] sweep: ${r.skipped ? `SKIPPED (${r.skipped}) ` : ''}selected ${r.selected} investigated ${r.investigated} (qualified ${r.qualified} watching ${r.watching} not_reproducible ${r.notReproducible} refreshes ${r.pathRefreshes}) paths ${r.pathsWritten} failed ${r.failed.length} fetches ${r.fetches} llm ${r.llmCalls}`);
+    } catch (err) { logger.error(`Link path investigator sweep failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // WEEKLY SUNDAY 4:10AM — Registry feeders, after the 3:30 backlink scan (§4):
   // existing-profile baseline (idempotent) → competitor-gap ingestion → enrich
   // (DataForSEO, gated by GATE_SEO_INTELLIGENCE inside the service). Services
@@ -4015,7 +4028,12 @@ function initScheduledJobs() {
           }
         } catch (e) {
           logger.error(`Scheduled estimate ${est.id} failed: ${e.message}`);
-          await markScheduledEstimateSendFailure(est, e.message, { retry: true, now });
+          // A pricing-authority refusal is deterministic (the row needs a
+          // re-save through the engine): fail it once with the gate's own
+          // message instead of burning scheduled_send_attempts on retries
+          // (pre-push codex P1 on #3750).
+          const pricingAuthorityRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER'].includes(e.code));
+          await markScheduledEstimateSendFailure(est, e.message, { retry: !pricingAuthorityRefusal, now });
         }
       }
       logger.info(`Scheduled estimates processed: ${scheduled.length}`);

@@ -429,3 +429,56 @@ describe('createScheduledService wrapper', () => {
     })).rejects.toThrow(/idempotency_key column/);
   });
 });
+
+// First adopter (admin-schedule POST / create parent): the contract must be a
+// strict superset of today's insert — a fully stamped payload comes back
+// byte-identical plus attribution, and ONLY the unlinked legacy-label shape
+// (service_id absent, snapshots null — the rows that were still being
+// created unlinked) gains a catalog identity, through the same
+// (label, cadence) bridge series generation resolves through.
+describe('admin create-parent adoption — gate ON fixtures', () => {
+  beforeEach(() => { mockGates.bookingStampingContract = true; });
+  const ADMIN_COLS = { source_action: true, booking_source: true, service_id: true, service_key_snapshot: true, service_category_snapshot: true };
+  const ADMIN_CATALOG = [
+    { id: 'svc-pq', name: 'Quarterly Pest Control Service', service_key: 'pest_general_quarterly', category: 'pest_control' },
+    { id: 'svc-pm', name: 'Monthly Pest Control Service', service_key: 'pest_general_monthly', category: 'pest_control' },
+    { id: 'svc-ot', name: 'One-Time Pest Control Service', service_key: 'one_time_pest_control', category: 'pest_control' },
+  ];
+  const run = (data) => completeScheduledServiceInsert(data, {
+    trx: makeConn(ADMIN_CATALOG), cols: ADMIN_COLS, source: { sourceAction: 'admin_manual' },
+  });
+  const stampedAdminPayload = () => ({
+    customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: '2026-09-10', window_start: '09:00', window_end: '10:00',
+    service_type: 'Quarterly Pest Control Service', status: 'pending', time_window: 'morning', zone: 'N', estimated_duration_minutes: 45,
+    notes: null, is_recurring: true, recurring_pattern: 'quarterly', property_id: 'prop-1',
+    service_id: 'svc-pq', service_key_snapshot: 'pest_general_quarterly', service_category_snapshot: 'pest_control',
+    estimated_price: 129, primary_line_price: 129, urgency: 'routine', is_callback: false, source_estimate_id: 'est-1',
+    recurring_ongoing: true, recurring_nth: 2, recurring_weekday: 3, skip_weekends: true, create_invoice_on_complete: false,
+    discount_id: 'd-1', discount_name: 'Spring', discount_type: 'percent', discount_amount: 10, discount_dollars: 12.9,
+  });
+
+  test('a fully stamped admin payload is returned unchanged except for attribution', async () => {
+    const input = stampedAdminPayload();
+    const out = await run(input);
+    expect(out).toEqual({ ...input, source_action: 'admin_manual' });
+  });
+
+  test('the unlinked legacy-label shape ("Pest Control" + quarterly, snapshots null) gains the quarterly plan identity', async () => {
+    const input = { ...stampedAdminPayload(), service_type: 'Pest Control', service_key_snapshot: null, service_category_snapshot: null };
+    delete input.service_id;
+    const out = await run(input);
+    expect(out.service_id).toBe('svc-pq');
+    expect(out.service_key_snapshot).toBe('pest_general_quarterly');
+    expect(out.service_category_snapshot).toBe('pest_control');
+    expect(out.source_action).toBe('admin_manual');
+  });
+
+  test('a bare label with no cadence evidence stays unlinked (enrichment never guesses)', async () => {
+    const input = { ...stampedAdminPayload(), service_type: 'Pest Control', recurring_pattern: 'custom', service_key_snapshot: null, service_category_snapshot: null };
+    delete input.service_id;
+    const out = await run(input);
+    expect(out.service_id).toBeUndefined();
+    expect(out.service_key_snapshot).toBeNull();
+    expect(out.service_category_snapshot).toBeNull();
+  });
+});

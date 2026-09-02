@@ -828,3 +828,11 @@ module.exports = {
   computeProposalTotals,
   isCommercialProposalData,
 };
+
+// The server-owned provenance marker PUT /:id/proposal stamps on every
+// proposal it writes (proposal.provenance.source). The pricing-authority
+// send gate exempts an authored proposal only on this marker (#3750).
+module.exports.PROPOSAL_PROVENANCE_SOURCE = 'proposal-editor';
+module.exports.isProposalAuthoredByEditor = function isProposalAuthoredByEditor(proposal) {
+  return !!proposal && proposal.enabled === true && proposal?.provenance?.source === 'proposal-editor';
+};
