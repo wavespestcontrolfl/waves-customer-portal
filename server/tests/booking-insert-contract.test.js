@@ -194,6 +194,42 @@ function insideComment(source, index, sql = false) {
   return false;
 }
 
+// The same text with every comment blanked to spaces (length preserved,
+// strings kept), so payload-flow analysis never mistakes prose for code —
+// a comment reading "absent (the column is …" is not a call whose paren
+// walk swallows the statements after it (GH Codex r21 follow-up).
+function stripComments(source) {
+  let out = '';
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      let j = i + 1;
+      while (j < source.length && source[j] !== ch) { if (source[j] === '\\') j += 1; j += 1; }
+      out += source.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    if (source.startsWith('//', i)) {
+      const nl = source.indexOf('\n', i);
+      const end = nl === -1 ? source.length : nl;
+      out += ' '.repeat(end - i);
+      i = end;
+      continue;
+    }
+    if (source.startsWith('/*', i)) {
+      const close = source.indexOf('*/', i + 2);
+      const end = close === -1 ? source.length : close + 2;
+      out += source.slice(i, end).replace(/[^\n]/g, ' ');
+      i = end;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 // Advance past whitespace and // and /* */ comments.
 function skipTrivia(source, i) {
   for (;;) {
@@ -402,8 +438,9 @@ function isSingleBinding(source, id) {
   return true;
 }
 
-function isContractCompleted(source, arg) {
-  if (!importsCanonicalHelper(source)) return false;
+function isContractCompleted(rawSource, arg) {
+  if (!importsCanonicalHelper(rawSource)) return false;
+  const source = stripComments(rawSource);
   const text = String(arg || '').trim();
   if (rootedInHelper(text)) return true;
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text)) return false;
@@ -436,7 +473,7 @@ function isContractCompleted(source, arg) {
   // name the checks above can't see (`for (const row of rows) row.x = …`):
   // a plain element binding is inspected for mutation/escape through
   // that name; a destructured one fails closed (GH Codex r17 P2).
-  const forOf = new RegExp(`\\bfor\\s*\\(\\s*(?:const|let|var)\\s+([^)]*?)\\s+of\\s+${text}\\b[^)]*\\)`, 'g');
+  const forOf = new RegExp(`\\bfor\\s*(?:await\\s*)?\\(\\s*(?:const|let|var)\\s+([^)]*?)\\s+of\\s+${text}\\b[^)]*\\)`, 'g');
   let fo;
   while ((fo = forOf.exec(source)) !== null) {
     const binding = fo[1].trim();
@@ -476,12 +513,50 @@ function isContractCompleted(source, arg) {
   return true;
 }
 
-// Whether `id` escapes into another binding (`const alias = id;` /
-// `alias = id`) — a mutation under that name can't be tracked, so the
-// completed value is no longer certified (GH Codex r9 P2; applied to
-// callback and for…of elements too — r20 P2).
+// A bare reference to `id`: not a property of something else, not
+// followed by a property access (a read), not a spread copy.
+function bareRef(id) {
+  return new RegExp(`(?<![.\\w$])(?<!\\.\\.\\.)${id}\\b(?!\\s*[.\\[])`);
+}
+
+// Whether `id` escapes into another binding — a mutation under that name
+// can't be tracked, so the completed value is no longer certified
+// (GH Codex r9 P2; callback and for…of elements too — r20 P2). Any
+// declaration or assignment whose right-hand side carries a bare
+// reference counts: `const alias = id`, `const [alias] = [id]`,
+// `const box = { inner: id }` (r21 P2). Property reads and spread
+// copies do not.
 function escapesToBinding(text, id) {
-  return new RegExp(`\\b(?!${id}\\b)[A-Za-z_$][\\w$]*\\s*=(?![=>])\\s*${id}\\b\\s*(?=[;,)\\]}]|\\n|$)`).test(text);
+  const decl = new RegExp(`(?:\\b(?:const|let|var)\\s+[^=;]*?|\\b(?!${id}\\b)[A-Za-z_$][\\w$]*\\s*)=(?![=>])`, 'g');
+  let m;
+  while ((m = decl.exec(text)) !== null) {
+    const rhs = text.slice(m.index + m[0].length, statementEnd(text, m.index + m[0].length));
+    if (/\bcompleteScheduledServiceInsert\s*\(/.test(rhs)) continue; // the completion itself
+    // References inside CALL arguments are judged by escapesThroughCall
+    // (allowlisted callees such as insert/batchInsert are fine there);
+    // here only the bare structure of the value counts.
+    if (bareRef(id).test(stripCallArgs(rhs))) return true;
+  }
+  return false;
+}
+
+// Blank the argument lists of every call in `text` (balanced), keeping
+// everything else — so a binding check sees `const [row] = await q.insert()`
+// rather than the payload inside the call.
+function stripCallArgs(text) {
+  let out = '';
+  let i = 0;
+  const callRe = /[A-Za-z_$\]][\w$]*\s*\(/g;
+  let m;
+  while ((m = callRe.exec(text)) !== null) {
+    const open = m.index + m[0].length - 1;
+    if (open < i) continue;
+    const end = balancedParens(text, open);
+    out += text.slice(i, open + 1);
+    i = end - 1;
+    callRe.lastIndex = end;
+  }
+  return out + text.slice(i);
 }
 
 // Whether `id` is passed as a direct argument to a call that is not on
@@ -496,7 +571,10 @@ function escapesThroughCall(text, id) {
   while ((cm = callRe.exec(text)) !== null) {
     const open = cm.index + cm[0].length - 1;
     const args = topLevelArgs(text.slice(open + 1, balancedParens(text, open) - 1));
-    if (!args.some((a) => a === id)) continue;
+    // Any BARE reference to the tracked object inside an argument counts
+    // (`mutate({ payload: data })`, `mutate([data])`) — a property read
+    // (`data.id`) or a spread copy (`{ ...data }`) does not (GH Codex r21 P2).
+    if (!args.some((a) => bareRef(id).test(a))) continue;
     const callee = cm[1].replace(/\s+/g, '');
     const last = callee.split('.').pop();
     if (NOT_A_FUNCTION.has(callee)) continue; // `if (data)` is not a call
@@ -736,7 +814,7 @@ function collectInsertSites(source, { sql = false } = {}) {
   // (`INSERT INTO public.scheduled_services`, quoted or not; r5 P2).
   // …and PostgreSQL COPY / psql \copy INTO the table, which write rows
   // without an INSERT (GH Codex r17 P2).
-  const rawRe = /(?:INSERT\s+INTO|MERGE\s+INTO|\bCOPY|\\copy)\s+(?:["'`]?\w+["'`]?\s*\.\s*)?["'`]?scheduled_services\b/gi;
+  const rawRe = /(?:INSERT\s+INTO(?:\s+ONLY)?|MERGE\s+INTO(?:\s+ONLY)?|\bCOPY|\\copy)\s+(?:["'`]?\w+["'`]?\s*\.\s*)?["'`]?scheduled_services\b/gi;
   let rawM;
   while ((rawM = rawRe.exec(source)) !== null) {
     // Comment mentions are not sites (the iCal script documents its own
@@ -745,7 +823,13 @@ function collectInsertSites(source, { sql = false } = {}) {
     // is still a site (GH Codex r16 P2). `#` covers shell/SQL tools.
     if (insideComment(source, rawM.index, sql)) continue;
     const verb = /^insert/i.test(rawM[0]) ? 'INSERT INTO' : /^merge/i.test(rawM[0]) ? 'MERGE INTO' : 'COPY';
-    if (verb === 'COPY' && /\bcopy\s+(?:["'`]?\w+["'`]?\s*\.\s*)?["'`]?scheduled_services\b[^\n]*\bTO\b/i.test(source.slice(rawM.index, rawM.index + 200))) continue; // COPY … TO is an export
+    // COPY direction comes from the keyword right after the target (and
+    // its optional column list): FROM imports, TO exports — a "to" inside
+    // a path or comment further along doesn't decide it (GH Codex r21 P2).
+    if (verb === 'COPY') {
+      const dir = /^[^\n]*?scheduled_services["'`]?\s*(?:\([^)]*\))?\s*(FROM|TO)\b/i.exec(source.slice(rawM.index, rawM.index + 400));
+      if (dir && dir[1].toUpperCase() === 'TO') continue;
+    }
     site(rawM.index, `${statementPrefix(source, rawM.index)} raw:${verb} scheduled_services`, null);
   }
   // Builder refs, schema-qualified or not (`trx('public.scheduled_services')`),
@@ -825,7 +909,7 @@ function certifiedWrapperViolations(moduleSource) {
     out.push(`the certified wrapper no longer completes its payload with exactly \`${CONTRACT_MODULE_CERTIFIED_COMPLETION}\` — the certified insert sites would insert something else.`);
   }
   const wrapperAt = moduleSource.indexOf('async function createScheduledService');
-  const wrapper = wrapperAt === -1 ? '' : moduleSource.slice(wrapperAt, moduleSource.indexOf('\nmodule.exports', wrapperAt));
+  const wrapper = wrapperAt === -1 ? '' : stripComments(moduleSource.slice(wrapperAt, moduleSource.indexOf('\nmodule.exports', wrapperAt)));
   const prop = '\\bdata\\s*(?:\\.\\s*[A-Za-z_$][\\w$]*|\\[[^\\]]*\\])+';
   const writeRe = new RegExp(
     `${prop}\\s*(?:[-+*/%|&^]|\\*\\*|\\?\\?|\\|\\||&&)?=(?![=>])[^;\\n]*;?`
@@ -922,6 +1006,16 @@ describe('booking insert-site contract', () => {
       expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\n${cb}\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     }
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach((row) => { if (row.status === 'x') count += 1; });\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
+    // …a for await…of loop is inspected like for…of (r21 P2)…
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nfor await (const row of rows) row.source_action = null;\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
+    // …a destructuring or boxed binding built from the payload is an escape, a property read or spread copy is not (r21 P2)…
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nconst [alias] = [data];\nalias.source_action = null;\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nconst box = { inner: data };\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    // …and a nested reference inside a non-allowlisted call's argument is an escape (r21 P2).
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nmutate({ payload: data });\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.info({ payload: data });\nconst n = count(data.items);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
+    // (prose in a comment is never a call or a binding)
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\n// counts as absent (the column is\n// nullable) and mutate(data) is documented here\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
     // …an alias of the callback element (or a for…of element) is an escape (r20 P2)…
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach(row => { const alias = row; alias.source_action = null; });\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nfor (const row of rows) {\n  const alias = row;\n  alias.status = 'x';\n}\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
@@ -998,6 +1092,11 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("COPY scheduled_services (customer_id) FROM STDIN;")).toEqual(["raw:COPY scheduled_services"]);
     expect(collectInsertSites("psql \"$DATABASE_URL\" -c \"\\\\copy scheduled_services from 'rows.csv'\"")).toHaveLength(1);
     expect(collectInsertSites("COPY scheduled_services TO '/tmp/out.csv';")).toEqual([]);
+    // …direction comes from the keyword after the target, not a later "to" in a path (r21 P2)…
+    expect(collectInsertSites("COPY scheduled_services (customer_id) FROM '/tmp/to/rows.csv';")).toHaveLength(1);
+    expect(collectInsertSites("COPY scheduled_services (customer_id) TO '/tmp/from/out.csv';")).toEqual([]);
+    // …and INSERT INTO ONLY is a writer (r21 P2).
+    expect(collectInsertSites("INSERT INTO ONLY scheduled_services (customer_id) VALUES (1);")).toEqual(["raw:INSERT INTO scheduled_services"]);
     // Shell / SQL tools: a psql insert is a site, a # comment is not.
     expect(collectInsertSites('psql "$DATABASE_URL" -c "INSERT INTO scheduled_services (customer_id) VALUES (1)"', { sql: true })).toHaveLength(1);
     expect(collectInsertSites('# never: INSERT INTO scheduled_services\npsql "$DATABASE_URL" -c "SELECT 1"', { sql: true })).toEqual([]);
