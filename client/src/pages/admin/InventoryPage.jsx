@@ -2083,9 +2083,8 @@ function ProductsTab({
               onFilterChange?.(f.key);
               setPage(1);
             }}
-            className="u-touch-hit"
             style={{
-              position: "relative",
+              minHeight: 40,
               padding: "6px 14px",
               borderRadius: 20,
               border: "none",
@@ -3596,9 +3595,8 @@ function RegistryTab({ showToast }) {
           <button
             key={f.key}
             onClick={() => setFilter(f.key)}
-            className="u-touch-hit"
             style={{
-              position: "relative",
+              minHeight: 40,
               ...sBtn(filter === f.key ? D.teal : "transparent", filter === f.key ? "#fff" : D.muted),
               border: filter === f.key ? "none" : `1px solid ${D.border}`,
               fontSize: 11,

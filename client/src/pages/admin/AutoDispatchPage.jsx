@@ -59,10 +59,8 @@ function HeaderButton({ onClick, disabled = false, primary = false, icon: Icon, 
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="u-touch-hit"
       style={{
-        position: "relative",
-        display: "inline-flex", alignItems: "center", gap: 6, minHeight: 32,
+        display: "inline-flex", alignItems: "center", gap: 6, minHeight: 40,
         padding: "0 12px", borderRadius: 8, fontSize: 13, fontWeight: 500,
         fontFamily: "inherit", cursor: disabled ? "default" : "pointer",
         background: primary ? D.heading : "transparent",
