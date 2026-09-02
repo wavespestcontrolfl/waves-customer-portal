@@ -16,6 +16,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
+const { deliverOpsDigest } = require('./ops-digest');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { isInternalTestCustomerId, INTERNAL_TEST_CUSTOMER_IDS } = require('./internal-test-customers');
@@ -406,15 +407,22 @@ async function runRescheduleIntentWatcher(opts = {}) {
   }
 
   try {
-    await mailer.sendOne({
-      to,
-      fromEmail: fromEmail(),
-      fromName: FROM_NAME,
+    await deliverOpsDigest({
+      key: 'reschedule-intent',
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
-      categories: ['ops', 'reschedule-intent'],
-      suppressErrorLog: true,
+      link: '/admin/communications',
+      sendEmail: () => mailer.sendOne({
+        to,
+        fromEmail: fromEmail(),
+        fromName: FROM_NAME,
+        subject: composed.subject,
+        html: composed.html,
+        text: composed.text,
+        categories: ['ops', 'reschedule-intent'],
+        suppressErrorLog: true,
+      }),
     });
   } catch (err) {
     logger.error(`[reschedule-intent-watcher] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);
