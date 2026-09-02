@@ -1004,6 +1004,24 @@ function sanitizeClientIdentityFields(obj) {
   return obj;
 }
 
+// estimate_data.proposal is SERVER-OWNED. PUT /:id/proposal is the only
+// authoring path (it validates the proposal and stamps category=COMMERCIAL
+// in the same UPDATE) and the commercial-proposal lane seeds scaffolds; the
+// generic create/revise save must never accept one from the browser —
+// `proposal.enabled` exempts a row from the pricing-authority send gate
+// (admin-estimates sendRequiresServerPricingFor) and from its rollout
+// telemetry, so a forged flag on a CLIENT_FALLBACK draft would deliver
+// un-audited browser pricing (pre-push P0 on #3750). A revision carries the
+// ROW's stored proposal forward verbatim instead of the client's copy.
+function stripClientProposal(estimateData, storedProposal = null) {
+  if (!estimateData || typeof estimateData !== 'object' || Array.isArray(estimateData)) return estimateData;
+  delete estimateData.proposal;
+  if (storedProposal && typeof storedProposal === 'object' && !Array.isArray(storedProposal)) {
+    estimateData.proposal = storedProposal;
+  }
+  return estimateData;
+}
+
 async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   const generateEstimate = deps.generateEstimate || pricingEngine.generateEstimate;
   const needsSync = deps.needsSync || pricingEngine.needsSync;
@@ -1696,6 +1714,7 @@ async function resolveEstimateWritePayload({
   now = () => new Date(),
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
   pricingOut = null, // optional side-channel: { fallbackReason } for post-commit alerts
+  storedProposal = null, // revise only: the ROW's estimate_data.proposal (server-owned, see stripClientProposal)
 }) {
   const {
     showOneTimeOption,
@@ -1707,6 +1726,10 @@ async function resolveEstimateWritePayload({
     technicianId,
     now,
   });
+  // Before anything downstream derives from the payload (quoteRequired reads
+  // proposal.enabled through buildPricingBundle): the browser's proposal is
+  // discarded, the row's own is restored.
+  stripClientProposal(trustedEstimateData, storedProposal);
   // Server-authoritative pest program floor: normalize client-stamped floor
   // metadata AND the client-baked lift in the totals BEFORE resolving the
   // billable preview, so CLIENT_FALLBACK persists collect per the live
@@ -2336,8 +2359,20 @@ async function reviseAdminEstimate({
     address: body.address,
   });
   const pricingOut = {};
+  // The ROW's proposal survives a generic revision (an enabled or scaffold
+  // proposal is refused above by estimateReviseBlock; a disabled authored one
+  // stays exactly as PUT /:id/proposal left it). The browser's copy is never
+  // written — see stripClientProposal.
+  let storedProposal = null;
+  try {
+    const parsedPrior = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
+    storedProposal = parsedPrior?.proposal ?? null;
+  } catch {
+    storedProposal = null;
+  }
   const writeFields = await resolveEstimateWritePayload({
     database,
+    storedProposal,
     body: {
       ...body,
       customerId: body.customerId || estimate.customer_id || null,
@@ -2710,3 +2745,4 @@ module.exports = {
   // the newer witness must always win.
   preserveClickMintMarkersAcrossRevise,
 };
+module.exports.stripClientProposal = stripClientProposal;

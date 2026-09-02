@@ -918,3 +918,39 @@ describe('reviseAdminEstimate — a scheduled row is protected from a fallback r
     expect(updates).toHaveLength(1);
   });
 });
+
+describe('estimate_data.proposal is server-owned on revise (pre-push P0 on #3750)', () => {
+  test('the browser copy is discarded and the row\'s disabled authored proposal is carried forward verbatim', async () => {
+    const storedProposal = { enabled: false, buildings: [{ name: 'Authored then disabled', lineItems: [{ description: 'Office', amount: 240 }] }] };
+    const estimate = {
+      ...sentEstimate,
+      estimate_data: JSON.stringify({ ...JSON.parse(sentEstimate.estimate_data), proposal: storedProposal }),
+    };
+    const { database, updates } = makeReviseDatabase({ estimate });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, estimateData: { ...reviseBody.estimateData, proposal: { enabled: true, buildings: [{ name: 'Forged', lineItems: [{ description: 'Browser-priced', amount: 1 }] }] } } },
+      technicianId: 'tech-2',
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    const data = JSON.parse(updates[0].estimate_data);
+    expect(data.proposal).toEqual(storedProposal);
+  });
+
+  test('a row without a proposal never gains one from the browser', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, estimateData: { ...reviseBody.estimateData, proposal: { enabled: true } } },
+      technicianId: 'tech-2',
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(JSON.parse(updates[0].estimate_data).proposal).toBeUndefined();
+  });
+});

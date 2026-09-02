@@ -306,6 +306,36 @@ describe('createOrReuseAdminEstimate — server authoritative on save', () => {
     expect(persisted.result.recurring.grandTotal).toBe(69);
   });
 
+  it('never persists a browser-supplied proposal — proposal.enabled would exempt the row from the send gate (pre-push P0 on #3750)', async () => {
+    const { database, getInsert } = makeDatabase();
+    const recompute = async () => ({
+      recomputed: true,
+      source: 'ENGINE_REQUEST',
+      serverResult: serverResultMonthly(69, 828),
+      serverTotals: { monthlyTotal: 69, annualTotal: 828, onetimeTotal: 0 },
+    });
+    await createOrReuseAdminEstimate({
+      database,
+      now: NOW,
+      recompute,
+      body: baseBody({
+        monthlyTotal: 69,
+        annualTotal: 828,
+        estimateData: {
+          inputs: {},
+          result: { recurring: { grandTotal: 69, monthlyTotal: 69, annualTotal: 828, services: [{ service: 'lawn_care', mo: 69 }] }, oneTime: { total: 0 } },
+          engineRequest: { profile: {}, selectedServices: ['LAWN'], options: {} },
+          // Forged: only PUT /:id/proposal may author this.
+          proposal: { enabled: true, buildings: [{ name: 'Forged', lineItems: [{ description: 'Browser-priced', amount: 1 }] }] },
+        },
+      }),
+    });
+    const row = getInsert().row;
+    expect(row.pricing_authority).toBe('SERVER');
+    const persisted = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data;
+    expect(persisted.proposal).toBeUndefined();
+  });
+
   it('a SERVER reprice persists the RAW engine result beside the mapped one (audit enrichment source)', async () => {
     const { database, getInsert } = makeDatabase();
     const rawEngineResult = { lineItems: [{ service: 'commercial_lawn', name: 'Commercial Turf Program', monthly: 69, annual: 828, costs: { total: 310 } }] };
