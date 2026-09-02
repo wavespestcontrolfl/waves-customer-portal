@@ -213,6 +213,18 @@ describe('selectTierCeiling', () => {
     ]))).toBe('Bronze');
   });
 
+  test('a bare legacy rodent row never counts; new-model or stamped rodent rows do (GH codex P0)', () => {
+    const rows = (services) => ({ result: { recurring: { services } } });
+    const pest = { name: 'Pest Control', service: 'pest_control', mo: 37.33 };
+    // Pre-2026-08-29 posture: monthly-billed rodent bait, no tier count.
+    expect(selectTierCeiling(rows([pest, { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 59 }]))).toBe('Bronze');
+    // New-model evidence (per-application billing / station allowance) counts.
+    expect(selectTierCeiling(rows([pest, { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 29.67, perApplicationBilled: true }]))).toBe('Silver');
+    expect(selectTierCeiling(rows([pest, { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 29.67, stations: 6 }]))).toBe('Silver');
+    // A frozen affirmative stamp counts even on a bare-looking row.
+    expect(selectTierCeiling(rows([pest, { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 29.67, countsTowardWaveGuardTier: true }]))).toBe('Silver');
+  });
+
   test('no recurring evidence at all fails closed to Bronze', () => {
     expect(selectTierCeiling({})).toBe('Bronze');
     expect(selectTierCeiling(null)).toBe('Bronze');

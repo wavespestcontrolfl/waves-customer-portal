@@ -13759,7 +13759,20 @@ function selectTierCeiling(estData = {}) {
   if (stamped) return normalizeWaveGuardTierLabel(stamped);
   const estResult = data.result && typeof data.result === 'object' ? data.result : data;
   const rows = recurringServicesWithSupplements(estResult);
+  // A bare legacy rodent row — no new-model marker (perApplicationBilled /
+  // stations) and no affirmative stamp — was priced under the pre-2026-08-29
+  // posture: monthly-billed, NO tier count, no % (rodent-bait-legacy-replay).
+  // rodent_bait joined the live qualifying list on 08-29, so counting such a
+  // row here would resolve a legacy pest+rodent blob to Silver although its
+  // engine wrote Bronze (GH codex P0 on #3741). Same conservative default as
+  // recurringServiceReceivesTierDiscount.
+  const bareLegacyRodentRow = (svc) => recurringServiceKey(svc) === 'rodent_bait'
+    && svc.perApplicationBilled !== true
+    && !(Number(svc.stations) > 0)
+    && svc.countsTowardWaveGuardTier !== true
+    && svc.waveGuardTierEligible !== true;
   const keys = rows
+    .filter((svc) => !bareLegacyRodentRow(svc))
     .filter(recurringServiceCountsTowardTier)
     .map(recurringServiceKey)
     .filter(Boolean);
