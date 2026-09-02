@@ -9,9 +9,13 @@
  * path's current revision with this stamp and applies the transition then.
  *
  * The send valve REQUIRES the stamp on a drafted row (a draft is bound to the
- * revision it was composed on), so every draft that pre-dates the column is
- * stamped with its path's CURRENT revision — the same binding saveDraft
- * writes at draft time. Idempotent: only null stamps are filled.
+ * revision it was composed on). A draft that pre-dates the column can only be
+ * bound FAIL-CLOSED: on a path still at revision 1 (never revised) the draft
+ * was necessarily composed on revision 1, so it is stamped 1; on a path that
+ * has been revised nothing can tell whether the copy predates the change, so
+ * the stamp stays null and the send valve refuses it until it is re-drafted
+ * (saveDraft / the worker stamp the revision they observe while composing).
+ * Idempotent: only null stamps are filled.
  */
 exports.up = async function up(knex) {
   const cols = await knex('seo_link_prospects').columnInfo();
@@ -27,6 +31,7 @@ exports.up = async function up(knex) {
      WHERE a.id = p.path_id
        AND p.outreach_status = 'drafted'
        AND p.leased_path_revision IS NULL
+       AND a.revision = 1
   `);
 };
 
