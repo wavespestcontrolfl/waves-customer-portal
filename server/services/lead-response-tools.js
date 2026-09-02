@@ -112,37 +112,60 @@ async function executeLeadTool(toolName, input) {
       const customerId = input.customer_id;
       const phone = input.phone;
 
-      let estimates;
-      if (customerId) {
-        estimates = await db('estimates')
-          .where({ customer_id: customerId })
-          .orderBy('created_at', 'desc')
-          .limit(5);
-      } else if (phone) {
-        const clean = (phone || '').replace(/\D/g, '');
-        estimates = await db('estimates')
-          .where(function () {
+      const clean = (phone || '').replace(/\D/g, '');
+      const baseQuery = () => {
+        if (customerId) return db('estimates').where({ customer_id: customerId });
+        if (phone) {
+          return db('estimates').where(function () {
             this.where('customer_phone', clean)
               .orWhere('customer_phone', `+1${clean}`)
               .orWhere('customer_phone', `+${clean}`);
-          })
-          .orderBy('created_at', 'desc')
-          .limit(5);
+          });
+        }
+        return null;
+      };
+
+      // Only rows the customer can actually OPEN are listed (uncapped codex
+      // P1 r33 on #3750): an expired, send-failed, never-published, or
+      // linkage-invalidated row is refused by the public page, so its price,
+      // bearer token, and URL never reach the agent — it would quote a dead
+      // offer or send a dead link. Viewability is a predicate the query can't
+      // express, so the candidates are PAGED until five viewable rows are in
+      // hand or the candidates run out (a filter applied after a limit lets
+      // newer hidden rows mask an older estimate the customer still holds —
+      // the composer-customer-links.js pattern). Hidden rows are counted so
+      // the agent can offer a fresh quote without quoting the old one.
+      const { isEstimateCustomerViewable } = require('../routes/estimate-public');
+      const LIMIT = 5;
+      const PAGE = 15;
+      const viewable = [];
+      let hiddenCount = 0;
+      if (baseQuery()) {
+        for (let offset = 0; ; offset += PAGE) {
+          const rows = await baseQuery().orderBy('created_at', 'desc').offset(offset).limit(PAGE);
+          for (const row of rows) {
+            if (isEstimateCustomerViewable(row)) { if (viewable.length < LIMIT) viewable.push(row); }
+            else hiddenCount += 1;
+          }
+          if (viewable.length >= LIMIT || rows.length < PAGE) break;
+        }
       }
 
-      if (!estimates?.length) return { hasEstimates: false, estimates: [] };
+      if (!viewable.length) {
+        return { hasEstimates: false, estimates: [], ...(hiddenCount ? { unviewableEstimates: hiddenCount } : {}) };
+      }
 
       // The agent may quote these URLs to the customer, so a link (and the
-      // bearer token behind it) is handed out ONLY for a PUBLISHED, unarchived
-      // row that passes the group-aware pricing-authority verdict while the
-      // gate is on (#3750, uncapped codex P0 r24) — the same rule every
-      // guarded send funnel applies. Withheld rows still list, with the reason.
+      // bearer token behind it) is handed out ONLY for a viewable row that
+      // passes the group-aware pricing-authority verdict while the gate is on
+      // (#3750, uncapped codex P0 r24) — the same rule every guarded send
+      // funnel applies. Withheld rows still list, with the reason.
       return {
         hasEstimates: true,
-        estimates: await Promise.all(estimates.map(async (e) => {
-          const published = !!(e.sent_at || e.viewed_at) && !e.archived_at;
+        ...(hiddenCount ? { unviewableEstimates: hiddenCount } : {}),
+        estimates: await Promise.all(viewable.map(async (e) => {
           const authorityOk = !gatedSendAuthorityPredicateApplies() || await estimateDeliverableUnderGate(db, e);
-          const linkable = published && authorityOk && !!e.token;
+          const linkable = authorityOk && !!e.token;
           // A row the verdict refuses shows NO price either (uncapped codex P0
           // r25): the agent quotes what it is given, and an unverified
           // dollar figure must never reach a customer by any rail.
@@ -160,7 +183,7 @@ async function executeLeadTool(toolName, input) {
                   { kind: 'estimate', entityType: 'estimates', entityId: e.id, customerId: e.customer_id || null }
                 )
               : null,
-            ...(linkable ? {} : { viewUrlWithheld: !published ? 'unpublished' : 'pricing-authority-not-server' }),
+            ...(linkable ? {} : { viewUrlWithheld: !e.token ? 'no-token' : 'pricing-authority-not-server' }),
           };
         })),
       };
