@@ -31,7 +31,7 @@
 //   (operator double-clicks "Complete" should not double-bill).
 // - RescheduleModal's slot-conflict handling — what happens if the
 //   chosen slot is taken between modal open and submit?
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import { createPortal } from "react-dom";
 
@@ -10740,11 +10740,19 @@ export function CompletionPanel({
   }, [service?.id, sprayEvidenceInForm]);
   const typedTreatmentArea = typedTreatmentAreaField(typedFindingsSchema);
   const typedFindingsOwnAreas = Boolean(typedTreatmentArea);
-  const completionAreasServiced = completionAreasForTypedFindings({
-    typedAreaKey: typedTreatmentArea?.key,
-    findingsValues,
-    genericAreas: areasServiced,
-  });
+  // Memoized on its scalar inputs: this array is an effect dependency (the
+  // recap preview), and a fresh array every render would restart that
+  // request indefinitely (local audit P1 on #3701).
+  const typedAreaKey = typedTreatmentArea?.key || null;
+  const typedAreaValue = typedAreaKey ? (findingsValues?.[typedAreaKey] ?? "") : "";
+  const completionAreasServiced = useMemo(
+    () => completionAreasForTypedFindings({
+      typedAreaKey,
+      findingsValues: typedAreaKey ? { [typedAreaKey]: typedAreaValue } : null,
+      genericAreas: areasServiced,
+    }),
+    [typedAreaKey, typedAreaValue, areasServiced],
+  );
   const areasTreatedHidden = treeShrubCloseoutOn
     || typedFindingsOwnAreas
     || [
