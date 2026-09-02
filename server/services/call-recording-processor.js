@@ -6396,6 +6396,11 @@ const CallRecordingProcessor = {
                   .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
               });
           })
+          // An operator adopting a recording claims FOR that recording: a
+          // callback that replaced it before this claim makes the claim
+          // refuse (reason recording_changed below) instead of processing
+          // audio the operator never chose (Codex #3736 r6 P1).
+          .where(function expectedRecording() { if (opts.expectedRecordingSid) this.where('recording_sid', opts.expectedRecordingSid); })
           .update({
             processing_status: 'processing',
             processing_token: procToken,
@@ -6451,6 +6456,11 @@ const CallRecordingProcessor = {
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
               .orWhereRaw(reclaimableClaim(FORCE_CLAIM_QUIET_MINUTES));
           })
+          // An operator adopting a recording claims FOR that recording: a
+          // callback that replaced it before this claim makes the claim
+          // refuse (reason recording_changed below) instead of processing
+          // audio the operator never chose (Codex #3736 r6 P1).
+          .where(function expectedRecording() { if (opts.expectedRecordingSid) this.where('recording_sid', opts.expectedRecordingSid); })
           .update({
             processing_status: 'processing',
             processing_token: procToken,
@@ -6482,6 +6492,14 @@ const CallRecordingProcessor = {
     // manual Process tap during a wedged claim returned success and the UI
     // said processed while the call sat unprocessed for 18 minutes.
     if (claimBlocked) {
+      if (opts.expectedRecordingSid) {
+        const now = await db('call_log').where({ id: call.id }).first('recording_sid').catch(() => null);
+        const currentSid = now?.recording_sid || null;
+        if (now && currentSid !== opts.expectedRecordingSid) {
+          logger.warn(`[call-proc] ${maskSid(callSid)}: expected recording ${maskSid(opts.expectedRecordingSid)} was replaced by ${maskSid(currentSid)} before the claim — not processing`);
+          return { success: false, skipped: true, reason: 'recording_changed', current_recording_sid: currentSid };
+        }
+      }
       // Which window applies depends on the claim we are blocked BEHIND: a
       // beating claim frees up after the short quiet window, but one with no
       // beat of its own — a legacy row, or a pod mid-rolling-deploy — keeps
@@ -6569,6 +6587,29 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc] ${maskSid(callSid)}: recording changed between load and claim (${maskSid(before)} → ${maskSid(call.recording_sid)}) — processing the current one`);
       }
     }
+    // A customer link set by a PERSON (admin relink/unlink — metadata.
+    // customer_link_override) outranks everything this pass would resolve
+    // from the transcript: it seeds the pre-linked customer, the phantom
+    // guard and the name-mismatch reconciliation stand down, and the Step 4
+    // checkpoint writes the override back. Without this a Reprocess undid
+    // the office's correction on every run.
+    const customerLinkOverride = (() => {
+      try {
+        const meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+        const o = meta?.customer_link_override;
+        return o && typeof o === 'object' && 'customer_id' in o ? o : null;
+      } catch { return null; }
+    })();
+    if (customerLinkOverride) {
+      call.customer_id = customerLinkOverride.customer_id || null;
+      logger.info(`[call-proc] ${maskSid(callSid)}: honouring operator customer link (${customerLinkOverride.customer_id ? 'linked' : 'unlinked'})`);
+    }
+    // An explicit UNLINK (override with a null customer_id) means this call
+    // belongs to no customer: the pass must not find or mint one from the
+    // caller's phone or name — the checkpoint would write the link back to
+    // null, but the customer it touched, the lead, and the timeline entry
+    // would already carry the call.
+    const explicitUnlink = !!customerLinkOverride && !customerLinkOverride.customer_id;
     const contactPhone = resolveCallContactPhone(call);
     // Forwarding-masked call: the inbound leg recorded one of our own internal
     // numbers (a tracking number, or the staff cell it forwarded to) as the caller,
@@ -6592,7 +6633,7 @@ const CallRecordingProcessor = {
     // fallbacks (customerId || call.customer_id) from resurrecting the phantom; the
     // call then falls through to real phone-based resolution, or stays unkeyed when
     // fully masked. (Cleanup of the already-created phantom rows is handled separately.)
-    if (call.customer_id && !isOutboundCall(call) && TWILIO_NUMBERS.isInternalNumber(call.from_phone)) {
+    if (call.customer_id && !customerLinkOverride && !isOutboundCall(call) && TWILIO_NUMBERS.isInternalNumber(call.from_phone)) {
       const linked = await db('customers').where({ id: call.customer_id }).select('phone').first().catch(() => null);
       if (linked && TWILIO_NUMBERS.isInternalNumber(linked.phone)) {
         logger.warn(`[call-proc] ${maskSid(callSid)}: pre-linked customer ${call.customer_id} is keyed on an internal number (${maskPhone(linked.phone)}) — phantom from forwarding-masked linking; treating call as unlinked`);
@@ -6608,6 +6649,8 @@ const CallRecordingProcessor = {
         // even after that pass finalized (codex P1).
         await db('call_log').where({ id: call.id })
           .where('processing_token', procToken)
+          // Never clear a link a person set, even one set a moment ago.
+          .whereRaw("NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')")
           .update({ customer_id: null, updated_at: new Date() });
       }
     }
@@ -8480,7 +8523,9 @@ const CallRecordingProcessor = {
     let newsletterCandidate = null;
     let createdCustomerFromCall = false;
 
-    if (customerId && extracted.first_name && phone) {
+    // An operator-set link is not re-litigated against the transcript name:
+    // the person who set it heard the call.
+    if (customerId && extracted.first_name && phone && !customerLinkOverride) {
       const currentCustomer = await db('customers').where({ id: customerId }).first().catch(() => null);
       if (currentCustomer && customerPhoneMatches(phone, currentCustomer) && !extractedNameMatchesCustomer(extracted, currentCustomer)) {
         const namedCustomer = await findCustomerForCallContact(phone, extracted).catch((e) => {
@@ -8498,7 +8543,7 @@ const CallRecordingProcessor = {
     }
 
     const sharedPhoneAmbiguity = {};
-    if (!customerId && phone) {
+    if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
       // signal (single owner / AV-address / household) — see the cascade.
@@ -9461,7 +9506,9 @@ const CallRecordingProcessor = {
     // A job-applicant veto is an INTENTIONAL skip, not a creation failure —
     // without excluding it here the call would close as
     // customer_creation_failed and pollute failure reporting (codex r4 P2).
-    const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature);
+    // An explicit operator unlink is an INTENTIONAL customer-less result,
+    // never a creation failure to file a card for on every reprocess.
+    const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
@@ -9481,7 +9528,16 @@ const CallRecordingProcessor = {
       .where({ id: call.id })
       .where('processing_token', procToken)
       .update({
-      customer_id: customerId || call.customer_id || null,
+      // The operator's link wins over anything this pass resolved — read
+      // from the row IN the write, not from the snapshot taken at claim
+      // time, so a relink made while this pass was running is honoured
+      // too (jsonb_exists rather than the `?` operator: knex would read
+      // `?` as a binding).
+      customer_id: db.raw(
+        "CASE WHEN jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')"
+        + " THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE ?::uuid END",
+        [customerId || call.customer_id || null],
+      ),
       // Call-creation provenance rides the SAME durable write that links
       // the customer (Codex #3084 r24): customer_id persisted ⇒ marker
       // persisted, so a recovery run can never see a call-created customer
@@ -9615,7 +9671,10 @@ const CallRecordingProcessor = {
     // lands in Needs Review (UNqualified: missing name) instead of being dropped
     // to a silent no_op. Still gated by the non-lead content veto, so existing-
     // customer / spam / wrong-number calls never take this path.
-    const workableUnnamedLead = !customerId && !nonLeadCall
+    // An operator's explicit UNLINK covers the lead too (Codex #3736 r8
+    // P2): the call belongs to no one, so a reprocess must not mint or
+    // reuse a customer-less lead from its phone and stamp the call with it.
+    const workableUnnamedLead = !customerId && !nonLeadCall && !explicitUnlink
       && hasWorkableLeadSignal({ extracted, phone, voicemail: extracted.is_voicemail === true });
     // Set when a same-call row is dropped because it is no longer ours (see
     // the ownership re-read in Step 4b). workableUnnamedLead is false
