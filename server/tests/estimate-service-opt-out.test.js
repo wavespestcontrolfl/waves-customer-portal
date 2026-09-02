@@ -272,3 +272,12 @@ describe('the audit record', () => {
     expect(currentlyOptedOutKeys({})).toEqual([]);
   });
 });
+
+describe('event provenance', () => {
+  it('the public opt-out route stamps actor:customer on every event it records (source contract)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
+    const idx = src.indexOf('OptOut.recordServiceOptOutEvent(parsedData, {');
+    expect(idx).toBeGreaterThan(0);
+    expect(src.slice(idx, idx + 600)).toMatch(/actor: 'customer'/);
+  });
+});

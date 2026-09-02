@@ -54,6 +54,7 @@
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
+ *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true (12-month application strip under the lawn price card, arithmetic on visitsPerYear only; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
@@ -1437,6 +1438,16 @@ const gates = {
   // No customer comms anywhere in the flow. Ships DARK.
   // Enable with GATE_ESTIMATE_MEASUREMENT_REVIEW=true.
   estimateMeasurementReview: isProd ? process.env.GATE_ESTIMATE_MEASUREMENT_REVIEW === 'true' : true,
+
+  // Returning-visitor mode on the estimate page: on the second or later
+  // VISIT (estimate_views sessionized at the engagement engine's 30-minute
+  // gap) the /data payload carries a `returnVisit` block — visit number, the
+  // previous visit's end, and the customer-visible changes since then, each
+  // named from a durable stamp (opt-out events, extension grant). Never a
+  // "price changed" inferred from updated_at. Read-only projection, no write,
+  // no comms. Dev-open, prod dark.
+  // Enable with GATE_ESTIMATE_RETURN_VISIT=true.
+  estimateReturnVisit: isProd ? process.env.GATE_ESTIMATE_RETURN_VISIT === 'true' : true,
 
   // Customer-facing service opt-out on a sent estimate: the customer drops one
   // recurring service line and the estimate re-prices through the canonical
