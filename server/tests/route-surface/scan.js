@@ -1717,13 +1717,31 @@ class ModuleAnalysis {
     for (const arg of call.arguments || []) {
       if (!arg || arg.type !== 'ObjectExpression') continue;
       for (const prop of arg.properties) {
-        if (prop.type === 'SpreadElement') return '...spread';
+        if (prop.type === 'SpreadElement') return { key: '...spread', node: null };
         const key = prop.key && (prop.key.type === 'Identifier' ? prop.key.name : prop.key.value);
-        if (prop.computed) return '<computed key>';
-        if (RESPONDING_FACTORY_OPTIONS.has(key)) return key;
+        if (prop.computed) return { key: '<computed key>', node: null };
+        if (RESPONDING_FACTORY_OPTIONS.has(key)) return { key, node: prop.value };
       }
     }
     return null;
+  }
+
+  /**
+   * The handler for a reviewed package factory that carries a responder
+   * option: INVENTORIED as middleware keyed by the responder's body digest
+   * (it is repo code that answers requests, exactly like an inline
+   * responder), or opaque when the responder cannot be resolved.
+   */
+  responderFactoryHandler(label, responder) {
+    let fn = responder.node;
+    if (fn && fn.type === 'Identifier') {
+      const b = this.bindings.get(this.canonName(fn.name));
+      fn = b && b.kind === 'function' ? b.node : null;
+    }
+    if (fn && (fn.type === 'FunctionExpression' || fn.type === 'ArrowFunctionExpression' || fn.type === 'FunctionDeclaration')) {
+      return { type: 'middleware', desc: `${label}({ ${responder.key}#${this.bodyDigest(fn)} })` };
+    }
+    return { type: 'opaque', desc: `${label}({ ${responder.key} }) — package factory with an unresolvable responder option` };
   }
 
   /**
@@ -2058,7 +2076,11 @@ class ModuleAnalysis {
           // require('express-rate-limit')({...}) — node_modules factory call.
           // A package factory CAN return a router — only reviewed entries pass.
           const spec = c.arguments[0].value;
-          if (registry.lookupPackagePassthrough(spec, null)) return [{ type: 'passthrough', name: spec }];
+          if (registry.lookupPackagePassthrough(spec, null)) {
+            const responder = this.respondingFactoryOption(node);
+            if (responder) return [this.responderFactoryHandler(spec, responder)];
+            return [{ type: 'passthrough', name: spec }];
+          }
           return [{ type: 'opaque', desc: `${this.src.slice(c.start, c.end)}(...) — unreviewed package factory` }];
         }
         if (c.type === 'Identifier') {
@@ -2083,7 +2105,7 @@ class ModuleAnalysis {
             // router factories) — only registry-reviewed entries count.
             if (registry.lookupPackagePassthrough(b.spec, b.kind === 'requireMember' ? b.name : null)) {
               const responder = this.respondingFactoryOption(node);
-              if (responder) return [{ type: 'opaque', desc: `${c.name}({ ${responder} }) — package factory with a custom responder option (${b.spec})` }];
+              if (responder) return [this.responderFactoryHandler(b.spec, responder)];
               return [{ type: 'passthrough', name: c.name }];
             }
             return [{ type: 'opaque', desc: `${c.name}(...) — unreviewed package factory (${b.spec})` }];
@@ -2097,7 +2119,7 @@ class ModuleAnalysis {
           const spec = isRequireCall(c.object) ? c.object.arguments[0].value : (this.cleanBinding(c.object.name) || {}).spec;
           if (spec && registry.lookupPackagePassthrough(spec, c.property.name)) {
             const responder = this.respondingFactoryOption(node);
-            if (responder) return [{ type: 'opaque', desc: `${spec}.${c.property.name}({ ${responder} }) — package factory with a custom responder option` }];
+            if (responder) return [this.responderFactoryHandler(`${spec}.${c.property.name}`, responder)];
             return [{ type: 'passthrough', name: `${spec}.${c.property.name}` }];
           }
           return [{ type: 'opaque', desc: `${this.src.slice(c.start, c.end)}(...) — unreviewed package factory` }];
@@ -2558,6 +2580,12 @@ class Scanner {
         const middlewareDescs = handlers.filter((h) => h.type === 'middleware').map((h) => h.desc);
         for (const p of paths) {
           const scope = joinPaths(ctx.prefix, p);
+          // An unsafe router.param() callback runs while THIS layer's path
+          // is matched — before any guard in the same use() registration —
+          // so a parameterised scope withholds the registration's own
+          // guards (verb registrations get the same treatment below);
+          // guards from enclosing mounts and earlier use() scopes still count.
+          const useParamVoided = pathUsesUnsafeParam(pathToken(p));
           const inEffectFor = (p2) => (reg.topLevel ? inEffectGuards(inEffect, p2) : []);
           if (middlewareDescs.length) {
             // Terminal-capable middleware is real surface: Express runs it
@@ -2568,13 +2596,13 @@ class Scanner {
             // passthroughs are exempt.
             this.routes.push(this.makeRoute({
               method: 'USE', fullPath: scope, routerFile: m.file, mountPrefix: ctx.mountLabel,
-              guards: [...ctx.mountGuards, ...ownGuards.map((g) => ({ ...g, baseScope: scope })), ...inEffectFor(scope)],
+              guards: [...ctx.mountGuards, ...(useParamVoided ? [] : ownGuards).map((g) => ({ ...g, baseScope: scope })), ...inEffectFor(scope)],
               resolved: pathResolved, conditional: ctx.mountConditional || !reg.topLevel, cond: joinConds([ctx.mountCond, reg.cond]), extra: middlewareDescs.join(' + '), loc: m.loc(reg.node),
             }));
           }
           if (routerRefs.length === 0 && statics.length === 0) {
             // Pure middleware. Only guards matter for the model.
-            const useGuards = ownGuards.map((g) => ({ ...g, baseScope: scope }));
+            const useGuards = (useParamVoided ? [] : ownGuards).map((g) => ({ ...g, baseScope: scope }));
             if (useGuards.length === 0) continue;
             if (!pathResolved) {
               this.problems.push(`${m.loc(reg.node)}: guard ${useGuards.map((g) => g.name).join(',')} mounted on an unresolvable path — make the path a literal`);
@@ -2590,14 +2618,14 @@ class Scanner {
           for (const s of statics) {
             this.routes.push(this.makeRoute({
               method: 'STATIC', fullPath: scope, routerFile: m.file, mountPrefix: ctx.mountLabel,
-              guards: [...ctx.mountGuards, ...s.precedingGuards.map((g) => ({ ...g, baseScope: scope })), ...inEffectFor(scope)],
+              guards: [...ctx.mountGuards, ...(useParamVoided ? [] : s.precedingGuards).map((g) => ({ ...g, baseScope: scope })), ...inEffectFor(scope)],
               resolved: pathResolved, conditional: ctx.mountConditional || !reg.topLevel, cond: joinConds([ctx.mountCond, reg.cond]), extra: s.desc, loc: m.loc(reg.node),
             }));
           }
           for (const ref of routerRefs) {
             const childCtx = {
               prefix: scope,
-              mountGuards: [...ctx.mountGuards, ...ref.precedingGuards.map((g) => ({ ...g, baseScope: scope }))],
+              mountGuards: [...ctx.mountGuards, ...(useParamVoided ? [] : ref.precedingGuards).map((g) => ({ ...g, baseScope: scope }))],
               // A mount inside a function/block executes at an unknowable
               // time relative to the module's top-level use() guards — give
               // it NO source-order guard credit (fail closed).

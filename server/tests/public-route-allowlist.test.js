@@ -2522,6 +2522,68 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(use.extra).toMatch(/exempt: GET \/api\/x\/oauth\/callback/);
   });
 
+  test('an INLINE reviewed factory call (require(pkg)({ handler })) is opaque like the identifier form', () => {
+    const mk = (opts) => new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, passthroughs: [{ name: '*', module: 'express-rate-limit', package: true }] },
+      files: {
+        'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+        'server/routes/x.js': [
+          "const router = require('express').Router();",
+          "const { guardA } = require('../middleware/a');",
+          `router.get('/thing', require('express-rate-limit')({ ${opts} }), guardA, (req, res) => res.json({}));`,
+          'module.exports = router;',
+        ].join('\n'),
+        'server/middleware/a.js': 'function guardA(req, res, next) { next(); }\nmodule.exports = { guardA };',
+      },
+    }).scan();
+    expect(mk('windowMs: 1000').publicRoutes.find((r) => r.path === '/api/x/thing')).toBeUndefined();
+    expect(mk("windowMs: 1000, handler: (req, res) => res.json({ secret: 1 })").publicRoutes.find((r) => r.path === '/api/x/thing')).toBeDefined();
+  });
+
+  test('a responder-option factory mounted with use() is INVENTORIED as a digest-keyed USE entry', () => {
+    const mk = (body) => new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, passthroughs: [{ name: '*', module: 'express-rate-limit', package: true }] },
+      files: {
+        'server/index.js': app("app.use('/l', require('./routes/l'));"),
+        'server/routes/l.js': [
+          "const router = require('express').Router();",
+          `router.use(require('express-rate-limit')({ windowMs: 1000, handler: (req, res) => ${body} }));`,
+          "router.get('/:code', (req, res) => res.redirect('/'));",
+          'module.exports = router;',
+        ].join('\n'),
+      },
+    }).scan();
+    const a = mk('res.status(429).send("slow down")').publicRoutes.find((r) => r.method === 'USE' && r.path === '/l');
+    const b = mk('res.json({ leak: 1 })').publicRoutes.find((r) => r.method === 'USE' && r.path === '/l');
+    expect(a.extra).toMatch(/^express-rate-limit\(\{ handler#[0-9a-f]{8} \}\)$/);
+    expect(a.extra).not.toBe(b.extra);
+  });
+
+  test('an UNSAFE router.param on a use() mount path withholds that registration\'s own guards from the child', () => {
+    const mk = (paramHandler) => scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        `router.param('id', ${paramHandler});`,
+        "router.use('/:id', guardA, require('./child'));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/routes/child.js': [
+        "const child = require('express').Router();",
+        "child.get('/leak', (req, res) => res.json({}));",
+        'module.exports = child;',
+      ].join('\n'),
+      'server/middleware/a.js': 'function guardA(req, res, next) { next(); }\nmodule.exports = { guardA };',
+    });
+    const unsafe = mk('(req, res, next, id) => res.json({ id })');
+    expect(unsafe.publicRoutes.find((r) => r.path === '/api/x/:id/leak')).toBeDefined();
+    const safe = mk('guardA');
+    expect(safe.publicRoutes.find((r) => r.path === '/api/x/:id/leak')).toBeUndefined();
+  });
+
   test('an UNRESOLVED static root is a problem, never a stable identity', () => {
     const res = scanOf({
       'server/index.js': app([

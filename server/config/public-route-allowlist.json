@@ -105,9 +105,10 @@
     {
       "router": "server/routes/public-shortlinks.js",
       "mount": "/l",
-      "reason": "Public shortlink redirect — code entropy floor + per-route limiter (see public-route-gates.test.js)",
+      "reason": "Public shortlink redirect — code entropy floor + per-route limiter (see public-route-gates.test.js); the limiter's custom over-limit handler serves the same 404 page and is keyed by its body digest",
       "routes": [
-        "GET /l/:code"
+        "GET /l/:code",
+        "USE /l (express-rate-limit({ handler#945948f2 }))"
       ]
     },
     {
