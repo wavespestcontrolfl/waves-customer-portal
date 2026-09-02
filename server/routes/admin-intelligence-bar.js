@@ -186,6 +186,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // execute it for a technician token.
   ...HISTORY_TOOL_NAMES,
   'create_customer',
+  // Cancel plan (C3) churns accounts and moves billing — admin only, like the
+  // requireAdmin Customer 360 endpoints it mirrors.
+  'cancel_plan',
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
 
@@ -195,6 +198,8 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
 const PII_TOOL_NAMES = new Set([
   'create_customer',
   'update_property_access',
+  // cancel_plan previews/results echo the customer's name and free-text note.
+  'cancel_plan',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',
@@ -637,6 +642,56 @@ function maskEmail(address) {
 }
 
 function confirmationDisplayParams(toolName, params, preview) {
+  if (toolName === 'cancel_plan' && preview?.preview === true) {
+    // The card must show everything the commit will do: who, what scope,
+    // the visits coming off, the money, the effective date, whether the
+    // customer gets texted/emailed, and any recorded refund (never an
+    // automatic one).
+    const prepay = preview.prepay || null;
+    // Only the channels that CAN send (preview.confirmation_channels) — a
+    // customer with no phone must not be promised "SMS + email".
+    const channels = preview.confirmation_channels || {};
+    const reachable = [channels.sms && 'SMS', channels.email && 'email'].filter(Boolean).join(' + ');
+    return {
+      customer: preview.customer_name || params.customer_id,
+      scope: preview.whole_account ? 'whole account' : (preview.scope || []).join(', '),
+      visits_to_pull: preview.visits_to_pull,
+      tier: `${preview.tier_before || 'none'} → ${preview.tier_after || 'none'}`,
+      monthly: `${preview.monthly_before ?? '—'} → ${preview.monthly_after ?? '—'}`,
+      effective: preview.effective_date === 'end_of_coverage' ? `end of paid coverage (${preview.effective_on})` : `now (${preview.effective_on})`,
+      ...(prepay ? {
+        prepay: prepay.disposition === 'end_at_term'
+          ? `ends at term ${prepay.termEnd}; no renewal`
+          : `ended now — refund ${prepay.refund && !prepay.refund.needsManualCalc ? `$${prepay.refund.amount.toFixed(2)}` : 'needs manual calc'} recorded as an office task (not automatic)`,
+      } : {}),
+      // Per-application repricing of surviving visits (scoped cancels on the
+      // per-visit billing lane) — real charge changes the operator approves.
+      ...(Array.isArray(preview.per_app_changes) && preview.per_app_changes.length ? {
+        visit_prices: preview.per_app_changes
+          .map((r) => `${r.label || r.family} $${r.before} → $${r.after}`).join(', '),
+      } : {}),
+      // Outstanding balance stays payable through the cancel — a money fact
+      // the card must show (the dialog shows the same line).
+      ...(Number(preview.open_balance) > 0 ? {
+        open_balance: `$${Number(preview.open_balance).toFixed(2)} outstanding — remains payable`,
+      } : {}),
+      // The fee-or-waive exposure on the pulled visits (both card fee
+      // lanes) — a money fact the operator must see BEFORE confirming;
+      // unresolved lanes read fee-may-apply, never a silent no-fee.
+      ...(preview.visit_fees && (preview.visit_fees.applies || preview.visit_fees.unresolved) ? {
+        visit_fees: preview.visit_fees.total != null
+          ? `$${preview.visit_fees.total.toFixed(2)} in scheduled-visit fees on ${preview.visit_fees.visits.length} pulled visit(s) unless waived`
+          : `fee may apply to ${preview.visit_fees.visits.length} pulled visit(s) — amount unverifiable; waive or the fee rail judges at commit`,
+      } : {}),
+      waive_late_fee: preview.waive_late_fee === true,
+      send_confirmation: preview.send_confirmation !== false
+        ? (reachable || 'no phone or email on file — nothing can send')
+        : 'no customer communication',
+      ...(preview.reason_code ? { reason_code: preview.reason_code } : {}),
+      ...(preview.note ? { note: preview.note } : {}),
+      ...(preview.termite_retrieval ? { termite_stations: 'retrieval task will be raised' } : {}),
+    };
+  }
   if ((toolName === 'trigger_review_request' || toolName === 'reply_via_sms') && preview?.pinned_recipient) {
     return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
   }
@@ -1207,6 +1262,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // preview and let /confirm-action refuse if a re-run resolves
     // differently (product, stop order, record, before/after state).
     params._two_step_preview_fingerprint = AuthorizationContract.previewFingerprint(preview);
+  }
+  // cancel_plan: pin the approved facts (visit pull, refund dollars, term,
+  // scope) into the stored action — the confirmed commit refuses with
+  // preview_changed when the live numbers no longer match the card the
+  // operator approved (a visit completed/appeared, a term edit).
+  if (toolUse.name === 'cancel_plan' && preview?.preview_fingerprint) {
+    params.preview_fingerprint = preview.preview_fingerprint;
   }
   // Phone identifiers are MUTABLE — a newer estimate for the same phone can
   // appear between preview and Confirm, and the confirmed re-resolve would
@@ -1964,7 +2026,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (REVENUE_TOOL_NAMES.has(toolName)) {
     return executeRevenueTool(toolName, input);
   }
-  return executeTool(toolName, input);
+  return executeTool(toolName, input, actionContext);
 }
 
 const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language command center for Waves Pest Control & Lawn Care's admin portal. You help the operator (owner/admin) query, analyze, and take action on their business data.

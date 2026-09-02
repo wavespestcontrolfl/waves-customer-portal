@@ -87,6 +87,7 @@ import {
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
+import CancelPlanDialog from "./CancelPlanDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
@@ -5071,6 +5072,7 @@ export default function Customer360ProfileV2({
   const [annualPrepayOpen, setAnnualPrepayOpen] = useState(false);
   const [annualPrepayInvoiceOpen, setAnnualPrepayInvoiceOpen] = useState(false);
   const [cancelSignupOpen, setCancelSignupOpen] = useState(false);
+  const [cancelPlanOpen, setCancelPlanOpen] = useState(false);
   const [refundPayment, setRefundPayment] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
@@ -5305,6 +5307,7 @@ export default function Customer360ProfileV2({
     setAnnualPrepayOpen(false);
     setAnnualPrepayInvoiceOpen(false);
     setCancelSignupOpen(false);
+    setCancelPlanOpen(false);
     setRefundPayment(null);
     Promise.all([
       adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
@@ -6938,6 +6941,23 @@ export default function Customer360ProfileV2({
                   </Button>{" "}
                 </div>
               )}
+              {isAdmin && data.cancelPlanEnabled && (
+                <div className="mt-3 px-3 py-2.5 border-hairline border-zinc-200 rounded-sm flex justify-between items-center gap-3">
+                  {" "}
+                  <div className="text-12 text-ink-secondary">
+                    Cancelling an active plan? Same engine the customer portal
+                    uses: pulls visits, stops billing, records the case, and
+                    confirms to the customer.
+                  </div>{" "}
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    onClick={() => setCancelPlanOpen(true)}
+                  >
+                    Cancel plan…
+                  </Button>{" "}
+                </div>
+              )}
             </div>
           )}
 
@@ -8005,6 +8025,13 @@ export default function Customer360ProfileV2({
         <CancelSignupModal
           customer={c}
           onClose={() => setCancelSignupOpen(false)}
+          onDone={reloadCustomer}
+        />
+      )}
+      {cancelPlanOpen && (
+        <CancelPlanDialog
+          customer={c}
+          onClose={() => setCancelPlanOpen(false)}
           onDone={reloadCustomer}
         />
       )}

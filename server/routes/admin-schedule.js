@@ -17128,12 +17128,33 @@ router.post('/recurring-alerts/:id/action', requireAdmin, async (req, res, next)
       }
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
       const termId = idParam.replace(/^annual-/, '');
-      const term = await AnnualPrepayRenewals.recordDecision({
-        termId,
-        action,
-        adminUserId: req.adminUserId || req.technicianId || null,
-        notes: notes || null,
-      });
+      // Serialize with the admin cancel-plan commit (its per-customer
+      // advisory lock): a renew/switch decision landing between the
+      // cancel's destructive wind-down and its term decision would leave a
+      // churned account with a renewing term — with both writers on the
+      // lock, the decision either lands before the cancel's pre-write term
+      // read (cancel refuses 409 prepay_term_decided) or after its cancel
+      // decision (this CAS returns null → 409 already-decided).
+      const termRow = await db('annual_prepay_terms').where({ id: termId }).first('id', 'customer_id');
+      if (!termRow) return res.status(404).json({ error: 'annual prepay term not found' });
+      let releaseDecisionLock;
+      try {
+        const { acquireCancelCommitLock } = require('../services/admin-cancellation');
+        releaseDecisionLock = await acquireCancelCommitLock(termRow.customer_id);
+      } catch (lockErr) {
+        return res.status(409).json({ error: 'A cancellation for this customer is being processed — retry in a moment.' });
+      }
+      let term;
+      try {
+        term = await AnnualPrepayRenewals.recordDecision({
+          termId,
+          action,
+          adminUserId: req.adminUserId || req.technicianId || null,
+          notes: notes || null,
+        });
+      } finally {
+        await releaseDecisionLock();
+      }
       if (!term) {
         let existing = null;
         try {

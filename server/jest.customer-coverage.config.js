@@ -23,6 +23,11 @@ module.exports = {
     '<rootDir>/tests/customer-request-photo-validation.test.js',
     '<rootDir>/tests/customer-notification-native-push.test.js',
     '<rootDir>/tests/customer-notification-push.test.js',
+    // notifyAdmin's keyed dedupe (rolling window + content refresh) — the
+    // admin half of notification-service.js, measured here since the
+    // module is in the floor's coverage set and these are its direct tests.
+    '<rootDir>/tests/notification-admin-dedupe-window.test.js',
+    '<rootDir>/tests/notification-admin-dedupe-refresh.test.js',
   ],
   collectCoverage: true,
   collectCoverageFrom: [

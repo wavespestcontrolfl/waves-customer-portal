@@ -75,7 +75,7 @@ const { startHold, runPlanHoldLifecycle } = require('../services/cancellation-re
 const { planScopedWindDown } = require('../services/cancellation-processor');
 const { etDateString } = require('../utils/datetime-et');
 
-function seed({ holds = [], customers = [], components = [], visits = [] } = {}) {
+function seed({ holds = [], customers = [], components = [], visits = [], invoices = [] } = {}) {
   mockState.tables = {
     plan_holds: holds,
     customers,
@@ -83,6 +83,7 @@ function seed({ holds = [], customers = [], components = [], visits = [] } = {})
     scheduled_services: visits,
     customer_interactions: [],
     services: [],
+    invoices,
   };
 }
 
@@ -298,5 +299,17 @@ describe('planScopedWindDown (ruling C-3)', () => {
     expect(plan.perAppRows).toHaveLength(1);
     expect(plan.perAppRows[0]).toMatchObject({ family: 'pest_control', before: 90 });
     expect(plan.perAppRows[0].after).toBeGreaterThan(90);
+    // An already-INVOICED surviving row bills at its fixed terms — the
+    // apply step skips it, so the plan (what the card shows, fingerprints,
+    // and the operator approves) must not list it as a change (codex GH
+    // r26 P1). A voided invoice does not fix the price.
+    const invoicedId = plan.perAppRows[0].id;
+    mockState.tables.invoices = [{ id: 'inv-1', scheduled_service_id: invoicedId, status: 'paid' }];
+    const fixed = await planScopedWindDown('c1', ['lawn_care']);
+    expect(fixed.ok).toBe(true);
+    expect(fixed.perAppRows).toEqual([]);
+    mockState.tables.invoices = [{ id: 'inv-1', scheduled_service_id: invoicedId, status: 'void' }];
+    const voided = await planScopedWindDown('c1', ['lawn_care']);
+    expect(voided.perAppRows).toHaveLength(1);
   });
 });

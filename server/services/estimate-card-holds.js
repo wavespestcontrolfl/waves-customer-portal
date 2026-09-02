@@ -1738,12 +1738,25 @@ async function cardHoldReminderLine(scheduledServiceId) {
 async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
   const hold = await heldCardForScheduledService(scheduledServiceId);
   if (!hold) return { held: false, feeApplies: false };
+  const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
+  // Rail OFF (ONE_TIME_CARD_HOLD kill switch) with a historical held row:
+  // no fee can be collected, so nothing below may report one — including
+  // the fee-may-apply posture of a FAILED time lookup, which would make the
+  // cancel card warn of, fingerprint, and invite a waiver for a charge the
+  // disabled rail never makes (codex GH r31 P2).
+  if (!isCardHoldEnabled()) return { held: true, feeApplies: false, feeAmount };
   let start = null;
   try {
     const { scheduledServiceApptTime } = require('./appointment-reminders');
-    start = await scheduledServiceApptTime(scheduledServiceId);
+    // throwOnError distinguishes a FAILED lookup from a genuinely timeless
+    // visit (same contract as appointmentCardCancelPreview): a THROWN time
+    // resolution is unresolved, not fee-free — the cancel paths re-resolve
+    // independently, and a recovered lookup could charge an in-window
+    // cancel this preview called free. (A cleanly-null time stays fee-free.)
+    start = await scheduledServiceApptTime(scheduledServiceId, { throwOnError: true });
   } catch (err) {
-    logger.warn('[estimate-card-holds] appt-time resolution for cancel preview failed', { error: err.message });
+    logger.warn('[estimate-card-holds] appt-time resolution for cancel preview failed — reporting fee-may-apply', { error: err.message });
+    return { held: true, feeApplies: true, feeAmount, unresolved: true };
   }
   let feeApplies = isCardHoldEnabled() && !!start && isWithinCancelWindow({ hold, serviceStart: start, now });
   const previewStartMs = start ? new Date(start).getTime() : NaN;
@@ -1751,8 +1764,8 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
   if (!feeApplies && isCardHoldEnabled() && previewStartLive && hold.sticky_window_disclosed && isStickyCancelWindowEnabled()) {
     // Sticky window — the preview must agree with handleCardHoldCancellation
     // or the operator's confirm prompt lies (same enforcement gate, same
-    // evidence). Same fail-soft posture as the cancel path (a failed lookup
-    // there releases free, so feeApplies:false here stays coherent).
+    // evidence). A THROWN lookup is unresolved, not fee-free (same posture
+    // as the time-resolution catch above and the appointment-card preview).
     try {
       feeApplies = !!(await findStickyLateReschedule({
         scheduledServiceId,
@@ -1770,11 +1783,10 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
         if (!pmRow) feeApplies = false;
       }
     } catch (err) {
-      logger.warn('[estimate-card-holds] sticky-window lookup for cancel preview failed', { error: err.message });
-      feeApplies = false;
+      logger.warn('[estimate-card-holds] sticky-window lookup for cancel preview failed — reporting fee-may-apply', { error: err.message });
+      return { held: true, feeApplies: true, feeAmount, unresolved: true };
     }
   }
-  const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
   return { held: true, feeApplies, feeAmount };
 }
 

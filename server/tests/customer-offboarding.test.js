@@ -150,6 +150,8 @@ describe('previewCancelSignup — eligibility fails closed', () => {
     const p = await CustomerOffboarding.previewCancelSignup('cust-1');
     expect(p.eligible).toBe(true);
     expect(p.refundTotal).toBe(49);
+    // Recoverable credit (voidable invoice) — still deposit-stage money.
+    expect(p.depositOutstanding).toBe(true);
     expect(p.invoices).toHaveLength(1);
     expect(p.visits).toHaveLength(2);
   });
@@ -166,6 +168,10 @@ describe('previewCancelSignup — eligibility fails closed', () => {
     const p = await CustomerOffboarding.previewCancelSignup('cust-1');
     expect(p.eligible).toBe(false);
     expect(p.blockers.join(' ')).toMatch(/refund that payment instead/);
+    // A credit CONSUMED by a paid invoice is the established-customer
+    // steady state — it must NOT read as an outstanding deposit, or every
+    // legacy account with a credited signup deposit refuses a plan cancel.
+    expect(p.depositOutstanding).toBe(false);
   });
 
   it('voids EVERY invoice carrying the credit when it split across invoices', async () => {
@@ -204,6 +210,7 @@ describe('previewCancelSignup — eligibility fails closed', () => {
     const p = await CustomerOffboarding.previewCancelSignup('cust-1');
     expect(p.eligible).toBe(false);
     expect(p.blockers.join(' ')).toMatch(/no refundable deposit/);
+    expect(p.depositOutstanding).toBe(false);
   });
 
   it('blocks while a deposit refund is already in flight', async () => {
@@ -213,6 +220,8 @@ describe('previewCancelSignup — eligibility fails closed', () => {
     const p = await CustomerOffboarding.previewCancelSignup('cust-1');
     expect(p.eligible).toBe(false);
     expect(p.blockers.join(' ')).toMatch(/in flight/);
+    // In-flight refunds hold the plan-cancel guard closed until settled.
+    expect(p.depositOutstanding).toBe(true);
   });
 
   it('blocks when a visit is in progress (tech en route / on property)', async () => {
