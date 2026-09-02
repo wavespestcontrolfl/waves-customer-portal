@@ -2009,6 +2009,15 @@ const gates = {
   // (gateEnvValue is a hoisted function declaration, safe to call here.)
   ibThreads: gateEnvValue('GATE_IB_THREADS'),
 
+  // Tips from your tech (scope + owner decisions 2026-09-01): the completion
+  // screen's searchable tip picker (replacing the free-text Observations /
+  // Recommendations boxes) and, in a later PR, the quoted note on the live
+  // service report. OFF unless set ('1' / 'true' / 'on'), in dev AND prod — the
+  // gate-off answer of GET /admin/dispatch/:serviceId/tech-tips is
+  // { available: false } and the completion screen keeps today's textareas.
+  // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
+  techTips: gateEnvValue('GATE_TECH_TIPS'),
+
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

@@ -24,19 +24,27 @@
  */
 
 const { etParts } = require('../../utils/datetime-et');
+const { customerCopyViolations } = require('./technician-report-copy');
 const { detectServiceLine } = require('./service-line-configs');
 
 const SERVICE_LINES = Object.freeze(['pest', 'lawn', 'mosquito', 'termite', 'rodent', 'tree_shrub']);
 const SEASONS = Object.freeze(['wet', 'dry', 'all']);
 const MAX_TIPS_PER_VISIT = 3;
+// The "write your own" line: one sentence. The picker enforces the same
+// maxLength; the server rejects, never trims.
+const MAX_CUSTOM_TIP_CHARS = 240;
 
 // SWFL rain season, June–October. This is the rainfall calendar (standing
 // water, humidity), not turf growth — lawn-seasonality's peak/shoulder/dormant
 // answers a different question and deliberately isn't reused here.
 const WET_SEASON_MONTHS = new Set([6, 7, 8, 9, 10]);
 
+// Accepts a Date (read in ET) or a 'YYYY-MM-DD' calendar day, which is how
+// the schedule stores a visit date — never parse that string through
+// `new Date()`, which reads it as UTC midnight (the previous ET evening).
 function seasonForDate(date = new Date()) {
-  const { month } = etParts(date);
+  const day = typeof date === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(date.trim()) : null;
+  const month = day ? Number(day[2]) : etParts(date).month;
   return WET_SEASON_MONTHS.has(month) ? 'wet' : 'dry';
 }
 
@@ -373,14 +381,78 @@ function resolveTipIds(ids) {
   return resolved;
 }
 
+/**
+ * What the completion route freezes into structured_notes.techTips from the
+ * client's { ids, custom } payload: library ids resolved to their copy, then
+ * the optional "write your own" line — the tech's own words about this
+ * house, so it skips the visit-claim rule but goes through the same
+ * customer-copy screen as every other verbatim customer string. A line the
+ * screen rejects is dropped (reported back so the caller can log it), the
+ * whole set is capped at MAX_TIPS_PER_VISIT, and anything malformed yields
+ * an empty freeze rather than a throw.
+ */
+// Sentence terminators followed by whitespace and more text, or the end —
+// independent of capitalisation ("Flip the mats. then empty the saucers."
+// is two). "A/C" has no terminator and decimals ("1.25") have no
+// whitespace after the dot, so neither splits; a mid-line abbreviation
+// ("approx. 1 inch") does, and the 400 tells the tech to make it one
+// sentence.
+function sentenceCount(text) {
+  const t = String(text || '').trim();
+  if (!t) return 0;
+  // interior boundaries + 1: a trailing terminator (or none) is still one sentence
+  return (t.match(/[.!?]+(?:["')\]]+)?(?=\s+\S)/g) || []).length + 1;
+}
+
+function freezeTechTips(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return { tips: [], dropped: [] };
+  const tips = resolveTipIds(input.ids);
+  const dropped = [];
+  // Nothing the tech was told would print may vanish silently: an id the
+  // library no longer has (retired between picker load and completion, or
+  // an out-of-date client) and any pick past the cap are reported so the
+  // completion route can refuse with an actionable message.
+  const kept = new Set(tips.map((t) => t.id));
+  const seenIds = new Set();
+  for (const raw of Array.isArray(input.ids) ? input.ids : []) {
+    const id = String(raw || '').trim();
+    if (!id || seenIds.has(id)) continue;
+    seenIds.add(id);
+    if (kept.has(id)) continue;
+    dropped.push({ id, violations: [TIPS_BY_ID.has(id) ? 'over_cap' : 'unknown_tip'] });
+  }
+  // Never truncated: an over-long line is rejected as `too_long` so the
+  // tech rewrites it, rather than a silently shortened sentence printing.
+  // Only a string is a custom line — a malformed array/object must never be
+  // stringified into customer-facing text ("[object Object]").
+  const custom = typeof input.custom === 'string' ? input.custom.replace(/\s+/g, ' ').trim() : '';
+  if (custom) {
+    // One sentence, one slot: a value carrying several sentences would be
+    // several tips under one cap entry. customerCopyViolations also runs
+    // containsReportAccessCode, so a gate code never freezes.
+    const violations = custom.length > MAX_CUSTOM_TIP_CHARS
+      ? ['too_long']
+      : sentenceCount(custom) > 1
+        ? ['multi_sentence']
+        : customerCopyViolations(custom);
+    if (violations.length) dropped.push({ copy: custom, violations });
+    else if (tips.length < MAX_TIPS_PER_VISIT) tips.push({ id: 'custom', copy: custom, source: 'technician' });
+    else dropped.push({ copy: custom, violations: ['over_cap'] });
+  }
+  return { tips, dropped };
+}
+
 module.exports = {
   TIPS,
   TIP_GROUPS,
   SERVICE_LINES,
   SEASONS,
   MAX_TIPS_PER_VISIT,
+  MAX_CUSTOM_TIP_CHARS,
   seasonForDate,
   registryLineFor,
   tipsForVisit,
   resolveTipIds,
+  freezeTechTips,
+  sentenceCount,
 };
