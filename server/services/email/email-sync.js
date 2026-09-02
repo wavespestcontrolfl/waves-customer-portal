@@ -246,10 +246,22 @@ async function offerZelleNotice(email, { backfill }) {
     return await maybeHandleZelleNotice(email, { backfill });
   } catch (err) {
     logger.error(`[email-sync] Zelle notice check failed for ${email.id}: ${err?.message || err}`);
+    let marked;
     try {
-      await db('emails').where({ id: email.id }).whereNull('auto_action').update({ auto_action: ZELLE_RETRY_MARK, updated_at: new Date() });
+      marked = await db('emails').where({ id: email.id }).whereNull('auto_action').update({ auto_action: ZELLE_RETRY_MARK, updated_at: new Date() });
+      // 0 rows = auto_action already set. Only a reconciler stamp (a prior
+      // mark, or an outcome) is a durable record; anything else means the
+      // retry would be lost — fail the message instead.
+      if (!marked) {
+        const current = await db('emails').where({ id: email.id }).first('auto_action');
+        marked = String(current?.auto_action || '').startsWith('zelle_notice');
+      }
     } catch (markErr) {
       logger.error(`[email-sync] could not mark ${email.id} for Zelle retry (${markErr.message}) — failing the message so the sync retries it`);
+      throw err;
+    }
+    if (!marked) {
+      logger.error(`[email-sync] ${email.id} could not be marked for Zelle retry (auto_action already set) — failing the message so the sync retries it`);
       throw err;
     }
     return true; // marked = owned until the reconciler decides

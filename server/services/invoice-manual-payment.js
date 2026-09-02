@@ -194,6 +194,12 @@ async function recordManualPayment(id, {
     // one connection and this trx on the other (DB_POOL_MAX floor is 2), so
     // a third acquire here would wait on itself.
     if (requireSelfPay) {
+      // Lock the payer-SOURCE rows the resolution reads (customers.payer_id,
+      // the visit's payer_id / self_pay_override) so a reassignment cannot
+      // commit between this read and the paid flip. Lock order everywhere
+      // in this file: invoice → customer → visit.
+      await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id');
+      if (locked.scheduled_service_id) await trx('scheduled_services').where({ id: locked.scheduled_service_id }).forUpdate().first('id');
       const { rowIsSelfPayDue } = require('./open-balance');
       const selfPay = !locked.payer_id && !locked.payer_statement_id && await rowIsSelfPayDue(locked.customer_id, locked, { database: trx });
       if (!selfPay) return { notSelfPay: true };
