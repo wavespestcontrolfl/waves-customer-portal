@@ -169,6 +169,10 @@ Per file, with the proving test.
 - Pre-push Codex round 15 (1 P1, fixed): on a terminal row the call duration
   never decreases — a duplicate completed callback carrying "0" keeps the
   real length.
+- Pre-push Codex round 16 (1 P1, fixed): party/kind pairing is strict — a
+  human request with an unknown party, an unknown kind, or a kind that
+  belongs to the other party is a 400, and model output with a mismatched
+  pairing is dropped rather than re-labelled.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 

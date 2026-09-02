@@ -165,6 +165,26 @@ describe('anchorEvidence', () => {
   });
 });
 
+describe('kindBelongsToParty — a kind belongs to one party', () => {
+  const { kindBelongsToParty } = require('../services/call-commitments');
+  test('waves kinds are waves-only, customer kinds customer-only, other is both, unknown is neither', () => {
+    expect(kindBelongsToParty('waves', 'send_estimate')).toBe(true);
+    expect(kindBelongsToParty('customer', 'send_estimate')).toBe(false);
+    expect(kindBelongsToParty('customer', 'send_photos')).toBe(true);
+    expect(kindBelongsToParty('waves', 'send_photos')).toBe(false);
+    expect(kindBelongsToParty('waves', 'other')).toBe(true);
+    expect(kindBelongsToParty('customer', 'other')).toBe(true);
+    expect(kindBelongsToParty('martian', 'other')).toBe(false);
+  });
+  test('model output with a mismatched pairing is dropped, not re-labelled', () => {
+    const out = groundModelCommitments([
+      { party: 'customer', kind: 'send_estimate', description: 'x', confidence: 0.9, evidence: [{ quote: 'this is the office', speaker: 'agent' }] },
+    ], TRANSCRIPT);
+    expect(out.kept).toEqual([]);
+    expect(out.droppedMismatched).toBe(1);
+  });
+});
+
 describe('parseDueAt — office-entered times are Eastern', () => {
   const { parseDueAt } = require('../services/call-commitments');
   test('a naive datetime-local string is pinned to ET, not to the server\'s UTC clock', () => {

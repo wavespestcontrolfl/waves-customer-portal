@@ -128,6 +128,10 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     const row = await cc.addHumanCommitment(db, callId, { party: 'waves', kind: 'send_paperwork', description: 'Mail the WDO paperwork', reviewedBy: 'tech-fixture' });
     expect(row).toMatchObject({ source: 'human', human_state: 'confirmed', status: 'open', kind: 'send_paperwork', confidence: null });
     expect(row.commitment_key).toMatch(/^waves:send_paperwork:[a-z0-9-]+:h[0-9a-f]{6}$/);
+    // Strict pairing: a caller promise cannot be filed as a Waves one, and vice versa.
+    await expect(cc.addHumanCommitment(db, callId, { party: 'customer', kind: 'send_paperwork', description: 'x' })).rejects.toMatchObject({ status: 400 });
+    await expect(cc.addHumanCommitment(db, callId, { party: 'martian', kind: 'other', description: 'x' })).rejects.toMatchObject({ status: 400 });
+    await expect(cc.addHumanCommitment(db, callId, { party: 'waves', kind: 'teleport', description: 'x' })).rejects.toMatchObject({ status: 400 });
     // A retried or double-submitted request returns the same row, never a
     // uniqueness error.
     const again = await cc.addHumanCommitment(db, callId, { party: 'waves', kind: 'send_paperwork', description: 'Mail the WDO paperwork', reviewedBy: 'tech-fixture' });

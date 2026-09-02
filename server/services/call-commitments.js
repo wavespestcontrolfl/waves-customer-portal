@@ -59,6 +59,16 @@ const CUSTOMER_KINDS = Object.freeze([
   'send_photos', 'confirm_date', 'call_back', 'provide_info', 'make_payment',
 ]);
 const COMMITMENT_KINDS = Object.freeze([...WAVES_KINDS, ...CUSTOMER_KINDS, 'other']);
+
+// A kind belongs to one party (plus 'other' for both). A caller promise
+// must never be recorded as a Waves promise, or the reverse — by a
+// malformed request or by model output.
+function kindBelongsToParty(party, kind) {
+  if (kind === 'other') return party === 'waves' || party === 'customer';
+  if (party === 'waves') return WAVES_KINDS.includes(kind);
+  if (party === 'customer') return CUSTOMER_KINDS.includes(kind);
+  return false;
+}
 const CHANNELS = Object.freeze(['sms', 'email', 'call', 'in_person', 'unknown']);
 
 // Bumped when the derivation rules or the model prompt change, so a row can
@@ -310,6 +320,7 @@ function groundModelCommitments(items, transcript) {
   const kept = [];
   let droppedUngrounded = 0;
   let droppedLowConfidence = 0;
+  let droppedMismatched = 0;
   for (const item of Array.isArray(items) ? items : []) {
     const grounded = (item.evidence || []).filter((e) => {
       const q = normalizeForMatch(e?.quote);
@@ -317,6 +328,9 @@ function groundModelCommitments(items, transcript) {
     });
     if (!grounded.length) { droppedUngrounded += 1; continue; }
     if (typeof item.confidence !== 'number' || item.confidence < MIN_MODEL_CONFIDENCE) { droppedLowConfidence += 1; continue; }
+    // The schema already restricts party and kind individually; the pairing
+    // is a cross-field rule the schema cannot express.
+    if (!kindBelongsToParty(item.party, item.kind)) { droppedMismatched += 1; continue; }
     kept.push({
       party: item.party,
       kind: COMMITMENT_KINDS.includes(item.kind) ? item.kind : 'other',
@@ -330,7 +344,7 @@ function groundModelCommitments(items, transcript) {
       origin: 'model',
     });
   }
-  return { kept, droppedUngrounded, droppedLowConfidence };
+  return { kept, droppedUngrounded, droppedLowConfidence, droppedMismatched };
 }
 
 async function extractCommitmentsWithModel(transcript, { callStartedAt = null, client = null } = {}) {
@@ -479,7 +493,7 @@ async function recordCallCommitments({
     if (runModel) {
       const model = await extractCommitmentsWithModel(transcript, { callStartedAt: call?.created_at, client: modelClient });
       summary.skipped = model.skipped || null;
-      summary.dropped = (model.droppedUngrounded || 0) + (model.droppedLowConfidence || 0);
+      summary.dropped = (model.droppedUngrounded || 0) + (model.droppedLowConfidence || 0) + (model.droppedMismatched || 0);
       summary.modelMs = model.ms || null;
       modelItems = model.items || [];
       summary.model = modelItems.length;
@@ -755,8 +769,13 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
 }
 
 async function addHumanCommitment(conn, callLogId, { party, kind, description, due_at = null, channel = null, reviewedBy = null } = {}) {
-  const p = party === 'customer' ? 'customer' : 'waves';
-  const k = COMMITMENT_KINDS.includes(kind) ? kind : 'other';
+  // Strict: an unknown party or a kind that does not belong to that party
+  // is a bad request, never a silently different obligation.
+  if (party !== 'waves' && party !== 'customer') throw Object.assign(new Error('party must be waves or customer'), { status: 400 });
+  if (!COMMITMENT_KINDS.includes(kind)) throw Object.assign(new Error(`kind must be one of: ${COMMITMENT_KINDS.join(', ')}`), { status: 400 });
+  if (!kindBelongsToParty(party, kind)) throw Object.assign(new Error(`kind "${kind}" is not a ${party} commitment`), { status: 400 });
+  const p = party;
+  const k = kind;
   const text = String(description || '').trim();
   if (!text) throw Object.assign(new Error('description is required'), { status: 400 });
   const due = parseDueAt(due_at);
@@ -870,6 +889,7 @@ module.exports = {
   MIN_MODEL_CONFIDENCE,
   MODEL_OUTPUT_SCHEMA,
   commitmentKey,
+  kindBelongsToParty,
   parseDueAt,
   anchorEvidence,
   deriveCommitmentsFromExtraction,
