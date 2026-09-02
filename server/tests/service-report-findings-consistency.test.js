@@ -1,0 +1,173 @@
+const {
+  PROJECT_TYPES,
+  TERMITE_LIQUID_DILUTION_METHODS,
+  TERMITE_PERIMETER_METHODS,
+} = require('../services/project-types');
+const { validateTypedFindings } = require('../services/service-report/activity-indicators');
+
+function validate(type, values) {
+  return validateTypedFindings({ type, values, expectedType: type, enforceRequired: false });
+}
+
+describe('editable service-report findings consistency', () => {
+  test('treatment-area fields accept this lane\'s migrated legacy chips but reject other lanes and free text', () => {
+    const legacy = require('../../shared/legacy-completion-areas.json');
+    const optionsOf = (type, key) => PROJECT_TYPES[type].findingsFields.find((f) => f.key === key).options;
+    // A pre-typed draft migrates the generic completion chips into the typed
+    // area field; a legacy label the field itself does not list still passes.
+    const termiteLegacyOnly = legacy.categories.termite.find((a) => !optionsOf('termite_treatment', 'areas_treated').includes(a));
+    expect(termiteLegacyOnly).toBeTruthy();
+    expect(validate('termite_treatment', { areas_treated: `${termiteLegacyOnly}, Foundation perimeter` }).errors).toEqual([]);
+    const pestLegacyOnly = legacy.categories.pest.find((a) => !optionsOf('one_time_pest_treatment', 'areas_treated').includes(a));
+    expect(pestLegacyOnly).toBeTruthy();
+    expect(validate('one_time_pest_treatment', { areas_treated: pestLegacyOnly }).errors).toEqual([]);
+    // Another lane's controlled area is not this lane's vocabulary.
+    expect(validate('one_time_lawn_treatment', { spot_treatment_areas: 'Primary bedroom' }).errors)
+      .toEqual(['Invalid value for spot_treatment_areas: Primary bedroom']);
+    expect(validate('bed_bug', { areas_treated: 'Front lawn' }).errors)
+      .toEqual(['Invalid value for areas_treated: Front lawn']);
+    expect(validate('termite_treatment', { areas_treated: 'Rear addition slab' }).errors)
+      .toEqual(['Invalid value for areas_treated: Rear addition slab']);
+    // Inspection areas: a migrated legacy pest chip passes, free text does not.
+    expect(validate('one_time_pest_treatment', { areas_inspected: pestLegacyOnly }).errors).toEqual([]);
+    expect(validate('one_time_pest_treatment', { areas_inspected: 'Behind the pool pump' }).errors)
+      .toEqual(['Invalid value for areas_inspected: Behind the pool pump']);
+    expect(validate('one_time_lawn_treatment', {
+      spot_treatment_areas: 'Front lawn, Custom strip beside seawall',
+    }).errors).toEqual(['Invalid value for spot_treatment_areas: Custom strip beside seawall']);
+  });
+  test.each(Object.entries({
+    termite_inspection: 'activity_status',
+    pest_inspection: 'findings_observed',
+    flea: 'evidence_level',
+    cockroach: 'evidence_observed',
+    german_roach_knockdown: 'activity_level',
+    palmetto_roach_knockdown: 'activity_level',
+    rodent_exclusion: 'remaining_concerns',
+    rodent_sanitation: 'contamination_level',
+    rodent_inspection: 'evidence_observed',
+    rodent_trapping: 'evidence_observed',
+    rodent_bait_station: 'evidence_observed',
+    wildlife_trapping: 'evidence_observed',
+    one_time_pest_treatment: 'pests_observed',
+    one_time_lawn_treatment: 'turf_issues',
+    mosquito_event: 'activity_level',
+    palm_injection: 'condition_observations',
+    tree_shrub: 'landscape_condition',
+    termite_treatment: 'termite_evidence',
+    termite_bait_station: 'termite_activity',
+    bed_bug: 'evidence_observed',
+  }))('%s has a structured findings or condition field', (type, fieldKey) => {
+    const field = PROJECT_TYPES[type].findingsFields.find(({ key }) => key === fieldKey);
+    expect(field).toBeDefined();
+    expect(['select', 'chips', 'multi_select']).toContain(field.type);
+  });
+
+  test.each([
+    ['pest_inspection', { findings_observed: 'No live activity observed, Active pest activity' }],
+    ['cockroach', { activity_level: 'None observed', activity_locations: 'Kitchen' }],
+    ['mosquito_event', { activity_level: 'None observed', activity_locations: 'Backyard' }],
+    ['bed_bug', { evidence_level: 'No active signs observed', evidence_observed: 'Live bed bugs' }],
+    ['bed_bug', { evidence_observed: 'No visible evidence, Cast skins' }],
+    ['bed_bug', { treatment_method: 'Inspection / monitoring only', work_completed: 'Crack & crevice treatment' }],
+    ['one_time_pest_treatment', { pests_observed: 'No pest activity observed, Fire ants' }],
+    ['one_time_pest_treatment', { evidence_observed: 'No evidence observed, Live pests observed' }],
+    ['one_time_pest_treatment', { work_completed: 'Inspection / identification only, Bait placement' }],
+    ['one_time_pest_treatment', { work_completed: 'Treatment deferred, Exterior perimeter application' }],
+    ['one_time_pest_treatment', { work_completed: 'Treatment deferred, Treatment limited by site conditions' }],
+    ['one_time_pest_treatment', { activity_level: 'Heavy', pests_observed: 'No pest activity observed' }],
+    ['one_time_pest_treatment', { activity_level: 'Light', evidence_observed: 'No evidence observed' }],
+    ['termite_treatment', { termite_evidence: 'Preventive treatment — no activity observed, Live termites observed' }],
+    ['palm_injection', { pest_disease_signs: 'None observed today, Scale' }],
+  ])('%s rejects a zero-state paired with positive technician evidence', (type, values) => {
+    expect(validate(type, values).ok).toBe(false);
+  });
+
+  test('a positive activity level stays valid beside observed pests', () => {
+    expect(validate('one_time_pest_treatment', {
+      activity_level: 'Moderate',
+      pests_observed: 'Fire ants',
+      evidence_observed: 'Live pests observed',
+    }).ok).toBe(true);
+  });
+
+  test('customer-reported activity remains compatible with no technician-observed evidence', () => {
+    expect(validate('one_time_pest_treatment', {
+      activity_level: 'None observed',
+      pests_observed: 'Customer-reported activity only, No pest activity observed',
+      evidence_observed: 'Customer-reported activity only, No evidence observed',
+    }).ok).toBe(true);
+  });
+
+  test('one-time pest and standard termite reports have dedicated findings dropdowns', () => {
+    const oneTimeKeys = new Set(PROJECT_TYPES.one_time_pest_treatment.findingsFields.map(({ key }) => key));
+    expect(oneTimeKeys.has('pests_observed')).toBe(true);
+    expect(oneTimeKeys.has('evidence_observed')).toBe(true);
+    const termiteEvidence = PROJECT_TYPES.termite_treatment.findingsFields.find(({ key }) => key === 'termite_evidence');
+    expect(termiteEvidence?.type).toBe('chips');
+    expect(termiteEvidence.options).toContain('Preventive treatment — no activity observed');
+  });
+
+  test('rodding carries the termite perimeter posted-notice classification', () => {
+    expect(TERMITE_PERIMETER_METHODS).toContain('Rodding');
+  });
+
+  test('liquid termite injection methods require dilution details', () => {
+    expect(TERMITE_LIQUID_DILUTION_METHODS).toEqual(expect.arrayContaining([
+      'Foam / void injection', 'Drill-and-inject',
+    ]));
+  });
+
+  test('general one-time pest work uses controlled, field-accurate protocol choices', () => {
+    const fields = PROJECT_TYPES.one_time_pest_treatment.findingsFields;
+    const work = fields.find(({ key }) => key === 'work_completed');
+    expect(work?.type).toBe('chips');
+    expect(work.options).toEqual(expect.arrayContaining([
+      'Exterior perimeter application',
+      'Interior crack & crevice application',
+      'Bait placement',
+      'Nest treated',
+      'Individual mound treatment',
+      'Broadcast lawn application',
+      'Monitoring devices installed or checked',
+    ]));
+    expect(fields.find(({ key }) => key === 'treatment_performed')).toEqual(expect.objectContaining({
+      detail: true,
+      label: 'Additional work details',
+    }));
+  });
+
+  test('general one-time pest requires a performed-work lane at closeout', () => {
+    expect(validateTypedFindings({
+      type: 'one_time_pest_treatment',
+      expectedType: 'one_time_pest_treatment',
+      values: { activity_level: 'Low' },
+      enforceRequired: true,
+    }).ok).toBe(false);
+    expect(validateTypedFindings({
+      type: 'one_time_pest_treatment',
+      expectedType: 'one_time_pest_treatment',
+      values: { activity_level: 'Low', work_completed: 'Targeted spot treatment' },
+      enforceRequired: true,
+    }).ok).toBe(true);
+  });
+
+  test('bed-bug treatment methods describe the heat/hybrid service model', () => {
+    const method = PROJECT_TYPES.bed_bug.findingsFields.find(({ key }) => key === 'treatment_method');
+    expect(method?.options).toEqual(expect.arrayContaining([
+      'Heat treatment',
+      'Hybrid heat + chemical treatment',
+      'Chemical / IPM treatment',
+      'Targeted follow-up treatment',
+      'Inspection / monitoring only',
+    ]));
+    expect(method?.options).toEqual(expect.arrayContaining([
+      'Chemical only', 'Heat only', 'Chemical + heat', 'Steam + chemical',
+    ]));
+  });
+
+  test('protected report schemas are not part of this findings pass', () => {
+    expect(PROJECT_TYPES.wdo_inspection).toBeDefined();
+    expect(PROJECT_TYPES.pre_treatment_termite_certificate).toBeDefined();
+  });
+});

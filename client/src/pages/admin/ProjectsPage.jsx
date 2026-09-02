@@ -20,6 +20,12 @@ import ProjectFindingFieldInput, {
   normalizeApplicationRows,
 } from "../../components/tech/ProjectFindingFieldInput";
 import { parseSections, TERMITE_COMPLIANCE_SECTIONS } from "../ProjectReportViewPage";
+import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
+
+const {
+  TERMITE_LIQUID_DILUTION_METHODS,
+  TERMITE_PERIMETER_METHODS,
+} = termiteTreatmentMethods;
 
 
 /**
@@ -513,7 +519,7 @@ function evaluateProjectReadiness({
   }
   if (project?.project_type === "termite_treatment") {
     const method = String(findings?.treatment_method || "");
-    const isPerimeter = ["Liquid perimeter", "Trenching"].includes(method);
+    const isPerimeter = TERMITE_PERIMETER_METHODS.includes(method);
     required.push(
       { label: "Treatment method", ok: hasMeaningfulValue(method), hard: true },
       { label: "EPA reg. no.", ok: hasMeaningfulValue(findings?.epa_registration), hard: true },
@@ -527,7 +533,7 @@ function evaluateProjectReadiness({
         hard: true,
       },
     );
-    if (["Spot treatment", "Liquid perimeter", "Trenching", "Wood treatment"].includes(method)) {
+    if (TERMITE_LIQUID_DILUTION_METHODS.includes(method)) {
       required.push({
         label: "% solution",
         ok: hasMeaningfulValue(findings?.percent_solution),

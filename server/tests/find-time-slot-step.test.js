@@ -56,7 +56,17 @@ beforeEach(() => {
   db.mockImplementation((table) => (table === 'technicians' ? chain([{ id: 't1', name: 'A' }]) : chain([])));
 });
 
-const BASE = { lat: 27.4, lng: -82.5, durationMinutes: 60, dateFrom: '2026-09-01', dateTo: '2026-09-01', topN: 5 };
+function nextBookableDate(from) {
+  const date = new Date(from);
+  do date.setUTCDate(date.getUTCDate() + 1);
+  while (date.getUTCDay() === 0);
+  return date;
+}
+const FUTURE_DATE_VALUE = nextBookableDate(Date.now() + 29 * 24 * 60 * 60 * 1000);
+const NEXT_FUTURE_DATE_VALUE = nextBookableDate(FUTURE_DATE_VALUE);
+const FUTURE_DATE = FUTURE_DATE_VALUE.toISOString().slice(0, 10);
+const NEXT_FUTURE_DATE = NEXT_FUTURE_DATE_VALUE.toISOString().slice(0, 10);
+const BASE = { lat: 27.4, lng: -82.5, durationMinutes: 60, dateFrom: FUTURE_DATE, dateTo: FUTURE_DATE, topN: 5 };
 
 test('default (no step) returns the exact earliest-feasible minute', async () => {
   const { slots } = await findAvailableSlots(BASE);
@@ -101,7 +111,7 @@ test('earliestStartMin default (0) is a no-op — identical legacy behavior', as
 
 test('a coordless stop (divergent stamped rental) degrades to zero drive, not hidden gaps (round-9 P2)', async () => {
   const stop = {
-    id: 's1', scheduled_date: '2026-09-01', technician_id: 't1',
+    id: 's1', scheduled_date: FUTURE_DATE, technician_id: 't1',
     window_start: '10:00', window_end: '11:00', service_type: 'pest',
     estimated_duration_minutes: 60,
     svc_lat: null, svc_lng: null, cust_lat: null, cust_lng: null,
@@ -116,10 +126,10 @@ test('a coordless stop (divergent stamped rental) degrades to zero drive, not hi
 });
 
 test('blackout dates are removed from the offer enumeration', async () => {
-  // 2026-09-01 blacked out: the only requested day yields zero candidates.
+  // The only requested day is blacked out, so it yields zero candidates.
   db.mockImplementation((table) => {
     if (table === 'technicians') return chain([{ id: 't1', name: 'A' }]);
-    if (table === 'schedule_blackout_dates') return chain([{ date: '2026-09-01' }]);
+    if (table === 'schedule_blackout_dates') return chain([{ date: FUTURE_DATE }]);
     return chain([]);
   });
   const { slots } = await findAvailableSlots(BASE);
@@ -129,13 +139,13 @@ test('blackout dates are removed from the offer enumeration', async () => {
 test('blackout removes only the blacked-out day from a range', async () => {
   db.mockImplementation((table) => {
     if (table === 'technicians') return chain([{ id: 't1', name: 'A' }]);
-    if (table === 'schedule_blackout_dates') return chain([{ date: '2026-09-01' }]);
+    if (table === 'schedule_blackout_dates') return chain([{ date: FUTURE_DATE }]);
     return chain([]);
   });
-  const { slots } = await findAvailableSlots({ ...BASE, dateTo: '2026-09-02', topN: 50 });
+  const { slots } = await findAvailableSlots({ ...BASE, dateTo: NEXT_FUTURE_DATE, topN: 50 });
   const dates = new Set(slots.map((s) => s.date));
-  expect(dates.has('2026-09-01')).toBe(false);
-  expect(dates.has('2026-09-02')).toBe(true);
+  expect(dates.has(FUTURE_DATE)).toBe(false);
+  expect(dates.has(NEXT_FUTURE_DATE)).toBe(true);
 });
 
 test('a failed blackout lookup fails OPEN — all dates still offered', async () => {

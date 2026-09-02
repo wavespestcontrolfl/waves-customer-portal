@@ -1,0 +1,85 @@
+{
+  "categories": {
+    "pest": [
+      "Perimeter",
+      "Garage",
+      "Kitchen",
+      "Bathrooms",
+      "Bedrooms",
+      "Living areas",
+      "Laundry / utility room",
+      "Pantry",
+      "Entry points",
+      "Eaves / soffits",
+      "Attic",
+      "Crawlspace",
+      "Lanai / pool cage",
+      "Yard",
+      "Fence line",
+      "Trash area",
+      "Ornamentals",
+      "Bedding areas"
+    ],
+    "bed_bug": [
+      "Primary bedroom",
+      "Guest bedroom",
+      "Living room",
+      "Mattress & box spring",
+      "Bed frame & headboard",
+      "Baseboards",
+      "Furniture & upholstery",
+      "Closets",
+      "Adjacent rooms"
+    ],
+    "lawn": [
+      "Front yard",
+      "Back yard",
+      "Side yards",
+      "Landscape beds",
+      "Thin / stressed turf areas",
+      "Bare / damaged turf areas",
+      "Along driveway / sidewalk",
+      "Slope / drainage area"
+    ],
+    "termite": [
+      "Foundation perimeter",
+      "Bait stations",
+      "Garage / slab edge",
+      "Crawlspace",
+      "Attic",
+      "Exterior walls",
+      "Wood contact points",
+      "Interior slab penetrations",
+      "Plumbing penetrations",
+      "Expansion joints",
+      "Wall void",
+      "Localized activity area",
+      "Attic framing",
+      "Exposed wood framing"
+    ],
+    "mosquito": [
+      "Yard vegetation",
+      "Shrubs & landscape beds",
+      "Under deck / patio",
+      "Fence line",
+      "Standing water areas",
+      "Property perimeter",
+      "Screened enclosure",
+      "Pool deck / seating area",
+      "Gutters / drains",
+      "Planters / bromeliads",
+      "Mosquito station location"
+    ]
+  },
+  "byFindingsType": {
+    "flea": "pest",
+    "cockroach": "pest",
+    "german_roach_knockdown": "pest",
+    "palmetto_roach_knockdown": "pest",
+    "one_time_pest_treatment": "pest",
+    "one_time_lawn_treatment": "lawn",
+    "mosquito_event": "mosquito",
+    "termite_treatment": "termite",
+    "bed_bug": "bed_bug"
+  }
+}

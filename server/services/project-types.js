@@ -19,9 +19,11 @@
 // - Perimeter methods are the exterior applications carrying the
 //   FS 482.2265 posted-notice duty — 'Not applicable' is a contradiction
 //   there, not an answer.
-const TERMITE_LIQUID_DILUTION_METHODS = ['Spot treatment', 'Liquid perimeter', 'Trenching', 'Wood treatment'];
-const TERMITE_NON_DILUTION_METHODS = ['Bait station setup', 'Cartridge replacement', 'Other'];
-const TERMITE_PERIMETER_METHODS = ['Liquid perimeter', 'Trenching'];
+const {
+  TERMITE_LIQUID_DILUTION_METHODS,
+  TERMITE_NON_DILUTION_METHODS,
+  TERMITE_PERIMETER_METHODS,
+} = require('../../shared/termite-treatment-methods.json');
 
 const WDO_TARGET_OPTIONS = [
   'Subterranean termites',
@@ -171,6 +173,11 @@ const PROJECT_TYPES = {
         'Interior', 'Exterior lawn', 'Pet resting area', 'Shaded yard', 'Lanai',
         'Around bedding', 'Carpet / rugs', 'Furniture', 'Garage', 'Other',
       ] },
+      { key: 'areas_treated', label: 'Areas treated', type: 'chips', section: 'Treatment', options: [
+        'Interior living areas', 'Bedrooms', 'Carpet / rugs', 'Furniture / upholstery',
+        'Pet resting areas', 'Garage', 'Lanai', 'Front lawn', 'Back lawn',
+        'Side lawns', 'Shaded yard areas', 'Landscape beds', 'Other',
+      ] },
       { key: 'treatment_completed', label: 'Treatment completed', type: 'chips', section: 'Treatment', options: [
         'Exterior flea treatment', 'Interior flea treatment', 'Growth regulator',
         'Crack / crevice treatment', 'Lawn treatment', 'Pet resting area treatment',
@@ -210,6 +217,12 @@ const PROJECT_TYPES = {
         'Moisture / leaks', 'Food debris', 'Clutter', 'Cardboard storage', 'Open trash',
         'Pet food out', 'Gaps / unsealed penetrations',
       ] },
+      { key: 'areas_treated', label: 'Areas treated', type: 'chips', section: 'Work completed', options: [
+        'Kitchen', 'Bathrooms', 'Laundry / utility room', 'Pantry', 'Cabinets',
+        'Under sinks', 'Appliance areas', 'Plumbing penetrations', 'Baseboards',
+        'Wall voids', 'Garage', 'Attic', 'Exterior perimeter', 'Landscape beds',
+        'Lanai / pool cage', 'Other',
+      ] },
       { key: 'work_completed', label: 'Work completed today', type: 'chips', section: 'Work completed', options: [
         'Bait placement', 'Insect growth regulator', 'Crack & crevice treatment',
         'Dust application', 'Flush-out treatment', 'Exterior perimeter treatment',
@@ -241,6 +254,10 @@ const PROJECT_TYPES = {
       // always has activity by definition.
       { key: 'activity_level', label: 'Activity level', type: 'select', section: 'Activity', options: ['None observed', 'Light', 'Moderate', 'Heavy', 'Severe'] },
       { key: 'rooms_treated', detail: true, label: 'Rooms treated', type: 'text', section: 'Activity', placeholder: 'Kitchen, hall bath, laundry…' },
+      { key: 'areas_treated', label: 'Areas treated', type: 'chips', section: 'Treatment', options: [
+        'Kitchen', 'Pantry', 'Dining area', 'Living room', 'Bathrooms', 'Laundry / utility room',
+        'Garage', 'Cabinets', 'Under sinks', 'Appliance areas', 'Wall voids', 'Other',
+      ] },
       { key: 'primary_harborage', detail: true, label: 'Primary harborage', type: 'chips', section: 'Activity', options: [
         'Behind refrigerator', 'Behind stove', 'Under sink', 'Dishwasher area',
         'Cabinet hinges', 'Pantry', 'Bathroom plumbing', 'Wall voids', 'Other',
@@ -289,6 +306,11 @@ const PROJECT_TYPES = {
       { key: 'exterior_harborage', detail: true, label: 'Exterior harborage', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
       { key: 'moisture_issue', detail: true, label: 'Moisture issue', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
       { key: 'entry_points_observed', detail: true, label: 'Entry points observed', type: 'select', section: 'Pressure', options: ['Yes', 'No'] },
+      { key: 'areas_treated', label: 'Areas treated', type: 'chips', section: 'Treatment', options: [
+        'Kitchen', 'Bathrooms', 'Laundry / utility room', 'Garage', 'Attic',
+        'Interior entry points', 'Exterior perimeter', 'Foundation', 'Eaves / soffits',
+        'Lanai / pool cage', 'Drains / moisture areas', 'Landscape beds', 'Other',
+      ] },
       { key: 'treatment_completed', label: 'Treatment completed', type: 'chips', section: 'Treatment', options: [
         'Interior crack & crevice', 'Exterior perimeter treatment', 'Garage treatment',
         'Attic / void treatment', 'Drain / moisture area treatment', 'Bait placement',
@@ -609,9 +631,43 @@ const PROJECT_TYPES = {
     photoCategories: ['exterior', 'interior', 'kitchen', 'bathroom', 'garage', 'evidence', 'treatment_area', 'other'],
     findingsFields: [
       { key: 'target_pest', label: 'Target pest', type: 'text', placeholder: 'German roaches, wasps, fire ants, fleas/ticks…' },
-      { key: 'areas_inspected', detail: true, label: 'Areas inspected', type: 'textarea' },
+      { key: 'pests_observed', label: 'Pests observed', type: 'chips', options: [
+        'Ghost ants', 'Fire ants', 'Carpenter ants', 'German cockroaches',
+        'American / palmetto cockroaches', 'Spiders', 'Silverfish', 'Fleas',
+        'Ticks', 'Mosquitoes', 'Paper wasps', 'Yellowjackets', 'Mud daubers',
+        'Bed bugs', 'Stored-product pests', 'Occasional invaders',
+        'Customer-reported activity only', 'No pest activity observed', 'Other',
+      ] },
+      { key: 'evidence_observed', label: 'Evidence observed', type: 'chips', options: [
+        'Live pests observed', 'Dead pests observed', 'Active trail / foraging',
+        'Nest / harborage located', 'Droppings / spotting', 'Cast skins / egg cases',
+        'Damage observed', 'Customer-reported activity only', 'No evidence observed', 'Other',
+      ] },
+      { key: 'areas_inspected', detail: true, label: 'Areas inspected', type: 'chips', options: [
+        'Exterior perimeter', 'Foundation', 'Eaves / soffits', 'Garage', 'Attic',
+        'Crawlspace', 'Kitchen', 'Bathrooms', 'Bedrooms', 'Living areas',
+        'Laundry / utility room', 'Lanai / pool cage', 'Landscape beds', 'Yard', 'Other',
+      ] },
       { key: 'activity_level', label: 'Activity level', type: 'select', options: ['None observed', 'Low', 'Moderate', 'Heavy', 'Severe'] },
-      { key: 'treatment_performed', label: 'Treatment performed', type: 'textarea' },
+      { key: 'work_completed', label: 'Work completed today', type: 'chips', section: 'Work completed', options: [
+        'Inspection / identification only', 'Exterior perimeter application',
+        'Interior crack & crevice application', 'Targeted spot treatment',
+        'Bait placement', 'Insect growth regulator applied', 'Dust applied to labeled voids',
+        'Nest treated', 'Accessible nest removed', 'Individual mound treatment',
+        'Broadcast lawn application', 'Mechanical removal / vacuuming',
+        'Monitoring devices installed or checked', 'Source reduction completed',
+        'Treatment limited by site conditions', 'Treatment deferred', 'Other',
+      ] },
+      // Keep the legacy key so old snapshots and technician-entered details
+      // continue to render. Routine work belongs in the controlled chips
+      // above; this is only for facts the vocabulary cannot express.
+      { key: 'treatment_performed', detail: true, label: 'Additional work details', type: 'textarea', section: 'Work completed' },
+      { key: 'areas_treated', label: 'Areas treated', type: 'chips', options: [
+        'Exterior perimeter', 'Foundation', 'Eaves / soffits', 'Garage', 'Attic',
+        'Crawlspace', 'Kitchen', 'Bathrooms', 'Bedrooms', 'Living areas',
+        'Laundry / utility room', 'Entry points', 'Lanai / pool cage',
+        'Landscape beds', 'Yard', 'Other',
+      ] },
       { key: 'products_used', detail: true, label: 'Products used', type: 'textarea' },
       { key: 'customer_instructions', detail: true, label: 'Customer instructions', type: 'textarea' },
       { key: 'followup_plan', detail: true, label: 'Follow-up plan', type: 'textarea' },
@@ -647,7 +703,12 @@ const PROJECT_TYPES = {
         'Soil amendment applied', 'Wetting agent applied', 'Spot treatment completed',
         'Inspection completed',
       ] },
-      { key: 'spot_treatment_areas', detail: true, label: 'Spot-treated areas', type: 'text', section: 'Work completed', placeholder: 'Front right lawn, rear fence line…' },
+      { key: 'spot_treatment_areas', detail: true, label: 'Areas treated', type: 'chips', section: 'Work completed', options: [
+        'Entire lawn', 'Front lawn', 'Back lawn', 'Side lawns', 'Landscape beds',
+        'Thin / stressed turf areas', 'Weed breakthrough areas', 'Insect activity areas',
+        'Disease-affected areas', 'Along driveway / sidewalk', 'Fence line',
+        'Slope / drainage area', 'Other',
+      ] },
       { key: 'customer_recommendations', detail: true, label: 'Customer recommendations', type: 'chips', section: 'Recommendations', options: [
         'Water deeply and less frequently', 'Adjust irrigation coverage', 'Avoid mowing too low',
         'Sharpen mower blades', 'Reduce watering while fungus is active',
@@ -726,6 +787,10 @@ const PROJECT_TYPES = {
     findingsFields: [
       { key: 'palm_species', detail: true, label: 'Palm species', type: 'text', section: 'Palm condition' },
       { key: 'palms_serviced', detail: true, label: 'Palms serviced', type: 'count', section: 'Palm condition' },
+      { key: 'areas_treated', label: 'Palms treated', type: 'chips', section: 'Palm condition', options: [
+        'Front landscape palms', 'Back landscape palms', 'Side landscape palms',
+        'Entry palms', 'Pool / lanai palms', 'Driveway palms', 'Individual tagged palms', 'Other',
+      ] },
       { key: 'palm_condition', label: 'Overall palm condition', type: 'select', section: 'Palm condition', options: ['Good', 'Fair', 'Poor', 'Declining'] },
       { key: 'condition_observations', detail: true, label: 'Canopy & growth observations', type: 'chips', section: 'Palm condition', options: [
         'Healthy canopy color', 'Yellowing lower fronds', 'Thin canopy', 'Weak new growth',
@@ -778,6 +843,11 @@ const PROJECT_TYPES = {
     requiresFollowup: false,
     photoCategories: ['palm', 'shrub', 'bed', 'disease', 'pest_activity', 'treatment_area', 'before', 'after', 'other'],
     findingsFields: [
+      { key: 'areas_treated', label: 'Areas treated', type: 'multi_select', section: 'Service scope', options: [
+        'Front landscape', 'Back landscape', 'Side landscapes', 'Entry landscape',
+        'Foundation beds', 'Pool / lanai landscape', 'Driveway beds',
+        'Hedges / screening plants', 'Individual tagged plants', 'Other',
+      ] },
       { key: 'plant_groups', label: 'Plant groups serviced', type: 'multi_select', section: 'Service scope', options: [
         'Palms', 'Shrubs', 'Ornamentals', 'Hedges', 'Small trees',
         'Flowering plants', 'Groundcover beds', 'Other',
@@ -860,8 +930,23 @@ const PROJECT_TYPES = {
     photoCategories: ['foundation', 'trench', 'drill_point', 'station', 'damage', 'treatment_area', 'before', 'after', 'other'],
     findingsFields: [
       { key: 'target_termite', label: 'Target termite / WDO', type: 'select', options: ['Subterranean termites', 'Formosan subterranean termites', 'Drywood termites', 'Unknown / preventive'] },
-      { key: 'areas_treated', label: 'Areas treated', type: 'textarea' },
-      { key: 'treatment_method', label: 'Treatment method', type: 'select', options: ['Spot treatment', 'Liquid perimeter', 'Trenching', 'Bait station setup', 'Cartridge replacement', 'Wood treatment', 'Other'] },
+      { key: 'termite_evidence', label: 'Evidence observed', type: 'chips', options: [
+        'Live termites observed', 'Active shelter tubes', 'Inactive shelter tubes',
+        'Wood damage observed', 'Swarmers / discarded wings', 'Frass / pellets',
+        'Previous treatment evidence', 'Customer-reported activity only',
+        'Preventive treatment — no activity observed', 'Other',
+      ] },
+      { key: 'areas_treated', label: 'Areas treated', type: 'chips', options: [
+        'Foundation perimeter', 'Exterior perimeter', 'Garage / slab edge', 'Interior slab penetrations',
+        'Plumbing penetrations', 'Expansion joints', 'Wall void',
+        'Localized activity area', 'Attic framing', 'Crawlspace',
+        'Exposed wood framing', 'Bait station locations', 'Other',
+      ] },
+      { key: 'treatment_method', label: 'Treatment method', type: 'select', options: [
+        'Spot treatment', 'Liquid perimeter', 'Trenching', 'Rodding',
+        'Foam / void injection', 'Drill-and-inject', 'Bait station setup',
+        'Cartridge replacement', 'Wood treatment', 'Other',
+      ] },
       { key: 'products_used', label: 'Products used', type: 'textarea' },
       // FAC 5E-14 application-record detail (owner Phase-3 signoff
       // 2026-07-13). The product application log remains the record of
@@ -952,12 +1037,26 @@ const PROJECT_TYPES = {
     // stored snapshots.
     findingsFields: [
       { key: 'rooms_treated', label: 'Rooms treated', type: 'text', section: 'Inspection', placeholder: 'Primary bedroom, guest bedroom…' },
+      { key: 'areas_treated', label: 'Areas treated', type: 'chips', section: 'Work completed', options: [
+        'Primary bedroom', 'Guest bedroom', "Child's bedroom", 'Living room',
+        'Family room', 'Office', 'Other sleeping area', 'Adjacent room',
+        'Shared wall / adjoining unit', 'Mattress / box spring', 'Bed frame / headboard',
+        'Baseboards / wall edges', 'Furniture / upholstery', 'Closets',
+        'Wall voids / outlets', 'Luggage / storage area', 'Other',
+      ] },
       { key: 'evidence_level', label: 'Evidence level', type: 'select', section: 'Evidence', options: ['No active signs observed', 'Low (few bugs)', 'Moderate', 'Heavy', 'Severe infestation'] },
       { key: 'evidence_observed', detail: true, label: 'Evidence observed', type: 'chips', section: 'Evidence', options: [
         'Live bed bugs', 'Dead bed bugs', 'Eggs', 'Cast skins', 'Fecal spotting',
         'Blood spotting', 'Bites reported by customer', 'No visible evidence',
       ] },
-      { key: 'treatment_method', label: 'Treatment method', type: 'select', section: 'Work completed', options: ['Chemical only', 'Heat only', 'Chemical + heat', 'Steam + chemical'] },
+      { key: 'treatment_method', label: 'Treatment method', type: 'select', section: 'Work completed', options: [
+        'Heat treatment', 'Hybrid heat + chemical treatment',
+        'Chemical / IPM treatment', 'Targeted follow-up treatment',
+        'Inspection / monitoring only',
+        // Permanent snapshots and open drafts created before this vocabulary
+        // change must remain valid and editable.
+        'Chemical only', 'Heat only', 'Chemical + heat', 'Steam + chemical',
+      ] },
       { key: 'work_completed', detail: true, label: 'Work completed today', type: 'chips', section: 'Work completed', options: [
         'Crack & crevice treatment', 'Mattress / box spring treatment', 'Bed frame treatment',
         'Baseboard treatment', 'Furniture treatment', 'Dust application', 'Steam treatment',
