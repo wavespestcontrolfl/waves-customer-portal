@@ -41,6 +41,9 @@ function makeReviseDatabase({
   lead = null,
   customer = matchingCustomer,
   updateReturnsEmpty = false,
+  // The row the FOR UPDATE read inside the write transaction sees — lets a
+  // test model a send committing between the pre-read and the lock.
+  lockedEstimate = null,
 }) {
   const updates = [];
   const rawGuards = [];
@@ -119,8 +122,8 @@ function makeReviseDatabase({
         rawGuards.push(sql);
         return chain;
       },
-      forUpdate: () => chain,
-      first: async () => estimate,
+      forUpdate: () => { chain.__locked = true; return chain; },
+      first: async () => (chain.__locked && lockedEstimate ? lockedEstimate : estimate),
       update: (patch) => {
         updates.push(patch);
         return {
@@ -855,5 +858,36 @@ describe('reviseAdminEstimate — engine-authoritative pricing on a LIVE link (S
     });
     expect(updates).toHaveLength(1);
     expect(out.pricingFallbackReason).toBeNull();
+  });
+});
+
+describe('reviseAdminEstimate — send-versus-revise race on the live-link guard (pre-push codex P0)', () => {
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  const draftEstimate = { ...sentEstimate, status: 'draft', sent_at: null, viewed_at: null };
+  beforeEach(() => {
+    clearAllEstimatePricingCache();
+    mockGateState.sendRequiresServerPricing = true;
+  });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('a draft at the pre-read that a concurrent send delivered before the row lock is refused under the lock — nothing written', async () => {
+    const { database, updates } = makeReviseDatabase({
+      estimate: draftEstimate,
+      lockedEstimate: { ...draftEstimate, status: 'sent', sent_at: '2026-07-10T11:59:00Z' },
+    });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/already with the customer/i) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('control: a draft that stays a draft under the lock keeps the fail-open save', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: draftEstimate });
+    const out = await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].pricing_authority).toBe('CLIENT_FALLBACK');
+    expect(out.pricingFallbackReason).toBe('ENGINE_ERROR');
   });
 });

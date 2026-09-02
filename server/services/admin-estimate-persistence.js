@@ -2111,6 +2111,25 @@ async function createOrReuseAdminEstimate({
   });
 }
 
+// Engine-authoritative pricing on a LIVE link (validation audit SEC-002,
+// pre-push codex P0s): a delivered estimate's bearer link renders whatever
+// is stored, so a revision whose recompute fell back to the browser preview
+// is not persisted while GATE_SEND_REQUIRES_SERVER_PRICING is on — nothing
+// is saved (dryRun preflights surface the same refusal), the operator fixes
+// the inputs and retries. Drafts keep the fail-open save; the send gate
+// holds them. Called on the pre-read row (fast refusal, preflight-visible)
+// AND on the locked row inside the write transaction (the send-versus-revise
+// race), so the verdict can never depend on a stale read.
+function assertNoFallbackRevisionOfLiveLink(row, writeFields) {
+  if (!row || !(row.sent_at || row.viewed_at)) return;
+  if (String(writeFields?.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return;
+  if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return;
+  throw errorWithStatus(
+    'The pricing engine could not verify this revision and the estimate is already with the customer — nothing was saved. Fix the inputs and try again.',
+    409,
+  );
+}
+
 // Statuses a revise can never touch. Acceptance locks the price and spins up
 // downstream records; declined/expired are closed; `sending` means a send is
 // mid-flight (editing under it would race the sender's pre-send read into a
@@ -2334,14 +2353,7 @@ async function reviseAdminEstimate({
   // — nothing is saved (dryRun preflights surface the same refusal), the
   // operator fixes the inputs and retries. Drafts keep the fail-open save;
   // the send gate holds them.
-  if ((estimate.sent_at || estimate.viewed_at)
-    && String(writeFields.pricing_authority || '').toUpperCase() === 'CLIENT_FALLBACK'
-    && require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) {
-    throw errorWithStatus(
-      'The pricing engine could not verify this revision and the estimate is already with the customer — nothing was saved. Fix the inputs and try again.',
-      409,
-    );
-  }
+  assertNoFallbackRevisionOfLiveLink(estimate, writeFields);
 
   // A revision that changes or introduces a group id — OR changes the
   // estimate's contact identity while grouped (codex #3244 r5: a lead-only
@@ -2568,6 +2580,11 @@ async function reviseAdminEstimate({
       .forUpdate()
       .first();
     if (!lockedPrior) return null;
+    // Live-link guard re-asserted on the LOCKED row (pre-push codex P0): a
+    // first send finishing between the pre-read and this lock turns the
+    // row live, and the fallback revision must lose to it — the throw rolls
+    // this transaction back with nothing written.
+    assertNoFallbackRevisionOfLiveLink(lockedPrior, writeFields);
     // Protocol keys re-applied from the LOCKED row (codex P0, PR #3304 GH
     // r8c): writeFields.estimate_data was built from the pre-read
     // snapshot, so a delivery claim or an invalidation marker recorded
