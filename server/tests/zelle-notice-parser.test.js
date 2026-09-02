@@ -124,6 +124,20 @@ describe('isTrustedZelleSender', () => {
     expect(isTrustedZelleSender({ from_address: 'alerts@capitalone.com', authentication_results: breakout })).toBe(false);
     const escaped = 'mx.google.com; dkim=none; spf=pass (domain of x\\); dkim=pass header.i=@capitalone.com; (@evil.example) smtp.mailfrom=evil.example';
     expect(isTrustedZelleSender({ from_address: 'alerts@capitalone.com', authentication_results: escaped })).toBe(false);
+    // Attacker-controlled envelope text, echoed by Google both quoted and inside the SPF comment,
+    // with every quote / escape / paren trick: none may ever yield a trusted verdict.
+    const payloads = [
+      'x); dkim=pass header.i=@capitalone.com; (',
+      'x\\"); dkim=pass header.i=@capitalone.com; ("',
+      'x\\\\"); dkim=pass header.i=@capitalone.com; ("',
+      'x"; dkim=pass header.i=@capitalone.com; "',
+      'x\\); dkim=pass header.i=@capitalone.com; (',
+      '(x)); dkim=pass header.i=@capitalone.com; ((',
+    ];
+    for (const payload of payloads) {
+      const header = `mx.google.com; dkim=none; spf=pass (google.com: domain of "${payload}"@evil.example designates 1.2.3.4 as permitted sender) smtp.mailfrom="${payload}"@evil.example`;
+      expect(isTrustedZelleSender({ from_address: 'alerts@capitalone.com', authentication_results: header })).toBe(false);
+    }
     // A genuine clause with a comment inside it still passes.
     const genuine = 'mx.google.com; dkim=pass (2048-bit key; unprotected) header.i=@notification.capitalone.com header.s=k1 header.b="ab;cd"; spf=pass smtp.mailfrom=gmail.com';
     expect(isTrustedZelleSender({ from_address: 'capitalone@notification.capitalone.com', authentication_results: genuine })).toBe(true);
