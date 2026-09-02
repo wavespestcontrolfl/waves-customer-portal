@@ -6,6 +6,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
+const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -131,23 +132,34 @@ async function executeLeadTool(toolName, input) {
 
       if (!estimates?.length) return { hasEstimates: false, estimates: [] };
 
+      // The agent may quote these URLs to the customer, so a link (and the
+      // bearer token behind it) is handed out ONLY for a PUBLISHED, unarchived
+      // row that passes the group-aware pricing-authority verdict while the
+      // gate is on (#3750, uncapped codex P0 r24) — the same rule every
+      // guarded send funnel applies. Withheld rows still list, with the reason.
       return {
         hasEstimates: true,
-        estimates: await Promise.all(estimates.map(async e => ({
-          id: e.id,
-          status: e.status,
-          total: e.monthly_total || e.total_amount,
-          serviceInterest: e.service_interest,
-          sentAt: e.sent_at,
-          viewedAt: e.viewed_at,
-          token: e.token,
-          viewUrl: e.token
-            ? await shortenOrPassthrough(
-                `https://portal.wavespestcontrol.com/estimate/${e.token}`,
-                { kind: 'estimate', entityType: 'estimates', entityId: e.id, customerId: e.customer_id || null }
-              )
-            : null,
-        }))),
+        estimates: await Promise.all(estimates.map(async (e) => {
+          const published = !!(e.sent_at || e.viewed_at) && !e.archived_at;
+          const authorityOk = !gatedSendAuthorityPredicateApplies() || await estimateDeliverableUnderGate(db, e);
+          const linkable = published && authorityOk && !!e.token;
+          return {
+            id: e.id,
+            status: e.status,
+            total: e.monthly_total || e.total_amount,
+            serviceInterest: e.service_interest,
+            sentAt: e.sent_at,
+            viewedAt: e.viewed_at,
+            token: linkable ? e.token : null,
+            viewUrl: linkable
+              ? await shortenOrPassthrough(
+                  `https://portal.wavespestcontrol.com/estimate/${e.token}`,
+                  { kind: 'estimate', entityType: 'estimates', entityId: e.id, customerId: e.customer_id || null }
+                )
+              : null,
+            ...(linkable ? {} : { viewUrlWithheld: !published ? 'unpublished' : 'pricing-authority-not-server' }),
+          };
+        })),
       };
     }
 

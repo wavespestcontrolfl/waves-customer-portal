@@ -308,6 +308,7 @@ const {
   gatedSendAuthorityPredicateApplies,
   rowPassesGatedSendAuthority,
   applyLinkVisibleSiblingScope,
+  estimateDeliverableUnderGate,
 } = require('../services/pricing-authority-gate');
 // The gated MANUAL claims (immediate, scheduled, grouped anchor + siblings)
 // re-assert the whole verdict IN SQL on the row as it is at claim time —
@@ -3935,6 +3936,16 @@ router.post('/:id/follow-up', async (req, res, next) => {
     if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
     if (estimate.status === 'accepted') return res.status(400).json({ error: 'Already accepted' });
     assertEstimateSendable(estimate);
+    // Group-aware pricing-authority verdict (#3750, uncapped codex P0 r24):
+    // this text carries the estimate link, and the link renders every
+    // viewable sibling — a SERVER anchor beside an unverified sibling is
+    // refused like any other send while the gate is on.
+    if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+      return res.status(409).json({
+        error: 'A property on this estimate\'s link has no engine-verified price — re-save it from the estimate tool before sending this follow-up.',
+        code: 'PRICING_AUTHORITY_NOT_SERVER',
+      });
+    }
 
     const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
     const viewUrl = await shortenOrPassthrough(longUrl, {
