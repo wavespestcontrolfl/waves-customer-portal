@@ -28,11 +28,13 @@
  * writes nothing.
  *
  * automated (optional, the Zelle reconciler's auto-settlement): nobody tapped
- * a button, so the receipt is NOT sent inline — it is enqueued on the
- * automatic receipt queue (receipt-delivery-queue.js), the one mechanism
- * that honors payment_receipt / email_enabled opt-outs, the SMS send window
- * (quiet-hours hold + reschedule) and the retry ladder. `receipt` then
- * reads { queued: true }. Operator paths leave it false and send inline.
+ * a button, so the receipt is NOT sent inline — a receipt_delivery_jobs row
+ * is inserted IN the settlement transaction (the automatic receipt queue,
+ * receipt-delivery-queue.js, is the one mechanism that honors
+ * payment_receipt / email_enabled opt-outs, the SMS send window and the
+ * retry ladder) and drained after commit. The job commits with the
+ * payment or not at all. `receipt` then reads { queued: true }. Operator
+ * paths leave it false and send inline.
  *
  * settlementFence (optional, both Zelle paths): async (trx) => boolean, run
  * under the invoice row lock right before the paid flip. The Zelle callers
@@ -306,6 +308,13 @@ async function recordManualPayment(id, {
     // collect. Complete it on the SAME trx so a paid invoice never keeps
     // an `active` plan that blocks edits / credit reversal.
     await PaymentPlans.completeActivePlansForInvoice(row.id, trx);
+    if (sendReceipt && automated) {
+      // Same transaction as the paid flip: the receipt job is durable the
+      // moment the payment is. The customer sent the money themselves (a
+      // Zelle transfer minutes ago), so the receipt is customer-initiated
+      // for the send-window decision.
+      await require('./receipt-delivery-queue').enqueueReceiptDelivery({ invoiceId: id, source: 'zelle_notice_reconciler', customerInitiated: true, database: trx });
+    }
     return row;
   });
 
@@ -398,13 +407,8 @@ async function recordManualPayment(id, {
   let smsResult = null;
   let queued = false;
   if (sendReceipt && automated) {
-    // The customer sent the money themselves (a Zelle transfer minutes ago),
-    // so the receipt is customer-initiated for the send-window decision —
-    // the queue still holds/reschedules per its own rules and honors every
-    // opt-out.
-    const ReceiptDeliveryQueue = require('./receipt-delivery-queue');
-    await ReceiptDeliveryQueue.enqueueReceiptDelivery({ invoiceId: id, source: 'zelle_notice_reconciler', customerInitiated: true });
-    ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
+    // The job row committed with the payment above; just nudge the drain.
+    require('./receipt-delivery-queue').scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
     queued = true;
   } else if (sendReceipt) {
     const { sendReceiptEmail } = require('./invoice-email');

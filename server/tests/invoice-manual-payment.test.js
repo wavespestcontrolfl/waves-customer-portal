@@ -264,11 +264,13 @@ describe('recordManualPayment — settlement', () => {
     expect(descriptions[1]).toMatch(/Receipt sent for invoice WPC-2026-0400 \(email \+ sms\)/);
   });
 
-  test('automated: the receipt is ENQUEUED on the automatic receipt queue (opt-outs, send window, retries live there), nothing sent inline', async () => {
+  test('automated: the receipt job is inserted IN the settlement transaction (opt-outs, send window, retries live in the queue), nothing sent inline', async () => {
     settle(openInvoice());
     const out = await recordManualPayment('inv-1', { method: 'zelle', automated: true });
     expect(out.receipt).toEqual({ queued: true });
-    expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).toHaveBeenCalledWith({ invoiceId: 'inv-1', source: 'zelle_notice_reconciler', customerInitiated: true });
+    // Inserted IN the settlement transaction (database = the trx), not after commit.
+    expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).toHaveBeenCalledWith({ invoiceId: 'inv-1', source: 'zelle_notice_reconciler', customerInitiated: true, database: expect.any(Function) });
+    expect(ReceiptDeliveryQueue.enqueueReceiptDelivery.mock.invocationCallOrder[0]).toBeLessThan(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain.mock.invocationCallOrder[0]);
     expect(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain).toHaveBeenCalled();
     expect(sendReceiptEmail).not.toHaveBeenCalled();
     expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
