@@ -110,11 +110,23 @@ async function laneCallProcessing() {
                 this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'").whereNotNull('transcription');
               });
           });
-      }).orWhere(function whereFailedRecent() {
-        this.whereIn('processing_status', ['extraction_failed', 'no_transcription'])
-          .whereNotNull('recording_url')
-          .where('created_at', '>', since(RECENT_DAYS));
-      });
+      })
+        // no_transcription is a known-failed retry the processor re-runs
+        // promptly with no age fence — open work, not windowed.
+        .orWhere('processing_status', 'no_transcription')
+        // extraction_failed: retried while under the attempt cap AND inside
+        // the processor's 7-day fence (PAN-quarantined rows keep recording_url
+        // null by design and still retry); outside either it is terminal.
+        .orWhere(function whereExtractionFailed() {
+          this.where('processing_status', 'extraction_failed')
+            .where('created_at', '>', since(RECENT_DAYS))
+            .where(function somethingToProcess() {
+              this.whereRaw("NULLIF(btrim(recording_url), '') IS NOT NULL")
+                .orWhere(function panQuarantined() {
+                  this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'").whereNotNull('transcription');
+                });
+            });
+        });
     })
     // Oldest claim first: a stuck call is by definition old, and a
     // newest-first cap would hide exactly the rows this lane exists for.
@@ -132,8 +144,8 @@ async function laneCallProcessing() {
     let detail = ps === 'processing' ? 'transcribing / extracting' : 'waiting for the processor';
     const attempts = Number(r.extraction_attempts) || 0;
     if (ps === 'no_transcription') {
-      status = 'failed';
-      detail = 'no transcript could be produced';
+      // Known-failed retry: processAllPending re-runs it on the next tick.
+      detail = 'no transcript yet — retry scheduled';
     } else if (ps === 'extraction_failed' && attempts < CALL_EXTRACTION_MAX_ATTEMPTS) {
       detail = `extraction failed, retry scheduled (${attempts}/${CALL_EXTRACTION_MAX_ATTEMPTS})`;
     } else if (ps === 'extraction_failed') {
