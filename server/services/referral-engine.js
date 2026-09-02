@@ -204,8 +204,10 @@ async function sendSMS(to, body, options = {}) {
 // under that same lock — GH codex P1 on #3710) passes its trx so the whole
 // enroll rides it; otherwise the enroll opens its own transaction exactly as
 // before.
-async function enrollPromoter(customerId, { conn = null } = {}) {
-  const settings = await getSettings();
+async function enrollPromoter(customerId, { conn = null, settings: presetSettings = null } = {}) {
+  // settings: a caller that already read the live settings on its own
+  // transaction passes them so the enroll performs no second pool read.
+  const settings = presetSettings || await getSettings();
   // The whole enroll runs in ONE transaction opened by a customer-row lock
   // (codex #3379 r1 P1): the public report's referral tap made concurrent
   // first-enrollments reachable (double-tap, two devices, 5/min limiter),
@@ -1157,8 +1159,11 @@ async function checkMilestones(promoterId) {
 // defaults below, which advertise an active $25/$25 program that a failed
 // lookup or an unconfigured environment cannot honor. Errors propagate to
 // the caller's catch.
-async function getLiveSettings() {
-  const row = await db('referral_program_settings').where({ id: 1 }).first();
+// conn: a caller holding a transaction passes it so this read rides that
+// connection instead of acquiring a second one from the pool (GH codex P2 on
+// #3710 — concurrent taps each holding a transaction could starve each other).
+async function getLiveSettings(conn = db) {
+  const row = await conn('referral_program_settings').where({ id: 1 }).first();
   return row ? { ...row, base_url: normalizeReferralBaseUrl(row.base_url) } : null;
 }
 

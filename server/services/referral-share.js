@@ -62,7 +62,9 @@ async function buildReferralShareForCustomer(customerId, {
   conn = null,
 } = {}) {
   if (!customerId) return null;
-  const settings = await referralEngine.getLiveSettings();
+  // Under an outer transaction every read rides it (a second pool
+  // connection per concurrent tap could starve the pool — GH codex P2).
+  const settings = conn ? await referralEngine.getLiveSettings(conn) : await referralEngine.getLiveSettings();
   if (!settings?.program_active) return null;
 
   const dbx = conn || database;
@@ -75,7 +77,7 @@ async function buildReferralShareForCustomer(customerId, {
     // otherwise aborts the whole Postgres transaction (25P02) (pre-push
     // codex P1).
     ({ promoter } = await (conn
-      ? conn.transaction((sp) => referralEngine.enrollPromoter(customerId, { conn: sp }))
+      ? conn.transaction((sp) => referralEngine.enrollPromoter(customerId, { conn: sp, settings }))
       : referralEngine.enrollPromoter(customerId)));
   } catch (err) {
     if (err?.code !== '23505') throw err;

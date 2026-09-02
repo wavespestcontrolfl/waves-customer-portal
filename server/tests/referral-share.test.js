@@ -124,7 +124,9 @@ describe('buildReferralShareForCustomer', () => {
     conn.transaction = jest.fn(async (fn) => fn(sp));
     await buildReferralShareForCustomer('cust-1', { conn });
     expect(conn.transaction).toHaveBeenCalledTimes(1);
-    expect(mockEngine.enrollPromoter).toHaveBeenCalledWith('cust-1', { conn: sp });
+    // The settings read rides the outer connection and is reused by the enroll.
+    expect(mockEngine.getLiveSettings).toHaveBeenCalledWith(conn);
+    expect(mockEngine.enrollPromoter).toHaveBeenCalledWith('cust-1', { conn: sp, settings: expect.objectContaining({ program_active: true }) });
   });
 
   test('a 23505 inside the savepoint leaves the outer transaction usable for the household fallback', async () => {
