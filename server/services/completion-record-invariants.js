@@ -119,6 +119,14 @@ const VISIT_NOT_PROJECT_BACKED = `
                AND (pc.completion_source = 'project_completion'
                     OR EXISTS (SELECT 1 FROM projects pj2 WHERE pj2.service_record_id = pc.id)))`;
 
+// Any sibling record whose frozen closeout requirements say the named
+// obligation is NOT owed. Used as NOT EXISTS: one frozen "false" exempts the
+// visit, mirroring closeout-status's canonical-sibling read conservatively.
+const SIBLING_FROZE_FALSE = (requirement) => `
+                 SELECT 1 FROM service_records fr
+                  WHERE fr.scheduled_service_id = ss.id
+                    AND fr.structured_notes->'closeoutRequirements'->>'${requirement}' = 'false'`;
+
 // matchSql must SELECT `id` (text-castable) and `ord` (sort key, newest
 // first). The CTE is scanned once for the count and once for a LIMIT-bounded
 // sample, so the sample never aggregates the whole backlog.
@@ -165,8 +173,9 @@ const PREDICATES = Object.freeze({
          GROUP BY g.scheduled_service_id`),
   },
   // A frozen catalog rule saying the service owes no report
-  // (closeoutRequirements.requiresServiceReport=false) exempts the record,
-  // as it does in closeout-status; absent = owed (conservative).
+  // (closeoutRequirements.requiresServiceReport=false) on ANY sibling
+  // exempts the visit (conservative twin of closeout-status's canonical
+  // sibling read — codex P2 r5); absent everywhere = owed.
   completed_record_without_report_token: {
     label: 'Completed non-project visits (>2h) that owe a customer report and have no sibling record with a report token',
     href: '/admin/dispatch',
@@ -179,9 +188,9 @@ const PREDICATES = Object.freeze({
                  SELECT 1 FROM service_records sr
                   WHERE sr.scheduled_service_id = ss.id
                     AND ${OWES_CUSTOMER_ARTIFACT}
-                    AND COALESCE(sr.structured_notes->'closeoutRequirements'->>'requiresServiceReport', 'true') <> 'false'
                     AND sr.created_at >= '${REPORT_TOKEN_SINCE}'::date
                     AND ${COMPLETED_MARKER_AT} < now() - interval '2 hours')
+           AND NOT EXISTS (${SIBLING_FROZE_FALSE('requiresServiceReport')})
            AND NOT EXISTS (
                  SELECT 1 FROM service_records tok
                   WHERE tok.scheduled_service_id = ss.id
@@ -193,7 +202,9 @@ const PREDICATES = Object.freeze({
     // The cutover keys on the completion TRANSITION time, not the visit
     // date or the record's creation: a modern backfill of a pre-tracking
     // visit, or a recap re-completing an old FK-healed record, runs on
-    // today's code and owes the stamp (codex P2 r3/r4).
+    // today's code and owes the stamp (codex P2 r3/r4). An 'incomplete'
+    // record is completion evidence too — /complete still calls
+    // markComplete for visitOutcome 'incomplete' (codex P2 r5).
     sql: aggregate(`
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
@@ -201,7 +212,10 @@ const PREDICATES = Object.freeze({
            AND ss.completed_at IS NULL
            AND ${BEFORE_TODAY_ET}
            AND ${COMPLETED_TRANSITION_SINCE(TRACKING_STAMP_SINCE)}
-           AND EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND sr.status = 'completed')`),
+           AND EXISTS (
+                 SELECT 1 FROM service_records sr
+                  WHERE sr.scheduled_service_id = ss.id
+                    AND sr.status IN ('completed', 'incomplete'))`),
   },
   // Confirmed notice = a TERMINAL completionSmsStatus on ANY sibling —
   // the closeout-status.js comms vocabulary's done / not_required outcomes
@@ -211,7 +225,12 @@ const PREDICATES = Object.freeze({
   // artifact record. 'sending' and 'deferred' are pending there and stay
   // findings once 24h old; NULL and 'failed' are findings. A frozen catalog
   // rule saying the service owes no notice
-  // (closeoutRequirements.requiresCustomerNotice=false) exempts the record.
+  // (closeoutRequirements.requiresCustomerNotice=false) on ANY sibling
+  // exempts the visit (closeout-status reads the canonical sibling's
+  // snapshot; treating a frozen "not owed" on any sibling as authoritative
+  // is the conservative SQL twin — codex P2 r5). A delivered video recap
+  // (service_recaps.sent_at — set only on provider confirmation,
+  // recap-delivery.js) is a completion notice too (codex P2 r5).
   completed_record_without_comms_marker: {
     label: 'Completed non-project visits (>24h) that owe a completion notice and have no sibling with a terminal one (sent / recap sent / consent-blocked SMS, or sent report email on the artifact record)',
     href: '/admin/dispatch',
@@ -224,9 +243,9 @@ const PREDICATES = Object.freeze({
                  SELECT 1 FROM service_records sr
                   WHERE sr.scheduled_service_id = ss.id
                     AND ${OWES_CUSTOMER_ARTIFACT}
-                    AND COALESCE(sr.structured_notes->'closeoutRequirements'->>'requiresCustomerNotice', 'true') <> 'false'
                     AND ${COMPLETED_MARKER_AT} >= '${COMMS_MARKER_SINCE}'::date
                     AND ${COMPLETED_MARKER_AT} < now() - interval '24 hours')
+           AND NOT EXISTS (${SIBLING_FROZE_FALSE('requiresCustomerNotice')})
            AND NOT EXISTS (
                  SELECT 1 FROM service_records sib
                   WHERE sib.scheduled_service_id = ss.id
@@ -234,7 +253,10 @@ const PREDICATES = Object.freeze({
                       sib.structured_notes->>'completionSmsStatus' IN (${TERMINAL_SMS_STATUSES.map((s) => `'${s}'`).join(', ')})
                       OR (sib.report_view_token IS NOT NULL AND EXISTS (
                            SELECT 1 FROM service_report_deliveries d
-                            WHERE d.service_record_id = sib.id AND d.status = 'sent'))))`),
+                            WHERE d.service_record_id = sib.id AND d.status = 'sent'))))
+           AND NOT EXISTS (
+                 SELECT 1 FROM service_recaps rc
+                  WHERE rc.scheduled_service_id = ss.id AND rc.sent_at IS NOT NULL)`),
   },
   // visitOutcome 'incomplete' leaves scheduled_services.status='completed'
   // with a service_records row of status 'incomplete' (admin-dispatch.js);
@@ -288,7 +310,7 @@ module.exports = {
   runPredicate,
   _private: {
     SAMPLE, RECORD_FK_SINCE, TRACKING_STAMP_SINCE, REPORT_TOKEN_SINCE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, COMPLETED_TRANSITION_SINCE,
-    OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES,
+    OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES, SIBLING_FROZE_FALSE,
     COMPLETED_MARKER_AT, INCOMPLETE_FOLLOWUP_GRACE_DAYS, aggregate,
   },
 };
