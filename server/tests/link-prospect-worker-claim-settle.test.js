@@ -321,3 +321,22 @@ test('a drafted report whose settlement moved the placement is refused as path_m
   expect(row).toMatchObject({ path_id: 'p-new', outreach_status: 'none', outreach_to_email: null, claimed_at: null }); // released, moved, the stale draft cleared
 });
 
+test('a terminal failure released after a same-path REVISION reopens with a fresh count; after a confidence-only disproof it stays closed (local Codex P1)', async () => {
+  const mk = (id, host) => ({ id, domain_id: 'd', submission_url: `https://${host}/join`, superseded_by: null, link_type: 'directory', confidence: 0.7, revision: 2 });
+  const revisedPath = mk('p-rev', 'rev.example'); const deadPath = mk('p-dead', 'dead.example');
+  mockStore.seo_link_acquisition_paths.push(revisedPath, deadPath);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, attempts: worker.MAX_ATTEMPTS - 1, automation_policy: 'submit_free', last_classified_at: new Date('2026-08-01'), priority: 'high', domain_rating: 40, quality_signals: null };
+  const onRevised = { ...base, id: 'r-rev', target_domain: 'rev.example', path_id: 'p-rev', target_url: 'https://rev.example/join' };
+  const onDead = { ...base, id: 'r-dead', target_domain: 'dead.example', path_id: 'p-dead', target_url: 'https://dead.example/join' };
+  mockStore.seo_link_prospects.push(onRevised, onDead);
+  const claimed = await worker.claim({ n: 5, type: 'signup' });
+  const tok = (id) => claimed.find((r) => r.id === id).lease_token;
+  revisedPath.revision = 3; // a gate/URL/lane change landed while leased
+  deadPath.confidence = 0;  // a disproof landed while leased (revision unchanged)
+  expect(await worker.report({ prospect_id: 'r-rev', outcome: 'failed', lease_token: tok('r-rev') })).toMatchObject({ ok: true, status: 'prospect', attempts: 0, reopened_on_successor: true });
+  expect(onRevised).toMatchObject({ status: 'prospect', attempts: 0, automation_policy: null });
+  const dead = await worker.report({ prospect_id: 'r-dead', outcome: 'failed', lease_token: tok('r-dead') });
+  expect(dead).toMatchObject({ ok: true, status: 'rejected' });
+  expect(onDead).toMatchObject({ status: 'rejected', attempts: worker.MAX_ATTEMPTS, automation_policy: null }); // closed for good; the transition still unclassified it
+});
+

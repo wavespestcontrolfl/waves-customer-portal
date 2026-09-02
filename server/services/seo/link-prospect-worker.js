@@ -370,9 +370,19 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
     // may have exhausted) belongs to the predecessor. When settlement just
     // moved the row onto a DIFFERENT path, the successor has had no attempt
     // yet — reopen it with a fresh count rather than leaving it terminal.
+    // The same holds for a SAME-path revision that landed during the lease
+    // (working URL, gate, lane): the route the attempts were spent on is
+    // materially different now. A confidence-only disproof is not — a
+    // route declared gone stays closed.
     if (settled && outcome === 'failed') {
       const after = await trx('seo_link_prospects').where({ id: prospect_id }).first('path_id');
-      if (after && after.path_id && after.path_id !== prospect.path_id) {
+      let reopen = false;
+      if (after && after.path_id && after.path_id !== prospect.path_id) reopen = true;
+      else if (after && after.path_id && prospect.leased_path_revision != null) {
+        const pathNow = await trx('seo_link_acquisition_paths').where({ id: after.path_id }).first('revision');
+        reopen = !!(pathNow && pathNow.revision != null && Number(pathNow.revision) > Number(prospect.leased_path_revision));
+      }
+      if (reopen) {
         await trx('seo_link_prospects').where({ id: prospect_id }).whereNull('claimed_at').update({ status: 'prospect', attempts: 0, updated_at: new Date() });
         reopenedRow = true;
       }
