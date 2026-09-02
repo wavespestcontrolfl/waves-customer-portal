@@ -15,6 +15,8 @@ function generatedEstimate(overrides = {}) {
     id: 'estimate-1',
     source: 'lead_webhook',
     status: 'draft',
+    // The lane fails closed without the explicit engine-verified stamp.
+    pricing_authority: 'SERVER',
     customer_phone: '+19415550101',
     customer_email: 'lead@example.com',
     created_at: new Date(now.getTime() - 10 * 60 * 1000).toISOString(),
@@ -141,13 +143,17 @@ describe('lead estimate auto-send policy', () => {
     });
   });
 
-  test('never auto-sends a price the engine did not verify (pricing_authority CLIENT_FALLBACK)', () => {
+  test('never auto-sends a price the engine did not verify — only the explicit SERVER stamp is eligible', () => {
     const now = new Date('2026-05-26T12:00:00.000Z');
     const opts = { now, delayMinutes: 5, allowedReviewReasons: ['property_measurements_defaulted'] };
     expect(leadEstimateAutoSendEligibility(generatedEstimate({ pricing_authority: 'CLIENT_FALLBACK' }), opts))
-      .toEqual({ eligible: false, reason: 'client_fallback_pricing' });
-    expect(leadEstimateAutoSendEligibility(generatedEstimate({ pricingAuthority: 'client_fallback' }), opts))
-      .toEqual({ eligible: false, reason: 'client_fallback_pricing' });
+      .toEqual({ eligible: false, reason: 'pricing_authority_not_server' });
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ pricing_authority: null }), opts))
+      .toEqual({ eligible: false, reason: 'pricing_authority_not_server' });
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ pricing_authority: 'LOCKED' }), opts))
+      .toEqual({ eligible: false, reason: 'pricing_authority_not_server' });
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ pricingAuthority: 'server', pricing_authority: undefined }), opts))
+      .toEqual({ eligible: true, reason: null });
     expect(leadEstimateAutoSendEligibility(generatedEstimate({ pricing_authority: 'SERVER' }), opts))
       .toEqual({ eligible: true, reason: null });
   });
@@ -384,12 +390,12 @@ describe('claimLeadEstimateAutoSend — the claim itself re-asserts engine-autho
     return { database, rawGuards, patchRef: () => patch };
   }
 
-  test('the UPDATE excludes CLIENT_FALLBACK rows atomically, regardless of the send gate', async () => {
+  test('the UPDATE requires the explicit SERVER stamp atomically, regardless of the send gate', async () => {
     const { database, rawGuards } = recordingDatabase();
     const claimed = await claimLeadEstimateAutoSend(database, generatedEstimate(), { now: new Date('2026-05-26T12:10:00.000Z') });
     expect(claimed?.status).toBe('sending');
     expect(rawGuards).toEqual(expect.arrayContaining([
-      expect.stringContaining("COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'"),
+      expect.stringContaining("UPPER(pricing_authority) = 'SERVER'"),
     ]));
   });
 });

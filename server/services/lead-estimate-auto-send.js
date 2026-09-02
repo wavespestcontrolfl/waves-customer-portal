@@ -151,12 +151,13 @@ function leadEstimateAutoSendEligibility(estimate = {}, options = {}) {
   }
   if (summary.status !== 'generated' || !summary.generated) return { eligible: false, reason: 'not_generated' };
   if (summary.quoteRequired) return { eligible: false, reason: 'quote_required' };
-  // A price the engine never verified (pricing_authority CLIENT_FALLBACK —
-  // the save's recompute failed or had no replayable inputs) is never
-  // auto-delivered, gate or no gate (validation audit SEC-002, 2026-09-02);
-  // the operator re-saves it through the engine or sends it by hand.
-  if (String(estimate.pricing_authority || estimate.pricingAuthority || '').toUpperCase() === 'CLIENT_FALLBACK') {
-    return { eligible: false, reason: 'client_fallback_pricing' };
+  // Automation delivers ONLY a price the engine verified: the row must carry
+  // the explicit SERVER authority stamp (validation audit SEC-002,
+  // 2026-09-02; pre-push codex P0 — a negative CLIENT_FALLBACK check failed
+  // open for null / unknown stamps). Gate or no gate; the operator re-saves
+  // an unstamped or fallback row through the engine or sends it by hand.
+  if (String(estimate.pricing_authority || estimate.pricingAuthority || '').toUpperCase() !== 'SERVER') {
+    return { eligible: false, reason: 'pricing_authority_not_server' };
   }
   if (disallowedReview.length > 0) {
     return { eligible: false, reason: 'disallowed_review_reasons', review: disallowedReview };
@@ -444,10 +445,11 @@ async function claimLeadEstimateAutoSend(database, estimate, { now = new Date(),
       )
     )`)
     // Engine-authoritative pricing re-asserted ON the claim, gate or no gate
-    // (pre-push codex P0): eligibility rejected CLIENT_FALLBACK on a
-    // pre-read, and a revision stamping it between that read and this
-    // UPDATE must lose the race — an unverified price is never auto-sent.
-    .whereRaw("COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'")
+    // (pre-push codex P0s): eligibility required the SERVER stamp on a
+    // pre-read, and a revision replacing it between that read and this
+    // UPDATE must lose the race — only an engine-verified price is ever
+    // auto-sent (fail closed on null / unknown stamps).
+    .whereRaw("UPPER(pricing_authority) = 'SERVER'")
     .update({
       status: 'sending',
       send_method: sendMethod,

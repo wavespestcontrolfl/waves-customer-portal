@@ -867,6 +867,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             onetime_total: automatedDraftEstimate?.oneTimeTotal || null,
             status: 'draft',
             source: 'lead_webhook',
+            // Engine-verified price → explicit SERVER stamp; a parked /
+            // manual-review draft (no engine price) stays unstamped. The lead
+            // auto-send lane fails closed on anything but SERVER (SEC-002).
+            pricing_authority: automatedDraftEstimate?.automation?.status === 'generated' ? 'SERVER' : null,
             service_interest: serviceInterest || null,
             lead_source: leadSource.source,
             lead_source_detail: leadSource.detail,

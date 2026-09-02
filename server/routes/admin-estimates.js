@@ -283,17 +283,23 @@ function sendRequiresServerPricingFor(estimate = {}) {
   return parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled !== true;
 }
 const SEND_CLAIM_PRICING_AUTHORITY_SQL = "COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'";
+// Automation claims require the explicit SERVER stamp (fail closed on null /
+// unknown values — pre-push codex P0); the manual gate above only refuses
+// the known fallback stamp.
+const AUTO_SEND_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
 
 // Automation never publishes a price the engine did not verify — gate or no
-// gate (AGENTS.md estimator-engine authority; pre-push codex P0). The lead
-// auto-send lane claims its anchor with the SQL predicate above; this is the
-// same verdict for every grouped SIBLING that lane would publish, applied in
-// the group preflight when the caller declares options.autoSend.
+// gate (AGENTS.md estimator-engine authority; pre-push codex P0s). Only the
+// explicit SERVER stamp passes: null, unknown and CLIENT_FALLBACK all fail
+// closed. The lead auto-send lane claims its anchor with
+// AUTO_SEND_PRICING_AUTHORITY_SQL; this is the same verdict for every
+// grouped SIBLING that lane would publish, applied in the group preflight
+// when the caller declares options.autoSend.
 function assertAutoSendPricingAuthority(row = {}) {
-  if (String(row.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return;
-  const err = new Error('This estimate\'s price was saved from the browser preview because the pricing engine could not verify it — it is never auto-sent. Re-save it from the estimate tool and send it by hand.');
+  if (String(row.pricing_authority || '').toUpperCase() === 'SERVER') return;
+  const err = new Error('This estimate\'s price has no engine verification stamp (or was saved from the browser preview because the pricing engine could not verify it) — it is never auto-sent. Re-save it from the estimate tool and send it by hand.');
   err.statusCode = 422;
-  err.code = 'CLIENT_FALLBACK_PRICING';
+  err.code = 'PRICING_AUTHORITY_NOT_SERVER';
   throw err;
 }
 
@@ -1425,7 +1431,8 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
         // read the sibling before this lock; a fallback stamp landing in
         // between loses the race here.
         .modify((q) => {
-          if (autoSend || sendRequiresServerPricingFor(sibling)) q.whereRaw(SEND_CLAIM_PRICING_AUTHORITY_SQL);
+          if (autoSend) q.whereRaw(AUTO_SEND_PRICING_AUTHORITY_SQL);
+          else if (sendRequiresServerPricingFor(sibling)) q.whereRaw(SEND_CLAIM_PRICING_AUTHORITY_SQL);
         })
         .update({ status: 'sending', updated_at: trx.fn.now() });
       if (won) claimed.push(sibling);
@@ -4236,6 +4243,7 @@ router._internals = {
   assertEstimateSendable,
   sendRequiresServerPricingFor,
   SEND_CLAIM_PRICING_AUTHORITY_SQL,
+  AUTO_SEND_PRICING_AUTHORITY_SQL,
   assertAutoSendPricingAuthority,
   notifyPricingFallbackAfterCommit,
   assertEstimateManagerApprovalResolved,
