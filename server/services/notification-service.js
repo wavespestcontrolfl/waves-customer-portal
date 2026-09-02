@@ -83,7 +83,7 @@ const NotificationService = {
   // `bell` (admin recipients only) is an explicit site-level policy tag:
   // true always rings, false never rings — see notification-bell-policy.js.
   // It only has effect while GATE_ADMIN_BELL_POLICY is on.
-  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, connection = db }) {
+  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, bellDefault, connection = db }) {
     try {
       // Demo/internal test accounts (App Store review account) must not ring
       // the admin bell — their bounce alerts and junk service requests are
@@ -117,7 +117,7 @@ const NotificationService = {
             const allowed = await bellPolicy.bellAllowed({
               category,
               triggerKey: metadata?.triggerKey || null,
-              options: { bell },
+              options: { bell, bellDefault },
             });
             if (!allowed) {
               // Category + triggerKey only — titles/bodies carry customer
@@ -170,18 +170,27 @@ const NotificationService = {
     // again — the office must never keep reading an obsolete error list
     // while the response says the alert has the details. Identical content
     // stays a plain dedupe (no re-bell).
-    const { dedupeKey, refreshOnDedupe = false, ...createOpts } = opts;
+    // dedupeWindowMs (optional, with dedupeKey): a ROLLING window instead of
+    // forever — the key dedupes only against rows younger than the window,
+    // so a recurring signal (an estimate re-opened again tomorrow) can ring
+    // again once the window passes while two opens inside it contend on the
+    // same stable lock. One mechanism for every admin emitter (rule 15).
+    const { dedupeKey, dedupeWindowMs, refreshOnDedupe = false, ...createOpts } = opts;
     if (!dedupeKey) {
       return this.create({ recipientType: 'admin', category, title, body, ...createOpts });
     }
+    const windowMs = Number(dedupeWindowMs);
     const metadata = { ...(createOpts.metadata || {}), dedupeKey };
     try {
       const persisted = await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
-        const existing = await trx('notifications')
+        let existingQuery = trx('notifications')
           .where({ recipient_type: 'admin' })
-          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-          .first();
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]);
+        if (Number.isFinite(windowMs) && windowMs > 0) {
+          existingQuery = existingQuery.where('created_at', '>', trx.raw("NOW() - (? * interval '1 millisecond')", [Math.round(windowMs)]));
+        }
+        const existing = await existingQuery.first();
         if (existing) {
           // Compared and stored in create()'s admin form (emoji-stripped),
           // or an emoji title would read as "changed" on every emission.

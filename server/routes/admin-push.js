@@ -18,7 +18,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { listTriggers } = require('../services/notification-triggers');
 const {
-  OVERRIDABLE_CATEGORY_SET,
+  OVERRIDABLE_CATEGORY_SET, DEFAULT_ON_CATEGORIES,
   clearOverrideCache,
 } = require('../services/notification-bell-policy');
 const PushService = require('../services/push-notifications');
@@ -221,7 +221,10 @@ router.get('/preferences', async (req, res, next) => {
         return {
           key: `category:${cat}`,
           category: cat,
-          bell_enabled: r ? r.bell_enabled === true : false,
+          // Absent row = the policy default: off for most categories, ON for
+          // the default-on set (so the page shows the live state and a
+          // round-trip save cannot silently create an "off" override).
+          bell_enabled: r ? r.bell_enabled === true : DEFAULT_ON_CATEGORIES.has(cat),
         };
       })
       : [];
