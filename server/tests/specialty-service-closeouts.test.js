@@ -3,6 +3,7 @@
 const {
   SPECIALTY_SERVICE_CLOSEOUTS,
   observationsForSpecialtyService,
+  noApplicationOutcomeConflict,
   specialtyActionScopeForAreas,
   specialtyCompletedWorkWithoutAction,
   specialtyProtocolActionScopes,
@@ -221,6 +222,22 @@ describe('specialty service closeout vocabulary', () => {
     expect(specialtyCompletedWorkWithoutAction(SPECIALTY_SERVICE_CLOSEOUTS.bee_wasp_removal, ['Active'], [])).toBeNull();
   });
 
+  test('a no-application outcome cannot carry performed actions or products', () => {
+    expect(validateSpecialtyClosureCombination('fire_ant', {
+      observations: ['Active mounds observed'], actions: ['Individual mound treatment'], visitOutcome: 'inspection_only',
+    })).toBe('Visit outcome “inspection only” cannot record the performed action “Individual mound treatment” — change the outcome or clear the action.');
+    expect(validateSpecialtyClosureCombination('fire_ant', {
+      observations: [], actions: ['Inspection only'], productCount: 1, visitOutcome: 'customer_declined',
+    })).toBe('Visit outcome “customer declined” cannot record applied products — change the outcome or remove the products.');
+    expect(validateSpecialtyClosureCombination('fire_ant', {
+      observations: [], actions: ['Inspection only'], productCount: 0, visitOutcome: 'inspection_only',
+    })).toBeNull();
+    expect(validateSpecialtyClosureCombination('fire_ant', {
+      observations: [], actions: ['Individual mound treatment'], productCount: 1, visitOutcome: 'completed',
+    })).toBeNull();
+    expect(noApplicationOutcomeConflict(SPECIALTY_SERVICE_CLOSEOUTS.fire_ant, ['Individual mound treatment'], 0, 'incomplete')).toBeNull();
+  });
+
   test('accepts consistent work state and lanes without work-state rules', () => {
     expect(validateSpecialtyClosureCombination('dethatching', {
       observations: ['Inspection only'], actions: ['Inspection only'],
@@ -242,35 +259,35 @@ describe('specialty service closeout vocabulary', () => {
       actions: ['Void nest treated', 'Inspection and identification only', 'Not a preset action'],
       areas: ['Attic'],
     })).toEqual([
-      { label: 'Void nest treated', scope: 'interior', treatmentApplied: true, treatmentPerformed: true, dryDown: true },
-      { label: 'Inspection and identification only', scope: 'interior', treatmentApplied: false, treatmentPerformed: false, dryDown: false },
+      { label: 'Void nest treated', scope: 'interior', treatmentApplied: true, treatmentPerformed: true, dryDown: true, reentryWait: false },
+      { label: 'Inspection and identification only', scope: 'interior', treatmentApplied: false, treatmentPerformed: false, dryDown: false, reentryWait: false },
     ]);
     expect(specialtyProtocolActionScopes('bee_wasp_removal', {
       actions: ['Void nest treated'], areas: ['Attic', 'Eaves / soffit'],
-    })).toEqual([{ label: 'Void nest treated', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true, dryDown: true }]);
+    })).toEqual([{ label: 'Void nest treated', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true, dryDown: true, reentryWait: false }]);
     expect(specialtyProtocolActionScopes('tick_control', {
       actions: ['Pet-resting or kennel-area treatment'], areas: ['Interior pet areas', 'Furniture near pet areas'],
-    })).toEqual([{ label: 'Pet-resting or kennel-area treatment', scope: 'interior', treatmentApplied: true, treatmentPerformed: true, dryDown: true }]);
+    })).toEqual([{ label: 'Pet-resting or kennel-area treatment', scope: 'interior', treatmentApplied: true, treatmentPerformed: true, dryDown: true, reentryWait: false }]);
     // A granular bait is an application without a dry-down phase.
     expect(specialtyProtocolActionScopes('fire_ant', {
       actions: ['Broadcast bait application', 'Individual mound treatment'], areas: ['Front lawn'],
     })).toEqual([
-      { label: 'Broadcast bait application', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true, dryDown: false },
-      { label: 'Individual mound treatment', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true, dryDown: true },
+      { label: 'Broadcast bait application', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true, dryDown: false, reentryWait: false },
+      { label: 'Individual mound treatment', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true, dryDown: true, reentryWait: false },
     ]);
     // Completed mechanical work is treatment without a pesticide application.
     expect(specialtyProtocolActionScopes('plugging', {
       actions: ['Sod plugs installed at quoted spacing', 'Installation areas reviewed with customer'], areas: ['Front lawn'],
     })).toEqual([
-      { label: 'Sod plugs installed at quoted spacing', scope: 'exterior', treatmentApplied: false, treatmentPerformed: true, dryDown: false },
-      { label: 'Installation areas reviewed with customer', scope: 'exterior', treatmentApplied: false, treatmentPerformed: false, dryDown: false },
+      { label: 'Sod plugs installed at quoted spacing', scope: 'exterior', treatmentApplied: false, treatmentPerformed: true, dryDown: false, reentryWait: false },
+      { label: 'Installation areas reviewed with customer', scope: 'exterior', treatmentApplied: false, treatmentPerformed: false, dryDown: false, reentryWait: false },
     ]);
     // Heat and steam are treatment without a pesticide application.
     expect(specialtyProtocolActionScopes('bed_bug', {
       actions: ['Heat treatment', 'Vacuuming performed'], areas: ['Primary bedroom'],
     })).toEqual([
-      { label: 'Heat treatment', scope: 'interior', treatmentApplied: false, treatmentPerformed: true, dryDown: false },
-      { label: 'Vacuuming performed', scope: 'interior', treatmentApplied: false, treatmentPerformed: true, dryDown: false },
+      { label: 'Heat treatment', scope: 'interior', treatmentApplied: false, treatmentPerformed: true, dryDown: false, reentryWait: true },
+      { label: 'Vacuuming performed', scope: 'interior', treatmentApplied: false, treatmentPerformed: true, dryDown: false, reentryWait: false },
     ]);
     expect(specialtyProtocolActionScopes('general_pest', { actions: ['Anything'], areas: [] })).toBeNull();
     expect(specialtyActionScopeForAreas(['Other'], 'exterior')).toBe('exterior');

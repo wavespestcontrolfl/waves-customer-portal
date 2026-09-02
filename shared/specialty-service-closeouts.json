@@ -869,7 +869,8 @@
         "label": "Steam treatment performed",
         "scope": "interior",
         "treatmentApplied": false,
-        "treatmentPerformed": true
+        "treatmentPerformed": true,
+        "reentryWait": true
       },
       {
         "label": "Crack-and-crevice treatment",
@@ -901,7 +902,8 @@
         "label": "Heat treatment",
         "scope": "interior",
         "treatmentApplied": false,
-        "treatmentPerformed": true
+        "treatmentPerformed": true,
+        "reentryWait": true
       },
       {
         "label": "Hybrid heat and chemical treatment",

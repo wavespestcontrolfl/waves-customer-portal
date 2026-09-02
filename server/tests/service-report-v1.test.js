@@ -574,8 +574,36 @@ describe('service report v1', () => {
         service: {
           areas_serviced: JSON.stringify(['Primary bedroom']),
           structured_notes: { protocolActionScopesCompleted: [
-            { label: 'Heat treatment', scope: 'interior', treatmentApplied: false, treatmentPerformed: true },
+            { label: 'Heat treatment', scope: 'interior', treatmentApplied: false, treatmentPerformed: true, reentryWait: true },
           ] },
+        },
+        treatmentEvidence: false,
+      })).toMatchObject({ interior_reentry_min: 120 });
+      // Purely mechanical performed work (plugging, dethatching, nest removal) has no waiting period: targets clear.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          service_type: 'Lawn Plugging',
+          areas_serviced: JSON.stringify(['Front lawn']),
+          structured_notes: { protocolActionScopesCompleted: [
+            { label: 'Sod plugs installed at quoted spacing', scope: 'exterior', treatmentApplied: false, treatmentPerformed: true, reentryWait: false },
+          ] },
+        },
+        treatmentEvidence: false,
+      })).toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
+      // Typed mechanical work behaves the same; typed heat keeps its guidance.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          service_type: 'One-Time Pest Treatment',
+          areas_serviced: JSON.stringify(['Kitchen']),
+          service_data: { typedReportSnapshot: { type: 'one_time_pest_treatment', values: { work_completed: 'Mechanical removal / vacuuming' } } },
+        },
+        treatmentEvidence: false,
+      })).toMatchObject({ interior_reentry_min: 0 });
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          service_type: 'Bed Bug Treatment',
+          areas_serviced: JSON.stringify(['Primary bedroom']),
+          service_data: { typedReportSnapshot: { type: 'bed_bug', values: { treatment_method: 'Heat only' } } },
         },
         treatmentEvidence: false,
       })).toMatchObject({ interior_reentry_min: 120 });

@@ -7,6 +7,7 @@ import {
   reconcileExclusiveProtocolSelections,
   replaceFindingGroupSelection,
   resolveSpecialtyServiceKey,
+  noApplicationOutcomeConflict,
   specialtyCompletedWorkWithoutAction,
   specialtyCompletionFor,
   specialtyFindingActionConflict,
@@ -64,6 +65,17 @@ describe("specialty pest completion configuration", () => {
     expect(msg).toContain("requires a completed protocol action");
     expect(validateSpecialtyClosureCombination("dethatching", { observations: ["Heavy debris removed"], actions: [] })).toBe(msg);
     expect(specialtyCompletedWorkWithoutAction(dethatching, ["Heavy debris removed"], ["Loose thatch collected"])).toBeNull();
+  });
+
+  test("no-application outcomes reject performed work with the same message on both sides", () => {
+    const fireAnt = SERVICE_COMPLETION_PRESETS.fire_ant;
+    const msg = noApplicationOutcomeConflict(fireAnt, ["Individual mound treatment"], 0, "inspection_only");
+    expect(msg).toContain("cannot record the performed action");
+    expect(validateSpecialtyClosureCombination("fire_ant", {
+      observations: [], actions: ["Individual mound treatment"], visitOutcome: "inspection_only",
+    })).toBe(msg);
+    expect(noApplicationOutcomeConflict(fireAnt, ["Inspection only"], 2, "customer_declined")).toContain("applied products");
+    expect(noApplicationOutcomeConflict(fireAnt, ["Individual mound treatment"], 2, "completed")).toBeNull();
   });
 
   test("work-state findings reject contradictory protocol actions on both sides", () => {

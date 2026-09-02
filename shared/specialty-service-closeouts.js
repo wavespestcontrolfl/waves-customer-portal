@@ -144,11 +144,33 @@ function specialtyCompletedWorkWithoutAction(spec, observations, actionLabels) {
     : null;
 }
 
-function validateSpecialtyClosureCombination(serviceKey, { observations, actions, productCount = 0, enforcePresetActions = true } = {}) {
+// inspection_only / customer_declined outcomes bill as "not performed"; the
+// report must not publish performed work or applied products beside them.
+// Mirrored by noApplicationOutcomeConflict on the client (submit).
+const NO_APPLICATION_OUTCOMES = Object.freeze({
+  inspection_only: 'inspection only',
+  customer_declined: 'customer declined',
+});
+
+function noApplicationOutcomeConflict(spec, actionLabels, productCount, visitOutcome) {
+  const outcomeLabel = NO_APPLICATION_OUTCOMES[String(visitOutcome || '')];
+  if (!outcomeLabel) return null;
+  const byLabel = new Map((spec.protocols || []).map((action) => [action.label, action]));
+  const performed = (Array.isArray(actionLabels) ? actionLabels : [])
+    .find((label) => byLabel.has(label) && byLabel.get(label).exclusive !== true);
+  if (performed) return `Visit outcome “${outcomeLabel}” cannot record the performed action “${performed}” — change the outcome or clear the action.`;
+  if (Number(productCount) > 0) return `Visit outcome “${outcomeLabel}” cannot record applied products — change the outcome or remove the products.`;
+  return null;
+}
+
+function validateSpecialtyClosureCombination(serviceKey, {
+  observations, actions, productCount = 0, enforcePresetActions = true, visitOutcome = null,
+} = {}) {
   const spec = SPECIALTY_SERVICE_CLOSEOUTS[specialtyServiceKey({ serviceKey })];
   if (!spec) return null;
   return validateSpecialtyObservationCombination(serviceKey, observations)
     || (enforcePresetActions ? offPresetSpecialtyAction(spec, actions) : null)
+    || noApplicationOutcomeConflict(spec, actions, productCount, visitOutcome)
     || exclusiveSpecialtyActionConflict(spec, actions, productCount)
     || specialtyFindingActionConflict(spec, observations, actions)
     || specialtyCompletedWorkWithoutAction(spec, observations, actions);
@@ -192,6 +214,10 @@ function specialtyProtocolActionScopes(serviceKey, { actions, areas } = {}) {
       // dryDown = the application leaves a until-dry phase (re-entry evidence).
       // A granular bait is an application with no dry-down (codex P1 r15).
       dryDown: byLabel.get(label).treatmentApplied === true && byLabel.get(label).dryDown !== false,
+      // reentryWait = non-chemical work that still needs a waiting period
+      // (heat, steam). Mechanical work (plugging, dethatching, nest removal)
+      // is performed treatment for aftercare but keeps no re-entry timer.
+      reentryWait: byLabel.get(label).reentryWait === true,
     }));
 }
 
@@ -219,6 +245,7 @@ function validateSpecialtyAreas(serviceKey, areas, { enforcePresetAreas = true }
 }
 
 module.exports = {
+  noApplicationOutcomeConflict,
   specialtyCompletedWorkWithoutAction,
   validateSpecialtyAreas,
   specialtyActionScopeForAreas,
