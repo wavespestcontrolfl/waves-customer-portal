@@ -914,3 +914,20 @@ describe('resolveFirstApplicationAmount — an unresolved per-application charge
     expect(resolveFirstApplicationAmount({ firstApplicationAmount: 103.5, billingCadence: { amount: 51.75 }, perApplicationAmount: null, allowFallback: false })).toBe(103.5);
   });
 });
+
+describe('emailPerApplicationAmountForConversion — the welcome email never quotes the monthly figure per application (DATA-001)', () => {
+  const { emailPerApplicationAmountForConversion } = EstimateConverter;
+
+  test('quotes the derived per-visit charge of a single recurring unit', () => {
+    expect(emailPerApplicationAmountForConversion({ recurringUnitCount: 1, perApplicationAmount: 112 })).toBe(112);
+  });
+
+  test('an unresolved charge (no cadence, or a monthly tier with unknown visits) quotes nothing — never monthlyRate', () => {
+    expect(emailPerApplicationAmountForConversion({ recurringUnitCount: 1, perApplicationAmount: null, monthlyRate: 37.33, billingCadence: null })).toBeNull();
+    expect(emailPerApplicationAmountForConversion({ recurringUnitCount: 1, perApplicationAmount: 0, monthlyRate: 51.75 })).toBeNull();
+  });
+
+  test('multi-unit plans quote no single per-application figure', () => {
+    expect(emailPerApplicationAmountForConversion({ recurringUnitCount: 2, perApplicationAmount: 112 })).toBeNull();
+  });
+});

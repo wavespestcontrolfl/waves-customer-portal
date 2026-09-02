@@ -76,16 +76,19 @@ function acceptedBillingLaneForConversion({
 // multi-service accept returns an EXPLICIT null — no single per-application
 // figure exists, and sendMembershipStarted keeps an explicit null blank so
 // the row drops (round-1 fix) instead of resurrecting a stale row fee.
+// The per-application amount the membership.started email may quote for
+// THIS acceptance: the derived per-visit charge of a single recurring unit,
+// or nothing. It never falls back to the monthly figure — the converter no
+// longer stamps that as a fee and completion will not bill it, so quoting
+// it "per application" would promise a charge that never comes (validation
+// audit DATA-001 / pre-push codex P1). An unresolved amount (null) makes the
+// email omit the per-application line.
 function emailPerApplicationAmountForConversion({
   recurringUnitCount,
-  billingCadence,
   perApplicationAmount,
-  monthlyRate,
 }) {
-  if (recurringUnitCount === 1 && billingCadence && Number(billingCadence.amount) > 0) {
-    return Number(perApplicationAmount);
-  }
-  return (recurringUnitCount === 1 && Number(monthlyRate) > 0) ? Number(monthlyRate) : null;
+  if (recurringUnitCount !== 1) return null;
+  return Number(perApplicationAmount) > 0 ? Number(perApplicationAmount) : null;
 }
 
 function findGrassTypeDeep(node, depth = 6) {
@@ -6548,9 +6551,7 @@ const EstimateConverter = {
       }),
       perApplicationAmount: emailPerApplicationAmountForConversion({
         recurringUnitCount,
-        billingCadence,
         perApplicationAmount,
-        monthlyRate,
       }),
       includedServices: recurringServicesForConversion
         .map((svc) => svc.name || svc.serviceName || svc.service_name || svc.label)
