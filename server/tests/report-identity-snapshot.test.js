@@ -153,6 +153,10 @@ describe('resolveVisitCoordinates (JS twin of the /:token coordinate COALESCE)',
     expect(resolveVisitCoordinates({ visit: { service_address_line1: '100 Main Street' }, customer })).toEqual({ lat: 27.58, lng: -82.42 });
   });
 
+  test('each axis falls back independently: a stamped lat beside a missing lng keeps the stamped lat', () => {
+    expect(resolveVisitCoordinates({ visit: { lat: 27.1, lng: null, service_address_line1: '100 Main Street' }, customer })).toEqual({ lat: 27.1, lng: -82.42 });
+  });
+
   test('divergent stamp without coords freezes NO centre (no pin beats a wrong pin)', () => {
     expect(resolveVisitCoordinates({ visit: { service_address_line1: '55 Rental Rd', service_address_city: 'Venice', service_address_zip: '34285' }, customer })).toBeNull();
   });

@@ -98,9 +98,12 @@ function resolveVisitCoordinates({ visit = {}, customer = {} } = {}) {
   const c = customer || {};
   let lat = numberOrNull(v.lat);
   let lng = numberOrNull(v.lng);
+  // Each axis falls back on its own, exactly like the two independent
+  // COALESCE columns in the report queries (codex P2): a stamped lat beside
+  // a missing lng keeps the stamped lat.
   if ((lat == null || lng == null) && c && !visitDiverges(v, c)) {
-    lat = numberOrNull(c.latitude);
-    lng = numberOrNull(c.longitude);
+    if (lat == null) lat = numberOrNull(c.latitude);
+    if (lng == null) lng = numberOrNull(c.longitude);
   }
   return lat != null && lng != null ? { lat, lng } : null;
 }
