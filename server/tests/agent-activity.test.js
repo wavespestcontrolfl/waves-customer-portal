@@ -253,6 +253,9 @@ describe('buildActivity digests', () => {
     expect(items[1].subtitle).toBe('lead to cash invariants · needs a fix');
     expect(items[0].link).toBe('/admin/pipeline');
     expect(items[0].detail).toBe('Line one\nLine two');
+    // never truncated — in-app mode this is the only copy of the digest
+    const long = 'x'.repeat(5000);
+    expect(buildActivity({ digests: [{ id: 'n5', title: 'ACT: long', body: long, created_at: '2026-09-02T05:00:00Z' }] }).items[0].detail).toHaveLength(5000);
   });
 });
 

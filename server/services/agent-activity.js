@@ -317,7 +317,9 @@ function digestItem(row) {
     stepsDone: status === 'completed' ? 1 : 0,
     stepsTotal: 1,
     link: row.link || null,
-    detail: row.body ? String(row.body).slice(0, 1200) : null,
+    // The full body: with the email skipped this row is the only copy of
+    // the digest (ops-digest.js already caps what it stores).
+    detail: row.body ? String(row.body) : null,
   };
 }
 

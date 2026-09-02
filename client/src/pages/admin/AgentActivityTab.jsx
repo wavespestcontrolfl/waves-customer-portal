@@ -125,7 +125,12 @@ function ActivityRow({ item, onReview }) {
           {open && (
             <div className="mt-3 flex flex-col gap-2">
               {item.detail && (
-                <div className={cn("text-12 leading-normal", ["failed", "blocked"].includes(item.status) ? "text-alert-fg" : "text-ink-secondary")}>
+                <div
+                  className={cn(
+                    "text-12 leading-normal whitespace-pre-wrap break-words",
+                    ["failed", "blocked"].includes(item.status) ? "text-alert-fg" : "text-ink-secondary",
+                  )}
+                >
                   {item.detail}
                 </div>
               )}
