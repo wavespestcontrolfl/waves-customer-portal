@@ -161,6 +161,7 @@ describe('getOpsQueue', () => {
       parked: 2 + 1 + 1 + 2 + 1 + 2 + 1 + 2, // ga4 + nightly-audit, c1, opp-1, ea-1 + ea-5, pa-1, d4 + p2, da-1, aa-2 + aa-3
       failed: 1 + 2 + 1 + 1 + 1, // pricing, c3 + c8, ea-2, d2, aa-1
       truncated: false,
+      truncatedStatuses: [],
     });
     expect(typeof q.generatedAt).toBe('string');
   });
@@ -201,11 +202,13 @@ describe('getOpsQueue scan cap', () => {
     const q = await getOpsQueue();
     const ib = q.lanes.find((l) => l.key === 'ib');
     expect(ib.truncated).toBe(true);
+    expect(ib.truncatedStatuses).toEqual(['parked']); // the capped scan feeds parked only
     expect(ib.total).toBe(200);
     const content = q.lanes.find((l) => l.key === 'content');
     expect(content).toMatchObject({ total: 150, parked: 150, truncated: false }); // exact count, no "+"
     expect(q.totals.parked).toBeGreaterThanOrEqual(150);
     expect(q.totals.truncated).toBe(true);
+    expect(q.totals.truncatedStatuses).toEqual(['parked']); // failed / pending stay exact in the tab
   });
 });
 

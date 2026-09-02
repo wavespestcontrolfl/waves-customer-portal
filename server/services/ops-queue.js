@@ -48,10 +48,12 @@ function tally(items) {
   return counts;
 }
 
-// `truncated` = a scan hit SCAN_LIMIT, so counts are a floor, not a total;
-// the tab renders them as "200+". Cheaper and more honest than a second
-// count query per lane on a view that refreshes on demand.
-function finish(items, { truncated = false, total = null } = {}) {
+// `truncated` = the statuses whose scans hit SCAN_LIMIT, so THOSE counts
+// are a floor, not a total; the tab renders them as "200+" and leaves the
+// statuses whose scans were complete exact. Cheaper and more honest than a
+// second count query per lane on a view that refreshes on demand.
+function finish(items, { truncated = [], total = null } = {}) {
+  const truncatedStatuses = [...new Set(truncated)];
   const rank = { failed: 0, parked: 1, pending: 2 };
   // Lanes scan failed and open sets separately; a row can only be in one
   // state, but dedupe by id defensively so a race between the two reads
@@ -63,11 +65,18 @@ function finish(items, { truncated = false, total = null } = {}) {
     if (r !== 0) return r;
     return String(b.at || '').localeCompare(String(a.at || ''));
   });
-  return { ...tally(sorted), total: total ?? sorted.length, truncated, items: sorted.slice(0, ITEM_LIMIT) };
+  return {
+    ...tally(sorted),
+    total: total ?? sorted.length,
+    truncated: truncatedStatuses.length > 0,
+    truncatedStatuses,
+    items: sorted.slice(0, ITEM_LIMIT),
+  };
 }
 
-function hitCap(rows) {
-  return Array.isArray(rows) && rows.length >= SCAN_LIMIT;
+// The statuses a capped scan could have fed — [] when the scan was complete.
+function capped(rows, ...statuses) {
+  return Array.isArray(rows) && rows.length >= SCAN_LIMIT ? statuses : [];
 }
 
 async function laneScheduledJobs() {
@@ -122,14 +131,21 @@ async function laneCallProcessing() {
   // Column set = the watchdog's candidates() select: computeStalledCalls
   // reads metadata (recording-ready time), the SID and the customer id.
   const columns = ['id', 'twilio_call_sid', 'customer_id', 'from_phone', 'to_phone', 'direction', 'processing_status', 'processing_heartbeat_at', 'processing_started_at', 'updated_at', 'created_at', 'extraction_attempts', 'metadata', 'recording_url', 'recording_duration_seconds', 'duration_seconds', 'transcription', 'transcription_metadata'];
-  // Live/retryable rows: oldest claim first — a stuck call is by definition
-  // old, and a newest-first cap would hide exactly the rows this lane exists
-  // for. no_transcription is retried promptly with no age fence.
+  // Live rows (the watchdog's stall candidates: null / pending / processing):
+  // oldest claim first — a stuck call is by definition old, and a newest-first
+  // cap would hide exactly the rows this lane exists for.
   const live = await eligible(db('call_log')
     .where(function liveStatus() {
-      this.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing', 'no_transcription']);
+      this.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing']);
     }))
     .orderByRaw('COALESCE(processing_heartbeat_at, processing_started_at, updated_at, created_at) ASC')
+    .limit(SCAN_LIMIT)
+    .select(columns);
+  // no_transcription retries (prompt, no age fence, never a stall candidate)
+  // scanned SEPARATELY: a backlog of old retry rows must never fill the live
+  // page ahead of the stalled calls it monitors.
+  const retryRows = await eligible(db('call_log').where('processing_status', 'no_transcription'))
+    .orderBy('updated_at', 'desc')
     .limit(SCAN_LIMIT)
     .select(columns);
   // extraction_failed: retried while under the attempt cap AND inside the
@@ -149,7 +165,7 @@ async function laneCallProcessing() {
     .orderBy('updated_at', 'desc')
     .limit(SCAN_LIMIT)
     .select(columns);
-  const rows = [...failedRows, ...live];
+  const rows = [...failedRows, ...live, ...retryRows];
   // One stall definition, the watchdog's (grace window, live-claim heartbeat,
   // alert ceiling, eligibility) — the tab must never disagree with the bell.
   const stalledIds = new Set(computeStalledCalls(rows).map((r) => r.id));
@@ -186,7 +202,7 @@ async function laneCallProcessing() {
       href: '/admin/communications#tab=calls',
     };
   });
-  return finish(items, { truncated: hitCap(live) || hitCap(failedRows) });
+  return finish(items, { truncated: [...capped(failedRows, 'failed'), ...capped(live, 'parked', 'pending'), ...capped(retryRows, 'pending')] });
 }
 
 async function laneContentParks() {
@@ -250,7 +266,7 @@ async function laneEmailApprovals() {
       at: iso(r.status === 'failed' ? (r.updated_at || r.created_at) : r.created_at),
     };
   });
-  return finish(items, { truncated: hitCap(failedRows) || hitCap(openRows) });
+  return finish(items, { truncated: [...capped(failedRows, 'failed'), ...capped(openRows, 'parked', 'pending')] });
 }
 
 async function laneIbPendingActions() {
@@ -269,7 +285,7 @@ async function laneIbPendingActions() {
     detail: `awaiting confirmation on the card${r.context ? ` · ${r.context}` : ''} · expires ${iso(r.expires_at)}`,
     at: iso(r.created_at),
   }));
-  return finish(items, { truncated: hitCap(rows) });
+  return finish(items, { truncated: capped(rows, 'parked') });
 }
 
 async function laneReportDelivery() {
@@ -316,7 +332,13 @@ async function laneReportDelivery() {
       at: iso(r.failed_at || r.created_at),
     })),
   ];
-  return finish(items, { truncated: [dFailed, dClaimed, dQueued, pFailed, pClaimed, pQueued].some(hitCap) });
+  return finish(items, {
+    truncated: [
+      ...capped(dFailed, 'failed'), ...capped(pFailed, 'failed'),
+      ...capped(dClaimed, 'parked', 'pending'), ...capped(pClaimed, 'parked', 'pending'),
+      ...capped(dQueued, 'pending'), ...capped(pQueued, 'pending'),
+    ],
+  });
 }
 
 async function laneFollowUps() {
@@ -341,7 +363,7 @@ async function laneFollowUps() {
       href: '/admin/dispatch',
     };
   });
-  return finish(items, { truncated: hitCap(rows) });
+  return finish(items, { truncated: capped(rows, 'parked') });
 }
 
 async function laneAdminAlerts() {
@@ -365,7 +387,7 @@ async function laneAdminAlerts() {
     at: iso(r.last_seen_at || r.detected_at),
     href: r.href || null,
   }));
-  return finish(items, { truncated: hitCap(hot) || hitCap(rest) });
+  return finish(items, { truncated: [...capped(hot, 'failed'), ...capped(rest, 'parked')] });
 }
 
 const LANES = [
@@ -386,15 +408,17 @@ async function getOpsQueue() {
       return { key, label, error: null, ...r };
     } catch (err) {
       logger.warn(`[ops-queue] lane ${key} failed: ${err.message}`);
-      return { key, label, error: err.message, pending: 0, parked: 0, failed: 0, total: 0, truncated: false, items: [] };
+      return { key, label, error: err.message, pending: 0, parked: 0, failed: 0, total: 0, truncated: false, truncatedStatuses: [], items: [] };
     }
   }));
+  const truncatedStatuses = [...new Set(lanes.flatMap((l) => l.truncatedStatuses || []))];
   const totals = lanes.reduce((acc, l) => ({
     pending: acc.pending + l.pending,
     parked: acc.parked + l.parked,
     failed: acc.failed + l.failed,
-    truncated: acc.truncated || l.truncated === true,
-  }), { pending: 0, parked: 0, failed: 0, truncated: false });
+  }), { pending: 0, parked: 0, failed: 0 });
+  totals.truncated = truncatedStatuses.length > 0;
+  totals.truncatedStatuses = truncatedStatuses;
   return { generatedAt: new Date().toISOString(), totals, lanes };
 }
 

@@ -23,8 +23,11 @@ function statusTone(status) {
 }
 
 // Counts from a lane that hit its scan cap are a floor, shown as "200+".
-function count(n, truncated) {
-  return `${n}${truncated ? "+" : ""}`;
+// A count is a floor ("12+") only when a scan feeding THAT status hit its
+// cap; the other statuses in the same lane stay exact.
+function count(n, truncatedStatuses, status) {
+  const floor = status ? (truncatedStatuses || []).includes(status) : Boolean(truncatedStatuses);
+  return `${n}${floor ? "+" : ""}`;
 }
 
 function ago(iso) {
@@ -87,9 +90,9 @@ export default function AgentQueueTab({ embedded = false } = {}) {
     <div className={cn("flex flex-col gap-4", embedded ? "px-4 md:px-6 py-4" : "p-6")} aria-label="Ops queue">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="flex flex-wrap gap-3">
-          <StatTile label="Failed" value={count(totals.failed, totals.truncated)} tone="alert" />
-          <StatTile label="Parked" value={count(totals.parked, totals.truncated)} />
-          <StatTile label="Pending" value={count(totals.pending, totals.truncated)} />
+          <StatTile label="Failed" value={count(totals.failed, totals.truncatedStatuses, "failed")} tone="alert" />
+          <StatTile label="Parked" value={count(totals.parked, totals.truncatedStatuses, "parked")} />
+          <StatTile label="Pending" value={count(totals.pending, totals.truncatedStatuses, "pending")} />
         </div>
         <div className="flex items-center gap-3">
           {data?.generatedAt ? (
@@ -136,9 +139,9 @@ export default function AgentQueueTab({ embedded = false } = {}) {
                   ) : null}
                 </span>
                 <span className="flex flex-wrap items-center gap-2 shrink-0">
-                  {lane.failed > 0 ? <Badge tone="alert" dot>{count(lane.failed, lane.truncated)} failed</Badge> : null}
-                  {lane.parked > 0 ? <Badge tone="strong" dot>{count(lane.parked, lane.truncated)} parked</Badge> : null}
-                  {lane.pending > 0 ? <Badge tone="neutral" dot>{count(lane.pending, lane.truncated)} pending</Badge> : null}
+                  {lane.failed > 0 ? <Badge tone="alert" dot>{count(lane.failed, lane.truncatedStatuses, "failed")} failed</Badge> : null}
+                  {lane.parked > 0 ? <Badge tone="strong" dot>{count(lane.parked, lane.truncatedStatuses, "parked")} parked</Badge> : null}
+                  {lane.pending > 0 ? <Badge tone="neutral" dot>{count(lane.pending, lane.truncatedStatuses, "pending")} pending</Badge> : null}
                   <span aria-hidden className="text-13 text-ink-tertiary w-3 text-center">{open ? "▾" : "▸"}</span>
                 </span>
               </button>
