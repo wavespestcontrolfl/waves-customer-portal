@@ -138,6 +138,8 @@ describe('isTrustedZelleSender', () => {
       const header = `mx.google.com; dkim=none; spf=pass (google.com: domain of "${payload}"@evil.example designates 1.2.3.4 as permitted sender) smtp.mailfrom="${payload}"@evil.example`;
       expect(isTrustedZelleSender({ from_address: 'alerts@capitalone.com', authentication_results: header })).toBe(false);
     }
+    // An unbalanced comment is untrusted too.
+    expect(isTrustedZelleSender({ from_address: 'alerts@capitalone.com', authentication_results: 'mx.google.com; spf=pass (unterminated; dkim=pass header.i=@capitalone.com' })).toBe(false);
     // A genuine clause with a comment inside it still passes.
     const genuine = 'mx.google.com; dkim=pass (2048-bit key; unprotected) header.i=@notification.capitalone.com header.s=k1 header.b="ab;cd"; spf=pass smtp.mailfrom=gmail.com';
     expect(isTrustedZelleSender({ from_address: 'capitalone@notification.capitalone.com', authentication_results: genuine })).toBe(true);
