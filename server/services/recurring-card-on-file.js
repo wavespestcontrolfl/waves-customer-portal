@@ -418,8 +418,12 @@ async function verifyRecurringCardIntent({ estimate, setupIntentId }) {
   // RECURRING_CARD_REQUIRED and the client re-mints a card-only intent.
   const bankPossible = Array.isArray(setupIntent.payment_method_types)
     && setupIntent.payment_method_types.includes('us_bank_account');
+  // The captured tender rides the verification result so the accept
+  // transaction can re-judge a bank under its customer lock (Codex #3723
+  // r3 P1). Card-only intents can only hold a card.
+  let methodType = 'card';
   if (bankPossible) {
-    let methodType = typeof pm === 'string' ? null : pm.type;
+    methodType = typeof pm === 'string' ? null : pm.type;
     if (!methodType) {
       try {
         methodType = (await StripeService.retrievePaymentMethod(paymentMethodId))?.type || null;
@@ -438,7 +442,30 @@ async function verifyRecurringCardIntent({ estimate, setupIntentId }) {
     ok: true,
     paymentMethodId,
     setupIntentId: setupIntent.id,
+    methodType: methodType || 'unknown',
   };
+}
+
+// In-transaction re-judgement of a captured BANK tender against the customer
+// the accept actually landed on, under that customer's lock (Codex #3723 r3
+// P1): the pre-transaction verify judged a prospective customer, and the
+// ACH state (or the resolved customer itself, via a grouped sibling) can
+// move before commit. Returns true when the bank may proceed; a lookup
+// failure fails closed (false). Card tenders are always allowed.
+async function bankTenderAllowedUnderLock(trx, { customerId, methodType }) {
+  if (methodType === 'card') return true;
+  // Anything that is not provably a card (a bank, or an unresolved type on a
+  // bank-capable intent) is judged as a bank — fail closed.
+  if (methodType !== 'us_bank_account') return false;
+  if (require('../config/feature-gates').gates.acceptAchCapture !== true) return false;
+  if (!customerId) return false;
+  try {
+    const row = await trx('customers').where({ id: customerId }).first('ach_status');
+    return !(row?.ach_status && row.ach_status !== 'active');
+  } catch (err) {
+    logger.warn(`[recurring-cof] in-lock ach_status recheck failed for customer ${customerId} — refusing bank: ${err.message}`);
+    return false;
+  }
 }
 
 // Post-commit: attach the captured card + record consent + enroll in Auto Pay.
@@ -1336,6 +1363,7 @@ module.exports = {
   createRecurringCardSetupIntentForEstimate,
   resolveRecurringCaptureTender,
   verifyRecurringCardIntent,
+  bankTenderAllowedUnderLock,
   completeRecurringCardEnrollment,
   _private: {
     recurringCardIntentMatchesEstimate,

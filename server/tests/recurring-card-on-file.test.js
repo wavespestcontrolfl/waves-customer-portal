@@ -98,6 +98,7 @@ const {
   sweepStrandedPrepayAutoCharges,
   createRecurringCardSetupIntentForEstimate,
   verifyRecurringCardIntent,
+  bankTenderAllowedUnderLock,
   completeRecurringCardEnrollment,
   _private: { recurringCardIntentMatchesEstimate },
 } = require('../services/recurring-card-on-file');
@@ -452,7 +453,7 @@ describe('verifyRecurringCardIntent (trust boundary)', () => {
   it('accepts a live succeeded intent pinned to this estimate (string or expanded pm)', async () => {
     mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
     expect(await verifyRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' }))
-      .toEqual({ ok: true, paymentMethodId: 'pm_1', setupIntentId: 'seti_1' });
+      .toEqual({ ok: true, paymentMethodId: 'pm_1', setupIntentId: 'seti_1', methodType: 'card' });
     mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_SI, payment_method: { id: 'pm_9' } });
     expect((await verifyRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).paymentMethodId).toBe('pm_9');
   });
@@ -475,7 +476,7 @@ describe('verifyRecurringCardIntent (trust boundary)', () => {
       mockDbFixtures.customers = { ach_status: 'active' };
       mockRetrieveSetupIntent.mockResolvedValue({ ...BANK_SI, payment_method: { id: 'pm_b', type: 'us_bank_account' } });
       expect(await verifyRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' }))
-        .toEqual({ ok: true, paymentMethodId: 'pm_b', setupIntentId: 'seti_1' });
+        .toEqual({ ok: true, paymentMethodId: 'pm_b', setupIntentId: 'seti_1', methodType: 'us_bank_account' });
       expect(mockRetrievePaymentMethod).not.toHaveBeenCalled();
     });
 
@@ -513,6 +514,30 @@ describe('verifyRecurringCardIntent (trust boundary)', () => {
       mockRetrieveSetupIntent.mockResolvedValue({ ...BANK_SI, payment_method: 'pm_x' });
       mockRetrievePaymentMethod.mockRejectedValue(new Error('stripe down'));
       expect((await verifyRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).reason).toBe('verification_failed');
+    });
+
+    // In-transaction re-judgement (Codex #3723 r3 P1): the accept re-checks
+    // the bank against the customer it LANDED on, under that customer's lock.
+    describe('bankTenderAllowedUnderLock', () => {
+      const trxFor = (row, fail = false) => (() => ({ where: () => ({ first: async () => { if (fail) throw new Error('db down'); return row; } }) }));
+      it('always allows a card', async () => {
+        gates.acceptAchCapture = false;
+        expect(await bankTenderAllowedUnderLock(trxFor(null), { customerId: 'c1', methodType: 'card' })).toBe(true);
+      });
+      it('allows a bank only with the gate on and a healthy customer', async () => {
+        gates.acceptAchCapture = true;
+        expect(await bankTenderAllowedUnderLock(trxFor({ ach_status: null }), { customerId: 'c1', methodType: 'us_bank_account' })).toBe(true);
+        expect(await bankTenderAllowedUnderLock(trxFor({ ach_status: 'active' }), { customerId: 'c1', methodType: 'us_bank_account' })).toBe(true);
+        expect(await bankTenderAllowedUnderLock(trxFor({ ach_status: 'suspended' }), { customerId: 'c1', methodType: 'us_bank_account' })).toBe(false);
+        gates.acceptAchCapture = false;
+        expect(await bankTenderAllowedUnderLock(trxFor({ ach_status: 'active' }), { customerId: 'c1', methodType: 'us_bank_account' })).toBe(false);
+      });
+      it('fails closed on an unknown tender, a missing customer, or a lookup error', async () => {
+        gates.acceptAchCapture = true;
+        expect(await bankTenderAllowedUnderLock(trxFor({ ach_status: null }), { customerId: 'c1', methodType: 'unknown' })).toBe(false);
+        expect(await bankTenderAllowedUnderLock(trxFor({ ach_status: null }), { customerId: null, methodType: 'us_bank_account' })).toBe(false);
+        expect(await bankTenderAllowedUnderLock(trxFor(null, true), { customerId: 'c1', methodType: 'us_bank_account' })).toBe(false);
+      });
     });
   });
 });

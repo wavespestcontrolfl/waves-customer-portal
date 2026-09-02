@@ -10704,6 +10704,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
       }
 
+      // Bank tender re-judged UNDER THE CUSTOMER LOCK against the customer the
+      // accept actually landed on (Codex #3723 r3 P1): the pre-transaction
+      // verify judged a prospective match, and the ACH state — or the
+      // resolved customer itself — can move before commit. A refused bank
+      // aborts the accept the same way the pre-check does (402
+      // RECURRING_CARD_REQUIRED → the client re-mints card-only); nothing
+      // has been committed yet.
+      if (recurringCardVerification?.ok
+        && !(await RecurringCards.bankTenderAllowedUnderLock(trx, { customerId, methodType: recurringCardVerification.methodType }))) {
+        const err = new Error('Save a card for Auto Pay to confirm your recurring plan');
+        err.status = 402;
+        err.code = 'RECURRING_CARD_REQUIRED';
+        throw err;
+      }
+
       // Commercial identity for a ONE-TIME accept (codex #3594 r2 P1): the
       // one-time path below skips EstimateConverter entirely (`treatAsOneTime`),
       // so the converter's one-way commercial stamp never runs for a

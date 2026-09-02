@@ -4652,22 +4652,23 @@ async function handleSetupIntentSucceeded(setupIntent) {
     // estimate is a superseded capture (e.g. a bank intent the kill switch
     // refused, replaced by a card-only one) and must not enroll. Legacy
     // accepts without the stamp keep the pre-stamp behavior.
-    {
-      let estimateData = estimate.estimate_data;
-      if (typeof estimateData === 'string') {
-        try { estimateData = JSON.parse(estimateData); } catch { estimateData = null; }
-      }
-      const acceptedIntentId = estimateData?.acceptedRecurringCardSetupIntentId || null;
-      if (acceptedIntentId && acceptedIntentId !== setupIntent.id) {
-        logger.info(`[stripe-webhook] recurring card intent ${setupIntent.id} superseded by accepted ${acceptedIntentId} (estimate ${estimate.id}) — not enrolling`);
-        return;
-      }
+    let estimateData = estimate.estimate_data;
+    if (typeof estimateData === 'string') {
+      try { estimateData = JSON.parse(estimateData); } catch { estimateData = null; }
     }
-    // Re-apply the bank kill switch (GATE_ACCEPT_ACH_CAPTURE) at recovery:
-    // a bank method is enrolled only while the current tender policy still
-    // offers bank to this estimate's customer. A lookup failure on a
-    // bank-capable intent rethrows (retry), never enrolls.
-    if (Array.isArray(setupIntent.payment_method_types) && setupIntent.payment_method_types.includes('us_bank_account')) {
+    const acceptedIntentId = estimateData?.acceptedRecurringCardSetupIntentId || null;
+    if (acceptedIntentId && acceptedIntentId !== setupIntent.id) {
+      logger.info(`[stripe-webhook] recurring card intent ${setupIntent.id} superseded by accepted ${acceptedIntentId} (estimate ${estimate.id}) — not enrolling`);
+      return;
+    }
+    // The intent the accept COMMITTED with was judged under the customer
+    // lock at accept time — recovery honors that decision (a gate flip after
+    // a committed bank accept must not strand the plan without Auto Pay;
+    // pre-push Codex P0). Only a LEGACY accept with no stamp re-applies the
+    // bank policy here, and a refusal bells the office instead of dropping
+    // silently. A lookup failure on a bank-capable intent rethrows (retry).
+    const boundToAccept = !!acceptedIntentId && acceptedIntentId === setupIntent.id;
+    if (!boundToAccept && Array.isArray(setupIntent.payment_method_types) && setupIntent.payment_method_types.includes('us_bank_account')) {
       const pmRef = setupIntent.payment_method;
       let pmType = typeof pmRef === 'object' && pmRef?.type ? pmRef.type : null;
       if (!pmType) {
@@ -4678,7 +4679,17 @@ async function handleSetupIntentSucceeded(setupIntent) {
         }
       }
       if (pmType !== 'card' && (await RecurringCards.resolveRecurringCaptureTender(estimate)) !== 'card_or_bank') {
-        logger.info(`[stripe-webhook] recurring bank intent ${setupIntent.id} refused at recovery — tender no longer offered (estimate ${estimate.id})`);
+        logger.warn(`[stripe-webhook] recurring bank intent ${setupIntent.id} refused at recovery — tender no longer offered (estimate ${estimate.id}); office alerted`);
+        try {
+          await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'Auto Pay bank enrollment refused at recovery',
+            'An accepted recurring plan captured a bank account, but bank capture is no longer offered for this customer — Auto Pay was NOT enrolled. Add a card or re-enable bank capture, then re-enroll from the customer page.',
+            { link: `/admin/customers/${estimate.customer_id}`, metadata: { estimateId: estimate.id, setupIntentId: setupIntent.id } },
+          );
+        } catch (alertErr) {
+          logger.warn(`[stripe-webhook] recovery refusal alert failed: ${alertErr.message}`);
+        }
         return;
       }
     }
