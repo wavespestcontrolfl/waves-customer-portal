@@ -440,8 +440,9 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
                     {r.recording_duration_seconds != null ? `${r.recording_duration_seconds}s` : "unknown length"}
                     {r.received_at ? ` · received ${fmtWhen(r.received_at)}` : ""}
                     {r.parked_because ? ` · ${humanize(r.parked_because)}` : ""}
+                    {r.quarantined_at ? (r.delete_pending ? " · quarantined, delete pending" : " · quarantined, audio deleted") : ""}
                   </span>
-                  {isAdmin && (
+                  {isAdmin && !r.quarantined_at && (
                     <Button
                       size="sm"
                       variant="secondary"

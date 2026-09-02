@@ -444,6 +444,19 @@ function scrubStructuredTranscript(json) {
 // idempotent: a failed Twilio delete still strips local references, and the
 // office gets a heads-up either way (a quarantined recording is an
 // exception a human should know about, never a silent event).
+// SIDs parked in metadata.additional_recordings whose Twilio delete is still
+// owed (quarantineCardRecording tombstoned them with delete_pending).
+function parkedDeletesPending(metadata) {
+  try {
+    const meta = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
+    return (Array.isArray(meta.additional_recordings) ? meta.additional_recordings : [])
+      .filter((e) => e && e.delete_pending === true && e.recording_sid)
+      .map((e) => e.recording_sid);
+  } catch {
+    return [];
+  }
+}
+
 async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {}) {
   if (!call?.id) return { quarantined: false };
   const recordingUrl = call.recording_url || null;
@@ -459,7 +472,12 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
         twilioDeleted = true;
       }
     } catch (err) {
-      logger.error(`[call-proc] PAN quarantine: Twilio recording delete failed for ${maskSid(sid)}: ${err.message}`);
+      // Already gone at Twilio is a complete delete, not one to retry forever.
+      if (err?.status === 404 || err?.code === 20404) {
+        twilioDeleted = true;
+      } else {
+        logger.error(`[call-proc] PAN quarantine: Twilio recording delete failed for ${maskSid(sid)}: ${err.message}`);
+      }
     }
   }
   let alreadyQuarantined = false;
@@ -480,22 +498,50 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
     // stamping it in this update meant a failed/interrupted notifyAdmin
     // was never retried and the office never heard about the quarantine).
     alreadyQuarantined = meta.pan_notified === true;
+    // A delete that did not happen (Twilio error, or no client) leaves THIS
+    // SID owed: recording_quarantined goes FALSE even when an earlier
+    // recording on the call was deleted — a parked recording's failed delete
+    // on an already-quarantined call was otherwise never retried — and the
+    // SID is saved for recovery's incomplete-quarantine retry (round-13
+    // P1). A delete that succeeded clears a matching saved SID.
+    const deleteIncomplete = !!sid && !twilioDeleted;
+    const nextMeta = {
+      ...meta,
+      pan_detected: true,
+      recording_quarantined: deleteIncomplete ? false : (twilioDeleted || meta.recording_quarantined === true),
+      quarantine_source: meta.quarantine_source || source,
+      ...(deleteIncomplete ? { quarantine_recording_sid: sid } : {}),
+    };
+    if (twilioDeleted && nextMeta.quarantine_recording_sid === sid) delete nextMeta.quarantine_recording_sid;
     await db('call_log').where({ id: call.id }).update({
       recording_url: null,
-      transcription_metadata: JSON.stringify({
-        ...meta,
-        pan_detected: true,
-        recording_quarantined: twilioDeleted || meta.recording_quarantined === true,
-        quarantine_source: meta.quarantine_source || source,
-        // A failed Twilio delete must not lose the only SID a later retry
-        // needs — recovery's incomplete-quarantine retry reads it back
-        // (round-13 P1). Cleared-URL rows otherwise have nothing to retry.
-        ...(sid && !twilioDeleted ? { quarantine_recording_sid: sid } : {}),
-      }),
+      transcription_metadata: JSON.stringify(nextMeta),
       updated_at: new Date(),
     });
   } catch (err) {
     logger.error(`[call-proc] PAN quarantine: call_log strip failed for call ${call.id}: ${err.message}`);
+  }
+  // The same SID parked in metadata.additional_recordings loses its URL NOW
+  // — the intelligence panel and adopt-recording never see playable card
+  // audio, whatever Twilio answered — and carries delete_pending while the
+  // delete is still owed, which the recovery sweep reads to retry it.
+  if (sid) {
+    try {
+      await db('call_log')
+        .where({ id: call.id })
+        .whereRaw("COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> ?::jsonb", [JSON.stringify([{ recording_sid: sid }])])
+        .update({
+          metadata: db.raw(
+            "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}',"
+            + " (SELECT COALESCE(jsonb_agg(CASE WHEN e ->> 'recording_sid' = ? THEN e || ?::jsonb ELSE e END), '[]'::jsonb)"
+            + " FROM jsonb_array_elements(COALESCE(metadata -> 'additional_recordings', '[]'::jsonb)) e), true)",
+            [sid, JSON.stringify({ recording_url: null, quarantined_at: new Date().toISOString(), delete_pending: !twilioDeleted })],
+          ),
+          updated_at: new Date(),
+        });
+    } catch (err) {
+      logger.error(`[call-proc] PAN quarantine: parked-entry strip failed for call ${call.id}: ${err.message}`);
+    }
   }
   // Clear the recording media already synced onto the unified voice message
   // — recording_url null keeps the helper from re-adding it, and the
@@ -15547,10 +15593,18 @@ const CallRecordingProcessor = {
         // but the office ALERT never delivered (pan_notified missing,
         // round-18 P2): quarantineCardRecording is idempotent on the strip
         // and re-sends the alert via the pan_notified guard.
-        if ((meta.recording_quarantined !== true && (retrySid || call.recording_url))
-          || meta.pan_notified !== true) {
+        const primaryOwed = (meta.recording_quarantined !== true && (retrySid || call.recording_url))
+          || meta.pan_notified !== true;
+        // Parked recordings whose delete is still owed (a multi-recording
+        // call can have more than one): each is its own retry.
+        const pendingParked = parkedDeletesPending(call.metadata);
+        if (primaryOwed || pendingParked.length) {
           try {
-            await quarantineCardRecording({ ...call, recording_sid: retrySid }, { source: 'recovery_quarantine_retry' });
+            if (primaryOwed) await quarantineCardRecording({ ...call, recording_sid: retrySid }, { source: 'recovery_quarantine_retry' });
+            for (const parkedSid of pendingParked) {
+              if (primaryOwed && parkedSid === retrySid) continue;
+              await quarantineCardRecording({ ...call, recording_sid: parkedSid, recording_url: null }, { source: 'recovery_quarantine_retry' });
+            }
           } catch (qErr) {
             logger.warn(`[call-proc] recovery quarantine retry failed for ${maskSid(callSid)}: ${qErr.message}`);
           }
@@ -15685,7 +15739,9 @@ const CallRecordingProcessor = {
         .whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
         // Incomplete delete OR undelivered office alert (round-18 P2) —
         // both are quarantine work the retry path finishes.
-        .whereRaw("(COALESCE(transcription_metadata::jsonb ->> 'recording_quarantined', 'false') <> 'true' OR COALESCE(transcription_metadata::jsonb ->> 'pan_notified', 'false') <> 'true')")
+        .whereRaw("(COALESCE(transcription_metadata::jsonb ->> 'recording_quarantined', 'false') <> 'true' OR COALESCE(transcription_metadata::jsonb ->> 'pan_notified', 'false') <> 'true'"
+          // A parked recording whose Twilio delete failed is owed too.
+          + " OR COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> '[{\"delete_pending\": true}]'::jsonb)")
         .orderBy('created_at', 'desc')
         .limit(10);
     } catch (qErr) {

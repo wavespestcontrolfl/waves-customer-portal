@@ -368,15 +368,36 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     const parked = Array.isArray(meta.additional_recordings) ? meta.additional_recordings : [];
     const chosen = parked.find((r) => r && r.recording_sid === wanted);
     if (!chosen) return res.status(404).json({ error: 'That recording is not parked on this call' });
+    // Every parked recording on a quarantined call goes, not only the one
+    // being adopted: the invariant is that the call keeps no audio. Each
+    // delete tombstones its entry in the parked list (URL gone now;
+    // delete_pending while a failed Twilio delete is owed to the recovery
+    // sweep), so a swallowed failure can never leave card audio reachable.
     const quarantineParked = async () => {
-      await CallRecordingProcessor.quarantineCardRecording(
-        { ...call, recording_sid: chosen.recording_sid, recording_url: chosen.recording_url },
-        { source: 'adopt_recording_post_quarantine' },
-      ).catch((e) => logger.error(`[call-recordings] parked recording quarantine delete failed for ${maskSid(chosen.recording_sid)}: ${e.message}`));
+      const outcome = { deleted: 0, delete_pending: 0 };
+      for (const entry of parked) {
+        if (!entry?.recording_sid) continue;
+        if (entry.recording_url == null && entry.delete_pending !== true) continue;
+        const q = await CallRecordingProcessor.quarantineCardRecording(
+          { ...call, recording_sid: entry.recording_sid, recording_url: entry.recording_url || null },
+          { source: 'adopt_recording_post_quarantine' },
+        ).catch((e) => {
+          logger.error(`[call-recordings] parked recording quarantine delete failed for ${maskSid(entry.recording_sid)}: ${e.message}`);
+          return { twilioDeleted: false };
+        });
+        if (q?.twilioDeleted) outcome.deleted += 1; else outcome.delete_pending += 1;
+      }
+      return outcome;
     };
+    const quarantinedResponse = (res, outcome, prefix) => res.status(409).json({
+      error: outcome.delete_pending
+        ? `${prefix} Its parked audio is no longer reachable here; a Twilio delete that did not complete is retried by the recovery sweep.`
+        : `${prefix} Its parked audio has been deleted.`,
+      reason: 'pan_quarantined',
+      ...outcome,
+    });
     if (panQuarantined) {
-      await quarantineParked();
-      return res.status(409).json({ error: 'This call is PAN-quarantined; recordings are deleted, never re-attached.', reason: 'pan_quarantined' });
+      return quarantinedResponse(res, await quarantineParked(), 'This call is PAN-quarantined; recordings are never re-attached.');
     }
     const remaining = parked.filter((r) => r.recording_sid !== wanted);
     if (call.recording_sid) {
@@ -432,8 +453,7 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         racedQuarantine = String(meta?.pan_detected) === 'true';
       } catch { racedQuarantine = false; }
       if (racedQuarantine) {
-        await quarantineParked();
-        return res.status(409).json({ error: 'This call was PAN-quarantined while the swap was being made; recordings are deleted, never re-attached.', reason: 'pan_quarantined' });
+        return quarantinedResponse(res, await quarantineParked(), 'This call was PAN-quarantined while the swap was being made; recordings are never re-attached.');
       }
       return res.status(409).json({ error: 'This call changed while the swap was being made (a pass claimed it, or its recordings changed). Reload and try again.', reason: 'call_changed' });
     }

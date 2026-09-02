@@ -10,6 +10,7 @@ jest.mock('../models/db', () => {
   builder.where = jest.fn(() => builder);
   builder.whereNull = jest.fn(() => builder);
   builder.orWhere = jest.fn(() => builder);
+  builder.whereRaw = jest.fn(() => builder);
   builder.first = jest.fn(async () => state.call);
   builder.update = jest.fn(async () => 1);
   const db = jest.fn(() => builder);
@@ -84,6 +85,69 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     // The retry ran the REAL quarantine and targeted the SAVED quarantine
     // SID (the delete that failed), not the row's older recording_sid.
     expect(recordingsSpy).toHaveBeenCalledWith('REfresh0000000000000000000000000');
+  });
+
+  test('a failed Twilio delete leaves the quarantine INCOMPLETE — recording_quarantined false, the SID saved, the parked entry tombstoned without its URL', async () => {
+    const processor = require('../services/call-recording-processor');
+    const recordingsSpy = require('twilio').__recordingsSpy;
+    const PARKED = 'REparked000000000000000000000001';
+    recordingsSpy.mockImplementationOnce(() => ({ remove: async () => { throw Object.assign(new Error('twilio 503'), { status: 503 }); } }));
+    db.__builder.update.mockClear();
+    db.raw.mockClear();
+    // An already-quarantined call (its first recording deleted, office told)
+    // with a parked second recording whose delete now fails.
+    db.__state.call = {
+      id: 'c-parked', recording_url: null, recording_sid: 'REmain0000000000000000000000001',
+      metadata: { additional_recordings: [{ recording_sid: PARKED, recording_url: 'https://api.twilio.com/p.mp3' }] },
+      transcription_metadata: { pan_detected: true, recording_quarantined: true, pan_notified: true },
+    };
+    const out = await processor.quarantineCardRecording({ ...db.__state.call, recording_sid: PARKED, recording_url: 'https://api.twilio.com/p.mp3' }, { source: 'adopt_recording_post_quarantine' });
+    expect(out).toMatchObject({ quarantined: true, twilioDeleted: false });
+    const stamp = db.__builder.update.mock.calls.map((c) => c[0]).find((patch) => patch.transcription_metadata);
+    expect(JSON.parse(stamp.transcription_metadata)).toMatchObject({ pan_detected: true, recording_quarantined: false, quarantine_recording_sid: PARKED, pan_notified: true });
+    // The parked entry is rewritten in place: URL gone, delete still owed.
+    const tomb = db.raw.mock.calls.find(([sql]) => String(sql).includes("'{additional_recordings}'"));
+    expect(tomb).toBeDefined();
+    expect(tomb[1][0]).toBe(PARKED);
+    expect(JSON.parse(tomb[1][1])).toMatchObject({ recording_url: null, delete_pending: true });
+  });
+
+  test('a recording already gone at Twilio (404) counts as deleted — never a retry loop', async () => {
+    const processor = require('../services/call-recording-processor');
+    const recordingsSpy = require('twilio').__recordingsSpy;
+    const PARKED = 'REparked000000000000000000000002';
+    recordingsSpy.mockImplementationOnce(() => ({ remove: async () => { throw Object.assign(new Error('not found'), { status: 404, code: 20404 }); } }));
+    db.__builder.update.mockClear();
+    db.raw.mockClear();
+    db.__state.call = {
+      id: 'c-parked-404', recording_url: null, recording_sid: 'REmain0000000000000000000000002',
+      metadata: { additional_recordings: [{ recording_sid: PARKED, recording_url: null, delete_pending: true }] },
+      transcription_metadata: { pan_detected: true, recording_quarantined: false, quarantine_recording_sid: PARKED, pan_notified: true },
+    };
+    const out = await processor.quarantineCardRecording({ ...db.__state.call, recording_sid: PARKED }, { source: 'recovery_quarantine_retry' });
+    expect(out.twilioDeleted).toBe(true);
+    const stamp = db.__builder.update.mock.calls.map((c) => c[0]).find((patch) => patch.transcription_metadata);
+    const meta = JSON.parse(stamp.transcription_metadata);
+    expect(meta.recording_quarantined).toBe(true);
+    expect(meta.quarantine_recording_sid).toBeUndefined();
+    const tomb = db.raw.mock.calls.find(([sql]) => String(sql).includes("'{additional_recordings}'"));
+    expect(JSON.parse(tomb[1][1])).toMatchObject({ recording_url: null, delete_pending: false });
+  });
+
+  test('recovery retries a parked delete still owed even when the primary quarantine is complete', async () => {
+    const processor = require('../services/call-recording-processor');
+    const recordingsSpy = require('twilio').__recordingsSpy;
+    recordingsSpy.mockClear();
+    const PARKED = 'REparked000000000000000000000003';
+    db.__state.call = {
+      id: 'c-parked-retry', recording_url: null, recording_sid: 'REmain0000000000000000000000003',
+      metadata: { additional_recordings: [{ recording_sid: PARKED, recording_url: null, delete_pending: true }] },
+      transcription_metadata: { pan_detected: true, recording_quarantined: true, pan_notified: true },
+    };
+    const out = await processor.recoverRecordingForCall('CAtest0000000000000000000000000009');
+    expect(out).toMatchObject({ skipped: true, reason: 'pan_quarantined' });
+    expect(recordingsSpy).toHaveBeenCalledWith(PARKED);
+    expect(recordingsSpy).not.toHaveBeenCalledWith('REmain0000000000000000000000003');
   });
 
   test('an unstamped call still proceeds into the Twilio lookup', async () => {

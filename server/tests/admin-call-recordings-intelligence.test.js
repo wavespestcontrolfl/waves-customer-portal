@@ -337,16 +337,33 @@ describe('POST /calls/:id/adopt-recording', () => {
     }
   });
 
-  test('a PAN-quarantined call never gets a parked recording re-attached: the audio is deleted at Twilio and the swap is refused', async () => {
-    const updates = mockDb([{ ...call(), transcription_metadata: JSON.stringify({ pan_detected: true }) }]);
+  test('a PAN-quarantined call never gets a parked recording re-attached: every parked recording is deleted at Twilio and the swap is refused', async () => {
+    const OTHER = 'RE' + '3'.repeat(32);
+    const row = { ...call(), transcription_metadata: JSON.stringify({ pan_detected: true }) };
+    row.metadata.additional_recordings.push({ recording_sid: OTHER, recording_url: 'https://api.twilio.com/x/RE3.mp3', parked_because: 'write_contended' });
+    const updates = mockDb([row]);
+    processor.quarantineCardRecording.mockResolvedValue({ quarantined: true, twilioDeleted: true });
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
       expect(res.status).toBe(409);
-      expect((await res.json()).reason).toBe('pan_quarantined');
+      expect(await res.json()).toMatchObject({ reason: 'pan_quarantined', deleted: 2, delete_pending: 0 });
     });
     expect(updates.find((u) => u.table === 'call_log')).toBeUndefined();
     expect(processor.quarantineCardRecording).toHaveBeenCalledWith(expect.objectContaining({ recording_sid: PARKED }), { source: 'adopt_recording_post_quarantine' });
+    expect(processor.quarantineCardRecording).toHaveBeenCalledWith(expect.objectContaining({ recording_sid: OTHER }), { source: 'adopt_recording_post_quarantine' });
     expect(processor.processRecording).not.toHaveBeenCalled();
+  });
+
+  test('a parked delete that fails at Twilio is reported as still pending, never as deleted', async () => {
+    mockDb([{ ...call(), transcription_metadata: JSON.stringify({ pan_detected: true }) }]);
+    processor.quarantineCardRecording.mockResolvedValue({ quarantined: true, twilioDeleted: false });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ reason: 'pan_quarantined', deleted: 0, delete_pending: 1 });
+      expect(body.error).toMatch(/retried by the recovery sweep/);
+    });
   });
 
   test('the swap itself carries the quarantine predicate, so a stamp landing after the read refuses it', async () => {
