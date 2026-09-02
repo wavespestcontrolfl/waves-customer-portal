@@ -475,6 +475,14 @@ describe('loadAutopaySetupPageData — state machine', () => {
     expect(persist.calls.find((x) => x[0] === 'where')[1]).toEqual({ id: 'req-1', status: 'pending' });
   });
 
+  it('retires the request when every SetupIntent generation is terminal, so a fresh link can mint', async () => {
+    mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_dead', setupIntentId: 'seti_dead', paymentMethodTypes: ['card'], status: 'canceled' });
+    expect((await loadAutopaySetupPageData({ ...PENDING })).state).toBe('unavailable');
+    expect(mockCreateSetupIntent).toHaveBeenCalledTimes(5);
+    const calls = touches('appointment_card_requests').flatMap((c) => c.calls);
+    expect(calls.find((c) => c[0] === 'update')[1]).toEqual(expect.objectContaining({ status: 'expired' }));
+  });
+
   it('renders unavailable (not closed) when Stripe cannot mint', async () => {
     mockCreateSetupIntent.mockRejectedValue(new Error('stripe down'));
     expect((await loadAutopaySetupPageData({ ...PENDING })).state).toBe('unavailable');
@@ -654,15 +662,29 @@ describe('completion tail (page POST + webhook)', () => {
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 
-  it('a refused enrollment reverts the claim, alerts the office, and stays retryable', async () => {
+  it('a transient enrollment failure reverts the claim, alerts the office, and stays retryable', async () => {
     mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
     mockTableHandlers.payment_methods = { first: () => null };
-    mockEnrollConsentedMethod.mockResolvedValue({ enrolled: false, reason: 'ach_blocked' });
+    mockEnrollConsentedMethod.mockResolvedValue({ enrolled: false, reason: 'customer_not_found' });
     const r = await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
     expect(r.code).toBe('completion_failed');
     expect(mockNotifyAdmin).toHaveBeenCalled();
     const updates = touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'update').map((c) => c[1]);
     expect(updates[updates.length - 1]).toEqual(expect.objectContaining({ status: 'pending' }));
+  });
+
+  it('policy refusals under the enrollment lock are permanent: payer_billed → no_longer_needed, ach_blocked → bank_not_allowed, link retired', async () => {
+    for (const [reason, code] of [['payer_billed', 'no_longer_needed'], ['ach_blocked', 'bank_not_allowed']]) {
+      mockDbTouches = [];
+      mockNotifyAdmin.mockClear();
+      mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
+      mockTableHandlers.payment_methods = { first: () => null };
+      mockEnrollConsentedMethod.mockResolvedValue({ enrolled: false, reason });
+      expect((await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).code).toBe(code);
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+      const updates = touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'update').map((c) => c[1]);
+      expect(updates[updates.length - 1]).toEqual(expect.objectContaining({ status: 'expired' }));
+    }
   });
 
   it('refuses to complete an EXPIRED link on both the page POST and the webhook (nothing saved, nothing enrolled)', async () => {

@@ -356,6 +356,14 @@ export default function SecureAppointmentPage() {
         setError('Please choose how you’d like to pay, then save your card.');
         return;
       }
+      // Bank no longer offered (gate off / ACH state changed after the form
+      // loaded): re-pull so the server mints the card-only generation — a
+      // retry on the same succeeded bank intent can only refuse again.
+      if (err?.code === 'bank_not_allowed') {
+        await refresh();
+        setError('Bank accounts aren’t available right now — please use a card.');
+        return;
+      }
       setError('We could not finish saving your card. Please try again, or text us and we’ll help.');
     } finally {
       setBusy(false);

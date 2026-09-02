@@ -381,7 +381,14 @@ async function mintOrReplaySetupIntent(request) {
     }
     return { ...minted, capturedMethodType: null };
   }
-  logger.error(`[autopay-setup-link] exhausted SetupIntent generations for request ${request.id} — all replays terminal`);
+  // Every deterministic generation is terminal at Stripe: this row can never
+  // mint a usable intent again, and the partial unique would keep blocking a
+  // replacement until expiry (GH Codex P2) — retire it so the office can
+  // mint a fresh link.
+  logger.error(`[autopay-setup-link] exhausted SetupIntent generations for request ${request.id} — retiring the link`);
+  await db('appointment_card_requests')
+    .where({ id: request.id, status: 'pending' })
+    .update({ status: 'expired', updated_at: new Date() });
   return null;
 }
 const MAX_SETUP_INTENT_GENERATIONS = 5;
@@ -715,12 +722,23 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
     if (enrollment?.enrolled && deferredEnrollmentEmail) {
       try { deferredEnrollmentEmail(); } catch { /* best-effort */ }
     }
-    if (!enrollment.enrolled && (enrollment.reason === 'lane_changed' || enrollment.reason === 'autopay_paused')) {
+    // Policy refusals under the enrollment lock are PERMANENT (GH Codex
+    // P2): a payer assignment / lane move / pause / ACH suspension that
+    // committed between the unlocked prechecks and the lock cannot be
+    // retried into success — retire the link and report the matching
+    // permanent code instead of a retry loop with repeated alerts.
+    const permanentUnderLock = {
+      lane_changed: 'no_longer_needed',
+      autopay_paused: 'no_longer_needed',
+      payer_billed: 'no_longer_needed',
+      ach_blocked: 'bank_not_allowed',
+    };
+    if (!enrollment.enrolled && permanentUnderLock[enrollment.reason]) {
       logger.info(`[autopay-setup-link] ${enrollment.reason} under the lock for customer ${request.customer_id} — retiring request ${request.id}`);
       await db('appointment_card_requests')
         .where({ id: request.id, status: 'completing', updated_at: claimStamp })
         .update({ status: 'expired', updated_at: new Date() });
-      return { ok: false, code: 'no_longer_needed' };
+      return { ok: false, code: permanentUnderLock[enrollment.reason] };
     }
     if (!enrollment.enrolled && enrollment.reason === 'opted_out_after_authorization') {
       // PERMANENT (pre-push Codex P1): the customer turned Auto Pay off
