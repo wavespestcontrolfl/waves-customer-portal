@@ -2293,8 +2293,7 @@ function revisionGroupLockIds(row, writeFields) {
 // them — the same verdict the send claims apply, mirrored here because the
 // join itself publishes them (GH codex P1 r10).
 async function assertLiveRowMayJoinGroup(trx, row, writeFields) {
-  const { isProposalAuthoredByEditor } = require('./estimate-proposal');
-  const { applyLinkVisibleSiblingScope } = require('./pricing-authority-gate');
+  const { applyLinkVisibleSiblingScope, rowPassesGatedSendAuthority } = require('./pricing-authority-gate');
   for (const groupId of liveGroupMoveDestinationIds(row, writeFields)) {
     // The siblings the joined link will actually render — the shared
     // link-visible scope (uncapped codex P1 r19), terminal rows included.
@@ -2304,10 +2303,8 @@ async function assertLiveRowMayJoinGroup(trx, row, writeFields) {
         .whereNot({ id: row?.id }),
     ).select('id', 'pricing_authority', 'estimate_data');
     for (const sibling of siblings) {
-      if (String(sibling.pricing_authority || '').toUpperCase() === 'SERVER') continue;
-      let data = sibling.estimate_data;
-      if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
-      if (isProposalAuthoredByEditor(data?.proposal)) continue;
+      // The ONE shared row verdict (uncapped codex P1 r21).
+      if (rowPassesGatedSendAuthority(sibling)) continue;
       throw errorWithStatus(
         'That multi-property group has a property without an engine-verified price — re-save it from the estimate tool before moving this estimate into the group (the group link shows every property together). Nothing was saved.',
         409,

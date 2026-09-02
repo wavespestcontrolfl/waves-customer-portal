@@ -306,6 +306,7 @@ const {
   SERVER_PRICING_AUTHORITY_SQL,
   GATED_SEND_AUTHORITY_SQL,
   gatedSendAuthorityPredicateApplies,
+  rowPassesGatedSendAuthority,
   applyLinkVisibleSiblingScope,
 } = require('../services/pricing-authority-gate');
 // The gated MANUAL claims (immediate, scheduled, grouped anchor + siblings)
@@ -387,15 +388,21 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
   const siblings = await query.select('id', 'status', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
     const authority = String(sibling.pricing_authority || '').toUpperCase();
-    if (authority === 'SERVER') continue;
-    if (autoSend) return { sibling, statusCode: 422, code: 'PRICING_AUTHORITY_NOT_SERVER' };
-    if (sendRequiresServerPricingFor(sibling)) {
-      return {
-        sibling,
-        statusCode: 409,
-        code: authority === 'CLIENT_FALLBACK' ? 'CLIENT_FALLBACK_PRICING' : 'PRICING_AUTHORITY_NOT_SERVER',
-      };
+    // Automation: the explicit SERVER stamp only. Manual sends: the ONE
+    // shared row verdict — SERVER, a genuinely locked accepted price, or an
+    // editor-authored proposal (uncapped codex P1 r21: a re-implemented
+    // SERVER-or-proposal check blocked every group holding a legitimately
+    // accepted property).
+    if (autoSend) {
+      if (authority === 'SERVER') continue;
+      return { sibling, statusCode: 422, code: 'PRICING_AUTHORITY_NOT_SERVER' };
     }
+    if (!gatedSendAuthorityPredicateApplies() || rowPassesGatedSendAuthority(sibling)) continue;
+    return {
+      sibling,
+      statusCode: 409,
+      code: authority === 'CLIENT_FALLBACK' ? 'CLIENT_FALLBACK_PRICING' : 'PRICING_AUTHORITY_NOT_SERVER',
+    };
   }
   return null;
 }

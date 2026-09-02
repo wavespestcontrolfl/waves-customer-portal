@@ -349,6 +349,7 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
       orWhere: (c) => { if (typeof c === 'function') c(builder); return builder; },
       whereNot: (c) => { calls.whereNots.push(c); return builder; },
       whereNull: (c) => { calls.whereNulls.push(c); return builder; },
+      whereRaw: () => builder,
       whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return builder; },
       orWhereIn: (col, vals) => { calls.orWhereIns.push([col, vals]); return builder; },
       select: async () => rows,
@@ -408,6 +409,13 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
       .toMatchObject({ statusCode: 422, code: 'PRICING_AUTHORITY_NOT_SERVER' });
   });
 
+  test('gate on: an ACCEPTED (locked) sibling passes a manual send but never automation (uncapped codex P1 r21)', async () => {
+    const lockedAccepted = { id: 'est-sib-locked', status: 'accepted', pricing_authority: 'LOCKED', price_locked_at: '2026-07-10T11:59:00Z', estimate_data: '{}' };
+    expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([lockedAccepted]).database })).toBeNull();
+    expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([lockedAccepted]).database, autoSend: true }))
+      .toMatchObject({ statusCode: 422, code: 'PRICING_AUTHORITY_NOT_SERVER' });
+  });
+
   test('gate on: SERVER siblings pass, and an authored-proposal sibling keeps the manual-send exemption', async () => {
     const server = { id: 'est-sib-ok', status: 'draft', pricing_authority: 'SERVER', estimate_data: '{}' };
     expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([server]).database })).toBeNull();
@@ -448,7 +456,7 @@ describe('pricing-authority-gate — group-aware verdict (GH codex P1 r14)', () 
     const chain = {
       where: (c) => { if (typeof c === 'function') { calls.whereFns += 1; c(chain); } return chain; },
       orWhere: (c) => { if (typeof c === 'function') c(chain); return chain; },
-      whereNot: () => chain, whereNull: () => chain,
+      whereNot: () => chain, whereNull: () => chain, whereRaw: () => chain,
       whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return chain; },
       orWhereIn: (col, vals) => { calls.orWhereIns.push([col, vals]); return chain; },
       select: async () => { if (throwOnRead) throw new Error('db down'); return siblings; },
@@ -492,11 +500,13 @@ describe('pricing-authority-gate — group-aware verdict (GH codex P1 r14)', () 
 
 describe('pricing-authority-gate — LOCKED passes only on the durable at-lock marker (uncapped codex P1 r20)', () => {
   const gate = require('../services/pricing-authority-gate');
-  test('an accepted engine-priced row passes; an accepted fallback row, or a row locked before the marker existed, fails closed — SQL mirrors it', () => {
+  test('a genuinely locked accepted price is authoritative (price_locked_at set, or status accepted); the at-lock marker is the tie-breaker; a bare LOCKED stamp with none of them fails closed — SQL mirrors it', () => {
+    expect(gate.rowPassesGatedSendAuthority({ pricing_authority: 'LOCKED', price_locked_at: '2026-07-10T11:59:00Z', estimate_data: '{}' })).toBe(true);
+    expect(gate.rowPassesGatedSendAuthority({ pricing_authority: 'LOCKED', status: 'accepted', estimate_data: '{}' })).toBe(true);
     expect(gate.rowPassesGatedSendAuthority({ pricing_authority: 'LOCKED', estimate_data: JSON.stringify({ pricingAuthorityAtLock: 'SERVER' }) })).toBe(true);
     expect(gate.rowPassesGatedSendAuthority({ pricing_authority: 'LOCKED', estimate_data: { pricingAuthorityAtLock: 'CLIENT_FALLBACK' } })).toBe(false);
     expect(gate.rowPassesGatedSendAuthority({ pricing_authority: 'LOCKED', estimate_data: '{}' })).toBe(false);
     expect(gate.PRICING_AUTHORITY_AT_LOCK_KEY).toBe('pricingAuthorityAtLock');
-    expect(gate.GATED_SEND_AUTHORITY_SQL).toContain("UPPER(pricing_authority) = 'LOCKED' AND estimate_data->>'pricingAuthorityAtLock' = 'SERVER'");
+    expect(gate.GATED_SEND_AUTHORITY_SQL).toContain("UPPER(pricing_authority) = 'LOCKED' AND (price_locked_at IS NOT NULL OR status = 'accepted' OR estimate_data->>'pricingAuthorityAtLock' = 'SERVER')");
   });
 });

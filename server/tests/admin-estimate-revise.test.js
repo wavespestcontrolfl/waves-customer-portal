@@ -1165,7 +1165,7 @@ describe('a LIVE row moving into a group has the destination judged and locked, 
     const chain = {
       where: (c) => { if (typeof c === 'function') c(chain); return chain; },
       orWhere: (c) => { if (typeof c === 'function') c(chain); return chain; },
-      whereNot: () => chain, whereNull: () => chain,
+      whereNot: () => chain, whereNull: () => chain, whereRaw: () => chain,
       whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return chain; },
       orWhereIn: (col, vals) => { calls.orWhereIns.push([col, vals]); return chain; },
       select: async () => siblings,
@@ -1199,6 +1199,8 @@ describe('a LIVE row moving into a group has the destination judged and locked, 
     const ok = fakeTrx([
       { id: 'est-a', pricing_authority: 'SERVER', estimate_data: '{}' },
       { id: 'est-b', pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' } } }) },
+      // A genuinely locked accepted sibling (uncapped P1 r21 / GH P0 r22).
+      { id: 'est-c', status: 'accepted', pricing_authority: 'LOCKED', price_locked_at: '2026-07-10T11:59:00Z', estimate_data: '{}' },
     ]);
     await expect(assertLiveRowMayJoinGroup(ok.trx, liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).resolves.toBeUndefined();
     const legacyProposal = fakeTrx([{ id: 'est-c', pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true } }) }]);

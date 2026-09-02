@@ -14,15 +14,19 @@ const { isEnabled } = require('../config/feature-gates');
 const { isProposalAuthoredByEditor } = require('./estimate-proposal');
 
 const SERVER_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
-// Acceptance rewrites pricing_authority to LOCKED (the price is frozen), so
-// every accept path stamps the authority the price carried AT LOCK into
-// estimate_data — server-written, from the row being locked — and a LOCKED
-// row passes only on that durable evidence (uncapped codex P1 r20: an
-// accepted, engine-priced sibling must not block its group; an accepted
-// fallback one must). Rows locked before the marker existed carry none and
-// fail closed.
+// Acceptance rewrites pricing_authority to LOCKED — the price is frozen and
+// the money is agreed. A GENUINELY locked accepted price (price_locked_at
+// set, or status accepted — the migration backfilled historic accepts as
+// LOCKED) is authoritative for every link/send verdict: it is no longer a
+// quote anyone can accept, and refusing it would lock every still-open
+// property in its group out of sends, follow-ups and extensions with no
+// operator remedy (GH codex P0 r22 on #3750). Every accept path still
+// stamps the authority the price carried AT LOCK into estimate_data
+// (server-written, from the row being locked) as durable audit evidence and
+// as the tie-breaker for a LOCKED row that carries neither lock timestamp
+// nor accepted status.
 const PRICING_AUTHORITY_AT_LOCK_KEY = 'pricingAuthorityAtLock';
-const GATED_SEND_AUTHORITY_SQL = "(UPPER(pricing_authority) = 'SERVER' OR (UPPER(pricing_authority) = 'LOCKED' AND estimate_data->>'pricingAuthorityAtLock' = 'SERVER') OR (estimate_data->'proposal'->'enabled' = 'true'::jsonb AND estimate_data->'proposal'->'provenance'->>'source' = 'proposal-editor'))";
+const GATED_SEND_AUTHORITY_SQL = "(UPPER(pricing_authority) = 'SERVER' OR (UPPER(pricing_authority) = 'LOCKED' AND (price_locked_at IS NOT NULL OR status = 'accepted' OR estimate_data->>'pricingAuthorityAtLock' = 'SERVER')) OR (estimate_data->'proposal'->'enabled' = 'true'::jsonb AND estimate_data->'proposal'->'provenance'->>'source' = 'proposal-editor'))";
 
 function gatedSendAuthorityPredicateApplies() {
   return isEnabled('sendRequiresServerPricing');
@@ -40,7 +44,10 @@ function rowPassesGatedSendAuthority(row = {}) {
   const authority = String(row.pricing_authority || row.pricingAuthority || '').toUpperCase();
   if (authority === 'SERVER') return true;
   const data = parseEstimateDataLoose(row.estimate_data ?? row.estimateData);
-  if (authority === 'LOCKED' && String(data?.[PRICING_AUTHORITY_AT_LOCK_KEY] || '').toUpperCase() === 'SERVER') return true;
+  if (authority === 'LOCKED') {
+    if (row.price_locked_at != null || String(row.status || '') === 'accepted') return true;
+    if (String(data?.[PRICING_AUTHORITY_AT_LOCK_KEY] || '').toUpperCase() === 'SERVER') return true;
+  }
   return isProposalAuthoredByEditor(data?.proposal);
 }
 
@@ -64,6 +71,12 @@ const LINK_VISIBLE_TERMINAL_STATUSES = ['accepted', 'declined'];
 function applyLinkVisibleSiblingScope(qb, now = new Date()) {
   return qb
     .whereNull('archived_at')
+    // A linkage-invalidated row never renders on the public link (the
+    // reader rejects it before propertyGroup) — mirror that exclusion so a
+    // marker-only terminal row cannot block its valid siblings (GH codex P2
+    // r22). Same predicate the revise UPDATE refuses on.
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
     .where((visible) => visible
       .where((live) => live
         .whereIn('status', LINK_VISIBLE_LIVE_STATUSES)
