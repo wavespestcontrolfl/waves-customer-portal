@@ -13005,6 +13005,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (completionSmsProviderAccepted || e.providerOutcome?.sent === true) {
           logger.warn(`[dispatch] Completion SMS for service_record ${record.id} was accepted by the provider (${e.providerOutcome?.providerMessageId || 'no message id'}) but a post-send write failed — no failure bell, do not re-send`);
         } else {
+          // A send that THREW before acceptance (an inactive template, a
+          // render failure) is not recovered by re-running it — the cause
+          // needs an operator fix first, and holding the closeout open would
+          // 503 every retry until then, stranding the email/PDF lanes behind
+          // it. So this path finalizes, and the bell says so (pre-push Codex
+          // P1 r5): resumable:false, no release-for-resume.
           const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
           await alertCompletionSmsFailed({
             serviceRecordId: record.id,
@@ -13012,6 +13018,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             smsType: null,
             errorClass: e.code || e.name || 'exception',
             error: e,
+            resumable: false,
           });
         }
       }

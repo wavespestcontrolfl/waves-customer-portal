@@ -359,7 +359,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Completion text not delivered',
       body: `${p.customerName || 'A customer'} did not receive their completion text${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.smsType ? ` [${p.smsType}]` : ''}${p.errorClass ? ` — ${p.errorClass}` : ''}${p.errorMessage ? `: ${p.errorMessage}` : ''}. ${p.resumable === false
-        ? 'The provider refused it permanently — fix the phone number on file before any text can reach them.'
+        ? 'The closeout finalized without it; retrying the closeout will not re-send — fix the cause first (a bad number on file, an inactive template).'
         : 'Nothing retries it automatically; the closeout is held for retry — retry it from the tech portal.'}`,
       link: p.link || '/admin/dispatch',
     }),

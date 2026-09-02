@@ -167,8 +167,9 @@ async function alertCompletionSmsFailed({ serviceRecordId, customerId, smsType, 
       smsType: smsType || null,
       errorClass: sanitizeErrorText(errorClass) || null,
       errorMessage,
-      // false = a permanent provider refusal: the closeout finalized and the
-      // bell copy must not promise a retry that cannot re-send.
+      // false = the closeout finalized without the text (a permanent
+      // provider refusal, or a send that threw before acceptance): the bell
+      // copy must not promise a retry that cannot re-send.
       resumable: resumable !== false,
       link: adminLink(context.customerId),
       dedupeKey,
