@@ -544,6 +544,18 @@ customer's last selection once the route writes it back (validation audit
 SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
 estimates). A membership reconcile that reprices the mix refreshes the
 opt-out stamp with the row tier.
+`/data` carries an optional `lawnCalendar` block behind
+`GATE_ESTIMATE_LAWN_CALENDAR` (dev-open, prod dark): `{ programs: {
+[frequencyKey]: { visitsPerYear, cadence, months } } }` for the recurring
+lawn section's frequencies, where `cadence` is the customer-facing interval
+line and `months` the 0-based ET month indices of the program's projected
+applications from the current month — both derived server-side by
+`describeLawnProgramCadence` (self-booking-plan-sync.js) from the catalog
+plan matching the frequency's visitsPerYear through the scheduler's own
+`buildRecurringOccurrenceDates`; no customer data, no dates. A frequency
+with no catalog plan is omitted; the key is ABSENT when the gate is off or
+nothing resolves (it was boolean `true` from 2026-08 until #3755). The page
+only buckets months into seasons — it never derives an interval itself.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,

@@ -27,6 +27,7 @@
  *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
  *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
  *   GATE_AGENT_ACTIVITY=true    (Activity tab in /admin/agents — read-only feed over existing ledgers; dark in dev AND prod)
+ *   GATE_OPS_DIGESTS_IN_APP=true (owner ops digests become ops_digest bell rows in the Activity feed instead of contact@ emails; dark in dev AND prod)
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
@@ -60,7 +61,7 @@
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
- *   GATE_ESTIMATE_LAWN_CALENDAR=true (12-month application strip under the lawn price card, arithmetic on visitsPerYear only; dev-open, prod dark)
+ *   GATE_ESTIMATE_LAWN_CALENDAR=true (season timeline under the lawn price card — four SWFL turf seasons from the current month, one-line focus each, cadence + projected months per frequency from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
@@ -813,6 +814,16 @@ const gates = {
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
 
+  // Backlink path investigator (Manager v2 step 3) — the hourly job that
+  // fetches ≤8 pages per registry domain and spends ONE WORKHORSE LLM call to
+  // classify HOW a link can be acquired (plan §5). PAY-PER-DOMAIN (fetches +
+  // LLM), so opt-in in EVERY env (not default-on in dev) — a dev box with a
+  // real ANTHROPIC_API_KEY must not burn batches on boot. Investigation only:
+  // it never sends, pays, or leases work. While ON, a registry domain still
+  // at `new` (never investigated) is not claimable either (plan §7) — the
+  // worker reads this gate for that rule.
+  linkInvestigator: process.env.GATE_LINK_INVESTIGATOR === 'true',
+
   // Backlink profile → astro sameAs sync — weekly job that opens a PR adding
   // verifier-confirmed (status live/indexed) directory/citation/social profile
   // URLs from seo_link_prospects to the marketing site's entity-profiles.auto.json
@@ -1544,11 +1555,13 @@ const gates = {
   // flip. The lead auto-send lane skips these rows regardless of the gate.
   // Enable with GATE_SEND_REQUIRES_SERVER_PRICING=true; unset = revoke.
   sendRequiresServerPricing: process.env.GATE_SEND_REQUIRES_SERVER_PRICING === 'true',
-  // Lawn program calendar on the estimate page: a 12-month strip under the
-  // lawn price card marking N evenly spaced application months, where N is
-  // the selected frequency's visitsPerYear. Pure arithmetic on data already
-  // on the page — no product, step, or fertilizer names (owner-owned business
-  // logic). Gates only the /data `lawnCalendar` flag. Dev-open, prod dark.
+  // Lawn program seasons on the estimate page: under the lawn price card,
+  // the four SWFL turf seasons in order from the current month, each with a
+  // one-line focus and the number of the selected frequency's applications
+  // the scheduling catalog puts there. Gates the /data `lawnCalendar` block
+  // ({ programs: { [frequencyKey]: { visitsPerYear, cadence, months } } },
+  // projected by describeLawnProgramCadence). No product, step, or
+  // fertilizer names (owner-owned business logic). Dev-open, prod dark.
   // Enable with GATE_ESTIMATE_LAWN_CALENDAR=true.
   estimateLawnCalendar: isProd ? process.env.GATE_ESTIMATE_LAWN_CALENDAR === 'true' : true,
 
@@ -2116,6 +2129,17 @@ const gates = {
   // logGateStatus; the service reads gateEnvValue('GATE_AGENT_ACTIVITY')
   // at CALL time (the techTips idiom), so a flip needs no redeploy.
   agentActivity: gateEnvValue('GATE_AGENT_ACTIVITY'),
+
+  // Ops digests in-app — server/services/ops-digest.js deliverOpsDigest.
+  // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become
+  // ops_digest bell rows the Activity feed lists, and the email is skipped
+  // (bell-write failure still emails). OFF (default, dev AND prod): every
+  // sender emails exactly as before. Requires GATE_AGENT_ACTIVITY too (the
+  // rows need a surface) — with it off the helper fails closed to email.
+  // The reply-to-approve flows and the stripe-webhook-health / llm-dispatch
+  // FIX alerts are not routed here. Kill switch: unset. This entry is for
+  // logGateStatus; the helper reads both env vars at CALL time.
+  opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

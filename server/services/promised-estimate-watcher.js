@@ -24,6 +24,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
+const { deliverOpsDigest } = require('./ops-digest');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { etDateString } = require('../utils/datetime-et');
@@ -266,15 +267,22 @@ async function runPromisedEstimateWatcher(opts = {}) {
   }
 
   try {
-    await mailer.sendOne({
-      to,
-      fromEmail: fromEmail(),
-      fromName: FROM_NAME,
+    await deliverOpsDigest({
+      key: 'promised-estimate',
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
-      categories: ['ops', 'promised-estimate'],
-      suppressErrorLog: true,
+      link: '/admin/pipeline',
+      sendEmail: () => mailer.sendOne({
+        to,
+        fromEmail: fromEmail(),
+        fromName: FROM_NAME,
+        subject: composed.subject,
+        html: composed.html,
+        text: composed.text,
+        categories: ['ops', 'promised-estimate'],
+        suppressErrorLog: true,
+      }),
     });
   } catch (err) {
     logger.error(`[promised-estimate-watcher] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);

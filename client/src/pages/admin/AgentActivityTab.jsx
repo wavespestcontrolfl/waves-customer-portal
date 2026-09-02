@@ -53,6 +53,36 @@ function fmtMs(ms) {
   return `${Math.round(ms / 60000)}m`;
 }
 
+// Digest bodies are the email's text: their URLs (absolute, or portal
+// routes written as /admin/…) must stay followable now that the email is
+// suppressed. Only http(s) and /admin paths become links; nothing is
+// rendered as HTML.
+const LINK_RE = /(https?:\/\/[^\s<>"')\]]+|(?<![\w/])\/admin\/[^\s<>"')\]]*)/g;
+function linkify(text) {
+  const out = [];
+  let last = 0;
+  let key = 0;
+  for (const m of String(text).matchAll(LINK_RE)) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const href = m[0];
+    const external = /^https?:/i.test(href) && !/^https?:\/\/(portal\.)?wavespestcontrol\.com\/admin\//i.test(href);
+    out.push(
+      external ? (
+        <a key={key++} href={href} target="_blank" rel="noreferrer" className="underline text-zinc-900 break-all">
+          {href}
+        </a>
+      ) : (
+        <Link key={key++} to={href.replace(/^https?:\/\/[^/]+/i, "")} className="underline text-zinc-900 break-all">
+          {href}
+        </Link>
+      ),
+    );
+    last = m.index + href.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
 function StepRow({ step }) {
   const glyph =
     step.status === "done"
@@ -88,11 +118,26 @@ function StepRow({ step }) {
   );
 }
 
-function ActivityRow({ item }) {
+// An ACT digest is "awaiting review" until its bell row is read; following
+// Review from here is that read, so the row clears on the next refresh.
+async function markDigestRead(item) {
+  if (item.kind !== "digest" || !item.notificationId) return;
+  try {
+    await adminFetch(`/admin/notifications/${item.notificationId}/read`, { method: "PUT" });
+  } catch {
+    // best effort — the destination still opens
+  }
+}
+
+function ActivityRow({ item, onReview }) {
   const [open, setOpen] = useState(false);
   const meta = STATUS_META[item.status] || STATUS_META.completed;
   const expandable = item.steps?.length > 0 || item.detail;
-  const needsAction = item.status === "awaiting_review" && item.link;
+  // Review: the owner owes a decision. A digest of any status keeps its
+  // link too (a FIX: digest's remediation page) — its email was suppressed,
+  // so this row is the only way to reach it.
+  const needsAction = !!item.link && (item.status === "awaiting_review" || item.kind === "digest");
+  const actionLabel = item.status === "awaiting_review" ? "Review" : "Open";
   return (
     <li className="border-t border-hairline border-zinc-200 first:border-t-0">
       <div className="flex items-start gap-3 px-3 py-3 md:px-4">
@@ -114,8 +159,13 @@ function ActivityRow({ item }) {
           {open && (
             <div className="mt-3 flex flex-col gap-2">
               {item.detail && (
-                <div className={cn("text-12 leading-normal", ["failed", "blocked"].includes(item.status) ? "text-alert-fg" : "text-ink-secondary")}>
-                  {item.detail}
+                <div
+                  className={cn(
+                    "text-12 leading-normal whitespace-pre-wrap break-words",
+                    ["failed", "blocked"].includes(item.status) ? "text-alert-fg" : "text-ink-secondary",
+                  )}
+                >
+                  {item.kind === "digest" ? linkify(item.detail) : item.detail}
                 </div>
               )}
               {item.steps?.length > 0 && (
@@ -132,9 +182,10 @@ function ActivityRow({ item }) {
           {needsAction && (
             <Link
               to={item.link}
+              onClick={() => onReview?.(item)}
               className="hidden md:inline-flex h-8 items-center rounded-sm border-hairline border-zinc-300 bg-white px-3 text-11 font-medium uppercase tracking-label text-zinc-900 no-underline hover:bg-zinc-50 u-focus-ring"
             >
-              Review
+              {actionLabel}
             </Link>
           )}
           {expandable && (
@@ -154,9 +205,10 @@ function ActivityRow({ item }) {
         <div className="px-3 pb-3 md:hidden">
           <Link
             to={item.link}
+            onClick={() => onReview?.(item)}
             className="inline-flex h-11 items-center rounded-sm border-hairline border-zinc-300 bg-white px-4 text-12 font-medium uppercase tracking-label text-zinc-900 no-underline u-focus-ring"
           >
-            Review
+            {actionLabel}
           </Link>
         </div>
       )}
@@ -287,7 +339,7 @@ export default function AgentActivityTab() {
         ) : (
           <ol>
             {items.map((item) => (
-              <ActivityRow key={item.id} item={item} />
+              <ActivityRow key={item.id} item={item} onReview={markDigestRead} />
             ))}
           </ol>
         )}

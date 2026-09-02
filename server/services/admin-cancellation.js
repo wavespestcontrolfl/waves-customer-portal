@@ -1655,6 +1655,10 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         `monthly=${liveImpact.accountMonthlyAfter ?? ''}`,
         `rates=${(liveImpact.remaining || []).map((r) => `${r.key}:${r.monthlyBefore}:${r.monthlyAfter}`).sort().join(',')}`,
         `perapp=${(liveImpact.perAppChanges || []).map((p) => `${p.id}:${p.before}:${p.after}`).sort().join(',')}`,
+        // Inputs too (cancellation-processor scopedPricingFingerprint): a
+        // tier or billing-mode edit during the sweep must be re-approved.
+        `tierbefore=${liveImpact.tierBefore ?? ''}`,
+        `mode=${liveImpact.billingMode ?? ''}`,
       ].join('|');
     }
   }

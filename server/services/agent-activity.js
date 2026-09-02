@@ -7,6 +7,8 @@
 //   message_drafts           → inbound-SMS drafts parked for approval
 //   job_health               → crons that are failing or mid-run (healthy ones
 //                              are only counted — exception-based feed)
+//   notifications            → ops_digest rows (services/ops-digest.js, the
+//                              in-app form of the owner FIX:/ACT: emails)
 //
 // Read-only. Behind GATE_AGENT_ACTIVITY (feature-gates.js `agentActivity`):
 // the route answers { available: false } while the gate is off.
@@ -32,6 +34,8 @@ const MISSING_TABLE_SQLSTATE = '42P01';
 const CONTENT_AGENT = 'Blog Content Engine';
 const SMS_AGENT = 'Customer Assistant';
 const SYSTEM_AGENT = 'System';
+const OPS_AGENT = 'Waves Ops';
+const DIGEST_CATEGORY = 'ops_digest'; // written by services/ops-digest.js
 
 // Stage order of the autonomous content runner; the *_ms columns are null
 // for stages a run never reached.
@@ -287,6 +291,41 @@ function jobItem(job) {
   };
 }
 
+// ops_digest bell rows (GATE_OPS_DIGESTS_IN_APP): the subject prefix is the
+// owner's action grammar — ACT: (and the price-match draft's "[Review]")
+// needs the owner, FIX: something is broken, FIRST: / anything else is
+// informational. A read ACT row is done.
+const ACTION_PREFIX = /^(ACT:|\[Review\])/i;
+const DIGEST_PREFIX = /^(ACT:|FIX:|FIRST:|\[Review\])\s*/i;
+function digestItem(row) {
+  const subject = String(row.title || '');
+  const isAct = ACTION_PREFIX.test(subject);
+  const isFix = /^FIX:/i.test(subject);
+  const status = isFix ? 'failed' : isAct ? (row.read_at ? 'completed' : 'awaiting_review') : 'completed';
+  const meta = parseJson(row.metadata, {}) || {};
+  return {
+    id: `digest:${row.id}`,
+    kind: 'digest',
+    // The Review link marks this bell row read (PUT /admin/notifications/:id/read)
+    // so an ACT item clears from the feed once the owner has followed it.
+    notificationId: row.id,
+    agent: OPS_AGENT,
+    title: subject.replace(DIGEST_PREFIX, ''),
+    subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
+    status,
+    startedAt: iso(row.created_at),
+    finishedAt: row.read_at ? iso(row.read_at) : null,
+    durationMs: null,
+    steps: [],
+    stepsDone: status === 'completed' ? 1 : 0,
+    stepsTotal: 1,
+    link: row.link || null,
+    // The full body: with the email skipped this row is the only copy of
+    // the digest (ops-digest.js already caps what it stores).
+    detail: row.body ? String(row.body) : null,
+  };
+}
+
 function summarize(items, healthyJobs = 0) {
   const summary = { total: items.length, healthyJobs };
   for (const s of STATUSES) summary[s] = 0;
@@ -302,7 +341,7 @@ function jobIsException(job) {
 }
 
 // Pure: rows in → feed out. The route loads the rows; tests feed fixtures.
-function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [] }) {
+function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [], digests = [] }) {
   // ONE newest approval per run (by created_at, never input order), then
   // classify that row: a run can be re-requested, and only its latest
   // request says whether the owner still owes a reply or already decided.
@@ -329,6 +368,7 @@ function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [] }) {
   const items = []
     .concat(runs.map((run) => contentRunItem(run, awaitingReplyByRun, decidedByRun)))
     .concat(drafts.map(smsDraftItem))
+    .concat(digests.map(digestItem))
     .concat(exceptionJobs.map(jobItem))
     .sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')));
   const agents = Array.from(new Set(items.map((i) => i.agent))).sort();
@@ -372,7 +412,7 @@ async function loadRows(windowHours) {
           'publish_ms', 'index_submit_ms', 'link_plan_ms',
           'uniqueness_gate_result', 'quality_gate_result', 'seo_completion_gate_result',
         );
-  const [runs, drafts, jobs] = await Promise.all([
+  const [runs, drafts, jobs, digests] = await Promise.all([
     safe('autonomous_runs', () =>
       runQuery()
         .where('created_at', '>=', since)
@@ -403,6 +443,18 @@ async function loadRows(windowHours) {
             .orWhere('consecutive_failures', '>', 0))
         .orderBy('last_started_at', 'desc')
         .limit(MAX_ITEMS)),
+    safe('notifications', () =>
+      db('notifications')
+        .select('id', 'title', 'body', 'link', 'metadata', 'read_at', 'created_at')
+        .where({ recipient_type: 'admin', category: DIGEST_CATEGORY })
+        // An unread action (ACT: / [Review]) or unresolved FIX: digest stays
+        // in the feed until read, however old — its email was suppressed, so
+        // this row is the only place it exists. FYI rows keep the window.
+        .where((q) =>
+          q.where('created_at', '>=', since)
+            .orWhere((u) => u.whereNull('read_at').andWhereRaw("title ~* '^(ACT:|FIX:|\\[Review\\])'")))
+        .orderBy('created_at', 'desc')
+        .limit(MAX_ITEMS)),
   ]);
   // Approvals (any status — a terminal one tells us a pending-review run
   // was decided): every row on a loaded run, PLUS any still awaiting that
@@ -429,7 +481,7 @@ async function loadRows(windowHours) {
   const stragglers = missingRunIds.length
     ? await safe('autonomous_runs', () => runQuery().whereIn('id', missingRunIds))
     : [];
-  return { runs: runs.concat(stragglers), approvals, drafts, jobs, unavailable };
+  return { runs: runs.concat(stragglers), approvals, drafts, jobs, digests, unavailable };
 }
 
 async function getActivity({ windowHours } = {}) {

@@ -23,6 +23,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
+const { deliverOpsDigest } = require('./ops-digest');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
@@ -190,15 +191,22 @@ async function runTurfVarianceDigest(opts = {}) {
   }
 
   try {
-    await mailer.sendOne({
-      to,
-      fromEmail: fromEmail(),
-      fromName: FROM_NAME,
+    await deliverOpsDigest({
+      key: 'turf-variance',
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
-      categories: ['ops', 'turf-variance'],
-      suppressErrorLog: true,
+      link: '/admin/estimates',
+      sendEmail: () => mailer.sendOne({
+        to,
+        fromEmail: fromEmail(),
+        fromName: FROM_NAME,
+        subject: composed.subject,
+        html: composed.html,
+        text: composed.text,
+        categories: ['ops', 'turf-variance'],
+        suppressErrorLog: true,
+      }),
     });
   } catch (err) {
     logger.error(`[turf-variance] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);

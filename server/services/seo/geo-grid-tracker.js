@@ -277,7 +277,7 @@ async function getHeatmap(officeId, keyword) {
  *  by the status endpoint the UI polls; falls back to the local flag on error. */
 async function isScanRunning() {
   try {
-    return await isLocked('geo-grid-scan');
+    return (await isLocked('geo-grid-scan')) ?? scanning; // null = probe could not run → the documented local-flag fallback
   } catch {
     return scanning;
   }

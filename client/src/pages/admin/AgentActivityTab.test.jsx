@@ -93,6 +93,61 @@ describe("AgentActivityTab", () => {
     expect(screen.getByText("Awaiting emailed reply (EA-12ab34cd)")).toBeInTheDocument();
   });
 
+  it("marks an ACT digest read when Review is followed", async () => {
+    adminFetch.mockResolvedValueOnce({
+      ...FEED,
+      items: [{
+        id: "digest:n9", kind: "digest", agent: "Waves Ops", notificationId: "n9",
+        title: "4 promised quotes never went out", subtitle: "promised estimate · needs you",
+        status: "awaiting_review", startedAt: "2026-09-02T10:00:00Z", finishedAt: null, durationMs: null,
+        steps: [], stepsDone: 0, stepsTotal: 1, link: "/admin/pipeline", detail: "Pat Tester",
+      }],
+    });
+    adminFetch.mockResolvedValue({});
+    renderTab();
+    const links = await screen.findAllByRole("link", { name: "Review" });
+    fireEvent.click(links[0]);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/notifications/n9/read", { method: "PUT" }));
+  });
+
+  it("a FIX digest keeps its remediation link as Open and marks read on follow", async () => {
+    adminFetch.mockResolvedValueOnce({
+      ...FEED,
+      items: [{
+        id: "digest:n8", kind: "digest", agent: "Waves Ops", notificationId: "n8",
+        title: "lead-to-cash invariants — 2 violations", subtitle: "lead to cash invariants · needs a fix",
+        status: "failed", startedAt: "2026-09-02T10:00:00Z", finishedAt: null, durationMs: null,
+        steps: [], stepsDone: 0, stepsTotal: 1, link: "/admin/invoices", detail: "INV-1042",
+      }],
+    });
+    adminFetch.mockResolvedValue({});
+    renderTab();
+    const links = await screen.findAllByRole("link", { name: "Open" });
+    expect(links[0]).toHaveAttribute("href", "/admin/invoices");
+    fireEvent.click(links[0]);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/notifications/n8/read", { method: "PUT" }));
+  });
+
+  it("linkifies portal routes and absolute URLs inside a digest body", async () => {
+    adminFetch.mockResolvedValueOnce({
+      ...FEED,
+      items: [{
+        id: "digest:n7", kind: "digest", agent: "Waves Ops", notificationId: "n7",
+        title: "2 reschedule requests by text with no schedule change", subtitle: "reschedule intent · needs you",
+        status: "awaiting_review", startedAt: "2026-09-02T10:00:00Z", finishedAt: null, durationMs: null,
+        steps: [], stepsDone: 0, stepsTotal: 1, link: "/admin/communications",
+        detail: "Pat Tester: thread /admin/communications?thread=abc — see https://docs.example.com/why (tap).",
+      }],
+    });
+    renderTab();
+    await screen.findByText("2 reschedule requests by text with no schedule change");
+    fireEvent.click(screen.getAllByRole("button", { name: "Expand" })[0]);
+    expect(screen.getByRole("link", { name: "/admin/communications?thread=abc" })).toHaveAttribute("href", "/admin/communications?thread=abc");
+    const ext = screen.getByRole("link", { name: "https://docs.example.com/why" });
+    expect(ext).toHaveAttribute("href", "https://docs.example.com/why");
+    expect(ext).toHaveAttribute("target", "_blank");
+  });
+
   it("ignores a slower, superseded window response", async () => {
     let resolveFirst;
     adminFetch.mockImplementationOnce(() => new Promise((r) => { resolveFirst = r; }));
