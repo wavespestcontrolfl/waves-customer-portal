@@ -1727,16 +1727,25 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // creation (estimate acceptance → estimate-converter / renewals attach)
   // does not take the cancel lock, so a term can appear between that read
   // and the end of the wind-down and stay payable on the churned account
-  // (codex GH r28 P1). Re-read at the boundary: a term that surfaced is an
-  // exception the office resolves (void the invoice, then retry closes) —
-  // never a clean run leaving coverage re-activatable. Unreadable = same
-  // exception (fail closed on a money hazard).
+  // (codex GH r28 P1). Re-read at the boundary and make a surfaced invoice
+  // UNPAYABLE right here (codex GH r30 P1): the canonical void
+  // (InvoiceService.voidInvoice — the same path the invoice tools use;
+  // it syncs the never-paid term to cancelled) — a bell alone leaves the
+  // public invoice payable until staff act, and a payment in that window
+  // re-activates coverage on the churned account. A void that cannot land
+  // (already paid, on a finalized statement, unreadable) is the exception
+  // the office resolves, never a clean run.
   if (processed) {
     try {
       const surfaced = await findPendingPrepayInvoice(customerId, wholeAccount ? null : scope);
       if (surfaced) {
-        errors.push('pending_prepay_invoice_appeared');
-        logger.error(`[admin-cancellation] pending prepay invoice ${surfaced.invoice.id} (term ${surfaced.term.id}) surfaced during the wind-down for request ${request.id} — void it, then retry`);
+        try {
+          await require('./invoice').voidInvoice(surfaced.invoice.id);
+          logger.warn(`[admin-cancellation] pending prepay invoice ${surfaced.invoice.id} (term ${surfaced.term.id}) surfaced during the wind-down for request ${request.id} — voided at the boundary`);
+        } catch (voidErr) {
+          errors.push('pending_prepay_invoice_appeared');
+          logger.error(`[admin-cancellation] pending prepay invoice ${surfaced.invoice.id} (term ${surfaced.term.id}) surfaced during the wind-down for request ${request.id} and could not be voided: ${voidErr.message}`);
+        }
       }
     } catch (recheckErr) {
       errors.push('pending_prepay_invoice_appeared');
@@ -1998,7 +2007,12 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             tierBefore: priorOutcome?.tierBefore ?? result?.tierBefore ?? (caseSnapshot ? caseSnapshot.waveguard_tier : null),
             tierAfter: result?.tierAfter ?? priorOutcome?.tierAfter ?? null,
             lateFeeWaived: (result ? result.lateFeeWaived === true : false) || priorOutcome?.lateFeeWaived === true,
-            confirmationRequested: input.sendConfirmation || priorOutcome?.confirmationRequested === true,
+            // An explicit repair-time opt-out overrides the first attempt's
+            // request (codex GH r30 P2) — a lost-response echo must read
+            // "nothing, by choice", not "nothing accepted".
+            confirmationRequested: input.sendConfirmation === false
+              ? false
+              : (input.sendConfirmation || priorOutcome?.confirmationRequested === true),
             confirmation: (confirmations.smsSent ? 'sms' : (confirmations.emailSent ? 'email' : null))
               ?? priorOutcome?.confirmation ?? null,
             confirmationChannels: [...new Set([...(priorOutcome?.confirmationChannels || []), ...confirmations.channels])],
@@ -2061,6 +2075,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           bell: true,
           link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
           dedupeKey: `admin_cancel_review:${request.id}`,
+          // A retry whose failure set CHANGED (an SMS repaired, a refund
+          // task newly lost) refreshes the standing alert's body and error
+          // list instead of leaving the office reading obsolete details
+          // (codex GH r30 P2).
+          refreshOnDedupe: true,
           metadata: { requestId: request.id, customerId, processingErrors: errors },
         }
       );

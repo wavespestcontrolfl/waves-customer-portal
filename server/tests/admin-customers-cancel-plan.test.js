@@ -79,6 +79,10 @@ jest.mock('../services/cancellation-resolution', () => ({
 const mockProcess = jest.fn();
 const mockPlan = jest.fn();
 const mockRaiseTermite = jest.fn(async () => ({ raised: true }));
+// The boundary void of a prepay invoice that surfaced mid-run rides the
+// canonical InvoiceService.voidInvoice (the invoice tools' own path).
+const mockVoidInvoice = jest.fn(async (id) => ({ id, status: 'void' }));
+jest.mock('../services/invoice', () => ({ voidInvoice: (...a) => mockVoidInvoice(...a) }));
 jest.mock('../services/cancellation-processor', () => ({
   processCancellationRequest: (...args) => mockProcess(...args),
   planScopedWindDown: (...args) => mockPlan(...args),
@@ -1043,6 +1047,10 @@ describe('POST /:id/cancel-plan', () => {
     expect(third.errors).toEqual([]);
     expect(sendCancellationConfirmations).not.toHaveBeenCalled();
     expect(third.confirmationRequested).toBe(false);
+    // The case records the explicit opt-out over attempt 1's request — a
+    // lost-response echo reads "nothing, by choice", not "nothing accepted".
+    const latest = mockState.cancellation_cases[mockState.cancellation_cases.length - 1];
+    expect(JSON.parse(latest.snapshot).outcome.confirmationRequested).toBe(false);
   }));
 
   test('a requested confirmation a reachable channel did not accept is a surfaced failure — review bell, never a clean "Done."', () => withServer(async (baseUrl) => {
@@ -1051,6 +1059,11 @@ describe('POST /:id/cancel-plan', () => {
     expect(body.processed).toBe(true);
     expect(body.errors).toEqual(['confirmation_sms_not_sent', 'confirmation_email_not_sent']);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    // A retry whose failure set changes refreshes this standing alert.
+    expect(NotificationService.notifyAdmin.mock.calls[0][3]).toEqual(expect.objectContaining({
+      dedupeKey: `admin_cancel_review:${body.requestId}`, refreshOnDedupe: true,
+      metadata: expect.objectContaining({ processingErrors: ['confirmation_sms_not_sent', 'confirmation_email_not_sent'] }),
+    }));
     const [category, , text] = NotificationService.notifyAdmin.mock.calls[0];
     expect(category).toBe('service');
     expect(text).toContain('confirmation_sms_not_sent');
@@ -1777,20 +1790,43 @@ describe('POST /:id/cancel-plan', () => {
         mockState.invoices = [{ id: 'inv-late', status: 'sent', invoice_number: 'WPC-2026-0042' }];
         return { ...PROCESSED };
       });
+      // The void cannot land (already paid): the exception parks the run.
+      mockVoidInvoice.mockRejectedValueOnce(new Error('Paid invoices cannot be voided'));
       const body = await (await postCancel(baseUrl)).json();
       expect(body.processed).toBe(true);
+      expect(mockVoidInvoice).toHaveBeenCalledWith('inv-late');
       expect(body.errors).toEqual(['pending_prepay_invoice_appeared']);
       // Partial: belled, acceptance stays open for the retry after the void.
       expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
       expect(mockState.service_requests[0].status).toBe('new');
-      // The office voids the invoice (the void handler cancels the
-      // never-paid term with it); the repair retry closes clean.
+      // The office disposes of it (the void handler cancels the never-paid
+      // term with it); the repair retry closes clean.
       mockState.invoices[0].status = 'void';
       mockState.annual_prepay_terms = [];
       mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 0 });
       const retry = await (await postCancel(baseUrl)).json();
       expect(retry.requestId).toBe(body.requestId);
       expect(retry.errors).toEqual([]);
+      expect(mockState.service_requests[0].status).toBe('resolved');
+    }));
+
+    test('a pending prepay invoice that SURFACES during the wind-down is VOIDED at the boundary — never left payable until staff act', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms = [];
+      mockProcess.mockImplementationOnce(async () => {
+        mockState.annual_prepay_terms = [{
+          id: 'term-late', customer_id: 'cust-1', term_start: '2026-09-01', term_end: '2027-08-31', plan_label: 'Annual Pest',
+          prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+          status: 'payment_pending', renewal_decision: null, prepay_invoice_id: 'inv-late',
+        }];
+        mockState.invoices = [{ id: 'inv-late', status: 'sent', invoice_number: 'WPC-2026-0042' }];
+        return { ...PROCESSED };
+      });
+      const body = await (await postCancel(baseUrl)).json();
+      expect(mockVoidInvoice).toHaveBeenCalledWith('inv-late');
+      // Made unpayable by the canonical void: a clean run, no bell.
+      expect(body.processed).toBe(true);
+      expect(body.errors).toEqual([]);
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
       expect(mockState.service_requests[0].status).toBe('resolved');
     }));
 

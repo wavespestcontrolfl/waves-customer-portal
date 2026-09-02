@@ -164,7 +164,13 @@ const NotificationService = {
     // both recipient types share one mechanism; no dedupeKey = unchanged
     // behavior for every existing caller. Fail closed: an unprovably-new
     // event skips the bell rather than risking a duplicate.
-    const { dedupeKey, ...createOpts } = opts;
+    // refreshOnDedupe (opt-in): when the keyed bell already exists and this
+    // emission's CONTENT differs (a retried run whose failure set changed),
+    // rewrite the standing row's title/body/metadata and surface it unread
+    // again — the office must never keep reading an obsolete error list
+    // while the response says the alert has the details. Identical content
+    // stays a plain dedupe (no re-bell).
+    const { dedupeKey, refreshOnDedupe = false, ...createOpts } = opts;
     if (!dedupeKey) {
       return this.create({ recipientType: 'admin', category, title, body, ...createOpts });
     }
@@ -176,7 +182,21 @@ const NotificationService = {
           .where({ recipient_type: 'admin' })
           .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
           .first();
-        if (existing) return { notification: existing, deduped: true };
+        if (existing) {
+          // Compared and stored in create()'s admin form (emoji-stripped),
+          // or an emoji title would read as "changed" on every emission.
+          const nextTitle = stripEmoji(title) || title;
+          const nextBody = stripEmoji(body) || null;
+          if (refreshOnDedupe && (existing.title !== nextTitle || existing.body !== nextBody)) {
+            const existingMeta = typeof existing.metadata === 'string'
+              ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
+              : (existing.metadata || {});
+            const refreshed = { title: nextTitle, body: nextBody, metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
+            await trx('notifications').where({ id: existing.id }).update(refreshed);
+            return { notification: { ...existing, ...refreshed, metadata: { ...existingMeta, ...metadata } }, deduped: true, refreshed: true };
+          }
+          return { notification: existing, deduped: true };
+        }
         const created = await this.create({
           recipientType: 'admin', category, title, body, ...createOpts, metadata, connection: trx,
         });
@@ -187,7 +207,7 @@ const NotificationService = {
         if (!created) throw new Error('admin notification insert failed');
         return { notification: created, deduped: false };
       });
-      return { ...persisted.notification, deduped: persisted.deduped };
+      return { ...persisted.notification, deduped: persisted.deduped, ...(persisted.refreshed ? { refreshed: true } : {}) };
     } catch (err) {
       logger.warn(`[notifications] Admin notification dedupe failed: ${err.message}`);
       return null;
