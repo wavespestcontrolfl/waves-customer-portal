@@ -575,6 +575,11 @@ function notifyPricingFallbackAfterCommit(estimate, reason) {
       {
         icon: '\u26A0\uFE0F',
         link: '/admin/estimates',
+        // bell: true — an unverified price on a saved estimate must ring even
+        // under GATE_ADMIN_BELL_POLICY, whose default denies the 'estimate'
+        // category (pre-push codex P1; same override the commercial-schedule
+        // bell carries).
+        bell: true,
         dedupeKey: `estimate-pricing-fallback:${estimate.id}`,
         metadata: { estimateId: estimate.id, pricingAuthority: 'CLIENT_FALLBACK', reason },
       },
