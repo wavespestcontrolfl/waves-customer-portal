@@ -85,9 +85,12 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
     expect(est.evidence).toEqual([expect.objectContaining({ quote: 'about a hundred forty nine', speaker: 'agent' })]);
   });
 
-  test('a confirmed slot → send_appointment_confirmation; a callback window → callback with a STATED due time; follow_up_mentioned → technician_follow_up', () => {
+  test('a callback window → callback with a STATED due time; follow_up_mentioned → technician_follow_up; a confirmed slot alone seeds NO confirmation promise', () => {
     const items = deriveCommitmentsFromExtraction({ v2 });
-    expect(items.map((i) => i.kind).sort()).toEqual(['callback', 'send_appointment_confirmation', 'send_estimate', 'technician_follow_up']);
+    // A booked slot proves the booking, not a promise to text later — the
+    // pipeline sends its own confirmation; an explicit promise needs the
+    // model pass and verbatim evidence.
+    expect(items.map((i) => i.kind).sort()).toEqual(['callback', 'send_estimate', 'technician_follow_up']);
     const cb = items.find((i) => i.kind === 'callback');
     expect(cb.due_at).toBe(new Date('2026-09-02T09:00:00-04:00').toISOString());
     expect(cb.due_basis).toBe('stated');

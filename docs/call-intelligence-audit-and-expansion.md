@@ -180,6 +180,9 @@ Per file, with the proving test.
 - Pre-push Codex round 18 (1 P1, fixed): the link and the timeline move
   commit in one transaction; a failed move rolls the relink back and
   surfaces as an error.
+- Pre-push Codex round 19 (1 P1, fixed): a confirmed slot no longer seeds a
+  "send the confirmation" promise — the status proves the booking, not a
+  promise; an explicit one needs the model pass and verbatim evidence.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 
@@ -197,8 +200,8 @@ basis, matched_at), `human_state` (confirmed|dismissed|edited), `human_note`,
 **Extraction** (`services/call-commitments.js`, step 7c of the pass, gated by
 `GATE_CALL_COMMITMENTS`):
 1. Deterministic seeds from the V2 extraction the pipeline already has:
-   `quote_promised` → send_estimate; a confirmed slot → send_appointment_confirmation;
-   a callback window or disposition → callback (due = the stated window);
+   `quote_promised` → send_estimate; a callback window or disposition →
+   callback (due = the stated window);
    `follow_up_mentioned` → technician_follow_up. Evidence = the V2 quotes
    already pinned to those fields. No new prompt hash, no cohort reset.
 2. One bounded Claude FLAGSHIP pass over the labeled transcript for the kinds

@@ -187,19 +187,11 @@ function deriveCommitmentsFromExtraction({ v2 = null, v1 = null, disposition = n
     });
   }
 
-  if (sched.status === 'confirmed' && sched.confirmed_start_at) {
-    items.push({
-      party: 'waves',
-      kind: 'send_appointment_confirmation',
-      description: `Send the appointment confirmation for ${sched.confirmed_start_at}`,
-      channel: 'sms',
-      due_at: null,
-      due_basis: null,
-      confidence: typeof conf.scheduling_window === 'number' ? conf.scheduling_window : null,
-      evidence: evidenceFor(v2, ['/scheduling/confirmed_start_at', '/scheduling/status', '/scheduling/agent_committed_booking']),
-      origin: 'v2:scheduling.confirmed',
-    });
-  }
+  // A confirmed slot is NOT seeded as a "send the confirmation" promise: the
+  // status proves the booking, not that anyone promised a later text, and
+  // the pipeline sends its own confirmation when it books. An explicit
+  // "we will text you the details" is left to the model pass, which needs
+  // verbatim evidence to record it.
 
   const callbackWindow = isoOrNull(sched.callback_window_start);
   if (disposition === 'callback_task_created' || v2?.recommended_disposition === 'callback_task_created' || callbackWindow) {
