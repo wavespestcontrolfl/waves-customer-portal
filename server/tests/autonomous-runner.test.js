@@ -2995,7 +2995,7 @@ describe('runNext post-publish bookkeeping', () => {
 describe('named-competitor autopublish gate', () => {
   const SLUG = '/pest-control/taexx-system-comparison/';
 
-  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true }) {
+  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null }) {
     const claimedAt = new Date('2026-08-26T05:30:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({
@@ -3041,7 +3041,7 @@ describe('named-competitor autopublish gate', () => {
             canonical: `https://www.wavespestcontrol.com${SLUG}`,
             title: 'In-Wall Systems Compared for SWFL Homes',
           },
-          body: 'A sourced comparison of in-wall pest systems for Southwest Florida homes.',
+          body: body || 'A sourced comparison of in-wall pest systems for Southwest Florida homes.',
         },
       }),
     };
@@ -3058,7 +3058,7 @@ describe('named-competitor autopublish gate', () => {
       publisher,
       indexNow: { submit: jest.fn() },
       linkPlanner: {},
-      contentGuardrails: { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) },
+      contentGuardrails: contentGuardrails || { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) },
       // Default: the gate PASSES but flags the named-competitor human-review
       // signal — the exact shape a validated curated-competitor table
       // produces. Tests may override with a failing gate. The REAL shared
@@ -3105,6 +3105,26 @@ describe('named-competitor autopublish gate', () => {
     expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
     expect(queue.pendingReview).toHaveBeenCalledWith('opp_named_1', 'named_competitor_review', { claimToken: claimedAt });
     expect(queue.release).not.toHaveBeenCalled();
+  });
+
+  test('affiliate review (owner ruling 2026-08-31): a clean draft carrying <AffiliateLink> parks at affiliate_review — outranking named_competitor_review (email-approvable) even with the gate OFF', async () => {
+    delete process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH;
+    const publisher = { publishOrUpdatePage: jest.fn() };
+    const { runner, queue, claimedAt } = namedCompetitorScenario({
+      publisher,
+      contentGuardrails: {
+        evaluate: () => ({ pass: true, findings: [] }),
+        affiliateProductIdsIn: (body) => (/<AffiliateLink\b/.test(String(body)) ? ['rain-gauge'] : []),
+      },
+      body: '## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>',
+    });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('completed_pending_review');
+    expect(result.skip_reason).toBe('affiliate_review');
+    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_named_1', 'affiliate_review', { claimToken: claimedAt });
   });
 
   test('gate ON: the same clean draft publishes through the normal astro-PR path', async () => {
@@ -3359,6 +3379,20 @@ describe('approveAndPublishNamedCompetitor — stale named-competitor run guard'
     const runner = dbReturning([runB, runB]); // by-id → B, latest-parked → B (same)
     await expect(runner.approveAndPublishNamedCompetitor(7, { runId: 2 }))
       .rejects.toMatchObject({ statusCode: 422 }); // got past the stale-run guard
+  });
+
+  test('an affiliate_review park is an approvable-publish kind: passes the kind guard (422 missing-draft, not 400) — Codex PR3 r1', async () => {
+    const aff = { ...runB, skip_reason: 'affiliate_review' };
+    const runner = dbReturning([aff, aff]);
+    await expect(runner.approveAndPublishNamedCompetitor(7, { runId: 2 }))
+      .rejects.toMatchObject({ statusCode: 422 });
+  });
+
+  test('a trust-build park is NOT an approvable-publish kind (400)', async () => {
+    const tb = { ...runB, skip_reason: 'trust_build_1_of_3' };
+    const runner = dbReturning([tb, tb]);
+    await expect(runner.approveAndPublishNamedCompetitor(7, { runId: 2 }))
+      .rejects.toMatchObject({ statusCode: 400 });
   });
 });
 

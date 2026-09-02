@@ -134,6 +134,9 @@ function gbpLocationIdForCity(city) {
 }
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
+// completed_pending_review kinds that approve-and-publish (see
+// approveAndPublishNamedCompetitor). Mirrored by approve-autonomous-run.js.
+const APPROVABLE_PUBLISH_SKIP_REASONS = Object.freeze(['named_competitor_review', 'affiliate_review']);
 const DEFAULT_MIN_SCORE = THRESHOLDS.minScoreToAct;
 const INTERNAL_LINK_RETRYABLE_STATUSES = ['pending', 'queued', 'patch_candidate', 'skipped', 'failed'];
 
@@ -1128,10 +1131,22 @@ class AutonomousRunner {
         || trustBuildCount >= TRUST_BUILD_THRESHOLD);
     run.trust_build_count_after = trustBuildCount + (gatesPass ? 1 : 0);
 
+    // 6b. Affiliate review (owner ruling 2026-08-31): EVERY draft that carries
+    // an <AffiliateLink> parks for the owner during the pilot — no autopublish,
+    // no trust-build shortcut, no email-reply approval (yellow-class consumer
+    // pesticides were approved CONDITIONAL on per-product scrutiny a reply-
+    // "approved" would rubber-stamp). The guardrails already gated the
+    // products; this is the human sign-off on the finished post. Approve with
+    // server/scripts/approve-autonomous-run.js (same publish path as the
+    // named-competitor review).
+    const affiliateProductIds = (contentGuardrails && typeof contentGuardrails.affiliateProductIdsIn === 'function' && draft?.body)
+      ? contentGuardrails.affiliateProductIdsIn(draft.body) : [];
+    const affiliateReview = affiliateProductIds.length > 0;
+
     // 7. Decide outcome.
     if (dryRun || run.shadow_mode) {
       // Shadow / dry: never publish. Record what would have happened.
-      const wouldPublish = gatesPass && trustBuildSatisfied && !brief.human_review_required;
+      const wouldPublish = gatesPass && trustBuildSatisfied && !brief.human_review_required && !affiliateReview;
       const finalized = await finalize(run, t0, {
         outcome: 'skipped_shadow_mode',
         skip_reason: wouldPublish ? 'shadow_would_publish' : 'shadow_would_gate',
@@ -1140,7 +1155,7 @@ class AutonomousRunner {
       return finalized;
     }
 
-    if (!gatesPass || !trustBuildSatisfied || brief.human_review_required) {
+    if (!gatesPass || !trustBuildSatisfied || brief.human_review_required || affiliateReview) {
       // Pure quality-gate failure on ANY lane (owner directive 2026-07-18:
       // exceptions-only review queue): one feedback-informed redraft, then
       // silent skip — same disposition as the guardrails/comparison gates.
@@ -1180,17 +1195,28 @@ class AutonomousRunner {
       }
       // Remaining combinations are genuine human decisions (gate infra
       // errors, router-flagged briefs, named-competitor, trust-build ramp).
+      // affiliate_review OUTRANKS named_competitor_review: the latter is an
+      // email-approvable kind, and every affiliate-bearing draft must stay in
+      // the script-only lane (Codex r1 P1).
       const reason = !gatesPass ? 'gate_fail'
+        : affiliateReview ? 'affiliate_review'
         : forceNamedCompetitorReview ? 'named_competitor_review'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
         : 'brief_requires_human_review';
-      const trustBuildNote = (reason.startsWith('trust_build_') || reason === 'named_competitor_review')
+      const trustBuildNote = (reason.startsWith('trust_build_') || reason === 'named_competitor_review' || reason === 'affiliate_review')
         ? 'Review autonomous_runs.draft_payload, then approve with server/scripts/approve-autonomous-run.js --id=<run_id> --by=<operator>.'
         : null;
+      // Name the referenced products with their risk class so the owner
+      // reviews with the label context in front of him.
+      const affiliateNote = affiliateReview ? (() => {
+        let idx = new Map();
+        try { idx = require('../../../packages/affiliate-registry').productIndex(); } catch (_) { /* registry unavailable — ids still listed */ }
+        return `affiliate products: ${affiliateProductIds.map((id) => `${id} [${idx.get(id)?.row?.risk_class || 'unregistered'}/${idx.get(id)?.state || 'n/a'}]`).join(', ')}`;
+      })() : null;
       const finalized = await finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: reason,
-        reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), trustBuildNote].filter(Boolean).join(' | '),
+        reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), affiliateNote, trustBuildNote].filter(Boolean).join(' | '),
       });
       await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken });
       // Owner email-approval loop (2026-07-28): approvable kinds notify the
@@ -2866,6 +2892,11 @@ class AutonomousRunner {
   // statusCode) on any guard/gate/publish failure so the caller leaves the
   // opportunity pending. Idempotent-ish: a second approval after a live publish
   // is rejected because the run is no longer 'named_competitor_review'.
+  // Parked kinds whose approval PUBLISHES the reviewed draft (vs trust-build
+  // credit): a human signs off on every competitor naming and on every
+  // affiliate post (owner ruling 2026-08-31). Approval stamps
+  // trust_build_approved_by/at — the marker the PR poller's affiliate belt
+  // requires before auto-merging a head that carries <AffiliateLink>.
   async approveAndPublishNamedCompetitor(opportunityId, { runId = null, approvedBy = 'operator', expectedDraftSha = null } = {}) {
     if (!opportunityId) { const e = new Error('opportunityId required'); e.statusCode = 400; throw e; }
     // Serialize with runDaily / runCatchUp / admin run-now behind the engine
@@ -2896,7 +2927,7 @@ class AutonomousRunner {
       // otherwise pass every check and claim the opportunity (now parked for the
       // NEW run), publishing the stale draft the operator is no longer reviewing.
       const latestParked = await db('autonomous_runs')
-        .where({ opportunity_id: opportunityId, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', shadow_mode: false })
+        .where({ opportunity_id: opportunityId, outcome: 'completed_pending_review', skip_reason: run.skip_reason, shadow_mode: false })
         .orderBy('claimed_at', 'desc')
         .orderBy('id', 'desc')
         .first();
@@ -2908,8 +2939,8 @@ class AutonomousRunner {
       run = await db('autonomous_runs').where('opportunity_id', opportunityId).orderBy('claimed_at', 'desc').orderBy('id', 'desc').first();
       if (!run) { const e = new Error('No autonomous run found for this opportunity'); e.statusCode = 404; throw e; }
     }
-    if (run.outcome !== 'completed_pending_review' || run.skip_reason !== 'named_competitor_review' || run.shadow_mode === true) {
-      const e = new Error('Only a live named-competitor review run can be approved-and-published'); e.statusCode = 400; throw e;
+    if (run.outcome !== 'completed_pending_review' || !APPROVABLE_PUBLISH_SKIP_REASONS.includes(run.skip_reason) || run.shadow_mode === true) {
+      const e = new Error('Only a live named-competitor or affiliate review run can be approved-and-published'); e.statusCode = 400; throw e;
     }
     const draft = parseJsonMaybe(run.draft_payload);
     if (!draft || !draft.body) { const e = new Error('Stored draft is missing or empty'); e.statusCode = 422; throw e; }
@@ -3024,27 +3055,32 @@ class AutonomousRunner {
     // without the refresh this claim is stale the moment it's taken —
     // recoverStaleClaims would bounce the row to 'pending' mid-publish and
     // a new run could re-draft an opportunity whose PR/post already exists.
+    // The parked KIND (named_competitor_review | affiliate_review) is the
+    // run's own skip_reason: the claim, the in-flight marker, and every
+    // rollback key off it so an affiliate approval can claim and revert its
+    // own rows (Codex r1 P1). The in-flight marker states are shared.
+    const parkedKind = run.skip_reason;
     const approvalClaimedAt = new Date();
     const oppClaimed = await db('opportunity_queue')
-      .where({ id: opportunityId, status: 'pending_review', skip_reason: 'named_competitor_review' })
+      .where({ id: opportunityId, status: 'pending_review', skip_reason: parkedKind })
       .update({ status: 'claimed', skip_reason: 'named_competitor_publishing', claimed_at: approvalClaimedAt, updated_at: new Date() });
     if (!oppClaimed) {
-      const e = new Error('This opportunity is no longer parked for named-competitor review'); e.statusCode = 409; throw e;
+      const e = new Error(`This opportunity is no longer parked for ${parkedKind}`); e.statusCode = 409; throw e;
     }
     const runClaimed = await db('autonomous_runs')
-      .where({ id: run.id, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review' })
+      .where({ id: run.id, outcome: 'completed_pending_review', skip_reason: parkedKind })
       .update({ outcome: 'publishing_named_competitor', updated_at: new Date() });
     if (!runClaimed) {
       await db('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
-        .update({ status: 'pending_review', skip_reason: 'named_competitor_review', updated_at: new Date() }).catch(() => {});
-      const e = new Error('This named-competitor review is already being published'); e.statusCode = 409; throw e;
+        .update({ status: 'pending_review', skip_reason: parkedKind, updated_at: new Date() }).catch(() => {});
+      const e = new Error(`This ${parkedKind} run is already being published`); e.statusCode = 409; throw e;
     }
 
     const revertClaims = async () => {
       await db('autonomous_runs').where({ id: run.id, outcome: 'publishing_named_competitor' })
-        .update({ outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', updated_at: new Date() }).catch(() => {});
+        .update({ outcome: 'completed_pending_review', skip_reason: parkedKind, updated_at: new Date() }).catch(() => {});
       await db('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
-        .update({ status: 'pending_review', skip_reason: 'named_competitor_review', updated_at: new Date() }).catch(() => {});
+        .update({ status: 'pending_review', skip_reason: parkedKind, updated_at: new Date() }).catch(() => {});
     };
 
     // Operator-intercept posts must capture the publish-day Wayband/source
@@ -3062,6 +3098,11 @@ class AutonomousRunner {
     }
 
     const published = !!patch.published_url;
+    // No-op refresh under approval: the reviewed body already matches the
+    // live page — same disposition as runNext's publish_no_changes (the
+    // review queue must not keep an approved no-op forever as
+    // publisher_no_live_url).
+    const noChanges = patch.publish_status === 'no_changes';
     // Bind the approval to the exact COMMIT the approved publish created
     // (PR #3508 r7 + r12 P1s): the poller's merge gate honors
     // trust_build_approved_at ONLY when the PR head still equals this SHA —
@@ -3091,7 +3132,9 @@ class AutonomousRunner {
     };
     const runUpdate = published
       ? { ...baseUpdate, outcome: 'completed_published', skip_reason: null, published_url: patch.published_url }
-      : { ...baseUpdate, outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', published_url: null };
+      : noChanges
+        ? { ...baseUpdate, outcome: 'completed_no_changes', skip_reason: 'publish_no_changes', published_url: null }
+        : { ...baseUpdate, outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', published_url: null };
     // Post is live / PR open. If persistence fails, fall back to a minimal
     // reconcilable state (never leave the row stuck in publishing_*).
     try {
@@ -3108,7 +3151,9 @@ class AutonomousRunner {
       };
       const fallback = published
         ? { outcome: 'completed_published', published_url: patch.published_url, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date(), ...approvalStamp }
-        : { outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', astro_pr_url: patch.astro_pr_url || null, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date(), ...approvalStamp };
+        : noChanges
+          ? { outcome: 'completed_no_changes', skip_reason: 'publish_no_changes', draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date(), ...approvalStamp }
+          : { outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', astro_pr_url: patch.astro_pr_url || null, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date(), ...approvalStamp };
       await db('autonomous_runs').where('id', run.id).update(fallback)
         .catch((e2) => logger.error(`[autonomous-runner] named-competitor run fallback persist ALSO failed (run ${run.id}); manual reconcile needed: ${e2.message}`));
     }
@@ -3119,11 +3164,16 @@ class AutonomousRunner {
     // never shows a phantom PR-pending item the poller will never reconcile: a
     // PR-open → astro_pr_pending_merge; a no-PR/no-live result (e.g. a refresh
     // 'no_changes') → publisher_no_live_url (actionable in review, not pollable).
+    // The published reason carries the run's own parked KIND — an approved
+    // affiliate_review publish must not land in the durable opportunity
+    // history as competitor content (Codex #3646 r12 P2).
     const oppFinal = published
-      ? { status: 'done', skip_reason: 'named_competitor_published', completed_at: new Date(), updated_at: new Date() }
-      : patch.astro_pr_url
-        ? { status: 'pending_review', skip_reason: 'astro_pr_pending_merge', updated_at: new Date() }
-        : { status: 'pending_review', skip_reason: 'publisher_no_live_url', updated_at: new Date() };
+      ? { status: 'done', skip_reason: parkedKind === 'affiliate_review' ? 'affiliate_published' : 'named_competitor_published', completed_at: new Date(), updated_at: new Date() }
+      : noChanges
+        ? { status: 'done', skip_reason: 'no_changes', completed_at: new Date(), updated_at: new Date() }
+        : patch.astro_pr_url
+          ? { status: 'pending_review', skip_reason: 'astro_pr_pending_merge', updated_at: new Date() }
+          : { status: 'pending_review', skip_reason: 'publisher_no_live_url', updated_at: new Date() };
     try {
       await db('opportunity_queue').where({ id: opportunityId }).update(oppFinal);
     } catch (err) {
@@ -3226,7 +3276,7 @@ class AutonomousRunner {
         reviewRuns = await db('autonomous_runs')
           .whereIn('opportunity_id', stuckOppIds)
           .where('outcome', 'completed_pending_review')
-          .where('skip_reason', 'named_competitor_review')
+          .whereIn('skip_reason', APPROVABLE_PUBLISH_SKIP_REASONS)
           .update({
             skip_reason: REASON,
             reviewer_notes: db.raw(`COALESCE(NULLIF(reviewer_notes, '') || E'\\n', '') || ?`, [note]),

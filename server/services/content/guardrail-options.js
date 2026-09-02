@@ -72,7 +72,14 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
     ...(curatedHubLink ? [curatedHubLink] : []),
   ];
   const isRefresh = brief.action_type === 'refresh_existing_page';
+  // A supporting-blog run IS a blog target: the affiliate gate builds its
+  // product index only for blog targets, so without this every valid
+  // <AffiliateLink> parked as UNREGISTERED and the affiliate_review park
+  // was unreachable (Codex #3646 r41). The refresh lane overrides it from
+  // the live page's source path.
+  const targetIsBlog = brief.action_type === 'new_supporting_blog' || brief.page_type === 'supporting-blog';
   return {
+    targetIsBlog,
     service: (faqBlockedTopic || specialtyTopic)
       ? [baseService, faqBlockedTopic, specialtyTopic].filter(Boolean)
       : baseService,
