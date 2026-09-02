@@ -2,6 +2,7 @@ const crypto = require('crypto');
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { detectServiceLine } = require('./service-report/service-line-configs');
 const { transitionJobStatus } = require('./job-status');
 const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
@@ -385,6 +386,10 @@ function buildServiceRecordInsert({
   };
 
   if (serviceRecordCols.scheduled_service_id) recordInsert.scheduled_service_id = scheduledService.id;
+  // Report line, frozen at write like the /complete path (admin-dispatch
+  // reportServiceLine): readers fall back to the same detection when NULL,
+  // but the neighborhood-pressure aggregate buckets a NULL line by raw label.
+  if (serviceRecordCols.service_line) recordInsert.service_line = detectServiceLine(recordInsert.service_type);
   if (serviceRecordCols.structured_notes) recordInsert.structured_notes = serializeJsonb(structuredNotes);
   if (serviceRecordCols.completion_source) recordInsert.completion_source = 'project_completion';
   if (serviceRecordCols.protocol_defaults_used) recordInsert.protocol_defaults_used = false;

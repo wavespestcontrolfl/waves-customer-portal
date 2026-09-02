@@ -126,7 +126,9 @@ const ONE_TIME_GENERIC_BY_DESIGN = [
   'tick_control',
   'bee_wasp_removal',
   'mud_dauber_removal',
-  'pest_initial_cleanout',
+  // pest_initial_cleanout left this list 2026-09-02: the key no longer
+  // exists in the catalog (live-catalog audit), and it is an estimate-engine
+  // line, not a scheduled service.
   // Owner ruling 2026-07-31 (migration 20260731400000): the typed bed_bug
   // form was retired the same way — basic form + AI photo analysis; the
   // profile keeps one_time billing AND followup_policy 'alert' (the 14-day

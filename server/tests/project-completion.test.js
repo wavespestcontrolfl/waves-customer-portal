@@ -742,3 +742,15 @@ describe('resolveProjectCompletionBilling — annual-prepay term-link coverage',
     expect(result).toMatchObject({ required: true, resolved: false, reason: 'invoice_required', amount: 55 });
   });
 });
+
+test('service record insert freezes the report line when the column exists, and omits it otherwise', () => {
+  const base = {
+    scheduledService: { id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: '2026-05-21', service_type: 'Rodent Trapping Service' },
+    project: { id: 'project-1', project_type: 'rodent_trapping', title: 'Rodent trapping', project_date: '2026-05-21', report_token: '0123456789abcdef0123456789abcdef' },
+    profile: { completionMode: 'project_required', portalVisibility: 'token_only', portalAttachPolicy: 'recurring_customer' },
+  };
+  const withCol = buildServiceRecordInsert({ ...base, serviceRecordCols: { scheduled_service_id: true, service_line: true } });
+  expect(withCol.service_line).toBe('rodent');
+  const withoutCol = buildServiceRecordInsert({ ...base, serviceRecordCols: { scheduled_service_id: true } });
+  expect(withoutCol).not.toHaveProperty('service_line');
+});
