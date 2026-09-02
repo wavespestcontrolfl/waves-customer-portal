@@ -54,9 +54,9 @@ describe('getOpsQueue', () => {
       { id: 'opp-1', skip_reason: 'affiliate_review', brief: { title: 'Best ant bait for lanais' }, run: { completed_at: ago(60) } },
     ]);
     fixtures.call_log = [
-      { id: 'c1', from_phone: '+19415550100', direction: 'inbound', processing_status: 'processing', processing_started_at: ago(45), created_at: ago(50) },
-      { id: 'c2', from_phone: '+19415550101', direction: 'inbound', processing_status: null, updated_at: ago(1), created_at: ago(1) },
-      { id: 'c3', from_phone: '+19415550102', direction: 'outbound', processing_status: 'extraction_failed', extraction_attempts: 3, created_at: ago(90) },
+      { id: 'c1', from_phone: '+15550000100', direction: 'inbound', processing_status: 'processing', processing_started_at: ago(45), created_at: ago(50) },
+      { id: 'c2', from_phone: '+15550000101', direction: 'inbound', processing_status: null, updated_at: ago(1), created_at: ago(1) },
+      { id: 'c3', from_phone: '+15550000102', direction: 'outbound', processing_status: 'extraction_failed', extraction_attempts: 3, created_at: ago(90) },
     ];
     fixtures.content_email_approvals = [
       { id: 'ea-1', token: 'EA-1a2b3c4d', kind: 'named_competitor_review', status: 'awaiting_reply', email_sent_at: ago(10), created_at: ago(10) },
@@ -73,10 +73,10 @@ describe('getOpsQueue', () => {
       { id: 'p1', service_record_id: 'rec-33333333', status: 'rendering', created_at: ago(2) },
     ];
     fixtures.dispatch_alerts = [
-      { id: 'da-1', severity: 'warn', payload: JSON.stringify({ customerName: 'Holly Thompson', serviceName: 'Termite re-treat' }), created_at: ago(500) },
+      { id: 'da-1', severity: 'warn', payload: JSON.stringify({ customerName: 'Test Customer', serviceName: 'Termite re-treat' }), created_at: ago(500) },
     ];
     fixtures.admin_alerts = [
-      { id: 'aa-1', type: 'closeout_contradiction', severity: 'high', title: 'Closeout contradiction on 123 Gulf Dr', href: '/admin/dispatch', last_seen_at: ago(20) },
+      { id: 'aa-1', type: 'closeout_contradiction', severity: 'high', title: 'Closeout contradiction on a test visit', href: '/admin/dispatch', last_seen_at: ago(20) },
       { id: 'aa-2', type: 'missing_required_photos', severity: 'low', title: 'Missing photos', last_seen_at: ago(40) },
     ];
   });
@@ -102,7 +102,7 @@ describe('getOpsQueue', () => {
     expect(by.reports.items.map((i) => [i.id, i.status])).toEqual([
       ['delivery:d2', 'failed'], ['pdf:p1', 'pending'], ['delivery:d1', 'pending'], // newest first within a status
     ]);
-    expect(by.followups.items).toEqual([expect.objectContaining({ status: 'parked', title: 'Holly Thompson · Termite re-treat' })]);
+    expect(by.followups.items).toEqual([expect.objectContaining({ status: 'parked', title: 'Test Customer · Termite re-treat' })]);
     expect(by.alerts.items.map((i) => [i.id, i.status])).toEqual([['aa-1', 'failed'], ['aa-2', 'parked']]);
 
     expect(by.calls).toMatchObject({ pending: 1, parked: 1, failed: 1, total: 3, error: null });
