@@ -192,20 +192,21 @@ function sameFirstName(a, b) {
 // The line is split into PERSONS first (on "&" / "and"), and both name parts
 // must belong to the SAME person: the customer's last name must be that
 // person's surname — the trailing token run, or everything before the comma
-// in "Last, First" form — and the remaining tokens must contain a contiguous
-// run that is first-name-compatible (nickname-aware; compound "Mary Ann"
-// joins). A single-token person shares the surname of the last person on
+// in "Last, First" form — and the LEADING run of the remaining tokens must be
+// first-name-compatible (nickname-aware; compound "Mary Ann" joins; a middle
+// name never counts). A single-token person shares the surname of the last person on
 // the line ("Pat & Robert Doe"). Initials never satisfy the first-name leg;
 // a missing customer name part never corroborates (amount alone is not
 // identity).
 function tokensOf(text) {
   return String(text || '').split(/\s+/).map(normalizeNameFolded).filter((t) => t.length > 1);
 }
-function runsOf(tokens) {
+// The given name is the LEADING run of a person's given tokens ("Mary Ann"
+// joins; "Robert James" is Robert with a middle name, never James) — so a
+// middle name can never satisfy the first-name leg.
+function givenNameRuns(tokens) {
   const runs = [];
-  for (let i = 0; i < tokens.length; i += 1) {
-    for (let j = i + 1; j <= tokens.length; j += 1) runs.push(tokens.slice(i, j).join(''));
-  }
+  for (let j = 1; j <= tokens.length; j += 1) runs.push(tokens.slice(0, j).join(''));
   return runs;
 }
 // [{ given: [tokens], surname: [tokens] }] per person on the line.
@@ -223,13 +224,13 @@ function personsOf(payerName) {
 }
 function personCorroborates(person, customerFirst, customerLast) {
   if (person.fixedSurname) {
-    return person.surname.join('') === customerLast && runsOf(person.given).some((r) => sameFirstName(r, customerFirst));
+    return person.surname.join('') === customerLast && givenNameRuns(person.given).some((r) => sameFirstName(r, customerFirst));
   }
   const tokens = person.all || [];
   // The surname is a trailing run; the given name lives in what precedes it.
   for (let k = tokens.length - 1; k >= 1; k -= 1) {
     if (tokens.slice(k).join('') === customerLast) {
-      if (runsOf(tokens.slice(0, k)).some((r) => sameFirstName(r, customerFirst))) return true;
+      if (givenNameRuns(tokens.slice(0, k)).some((r) => sameFirstName(r, customerFirst))) return true;
     }
   }
   return false;
