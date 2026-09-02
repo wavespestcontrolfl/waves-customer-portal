@@ -115,30 +115,29 @@ function memoInvoiceNumbers(memo) {
 // close the comment from inside a quoted run) can never count. The
 // signing identity is read after its LAST '@' and its org-domain must be
 // capitalone.com (public-suffix aware, so capitalone.com.evil.example fails).
+// Skip a quoted run starting at text[i] === '"', honouring backslash
+// escapes; returns the index of the closing quote (or the end of text).
+function skipQuoted(text, i) {
+  for (let j = i + 1; j < text.length; j += 1) {
+    if (text[j] === '\\') { j += 1; continue; }
+    if (text[j] === '"') return j;
+  }
+  return text.length;
+}
 function authResultClauses(authResults) {
   const text = String(authResults || '');
   const clauses = [];
   let cur = '';
   let depth = 0;
-  let quoted = false;
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i];
-    if (quoted) {
-      if (ch === '\\' && i + 1 < text.length) { i += 1; continue; }
-      if (ch === '"') quoted = false;
-      continue;
-    }
+    if (ch === '\\') { if (depth === 0) cur += text.slice(i, i + 2); i += 1; continue; }
+    if (ch === '"') { i = skipQuoted(text, i); continue; }
     if (depth > 0) {
-      // Inside a comment: honour quoted-pairs (\) and \\) and a quoted run,
-      // so text an attacker put in an envelope address that Google echoes
-      // into its SPF explanation can never close the comment early.
-      if (ch === '\\' && i + 1 < text.length) { i += 1; continue; }
-      if (ch === '"') { const close = text.indexOf('"', i + 1); i = close === -1 ? text.length : close; continue; }
       if (ch === '(') depth += 1;
       else if (ch === ')') depth -= 1;
       continue;
     }
-    if (ch === '"') { quoted = true; continue; }
     if (ch === '(') { depth = 1; continue; }
     if (ch === ';') { clauses.push(cur); cur = ''; continue; }
     cur += ch;
