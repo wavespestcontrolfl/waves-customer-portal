@@ -356,31 +356,44 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
   // Optimistic concurrency: only apply if THIS lease is still current. If the
   // claim was swept and re-claimed by another worker, claimed_at no longer
   // matches, the update affects 0 rows, and we reject the stale report.
-  const updated = await db.transaction(async (trx) => {
+  const { updated, moved, reopened } = await db.transaction(async (trx) => {
     const n = await trx('seo_link_prospects')
       .where({ id: prospect_id })
       .where('claimed_at', leaseDate)
       .update({ ...patch, attempts });
+    if (!n) return { updated: 0, moved: 0, reopened: false };
     // the lease is released — a superseded / changed path is followed in the
     // SAME transaction, even if this row is never claimed again
-    if (n) {
-      const moved = await settleReleasedPlacements([prospect_id], trx);
-      // The retry lifecycle is PATH-specific: a failure (and the retry cap it
-      // may have exhausted) belongs to the predecessor. When settlement just
-      // moved the row onto a DIFFERENT path, the successor has had no attempt
-      // yet — reopen it with a fresh count rather than leaving it terminal.
-      if (moved && outcome === 'failed') {
-        const after = await trx('seo_link_prospects').where({ id: prospect_id }).first('path_id');
-        if (after && after.path_id && after.path_id !== prospect.path_id) {
-          await trx('seo_link_prospects').where({ id: prospect_id }).whereNull('claimed_at').update({ status: 'prospect', attempts: 0, updated_at: new Date() });
-        }
+    const settled = await settleReleasedPlacements([prospect_id], trx);
+    let reopenedRow = false;
+    // The retry lifecycle is PATH-specific: a failure (and the retry cap it
+    // may have exhausted) belongs to the predecessor. When settlement just
+    // moved the row onto a DIFFERENT path, the successor has had no attempt
+    // yet — reopen it with a fresh count rather than leaving it terminal.
+    if (settled && outcome === 'failed') {
+      const after = await trx('seo_link_prospects').where({ id: prospect_id }).first('path_id');
+      if (after && after.path_id && after.path_id !== prospect.path_id) {
+        await trx('seo_link_prospects').where({ id: prospect_id }).whereNull('claimed_at').update({ status: 'prospect', attempts: 0, updated_at: new Date() });
+        reopenedRow = true;
       }
     }
-    return n;
+    return { updated: n, moved: settled, reopened: reopenedRow };
   });
 
   if (updated === 0) {
     return { ok: false, code: 'stale_lease', error: 'lease expired or reclaimed; re-claim before reporting' };
+  }
+  // A `drafted` outcome whose settlement MOVED the placement no longer holds
+  // a draft (the transition cleared copy composed for a retired route): the
+  // report is honest about it, like saveDraft — the drafter must not count
+  // it, the worker must not treat it as accepted.
+  if (outcome === 'drafted' && moved) {
+    logger.info(`[link-worker] report ${prospect_id} outcome=drafted discarded — its acquisition path moved while drafting`);
+    return { ok: false, code: 'path_moved', error: 'the placement\'s acquisition path changed while drafting; the draft was discarded — re-draft against the current path' };
+  }
+  if (reopened) {
+    logger.info(`[link-worker] report ${prospect_id} outcome=failed on a superseded path — reopened on its successor with a fresh retry count`);
+    return { ok: true, status: 'prospect', attempts: 0, reopened_on_successor: true };
   }
   logger.info(`[link-worker] report ${prospect_id} outcome=${outcome} attempts=${attempts} -> ${patch.status || prospect.status}`);
   return { ok: true, status: patch.status || prospect.status, attempts };

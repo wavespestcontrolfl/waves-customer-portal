@@ -304,7 +304,20 @@ test('a terminal failure reported on a superseded predecessor moves the row to t
   const [claimed] = await worker.claim({ n: 5, type: 'signup' });
   old.superseded_by = 'p-new'; // the investigator retires the predecessor while the lease is held
   const rep = await worker.report({ prospect_id: 'r1', outcome: 'failed', lease_token: claimed.lease_token });
-  expect(rep.ok).toBe(true);
+  expect(rep).toEqual({ ok: true, status: 'prospect', attempts: 0, reopened_on_successor: true }); // the report tells the truth about the post-settlement row
   expect(row).toMatchObject({ path_id: 'p-new', target_url: 'https://example.com/new', status: 'prospect', attempts: 0, claimed_at: null, automation_policy: null }); // the successor had no attempt: not terminal, count reset, unclassified for the classifier
+});
+
+test('a drafted report whose settlement moved the placement is refused as path_moved — no phantom draft is counted (local Codex P1)', async () => {
+  const old = { id: 'p-old', domain_id: 'd1', submission_url: null, superseded_by: null, link_type: 'editorial', confidence: 0.7, revision: 1 };
+  const next = { id: 'p-new', domain_id: 'd1', submission_url: null, superseded_by: null, link_type: 'editorial', confidence: 0.7, revision: 1 };
+  mockStore.seo_link_acquisition_paths.push(old, next);
+  const row = { id: 'r1', status: 'prospect', link_type: 'editorial', claimed_at: null, claimed_by: null, attempts: 0, automation_policy: null, priority: 'high', domain_rating: 40, target_domain: 'example.com', path_id: 'p-old', target_url: null, contact_email: 'ed@example.com', outreach_status: null, outreach_sent_at: null, quality_signals: null };
+  mockStore.seo_link_prospects.push(row);
+  const [claimed] = await worker.claim({ n: 5, type: 'outreach' });
+  old.superseded_by = 'p-new'; // superseded while the drafter worked
+  const rep = await worker.report({ prospect_id: 'r1', outcome: 'drafted', lease_token: claimed.lease_token, outreach_to_email: 'ed@example.com', outreach_subject: 'Pitch', outreach_body: 'Hi there' });
+  expect(rep).toMatchObject({ ok: false, code: 'path_moved' });
+  expect(row).toMatchObject({ path_id: 'p-new', outreach_status: 'none', outreach_to_email: null, claimed_at: null }); // released, moved, the stale draft cleared
 });
 

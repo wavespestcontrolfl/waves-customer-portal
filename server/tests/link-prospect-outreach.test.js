@@ -302,6 +302,21 @@ describe('sendOutreach', () => {
     expect(res.code).toBe('path_moved');
     expect(gmail.sendMessage).not.toHaveBeenCalled();
   });
+
+  test('a draft on a path disproven (or ruled human-only) since it was saved is not sent → path_moved', async () => {
+    isEnabled.mockReturnValue(true);
+    setDbQueues({
+      seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { c: '0' } }), chain({ result: [] }), chain({ first: { path_id: 'path-dead' } })],
+      seo_link_acquisition_paths: [chain({ first: { id: 'path-dead', superseded_by: null, confidence: 0, agent_completable: true } })],
+    });
+    expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');
+    setDbQueues({
+      seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { c: '0' } }), chain({ result: [] }), chain({ first: { path_id: 'path-human' } })],
+      seo_link_acquisition_paths: [chain({ first: { id: 'path-human', superseded_by: null, confidence: 0.8, agent_completable: false } })],
+    });
+    expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+  });
 });
 
 describe('saveDraft', () => {

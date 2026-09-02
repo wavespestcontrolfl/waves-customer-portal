@@ -225,10 +225,14 @@ async function sendOutreach({ prospectId, approvedBy = 'admin' }) {
     // zero moved is not proof of a live path: a chain settlement could not
     // resolve (bounded hops) or refused leaves the row on a retired path —
     // re-read and require the path it will send on to be non-superseded
+    // …and STANDING: the draft's lease stamp was consumed when it was saved, so
+    // a later disproof (confidence 0) or a human-step ruling
+    // (agent_completable=false) on the same path shows up only here
     const current = await trx('seo_link_prospects').where({ id: prospectId }).first('path_id');
     if (current && current.path_id) {
-      const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).first('id', 'superseded_by');
-      if (!onPath || onPath.superseded_by) return { ok: false, code: 'path_moved' };
+      const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).first('id', 'superseded_by', 'confidence', 'agent_completable');
+      const standing = onPath && !onPath.superseded_by && !(onPath.confidence != null && !(Number(onPath.confidence) > 0)) && onPath.agent_completable !== false;
+      if (!standing) return { ok: false, code: 'path_moved' };
     }
     const attemptAt = new Date();
     const claimedRows = await trx('seo_link_prospects')
