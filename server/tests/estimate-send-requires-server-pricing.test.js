@@ -433,3 +433,44 @@ describe('pricing-authority-gate — the one verdict shared by sends, follow-ups
     expect(gate.rowPassesGatedSendAuthority({})).toBe(false);
   });
 });
+
+describe('pricing-authority-gate — group-aware verdict (GH codex P1 r14)', () => {
+  const gate = require('../services/pricing-authority-gate');
+  function fakeDb(siblings, { throwOnRead = false } = {}) {
+    const calls = { whereIns: [] };
+    const chain = {
+      where: () => chain, whereNot: () => chain, whereNull: () => chain,
+      whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return chain; },
+      select: async () => { if (throwOnRead) throw new Error('db down'); return siblings; },
+    };
+    const database = jest.fn(() => chain);
+    return { database, calls };
+  }
+  const anchor = { id: 'est-a', estimate_group_id: 'grp-1', pricing_authority: 'SERVER', estimate_data: '{}' };
+
+  test('a SERVER anchor beside a published fallback sibling is NOT deliverable; all-SERVER (or editor-authored) siblings are; ungrouped rows never query', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    const bad = fakeDb([{ id: 'est-b', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' }]);
+    expect(await gate.estimateDeliverableUnderGate(bad.database, anchor)).toBe(false);
+    expect(bad.calls.whereIns).toEqual([['status', ['draft', 'scheduled', 'send_failed', 'sent', 'viewed']]]);
+    const good = fakeDb([
+      { id: 'est-b', pricing_authority: 'SERVER', estimate_data: '{}' },
+      { id: 'est-c', pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' } } }) },
+    ]);
+    expect(await gate.estimateDeliverableUnderGate(good.database, anchor)).toBe(true);
+    const ungrouped = fakeDb([{ id: 'x', pricing_authority: 'CLIENT_FALLBACK' }]);
+    expect(await gate.estimateDeliverableUnderGate(ungrouped.database, { ...anchor, estimate_group_id: null })).toBe(true);
+    expect(ungrouped.database).not.toHaveBeenCalled();
+  });
+
+  test('fails closed on a sibling read error; gate off is always deliverable; a fallback anchor never reaches the group read', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    const down = fakeDb([], { throwOnRead: true });
+    expect(await gate.estimateDeliverableUnderGate(down.database, anchor)).toBe(false);
+    const untouched = fakeDb([]);
+    expect(await gate.estimateDeliverableUnderGate(untouched.database, { ...anchor, pricing_authority: 'CLIENT_FALLBACK' })).toBe(false);
+    expect(untouched.database).not.toHaveBeenCalled();
+    mockGateState.sendRequiresServerPricing = false;
+    expect(await gate.estimateDeliverableUnderGate(down.database, { ...anchor, pricing_authority: 'CLIENT_FALLBACK' })).toBe(true);
+  });
+});

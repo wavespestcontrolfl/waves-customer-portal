@@ -248,6 +248,17 @@ async function guardClickFollowupSend(draft) {
       return { transient: true };
     }
   }
+  // Engine-authoritative pricing gate (#3750, uncapped codex P1 r17): an
+  // approved click-followup draft sends the estimate link, so a delivered
+  // row the engine never verified (or a group link showing such a sibling)
+  // holds the draft — claim released, draft pending — until the operator
+  // re-saves it through the engine.
+  if (estimate) {
+    const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
+    if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+      return { hold: true, message: 'This estimate\'s price has no engine verification stamp — re-save it from the estimate tool before sending this follow-up (draft left pending).' };
+    }
+  }
   const verdict = await evaluateClickFollowupGate({
     estimate,
     // Which link kind the click landed on decides the 'accepted' semantics

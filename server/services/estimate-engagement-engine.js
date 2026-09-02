@@ -33,7 +33,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
-const { gatedSendAuthorityPredicateApplies, rowPassesGatedSendAuthority } = require('./pricing-authority-gate');
+const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 // A pricing-authority block is TEMPORARY (the operator re-saves the row
 // through the engine), so the job is deferred — never made terminal — and
 // re-judged on this cadence without burning its attempts (uncapped codex P1
@@ -704,7 +704,7 @@ async function processDueBatch(now = new Date()) {
       // through safetyGate — the shared verdict applies HERE, before the
       // claim, so a delivered row the engine never verified is not prompted
       // while the gate is on. The operator re-saves it; the job is skipped.
-      if (gatedSendAuthorityPredicateApplies() && !rowPassesGatedSendAuthority(est)) {
+      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, est))) {
         await deferOrShadow(live, job, new Date(nowMs + PRICING_AUTHORITY_RECHECK_MS), 'pricing-authority-not-server');
         continue;
       }

@@ -26,7 +26,7 @@ const { leadIdForEstimate } = require("./estimate-lead-linkage");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
-const { gatedSendAuthorityPredicateApplies, rowPassesGatedSendAuthority } = require("./pricing-authority-gate");
+const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require("./pricing-authority-gate");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
 const {
   assessDepositFollowUpEligibility,
@@ -157,7 +157,10 @@ async function safetyGate(est, now = new Date(), { replay = false } = {}) {
   // claims apply, editor-authored proposals exempt. The operator re-saves
   // the row through the engine; the next tick re-judges it. Runs for the
   // deferred replay too (deferredFollowupStillEligible → this gate).
-  if (gatedSendAuthorityPredicateApplies() && !rowPassesGatedSendAuthority(est))
+  // Group-aware (GH codex P1 r14): the link a follow-up points at renders
+  // every viewable sibling, so a fallback sibling behind a SERVER anchor
+  // blocks the nudge too.
+  if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, est)))
     return { skip: true, reason: "pricing-authority-not-server" };
   // Durable zero-comms opt-out (out-of-band audit P1 on #3391): publish-
   // without-delivery mints (report click-to-estimate) pre-burn the four

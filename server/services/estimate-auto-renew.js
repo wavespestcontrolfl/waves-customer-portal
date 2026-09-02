@@ -21,7 +21,7 @@ const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
 const { isEnabled } = require('../config/feature-gates');
-const { gatedSendAuthorityPredicateApplies, rowPassesGatedSendAuthority } = require('./pricing-authority-gate');
+const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
 
@@ -74,7 +74,7 @@ const EstimateAutoRenew = {
           // renewal re-emails the estimate link — never for a delivered row
           // the engine never verified while the gate is on. Not renewed
           // either: the operator re-saves it through the engine first.
-          if (gatedSendAuthorityPredicateApplies() && !rowPassesGatedSendAuthority(est)) {
+          if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, est))) {
             logger.info(`[est-auto-renew] skip ${est.id}: pricing-authority-not-server`);
             continue;
           }

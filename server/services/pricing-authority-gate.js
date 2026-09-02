@@ -34,9 +34,43 @@ function rowPassesGatedSendAuthority(row = {}) {
   return isProposalAuthoredByEditor(data?.proposal);
 }
 
+// The customer's ONE link renders every viewable sibling of a grouped
+// estimate (estimate-public propertyGroup), so a row is deliverable under
+// the gate only when IT passes and every sibling the link would show passes
+// too — the same sibling set the send claims judge (draft / scheduled /
+// send_failed / sent / viewed, unlocked, unarchived). A sibling read that
+// fails answers "not deliverable": fail closed, never a nudge on a guess.
+async function groupPassesGatedSendAuthority(database, row = {}) {
+  if (!row?.estimate_group_id) return true;
+  let siblings;
+  try {
+    siblings = await database('estimates')
+      .where({ estimate_group_id: row.estimate_group_id })
+      .whereNot({ id: row.id })
+      .whereNull('archived_at')
+      .whereNull('price_locked_at')
+      .whereIn('status', ['draft', 'scheduled', 'send_failed', 'sent', 'viewed'])
+      .select('id', 'pricing_authority', 'estimate_data');
+  } catch {
+    return false;
+  }
+  return (Array.isArray(siblings) ? siblings : []).every((sibling) => rowPassesGatedSendAuthority(sibling));
+}
+
+// The one question every customer-facing rail asks while the gate is on:
+// may THIS row (and the group its link shows) be put in front of the
+// customer? Gate off → always yes.
+async function estimateDeliverableUnderGate(database, row = {}) {
+  if (!gatedSendAuthorityPredicateApplies()) return true;
+  if (!rowPassesGatedSendAuthority(row)) return false;
+  return groupPassesGatedSendAuthority(database, row);
+}
+
 module.exports = {
   SERVER_PRICING_AUTHORITY_SQL,
   GATED_SEND_AUTHORITY_SQL,
   gatedSendAuthorityPredicateApplies,
   rowPassesGatedSendAuthority,
+  groupPassesGatedSendAuthority,
+  estimateDeliverableUnderGate,
 };

@@ -91,6 +91,22 @@ function extensionStatusUpdate(estimate = {}, now = new Date()) {
  */
 async function extendEstimate({ estimate, days, silent = false, entryPoint, workflow, smsMetadata = {} }) {
   if (!estimate || !estimate.id) throw validationError('Estimate not found');
+  // Engine-authoritative pricing gate (#3750, GH codex P1 r14 / uncapped
+  // P0 r17): an extension revives the token — the price becomes viewable
+  // and acceptable again and its refreshed link is redelivered — so a
+  // delivered row the engine never verified (or one whose group link would
+  // show such a sibling) is refused here, in the shared service, for the
+  // public and admin callers alike. The operator re-saves it through the
+  // engine first. Customer-safe copy: the public route returns it verbatim.
+  {
+    const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
+    if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+      const err = new Error('This estimate can\'t be extended online right now — please call the office and we\'ll refresh it for you.');
+      err.statusCode = 409;
+      err.code = 'PRICING_AUTHORITY_NOT_SERVER';
+      throw err;
+    }
+  }
 
   // estimate_data.noEngagementAutomation — the durable zero-comms opt-out
   // stamped by publish-without-delivery mints (report click-to-estimate).
