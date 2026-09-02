@@ -4332,6 +4332,7 @@ const {
   observationsForSpecialtyService,
   specialtyProtocolActionScopes,
   specialtyServiceKey,
+  validateSpecialtyAreas,
   validateSpecialtyClosureCombination,
 } = require('../../shared/specialty-service-closeouts');
 
@@ -5344,6 +5345,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         error: structuredObservationConflict,
         code: 'conflicting_structured_observations',
       });
+    }
+    // The treated areas drive the derived action scope below, so they are
+    // validated against the lane first (codex P1 r13 #3701).
+    const invalidSpecialtyArea = validateSpecialtyAreas(resolvedSpecialtyServiceKey, completionAreas, {
+      enforcePresetAreas: explicitSpecialtyLane,
+    });
+    if (invalidSpecialtyArea) {
+      return res.status(422).json({ error: invalidSpecialtyArea, code: 'invalid_specialty_area' });
     }
     // report-data treats treatmentApplied as authoritative for applicationMade,
     // re-entry and aftercare, so for specialty lanes the persisted metadata is

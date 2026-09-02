@@ -6,6 +6,7 @@ const {
   specialtyActionScopeForAreas,
   specialtyProtocolActionScopes,
   specialtyServiceKey,
+  validateSpecialtyAreas,
   validateSpecialtyObservationCombination,
   validateSpecialtyClosureCombination,
 } = require('../../shared/specialty-service-closeouts');
@@ -189,6 +190,18 @@ describe('specialty service closeout vocabulary', () => {
     expect(validateSpecialtyClosureCombination('fire_ant', {
       observations: ['No active fire ants observed'], actions: ['Broadcast bait application'],
     })).toBeNull();
+  });
+
+  test('specialty areas must come from the preset, or the lane legacy list on keyless rows', () => {
+    expect(validateSpecialtyAreas('fire_ant', ['Kitchen', 'Front lawn'])).toBe('“Kitchen” is not a treatment area for this service.');
+    expect(validateSpecialtyAreas('fire_ant', ['Front lawn', 'Fence line'])).toBeNull();
+    // Keyless legacy row: the generic pest chips its older client offered still pass…
+    expect(validateSpecialtyAreas('fire_ant', ['Fence line', 'Perimeter'], { enforcePresetAreas: false })).toBeNull();
+    // …but another lane's vocabulary never does.
+    expect(validateSpecialtyAreas('dethatching', ['Kitchen'], { enforcePresetAreas: false }))
+      .toBe('“Kitchen” is not a treatment area for this service.');
+    expect(validateSpecialtyAreas('general_pest', ['Kitchen'])).toBeNull();
+    expect(validateSpecialtyAreas('bed_bug', [])).toBeNull();
   });
 
   test('accepts consistent work state and lanes without work-state rules', () => {

@@ -555,21 +555,27 @@ function classifyScopeValue(value, serviceLine) {
   return { interior: INTERIOR_SCOPE_RE.test(text), exterior: EXTERIOR_SCOPE_RE.test(text), text };
 }
 
-function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
+function treatmentScope({ service = {}, applications = [], zones = [], treatmentEvidence } = {}) {
   const serviceLine = service.service_line || detectServiceLine(service.service_type);
   const classified = scopeTextValues({ service, applications, zones })
     .map((value) => classifyScopeValue(value, serviceLine))
     .filter(Boolean);
   const text = classified.map((entry) => entry.text).join(' ');
   const textInterior = classified.some((entry) => entry.interior);
-  const textExterior = classified.some((entry) => entry.exterior);
+  // Typed area fields are optional, so an outdoor-only line can record an
+  // application with no area at all — the application itself is the
+  // exterior evidence there (codex P1 r13 #3701).
+  const outdoorApplication = EXTERIOR_ONLY_SERVICE_LINES.has(serviceLine)
+    && !classified.length
+    && (treatmentEvidence === true || applications.length > 0 || structuredActionScope(service).hasTreatment);
+  const textExterior = classified.some((entry) => entry.exterior) || outdoorApplication;
   // Structured action scope is additive: an interior treatment fires interior
   // even when only exterior areas were chipped (and vice-versa).
   const action = structuredActionScope(service);
   return {
     hasInterior: textInterior || action.hasInterior,
     hasExterior: textExterior || action.hasExterior,
-    hasExplicitScope: text.trim().length > 0 || action.hasTreatment,
+    hasExplicitScope: text.trim().length > 0 || action.hasTreatment || outdoorApplication,
     // TRUE only when a recognized interior/exterior LOCATION signal exists.
     // Target-only text (product target names) makes hasExplicitScope true
     // without classifying anything — the write-path defer must key on this
@@ -595,17 +601,21 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   const adjustedMarker = normalized.reentry_adjusted;
   const sideAdjusted = (side) => adjustedMarker === true
     || (!!adjustedMarker && typeof adjustedMarker === 'object' && adjustedMarker[side] === true);
-  const scope = treatmentScope({ service, applications, zones });
+  const scope = treatmentScope({ service, applications, zones, treatmentEvidence });
 
   // A closeout that DECLARED its protocol actions and marked none of them as
   // treatment (inspection-only, deferred, no treatment recommended) applied
   // nothing — the inspected areas are location, not treatment scope. With
   // no application evidence either, both re-entry targets must be zero so
   // the report never shows a "ready in" countdown beside "No treatment was
-  // applied" (codex P1 r10 #3701). Only the read-time caller knows the
-  // product-load verdict, so the rule is gated on an explicit `false`.
+  // applied" (codex P1 r10 #3701). Typed closeouts declare the same thing
+  // through their work fields (inspection-only / deferred options, codex P1
+  // r13). Only the read-time caller knows the product-load verdict, so the
+  // rule is gated on an explicit `false`.
   const declared = structuredActionScope(service);
-  if (treatmentEvidence === false && declared.hasActions && !declared.hasTreatment && !declared.hasNonChemicalTreatment) {
+  const declaredNoTreatment = (declared.hasActions && !declared.hasTreatment && !declared.hasNonChemicalTreatment)
+    || require('./activity-indicators').typedTreatmentEvidenceForRecord(service).noWork;
+  if (treatmentEvidence === false && declaredNoTreatment) {
     if (!sideAdjusted('interior') && normalized.interior_reentry_min != null) normalized.interior_reentry_min = 0;
     if (!sideAdjusted('exterior') && normalized.exterior_reentry_min != null) normalized.exterior_reentry_min = 0;
     return normalized;
@@ -4014,7 +4024,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // Typed lanes record their work in the frozen snapshot's values (products
   // and protocol actions are optional there) — an application-bearing typed
   // option is treatment evidence too (codex P1 r12 #3701).
-  const typedEvidence = require('./activity-indicators').typedTreatmentEvidence(typedSnapshot?.type, typedSnapshot?.values);
+  const typedEvidence = require('./activity-indicators').typedTreatmentEvidenceForRecord(service);
   const readTimeSprayEvidence = applications.some((app) => isSprayApplicationMethod(app.method) || isInferredPesticideApplication(app))
     || structuredActionScope(service).hasTreatment
     || typedEvidence.applied;

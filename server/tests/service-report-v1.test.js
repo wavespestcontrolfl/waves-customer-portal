@@ -559,6 +559,28 @@ describe('service report v1', () => {
       })).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
     });
 
+    test('a typed inspection-only closeout zeros re-entry; an area-less outdoor application keeps exterior', () => {
+      const inspectionOnly = {
+        service_type: 'One-Time Pest Treatment',
+        areas_serviced: JSON.stringify(['Foundation perimeter']),
+        service_data: { typedReportSnapshot: { type: 'one_time_pest_treatment', values: { work_completed: 'Inspection / identification only' } } },
+      };
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: inspectionOnly, treatmentEvidence: false }))
+        .toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: inspectionOnly }))
+        .toMatchObject({ exterior_reentry_min: 30 });
+      const areaLessLawn = {
+        service_type: 'One-Time Lawn Treatment',
+        service_data: { typedReportSnapshot: { type: 'one_time_lawn_treatment', values: { work_completed: 'Weed control applied' } } },
+      };
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: areaLessLawn, treatmentEvidence: true }))
+        .toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
+      // The same area-less record with no evidence at all still has no exterior scope.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { service_type: 'One-Time Lawn Treatment' }, treatmentEvidence: false,
+      })).toMatchObject({ exterior_reentry_min: 0 });
+    });
+
     test('an "Other" area on a lawn application keeps the exterior dry-down target', () => {
       const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
         service: { service_type: 'One-Time Lawn Treatment', areas_serviced: JSON.stringify(['Other']) },

@@ -1062,10 +1062,11 @@ const LEGACY_COMPLETION_AREAS = require('../../../shared/legacy-completion-areas
 // carries its treatment here (codex P1 r12 #3701). Every label is asserted to
 // exist in its field's options by the typed-treatment-evidence test.
 const TYPED_TREATMENT_OPTIONS = Object.freeze({
-  flea: { treatment_completed: { applied: [
-    'Exterior flea treatment', 'Interior flea treatment', 'Growth regulator', 'Crack / crevice treatment',
-    'Lawn treatment', 'Pet resting area treatment', 'Limited treatment',
-  ] } },
+  flea: { treatment_completed: {
+    applied: ['Exterior flea treatment', 'Interior flea treatment', 'Growth regulator', 'Crack / crevice treatment',
+      'Lawn treatment', 'Pet resting area treatment', 'Limited treatment'],
+    noWork: ['Inspection only'],
+  } },
   cockroach: { work_completed: { applied: [
     'Bait placement', 'Insect growth regulator', 'Crack & crevice treatment', 'Dust application',
     'Flush-out treatment', 'Exterior perimeter treatment',
@@ -1084,30 +1085,36 @@ const TYPED_TREATMENT_OPTIONS = Object.freeze({
       'Bait placement', 'Insect growth regulator applied', 'Dust applied to labeled voids', 'Nest treated',
       'Individual mound treatment', 'Broadcast lawn application', 'Treatment limited by site conditions'],
     performed: ['Accessible nest removed', 'Mechanical removal / vacuuming'],
+    noWork: ['Inspection / identification only', 'Treatment deferred'],
   } },
-  one_time_lawn_treatment: { work_completed: { applied: [
-    'Fertilizer applied', 'Weed control applied', 'Insect control applied', 'Disease control applied',
-    'Iron / micronutrients applied', 'Biostimulant applied', 'Soil amendment applied', 'Wetting agent applied',
-    'Spot treatment completed',
-  ] } },
-  mosquito_event: { treatment_completed: { applied: [
-    'Barrier treatment', 'Adulticide treatment', 'Larvicide applied', 'Resting-site treatment',
-  ] } },
-  palm_injection: { work_completed: { applied: [
-    'Palm fertilizer applied', 'Liquid micronutrient treatment', 'Soil drench', 'Insect treatment',
-    'Disease treatment', 'Palm injection completed', 'Soil acidifier applied',
-  ] } },
-  tree_shrub: { treatments_completed: { applied: [
-    'Fertilizer', 'Palm fertilizer', 'Micronutrients', 'Insect treatment', 'Disease / fungicide treatment',
-    'Horticultural oil', 'Soil drench', 'Foliar treatment', 'Pre-emergent bed treatment', 'Weed spot treatment',
-    'Soil amendment / acidifier',
-  ] } },
+  one_time_lawn_treatment: { work_completed: {
+    applied: ['Fertilizer applied', 'Weed control applied', 'Insect control applied', 'Disease control applied',
+      'Iron / micronutrients applied', 'Biostimulant applied', 'Soil amendment applied', 'Wetting agent applied',
+      'Spot treatment completed'],
+    noWork: ['Inspection completed'],
+  } },
+  mosquito_event: { treatment_completed: {
+    applied: ['Barrier treatment', 'Adulticide treatment', 'Larvicide applied', 'Resting-site treatment'],
+    noWork: ['Inspection only'],
+  } },
+  palm_injection: { work_completed: {
+    applied: ['Palm fertilizer applied', 'Liquid micronutrient treatment', 'Soil drench', 'Insect treatment',
+      'Disease treatment', 'Palm injection completed', 'Soil acidifier applied'],
+    noWork: ['Canopy / crown inspection', 'Photos taken', 'Palm flagged for monitoring'],
+  } },
+  tree_shrub: { treatments_completed: {
+    applied: ['Fertilizer', 'Palm fertilizer', 'Micronutrients', 'Insect treatment', 'Disease / fungicide treatment',
+      'Horticultural oil', 'Soil drench', 'Foliar treatment', 'Pre-emergent bed treatment', 'Weed spot treatment',
+      'Soil amendment / acidifier'],
+    noWork: ['Inspection only'],
+  } },
   termite_treatment: { treatment_method: { applied: TERMITE_LIQUID_DILUTION_METHODS } },
   bed_bug: {
     treatment_method: {
       applied: ['Hybrid heat + chemical treatment', 'Chemical / IPM treatment', 'Targeted follow-up treatment',
         'Chemical only', 'Chemical + heat', 'Steam + chemical'],
       performed: ['Heat treatment', 'Heat only'],
+      noWork: ['Inspection / monitoring only'],
     },
     work_completed: {
       applied: ['Crack & crevice treatment', 'Mattress / box spring treatment', 'Bed frame treatment',
@@ -1117,17 +1124,44 @@ const TYPED_TREATMENT_OPTIONS = Object.freeze({
   },
 });
 
+// `noWork` = the closeout explicitly recorded inspection-only / deferred work
+// and nothing else that treats — the typed counterpart of an exclusive
+// no-treatment protocol action, so read-time normalization can clear the
+// re-entry targets (codex P1 r13 #3701).
 function typedTreatmentEvidence(type, values) {
   const fields = TYPED_TREATMENT_OPTIONS[type];
-  const result = { applied: false, performed: false };
+  const result = { applied: false, performed: false, noWork: false };
   if (!fields || !values || typeof values !== 'object') return result;
+  let noWorkSelected = false;
   for (const [key, lists] of Object.entries(fields)) {
     const selected = String(values[key] ?? '').split(',').map((part) => part.trim()).filter(Boolean);
     if (selected.some((part) => (lists.applied || []).includes(part))) result.applied = true;
     if (selected.some((part) => (lists.performed || []).includes(part))) result.performed = true;
+    if (selected.some((part) => (lists.noWork || []).includes(part))) noWorkSelected = true;
   }
   result.performed = result.performed || result.applied;
+  result.noWork = noWorkSelected && !result.performed;
   return result;
+}
+
+// Combined visits keep the primary snapshot in service_data.typedReportSnapshot
+// and companion sections in service_data.companionReportSnapshots; treatment
+// evidence is the union, and no-work only holds when every section declared it.
+function typedTreatmentEvidenceForRecord(record) {
+  let serviceData = record?.service_data;
+  if (typeof serviceData === 'string') {
+    try { serviceData = JSON.parse(serviceData); } catch { serviceData = null; }
+  }
+  const snapshots = [
+    serviceData?.typedReportSnapshot,
+    ...(Array.isArray(serviceData?.companionReportSnapshots) ? serviceData.companionReportSnapshots : []),
+  ].filter((snap) => snap && typeof snap === 'object' && snap.type);
+  const verdicts = snapshots.map((snap) => typedTreatmentEvidence(snap.type, snap.values));
+  return {
+    applied: verdicts.some((v) => v.applied),
+    performed: verdicts.some((v) => v.performed),
+    noWork: verdicts.length > 0 && verdicts.every((v) => v.noWork),
+  };
 }
 
 const TREATMENT_AREA_FIELD_KEYS = ['areas_treated', 'spot_treatment_areas', 'treatment_zones'];
@@ -4444,6 +4478,7 @@ function findBannedCustomerCopy(text) {
 module.exports = {
   TYPED_TREATMENT_OPTIONS,
   typedTreatmentEvidence,
+  typedTreatmentEvidenceForRecord,
   SCHEMA_VERSION,
   BANNED_CUSTOMER_COPY,
   findBannedCustomerCopy,

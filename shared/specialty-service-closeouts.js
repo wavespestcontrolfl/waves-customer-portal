@@ -174,7 +174,31 @@ function specialtyProtocolActionScopes(serviceKey, { actions, areas } = {}) {
     }));
 }
 
+// Specialty lanes complete with their preset areas. A stale pre-preset tab can
+// still submit a former generic chip ("Kitchen" on a fire-ant visit); on an
+// explicitly profiled lane that is refused, and on a keyless legacy row only
+// the lane's own legacy generic vocabulary is tolerated — never a value the
+// shared area map could read as the wrong side (codex P1 r13 #3701).
+const LEGACY_COMPLETION_AREAS = require('./legacy-completion-areas.json');
+const SPECIALTY_LEGACY_AREA_CATEGORY = Object.freeze({
+  dethatching: 'lawn', plugging: 'lawn', mosquito: 'mosquito', fire_ant: 'pest', tick_control: 'pest',
+  bee_wasp_removal: 'pest', mud_dauber_removal: 'pest', bed_bug_treatment: 'bed_bug',
+});
+
+function validateSpecialtyAreas(serviceKey, areas, { enforcePresetAreas = true } = {}) {
+  const canonical = specialtyServiceKey({ serviceKey });
+  const spec = SPECIALTY_SERVICE_CLOSEOUTS[canonical];
+  if (!spec) return null;
+  const allowed = new Set(spec.areas);
+  if (!enforcePresetAreas) {
+    (LEGACY_COMPLETION_AREAS.categories[SPECIALTY_LEGACY_AREA_CATEGORY[canonical]] || []).forEach((area) => allowed.add(area));
+  }
+  const invalid = (Array.isArray(areas) ? areas : []).find((area) => !allowed.has(String(area || '').trim()));
+  return invalid ? `“${invalid}” is not a treatment area for this service.` : null;
+}
+
 module.exports = {
+  validateSpecialtyAreas,
   specialtyActionScopeForAreas,
   specialtyProtocolActionScopes,
   SPECIALTY_SERVICE_CLOSEOUTS,
