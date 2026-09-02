@@ -493,14 +493,63 @@ function relativeImports(src, filePath) {
 // INTO leads …'`).
 const moduleFactsCache = new Map();
 function computeModuleFacts(raw) {
-  // Cheap prechecks: no insert call → no helper; no `leads` → no lead SQL.
+  // Cheap prechecks: no insert call → no helper; no `leads` → no lead SQL,
+  // no lead builder, no lead factory.
   const modSrc = /insert|leads/i.test(raw) ? blankComments(raw) : '';
   const hasInsert = /insert/i.test(modSrc);
+  const hasLeads = /leads/i.test(modSrc);
+  const lead = hasLeads ? leadBuilderExports(modSrc) : { factories: new Set(), builders: new Set(), defaultFactory: false };
   return {
     helpers: hasInsert ? insertingHelperNames(modSrc) : new Set(),
     callableDefault: hasInsert && defaultExportInserts(modSrc),
-    sqlConstants: /leads/i.test(modSrc) ? leadSqlConstantNames(modSrc) : new Set(),
+    sqlConstants: hasLeads ? leadSqlConstantNames(modSrc) : new Set(),
+    factories: lead.factories,
+    builders: lead.builders,
+    defaultFactory: lead.defaultFactory,
   };
+}
+// Lead BUILDERS a module can hand to importers: functions returning a lead
+// builder (`const leadQuery = () => db('leads')`, `function leadQuery() {…
+// return db('leads'); }`, `exports.leadQuery = …`), stored builders (`const
+// leads = db('leads')`), and a default export that is itself a factory
+// (`module.exports = () => db('leads')`). Importers that call `.insert` on
+// them are lead writers although neither file alone shows table + insert.
+function leadBuilderExports(modSrc) {
+  const factories = new Set();
+  const builders = new Set();
+  let defaultFactory = false;
+  for (const { token } of leadsTableTokens(modSrc)) {
+    const { declRe, condDeclRe, factoryRe, returnRe } = builderRegexes(token);
+    let m;
+    while ((m = declRe.exec(modSrc))) builders.add(m[1]);
+    while ((m = condDeclRe.exec(modSrc))) builders.add(m[1]);
+    while ((m = factoryRe.exec(modSrc))) factories.add(m[1]);
+    for (const f of balancedBodyFactories(modSrc, returnRe, [declRe, condDeclRe])) factories.add(f.name);
+    const defRe = new RegExp(String.raw`(?:module\s*\.\s*exports|exports\s*\.\s*default|\bexport\s+default)\s*=?\s*(?:async\s*)?(?:function\b[^(]*\([^()]*\)\s*\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+|(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`);
+    if (defRe.test(modSrc)) defaultFactory = true;
+    const defNamed = modSrc.match(/(?:module\s*\.\s*exports\s*=|\bexport\s+default)\s*([A-Za-z_$][\w$]*)\s*;/);
+    if (defNamed && factories.has(defNamed[1])) defaultFactory = true;
+  }
+  return { factories, builders, defaultFactory };
+}
+// Imported lead builders/factories as this file's local callee spellings.
+function importedLeadBuilders(src, filePath) {
+  const factories = new Set();
+  const builders = new Set();
+  for (const imp of relativeImports(src, filePath)) {
+    const f = moduleFacts(imp.resolved);
+    if (imp.ns) {
+      for (const n of f.factories) factories.add(`${imp.ns}.${n}`);
+      for (const n of f.builders) builders.add(`${imp.ns}.${n}`);
+      if (f.defaultFactory) factories.add(imp.ns);
+      continue;
+    }
+    for (const [orig, local] of imp.bindings) {
+      if (f.factories.has(orig)) factories.add(local || orig);
+      if (f.builders.has(orig)) builders.add(local || orig);
+    }
+  }
+  return { factories, builders };
 }
 // The repo pass fills this cache as a by-product of each file's own scan
 // (its views are already lexed then); the single-file API reads on demand.
@@ -755,14 +804,32 @@ function nearestDeclBindsLeads(code, name, idx) {
 // schema-qualified head (`db.withSchema('public').table(X)`) via the same
 // CHAIN of intermediate calls the direct patterns allow, for X = the literal
 // or a resolved constant.
-function aliasInsertPatterns(src, token, filePath, imports = 'all') {
-  // Declaration keyword OPTIONAL — a builder stored by a later assignment
-  // (`let target; target = db('leads');`) is the same stored-builder form.
-  // Optional factory call after the head identifier — `getDb()('leads')`.
+// The per-token regexes that recognize a STORED lead builder (`const q =
+// db('leads')`, conditional initializers) and lead-builder FACTORIES (arrow
+// or function bodies returning one) — shared by the in-file alias pass and
+// the module-facts pass.
+function builderRegexes(token) {
   const declRe = new RegExp(
     String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${SEL_CHAIN}\s*(?:\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
     'g'
   );
+  const condDeclRe = new RegExp(
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;]{0,200}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
+    'g'
+  );
+  const factoryRe = new RegExp(
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
+    'g'
+  );
+  const returnRe = new RegExp(String.raw`\breturn\b[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*(?:\?\.)?\(\s*(${token})${TABLE_OPTS}\)`);
+  return { declRe, condDeclRe, factoryRe, returnRe };
+}
+
+function aliasInsertPatterns(src, token, filePath, imports = 'all') {
+  // Declaration keyword OPTIONAL — a builder stored by a later assignment
+  // (`let target; target = db('leads');`) is the same stored-builder form.
+  // Optional factory call after the head identifier — `getDb()('leads')`.
+  const { declRe, condDeclRe, factoryRe, returnRe } = builderRegexes(token);
   const patternsExtra = [];
   const builders = new Set();
   const factories = new Set();
@@ -782,10 +849,6 @@ function aliasInsertPatterns(src, token, filePath, imports = 'all') {
   // Conditional/logical initializers — `const target = cond ? db('leads')
   // : db('audit');` — anything holding a leads builder anywhere in its
   // (non-awaited) initializer is a stored builder.
-  const condDeclRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;]{0,200}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
-    'g'
-  );
   let cnd;
   while ((cnd = condDeclRe.exec(src))) { builders.add(cnd[1]); noteDecl(cnd[1], cnd); }
   // Builders stored in OBJECT PROPERTIES — `const queries = { lead:
@@ -824,15 +887,10 @@ function aliasInsertPatterns(src, token, filePath, imports = 'all') {
   // Arrow FACTORY returning the builder — `const baseQuery = () =>
   // db('leads'); … baseQuery().insert(row)` (the v2-promotion-readiness
   // idiom). Parenthesized or bare parameter lists both count.
-  const factoryRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
-    'g'
-  );
   let fac;
   while ((fac = factoryRe.exec(src))) factories.add(fac[1]);
   // Function/block-arrow factories with BALANCED bodies of any depth —
   // `function baseQuery() { try { … } finally { … } return db('leads'); }`.
-  const returnRe = new RegExp(String.raw`\breturn\b[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*(?:\?\.)?\(\s*(${token})${TABLE_OPTS}\)`);
   for (const f of balancedBodyFactories(src, returnRe, [declRe, condDeclRe])) factories.add(f.name);
   // TRANSITIVE aliases: `const target = base;` makes `target` the same
   // builder (or factory), to a fixpoint. One pass collects every simple
@@ -1364,6 +1422,14 @@ function scanSourceForLeadInserts(src, filePath, imports = 'all') {
       add(f.index, f.length);
     }
   }
+  // Lead builders and builder FACTORIES imported from a sibling module —
+  // `leadQuery().insert(row)`, `leads.where(x).insert(row)` — need no table
+  // token in this file: the module's facts say what they return.
+  if (imports !== 'skip') {
+    const { factories, builders } = importedLeadBuilders(code, filePath);
+    for (const f of factories) patterns.push(Object.assign(new RegExp(String.raw`${helperCallee(f)}\s*(?=\()`, 'g'), { chain: true, callArgs: true }));
+    for (const b of builders) patterns.push(chainHead(new RegExp(String.raw`${helperCallee(b)}\b(?!\s*\()`, 'g')));
+  }
   // Lead SQL imported as a constant and executed here — directly or as the
   // `text` of an inline pg QueryConfig.
   for (const local of imports === 'skip' ? [] : importedSqlConstants(code, filePath)) {
@@ -1415,25 +1481,27 @@ function repoScan() {
     const rel = path.relative(SERVER_ROOT, abs).split(path.sep).join('/');
     const src = fs.readFileSync(abs, 'utf8');
     files.push({ rel, src });
-    if (SKIP_FILES.has(rel) || !/insert|merge/i.test(src)) continue;
+    if (SKIP_FILES.has(rel)) continue;
+    // What THIS module exports to importers — for every file (a lead-builder
+    // factory module has no insert of its own), prechecked inside.
+    moduleFactsCache.set(abs, computeModuleFacts(src));
+    if (!/insert|merge/i.test(src)) { lexCache.delete(src); functionBodiesCache.delete(src); continue; }
     for (const site of scanSourceForLeadInserts(src, abs, 'skip')) sites.push({ file: rel, ...site });
     for (const site of scanSourceForDynamicTableInserts(src, abs, 'skip')) dynamic.push({ file: rel, ...site });
-    // What THIS module exports to importers — computed while its views are
-    // hot, so phase 2 never parses a module twice.
-    moduleFactsCache.set(abs, computeModuleFacts(src));
     for (const cache of [lexCache, functionBodiesCache]) {
       cache.delete(src);
       for (const view of cache.keys()) if (view.length === src.length) cache.delete(view);
     }
   }
   // Phase 2 — CROSS-MODULE writers: a file whose relative imports resolve
-  // to an inserting helper or a lead-SQL constant gets the imported-only
-  // patterns run (few files; everything else was settled in phase 1).
+  // to an inserting helper, a lead-SQL constant, or a lead builder/factory
+  // gets the imported-only patterns run (few files; everything else was
+  // settled in phase 1).
   for (const { rel, src } of files) {
     if (SKIP_FILES.has(rel)) continue;
     const abs = path.join(SERVER_ROOT, rel);
     const imports = relativeImports(src, abs);
-    if (!imports.some((imp) => { const f = moduleFactsCache.get(imp.resolved); return f && (f.helpers.size || f.callableDefault || f.sqlConstants.size); })) continue;
+    if (!imports.some((imp) => { const f = moduleFactsCache.get(imp.resolved); return f && (f.helpers.size || f.callableDefault || f.sqlConstants.size || f.factories.size || f.builders.size || f.defaultFactory); })) continue;
     for (const site of scanSourceForLeadInserts(src, abs, 'only')) sites.push({ file: rel, ...site });
     for (const site of scanSourceForDynamicTableInserts(src, abs, 'only')) dynamic.push({ file: rel, ...site });
     for (const cache of [lexCache, functionBodiesCache]) for (const view of cache.keys()) if (view.length === src.length) cache.delete(view);
@@ -1633,6 +1701,16 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(dynArrow).toHaveLength(1);
     const dynExprArrow = scanSourceForDynamicTableInserts("const writeRow = (builder, row) => builder.insert(row);\nawait writeRow(db(table), row);");
     expect(dynExprArrow).toHaveLength(1);
+    // Lead-builder FACTORIES and stored lead builders exported by a sibling
+    // module — neither file alone shows table + insert.
+    fs.writeFileSync(path.join(dir, 'lead-query.js'), "const leadQuery = () => db('leads');\nfunction leadsIn(trx) {\n  return trx('leads');\n}\nconst leads = db('leads');\nconst auditQuery = () => db('audit');\nmodule.exports = { leadQuery, leadsIn, leads, auditQuery };\n");
+    fs.writeFileSync(path.join(dir, 'lead-default.js'), "module.exports = () => db('leads');\n");
+    expect(found("const { leadQuery } = require('./lead-query');\nawait leadQuery().insert(row);", route)).toEqual(['await leadQuery().insert(row);']);
+    expect(found("const { leadsIn } = require('./lead-query');\nawait leadsIn(trx).where('id', 1).insert(row);", route)).toEqual(["await leadsIn(trx).where('id', 1).insert(row);"]);
+    expect(found("const { leads } = require('./lead-query');\nawait leads.where({ id }).insert(row);", route)).toEqual(['await leads.where({ id }).insert(row);']);
+    expect(found("const q = require('./lead-query');\nawait q.leadQuery().insert(row);", route)).toEqual(['await q.leadQuery().insert(row);']);
+    expect(found("const leadQuery = require('./lead-default');\nawait leadQuery().insert(row);", route)).toEqual(['await leadQuery().insert(row);']);
+    expect(found("const { leadQuery, auditQuery } = require('./lead-query');\nawait leadQuery().select();\nawait auditQuery().insert(row);", route)).toEqual([]);
     // Property-assigned CommonJS helpers and object-literal helper properties.
     fs.writeFileSync(path.join(dir, 'exports-helpers.js'), "exports.save = (builder, row) => builder.insert(row);\nmodule.exports.saveMany = function (qb, rows) {\n  return qb.insert(rows);\n};\nexports.scopedOnly = (qb) => qb.where('active', true);\n");
     fs.writeFileSync(path.join(dir, 'object-helpers.js'), "module.exports = {\n  save: async (builder, row) => {\n    return builder.insert(row);\n  },\n};\n");
