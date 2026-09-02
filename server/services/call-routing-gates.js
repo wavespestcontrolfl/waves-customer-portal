@@ -92,6 +92,7 @@ function buildRouteDecision({
   routingResult,
   action,
   mode = 'enforce',
+  recordingSid = null,
 }) {
   const scheduling = extraction?.scheduling || {};
   const confidence = extraction?.confidence || {};
@@ -100,6 +101,10 @@ function buildRouteDecision({
     call_log_id: callLogId,
     decision_version: V2_DECISION_VERSION,
     mode,
+    // The recording this decision was derived from is part of the audit
+    // key: a replaced recording's pass writes its OWN row instead of
+    // colliding with (and then updating) the discarded audio's decision.
+    recording_sid: recordingSid || '',
     validator_recommendation: routingResult?.allowed
       ? (scheduling.status === 'confirmed' ? 'auto_create_appointment' : 'upsert_customer_only')
       : 'needs_review',

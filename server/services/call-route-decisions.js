@@ -180,6 +180,7 @@ function buildLegacyShadowRouteDecision({
     ai_validation_prompt_version: null,
     ai_validation_schema_version: null,
     enrichment_version: null,
+    recording_sid: call?.recording_sid || '',
     metadata: compactObject({
       finalStatus,
       leadId,
@@ -215,7 +216,7 @@ async function writeLegacyShadowRouteDecision(input = {}) {
   try {
     const rows = await db('route_decisions')
       .insert(payload)
-      .onConflict(['call_log_id', 'decision_version', 'mode'])
+      .onConflict(['call_log_id', 'decision_version', 'mode', 'recording_sid'])
       .ignore()
       .returning(['id']);
     return rows?.[0] || null;

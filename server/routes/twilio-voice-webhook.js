@@ -1701,7 +1701,12 @@ router.post('/recording-status', async (req, res) => {
           call_summary: null,
           lead_synopsis: null,
           sentiment: null,
-          lead_quality: null, });
+          lead_quality: null,
+          // The routing audit on the row was derived from the discarded
+          // audio too; the replacement pass writes its own, and its route
+          // decision is a new row keyed on the new recording (r7 P1).
+          ai_validation: null,
+          ai_address_validation: null, });
           // Last-wins as before, but the superseded recording is kept: the
           // dial-leg recording a voicemail replaced is still evidence.
           write.metadata = db.raw(

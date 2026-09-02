@@ -8014,8 +8014,9 @@ const CallRecordingProcessor = {
             routingResult,
             action: routingResult.allowed ? 'auto_route' : 'triage_review',
             mode: 'enforce',
+            recordingSid: call.recording_sid,
           });
-          await db('route_decisions').insert(routeDecision).onConflict(['call_log_id', 'decision_version', 'mode']).ignore();
+          await db('route_decisions').insert(routeDecision).onConflict(['call_log_id', 'decision_version', 'mode', 'recording_sid']).ignore();
 
           // Advisory flags (missing surname / rental / second address) reach the
           // Needs Review inbox even when the call AUTO-ROUTES — they inform, they
@@ -14557,7 +14558,7 @@ const CallRecordingProcessor = {
           // Same-run outcome update: targets the row THIS process wrote
           // moments ago, so the CURRENT version only (a reprocess writes —
           // and updates — its own fresh v2-1.1.0 row).
-          .where({ call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce' })
+          .where({ call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: call.recording_sid || '' })
           .update({
             final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
             ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
@@ -15217,10 +15218,11 @@ const CallRecordingProcessor = {
             routingResult,
             action: routingResult.allowed ? 'shadow_auto_route_candidate' : 'shadow_needs_review_candidate',
             mode: 'shadow',
+            recordingSid: call.recording_sid,
           });
           await db('route_decisions')
             .insert(shadowDecision)
-            .onConflict(['call_log_id', 'decision_version', 'mode'])
+            .onConflict(['call_log_id', 'decision_version', 'mode', 'recording_sid'])
             .ignore()
             .catch((err) => logger.warn(`[call-proc-v2] Shadow route decision skipped for ${maskSid(callSid)}: ${err.message}`));
         }

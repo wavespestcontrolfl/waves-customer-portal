@@ -400,6 +400,12 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         lead_synopsis: null,
         sentiment: null,
         lead_quality: null,
+        // The routing audit on the row (validator verdict, address
+        // validation) was derived from the discarded audio too; the
+        // replacement pass writes its own, and its route decision is a new
+        // row keyed on the adopted recording (Codex #3736 r7 P1).
+        ai_validation: null,
+        ai_address_validation: null,
         // The row is no longer "processed": its transcript and extraction
         // describe the previous recording. NULL puts it back in the sweep,
         // so even if the immediate pass below defers (CDN not ready) or

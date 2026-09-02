@@ -205,3 +205,21 @@ describe('processRecording claims are fenced to the expected recording when one 
     expect(branch).toContain("reason: 'recording_changed'");
   });
 });
+
+// A replaced recording's pass must write its OWN route decision: the audit
+// key includes the recording, both inserts target that key, and the same-run
+// outcome update addresses this recording's row only (codex #3736 gh-r7).
+describe('route decisions are keyed on the recording they were derived from', () => {
+  const { body } = processRecordingBody();
+  test('both route_decisions inserts conflict on the recording-inclusive key and pass the recording', () => {
+    const targets = body.match(/onConflict\(\['call_log_id', 'decision_version', 'mode'(, 'recording_sid')?\]\)/g) || [];
+    expect(targets.length).toBe(2);
+    for (const t of targets) expect(t).toContain("'recording_sid'");
+    expect((body.match(/recordingSid: call\.recording_sid/g) || []).length).toBe(2);
+  });
+  test('the same-run outcome update is scoped to this recording', () => {
+    const upd = body.indexOf("final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped'");
+    expect(upd).toBeGreaterThan(-1);
+    expect(body.slice(upd - 400, upd)).toContain("recording_sid: call.recording_sid || ''");
+  });
+});
