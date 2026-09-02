@@ -49,7 +49,9 @@ jest.mock('../models/db', () => {
   };
   mockWhere.mockImplementation(() => builder); // chainable: .where(...).where(...)
   builder.where = mockWhere;
-  return jest.fn(() => builder);
+  const fn = jest.fn(() => builder);
+  fn.transaction = async (cb) => cb(fn); // reclassify releases + settles in one transaction
+  return fn;
 });
 
 const worker = require('../services/seo/link-prospect-worker');
@@ -91,7 +93,7 @@ describe('leaseGuardedReclassify (optimistic lease guard)', () => {
     expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null, claimed_by: null }));
     expect(n).toBe(1);
     // a reclassify IS a lease release: the placement settles onto its live path (Codex PR #3687 r29 P1)
-    expect(require('../services/seo/link-prospect-worker').settleReleasedPlacements).toHaveBeenCalledWith(['p1']);
+    expect(require('../services/seo/link-prospect-worker').settleReleasedPlacements).toHaveBeenCalledWith(['p1'], expect.anything()); // inside the release transaction
   });
   test('no-op (returns 0, no DB write) without a valid lease_token', async () => {
     const n = await leaseGuardedReclassify({ id: 'p1', lease_token: 'not-a-date' }, { automation_policy: 'skip' });
