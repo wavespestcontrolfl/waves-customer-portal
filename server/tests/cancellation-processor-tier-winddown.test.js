@@ -246,3 +246,19 @@ test('a per-application reprice whose CAS lands on zero rows aborts the wind-dow
   expect(db.__tables.customers[0].waveguard_tier).toBe('Bronze');
   expect(db.__tables.scheduled_services[0].estimated_price).toBe(95);
 });
+
+test('an EXISTING churned_at stamp survives a repeat churn from an archival relabel (dormant) — the episode never ended', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  db.__tables.customers[0].pipeline_stage = 'dormant';
+  db.__tables.customers[0].churned_at = '2026-06-01';
+  db.__tables.scheduled_services = [];
+  await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', actor: { type: 'portal' } });
+  expect(db.__tables.customers[0].pipeline_stage).toBe('churned');
+  expect(db.__tables.customers[0].churned_at).toBe('2026-06-01');
+  // A genuinely reactivated account (stamp cleared by customer-stages) gets a fresh one.
+  seedCustomer();
+  db.__tables.customers[0].churned_at = null;
+  await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', actor: { type: 'portal' } });
+  expect(db.__tables.customers[0].churned_at).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+});

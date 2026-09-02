@@ -692,27 +692,41 @@ async function adminCoverageBoundaryInForce(customerId) {
 }
 
 // The dedupe identity for a decided prepaid term's end-of-coverage side
-// effects (dated termite task, end-of-term confirmation): the TERM plus the
-// CHURN EPISODE — the customer's pipeline_stage_changed_at once churned,
-// the same anchor adminCoverageBoundaryInForce uses. A repeat commit on the
-// same decided term inside one episode reuses the identity (no second
-// task, no second text); a customer won back and churned again gets a new
-// stamp, hence fresh side effects. priorRequestIds = earlier admin
-// end-of-coverage requests of THIS episode for THIS term, so rows written
+// effects (dated termite task, end-of-term confirmation): the TERM, the
+// CHURN EPISODE and the COVERAGE BOUNDARY.
+//   episode  = customers.churned_at (the ET churn date). customer-stages
+//              clears it only on a real reactivation (entry into a live
+//              customer stage) and the processor keeps an existing stamp,
+//              so an archival relabel (dormant / past_customer / lost) plus
+//              a repeat cancel is the SAME episode while a genuine win-back
+//              followed by a new churn is a NEW one (fresh side effects).
+//              pipeline_stage_changed_at is NOT the anchor: it moves on
+//              every relabel.
+//   boundary = the term's end date: an admin correcting term_end and
+//              repeating the cancel must re-raise the dated instruction and
+//              re-tell the customer the new date, not dedupe against the
+//              old one.
+// priorRequestIds = earlier admin end-of-coverage requests of THIS episode
+// for THIS term at THIS boundary (cases created on/after the churn date's
+// ET midnight, snapshot term/effectiveDate/effectiveOn), so rows written
 // before the term key shipped (request-keyed) still count as delivered.
-// Not churned / unanchored / unreadable → null episode, and every consumer
+// Not churned / no stamp / unreadable → null episode, and every consumer
 // falls back to its request key (at-most-twice beats never telling anyone).
 async function resolveTermEpisode(customerId, term, currentRequestId = null) {
   if (!term) return null;
   const none = { termId: term.id, episodeKey: null, priorRequestIds: [] };
   try {
-    const row = await db('customers').where({ id: customerId }).first('pipeline_stage', 'pipeline_stage_changed_at');
-    if (!row || row.pipeline_stage !== 'churned' || !row.pipeline_stage_changed_at) return none;
-    const churnedAt = new Date(row.pipeline_stage_changed_at);
-    if (!Number.isFinite(churnedAt.getTime())) return none;
+    const row = await db('customers').where({ id: customerId }).first('pipeline_stage', 'churned_at');
+    if (!row || row.pipeline_stage !== 'churned' || !row.churned_at) return none;
+    const churnDate = dateOnly(row.churned_at);
+    const boundary = dateOnly(term.term_end);
+    if (!churnDate || !boundary) return none;
+    const { parseETDateTime } = require('../utils/datetime-et');
+    const episodeStart = parseETDateTime(`${churnDate}T00:00`);
+    if (!Number.isFinite(episodeStart.getTime())) return none;
     const cases = await db('cancellation_cases')
       .where({ customer_id: customerId })
-      .where('created_at', '>=', new Date(churnedAt.getTime() - 60 * 60 * 1000))
+      .where('created_at', '>=', episodeStart)
       .select('service_request_id', 'snapshot');
     const priorRequestIds = [];
     for (const c of cases || []) {
@@ -720,11 +734,12 @@ async function resolveTermEpisode(customerId, term, currentRequestId = null) {
       if (typeof snap === 'string') { try { snap = JSON.parse(snap); } catch { snap = {}; } }
       snap = snap || {};
       if (String(snap.prepayTermId || '') !== String(term.id) || snap.effectiveDate !== 'end_of_coverage') continue;
+      if (dateOnly(snap.effectiveOn) !== boundary) continue;
       const rid = c.service_request_id ? String(c.service_request_id) : null;
       if (!rid || rid === String(currentRequestId || '') || priorRequestIds.includes(rid)) continue;
       priorRequestIds.push(rid);
     }
-    return { termId: term.id, episodeKey: churnedAt.toISOString(), priorRequestIds };
+    return { termId: term.id, episodeKey: `${churnDate}:${boundary}`, priorRequestIds };
   } catch (err) {
     logger.warn(`[admin-cancellation] term episode lookup failed for ${customerId}: ${err.message}`);
     return none;

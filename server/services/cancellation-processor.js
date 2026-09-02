@@ -655,7 +655,7 @@ async function processCancellationRequest({
   if (!scoped) try {
     const customer = await db('customers')
       .where({ id: customerId })
-      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode');
+      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode', 'churned_at');
     if (customer) {
       wasChurnedStage = customer.pipeline_stage === 'churned';
       const now = new Date();
@@ -675,8 +675,13 @@ async function processCancellationRequest({
         update.pipeline_stage_changed_at = now;
         // churned_at is a DATE column — stamp the ET calendar date (a JS Date
         // lands on the wrong day after ET midnight; same rule as the admin
-        // stage-change path).
-        update.churned_at = etDateString();
+        // stage-change path). An EXISTING stamp is kept: customer-stages
+        // clears it only on a real reactivation (entry into a live customer
+        // stage), so a stamp on a dormant / past_customer / lost row means
+        // the original churn episode never ended — an archival relabel
+        // followed by a repeat cancel is the same episode, not a new churn
+        // (and the end-of-coverage side effects dedupe on it).
+        if (!customer.churned_at) update.churned_at = etDateString();
         update.churn_reason = CHURN_REASON;
         // Taxonomy (Phase 7): snapshot the rate AT churn (monthly_rate gets
         // zeroed/repriced later — without this the Pareto's dollars rewrite

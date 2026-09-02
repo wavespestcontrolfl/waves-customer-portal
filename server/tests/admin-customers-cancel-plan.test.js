@@ -738,8 +738,11 @@ describe('POST /:id/cancel-plan', () => {
     // same (term, episode) identity plus the earlier request id for rows
     // written before the term key shipped.
     const churnedAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+    const churnDate = churnedAt.toISOString().slice(0, 10);
     mockState.customers[0].pipeline_stage = 'churned';
-    mockState.customers[0].pipeline_stage_changed_at = churnedAt;
+    mockState.customers[0].churned_at = churnDate;
+    // The old case's snapshot names the same coverage boundary.
+    mockState.cancellation_cases[0].snapshot = JSON.stringify({ ...JSON.parse(mockState.cancellation_cases[0].snapshot), effectiveOn: '2027-02-28' });
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', termiteRetrievalPending: { retrieveAfter: '2027-02-28' } });
     const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
     // NOT an echo: the processor runs and a fresh request/case is recorded.
@@ -751,7 +754,7 @@ describe('POST /:id/cancel-plan', () => {
     // the end-of-term confirmation: both dedupe on the term, so a repeat
     // commit on a still-decided term (not a re-won-back account) raises no
     // second instruction and sends no second copy.
-    const episode = { termId: 'term-1', episodeKey: churnedAt.toISOString(), priorRequestIds: ['req-old'] };
+    const episode = { termId: 'term-1', episodeKey: `${churnDate}:2027-02-28`, priorRequestIds: ['req-old'] };
     expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', body.requestId, { retrieveAfter: '2027-02-28', ...episode });
     expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({
       keptThrough: true, prepayTermId: 'term-1', termEpisodeKey: episode.episodeKey, priorRequestIds: ['req-old'],
