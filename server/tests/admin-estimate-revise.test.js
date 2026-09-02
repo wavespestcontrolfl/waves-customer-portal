@@ -118,7 +118,20 @@ function makeReviseDatabase({
       // callback so tests can replay it against a recorder and assert the
       // predicate without a real query builder.
       where: (clause) => {
-        if (typeof clause === 'function') groupedWheres.push(clause);
+        if (typeof clause === 'function') {
+          if (chain.__groupQuery) {
+            // The in-flight verdict is a grouped where: status = 'sending'
+            // OR a fresh delivery claim. Replay it against a recorder so the
+            // fixture served depends on the predicate actually written.
+            const sub = {
+              where: (c) => { if (c && typeof c === 'object' && c.status) chain.__groupStatus = c.status; return sub; },
+              orWhereRaw: (sql) => { chain.__inFlightRaw = sql; return sub; },
+            };
+            clause(sub);
+          } else {
+            groupedWheres.push(clause);
+          }
+        }
         if (clause && typeof clause === 'object' && 'estimate_group_id' in clause) { chain.__groupQuery = true; chain.__groupStatus = clause.status; }
         return chain;
       },
@@ -132,7 +145,9 @@ function makeReviseDatabase({
       forUpdate: () => { chain.__locked = true; return chain; },
       modify: (fn) => { fn(chain); return chain; },
       first: async () => {
-        if (chain.__groupQuery) return chain.__groupStatus === 'sending' ? sendingGroupMember : scheduledGroupMember;
+        if (chain.__groupQuery) {
+          return chain.__groupStatus === 'sending' ? sendingGroupMember : scheduledGroupMember;
+        }
         return chain.__locked && lockedEstimate ? lockedEstimate : estimate;
       },
       update: (patch) => {
@@ -1040,21 +1055,39 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
     expect(database.raw).not.toHaveBeenCalled();
   });
 
-  function fakeTrx({ scheduledGroups = [], sendingGroups = [] } = {}) {
+  // claimHeldGroups: a member whose delivery claim is still fresh while its
+  // status has left 'sending' (anchor accepted mid-handoff) — served ONLY
+  // through the in-flight predicate's NOT (DELIVERY_CLAIM_NOT_LIVE_SQL) branch.
+  function fakeTrx({ scheduledGroups = [], sendingGroups = [], claimHeldGroups = [] } = {}) {
     const queried = [];
+    const raws = [];
     const chain = {
-      where: (c) => { chain.__group = c?.estimate_group_id; chain.__status = c?.status; return chain; },
+      where: (c) => {
+        if (typeof c === 'function') {
+          const sub = {
+            where: (o) => { if (o?.status) chain.__status = o.status; return sub; },
+            orWhereRaw: (sql) => { chain.__raw = sql; raws.push(sql); return sub; },
+          };
+          c(sub);
+          return chain;
+        }
+        chain.__group = c?.estimate_group_id; chain.__status = c?.status; return chain;
+      },
       whereNot: () => chain,
       whereNull: () => chain,
       first: async () => {
         queried.push(`${chain.__status}:${chain.__group}`);
-        if (chain.__status === 'sending') return sendingGroups.includes(chain.__group) ? { id: 'est-anchor' } : null;
+        if (chain.__status === 'sending') {
+          if (sendingGroups.includes(chain.__group)) return { id: 'est-anchor' };
+          const claimBranch = /NOT \(/.test(chain.__raw || '') && /delivering_at/.test(chain.__raw || '');
+          return claimBranch && claimHeldGroups.includes(chain.__group) ? { id: 'est-anchor' } : null;
+        }
         return scheduledGroups.includes(chain.__group) ? { id: 'est-anchor' } : null;
       },
     };
     const trx = () => chain;
     trx.raw = jest.fn(async () => ({}));
-    return { trx, queried };
+    return { trx, queried, raws };
   }
 
   test('a fallback revision that MOVES an ungrouped draft into a scheduled group is refused (destination judged); the verdict itself never locks', async () => {
@@ -1066,6 +1099,25 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
     )).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/group it would join is scheduled/i) });
     expect(queried).toEqual(['sending:grp-dest', 'scheduled:grp-dest']);
     expect(trx.raw).not.toHaveBeenCalled();
+  });
+
+  test('a fallback revision while a member still holds a FRESH delivery claim is refused — an anchor accepted mid-handoff has left sending (uncapped codex P0 r35 on #3750)', async () => {
+    mockGateState.sendRequiresServerPricing = false;
+    const { assertNoFallbackRevisionDuringGroupSend } = require('../services/admin-estimate-persistence');
+    const { trx, queried, raws } = fakeTrx({ sendingGroups: [], claimHeldGroups: ['grp-live'] });
+    await expect(assertNoFallbackRevisionDuringGroupSend(
+      trx,
+      { id: 'est-1', estimate_group_id: 'grp-live' },
+      { pricing_authority: 'CLIENT_FALLBACK' },
+    )).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/being sent right now/i) });
+    expect(queried).toEqual(['sending:grp-live']);
+    // The in-flight predicate is status = 'sending' OR a fresh delivery claim.
+    expect(raws).toHaveLength(1);
+    expect(raws[0]).toMatch(/^NOT \(/);
+    expect(raws[0]).toMatch(/delivering_at/);
+    // No claim, no sending member: the revision proceeds.
+    const quiet = fakeTrx({ sendingGroups: [], claimHeldGroups: [] });
+    await expect(assertNoFallbackRevisionDuringGroupSend(quiet.trx, { id: 'est-1', estimate_group_id: 'grp-live' }, { pricing_authority: 'CLIENT_FALLBACK' })).resolves.toBeUndefined();
   });
 
   test('a fallback revision while any group member is SENDING is refused — gate OFF too (pre-push codex P0: grouped auto-send exposure)', async () => {
@@ -1166,7 +1218,7 @@ describe('a LIVE row moving into a group has the destination judged and locked, 
     const chain = {
       where: (c) => { if (typeof c === 'function') c(chain); return chain; },
       orWhere: (c) => { if (typeof c === 'function') c(chain); return chain; },
-      whereNot: () => chain, whereNull: () => chain, whereRaw: () => chain,
+      whereNot: () => chain, whereNull: () => chain, whereRaw: () => chain, orWhereRaw: () => chain,
       whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return chain; },
       orWhereIn: (col, vals) => { calls.orWhereIns.push([col, vals]); return chain; },
       select: async () => siblings,

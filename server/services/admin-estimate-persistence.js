@@ -2357,13 +2357,18 @@ async function lockScheduledGroupGuardGroups(trx, row, writeFields) {
 // group lock: the send's claim (group lock, then anchor 'sending') either
 // committed first (refused here) or runs after this revision commits and
 // judges the new stamp in its own preflight.
+// "In flight" is a member that is 'sending' OR still holds a fresh delivery
+// claim (uncapped codex P0 r35): an anchor accepted or declined mid-handoff
+// leaves 'sending' while the automated group link is still being delivered
+// under its claim — the same verdict the proposal editor applies.
 async function assertNoFallbackRevisionDuringGroupSend(trx, row, writeFields) {
   const groupIds = fallbackRevisionGroupIds(row, writeFields);
   for (const groupId of groupIds) {
     const sendingMember = await trx('estimates')
-      .where({ estimate_group_id: groupId, status: 'sending' })
+      .where({ estimate_group_id: groupId })
       .whereNot({ id: row?.id })
       .whereNull('archived_at')
+      .where((q) => q.where({ status: 'sending' }).orWhereRaw(`NOT (${DELIVERY_CLAIM_NOT_LIVE_SQL})`))
       .first('id');
     if (!sendingMember) continue;
     throw errorWithStatus(
