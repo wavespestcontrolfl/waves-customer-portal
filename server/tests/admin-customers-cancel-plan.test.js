@@ -732,13 +732,19 @@ describe('POST /:id/cancel-plan', () => {
         outcome: { visitsPulled: 4, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'] },
       }),
     }];
-    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', termiteRetrievalPending: { retrieveAfter: '2027-02-28' } });
     const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
     // NOT an echo: the processor runs and a fresh request/case is recorded.
     expect(body.duplicate).toBeUndefined();
     expect(mockProcess).toHaveBeenCalledTimes(1);
     expect(body.prepayTermOutcome).toBe('decision_already_recorded');
     expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(1);
+    // The fresh run carries the SAME term to the dated retrieval task and
+    // the end-of-term confirmation: both dedupe on the term, so a repeat
+    // commit on a still-decided term (not a re-won-back account) raises no
+    // second instruction and sends no second copy.
+    expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', body.requestId, { retrieveAfter: '2027-02-28', termId: 'term-1' });
+    expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ keptThrough: true, prepayTermId: 'term-1' }));
   }));
 
   test('a deposit-stage account is refused — 409 use_cancel_signup routes to the dedicated offboarding flow', () => withServer(async (baseUrl) => {
@@ -1184,7 +1190,7 @@ describe('POST /:id/cancel-plan', () => {
       mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', termiteRetrievalPending: { retrieveAfter: '2027-02-28' } });
       const ok = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
       expect(ok.processed).toBe(true);
-      expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', ok.requestId, { retrieveAfter: '2027-02-28' });
+      expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', ok.requestId, { retrieveAfter: '2027-02-28', termId: 'term-1' });
       // A racing renew decision stands: the program continues, so no
       // retrieval instruction may exist — and the run parks for review.
       mockRaiseTermite.mockClear();
@@ -1213,7 +1219,7 @@ describe('POST /:id/cancel-plan', () => {
       // The processor is told a term decision follows, and the task is
       // raised here only once that decision stands.
       expect(mockProcess).toHaveBeenLastCalledWith(expect.objectContaining({ deferTermiteRetrieval: true }));
-      expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', ok.requestId, { retrieveAfter: null });
+      expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', ok.requestId, { retrieveAfter: null, termId: 'term-1' });
       // A racing renew decision stands: the term is still renewable, so
       // staff must hold no instruction to pull its stations.
       mockRaiseTermite.mockClear();
@@ -1615,7 +1621,7 @@ describe('POST /:id/cancel-plan', () => {
       // The repair COMPLETES the outcome (codex r15): the stale disposition
       // error clears, the now-valid completed confirmation goes out, and the
       // acceptance closes.
-      expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ processed: true }));
+      expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ processed: true, prepayTermId: 'term-1' }));
       const latestSnap = JSON.parse(mockState.cancellation_cases[0].snapshot);
       expect(latestSnap.outcome.errors).toEqual([]);
       expect(mockState.service_requests[0].status).toBe('resolved');
@@ -2149,7 +2155,7 @@ describe('POST /:id/cancel-plan', () => {
       }];
       const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
       expect(body.duplicate).toBe(true);
-      expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', 'req-9', { retrieveAfter: '2027-02-28' });
+      expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', 'req-9', { retrieveAfter: '2027-02-28', termId: 'term-1' });
       expect(body.errors).toEqual([]);
       // Clean after the repair: the acceptance closes.
       expect(mockState.service_requests[0].status).toBe('resolved');
@@ -2177,7 +2183,7 @@ describe('POST /:id/cancel-plan', () => {
       }];
       const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.duplicate).toBe(true);
-      expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', 'req-9', { retrieveAfter: null });
+      expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', 'req-9', { retrieveAfter: null, termId: 'term-1' });
       expect(body.errors).toEqual([]);
       // The recorded refund is never re-raised.
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();

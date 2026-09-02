@@ -1366,7 +1366,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             if (hasTermiteErr && (!datedTermite || priorSnap.effectiveOn)) {
               try {
                 const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
-                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: datedTermite ? priorSnap.effectiveOn : null });
+                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: datedTermite ? priorSnap.effectiveOn : null, termId: term.id });
                 promotedErrors = promotedErrors.filter((e) => e !== 'termite_retrieval_task');
               } catch (termiteErr) {
                 logger.warn(`[admin-cancellation] deferred termite retrieval repair failed for request ${reqRow.id}: ${termiteErr.message}`);
@@ -1395,6 +1395,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
                 effectiveAt: priorSnap.effectiveDate === 'end_of_coverage' && priorSnap.effectiveOn
                   ? `${priorSnap.effectiveOn}T12:00:00-04:00` : null,
                 keptThrough: priorSnap.effectiveDate === 'end_of_coverage',
+                prepayTermId: term.id,
                 entryPoint: 'admin_cancel_plan',
                 identityTrustLevel: 'admin_operator',
               });
@@ -1912,7 +1913,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       try {
         const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
         await raiseTermiteRetrievalTask(customerId, request.id,
-          { retrieveAfter: result.termiteRetrievalPending.retrieveAfter });
+          { retrieveAfter: result.termiteRetrievalPending.retrieveAfter, termId: term.id });
       } catch (termiteErr) {
         errors.push('termite_retrieval_task');
         logger.error(`[admin-cancellation] deferred termite retrieval task failed for request ${request.id}: ${termiteErr.message}`);
@@ -1986,6 +1987,10 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // "upcoming visits are off the calendar" copy would be false, so the
       // senders switch to the end-of-term wording.
       keptThrough: !!prepayPlan.keepThrough,
+      // The end-of-term confirmation is sent once per TERM, not per request
+      // (a repeat commit on the same decided term after the 24h latch opens
+      // a new request).
+      prepayTermId: term ? term.id : null,
       entryPoint: 'admin_cancel_plan',
       identityTrustLevel: 'admin_operator',
     });

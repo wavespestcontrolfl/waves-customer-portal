@@ -62,3 +62,32 @@ test('a DATED task never touches the retire step', async () => {
   const out = await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
   expect(out).toEqual(expect.objectContaining({ raised: true }));
 });
+
+describe('dedupe key: per TERM when a prepaid term governs the cancel, per request otherwise', () => {
+  const keyOf = (i = 0) => mockNotifyAdmin.mock.calls[i][3].dedupeKey;
+
+  test('a dated task keys on the term, class "dated"; the term and request ride in metadata', async () => {
+    await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1' });
+    expect(keyOf()).toBe('termite_station_retrieval:term:term-1:dated');
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata).toEqual(expect.objectContaining({ termId: 'term-1', requestId: 'req-1', retrieveAfter: '2027-02-28' }));
+  });
+
+  test('two requests on the same term produce the SAME dated key — the repeat commit after the 24h latch raises nothing new', async () => {
+    await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1' });
+    await raiseTermiteRetrievalTask('c1', 'req-2', { retrieveAfter: '2027-02-28', termId: 'term-1' });
+    expect(keyOf(0)).toBe(keyOf(1));
+  });
+
+  test('the immediate task keys on the term under its OWN class — the end_at_term → end_now transition still retires the dated row and raises "pull now"', async () => {
+    await raiseTermiteRetrievalTask('c1', 'req-2', { retrieveAfter: null, termId: 'term-1' });
+    expect(keyOf()).toBe('termite_station_retrieval:term:term-1:immediate');
+    expect(mockTables.notifications[0].read_at).not.toBeNull();
+    expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/supersedes the earlier dated retrieval task/);
+  });
+
+  test('no term (portal / non-prepaid) keeps the per-request key byte for byte', async () => {
+    await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
+    expect(keyOf()).toBe('termite_station_retrieval:c1:req-1');
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata.termId).toBeUndefined();
+  });
+});

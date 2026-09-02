@@ -198,6 +198,46 @@ describe('account and membership email sender', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('an end-of-coverage cancellation email keys on the prepaid TERM (both outcome classes); no term keeps the request key', async () => {
+    // A repeat end_of_coverage commit on the same decided term after the
+    // admin latch's 24h echo window opens a NEW request — the term key is
+    // what stops the customer being told twice.
+    for (const [processed, cls] of [[true, 'completed'], [false, 'received']]) {
+      jest.clearAllMocks();
+      setDbQueues({
+        email_messages: [chain({ first: undefined })],
+        customers: [chain({ first: customer() })],
+        customer_interactions: [chain()],
+      });
+      await AccountMembershipEmail.sendCancellationReceived({
+        customerId: 'cust-1',
+        request: { id: `req-${cls}`, category: 'cancellation', subject: 'Cancel plan', created_at: '2026-08-31' },
+        processed, keptThrough: true, prepayTermId: 'term-1',
+      });
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+        idempotencyKey: `account.cancellation_received:term:term-1:${cls}`,
+      }));
+    }
+    // keptThrough without a resolved term, and a term without keptThrough
+    // (immediate end-now cancel): request-keyed as before.
+    for (const args of [{ keptThrough: true }, { prepayTermId: 'term-1' }]) {
+      jest.clearAllMocks();
+      setDbQueues({
+        email_messages: [chain({ first: undefined })],
+        customers: [chain({ first: customer() })],
+        customer_interactions: [chain()],
+      });
+      await AccountMembershipEmail.sendCancellationReceived({
+        customerId: 'cust-1',
+        request: { id: 'req-1', category: 'cancellation', subject: 'Cancel plan', created_at: '2026-08-31' },
+        processed: true, ...args,
+      });
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+        idempotencyKey: 'account.cancellation_received:req-1:completed',
+      }));
+    }
+  });
+
   test('sends portal request received confirmation with request id idempotency', async () => {
     setDbQueues({
       customers: [chain({ first: customer() })],

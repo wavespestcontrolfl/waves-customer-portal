@@ -78,7 +78,7 @@ async function rentedTermiteStationState(customerId) {
   return { rented, flaggedRental };
 }
 
-async function raiseTermiteRetrievalTask(customerId, requestId = null, { retrieveAfter = null } = {}) {
+async function raiseTermiteRetrievalTask(customerId, requestId = null, { retrieveAfter = null, termId = null } = {}) {
   const { rented, flaggedRental } = await rentedTermiteStationState(customerId);
   if (!rented.length && !flaggedRental) return { raised: false, reason: 'no_rented_stations' };
   const NotificationService = require('./notification-service');
@@ -132,11 +132,26 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
       // never be silenced by the category allowlist.
       bell: true,
       link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
-      // Keyed per cancellation EVENT (request), not per customer: retries of
-      // the same request stay idempotent, while a restored customer who later
+      // Keyed on the PREPAID TERM when one governs the cancel: the admin
+      // duplicate latch only echoes a prior run for 24h, so a repeat
+      // end-of-coverage commit on the same decided term after that opens a
+      // NEW request — a request-keyed task would hand staff a second dated
+      // instruction for the same stations (same rule as the refund task,
+      // prepay_refund:term:<id>). Dated and immediate classes stay distinct:
+      // an end_at_term → end_now_refund transition must still raise "pull
+      // now" after the dated row was stamped read. No term (portal path,
+      // non-prepaid admin cancel) keeps the per-EVENT key: retries of the
+      // same request stay idempotent, while a restored customer who later
       // cancels another rental program gets a fresh task.
-      dedupeKey: `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`,
-      metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental, ...(retrieveAfter ? { retrieveAfter } : {}) },
+      dedupeKey: termId
+        ? `termite_station_retrieval:term:${termId}:${retrieveAfter ? 'dated' : 'immediate'}`
+        : `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`,
+      metadata: {
+        kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental,
+        ...(requestId ? { requestId } : {}),
+        ...(termId ? { termId } : {}),
+        ...(retrieveAfter ? { retrieveAfter } : {}),
+      },
     }
   );
   // notifyAdmin resolves null (never throws) when the deduped insert fails —

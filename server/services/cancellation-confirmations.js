@@ -50,6 +50,11 @@ function familyLabelOf(key) {
  * @param {boolean} [args.keptThrough] end-of-coverage cancel: paid visits
  *                  stay on the calendar through effectiveAt, so the copy must
  *                  not claim upcoming visits are off the calendar.
+ * @param {string}  [args.prepayTermId] end-of-coverage cancel: the prepaid
+ *                  term the kept coverage belongs to. The end-of-term
+ *                  confirmation is sent once per TERM, not per request — a
+ *                  repeat commit on the same decided term after the admin
+ *                  latch's 24h echo window opens a NEW request.
  * @param {string}  [args.identityTrustLevel]
  * @param {string}  [args.urgency]
  * @returns {Promise<{ smsSent: boolean, emailSent: boolean, smsTemplateKey: string, channels: string[] }>}
@@ -58,6 +63,7 @@ async function sendCancellationConfirmations({
   customer, request, result, processed,
   effectiveAt = null,
   keptThrough = false,
+  prepayTermId = null,
   entryPoint = 'customer_service_request',
   identityTrustLevel = 'authenticated_portal',
   urgency = 'routine',
@@ -68,6 +74,9 @@ async function sendCancellationConfirmations({
       ? 'service_cancellation_scoped_confirmation'
       : (keptThrough ? 'service_cancellation_end_of_term_confirmation' : 'service_cancellation_confirmation'))
     : 'service_cancellation_received';
+  // Term-keyed send-once applies ONLY to the end-of-term class: scoped,
+  // immediate and received sends stay request-keyed.
+  const termKeyed = !!(keptThrough && prepayTermId && smsTemplateKey === 'service_cancellation_end_of_term_confirmation');
   let smsSent = false;
   let emailSent = false;
   // Definitive POLICY refusals (opt-out, landline, suppression, hard
@@ -90,7 +99,13 @@ async function sendCancellationConfirmations({
     const prior = await db('messaging_audit_log')
       .where({ customer_id: customer.id, channel: 'sms' })
       .whereNotNull('sent_at')
-      .whereRaw("metadata::jsonb ->> 'service_request_id' = ?", [String(request.id)])
+      .where(function requestOrTerm() {
+        this.whereRaw("metadata::jsonb ->> 'service_request_id' = ?", [String(request.id)]);
+        // Same term under an earlier request = the same instruction already
+        // delivered; rows from before the term stamp shipped still match on
+        // the request.
+        if (termKeyed) this.orWhereRaw("metadata::jsonb ->> 'prepay_term_id' = ?", [String(prepayTermId)]);
+      })
       .whereRaw("metadata::jsonb ->> 'original_message_type' = ?", [smsTemplateKey])
       .first('id');
     smsAlreadySent = !!prior;
@@ -125,6 +140,7 @@ async function sendCancellationConfirmations({
       metadata: {
         original_message_type: smsTemplateKey,
         service_request_id: request.id,
+        ...(prepayTermId ? { prepay_term_id: prepayTermId } : {}),
         urgency,
       },
     });
@@ -173,6 +189,7 @@ async function sendCancellationConfirmations({
       processed: !!processed,
       effectiveAt,
       keptThrough: !!keptThrough,
+      prepayTermId,
       // Verified waiver outcome from the processor — the email must not
       // warn about an in-window scheduled-visit fee the office waived.
       feeWaived: result?.lateFeeWaived === true,
