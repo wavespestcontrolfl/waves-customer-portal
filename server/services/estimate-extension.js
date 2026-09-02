@@ -115,7 +115,7 @@ async function extensionDeliverableUnderGate(database, estimate) {
   if (!estimate?.estimate_group_id) return true;
   let revivable;
   try {
-    revivable = await revivableSiblingsQuery(database, estimate).select('id', 'pricing_authority', 'estimate_data');
+    revivable = await revivableSiblingsQuery(database, estimate).select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   } catch {
     return false;
   }

@@ -385,7 +385,7 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
       .where((publishable) => publishable.whereIn('status', ['draft', 'scheduled', 'send_failed']).whereNull('price_locked_at'))
       .orWhere((visible) => applyLinkVisibleSiblingScope(visible)));
   if (forUpdate) query = query.forUpdate();
-  const siblings = await query.select('id', 'status', 'pricing_authority', 'estimate_data');
+  const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
     const authority = String(sibling.pricing_authority || '').toUpperCase();
     // Automation: the explicit SERVER stamp only. Manual sends: the ONE

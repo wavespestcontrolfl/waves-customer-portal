@@ -2301,7 +2301,7 @@ async function assertLiveRowMayJoinGroup(trx, row, writeFields) {
       trx('estimates')
         .where({ estimate_group_id: groupId })
         .whereNot({ id: row?.id }),
-    ).select('id', 'pricing_authority', 'estimate_data');
+    ).select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
     for (const sibling of siblings) {
       // The ONE shared row verdict (uncapped codex P1 r21).
       if (rowPassesGatedSendAuthority(sibling)) continue;

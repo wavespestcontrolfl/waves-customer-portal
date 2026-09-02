@@ -93,7 +93,7 @@ async function groupPassesGatedSendAuthority(database, row = {}, now = new Date(
         .where({ estimate_group_id: row.estimate_group_id })
         .whereNot({ id: row.id }),
       now,
-    ).select('id', 'pricing_authority', 'estimate_data');
+    ).select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   } catch {
     return false;
   }
