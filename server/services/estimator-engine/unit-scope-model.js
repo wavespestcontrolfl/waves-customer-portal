@@ -505,7 +505,7 @@ const SUITE_DESIGNATOR_RE = /\b(?:ste|suite)\.?\s*#?\s*[\w-]+/i;
 
 function residentialUnitLookupVerdict({
   address, category, commercialSubtype, commercialDetectionSource,
-  structuredCommercialSignal = false,
+  structuredCommercialSignal = false, commercialUseSignal = false,
 }) {
   if (!unitScopeGuardrailsEnabled()) return false;
   if (String(category || '').toUpperCase() !== 'COMMERCIAL') return false;
@@ -521,6 +521,12 @@ function residentialUnitLookupVerdict({
   // apartment/multifamily text before the structured signal, so the
   // subtype alone cannot tell the two apart).
   if (structuredCommercialSignal || commercialDetectionSource === 'satellite_ai_property_use') return false;
+  // Mixed-use: a record whose text carries BOTH multifamily and a positive
+  // commercial use ("Retail Store" land use under an apartment type)
+  // collapses to the multifamily subtype because the resolver checks that
+  // first — the caller passes the record's own commercial-use read so a
+  // business unit in that building stays commercial (codex r1 P1).
+  if (commercialUseSignal) return false;
   return residentialMultifamilyVerdict({ commercialSubtype, commercialDetectionSource });
 }
 

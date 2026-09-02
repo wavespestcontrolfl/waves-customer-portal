@@ -1241,27 +1241,38 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     expect(isCommercialProfile(profile, {})).toBe(false);
   });
 
-  test('unit address: the building\'s dimensions are not carried into the unit quote; a verified value is the unit\'s', () => {
+  test('unit address: the building\'s dimensions are not carried into the unit quote; a verified sqft is the unit\'s, a verified lot is still the parcel\'s', () => {
     const whole = buildEnrichedProfile(
-      rentalComplexRecord({ squareFootage: 63096, lotSize: 93940, _source: 'county' }),
+      rentalComplexRecord({ squareFootage: 63096, lotSize: 93940, stories: 3, hasPool: true, poolCageSqft: 900, _source: 'county' }),
       null, null, null, null, null, unit,
     );
     expect(whole.isCommercial).toBe(false);
     expect(whole.homeSqFt).toBe(0);
     expect(whole.lotSqFt).toBe(0);
+    // The building's floor count would derive a fractional footprint from
+    // the unit's sqft; the complex pool is not the tenant's.
+    expect(whole.stories).toBe(1);
+    expect(whole.pool).not.toBe('YES');
+    expect(whole.poolCage).not.toBe('YES');
     // The county master-parcel guidance (which asks to collect the unit
     // number) stays quiet — the unit's own flag carries the instruction.
     expect(whole.fieldVerifyFlags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
 
     const verified = buildEnrichedProfile(
       rentalComplexRecord({
-        squareFootage: 1100, lotSize: 93940, _source: 'county',
-        _fieldEvidence: { squareFootage: { value: 1100, sourceType: 'verified', fieldVerify: false } },
+        squareFootage: 1100, lotSize: 93940, stories: 2, _source: 'county', _storiesSource: 'verified',
+        _fieldEvidence: {
+          squareFootage: { value: 1100, sourceType: 'verified', fieldVerify: false },
+          // A lot verified on this address before the reclassification
+          // existed can only be the parcel's — a unit has no lot.
+          lotSize: { value: 93940, sourceType: 'verified', fieldVerify: false },
+        },
       }),
       null, null, null, null, null, unit,
     );
     expect(verified.homeSqFt).toBe(1100);
     expect(verified.lotSqFt).toBe(0);
+    expect(verified.stories).toBe(2);
   });
 
   test('unit address: parcel-scale satellite areas are discarded with the building dims', () => {
@@ -1276,8 +1287,11 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     expect(profile.estimatedTurfSf).toBe(0);
     expect(Number(profile.estimatedBedAreaSf) || 0).toBe(0);
     expect(profile.imperviousSurfacePercent == null || profile.imperviousSurfacePercent === 0).toBe(true);
-    // Observations that are not areas survive.
-    expect(profile.shrubDensity).toBe('MODERATE');
+    // Density / pool reads describe the parcel too (codex r1 P1): the
+    // profile falls back to its synthesized defaults, marked unobserved.
+    expect(profile.pool).not.toBe('YES');
+    expect(profile._observed.shrubDensity).toBe(false);
+    expect(profile._observed.pool).toBeFalsy();
     // The bare building keeps the parcel-scale read.
     const whole = buildEnrichedProfile(
       rentalComplexRecord({ lotSize: 900000, _source: 'county' }), ai, null, null, null, null, building,
@@ -1292,6 +1306,15 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     );
     expect(profile.isCommercial).toBe(true);
     expect(profile.commercialSubtype).toBe('office_retail');
+    expect(profile.residentialUnitLookup).toBeNull();
+  });
+
+  test('unit address on a mixed-use record (multifamily type + retail land use) stays commercial', () => {
+    const profile = buildEnrichedProfile(
+      rentalComplexRecord({ _raw: { landUse: 'Retail Store' }, _source: 'county' }),
+      null, null, null, null, null, unit,
+    );
+    expect(profile.isCommercial).toBe(true);
     expect(profile.residentialUnitLookup).toBeNull();
   });
 

@@ -1832,6 +1832,9 @@ describe('residentialUnitLookupVerdict — the manual lookup honors a unit addre
       expect(residentialUnitLookupVerdict({
         ...apartmentVerdict, commercialSubtype: 'office_retail', commercialDetectionSource: 'property_record_unit_count',
       })).toBe(false);
+      // The record itself reads a commercial use beside the multifamily
+      // text (mixed-use) — the collapsed subtype cannot show it.
+      expect(residentialUnitLookupVerdict({ ...apartmentVerdict, commercialUseSignal: true })).toBe(false);
       // Vision read a commercial use on THIS parcel.
       expect(residentialUnitLookupVerdict({ ...apartmentVerdict, structuredCommercialSignal: true })).toBe(false);
       expect(residentialUnitLookupVerdict({

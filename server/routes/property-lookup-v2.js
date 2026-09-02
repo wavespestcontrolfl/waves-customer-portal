@@ -1782,28 +1782,41 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     commercialDetectionSource: wholePropertyCategory === 'COMMERCIAL'
       ? resolveCommercialDetectionSource(rc, ai) : null,
     structuredCommercialSignal: hasStructuredCommercialAiSignal(ai),
+    commercialUseSignal: recordCommercialUseSignal(rc),
   });
   const category = residentialUnitLookup ? 'RESIDENTIAL' : wholePropertyCategory;
   const commercialProfile = category === 'COMMERCIAL';
   const commercialSubtype = commercialProfile ? wholePropertySubtype : null;
   if (residentialUnitLookup && rc) {
-    // The record's dimensions are the BUILDING's (or the master parcel's):
-    // carrying them into a one-unit quote is the whole-complex overquote
-    // the unit-scope lane exists to end. Blank them for the unit's own
-    // figures (flagged HIGH below); a tech-verified value is the unit's
-    // and survives. unitCount is kept as whole-parcel context.
-    const isVerifiedDim = (field) => rc._fieldEvidence?.[field]?.sourceType === 'verified';
+    // Everything the record and the imagery say about SIZE and GROUNDS is
+    // the building's / the parcel's, not the unit's — carrying any of it
+    // into a one-unit quote is the whole-complex overquote the unit-scope
+    // lane exists to end (codex r1 P1 ×3 on top of the pre-push P1):
+    //  - sqft: blank for the unit's own figure; a tech-verified value IS
+    //    the unit's and survives.
+    //  - lot: ALWAYS 0 — a unit has no individual lot, and a verified lot
+    //    on this address can only be the parcel saved before the
+    //    reclassification existed.
+    //  - stories: the building's floor count would derive a fractional
+    //    footprint from the unit's sqft (1,200 sf / 3 floors = 400 sf), so
+    //    a unit is single-level (1) unless a tech verified otherwise.
+    //  - pool / cage: the complex's amenities are not serviced for a
+    //    tenant's unit.
+    //  - satellite analysis: EVERY read (areas, densities, water, pool)
+    //    describes the parcel, so the analysis is dropped whole — the
+    //    profile synthesizes its neutral defaults with _observed=false.
+    // unitCount stays as whole-parcel context; the HIGH flag below owns
+    // the confirm-before-pricing posture.
+    const isVerified = (field) => rc._fieldEvidence?.[field]?.sourceType === 'verified';
     rc = {
       ...rc,
-      squareFootage: isVerifiedDim('squareFootage') ? rc.squareFootage : 0,
-      lotSize: isVerifiedDim('lotSize') ? rc.lotSize : 0,
+      squareFootage: isVerified('squareFootage') ? rc.squareFootage : 0,
+      lotSize: 0,
+      stories: (rc._storiesSource === 'verified' || isVerified('stories')) ? rc.stories : 1,
+      hasPool: null,
+      poolCageSqft: null,
     };
-    // Vision measured the PARCEL too: its turf / bed / impervious areas
-    // are the complex's grounds, and left in place they price a tenant's
-    // lawn or exterior work off the whole property (pre-push codex P1).
-    // Same discard the stale-imagery guard uses; the unit's HIGH flag
-    // owns the confirm-before-pricing posture.
-    ai = discardVisionAreaFields(ai);
+    ai = null;
   }
   const footprintTurf = computeFootprintTurf(rc);
   const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
@@ -1905,7 +1918,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     const wholeUnits = verifiedUnitCountOf(rc) ?? Math.max(Number(rc?.unitCount) || 0, Number(rc?._parcel?.residentialUnits) || 0);
     fieldVerifyFlags.push({
       field: 'propertyType',
-      reason: `Unit address inside a${wholeUnits > 1 ? ` ${wholeUnits.toLocaleString()}-unit` : 'n'} apartment/condo building — quoted as ONE residential unit (condo pricing, ground floor assumed), not the whole property. Confirm the floor, and get the unit's own sq ft from the customer: the building's sq ft and lot were not carried over. Quote the whole property only if the association, complex owner, or property manager is the customer`,
+      reason: `Unit address inside a${wholeUnits > 1 ? ` ${wholeUnits.toLocaleString()}-unit` : 'n'} apartment/condo building — quoted as ONE residential unit (condo pricing, ground floor, single level, no lot, no pool assumed), not the whole property. Confirm the floor, and get the unit's own sq ft from the customer: the building's sq ft, lot, story count, pool, and every satellite read were dropped as parcel-wide. Quote the whole property only if the association, complex owner, or property manager is the customer`,
       priority: 'HIGH',
     });
   }
@@ -2898,11 +2911,20 @@ function countyAttestedSmallResidential(rc) {
   return counts.length > 0 && Math.max(...counts) <= 4;
 }
 
+// Positive commercial-USE text — the first (and strongest) COMMERCIAL vote
+// in detectCategory, and the mixed-use veto for the unit-address
+// reclassification (a record can read BOTH multifamily and retail).
+const COMMERCIAL_USE_RE = /(commercial|office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/;
+
+function recordCommercialUseSignal(rc) {
+  return COMMERCIAL_USE_RE.test(commercialSignalText(commercialSignalRecord(rc), {}));
+}
+
 function detectCategory(rc, ai = {}) {
   if (!rc && !ai) return 'RESIDENTIAL';
   const signalRc = commercialSignalRecord(rc);
   const text = commercialSignalText(signalRc, ai);
-  if (/(commercial|office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/.test(text)) return 'COMMERCIAL';
+  if (COMMERCIAL_USE_RE.test(text)) return 'COMMERCIAL';
   // Common-area parcels are association-owned regardless of unit count; the
   // multifamily-flavored strings alone defer to a county-attested small
   // residential count (≥5-unit ruling — duplex/guest house = residential).

@@ -363,6 +363,18 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
   return warnings;
 }
 
+// Triage reason codes that mean the lead's address itself is still owed
+// or unverified (call-routing-gates address_review lane, validation half).
+const ADDRESS_ASK_REASONS = new Set([
+  "missing_unit_number",
+  "address_unverified",
+  "missing_service_address",
+  "low_confidence_address",
+  "address_validation_unavailable",
+  "address_unverifiable",
+  "address_not_validated",
+]);
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...options,
@@ -3224,8 +3236,11 @@ export default function EstimateToolViewV2({
         if (!r.ok) return;
         const d = await r.json();
         if (cancelled) return;
+        // Validation-ask cards only: the address_review lane also files
+        // multi-property / second-address / property-role / dropped-call
+        // cards, which are not "this address may be wrong" (codex r1 P2).
         setOpenAddressAsks(
-          (Array.isArray(d.items) ? d.items : []).filter((i) => i.category === "address_review"),
+          (Array.isArray(d.items) ? d.items : []).filter((i) => ADDRESS_ASK_REASONS.has(i.reason_code)),
         );
       } catch {
         if (!cancelled) setOpenAddressAsks([]);
@@ -3818,6 +3833,29 @@ export default function EstimateToolViewV2({
         Object.assign(upd, resolveLookupPropertyTypeAutofill(ep.propertyType, ep.category));
       }
       if (ep.commercialSubtype) upd.commercialSubtype = ep.commercialSubtype;
+      if (ep.residentialUnitLookup) {
+        // One unit inside a building: the server already blanked the
+        // parcel's dims and dropped its parcel-wide reads, but the copies
+        // above only land TRUTHY values — so a bare-building lookup run a
+        // moment earlier (the usual sequence: address first, then "which
+        // apartment?") would keep the complex's sqft / lot / stories /
+        // pool / landscape in the form through the spread below and price
+        // the whole property anyway (codex r1 P1). Reset those to the form
+        // defaults; the operator supplies the unit's own figures.
+        Object.assign(upd, {
+          homeSqFt: ep.homeSqFt ? String(ep.homeSqFt) : "",
+          lotSqFt: "",
+          stories: ep.stories ? String(ep.stories) : "1",
+          hasPool: "NO",
+          hasPoolCage: "NO",
+          poolCageSize: "MEDIUM",
+          shrubDensity: "MODERATE",
+          treeDensity: "MODERATE",
+          landscapeComplexity: "MODERATE",
+          nearWater: "NO",
+          bedArea: "",
+        });
+      }
       if (ep.pool === "YES" || ep.pool === "POSSIBLE") upd.hasPool = "YES";
       if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
