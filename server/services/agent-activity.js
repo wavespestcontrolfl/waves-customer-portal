@@ -148,8 +148,12 @@ function contentRunItem(run, awaitingReplyByRun, decidedByRun = new Map()) {
   const stepsTotal = steps.length;
   const awaiting = awaitingReplyByRun.get(String(run.id));
   // A pending-review outcome never changes once decided (decideReviewItem
-  // stamps the run, not its outcome): a terminal emailed approval, the
-  // trust-build approval stamp, or a reviewer note all mean "decided".
+  // stamps the run, not its outcome): a terminal emailed approval or the
+  // trust-build approval stamp means "decided". reviewer_notes is NOT a
+  // signal — the runner seeds it with gate summaries when the run parks.
+  // An awaiting row whose email never left (email_sent_at null, last_error
+  // set on the SMTP failure, status kept for retry) is a delivery problem,
+  // not an owner action.
   const decided = decidedByRun.get(String(run.id));
   let decidedStatus = null;
   let decidedDetail = null;
@@ -160,11 +164,9 @@ function contentRunItem(run, awaitingReplyByRun, decidedByRun = new Map()) {
     } else if (run.trust_build_approved_at) {
       decidedStatus = 'completed';
       decidedDetail = 'Approved in review';
-    } else if (run.reviewer_notes) {
-      decidedStatus = 'skipped';
-      decidedDetail = 'Dismissed in review';
     }
   }
+  const awaitingUnsent = awaiting && !awaiting.email_sent_at;
   const title =
     run.draft_title ||
     run.draft_frontmatter_title ||
@@ -175,7 +177,11 @@ function contentRunItem(run, awaitingReplyByRun, decidedByRun = new Map()) {
   // An open approval is the owner's action; it outranks the run's own
   // skip_reason (every emailed approval sits on a run that was parked).
   const detail =
-    (awaiting ? `Awaiting emailed reply (${awaiting.token})` : null) ||
+    (awaitingUnsent
+      ? `Approval email not delivered yet (${awaiting.token})${awaiting.last_error ? `: ${awaiting.last_error}` : ''}`
+      : awaiting
+        ? `Awaiting emailed reply (${awaiting.token})`
+        : null) ||
     decidedDetail ||
     run.failure_message ||
     (run.skip_reason ? humanize(run.skip_reason) : null) ||
@@ -188,7 +194,11 @@ function contentRunItem(run, awaitingReplyByRun, decidedByRun = new Map()) {
     subtitle: [humanize(run.action_type), humanize(run.page_type), run.shadow_mode ? 'shadow' : null]
       .filter(Boolean)
       .join(' · '),
-    status: awaiting && status !== 'failed' ? 'awaiting_review' : decidedStatus || status,
+    status: awaitingUnsent
+      ? 'blocked'
+      : awaiting && status !== 'failed'
+        ? 'awaiting_review'
+        : decidedStatus || status,
     // An open approval is the current event: date the row by when it was
     // raised, not by the (possibly much older) run it belongs to.
     startedAt: iso(awaiting?.created_at || run.claimed_at || run.created_at),
@@ -253,8 +263,10 @@ function jobItem(job) {
       : 'scheduled job',
     status,
     startedAt: iso(job.last_started_at),
-    finishedAt: iso(job.last_finished_at),
-    durationMs: job.last_duration_ms == null ? null : Number(job.last_duration_ms),
+    // recordJobStart only rewrites last_started_at/last_status, so while a
+    // job is running the finish/duration columns belong to its previous run.
+    finishedAt: status === 'running' ? null : iso(job.last_finished_at),
+    durationMs: status === 'running' || job.last_duration_ms == null ? null : Number(job.last_duration_ms),
     steps: [],
     stepsDone: status === 'completed' ? 1 : 0,
     stepsTotal: 1,
@@ -328,7 +340,7 @@ async function loadRows(windowHours) {
           db.raw("draft_payload->>'title' AS draft_title"),
           db.raw("draft_payload->'frontmatter'->>'title' AS draft_frontmatter_title"),
           'published_url', 'claimed_at', 'completed_at', 'created_at', 'total_ms',
-          'trust_build_approved_at', 'reviewer_notes',
+          'trust_build_approved_at',
           'claim_ms', 'brief_ms', 'agent_ms', 'uniqueness_gate_ms', 'quality_gate_ms', 'seo_completion_gate_ms',
           'publish_ms', 'index_submit_ms', 'link_plan_ms',
           'uniqueness_gate_result', 'quality_gate_result', 'seo_completion_gate_result',
@@ -368,7 +380,7 @@ async function loadRows(windowHours) {
   const runIds = runs.map((r) => r.id);
   const approvals = await safe('content_email_approvals', () =>
     db('content_email_approvals')
-      .select('run_id', 'token', 'status', 'kind', 'created_at')
+      .select('run_id', 'token', 'status', 'kind', 'created_at', 'email_sent_at', 'last_error')
       .where((q) => {
         q.where({ status: 'awaiting_reply' }).andWhere('created_at', '>=', since);
         if (runIds.length) q.orWhereIn('run_id', runIds);

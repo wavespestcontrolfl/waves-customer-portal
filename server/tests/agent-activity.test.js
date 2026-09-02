@@ -110,10 +110,12 @@ describe('buildActivity', () => {
         { ...RUN_BASE, id: 'ok', outcome: 'completed_pending_review' },
         { ...RUN_BASE, id: 'no', outcome: 'completed_pending_review' },
         { ...RUN_BASE, id: 'ui', outcome: 'completed_pending_review', trust_build_approved_at: '2026-09-02T12:00:00Z' },
-        { ...RUN_BASE, id: 'dis', outcome: 'completed_pending_review', reviewer_notes: '2026-09-02 dismissed by owner' },
+        { ...RUN_BASE, id: 'notes', outcome: 'completed_pending_review', reviewer_notes: 'gate summary seeded at park time' },
+        { ...RUN_BASE, id: 'unsent', outcome: 'completed_pending_review' },
       ],
       approvals: [
-        { run_id: 'old', status: 'awaiting_reply', token: 'EA-old00001', created_at: '2026-09-02T11:30:00Z' },
+        { run_id: 'old', status: 'awaiting_reply', token: 'EA-old00001', created_at: '2026-09-02T11:30:00Z', email_sent_at: '2026-09-02T11:30:05Z' },
+        { run_id: 'unsent', status: 'awaiting_reply', token: 'EA-unsent01', created_at: '2026-09-02T11:40:00Z', email_sent_at: null, last_error: 'SMTP 421' },
         { run_id: 'ok', status: 'approved', token: 'EA-ok000001', created_at: '2026-09-02T09:00:00Z' },
         { run_id: 'no', status: 'rejected', token: 'EA-no000001', created_at: '2026-09-02T09:00:00Z' },
       ],
@@ -124,13 +126,15 @@ describe('buildActivity', () => {
     expect(by['run:ok']).toMatchObject({ status: 'completed', detail: 'approved by email reply' });
     expect(by['run:no']).toMatchObject({ status: 'skipped', detail: 'rejected by email reply' });
     expect(by['run:ui']).toMatchObject({ status: 'completed', detail: 'Approved in review' });
-    expect(by['run:dis']).toMatchObject({ status: 'skipped', detail: 'Dismissed in review' });
+    // reviewer_notes alone is not a decision — the runner seeds it at park time
+    expect(by['run:notes'].status).toBe('awaiting_review');
+    expect(by['run:unsent']).toMatchObject({ status: 'blocked', detail: 'Approval email not delivered yet (EA-unsent01): SMTP 421' });
   });
 
   it('an open approval outranks the skip reason in the detail line', () => {
     const { items } = buildActivity({
       runs: [{ ...RUN_BASE, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review' }],
-      approvals: [{ run_id: 'run-1', status: 'awaiting_reply', token: 'EA-aaaa1111' }],
+      approvals: [{ run_id: 'run-1', status: 'awaiting_reply', token: 'EA-aaaa1111', email_sent_at: '2026-09-02T10:05:00Z' }],
     });
     expect(items[0].detail).toBe('Awaiting emailed reply (EA-aaaa1111)');
   });
@@ -163,7 +167,7 @@ describe('buildActivity', () => {
   it('an awaiting emailed reply overrides a completed outcome and carries the token', () => {
     const { items } = buildActivity({
       runs: [{ ...RUN_BASE, outcome: 'completed_published', published_url: 'https://wavespestcontrol.com/blog/ghost-ants' }],
-      approvals: [{ run_id: 'run-1', status: 'awaiting_reply', token: 'EA-12ab34cd' }],
+      approvals: [{ run_id: 'run-1', status: 'awaiting_reply', token: 'EA-12ab34cd', email_sent_at: '2026-09-02T10:05:00Z' }],
     });
     expect(items[0].status).toBe('awaiting_review');
     expect(items[0].detail).toBe('Awaiting emailed reply (EA-12ab34cd)');
@@ -176,16 +180,19 @@ describe('buildActivity', () => {
       jobs: [
         { job_name: 'unworked_comms_watcher', last_started_at: '2026-09-02T09:00:00Z', last_finished_at: '2026-09-02T09:00:04Z', last_status: 'success', last_duration_ms: 4000, consecutive_failures: 0 },
         { job_name: 'impact_verdict_digest', last_started_at: '2026-09-02T08:00:00Z', last_finished_at: '2026-09-02T08:00:01Z', last_status: 'failed', last_error: 'ECONNRESET', last_duration_ms: 1000, consecutive_failures: 3 },
+        { job_name: 'stuck_sweep', last_started_at: '2026-09-02T07:00:00Z', last_finished_at: '2026-09-01T07:00:09Z', last_status: 'running', last_duration_ms: 9000, consecutive_failures: 0 },
       ],
     });
-    expect(items.map((i) => i.id)).toEqual(['draft:d1', 'job:impact_verdict_digest']);
+    expect(items.map((i) => i.id)).toEqual(['draft:d1', 'job:impact_verdict_digest', 'job:stuck_sweep']);
+    // a running job never shows its previous run's finish/duration
+    expect(items[2]).toMatchObject({ status: 'running', finishedAt: null, durationMs: null });
     expect(items[0].status).toBe('awaiting_review');
     expect(items[0].title).toBe('Reply draft for Pat Tester');
     expect(items[0].link).toBe('/admin/agents?tab=drafts');
     expect(items[1].status).toBe('failed');
     expect(items[1].subtitle).toBe('3 consecutive failures');
     expect(items[1].detail).toBe('ECONNRESET');
-    expect(summary).toMatchObject({ total: 2, awaiting_review: 1, failed: 1, healthyJobs: 1 });
+    expect(summary).toMatchObject({ total: 3, awaiting_review: 1, failed: 1, running: 1, healthyJobs: 1 });
   });
 });
 
