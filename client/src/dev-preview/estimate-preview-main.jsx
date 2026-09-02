@@ -308,6 +308,9 @@ function lawnScenario() {
     // priced one_time_lawn row, so the harness exercises the recurring/one-time
     // mode toggle on a lawn-only estimate.
     estimate: { ...bundle.estimate, serviceCategory: 'lawn_care', showOneTimeOption: true },
+    // Mirrors the GATE_ESTIMATE_SERVICE_ADD /data stamp: the page's mirror
+    // offer (Mosquito on this mix) prices in place through the opt-out rail.
+    serviceOptOut: { removedKeys: [], removedLabels: [], addable: [{ key: 'mosquito', label: 'Mosquito' }] },
     pricing: {
       ...bundle.pricing,
       services: [lawnService],
@@ -1060,6 +1063,20 @@ window.fetch = async (input, init) => {
   }
   if (url.includes('/preferences')) {
     return respond({ saved: true });
+  }
+  if (url.includes('/service-opt-out')) {
+    // Priced add / restore dry run: real-shaped disclosures, no combined totals.
+    return respond({
+      success: true, dryRun: true, mode: 'add', serviceKey: 'mosquito', label: 'Mosquito', included: true,
+      previous: { monthlyTotal: 85, annualTotal: 1020, onetimeTotal: 0, waveGuardTier: 'Bronze' },
+      next: { monthlyTotal: 125, annualTotal: 1500, onetimeTotal: 99, waveGuardTier: 'Silver' },
+      previewBasis: 'preview-basis',
+      disclosures: [
+        { code: 'waveguard_tier_change', message: 'Adding Mosquito moves your WaveGuard tier from Bronze to Silver, so your services are priced at the Silver rate.' },
+        { code: 'added_per_application', message: 'Mosquito is $60.00 per application.' },
+        { code: 'recurring_per_application', message: 'Lawn Care changes from $113.33 to $102.00 per application.' },
+      ],
+    });
   }
   if (url.includes('/reviews/featured')) {
     return respond(REVIEWS);

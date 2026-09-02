@@ -1101,6 +1101,38 @@ effective post-discount amounts (`annualAfterDiscount`/`visitsPerYear`),
 never the pre-discount list `perTreatment`.
 NOTHING is sent to the customer and no bell rings: one `activity_log` row,
 written ATOMICALLY with the estimate update, is the whole audit surface.
+The same PUT is the priced ADD rail under `GATE_ESTIMATE_SERVICE_ADD`
+(STRICT opt-in, needs the opt-out gate; off = the `/data` `addable` stamp is
+withheld and the write refuses 400 `service_not_addable`): `included:true`
+for a key the customer never removed adds a NEVER-quoted residential line
+(`SERVICE_ADD_KEYS` pest / lawn / mosquito; lawn only from a supplied turf
+basis — measured, `lawnSqFt`, or `estimatedTurfSf` — because lot-only
+turf prices review-only) through the identical dry-run → `previewBasis`
+confirm shape and canonical recompute (mode `add`). Eligibility is ONE
+resolver (`serviceOptOutAddableKeys`) shared with the `/data`
+`serviceOptOut.addable` stamp: `estimates.category` RESIDENTIAL
+fail-closed, no member evidence via `memberEvidenceInEstimateData`, PLUS a
+strict live `isActivePlanCustomer` check that fails closed on the stamp
+and the write; the write re-checks membership on a `FOR UPDATE` customer
+row inside its transaction (estimate row locked first, the accept path's
+order). The add branch is customer-only (`actor !== 'customer'` → 400); an
+add whose recompute yields no new recurring row, or one the engine could
+only price for review (`lineReviewOnly`), fails closed 409
+`add_unavailable`. The rail body is `applyServiceMixChange({ estimate,
+body, actor })` — the route owns gate / token / viewability, the rail owns
+eligibility, recompute, digest, CAS write and audit, and every event
+persists the caller's `actor`. Second caller: the send-time lead-service
+park in `admin-estimates.js` (`actor:'staff'`,
+`GATE_ESTIMATE_LEAD_SERVICE_SEND`, strict opt-in): a NEW residential
+customer's two-recurring-line estimate is sent leading with the
+estimator's first selected service (no selection order = unshaped), the
+other parked as ONE staff removal that `/data` ships as
+`serviceOptOut.staffOfferedKeys` and the page words as an offer; a
+customer restores it only under the add gate and the same live member
+check. A send that delivers on NO channel restores the park through this
+rail (`revertLeadServiceForSend`, bound to its `parkId`; that staff
+restore alone admits a `send_failed` row); a failed restore is a durable
+`leadServiceRevertPending` marker the next send retries first.
 Treat the gate, the generic-404
 indistinguishability, the fail-closed reprice, the explicit membership
 identity, and the no-comms contract as security-critical.)

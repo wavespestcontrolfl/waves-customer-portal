@@ -25,6 +25,7 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'adjust_stock',
   'create_restock_request',
   'update_restock_request',
+  'cancel_plan',
 ]);
 
 // Legacy writes with no structural gate — their executors mutate on call, so

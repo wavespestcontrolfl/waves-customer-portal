@@ -1953,6 +1953,14 @@ Everything else from the day's hardening stands: image-first visuals, pair-verif
 
 **Verification.** New suites: `estimate-return-visit` (first visit → null, session counting, previous-session-end boundary, named changes, ordering, no inference from updated_at, malformed input dropped) and client `EstimateViewPage.return-visit` (renders only from the payload, changed vs unchanged copy, sms fallback href, navigator.share preference, ask hand-off). Rendered in the preview harness at 390 and 1440.
 
+## 2026-09-01 — Priced add-a-service + send-time lead service (feat/estimate-add-service)
+
+**Why.** Two-service estimates close at 16% vs 34% for single-service (180-day prod read, 2026-09-01); lawn + pest closed 1 of 10. The only way to grow a plan from the page was a bundle inquiry that files an office request (used 4 times in 90 days), and every bundle was sent as a full bundle.
+
+**Decisions.** (1) Adding a line is the mirror of removing one: the same `PUT /:token/service-opt-out` rail, the same dryRun-preview → confirm panel, the same canonical recompute — never a second pricing path. (2) Only pest / lawn / mosquito are addable online; termite and rodent keep the office inquiry (measurements the profile may not carry). (3) The confirm panel discloses the tier move and every per-application change, and never a combined "$X/mo" total (standing price-copy rule). (4) The add-service card keeps its title and switches only the body and button ("See my price with X") when the key is stamped addable; without the stamp it is byte-identical to today. (5) Send-time lead-with-one-service parks the non-lead lines as staff removals so the customer page shows "Also available: Lawn Care · See my price" through the existing add-back row — one mechanism for customer removals, restores, adds, and staff offers. Lead = the estimator's first selected recurring service; only two-line estimates are shaped (one atomic park, never a partial mix); members and commercial are never re-shaped. (6) Two strict opt-in gates: `GATE_ESTIMATE_SERVICE_ADD`, `GATE_ESTIMATE_LEAD_SERVICE_SEND` (both need the opt-out gate).
+
+**Verification.** New suites: `estimate-service-add` (addable resolver, synthetic inputs per carrier, remove-after-add round trip, staff-offered reader, add-mode disclosures), `estimate-lead-service-send` (scope pins, staff dry-run→commit ordering, refusal never blocks a send), client `EstimateViewPage.service-add` (inquiry card unchanged without the stamp, priced tap → preview, confirm panel terms, no combined totals). Existing opt-out suites (52) green after the rail extraction.
+
 ## 2026-09-02 — Off-Stripe tenders: pay page is Zelle-only (feat/zelle-only-pay-page)
 
 **Owner ask.** "Remove venmo and paypal from the invoice, I just found out their fees, so this scope would just be for zelle." Follow-up to the 2026-08-29 entry above; the planned Gmail payment-notice auto-record lane is now scoped to Zelle alone.

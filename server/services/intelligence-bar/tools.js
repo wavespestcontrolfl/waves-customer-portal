@@ -256,6 +256,35 @@ IMPORTANT: Always show the operator exactly what you plan to set and ask for app
     },
   },
   {
+    name: 'cancel_plan',
+    description: `Cancel a customer's WaveGuard plan (whole account) or one or more service families on the SAME engine the customer portal uses: pulls upcoming visits, stops recurrence, winds down billing / demotes the tier, records the cancellation case, and (by default) texts + emails the customer the same confirmation the portal sends.
+Use for: "cancel Smith's plan", "cancel just the lawn care for the Garcias", "cancel Lee's plan at the end of their prepaid term".
+
+Options:
+- families: service family keys to cancel (pest_control, lawn_care, tree_shrub, mosquito, termite_bait). Omit for the whole account. The preview lists what the customer owns.
+- effective_date: "now" (default) or "end_of_coverage" — the latter only for a whole-account cancel of an annual-prepay customer: covered visits through term_end stay on the calendar and the term simply does not renew.
+- prepay_disposition: "end_at_term" (with end_of_coverage) or "end_now_refund" (with now — records the unused-value refund and opens an office task; nothing is refunded automatically).
+- waive_late_fee: true to waive the scheduled-visit fee on pulled visits.
+- send_confirmation: default true — SMS + email to the customer. false = no customer communication.
+- reason_code / note: optional structured reason + free-text note recorded on the case.
+
+The first call returns a PREVIEW (before/after facts) and nothing changes; the operator commits from the confirmation card. Only proceed after the operator has named the customer explicitly.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_id: { type: 'string', format: 'uuid' },
+        families: { type: 'array', items: { type: 'string' }, description: 'Service family keys to cancel; omit for the whole account' },
+        effective_date: { type: 'string', enum: ['now', 'end_of_coverage'] },
+        prepay_disposition: { type: 'string', enum: ['end_at_term', 'end_now_refund'] },
+        waive_late_fee: { type: 'boolean' },
+        send_confirmation: { type: 'boolean', description: 'Default true — SMS + email confirmation to the customer' },
+        reason_code: { type: 'string', description: 'One of the cancellation reason codes (price, results_pest, results_lawn, service_experience, away, scheduling_access_communication, moving_or_property_change, no_longer_needed, service_mix, diy, competitor, hoa_or_landlord, financial_hardship, health_or_chemicals, billing_issue, unexpected_recurring, damage_or_adverse_effect, personal_circumstances, other)' },
+        note: { type: 'string', description: 'Free-text note recorded on the cancellation case' },
+      },
+      required: ['customer_id'],
+    },
+  },
+  {
     name: 'create_appointment',
     description: `Create a new scheduled service appointment.
 service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Quarterly Tree & Shrub Care Service", "Waves Assessment".
@@ -330,7 +359,9 @@ Use for: "build the report for the customer we just finished", "who did we finis
 
 // ─── TOOL EXECUTION ─────────────────────────────────────────────
 
-async function executeTool(toolName, input) {
+// actionContext (route-derived, never model-supplied): { technicianId,
+// isAdmin, confirmed } — only writes that must record WHO committed read it.
+async function executeTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'search_field_intelligence': return await searchFieldIntelligence(input);
@@ -345,6 +376,7 @@ async function executeTool(toolName, input) {
       case 'update_customer': return await updateCustomer(input.customer_id, input.updates);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
+      case 'cancel_plan': return await cancelPlan(input, actionContext);
       case 'create_appointment': return await createAppointment(input);
       case 'get_recent_completions': return await getRecentCompletions(input);
       case 'reschedule_appointment': return await rescheduleAppointment(input);
@@ -1662,6 +1694,126 @@ async function updatePropertyAccess(input) {
   };
 }
 
+
+// cancel_plan (cancel-flow C3) — the admin Cancel plan service behind the
+// #1568 trust boundary: unconfirmed = the server-computed preview (no
+// writes); confirmed (attached ONLY by /confirm-action) = commit with the
+// operator recorded as the actor. Same shape the Customer 360 dialog uses.
+function cancelPlanServiceInput(input) {
+  return {
+    families: Array.isArray(input.families) ? input.families : [],
+    effectiveDate: input.effective_date || 'now',
+    prepayDisposition: input.prepay_disposition || null,
+    waiveLateFee: input.waive_late_fee === true,
+    sendConfirmation: input.send_confirmation !== false,
+    reasonCode: input.reason_code || null,
+    note: input.note || '',
+    // Pinned at proposal time by the pending-action layer; the commit
+    // refuses (preview_changed) when the live facts no longer match it.
+    previewFingerprint: input.preview_fingerprint || null,
+  };
+}
+
+async function cancelPlan(input, actionContext = {}) {
+  const customerId = input.customer_id;
+  if (!customerId) return { error: 'customer_id is required' };
+  const AdminCancellation = require('../admin-cancellation');
+  const serviceInput = cancelPlanServiceInput(input);
+
+  // BOTH confirmation signals, or it's a preview: /confirm-action is the
+  // only caller that attaches input.confirmed AND actionContext.confirmed
+  // (route-derived, never client params) — so a params-level confirmed
+  // smuggled through /execute or the model loop still previews (same
+  // posture as the estimate tools' actionContext.confirmed gate). This is
+  // never preview-only: UI confirmation is STRUCTURAL (W0B — no env value
+  // restores model-loop writes), cancel_plan is registered in
+  // write-gates.js, so every commit arrives via a pending action's
+  // /confirm-action.
+  if (input.confirmed !== true || actionContext.confirmed !== true) {
+    let preview;
+    try {
+      preview = await AdminCancellation.previewCancelPlan({ customerId, ...serviceInput });
+    } catch (err) {
+      if (err && err.code) return { error: err.message, code: err.code };
+      throw err;
+    }
+    const impact = preview.impact || {};
+    return {
+      preview: true,
+      customer_id: customerId,
+      customer_name: preview.customer.name,
+      eligible: preview.eligible,
+      repair_retry: preview.repairRetry === true,
+      whole_account: preview.wholeAccount,
+      scope: preview.scopeLabels,
+      scoped_supported: preview.scopedSupported,
+      scope_error: preview.scopeError,
+      owned_families: (impact.families || []).map((f) => ({ key: f.key, label: f.label, upcoming_visits: f.upcomingVisits, next_visit: f.nextVisitDate })),
+      visits_to_pull: impact.visitsCancelled ?? null,
+      next_visit_cancelled: impact.nextVisitCancelled || null,
+      tier_before: impact.tierBefore || null,
+      tier_after: impact.tierAfter || null,
+      monthly_before: impact.accountMonthlyBefore ?? null,
+      monthly_after: impact.accountMonthlyAfter ?? null,
+      open_balance: impact.openBalance ?? null,
+      termite_retrieval: impact.termiteRental === true,
+      effective_date: preview.effectiveDate,
+      effective_on: preview.effectiveOn,
+      prepay: preview.prepay,
+      // Scheduled-visit fee exposure on the pulled visits (both card fee
+      // lanes) — the confirmation card must show the fee-or-waive choice
+      // before the money-moving commit; unresolved = fee may apply.
+      visit_fees: preview.visitFees,
+      // Per-application repricing of surviving visits (scoped, per-visit
+      // billing lane) — charge changes the confirmation card must show.
+      per_app_changes: Array.isArray(impact.perAppChanges) ? impact.perAppChanges : [],
+      waive_late_fee: preview.waiveLateFee,
+      send_confirmation: preview.sendConfirmation,
+      confirmation_channels: preview.confirmationChannels,
+      preview_fingerprint: preview.previewFingerprint,
+      reason_code: preview.reasonCode,
+      note: preview.note || null,
+      note_to_operator: 'PREVIEW ONLY — nothing was cancelled. The operator commits from the confirmation card; the customer is texted and emailed only if send_confirmation stays on.',
+    };
+  }
+
+  try {
+    const outcome = await AdminCancellation.commitCancelPlan({
+      customerId,
+      ...serviceInput,
+      actor: { type: 'ib', userId: actionContext.technicianId || null },
+    });
+    logger.info(`[intelligence-bar] cancel_plan committed for customer ${customerId} (request ${outcome.requestId}, processed=${outcome.processed})`);
+    return {
+      success: true,
+      customer_id: customerId,
+      request_id: outcome.requestId,
+      processed: outcome.processed,
+      visits_pulled: outcome.visitsPulled,
+      scope: outcome.scope,
+      remaining: outcome.remaining,
+      tier_before: outcome.tierBefore,
+      tier_after: outcome.tierAfter,
+      effective_date: outcome.effectiveDate,
+      late_fee_waived: outcome.lateFeeWaived,
+      prepay_disposition: outcome.prepayDisposition,
+      ...(outcome.refund ? { refund: outcome.refund } : {}),
+      confirmation_channels: outcome.confirmationChannels,
+      ...(outcome.errors.length ? {
+        // review_alert_failed IS the alert write failing — claiming an
+        // alert was raised in exactly that case sends the operator to rely
+        // on follow-up that will never come (same truth rule as the dialog).
+        warning: `Auto-processing did not fully complete (${outcome.errors.join(', ')})`
+          + (outcome.errors.includes('review_alert_failed')
+            ? ' — the office review alert could NOT be raised; flag the office manually.'
+            : ' — an office review alert was raised.'),
+      } : {}),
+    };
+  } catch (err) {
+    if (err && err.code) return { error: err.message, code: err.code };
+    throw err;
+  }
+}
 
 // Terminal scheduled_services statuses — one-way; never movable. Shared
 // with the route's proposal guard via proposal-pins (codex r7 on #3648).

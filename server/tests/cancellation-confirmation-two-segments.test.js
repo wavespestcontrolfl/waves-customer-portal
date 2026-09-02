@@ -51,3 +51,23 @@ describe('service_cancellation_confirmation SMS body', () => {
     expect(countSegments(rendered).segmentCount).toBeGreaterThan(2);
   });
 });
+
+describe('service_cancellation_end_of_term_confirmation SMS body (C3 end-of-coverage)', () => {
+  const { CANCELLATION_END_OF_TERM_BODY } = require('../models/migrations/20260831000070_cancellation_end_of_term_sms_template');
+
+  test('renders to at most 2 segments with a long name and long date, GSM-7 only', () => {
+    const rendered = render(CANCELLATION_END_OF_TERM_BODY, LONG_VARS);
+    expect(rendered).not.toMatch(/\{\w+\}/);
+    expect(detectEncoding(rendered).encoding).toBe('GSM_7');
+    expect(countSegments(rendered).segmentCount).toBeLessThanOrEqual(2);
+  });
+
+  test('keeps the end-of-coverage truth: no renewal, paid visits STAY through the date — never "visits are off the calendar"', () => {
+    const b = CANCELLATION_END_OF_TERM_BODY;
+    expect(b).toMatch(/will not renew/);
+    expect(b).toMatch(/stay on the calendar through \{effective_date\}/);
+    expect(b).toMatch(/Reply here/);
+    expect(b).not.toMatch(/visits are off the calendar/);
+    expect(b).not.toMatch(/[\u{1F300}-\u{1FAFF}]/u);
+  });
+});

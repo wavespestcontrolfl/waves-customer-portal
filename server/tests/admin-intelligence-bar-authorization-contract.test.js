@@ -437,7 +437,7 @@ describe('W0B proposal-time pins for legacy-bare writes', () => {
         body: JSON.stringify({ pending_action_id: PENDING_ID }),
       });
       expect(res.status).toBe(200);
-      expect(mockExecuteTool).toHaveBeenCalledWith('trigger_review_request', { customer_name: 'acct 1042', _pinned_phone: '+19415550000' });
+      expect(mockExecuteTool).toHaveBeenCalledWith('trigger_review_request', { customer_name: 'acct 1042', _pinned_phone: '+19415550000' }, expect.objectContaining({ confirmed: true, isAdmin: true, technicianId: 'admin-1' }));
     });
   });
 });
@@ -502,7 +502,7 @@ describe('W0B booking is card-confirmable only when credit-free', () => {
         body: JSON.stringify({ pending_action_id: PENDING_ID }),
       });
       expect(res.status).toBe(200);
-      expect(mockExecuteTool).toHaveBeenCalledWith('create_appointment', { customer_id: 'c1', date: '2026-09-02', _inspection_credit_amount: 0 });
+      expect(mockExecuteTool).toHaveBeenCalledWith('create_appointment', { customer_id: 'c1', date: '2026-09-02', _inspection_credit_amount: 0 }, expect.objectContaining({ confirmed: true, isAdmin: true, technicianId: 'admin-1' }));
     });
   });
 });
@@ -551,7 +551,7 @@ describe('W0B estimate toggle pin', () => {
       expect(ok.status).toBe(200);
       // The approved CURRENT value rides to the executor for the
       // conditional UPDATE (pre-push r11 P1).
-      expect(mockExecuteTool).toHaveBeenCalledWith('toggle_show_one_time_option', { estimate_identifier: 'e1', enabled: true, _expected_flag_value: false });
+      expect(mockExecuteTool).toHaveBeenCalledWith('toggle_show_one_time_option', { estimate_identifier: 'e1', enabled: true, _expected_flag_value: false }, expect.objectContaining({ confirmed: true, isAdmin: true, technicianId: 'admin-1' }));
     });
   });
 });

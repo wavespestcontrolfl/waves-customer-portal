@@ -274,10 +274,32 @@ describe('the audit record', () => {
 });
 
 describe('event provenance', () => {
-  it('the public opt-out route stamps actor:customer on every event it records (source contract)', () => {
+  it('every recorded event carries the caller\'s actor, and the public route calls the rail as the customer (source contract)', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
     const idx = src.indexOf('OptOut.recordServiceOptOutEvent(parsedData, {');
     expect(idx).toBeGreaterThan(0);
-    expect(src.slice(idx, idx + 600)).toMatch(/actor: 'customer'/);
+    const block = src.slice(idx, idx + 800);
+    expect(block).toMatch(/\n\s+actor,\n/);
+    // Never a hardcoded actor in the rail — that overwrote staff parks (pre-push codex P0).
+    expect(block).not.toMatch(/actor: '/);
+    expect(src).toMatch(/applyServiceMixChange\(\{ estimate, body: req\.body \|\| \{\}, actor: 'customer' \}\)/);
+  });
+
+  it('a customer-driven line addition re-verifies membership INSIDE the write on a locked customer row and refuses with the reprice 409 (GH codex r9 P1)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
+    const txStart = src.indexOf('let memberActivatedMidWrite = false;');
+    expect(txStart).toBeGreaterThan(0);
+    const block = src.slice(txStart, txStart + 1600);
+    expect(block).toMatch(/await db\.transaction\(async \(trx\) => \{/);
+    // Every new-customer-priced write, the staff park included; the staff compensation restore excepted (GH codex r10 P1).
+    expect(block).toMatch(/!memberEvidence && !\(actor === 'staff' && mode === 'restore'\) && estimate\.customer_id/);
+    // Lock order: estimate row BEFORE the customer row, matching the accept path (GH codex r10 P2).
+    const estimateLock = block.indexOf("trx('estimates').where({ id: estimate.id }).forUpdate().first('id')");
+    const customerLock = block.indexOf("trx('customers').where({ id: estimate.customer_id }).forUpdate().first()");
+    expect(estimateLock).toBeGreaterThan(0);
+    expect(customerLock).toBeGreaterThan(estimateLock);
+    expect(block).toMatch(/isMembershipCustomerRow\(customerRow\)/);
+    const after = src.slice(txStart);
+    expect(after.indexOf("if (memberActivatedMidWrite) {\n      return { status: 409, body: ({ error: 'reprice_unavailable' }) };")).toBeGreaterThan(0);
   });
 });
