@@ -127,7 +127,9 @@ describe('lead staleness sweep', () => {
         + 'where "leads"."status" = ? and "leads"."created_at" <= ? '
         + 'and ("leads"."next_follow_up_at" is null or "leads"."next_follow_up_at" <= ?) '
         + 'and not exists (select 1 from "lead_activities" '
-        + 'where lead_activities.lead_id = leads.id and "lead_activities"."created_at" >= ?) '
+        + 'where lead_activities.lead_id = leads.id '
+        + "and lead_activities.activity_type IS DISTINCT FROM 'shared_phone_note' "
+        + 'and "lead_activities"."created_at" >= ?) '
         + 'and not exists (select 1 from "scheduled_services" '
         + 'where scheduled_services.customer_id = leads.customer_id '
         + 'and "scheduled_services"."status" not in (?, ?, ?, ?) '

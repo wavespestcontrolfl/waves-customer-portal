@@ -92,8 +92,12 @@ shapes) is blocked outside the rendered blog page, gate on or off:
 ## Autonomy posture (pilot)
 
 - Every draft containing `<AffiliateLink>` **parks for the owner**
-  (`skip_reason: affiliate_review` — wired in the follow-up portal PR with
-  the SAFE_MDX_COMPONENTS catalog change). No email-reply approval for this
+  (`skip_reason: affiliate_review`; reviewer_notes list each product with its
+  registry risk class/state). Approve with
+  `server/scripts/approve-autonomous-run.js --id=<run_id> --by=adam` — the
+  same publish path as the named-competitor review; the approval stamp is
+  what the PR poller's affiliate belt requires before auto-merging a head
+  that carries the component. No email-reply approval for this
   lane: yellow-class review is exactly the kind of decision a reply-
   "approved" would rubber-stamp.
 - The writer never proposes affiliate products and never sees commission
@@ -106,17 +110,27 @@ shapes) is blocked outside the rendered blog page, gate on or off:
 Pilot pair: **Amazon Associates** (3% lawn & garden, 24h — long-tail tools)
 + **Solutions Pest & Lawn** (up to 15%, 180-day — niche incl. approved
 yellow products). Add rows opportunistically where an article fits:
-**Thermacell** (Impact 4–8%/30d, zero service overlap), **The Andersons**
-(FlexOffers ~5%/30d, lawn fertility), **EGO Power+** (Awin 7%/30d — best
-equipment economics; dethatcher/mower/chainsaw content), **Husqvarna**
+**Thermacell** (Impact 4–8%/30d), **The Andersons**
+(FlexOffers ~5%/30d, lawn fertility), **Husqvarna**
 (CJ ~5%/45d, tree/chainsaw-safety fit), DoMyOwn (Awin ≤6%/90d — email
 placements restricted), ARBICO (7.5%), Greenworks (Rakuten 3–6%/30d).
+
+Rates above are unverified desk research except where noted below. The
+2026-09-01 signup pass verified only: DoMyOwn (Awin advertiser 88419,
+90-day cookie) and Solutions Pest & Lawn (up to 15%, 180-day, confirmed
+on their affiliate page). Confirm each remaining row against the
+advertiser's own network profile before joining — the EGO row below shows
+what name-matched research gets wrong.
 
 Excluded, do not revisit without an explicit owner ruling: **ClickBank**
 (info-product funnels — E-E-A-T damage), **Pestie** (no program exists;
 direct service substitute), **Sunday/Lawnbright** (DIY lawn subscriptions —
 direct lawn-program substitutes; $35–45 bounties do not cover a lost $500+/yr
-customer), any pest-service lead-gen/referral network, the dropped Terminix
+customer), **EGO** (owner ruling 2026-09-01 — the only EGO program on Awin
+is advertiser 12450, a footwear and clothing brand, not EGO Power+ the
+outdoor power equipment maker; the "7%/30d, best equipment economics" line
+this doc previously carried was that clothing listing's terms, matched on
+the name), any pest-service lead-gen/referral network, the dropped Terminix
 idea. Home Depot (1%/1d) and Lowe's (~2%/24h) only for bulky hardware Amazon
 ships badly. Stihl is dealer-only — no program.
 
@@ -145,10 +159,10 @@ ships badly. Stihl is dealer-only — no program.
    enum + `validateAffiliateUsage` in the publish gate, `/affiliate-
    disclosure/` page + hub footer Associates line, analytics events,
    `check-affiliate-links` CI (raw-URL scan, registry lint, dist scan).
-3. **Portal follow-up PR** — re-vendor blog-schema + first registry sync,
-   add `AffiliateLink` to `SAFE_MDX_COMPONENTS` (+ pinning test), runner
-   `affiliate_review` forced park, poller pre-merge refusal for affiliate
-   diffs without an approval.
+3. **Portal follow-up PR** (this one) — re-vendored blog-schema + first
+   registry sync, `AffiliateLink`/`InlineCTA`/`SpiderIdBoard` cataloged in
+   `SAFE_MDX_COMPONENTS`, runner `affiliate_review` forced park, approval
+   path extended, poller affiliate belt.
 4. **Ops** — owner signs up for programs; product-row PRs (yellow rows
    arrive with all four review fields filled); `GATE_AFFILIATE_LINKS=true`
    after a shadow run confirms parking; then the 6 pilot briefs.

@@ -424,6 +424,20 @@ finding and warns on P1. Reviewers must return JSON matching
     the cent or the mint refuses; the estimate is published with ZERO
     delivery — no send, no follow-up automation, no customer comms.
     "Never auto-send" stands everywhere else.
+  - OWNER-APPROVED EXCEPTION (ruling 2026-08-31, cancel-flow C4 GO —
+    "Restart = existing estimate machinery, card-first accept, current
+    price only"): a CANCELLED customer's "Restart my plan" tap
+    (`GATE_CANCEL_FLOW_V2`, `plan_restart` mint) publishes a
+    customer-viewable estimate for the tapping customer. Bounds that keep
+    the rule's intent: the account must be churned (`active=false` +
+    `pipeline_stage='churned'`, re-verified under the mint's row lock) and
+    any family with residual live recurring rows is excluded from the
+    quote — no live rate is ever re-priced; deterministic default options
+    only, no LLM in the loop; the server recompute is the sole dollar
+    authority and the send snapshot must freeze and match the minted
+    totals or the mint refuses; published with ZERO delivery — no send,
+    no follow-up automation, no customer comms; acceptance runs the
+    normal card-first public accept flow.
 - **Lawn-diagnostic lockstep.** The four artifacts (CONDITION_LABELS /
   SUMMARY_CAUSE_RE / CONFIRMABLE_CONDITION / the GOVERNED_CAUSE test) must
   stay mirrored, plural-aware; customer-facing egress is
@@ -1500,6 +1514,38 @@ violations at the severity noted.
   request-body figures are ignored. Treat the gate, the lock ordering, the
   generic-404 indistinguishability, and the no-comms contract as
   security-critical.)
+  `/api/estimates/:token/referral-link` (POST; the referral card's "Send My
+  Referral Link" tap on an ACCEPTED estimate, GATE_ESTIMATE_SUCCESS_REFERRAL.
+  Same composer as the service report's tap — `services/referral-share.js`
+  (`buildReferralShareForCustomer`: strict live-settings read, per-customer
+  `enrollPromoter` with the household 23505 fallback scoped to account_id,
+  owner-voice share copy, exact-cents referee amount). The RENDER payloads
+  (/data, the accept response, the already-accepted retry) carry only the
+  static headline + CTA via `composeReferralCard`; enrollment happens on the
+  tap only, never on a read. Guards: gate with a gate-aware limiter skip
+  (dark = generic 404), token format gate, 5/min shared IPv6-safe key, the
+  durable call-side linkage verdict, full customer-viewability +
+  accepted-only + linked-customer, inactive program = 404, `err.code`-only
+  logging (PG constraint errors quote phone numbers). Treat the gate, the
+  no-enroll-on-read rule, and the PII-in-logs rule as security-critical.)
+  `/api/estimates/:token/change-request` (POST; the non-decline half of the
+  customer soft-exit sheet, GATE_ESTIMATE_SOFT_EXIT. `kind:'change'` parks
+  ONE `service_requests` row (`requested_service='estimate_change_request'`)
+  + an admin bell through the measurement review's shared notify core;
+  `kind:'still_deciding'` writes one `activity_log` row and nothing else.
+  The estimate is NEVER mutated and the customer is NEVER auto-messaged.
+  Guards mirror measurement-review exactly: gate with a gate-aware limiter
+  skip (dark = generic 404), token format gate, 5/hr shared IPv6-safe key,
+  full customer-viewability + accepted/declined exclusion re-validated on the
+  LOCKED row, the durable call-side linkage verdict re-checked under the
+  estimates → leads → call_log lock order and held through the insert, open-
+  request dedupe pre-checked under the lock. The same gate lets
+  `PUT /:token/decline` accept optional `reason` / `competitorName` /
+  `competitorPrice` / `note`, validated by `customerDispositionUpdates`
+  against the normalized loss codes the staff modal writes; with the gate
+  dark those fields are ignored so the plain decline stays byte-identical.
+  Treat the gate, the lock ordering, the no-comms contract, and the no-
+  estimate-write contract as security-critical.)
   `/api/public/careers/apply` (POST; public job-application intake for the
   careers funnel. Guards mirror the lead webhook: GATE_JOB_APPLICATIONS
   (404 dark until flipped, unobservable-when-dark), IP limiter (6/10min)
@@ -1517,6 +1563,65 @@ violations at the severity noted.
   keeps us clear of automated-employment-decision law) and an owner
   bell/push. Treat the gate, the limiters, the no-customer/no-lead rule,
   and the no-comms contract as security-critical.)
+  `/api/estimates/:token/service-opt-out` (PUT; the customer drops ONE
+  recurring service line from a sent estimate. Unlike the bond and interior
+  switchers this route re-prices the WHOLE estimate through the canonical
+  engine — `serverRecomputeFromEstimateData` with `replaySavedPricingKnobs`,
+  never delta arithmetic — and PERSISTS the result, so it is the first public
+  route to write that recompute's output. `dryRun: true` runs every
+  precondition and the full replay and returns before/after WITHOUT writing;
+  the customer confirms against real numbers, because a removal can RAISE the
+  price of the services they keep (tier collapse, the solo setup fee, the
+  prepay rate) and must never do so silently. Guards:
+  `GATE_ESTIMATE_SERVICE_OPT_OUT` STRICT opt-in in every environment (dev
+  included), dark = generic 404 indistinguishable from an unknown token, with
+  a gate-aware limiter skip so a probe cannot spot the route by a 429;
+  estimate token format gate; 40/hr on the shared IPv6-safe key; the durable
+  call-side linkage verdict; `isEstimateAcceptActive` + an explicit
+  `price_locked_at` refusal; removability from ONE resolver shared with the
+  `/data` projection, which refuses an itemized proposal on ITEMIZATION
+  PRESENCE (not `proposal.enabled`) — the same refusal applies to RESTORES
+  and suppresses the add-back projection, because an itemization added after
+  a removal is the authoritative billed quote — plus the last remaining
+  recurring line, `tree_shrub` and every `commercial_*` key; a fail-CLOSED 409 when the
+  recompute cannot run; and a 400 refusal when the removal would turn a
+  bundled-free one-time item into a charge (owner ruling — that one goes to
+  the office; the before-state resolves through `result` OR the mapped raw
+  `engineResult` so engine-only estimates never blind the guard). Membership
+  identity is loaded EXPLICITLY — `membershipSnapshot.isExistingCustomer ===
+  true`, never snapshot truthiness — or an existing member reprices as a
+  brand-new customer and a linked NEW customer steals the perk; when member
+  evidence survives (snapshot flag, priors in any carrier, or a surviving
+  recurring flag), the handler LIVE-verifies the plan itself and fails
+  closed on any lookup failure — the reconciler never throws and every
+  other consumer only renders, but this route persists. EVERY commit
+  (removal AND restore) must echo its dry run's `previewBasis` — an HMAC
+  digest over the row version AND the computed totals/tier, re-derived from
+  the commit's own recompute — and is refused when the row, the pricing
+  config, or the membership verdict moved since the preview, so the terms
+  the customer confirmed are the terms that persist — restores get the same
+  preview-and-confirm step, never a one-tap reprice. Confirm-panel copy is per-application only:
+  no combined plan totals ("$X/mo"/"$X/yr") per the standing price-copy rule;
+  the first-visit line is the invoice-preview exempt class. The write carries the same six-predicate rails +
+  ms-truncated CAS as the bond/interior writes, refreshes BOTH stored result
+  carriers (`result` and raw `engineResult`) from the same recompute, and
+  stamps `serviceOptOut.engineTier` as the select-tier eligibility ceiling.
+  A standing /select-tier override (row tier differing from the engine tier)
+  REFUSES all self-serve mix changes — removals, restores, and both /data
+  projections — because an opt-out reprice persists the engine's tier and
+  totals, and honoring a hand-picked tier through that rewrite would either
+  discard the choice or persist totals that disagree with the stored result
+  rows every renderer and accept reads; that interplay is an owner ruling,
+  not a route default, so it routes to the office. A removal with no
+  trustworthy before-state (no pricing rows in `result` or the mapped raw
+  `engineResult`) fails closed, and per-application disclosures derive from
+  effective post-discount amounts (`annualAfterDiscount`/`visitsPerYear`),
+  never the pre-discount list `perTreatment`.
+  NOTHING is sent to the customer and no bell rings: one `activity_log` row,
+  written ATOMICALLY with the estimate update, is the whole audit surface.
+  Treat the gate, the generic-404
+  indistinguishability, the fail-closed reprice, the explicit membership
+  identity, and the no-comms contract as security-critical.)
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

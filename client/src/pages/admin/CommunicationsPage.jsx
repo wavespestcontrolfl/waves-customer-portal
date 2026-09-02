@@ -2086,7 +2086,7 @@ function CSRCoachTab() {
               marginBottom: 12,
             }}
           >
-            Lead Quality vs CSR Performance
+            Lead quality vs CSR performance
           </div>{" "}
           <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>
             Lost calls breakdown (last 30 days):
@@ -2198,7 +2198,7 @@ function CSRCoachTab() {
         >
           {" "}
           <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
-            Follow-Up Tasks
+            Follow-up tasks
           </div>{" "}
           <div style={{ fontSize: 12, color: D.muted }}>
             Pending: {tasks?.pending || 0} | Overdue:{" "}

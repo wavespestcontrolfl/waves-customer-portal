@@ -45,6 +45,7 @@
  *   GATE_PEST_STRANDED_RECOVERY=<ISO timestamp> (stranded-activation recovery sweep covers PEST parents created at/after this epoch; set AFTER a rollout completes so old-instance bookings from the Railway overlap can never match; unset/invalid = pest excluded — owner ruling 2026-08-27)
  *   GATE_COMPLETION_AUTOPAY_CHARGE=true (completion auto-charge extends to EVERY autopay customer's collectible self-pay completion invoice — hard-capped at the visit's accepted price or membership dues rate; no anchor or above-anchor → office review bell, never an uncapped charge)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
+ *   GATE_LEAD_TO_CASH_SWEEP=true (daily 6:55 ET read-only lead-to-cash invariants sweep — FIX: email to contact@ only on findings; never writes)
  *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
  *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
@@ -52,6 +53,12 @@
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
+ *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
+ *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
+ *   GATE_ESTIMATE_LAWN_CALENDAR=true (12-month application strip under the lawn price card, arithmetic on visitsPerYear only; dev-open, prod dark)
+ *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
+ *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
+ *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
  *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE.
  *     ⚠ PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true
  *     AND GATE_AUTO_APPLY_ACCOUNT_CREDIT=true are BOTH also set — the prod
@@ -259,6 +266,17 @@ const gates = {
   // creation) and issued /visit/:token links keep resolving. Fail-closed
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
+
+  // Booking stamping contract (Tier 2 consolidation): the shared
+  // field-stamping authority in services/booking/create-scheduled-service.js
+  // that scheduled_services insert sites converge on. Gate OFF = no
+  // behavioral enrichment: the contract only validates and stamps
+  // provenance attribution (source_action/booking_source, caller values
+  // always win), so adopting a call site changes nothing at rest. Gate ON
+  // = enrichment stamps apply (catalog-identity snapshot completion for
+  // rows the caller left snapshot-less).
+  // Fail-closed ==='true' in EVERY environment; kill switch: unset.
+  bookingStampingContract: process.env.GATE_BOOKING_STAMPING_CONTRACT === 'true',
 
   // Two-program combined visits retired (owner 2026-08-31, follow-through
   // on the 08-28 combo ruling "I want to remove all of these"): with visit
@@ -1043,6 +1061,11 @@ const gates = {
   // ingested. Read-only against Twilio; writes only admin notifications.
   // Off → cron ticks are no-ops.
   callIngestWatchdog: process.env.GATE_CALL_INGEST_WATCHDOG === 'true',
+  // Call-processing stall watchdog: recorded calls that never reach a
+  // terminal processing state (wedged claim, dead processor, provider
+  // outage) ring an admin bell instead of silently costing leads — the
+  // 2026-08-31 wedge and a row stuck since 07-10 both went unnoticed.
+  callProcessingStallWatchdog: process.env.GATE_CALL_PROCESSING_STALL_WATCHDOG === 'true',
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered
@@ -1427,6 +1450,68 @@ const gates = {
   // Enable with GATE_ESTIMATE_MEASUREMENT_REVIEW=true.
   estimateMeasurementReview: isProd ? process.env.GATE_ESTIMATE_MEASUREMENT_REVIEW === 'true' : true,
 
+  // Returning-visitor mode on the estimate page: on the second or later
+  // VISIT (estimate_views sessionized at the engagement engine's 30-minute
+  // gap) the /data payload carries a `returnVisit` block — visit number, the
+  // previous visit's end, and the customer-visible changes since then, each
+  // named from a durable stamp (opt-out events, extension grant). Never a
+  // "price changed" inferred from updated_at. Read-only projection, no write,
+  // no comms. Dev-open, prod dark.
+  // Enable with GATE_ESTIMATE_RETURN_VISIT=true.
+  estimateReturnVisit: isProd ? process.env.GATE_ESTIMATE_RETURN_VISIT === 'true' : true,
+
+  // Customer-facing service opt-out on a sent estimate: the customer drops one
+  // recurring service line and the estimate re-prices through the canonical
+  // engine (PUT /:token/service-opt-out, with a dryRun preflight that shows
+  // the new numbers before anything is written). No customer comms anywhere in
+  // the flow; one activity_log row, no bell.
+  // STRICT opt-in in EVERY environment — deliberately not the dev-open
+  // `isProd ? … : true` shape the measurement-review gate above uses: this
+  // route rewrites monthly_total, annual_total and onetime_total, so a
+  // local/dev run must arm it explicitly (same posture as securePlanChoice
+  // and reserviceSelfServe). Dark = the /data payload omits the keys and the
+  // route answers the generic 404, indistinguishable from an unknown token.
+  // Enable with GATE_ESTIMATE_SERVICE_OPT_OUT=true.
+  estimateServiceOptOut: process.env.GATE_ESTIMATE_SERVICE_OPT_OUT === 'true',
+
+  // Lawn program calendar on the estimate page: a 12-month strip under the
+  // lawn price card marking N evenly spaced application months, where N is
+  // the selected frequency's visitsPerYear. Pure arithmetic on data already
+  // on the page — no product, step, or fertilizer names (owner-owned business
+  // logic). Gates only the /data `lawnCalendar` flag. Dev-open, prod dark.
+  // Enable with GATE_ESTIMATE_LAWN_CALENDAR=true.
+  estimateLawnCalendar: isProd ? process.env.GATE_ESTIMATE_LAWN_CALENDAR === 'true' : true,
+
+  // Referral prompt on the estimate's accepted / just-accepted screens: the
+  // same share module the report page and the portal Refer tab use. Gates
+  // the `referral` card in /data + the accept payload and the
+  // POST /:token/referral-link tap (enrolls the promoter ON THE TAP, never on
+  // a read). Live program settings still decide whether the card shows at
+  // all. Dev-open, prod dark. Enable with GATE_ESTIMATE_SUCCESS_REFERRAL=true.
+  estimateSuccessReferral: isProd ? process.env.GATE_ESTIMATE_SUCCESS_REFERRAL === 'true' : true,
+  // Owner-side "reading it now" bell: when the engagement engine's
+  // multi_view_high_intent rule matches on a page open (>= minSessions
+  // sittings inside windowHours — the DB-tunable rule params), raise ONE
+  // admin notification per estimate per 24h so the owner can call while the
+  // estimate is open in front of the customer. NOT a customer message — the
+  // customer email job path is untouched. Category estimate_hot_view is
+  // silent by default under the admin bell policy (owner ruling 2026-08-28)
+  // and the owner enables it under push settings.
+  // STRICT opt-in in EVERY environment (a local run must never ring the
+  // office). Enable with GATE_ESTIMATE_HOT_VIEW_ALERT=true.
+  estimateHotViewAlert: process.env.GATE_ESTIMATE_HOT_VIEW_ALERT === 'true',
+  // Customer soft exit on a sent estimate: the "Not what you expected?" sheet.
+  // Three outcomes, none of which message the customer: a reason-tagged
+  // decline (PUT /:token/decline gains optional reason/competitor/note
+  // fields that land in the disposition columns the staff modal already
+  // writes), a "still deciding" signal (one activity_log row, no bell), and
+  // a change request (POST /:token/change-request parks ONE service_requests
+  // row + an admin bell; the estimate is never mutated). Gates the /data
+  // `softExit` flag that renders the sheet, the reason fields on /decline,
+  // and the change-request route. Dev-open, prod dark.
+  // Enable with GATE_ESTIMATE_SOFT_EXIT=true.
+  estimateSoftExit: isProd ? process.env.GATE_ESTIMATE_SOFT_EXIT === 'true' : true,
+
   // The `lawn_area` block on POST /public/quote/calculate — the priced
   // treatable-area basis the website estimator renders as "Priced for N sq
   // ft". Ships DARK because merely EMITTING the field activates the deployed
@@ -1721,6 +1806,14 @@ const gates = {
   // sitting in an open status (pending/confirmed/en_route/on_site).
   // Detection-only: never mutates the rows, no customer contact.
   staleVisitSweep: isProd ? process.env.GATE_STALE_VISIT_SWEEP === 'true' : true,
+  // Daily 6:55 ET lead-to-cash invariants sweep (services/lead-to-cash-
+  // invariants.js): a read-only registry over existing detectors (churned
+  // accounts with live plan state, WaveGuard field drift, recurring-schedule
+  // anomalies, stale open visits, converted-but-open estimates, completion-
+  // lane catalog coverage, failed closeout facts). Emails contact@ ONLY when
+  // a detector finds something or cannot run. Dark everywhere until flipped
+  // (it would email from every dev boot otherwise); kill = unset.
+  leadToCashInvariantSweep: process.env.GATE_LEAD_TO_CASH_SWEEP === 'true',
 
   // Customer rain chip — attaches a "chance of rain" percentage (NWS daily
   // outlook) to the customer portal's visit-tracker payload so the tracker

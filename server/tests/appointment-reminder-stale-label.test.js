@@ -154,11 +154,15 @@ describe('send-site wiring', () => {
     require.resolve('../services/appointment-reminders'), 'utf8',
   );
 
-  test('both reminder legs + the 24h night-skip email leg resolve the label live', () => {
-    // 72h SMS + 24h SMS sites
-    expect(src.split('const serviceLabel = await liveReminderServiceLabel(r);').length - 1).toBe(2);
-    // 24h night-skip email leg
-    expect(src).toContain('serviceLabel: await liveReminderServiceLabel(r),');
+  test('both reminder legs + the 24h night-skip email leg resolve the label live (visit-aware when the row owns the visit claim)', () => {
+    // 72h SMS + 24h SMS sites — the visit-claim owner widens the label to
+    // every member of the visit; non-owners keep the exact-slot merge.
+    expect(src).toContain('const serviceLabel = await liveReminderServiceLabel(r, { visitId: ownsVisit72 ? svcVisitId : null });');
+    expect(src).toContain('const serviceLabel = await liveReminderServiceLabel(r, { visitId: ownsVisit24 ? svcVisitId : null });');
+    // 24h night-skip email leg (label resolved before the lease renewal,
+    // passed through as nightLabel)
+    expect(src).toContain('const nightLabel = await liveReminderServiceLabel(r, { visitId: ownsNight ? svcVisitId : null });');
+    expect(src).toContain('serviceLabel: nightLabel,');
     // No reminder-loop site still reads the frozen row column directly.
     expect(src).not.toContain('smsServiceLabelStored(r.service_type)');
   });

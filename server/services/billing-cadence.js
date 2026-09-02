@@ -153,15 +153,76 @@ function frequencyFromService(service) {
   return null;
 }
 
+// A PINNED pre-realignment rodent bait row (legacyPinnedReplay, no
+// per-application marker) is the legacy MONTHLY-billed plan: its visitsPerYear
+// is an operational cadence, not a billing unit. It never drives the billing
+// cadence — with it, a rodent-only legacy accept inferred "quarterly" and
+// stamped annual ÷ 4 ($147) where the disclosed lane is the monthly figure
+// ($49). Shared with the converter, which routes the same rows through the
+// legacy supplement path (codex #3591 r19/r20 P0).
+function isPinnedLegacyRodentRow(svc = {}) {
+  return svc?.legacyPinnedReplay === true
+    && String(svc?.service || '').toLowerCase() === 'rodent_bait'
+    && svc?.perApplicationBilled !== true;
+}
+
+// New-model evidence on a rodent row (mirrors rodentBaitLegacyReplaySignal's
+// own test): the bracket engine stamps every row it prices with at least one
+// of these; a pre-realignment row carries none.
+function rodentRowHasNewModelMarker(svc = {}) {
+  return svc?.perApplicationBilled === true
+    || Number(svc?.stations) > 0
+    || svc?.pricingBasis === 'RODENT_BAIT_BRACKET';
+}
+
+// Legacy-rodent predicate for a STORED estimate (codex #3591 r37 P0): the
+// replay paths pin a pre-realignment row (legacyPinnedReplay) before it
+// reaches billing/conversion, but a manual "mark as won" hands the STORED
+// shape straight over — a pre-realignment quote-wizard row then has neither
+// the pin nor a new-model marker, and a disclosed $49/mo plan would be
+// stamped per-application at ~$147/completion. So the stored estimate's own
+// legacy signal (rodentBaitLegacyReplaySignal) also classifies: when the
+// stored result reads as legacy, every rodent_bait row without new-model
+// evidence IS the legacy monthly plan. Returns a row predicate.
+function legacyRodentRowPredicateFor(estimateData) {
+  const data = parseEstimateData(estimateData);
+  let storedLegacy = null;
+  try {
+    storedLegacy = require('./rodent-bait-legacy-replay').rodentBaitLegacyReplaySignal(data);
+  } catch { storedLegacy = null; }
+  return (svc = {}) => {
+    if (isPinnedLegacyRodentRow(svc)) return true;
+    if (!storedLegacy) return false;
+    return String(svc?.service || '').toLowerCase() === 'rodent_bait' && !rodentRowHasNewModelMarker(svc);
+  };
+}
+
 function collectRecurringServices(estimateData) {
   const data = parseEstimateData(estimateData);
+  const isLegacyRodentRow = legacyRodentRowPredicateFor(data);
   const lists = [
     data.result?.recurring?.services,
     data.recurring?.services,
     data.results?.recurring?.services,
     data.services,
   ];
-  return lists.flatMap((list) => (Array.isArray(list) ? list : []));
+  const primary = lists.flatMap((list) => (Array.isArray(list) ? list : []));
+  // Engine-backed recurring rows (codex #3591 r42 P1): a post-realignment
+  // quote-wizard save persists its rodent row ONLY under
+  // engineResult.lineItems (no mapped recurring container), so the cadence
+  // must read it there or a manual win falls back to the monthly
+  // equivalent. Recurring engine lines carry annual/monthly (one-time lines
+  // carry price alone — the engine's own oneTimeItems rule); a row whose
+  // service key the mapped lists already carry is not duplicated.
+  const primaryKeys = new Set(primary
+    .map((svc) => String(svc?.service || svc?.serviceKey || svc?.service_key || '').toLowerCase())
+    .filter(Boolean));
+  const engineRows = [data.engineResult?.lineItems, data.result?.lineItems]
+    .flatMap((list) => (Array.isArray(list) ? list : []))
+    .filter((li) => li && typeof li === 'object'
+      && (Number(li.annual) > 0 || Number(li.monthly) > 0)
+      && !primaryKeys.has(String(li.service || li.serviceKey || li.service_key || '').toLowerCase()));
+  return [...primary, ...engineRows].filter((svc) => !isLegacyRodentRow(svc));
 }
 
 function inferFrequencyKeyFromEstimateData(estimateData) {
@@ -290,6 +351,9 @@ module.exports = {
   collectRecurringServices,
   customerPreservesMonthlyMembership,
   displayForFrequencyKey,
+  isPinnedLegacyRodentRow,
+  rodentRowHasNewModelMarker,
+  legacyRodentRowPredicateFor,
   frequencyKeyFromVisitsPerYear,
   inferFrequencyKeyFromEstimateData,
   intervalPriceFromAnnual,

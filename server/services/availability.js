@@ -528,6 +528,9 @@ class AvailabilityEngine {
       // Create scheduled_service so it shows on the dispatch board
       const [scheduledRow] = await trx('scheduled_services').insert({
         customer_id: customerId,
+        // Sole-active-property anchor for the visit-group stamp below —
+        // see customer-properties.soleActivePropertyId (GH codex r3).
+        property_id: await require('./customer-properties').soleActivePropertyId(customerId, trx),
         scheduled_date: dateStr,
         window_start: startTime,
         window_end: endTime,
@@ -540,6 +543,12 @@ class AvailabilityEngine {
         self_booking_id: bookingRow.id,
         zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
       }).returning('*');
+
+      // Visit groups (visit-group-scope.md §2): stamp at scheduling.
+      // Gate-checked + best-effort + self-refusing (no property_id here ⇒
+      // inert until linkage stamps it; explicit so every booking path
+      // answers the stamping audit).
+      await require('./visit-groups').maybeGroupRow(scheduledRow.id, { database: trx, createdBy: 'seeder' });
 
       // Inspection credit: this is a REAL customer booking (AI assistant /
       // confirmed call path), so record durable evidence in-transaction —

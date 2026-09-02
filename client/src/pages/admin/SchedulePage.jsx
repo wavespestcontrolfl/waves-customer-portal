@@ -31,7 +31,7 @@
 //   (operator double-clicks "Complete" should not double-bill).
 // - RescheduleModal's slot-conflict handling — what happens if the
 //   chosen slot is taken between modal open and submit?
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import { createPortal } from "react-dom";
 
@@ -46,7 +46,19 @@ import {
   isPestDefaultMixVisit,
   pestDefaultMixSelections,
 } from "../../lib/pest-default-mix";
+import {
+  exclusiveProtocolProductConflict,
+  exclusiveProtocolSelectionConflict,
+  reconcileDependentFindingSelections,
+  reconcileExclusiveProtocolSelections,
+  specialtyCompletedWorkWithoutAction,
+  specialtyCompletionFor,
+  specialtyFindingActionConflict,
+} from "../../lib/service-completion-presets";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
+import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
+import AREA_SCOPES from "../../../../shared/treatment-area-scopes.json";
+import legacyCompletionAreas from "../../../../shared/legacy-completion-areas.json";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { Mic, MicOff } from "lucide-react";
@@ -56,6 +68,7 @@ import EstimateProvenanceCard from "../../components/schedule/EstimateProvenance
 import SlotConflictNotice from "../../components/schedule/SlotConflictNotice";
 import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
+
 import BestTimeHint from "../../components/schedule/BestTimeHint";
 import { useBestTimes } from "../../components/schedule/useBestTimes";
 import SeriesMoveNotice from "../../components/schedule/SeriesMoveNotice";
@@ -71,6 +84,13 @@ import {
   describeCardRequestResult,
   canSendCardRequest,
 } from "../../components/schedule/cardLinkStatus";
+const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
+const TREATMENT_AREA_FIELD_KEYS = ["areas_treated", "spot_treatment_areas", "treatment_zones"];
+// Area fields that changed from free text to chips in this PR: restored legacy
+// values stay visible (removable legacy chips) and block submit until replaced.
+// areas_inspected is inspection location, never treatment scope, so it is
+// deliberately NOT a typed treatment-area key (local audit P1 on #3701).
+const LEGACY_AREA_FIELD_KEYS = [...TREATMENT_AREA_FIELD_KEYS, "areas_inspected"];
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const D = {
@@ -205,66 +225,10 @@ function baseUnitOf(unit) {
   const u = String(unit || "");
   return u.includes("/") ? u.split("/")[0] : u;
 }
-const AREAS_BY_SERVICE = {
-  pest: [
-    "Perimeter",
-    "Garage",
-    "Kitchen",
-    "Bathrooms",
-    "Entry points",
-    "Yard",
-    "Fence line",
-    "Trash area",
-    // Landscape treatment surfaces on a general-pest visit (owner
-    // 2026-08-29): ornamental plantings and the mulched bedding areas
-    // around them. Labels never contain commas (comma-joined per product).
-    "Ornamentals",
-    "Bedding areas",
-  ],
-  // Bed bug is an interior treatment — yard/fence chips read wrong on its
-  // closeout (owner 2026-07-31, untype lane). Vocabulary carries over the
-  // retired typed form's treatment surfaces. Labels never contain commas
-  // (the per-product area field comma-joins selections).
-  bed_bug: [
-    "Primary bedroom",
-    "Guest bedroom",
-    "Living room",
-    "Mattress & box spring",
-    "Bed frame & headboard",
-    "Baseboards",
-    "Furniture & upholstery",
-    "Closets",
-    "Adjacent rooms",
-  ],
-  lawn: [
-    "Front yard",
-    "Back yard",
-    "Side yards",
-  ],
-  // Termite and mosquito previously fell back to the pest room list
-  // (Kitchen/Bathrooms/Trash area on a bait-station visit). Vocabularies
-  // are service-native; labels never contain commas (comma-joined per
-  // product) — owner directive 2026-08-27.
-  termite: [
-    "Foundation perimeter",
-    "Bait stations",
-    "Garage / slab edge",
-    "Crawlspace",
-    "Attic",
-    "Exterior walls",
-    "Wood contact points",
-    "Interior slab penetrations",
-  ],
-  mosquito: [
-    "Yard vegetation",
-    "Shrubs & landscape beds",
-    "Under deck / patio",
-    "Fence line",
-    "Standing water areas",
-    "Property perimeter",
-    "Screened enclosure",
-  ],
-};
+// Legacy generic "Areas treated" chips per service category — shared with the
+// server (typed area fields accept these as migrated values) via
+// shared/legacy-completion-areas.json.
+export const AREAS_BY_SERVICE = legacyCompletionAreas.categories;
 // Per-product treatment areas are multi-select but stored as ONE
 // comma-joined string in the existing applicationArea field
 // ("Kitchen, Bathrooms") so drafts, the submit payload, and the
@@ -277,12 +241,50 @@ function parseApplicationAreas(value) {
     .map((part) => part.trim())
     .filter(Boolean);
 }
+export function typedTreatmentAreaField(schema) {
+  return (schema?.fields || []).find((field) => TREATMENT_AREA_FIELD_KEYS.includes(field?.key)) || null;
+}
+export function completionAreasForTypedFindings({ typedAreaKey, findingsValues, genericAreas }) {
+  if (!typedAreaKey) return genericAreas || [];
+  const typedAreas = parseApplicationAreas(findingsValues?.[typedAreaKey]);
+  // Drafts saved before a lane gained its typed area field carry only the
+  // generic list. Preserve that scope until the technician picks a typed
+  // value; new typed selections remain authoritative once present.
+  return typedAreas.length ? typedAreas : (genericAreas || []);
+}
+export function labelsPresentInMarkerNotes(notes, labels) {
+  const markerValues = new Set(String(notes || "")
+    .split("\n")
+    .filter((line) => /^\s*\[[^\]]+\]\s/.test(line))
+    .map((line) => line.replace(/^\s*\[[^\]]+\]\s*/, "").trim().toLowerCase())
+    .filter(Boolean));
+  return (Array.isArray(labels) ? labels : []).filter((label) => (
+    markerValues.has(String(label || "").trim().toLowerCase())
+  ));
+}
+// Specialty preset actions carry a default scope, but the treated areas say
+// where the work actually happened: when every classified area sits on one
+// side (shared/treatment-area-scopes.json), the action follows it, so an
+// interior-only bee, mud-dauber or tick visit never exposes an exterior
+// re-entry target. Mixed or unclassified areas keep the default (codex P1 r9
+// #3701 — replaces a narrower attic/void token list).
+export function specialtyActionScope({ areas, defaultScope }) {
+  const scopes = new Set((areas || [])
+    .map((area) => {
+      const label = String(area || "").trim();
+      if (AREA_SCOPES.interior.includes(label)) return "interior";
+      if (AREA_SCOPES.exterior.includes(label)) return "exterior";
+      return null;
+    })
+    .filter(Boolean));
+  return scopes.size === 1 ? [...scopes][0] : defaultScope;
+}
 // Chip choices = this visit's treated-area chips, plus any already-selected
 // area that is no longer chipped at the visit level. Keeping stale
 // selections visible (instead of hiding them like the old <select> did)
 // lets the tech see and clear a value that would otherwise submit
 // invisibly from p.applicationArea (same trap as codex P3 r2 on #2950).
-function productAreaChoices(areasServiced, currentValue) {
+export function productAreaChoices(areasServiced, currentValue) {
   const choices = [...areasServiced];
   for (const area of parseApplicationAreas(currentValue)) {
     if (!choices.includes(area)) choices.push(area);
@@ -1165,10 +1167,12 @@ const EDIT_FALLBACK_SERVICES = [
       {
         name: "Rodent Bait Station Service",
         serviceKey: "rodent_bait_quarterly",
-        // rodent_bait is a percent-excluded family (pricing-engine
-        // WAVEGUARD.excludedFromPercentDiscount) — the only such family in
-        // this static list; stamped so the preview matches the save.
-        excludedFromPercentDiscount: true,
+        // Percent-exclusion is a LIVE policy (pricing_config.rodent_waveguard,
+        // admin-editable) — the offline fallback cannot know it, so it stays
+        // unknown here and the percentage preview is disabled while the
+        // live catalog is unavailable (codex #3591 r20 P2); the server
+        // applies the live exclusion on save.
+        excludedFromPercentDiscount: null,
       },
     ],
   },
@@ -1367,6 +1371,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [cancelNotificationType, setCancelNotificationType] = useState("text");
   const [cancelling, setCancelling] = useState(false);
   const [serviceGroups, setServiceGroups] = useState(EDIT_FALLBACK_SERVICES);
+  // True once the live service catalog loaded; the static fallback carries
+  // no server-derived percent-exclusion flags, so percentage previews are
+  // withheld until it does (codex #3591 r20 P2).
+  const [catalogLive, setCatalogLive] = useState(false);
   const [expandedCategory, setExpandedCategory] = useState(null);
   // Which service line's picker is open: null | 'primary' | line._key
   const [pickerKey, setPickerKey] = useState(null);
@@ -1591,7 +1599,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     (async () => {
       try {
         const r = await adminFetch("/admin/schedule/services-dropdown");
-        if (r.groups?.length) setServiceGroups(r.groups);
+        if (r.groups?.length) {
+          setServiceGroups(r.groups);
+          setCatalogLive(true);
+        }
       } catch {
         /* keep fallback */
       }
@@ -2445,13 +2456,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     (!presetKeyFilter || presetKeyFilter === (line.serviceKey || null)) &&
     (!presetCategoryFilter ||
       presetCategoryFilter === (line.serviceCategory || null));
+  // excludedFromPercentDiscount === null means UNKNOWN (static fallback
+  // row while the live catalog is unavailable): a percentage preview must
+  // not assume eligibility the server may refuse on save (codex #3591 r24
+  // P2) — the row is withheld from the percentage base.
   const lineTakesDiscount = (line) =>
     lineInDiscountScope(line) &&
-    !(discountType === "percentage" && line.excludedFromPercentDiscount === true);
+    !(discountType === "percentage"
+      && (line.excludedFromPercentDiscount === true || line.excludedFromPercentDiscount === null));
   const primaryLineForDiscount = {
     serviceKey: form.serviceKey,
     serviceCategory: form.serviceCategory,
-    excludedFromPercentDiscount: form.excludedFromPercentDiscount === true,
+    excludedFromPercentDiscount: form.excludedFromPercentDiscount === null
+      ? null
+      : form.excludedFromPercentDiscount === true,
   };
   const percentExcludedLines = serviceLines.filter(
     (l) => !lineTakesDiscount(l),
@@ -2730,7 +2748,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                                 onField("serviceId", svc.id || null);
                                 onField(
                                   "excludedFromPercentDiscount",
-                                  svc.excludedFromPercentDiscount === true,
+                                  svc.excludedFromPercentDiscount === null
+                                    ? null
+                                    : svc.excludedFromPercentDiscount === true,
                                 );
                                 onField("serviceKey", svc.serviceKey || null);
                                 // Static-fallback items carry no category of
@@ -3639,6 +3659,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <strong>(${manualDiscount.toFixed(2)})</strong>{" "}
                   </div>
                 )}
+                {discountType === "percentage" &&
+                  discountAmount !== "" &&
+                  !catalogLive && (
+                    <div
+                      style={{
+                        minWidth: 220,
+                        fontSize: 12,
+                        color: D.muted,
+                      }}
+                    >
+                      Live service catalog unavailable — lines whose percentage
+                      exclusion is unknown (e.g. rodent bait) are withheld from
+                      this preview; the server applies the live rules on save.
+                    </div>
+                  )}
                 {discountType &&
                   discountAmount !== "" &&
                   percentExcludedLines.length > 0 && (
@@ -6935,13 +6970,26 @@ const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
 // tech gets the inline prompt instead of the server 422 (Codex P3 r3 on
 // #2703). The method list mirrors TERMITE_PERIMETER_METHODS in
 // project-types.js; the messages mirror validateTypedFindings.
-export function typedFieldValueConflicts(schemaType, values) {
+export function typedFieldValueConflicts(schemaType, values, fields = null) {
   const conflicts = [];
+  // Legacy treatment-area values (a pre-chip free-text draft, or generic
+  // chips migrated from another lane) render as removable legacy chips; the
+  // server rejects them, so block here with the fix spelled out.
+  for (const field of Array.isArray(fields) ? fields : []) {
+    if (!LEGACY_AREA_FIELD_KEYS.includes(field?.key) || !Array.isArray(field.options)) continue;
+    const parts = String(values?.[field.key] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    const offList = offListTypedAreaValues(parts, field, schemaType);
+    if (offList.length) {
+      conflicts.push(
+        `Legacy area${offList.length === 1 ? "" : "s"} ${offList.map((a) => `"${a}"`).join(", ")} ${offList.length === 1 ? "is" : "are"} no longer offered for this service — remove or replace with a current area`,
+      );
+    }
+  }
   if (schemaType === "termite_treatment") {
     const method = String(values?.treatment_method ?? "").trim();
     const notice = String(values?.posted_notice ?? "").trim();
     if (
-      ["Liquid perimeter", "Trenching"].includes(method) &&
+      TERMITE_PERIMETER_METHODS.includes(method) &&
       notice &&
       notice !== "Yes"
     ) {
@@ -7008,7 +7056,18 @@ export function typedFieldValueConflicts(schemaType, values) {
 // definition: chips keep only allowlisted tokens, selects must match an
 // option, counts must be digit-only. Free-text fields keep anything.
 // Mutates and returns `restored`.
-function pruneRestoredFindingsValues(restored, fields) {
+// Values a typed treatment-area field can publish: its own options plus this
+// lane's legacy generic chips (the server enforces the same set). A restored
+// or migrated value outside it is NOT dropped — a draft's documented scope
+// stays visible as a removable legacy chip (ProjectFindingFieldInput renders
+// off-list selections that way) and typedFieldValueConflicts blocks submit
+// until the tech removes or replaces it (local audit P1s on #3701).
+export function offListTypedAreaValues(areas, field, findingsType = null) {
+  const legacy = legacyCompletionAreas.categories[legacyCompletionAreas.byFindingsType[findingsType]] || [];
+  const accepted = new Set([...(Array.isArray(field?.options) ? field.options : []), ...legacy]);
+  return (Array.isArray(areas) ? areas : []).filter((area) => !accepted.has(area));
+}
+export function pruneRestoredFindingsValues(restored, fields, findingsType = null) {
   const values = restored && typeof restored === "object" ? restored : {};
   if (!Array.isArray(fields)) return values;
   const fieldByKey = new Map(fields.map((f) => [f.key, f]));
@@ -7022,11 +7081,19 @@ function pruneRestoredFindingsValues(restored, fields) {
       // validation the tech can't fix (codex P2). Companion slices clear
       // the flag for fields they collect, so those restores survive.
       delete values[key];
-    } else if ((field.type === "chips" || field.type === "multi_select") && Array.isArray(field.options)) {
-      const kept = String(raw || "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => field.options.includes(s));
+    } else if (
+      (field.type === "chips" || field.type === "multi_select")
+      && Array.isArray(field.options)
+    ) {
+      // Treatment-area fields also keep this lane's legacy generic chips —
+      // a pre-typed draft's generic list migrates into them — but never
+      // another lane's areas or free text; the server enforces the same rule.
+      const parts = String(raw || "").split(",").map((s) => s.trim()).filter(Boolean);
+      // Treatment-area fields keep every restored value (legacy chips stay
+      // visible and removable); other chip fields prune to current options.
+      const kept = LEGACY_AREA_FIELD_KEYS.includes(field.key)
+        ? parts
+        : parts.filter((s) => field.options.includes(s));
       if (kept.length) values[key] = kept.join(", ");
       else delete values[key];
     } else if (
@@ -10677,7 +10744,23 @@ export function CompletionPanel({
       });
     return () => { live = false; };
   }, [service?.id, sprayEvidenceInForm]);
+  const typedTreatmentArea = typedTreatmentAreaField(typedFindingsSchema);
+  const typedFindingsOwnAreas = Boolean(typedTreatmentArea);
+  // Memoized on its scalar inputs: this array is an effect dependency (the
+  // recap preview), and a fresh array every render would restart that
+  // request indefinitely (local audit P1 on #3701).
+  const typedAreaKey = typedTreatmentArea?.key || null;
+  const typedAreaValue = typedAreaKey ? (findingsValues?.[typedAreaKey] ?? "") : "";
+  const completionAreasServiced = useMemo(
+    () => completionAreasForTypedFindings({
+      typedAreaKey,
+      findingsValues: typedAreaKey ? { [typedAreaKey]: typedAreaValue } : null,
+      genericAreas: areasServiced,
+    }),
+    [typedAreaKey, typedAreaValue, areasServiced],
+  );
   const areasTreatedHidden = treeShrubCloseoutOn
+    || typedFindingsOwnAreas
     || [
       "rodent_trapping", "rodent_exclusion", "rodent_sanitation",
       "rodent_inspection", "rodent_bait_station", "bed_bug",
@@ -10733,13 +10816,26 @@ export function CompletionPanel({
   // (codex P3 r2 on #2950).
   useEffect(() => {
     if (!areasTreatedHidden) return;
-    if (areasServiced.length) setAreasServiced([]);
-    setSelectedProducts((prev) => (
-      prev.some((p) => p && p.applicationArea)
-        ? prev.map((p) => (p && p.applicationArea ? { ...p, applicationArea: "" } : p))
-        : prev
-    ));
-  }, [areasTreatedHidden, areasServiced, selectedProducts]);
+    if (areasServiced.length) {
+      if (typedTreatmentArea?.key) {
+        // Every generic chip migrates — an off-list one renders as a legacy
+        // chip the tech must remove or replace before completing.
+        setFindingsValues((current) => (
+          parseApplicationAreas(current?.[typedTreatmentArea.key]).length
+            ? current
+            : { ...current, [typedTreatmentArea.key]: areasServiced.join(", ") }
+        ));
+      }
+      setAreasServiced([]);
+    }
+    if (!typedTreatmentArea?.key) {
+      setSelectedProducts((prev) => (
+        prev.some((p) => p && p.applicationArea)
+          ? prev.map((p) => (p && p.applicationArea ? { ...p, applicationArea: "" } : p))
+          : prev
+      ));
+    }
+  }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea?.key]);
   // Default pest tank mix (owner 2026-08-29): recurring general-pest and
   // pest re-service completions open with Taurus SC + Talstar P + the
   // non-ionic surfactant already on the Products list, totals prefilled
@@ -10779,10 +10875,12 @@ export function CompletionPanel({
   // Real treated areas only — the generic status chips ("No issues found" /
   // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
   // they aren't areas and don't belong in the treated-areas list.
+  const specialtyCompletion = specialtyCompletionFor(service);
   const areaOptions = [
-    ...(isBedBugVisit
-      ? AREAS_BY_SERVICE.bed_bug
-      : (AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest)),
+    ...(specialtyCompletion?.areas
+      || (isBedBugVisit
+        ? AREAS_BY_SERVICE.bed_bug
+        : (AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest))),
   ];
   const onSiteEntry = (service.statusLog || []).find(
     (e) => e.status === "on_site",
@@ -11240,7 +11338,7 @@ export function CompletionPanel({
     setProtocolActionMeta(null);
     setProtocolActionError("");
     // Typed jobs hide the protocol-actions section entirely — skip the fetch.
-    if (!service.serviceType || isTypedFindings)
+    if (!service.serviceType || isTypedFindings || specialtyCompletion)
       return () => {
         cancelled = true;
       };
@@ -11301,6 +11399,7 @@ export function CompletionPanel({
     service.date,
     isLawn,
     isTypedFindings,
+    specialtyCompletion,
   ]);
 
   useEffect(() => {
@@ -11725,9 +11824,13 @@ export function CompletionPanel({
       // Lines without the picker (T&S + rodent, owner 2026-07-23) never restore
       // areas — a pre-change draft's chips would sit invisible in state (codex P3
       // on #2950); the areasTreatedHidden clearing effect backstops any other path.
-      !areasTreatedHidden && Array.isArray(savedDraft.areasServiced)
+      // Lanes that moved scope into a typed area field DO restore the generic
+      // list unfiltered: the clearing effect copies it into the typed field
+      // when that field is still empty, then empties the generic state. Dropping
+      // it here would lose a pre-migration draft's coverage (codex P1 r6 #3701).
+      (!areasTreatedHidden || typedTreatmentArea?.key) && Array.isArray(savedDraft.areasServiced)
         ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
-            .filter((a) => areaOptions.includes(a))
+            .filter((a) => typedTreatmentArea?.key || areaOptions.includes(a))
         : [],
     );
     setZoneMapImageFallback(
@@ -11889,7 +11992,7 @@ export function CompletionPanel({
         : {};
     if (typedFindingsSchema?.fields) {
       const prePruneFindings = JSON.stringify(restoredFindings);
-      pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields);
+      pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields, typedFindingsSchema.type);
       if (JSON.stringify(restoredFindings) !== prePruneFindings) restorePruned = true;
       setFindingsValues(restoredFindings);
       setTypedActivityScore(
@@ -11959,7 +12062,7 @@ export function CompletionPanel({
             ? { ...saved.values }
             : {};
           const prePruneCompanion = JSON.stringify(preValues);
-          const values = pruneRestoredFindingsValues(preValues, schema.fields || []);
+          const values = pruneRestoredFindingsValues(preValues, schema.fields || [], schema.type);
           if (JSON.stringify(values) !== prePruneCompanion) restorePruned = true;
           const chips = Array.isArray(saved.chips)
             ? saved.chips.filter((chip) =>
@@ -12055,7 +12158,7 @@ export function CompletionPanel({
             // season/weather/expectations prompt context.
             serviceId: service.id || null,
             serviceType: service.serviceType,
-            areasTreated: areasServiced,
+            areasTreated: completionAreasServiced,
             // Tech-chosen solutions feed the AI recap prompt on every line
             // (owner directive 2026-07-21) — context only, the prompt rules
             // keep product names out of the customer copy.
@@ -12109,7 +12212,7 @@ export function CompletionPanel({
     // debounce above absorbs per-keystroke churn.
     recapProductsKey,
     visitOutcome,
-    areasServiced,
+    completionAreasServiced,
     observationsText,
     recommendationsText,
     clientPestRating,
@@ -12146,7 +12249,7 @@ export function CompletionPanel({
           visitOutcome,
           serviceId: service.id || null,
           serviceType: service.serviceType,
-          areasTreated: areasServiced,
+          areasTreated: completionAreasServiced,
           products: selectedProducts.map((p) => ({
             productId: p.productId,
             name: p.displayName || p.name,
@@ -12210,14 +12313,7 @@ export function CompletionPanel({
     // arrays are only ever populated alongside a marker (the chip handlers, or
     // a restored pre-draft whose saved notes carry the markers), so deleting a
     // marker line truly deselects the item.
-    const markerLines = notes
-      .split("\n")
-      .filter((line) => /^\s*\[[^\]]+\]\s/.test(line))
-      .map((line) => line.toLowerCase());
-    return (Array.isArray(labels) ? labels : []).filter((label) => {
-      const text = String(label || "").trim().toLowerCase();
-      return text && markerLines.some((line) => line.includes(text));
-    });
+    return labelsPresentInMarkerNotes(notes, labels);
   }
   // The still-selected structured labels, honoring whichever deselect model is
   // active: before an AI draft, the [Protocol]/[Found]/[Next] chip lines in the
@@ -12524,7 +12620,7 @@ export function CompletionPanel({
           : notes,
       ),
       productsApplied,
-      areasServiced,
+      areasServiced: completionAreasServiced,
       actionsCompleted,
       observations,
       recommendations,
@@ -12543,7 +12639,7 @@ export function CompletionPanel({
     const hasReportInput =
       Boolean(payload.serviceNotes) ||
       productsApplied.length > 0 ||
-      areasServiced.length > 0 ||
+      completionAreasServiced.length > 0 ||
       actionsCompleted.length > 0 ||
       observations.length > 0 ||
       recommendations.length > 0 ||
@@ -12566,7 +12662,7 @@ export function CompletionPanel({
       [label]: { scope, treatmentApplied: treatmentApplied === true },
     }));
   }
-  function applyProtocolAction(action) {
+  function applyProtocolAction(action, { conflictLabels = [] } = {}) {
     if (!action) return;
     // Same freeze + invalidation contract as every other payload mutation:
     // a productless protocol action (or one whose product is already
@@ -12586,13 +12682,22 @@ export function CompletionPanel({
     ) {
       return;
     }
-    invalidateGeneratedReportOnTypedEdit();
+    const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
     appendUniqueLabel(setSelectedProtocolActionLabels, noteText);
     recordActionScope(noteText, action.scope, action.treatmentApplied);
-    addChipNote(
-      action.conditional ? "Protocol optional" : "Protocol",
-      noteText,
-    );
+    if (!detachedAfterInvalidation) {
+      const conflictSet = new Set(conflictLabels);
+      const prefix = action.conditional ? "Protocol optional" : "Protocol";
+      setNotes((current) => current
+        .split("\n")
+        .filter((line) => {
+          const match = line.match(/^\s*\[Protocol(?: optional)?\]\s+(.+)$/i);
+          return !match || !conflictSet.has(match[1].trim());
+        })
+        .concat(`[${prefix}] ${noteText}`)
+        .join("\n")
+        .trim());
+    }
     if (
       action.product?.id &&
       !selectedProducts.find((p) => p.productId === action.product.id)
@@ -13072,6 +13177,41 @@ export function CompletionPanel({
     // #3187 r18: the guard silently swallowed the resume POST and left the
     // button disabled forever).
     if (submitting && !resumingPoll) return;
+    const specialtyProductConflict = exclusiveProtocolProductConflict(
+      activeSelectedLabels(selectedProtocolActionLabels),
+      specialtyProtocolActions,
+      selectedProducts.length,
+    );
+    if (specialtyProductConflict) {
+      alert(specialtyProductConflict);
+      return;
+    }
+    const specialtyActionConflict = exclusiveProtocolSelectionConflict(
+      activeSelectedLabels(selectedProtocolActionLabels),
+      specialtyProtocolActions,
+    );
+    if (specialtyActionConflict) {
+      alert(specialtyActionConflict);
+      return;
+    }
+    const specialtyFindingActionClash = specialtyFindingActionConflict(
+      specialtyCompletion,
+      activeSelectedLabels(selectedObservationLabels),
+      activeSelectedLabels(selectedProtocolActionLabels),
+    );
+    if (specialtyFindingActionClash) {
+      alert(specialtyFindingActionClash);
+      return;
+    }
+    const completedWorkWithoutAction = specialtyCompletedWorkWithoutAction(
+      specialtyCompletion,
+      activeSelectedLabels(selectedObservationLabels),
+      activeSelectedLabels(selectedProtocolActionLabels),
+    );
+    if (completedWorkWithoutAction) {
+      alert(completedWorkWithoutAction);
+      return;
+    }
     // Don't complete while an AI draft is in flight — the response is about to
     // replace the notes, and submitting now would either lose the generated copy
     // or rebuild the structured fields from soon-to-be-overwritten notes.
@@ -13243,6 +13383,7 @@ export function CompletionPanel({
       const fieldConflicts = typedFieldValueConflicts(
         typedFindingsSchema.type,
         findingsValues,
+        typedFindingsSchema.fields,
       );
       if (fieldConflicts.length) {
         completionTelemetryRef.current.requiredFieldErrorCount += 1;
@@ -13353,6 +13494,7 @@ export function CompletionPanel({
         const companionFieldConflicts = typedFieldValueConflicts(
           schema.type,
           entry.values,
+          schema.fields,
         );
         if (companionFieldConflicts.length) {
           completionTelemetryRef.current.requiredFieldErrorCount += 1;
@@ -13451,22 +13593,33 @@ export function CompletionPanel({
       // labels the selector no longer offers — they must not persist as
       // completed protocol actions. Only applied once the (filtered) action
       // set has loaded; pest keeps its fallback-chip labels untouched.
+      // Specialty preset lanes (any service) accept only the preset's own
+      // actions — a restored label from a previously served list is stale
+      // and must not reach the customer report (codex P2 r7 #3701).
       const reportProtocolActions = activeSelectedLabels(
         selectedProtocolActionLabels,
       ).filter(
         (label) =>
-          !isLawn ||
-          (protocolActionsLoaded &&
-            protocolActions.some(
-              (action) =>
-                (action.label || action.note || action.raw || "") === label,
-            )),
+          specialtyProtocolActions.length > 0
+            ? specialtyProtocolActions.some((action) => action.label === label)
+            : !isLawn ||
+              (protocolActionsLoaded &&
+                protocolActions.some(
+                  (action) =>
+                    (action.label || action.note || action.raw || "") === label,
+                )),
       );
       const reportProtocolActionScopes = reportProtocolActions
         .map((label) => {
           const meta = actionScopeByLabel[label];
           if (!meta) return null;
-          return { label, scope: meta.scope, treatmentApplied: meta.treatmentApplied === true };
+          return {
+            label,
+            scope: specialtyCompletion
+              ? specialtyActionScope({ areas: completionAreasServiced, defaultScope: meta.scope })
+              : meta.scope,
+            treatmentApplied: meta.treatmentApplied === true,
+          };
         })
         .filter(Boolean);
       const reportObservations = [
@@ -13507,7 +13660,7 @@ export function CompletionPanel({
             applicationMethod: productApplicationMethod(p, serviceTypeForArea),
           applicationArea:
             p.applicationArea ||
-            (areasServiced.length === 1 ? areasServiced[0] : null),
+            (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
           areaValue: p.areaValue,
           areaUnit: p.areaUnit,
           targets: Array.isArray(p.targets) ? p.targets : [],
@@ -13571,7 +13724,7 @@ export function CompletionPanel({
         // Single source of truth for the treated areas. The server reads
         // areasServiced (falling back to a legacy areasTreated only if present),
         // so we no longer post the same list under both keys.
-        areasServiced,
+        areasServiced: completionAreasServiced,
         // Bait station pins + this visit's statuses (station-map-v1).
         // Statuses post for EVERY active station — 'ok' is the zero-tap
         // default, so an untouched map still records a full check. Shapes
@@ -13625,6 +13778,9 @@ export function CompletionPanel({
         protocolActionsCompleted: reportProtocolActions,
         protocolActionScopesCompleted: reportProtocolActionScopes,
         observations: reportObservations,
+        structuredObservations: specialtyCompletion
+          ? activeSelectedLabels(selectedObservationLabels)
+          : [],
         recommendations: reportRecommendations,
         lawnAssessmentId,
         // Tree & Shrub AI photo assessment. When the background review ran,
@@ -13871,13 +14027,22 @@ export function CompletionPanel({
   // Lawn closeouts are product-backed-only: no generic pest fallback chips
   // (a scout-only or unmatched-catalog visit must not surface "Cobweb sweep"),
   // and an empty list hides the field instead of exposing the fallback.
+  const activeSpecialtyObservationLabels = activeSelectedLabels(selectedObservationLabels);
+  const specialtyProtocolActions = (specialtyCompletion?.protocols || []).map((action, index) => ({
+    ...action,
+    id: `specialty-${index}`,
+    note: action.label,
+  }));
+  const effectiveProtocolActions = specialtyProtocolActions.length
+    ? specialtyProtocolActions
+    : protocolActions;
   const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
   const hideProtocolActionsField =
     isLawn &&
     !protocolActionsLoading &&
     !protocolActionError &&
-    protocolActions.length === 0;
-  const protocolActionSelectOptions = protocolActions.map((action, index) => ({
+    effectiveProtocolActions.length === 0;
+  const protocolActionSelectOptions = effectiveProtocolActions.map((action, index) => ({
     value: action.id ? String(action.id) : `action-${index}`,
     label: action.label || action.note || action.raw || "Protocol action",
     selected: isProtocolActionSelected(action),
@@ -13915,7 +14080,7 @@ export function CompletionPanel({
     // would rebuild the structured fields from the overwritten text. (The select
     // is value="" so it stays on the placeholder; nothing to reset.)
     if (generating) return;
-    if (!protocolActions.length) {
+    if (!effectiveProtocolActions.length) {
       // Legacy label path never reaches applyProtocolAction — same
       // invalidation contract applies (codex r39).
       invalidateGeneratedReportOnTypedEdit();
@@ -13928,7 +14093,91 @@ export function CompletionPanel({
     const option = protocolActionSelectOptions.find(
       (opt) => opt.value === value,
     );
-    if (option?.action) applyProtocolAction(option.action);
+    if (option?.action) {
+      let conflicts = [];
+      // Specialty lanes allow several performed steps (for example treatment
+      // followed by nest removal), but an inspection/deferred choice cannot
+      // coexist with performed work. Remove only the conflicting specialty
+      // tags; generic pest and every other completion lane keep their existing
+      // multi-action behavior.
+      if (specialtyCompletion) {
+        const findingClash = specialtyFindingActionConflict(
+          specialtyCompletion,
+          activeSelectedLabels(selectedObservationLabels),
+          [option.action.label],
+        );
+        if (findingClash) {
+          alert(findingClash);
+          return;
+        }
+        const reconciled = reconcileExclusiveProtocolSelections(
+          selectedProtocolActionLabels,
+          specialtyProtocolActions,
+          option.action.label,
+        );
+        const reconciledSet = new Set(reconciled);
+        conflicts = selectedProtocolActionLabels.filter(
+          (label) => !reconciledSet.has(label),
+        );
+        if (conflicts.length) {
+          const conflictSet = new Set(conflicts);
+          setSelectedProtocolActionLabels((current) =>
+            current.filter((label) => !conflictSet.has(label)),
+          );
+          setActionScopeByLabel((current) => {
+            const next = { ...current };
+            conflicts.forEach((label) => delete next[label]);
+            return next;
+          });
+        }
+      }
+      applyProtocolAction(option.action, { conflictLabels: conflicts || [] });
+    }
+  }
+  function handleSpecialtyFindingChange(group, value) {
+    if (generating || photoAnalyzing) return;
+    const groupValues = new Set((group?.options || []).map((item) => item.value));
+    const reconciled = reconcileDependentFindingSelections(
+      specialtyCompletion,
+      selectedObservationLabels,
+      group,
+      value,
+    );
+    // A no-work finding beside already-selected performed actions (or a
+    // completed-work finding beside an inspection/deferred action) is
+    // refused at selection, before the AI draft is invalidated.
+    const actionClash = specialtyFindingActionConflict(
+      specialtyCompletion,
+      reconciled,
+      activeSelectedLabels(selectedProtocolActionLabels),
+    );
+    if (actionClash) {
+      alert(actionClash);
+      return;
+    }
+    const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
+    // Only dropdown-owned [Found] markers are rewritten: the changed group's
+    // marker goes, a reconciled-away marker from another group goes, and a
+    // free-text technician [Found] note ("Gate inaccessible") stays (codex P2
+    // r15 #3701).
+    const presetValues = new Set(
+      (specialtyCompletion?.findingGroups || []).flatMap((item) => item.options.map((option) => option.value)),
+    );
+    if (!detachedAfterInvalidation) {
+      setNotes((current) => current
+        .split("\n")
+        .filter((line) => {
+          const match = line.match(/^\s*\[Found\]\s+(.+)$/i);
+          if (!match) return true;
+          const marker = match[1].trim();
+          if (groupValues.has(marker)) return false;
+          return !presetValues.has(marker) || reconciled.includes(marker);
+        })
+        .concat(value ? [`[Found] ${value}`] : [])
+        .join("\n")
+        .trim());
+    }
+    setSelectedObservationLabels(reconciled);
   }
   function markTypedFirstFieldTouch() {
     if (!completionTelemetryRef.current.firstFieldTouchedAt) {
@@ -13985,7 +14234,7 @@ export function CompletionPanel({
   // the tech already edited is their reviewed copy and stays.
   function invalidateGeneratedReportOnTypedEdit() {
     const installed = generatedReportTextRef.current;
-    if (!installed) return;
+    if (!installed) return chipLinesDetached;
     generatedReportTextRef.current = null;
     if (String(notes || "").trim() === installed) {
       // The tech's handwritten pre-generation notes come BACK when the
@@ -13996,12 +14245,15 @@ export function CompletionPanel({
       // The restored notes' [Protocol]/[Found]/[Next] marker lines own
       // selection again — the detachment state travels with the notes it
       // described (codex r77).
-      setChipLinesDetached(preGenerationChipDetachedRef.current === true);
+      const restoredDetached = preGenerationChipDetachedRef.current === true;
+      setChipLinesDetached(restoredDetached);
       preGenerationNotesRef.current = null;
       preGenerationChipDetachedRef.current = false;
       setAiReportUsed(false);
       setGeneratedReportCleared(true);
+      return restoredDetached;
     }
+    return chipLinesDetached;
   }
   function handleTypedFindingChange(key, value) {
     // While a Generate request is in flight the snapshot must stay what the
@@ -14987,15 +15239,35 @@ export function CompletionPanel({
                 ))}
               </div>
             )}
+            {!isTypedFindings && specialtyCompletion?.findingGroups?.map((group) => {
+              // Marker-backed: before an AI draft, deleting the [Found] line
+              // deselects, so the dropdown must read the same active set the
+              // submit path uses (codex P2 r7 #3701).
+              const selected = group.options.find((item) =>
+                activeSpecialtyObservationLabels.includes(item.value),
+              )?.value || "";
+              return (
+                <Field key={group.key} label={group.label}>
+                  <ProjectFindingFieldInput
+                    field={{ ...group, type: "select" }}
+                    id={`cp-${group.key}-mobile`}
+                    name={group.key}
+                    value={selected}
+                    onChange={(value) => handleSpecialtyFindingChange(group, value)}
+                    inputStyle={{ width: "100%", boxSizing: "border-box" }}
+                  />
+                </Field>
+              );
+            })}
             {!isTypedFindings && !hideProtocolActionsField && (
               <Field label="Protocol actions">
-                {protocolActionsLoading ? (
+                {!specialtyCompletion && protocolActionsLoading ? (
                   <div style={{ fontFamily: font, fontSize: 13, color: M.ink4 }}>
                     Loading protocol actions...
                   </div>
                 ) : (
                   <>
-                    {protocolActionError && !protocolActions.length && (
+                    {!specialtyCompletion && protocolActionError && !protocolActions.length && (
                       <div
                         style={{
                           fontFamily: font,
@@ -15014,7 +15286,7 @@ export function CompletionPanel({
                       style={mSelect}
                     >
                       <option value="">Add protocol action...</option>
-                      {protocolActions.length > 0
+                      {effectiveProtocolActions.length > 0
                         ? protocolActionSelectOptions.map((opt) => (
                             <option key={opt.value} value={opt.value}>
                               {opt.selected ? "(applied) " : ""}
@@ -15667,12 +15939,12 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)
                           : null}{" "}
                       </select>{" "}
-                      {areasServiced.length > 0 && (() => {
+                      {completionAreasServiced.length > 0 && (() => {
                         const selectedAreas = parseApplicationAreas(
                           sp.applicationArea,
                         );
                         const areaChoices = productAreaChoices(
-                          areasServiced,
+                          completionAreasServiced,
                           sp.applicationArea,
                         );
                         return (
@@ -17263,12 +17535,35 @@ export function CompletionPanel({
           )}
           {/* Compact completion quick-picks */}
           <div style={{ marginTop: 10, marginBottom: 16 }}>
+            {!isTypedFindings && specialtyCompletion?.findingGroups?.map((group) => {
+              // Marker-backed: before an AI draft, deleting the [Found] line
+              // deselects, so the dropdown must read the same active set the
+              // submit path uses (codex P2 r7 #3701).
+              const selected = group.options.find((item) =>
+                activeSpecialtyObservationLabels.includes(item.value),
+              )?.value || "";
+              return (
+                <div key={group.key} style={{ marginBottom: 12 }}>
+                  <label htmlFor={`cp-${group.key}`} style={{ ...labelStyle, color: D.blue }}>
+                    {group.label}
+                  </label>
+                  <ProjectFindingFieldInput
+                    field={{ ...group, type: "select" }}
+                    id={`cp-${group.key}`}
+                    name={group.key}
+                    value={selected}
+                    onChange={(value) => handleSpecialtyFindingChange(group, value)}
+                    inputStyle={inputStyle}
+                  />
+                </div>
+              );
+            })}
             {!isTypedFindings && !hideProtocolActionsField && (
             <div style={{ marginBottom: 12 }}>
               <label style={{ ...labelStyle, color: D.blue }}>
                 Protocol Actions
               </label>
-              {protocolActionMeta?.programName && (
+              {!specialtyCompletion && protocolActionMeta?.programName && (
                 <div style={{ fontSize: 11, color: D.muted, marginBottom: 6 }}>
                   {protocolActionMeta.programName}
                   {protocolActionMeta.visit?.month
@@ -17276,13 +17571,13 @@ export function CompletionPanel({
                     : ""}
                 </div>
               )}
-              {protocolActionsLoading ? (
+              {!specialtyCompletion && protocolActionsLoading ? (
                 <span style={{ fontSize: 12, color: D.muted }}>
                   Loading protocol actions...
                 </span>
               ) : (
                 <>
-                  {protocolActionError && !protocolActions.length && (
+                  {!specialtyCompletion && protocolActionError && !protocolActions.length && (
                     <div
                       style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}
                     >
@@ -17296,7 +17591,7 @@ export function CompletionPanel({
                     style={inputStyle}
                   >
                     <option value="">Add protocol action...</option>
-                    {protocolActions.length > 0
+                    {effectiveProtocolActions.length > 0
                       ? protocolActionSelectOptions.map((opt) => (
                           <option key={opt.value} value={opt.value}>
                             {opt.selected ? "(applied) " : ""}
@@ -17890,12 +18185,12 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)
                           : null}{" "}
                   </select>{" "}
-                  {areasServiced.length > 0 && (() => {
+                  {completionAreasServiced.length > 0 && (() => {
                     const selectedAreas = parseApplicationAreas(
                       sp.applicationArea,
                     );
                     const areaChoices = productAreaChoices(
-                      areasServiced,
+                      completionAreasServiced,
                       sp.applicationArea,
                     );
                     return (

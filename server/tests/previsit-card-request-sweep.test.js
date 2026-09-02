@@ -222,7 +222,7 @@ describe('previsitCardInviteEligible', () => {
     const bulkLoopIdx = tools.indexOf('for (const cid of [...customerIds].map(String).sort()) {');
     expect(bulkLoopIdx).toBeGreaterThan(-1);
     expect(tools.indexOf('await lockCustomerComms(trx, cid);')).toBeGreaterThan(bulkLoopIdx);
-    const bulkForUpdateIdx = tools.indexOf(".whereIn('id', customerIds)\n          .forUpdate()");
+    const bulkForUpdateIdx = tools.indexOf(".whereIn('id', customerIds)\n        .forUpdate()");
     expect(bulkForUpdateIdx).toBeGreaterThan(bulkLoopIdx);
   });
 });

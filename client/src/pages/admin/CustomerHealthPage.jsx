@@ -1761,7 +1761,7 @@ export default function CustomerHealthPage() {
               color: COLORS.heading,
             }}
           >
-            Customer Health & Churn Prediction
+            Customer health & churn prediction
           </h1>{" "}
           <p
             style={{ margin: "4px 0 0", fontSize: 13, color: COLORS.textMuted }}

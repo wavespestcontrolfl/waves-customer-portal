@@ -1,0 +1,291 @@
+/**
+ * Booking stamping contract — the single field-stamping authority for new
+ * scheduled_services rows (Tier 2 booking-consolidation track).
+ *
+ * The repo has ~26 hand-built insert sites across 14 files, and the field
+ * sets they stamp have drifted: catalog-identity snapshots
+ * (service_key_snapshot / service_category_snapshot) are written by some
+ * writers and not others, so a scoped recurring discount meeting a
+ * snapshot-less row makes loadStoredDiscountScope throw, and source
+ * attribution is inconsistent to absent. This module is the contract those
+ * writers converge on, one call site per PR; server/tests/
+ * booking-insert-contract.test.js freezes the legacy site inventory so it
+ * can only shrink.
+ *
+ * Division of labor (deliberate — see the PR that introduced this):
+ *  - The contract OWNS: payload validation (customer/date), source
+ *    attribution, and — gated — completing the catalog-identity snapshot
+ *    from the services table when the caller didn't stamp it. Status
+ *    acceptance deliberately stays with the DB CHECK constraint
+ *    (scheduled_services_status_check, AGENTS.md) — a service-level list
+ *    would be a second gate every status migration must remember to
+ *    extend (GH Codex r5 P1).
+ *  - The CALLER keeps: pricing computation, occupancy/comms lock ordering
+ *    (scheduling/occupancy.js ORDERING CONTRACT), the transaction,
+ *    registerAppointment (customer comms NEVER move in here), inspection
+ *    credit, and child/booster spawning.
+ *  - Deferred, deliberately NOT stamped here: primary_line_price
+ *    defaulting and payer_id/po_number freezing at create time. Both
+ *    change billing semantics (a numeric primary_line_price is treated as
+ *    authoritative by the invoice builder — codex #3551; a stamped payer
+ *    freezes what completion currently resolves live via
+ *    COALESCE(visit payer, customer payer)) and need an owner ruling
+ *    before any path adopts them.
+ *
+ * GATE_BOOKING_STAMPING_CONTRACT (config/feature-gates.js): OFF = no
+ * behavioral enrichment — validation plus provenance attribution only
+ * (source_action/booking_source, caller values always win), so adopting a
+ * call site changes nothing at rest; ON = enrichment stamps apply.
+ */
+const { isEnabled } = require('../../config/feature-gates');
+
+function contractError(message) {
+  const err = new Error(`[booking-contract] ${message}`);
+  err.code = 'BOOKING_CONTRACT_VIOLATION';
+  return err;
+}
+
+// Resolve {service_id, service_key, category} from the live catalog for
+// the identity snapshot, in DURABILITY order (the same precedence
+// service-catalog-names uses): service_id → the row's own
+// service_key_snapshot (survives a catalog-row delete's ON DELETE SET
+// NULL, unlike the mutable display name) → a UNIQUE active name match on
+// service_type. Ambiguous or missing → null (the caller's row simply
+// stays snapshot-less, exactly as today — enrichment never guesses).
+// A QUERY ERROR propagates: inside a PostgreSQL transaction the failed
+// statement has already aborted the trx, so swallowing it would only trade
+// this error for a "current transaction is aborted" on the insert that
+// follows (pre-push Codex P1).
+async function resolveCatalogIdentity(conn, insertData) {
+  // Inside a transaction, hold a share lock on the uniquely resolved row
+  // through the caller's insert — the same stability service-catalog-names
+  // uses — so a concurrent deactivate/archive can't retire the service
+  // between this read and the insert that references it (GH Codex r4 P2).
+  const stable = (q) => (conn.isTransaction && typeof q.forShare === 'function' ? q.forShare() : q);
+  // Every lookup links only LIVE catalog rows: is_active AND not archived
+  // (archiveService sets both flags together), so a retired row can
+  // neither be newly stamped nor make an otherwise unique name ambiguous
+  // (pre-push Codex r6 P1) — including a caller-SUPPLIED service_id (the
+  // id is preserved as the caller's stamp; only the derived snapshots are
+  // withheld — pre-push Codex r9 P1). The archive flag is nullable and a
+  // NULL on an active row reads as live everywhere (20260730160000), so
+  // the predicate is IS NOT TRUE, not = false (GH Codex r6 P2).
+  const live = (q) => q.where({ is_active: true }).whereRaw('is_archived IS NOT TRUE');
+  if (insertData.service_id) {
+    const row = await stable(live(conn('services')
+      .where({ id: insertData.service_id })))
+      .first('id', 'service_key', 'category');
+    return row || null;
+  }
+  const snapshotKey = String(insertData.service_key_snapshot || '').trim();
+  if (snapshotKey) {
+    const byKey = await stable(live(conn('services')
+      .where({ service_key: snapshotKey })))
+      .select('id', 'service_key', 'category');
+    return byKey.length === 1 ? byKey[0] : null;
+  }
+  const name = String(insertData.service_type || '').trim();
+  if (!name) return null;
+  // Name matching goes through the SAME alias bridge completion uses
+  // (serviceNameCandidates: " Service" suffix, visit-program tails,
+  // cadence qualifiers, rename aliases) — an exact-name-only match would
+  // leave legacy/pre-rename labels snapshot-less, exactly the rows the
+  // scoped-discount replay throws on (GH Codex r2 P1). Unique-row
+  // semantics across ALL candidates: more than one DISTINCT catalog row
+  // matching means ambiguity, and enrichment never guesses.
+  // A bare pre-convention label is ambiguous on its own ("Pest Control"
+  // is the one-time job, the monthly plan, or the quarterly plan); the
+  // row's recurring_pattern is the cadence evidence, and the legacy
+  // (label, cadence) map — the same one series generation resolves
+  // through — names exactly one current catalog row. That mapping is
+  // decisive and runs BEFORE the generic suffix expansion, which would
+  // otherwise land a recurring row on the one-time service (GH Codex r15
+  // P1) — and the cadence-derived name then goes through the SAME
+  // candidate expansion as any label, so a catalog restored by the
+  // cadence-rename migration's down() (its rollback aliases) still
+  // resolves (GH Codex r16 P1).
+  const { serviceNameCandidates } = require('../service-completion-profiles');
+  const { legacyCatalogName } = require('../../config/service-name-aliases');
+  const cadenceName = legacyCatalogName(name, insertData.recurring_pattern);
+  const candidates = serviceNameCandidates(cadenceName || name).map((c) => c.toLowerCase());
+  if (!candidates.length) return null;
+  const hits = await stable(live(conn('services'))
+    .whereRaw(`LOWER(name) IN (${candidates.map(() => '?').join(', ')})`, candidates))
+    .select('id', 'service_key', 'category');
+  const distinct = [...new Map(hits.map((h) => [h.id, h])).values()];
+  return distinct.length === 1 ? distinct[0] : null;
+}
+
+/**
+ * Validate and (gate on) complete a scheduled_services insert payload.
+ * Pure with respect to the caller's transaction: reads the catalog, writes
+ * nothing. Returns a NEW object; the input is not mutated.
+ *
+ * @param {object} insertData  the payload the caller built
+ * @param {object} opts
+ *   - trx: the caller's knex connection/transaction (catalog reads)
+ *   - cols: scheduled_services columnInfo() map (column-existence guard,
+ *     same convention as the admin-schedule writers)
+ *   - source: { sourceAction, bookingSource? } — required attribution;
+ *     stamped onto source_action / booking_source when the caller's
+ *     payload doesn't already carry them
+ *   - allowNullCustomer: true only for the estimate slot-hold shape
+ *     (reserveSlot inserts customer_id NULL by design)
+ */
+async function completeScheduledServiceInsert(insertData, { trx, cols, source, allowNullCustomer = false } = {}) {
+  if (!insertData || typeof insertData !== 'object') throw contractError('insertData is required');
+  if (!trx) throw contractError('trx (knex connection) is required');
+  if (!cols || typeof cols !== 'object') throw contractError('cols (scheduled_services columnInfo) is required');
+
+  // ── Validation (always on) ─────────────────────────────────────────
+  if (!insertData.customer_id) {
+    // The escape hatch admits ONLY the estimate slot-hold shape: an
+    // EXPLICIT customer_id: null plus the reservation expiry marker the
+    // hold lifecycle keys on. A merely omitted customer or a payload
+    // without hold markers would otherwise insert a permanent
+    // customer-less appointment through the nullable column
+    // (GH Codex r2 P2).
+    // The hold must also carry its estimate: the refresh/supersession
+    // path finds live holds by source_estimate_id, so a hold without one
+    // would be unmanaged capacity until the expiry sweep (GH Codex r17 P2).
+    const explicitHold = allowNullCustomer
+      && Object.prototype.hasOwnProperty.call(insertData, 'customer_id')
+      && insertData.customer_id === null
+      && insertData.reservation_expires_at
+      && insertData.source_estimate_id != null && String(insertData.source_estimate_id).trim() !== '';
+    if (!explicitHold) {
+      throw contractError('customer_id is required (allowNullCustomer admits only the explicit slot-hold shape: customer_id null + reservation_expires_at + source_estimate_id)');
+    }
+  }
+  if (!insertData.scheduled_date) throw contractError('scheduled_date is required');
+  // Attribution is REQUIRED, so the column it lands in must be known: a
+  // cols map missing source_action (the repo's `columnInfo().catch(() =>
+  // ({}))` shape) would otherwise satisfy the requirement and then
+  // silently insert without provenance (GH Codex r11 P2).
+  if (!cols.source_action) throw contractError('cols has no source_action column — pass the real scheduled_services columnInfo()');
+  // Attribution values are judged and stamped TRIMMED: null, '' and a
+  // whitespace-only string all count as absent, so '   ' can neither
+  // satisfy the requirement nor be persisted as provenance (pre-push Codex
+  // r6 P1, same rule as the idempotency key).
+  // Only STRINGS are attribution: an object/boolean/number would coerce to
+  // '[object Object]' / 'true' and satisfy the requirement while losing the
+  // exact marker (voice_agent, the call pipeline) that schedule.js's
+  // membership checks key on (GH Codex r8 P2).
+  const blank = (v) => v == null || (typeof v === 'string' && v.trim() === '');
+  const trimmed = (v) => {
+    if (blank(v)) return null;
+    if (typeof v !== 'string') throw contractError(`source attribution must be a string, got ${typeof v}`);
+    return v.trim();
+  };
+  // The caller's stamped value is inspected FIRST: when it is a valid
+  // string the option is only a fallback and is not validated at all, so
+  // a malformed optional fallback can't reject a correctly stamped
+  // payload (GH Codex r17 P2).
+  const sourceAction = trimmed(insertData.source_action) || trimmed(source?.sourceAction);
+  if (!sourceAction) {
+    throw contractError('source attribution is required: pass source.sourceAction (e.g. admin_manual, voice_agent, admin_ib)');
+  }
+
+  const data = { ...insertData };
+
+  // Attribution stamps are part of the ungated contract — they add
+  // provenance, never change scheduling/billing behavior. A caller's
+  // NON-BLANK value always wins; a blank one counts as absent (a
+  // fixed-shape payload carrying source_action: null must not persist
+  // blank provenance past the requirement check — GH Codex P2).
+  data.source_action = trimmed(data.source_action) || sourceAction;
+  if (cols.booking_source) {
+    const bookingSource = trimmed(data.booking_source) || trimmed(source?.bookingSource);
+    // Optional, so absent stays absent — but a blank payload value is
+    // normalized to null rather than persisted as '' provenance
+    // (GH Codex r6 P2).
+    if (bookingSource) data.booking_source = bookingSource;
+    else if ('booking_source' in data) data.booking_source = null;
+  }
+
+  if (!isEnabled('bookingStampingContract')) return data;
+
+  // ── Gated enrichment ───────────────────────────────────────────────
+  // Catalog-identity snapshot: rows missing service_key_snapshot /
+  // service_category_snapshot are the ones loadStoredDiscountScope
+  // (admin-schedule.js) throws on when a scoped recurring discount is
+  // replayed. Only fills MISSING fields — undefined OR null: the
+  // fixed-shape writers stamp null when pricing lacks identity
+  // (admin-schedule's "no identity" branch), and a null snapshot is
+  // exactly the snapshot-less row this exists to close (GH Codex r14 P1).
+  // A caller's NON-BLANK stamp (slot-reservation's deliberate restamp at
+  // commit, the seeder's child identity) is never overridden.
+  const wantsKey = cols.service_key_snapshot && blank(data.service_key_snapshot);
+  const wantsCategory = cols.service_category_snapshot && blank(data.service_category_snapshot);
+  const wantsServiceId = cols.service_id && data.service_id == null;
+  if (wantsKey || wantsCategory || wantsServiceId) {
+    const identity = await resolveCatalogIdentity(trx, data);
+    // Conflicting evidence → no fill at all: a caller-stamped key or
+    // category that disagrees with the resolved row would otherwise be
+    // combined with that row's other field into a mixed identity that
+    // mis-scopes discounts and completion (pre-push Codex r9 P1).
+    // Enrichment never guesses; the caller's stamps stand as given.
+    const agrees = (stamped, resolved) => blank(stamped) || String(stamped).trim() === String(resolved ?? '');
+    if (identity
+      && agrees(data.service_key_snapshot, identity.service_key)
+      && agrees(data.service_category_snapshot, identity.category)) {
+      if (wantsServiceId) data.service_id = identity.id;
+      if (wantsKey) data.service_key_snapshot = identity.service_key || null;
+      if (wantsCategory) data.service_category_snapshot = identity.category || null;
+    }
+  }
+
+  return data;
+}
+
+/**
+ * Thin insert wrapper for callers whose transaction shape allows it: runs
+ * the contract, then performs the insert (opt-in idempotency via
+ * onConflict('idempotency_key').ignore()). Callers with bespoke insert
+ * shapes (bulk rows, savepoints) adopt completeScheduledServiceInsert
+ * directly instead — the scanner test recognizes an insert whose payload
+ * came out of that helper as compliant, so both routes leave the frozen
+ * inventory.
+ */
+async function createScheduledService({ trx, insertData, cols, source, idempotencyKey, allowNullCustomer } = {}) {
+  const data = await completeScheduledServiceInsert(insertData, { trx, cols, source, allowNullCustomer });
+  // Distinguish "idempotency not requested" (option omitted) from a
+  // SUPPLIED blank key: a caller that opted in but computed '' must fail
+  // closed, not fall through to an unguarded insert a retry would
+  // double-book (GH Codex P1).
+  if (idempotencyKey !== undefined) {
+    // Trim before judging: a whitespace-only key is a failed computation,
+    // and stamping it would make the NEXT unrelated failure read as an
+    // idempotent replay and silently drop a booking (GH Codex r4 P2).
+    idempotencyKey = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : idempotencyKey;
+    if (!idempotencyKey || typeof idempotencyKey !== 'string') {
+      throw contractError('idempotencyKey was supplied but is blank — refuse rather than insert unguarded');
+    }
+    if (!cols.idempotency_key) throw contractError('idempotencyKey passed but scheduled_services has no idempotency_key column');
+    // A payload carrying a DIFFERENT non-blank key would make the conflict
+    // guard dedupe on the wrong value and let retries under the intended
+    // key double-book (pre-push Codex P1) — refuse the ambiguity. A
+    // null/blank/whitespace payload value counts as absent (the column is
+    // nullable) and the supplied option stamps over it (GH Codex r2 P2);
+    // the payload key is judged TRIMMED, like the option, so a padded
+    // equivalent isn't a conflict (pre-push Codex r6 P1).
+    const payloadKey = typeof data.idempotency_key === 'string' ? data.idempotency_key.trim() : data.idempotency_key;
+    if (payloadKey != null && payloadKey !== '' && payloadKey !== idempotencyKey) {
+      throw contractError(`idempotencyKey '${idempotencyKey}' conflicts with insertData.idempotency_key '${payloadKey}'`);
+    }
+    data.idempotency_key = idempotencyKey;
+    const [row] = await trx('scheduled_services')
+      .insert(data)
+      .onConflict('idempotency_key')
+      .ignore()
+      .returning('*');
+    return row || null; // null = idempotent replay, caller decides how to reload
+  }
+  const [row] = await trx('scheduled_services').insert(data).returning('*');
+  return row;
+}
+
+module.exports = {
+  completeScheduledServiceInsert,
+  createScheduledService,
+};

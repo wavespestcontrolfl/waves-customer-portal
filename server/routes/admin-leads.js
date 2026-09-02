@@ -1596,7 +1596,19 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       };
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
       if (cols.urgency) insertData.urgency = 'routine';
+      // Property identity for the visit-group stamp below (GH codex r3):
+      // without it maybeGroupRow always refuses, and non-estimate bookings
+      // never regroup. Only the customer's SOLE active property is
+      // unambiguous; multi-property customers stay office-placed.
+      insertData.property_id = await require('../services/customer-properties')
+        .soleActivePropertyId(customerId, trx);
       const [appt] = await trx('scheduled_services').insert(insertData).returning('*');
+
+      // Visit groups (visit-group-scope.md §2): stamp at scheduling —
+      // gate-checked + best-effort + self-refusing inside maybeGroupRow
+      // (no property_id on this insert ⇒ inert until linkage; explicit so
+      // every booking path answers the stamping audit).
+      await require('../services/visit-groups').maybeGroupRow(appt.id, { database: trx, createdBy: 'dispatch' });
 
       // Inspection credit: mark the qualifying booking IN-TRANSACTION so
       // the evidence commits with the booking (Codex #3178 P1). Dark behind

@@ -263,7 +263,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     <div style={{ minHeight: "100%", background: D.bg, color: D.text }}>
       {!embedded && (
         <AdminCommandHeader
-          title="Agent Review"
+          title="Agent review"
           subtitle="Shadow decisions from customer communication agents."
           icon={Bot}
         />
@@ -471,7 +471,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                   <div style={{ background: D.bg, borderRadius: 8, padding: 12, lineHeight: 1.45 }}>{selected.inboundMessage || "-"}</div>
                 </section>
 
-                <Panel icon={MessageSquare} title="Conversation Context">
+                <Panel icon={MessageSquare} title="Conversation context">
                   {detailLoading ? (
                     <div style={{ color: D.muted }}>Loading thread...</div>
                   ) : detail?.context?.smsThread?.length ? (
@@ -518,7 +518,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                     )}
                   </Panel>
 
-                  <Panel icon={PhoneCall} title="Recent Calls">
+                  <Panel icon={PhoneCall} title="Recent calls">
                     {detailLoading ? (
                       <div style={{ color: D.muted }}>Loading calls...</div>
                     ) : detail?.context?.calls?.length ? (
@@ -540,7 +540,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                   </Panel>
                 </div>
 
-                <Panel icon={ClipboardList} title="Recent Service Context">
+                <Panel icon={ClipboardList} title="Recent service context">
                   {detailLoading ? (
                     <div style={{ color: D.muted }}>Loading services...</div>
                   ) : detail?.context?.services?.length ? (
@@ -566,7 +566,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                   <div style={{ background: D.bg, borderRadius: 8, padding: 12, lineHeight: 1.45 }}>{selected.suggestedMessage || "-"}</div>
                 </section>
 
-                <Panel icon={MessageSquare} title="Reply Training">
+                <Panel icon={MessageSquare} title="Reply training">
                   <div style={{ display: "grid", gap: 10 }}>
                     {detail?.replyTraining && (
                       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>

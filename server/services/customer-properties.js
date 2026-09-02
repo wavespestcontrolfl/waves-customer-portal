@@ -507,7 +507,29 @@ async function syncPrimaryCoordsFromCustomer(customerId, conn = db) {
     .update({ latitude: c.latitude, longitude: c.longitude, updated_at: new Date() });
 }
 
+/**
+ * The UNAMBIGUOUS property for a booking that carries no explicit property
+ * identity: the customer's sole ACTIVE property (GH codex #3699 r3 — the
+ * visit-group stamp needs a property anchor, and the estimate-linkage
+ * regroup only covers estimate-backed rows). Two or more active
+ * properties → null: the office places those, same exactly-one rule the
+ * 20260829000050 linkage backfill applied. Best-effort — null on error.
+ */
+async function soleActivePropertyId(customerId, conn = db) {
+  if (!customerId) return null;
+  try {
+    const rows = await conn('customer_properties')
+      .where({ customer_id: customerId, active: true })
+      .limit(2)
+      .select('id');
+    return rows.length === 1 ? rows[0].id : null;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
+  soleActivePropertyId,
   OCCUPANCY_TYPES,
   normStreet,
   addressKey,

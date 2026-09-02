@@ -538,7 +538,7 @@ export default function PestPressureSettingsPage() {
     <div style={{ background: D.bg, minHeight: "100vh", padding: 24 }}>
       <div style={{ maxWidth: 1100, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
         <AdminCommandHeader
-          title="Pest Pressure"
+          title="Pest pressure"
           icon={ShieldAlert}
           sticky={false}
           className="mb-0"

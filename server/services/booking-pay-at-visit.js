@@ -31,7 +31,17 @@ function perAppOf(s) {
 function hasSupplementalRecurring(estimate) {
   const data = estimate.estimate_data || {};
   const containers = [data.recurring, data.result?.recurring, data.results, data.result?.results].filter(Boolean);
-  return containers.some((c) => Number(c.rodentBaitMo) > 0 || Number(c.palmInjectionMo) > 0 || Number(c.rodBaitMo) > 0);
+  // 2026-08-29+: rodent bait is a REAL recurring.services row and the scalar
+  // rides only as legacy display fallback — a rodent_bait row means the row
+  // set already covers the money, so the scalar alone must not fail closed.
+  const serviceRows = [data.recurring?.services, data.result?.recurring?.services]
+    .filter(Array.isArray).flat();
+  const hasRodentRow = serviceRows.some((svc) => {
+    const raw = String(svc?.service || svc?.serviceKey || svc?.service_key || '').toLowerCase();
+    return raw === 'rodent_bait';
+  });
+  return containers.some((c) => Number(c.palmInjectionMo) > 0
+    || (!hasRodentRow && (Number(c.rodentBaitMo) > 0 || Number(c.rodBaitMo) > 0)));
 }
 
 const VISITS_PER_YEAR_BY_PATTERN = {
@@ -314,9 +324,26 @@ const RECURRING_FUNNEL_MAPPABLE_SERVICES = new Set([
 // billing: activating the recurring plan alone would archive the draft
 // with the add-on's dollars neither scheduled nor billed nor left for
 // office conversion.
+// The bait-station setup fee ($99, non-members) is intrinsic to a rodent
+// bait plan, not a one-time add-on: the engine folds it into oneTimeTotal
+// for invoicing/display but reports its share as summary.rodentBaitSetupTotal
+// so this gate can carve it out — a standalone rodent quote keeps its
+// self-book funnel (the plan and its setup fee ride staff conversion of the
+// draft, the same posture as the WaveGuard fee on a solo mosquito self-book).
+// Drafts persisted before the summary field existed fall back to scanning
+// the mirrored line items (codex #3591 r8).
+function rodentBaitSetupShare(summary = {}, data = {}) {
+  const fromSummary = summary.rodentBaitSetupTotal;
+  if (fromSummary != null && Number.isFinite(Number(fromSummary))) return Math.max(0, Number(fromSummary));
+  const lines = data?.engineResult?.lineItems ?? data?.lineItems ?? [];
+  return (Array.isArray(lines) ? lines : [])
+    .filter((l) => l && l.service === 'rodent_bait_setup' && !(Number(l.annual) > 0))
+    .reduce((sum, l) => sum + Math.max(0, Number(l.priceAfterDiscount ?? l.price ?? 0) || 0), 0);
+}
+
 function engineSummaryHasMixedBilling(summary = {}, data = {}) {
   const recurringAnnual = Number(summary.recurringAnnualAfterDiscount ?? summary.recurringAnnual ?? data.annual ?? 0);
-  const oneTimeTotal = Number(summary.oneTimeTotal ?? data.oneTimeTotal ?? 0);
+  const oneTimeTotal = Math.round((Number(summary.oneTimeTotal ?? data.oneTimeTotal ?? 0) - rodentBaitSetupShare(summary, data)) * 100) / 100;
   const specialtyTotal = Number(summary.specialtyTotal ?? data.specialtyTotal ?? 0);
   const installationTotal = Number(summary.installationTotal ?? data.installationTotal ?? 0);
   return recurringAnnual > 0 && (oneTimeTotal > 0 || specialtyTotal > 0 || installationTotal > 0);

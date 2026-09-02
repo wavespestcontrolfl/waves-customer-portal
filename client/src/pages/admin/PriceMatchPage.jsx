@@ -220,7 +220,7 @@ export default function PriceMatchPage() {
   return (
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
       <AdminCommandHeader
-        title="Price Match"
+        title="Price match"
         icon={Tag}
         actions={[
           { key: "refresh", label: "Refresh", size: "sm", variant: "ghost", icon: RefreshCw, onClick: loadDrafts },

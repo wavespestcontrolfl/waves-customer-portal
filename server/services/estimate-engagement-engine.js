@@ -214,7 +214,10 @@ async function onEstimateViewed(estimate, nowDate = new Date()) {
   try {
     if (!estimate || !ACTIVE_STATUSES.includes(estimate.status) || estimate.archived_at) return;
     if (estimateOptedOutOfEngagement(estimate)) return;
-    if (!estimate.customer_email) return;
+    // The customer follow-up jobs below need an email; the owner-side
+    // hot-view bell does not (it is admin-only), so the email requirement
+    // gates the enqueue, not the whole evaluation (pre-push codex P1).
+    const customerEmailable = !!estimate.customer_email;
     const rules = await loadRules('view_event');
     if (!rules.length) return;
     const sessions = await sessionsForEstimate(estimate.id);
@@ -250,10 +253,20 @@ async function onEstimateViewed(estimate, nowDate = new Date()) {
       } else if (rule.rule_key === 'multi_view_high_intent') {
         const windowStart = now - p.windowHours * 3600000;
         matches = sessions.filter((s) => s.startedAt.getTime() >= windowStart).length >= p.minSessions;
+        // Owner-side bell on the SAME match (GATE_ESTIMATE_HOT_VIEW_ALERT,
+        // strict opt-in): one admin notification per estimate per 24h so the
+        // owner can call while the page is open. Independent of the customer
+        // email job below — it never touches the queue, the send ledger, or
+        // shadow accounting, and it never throws.
+        if (matches) {
+          await require('./estimate-hot-view-alert').maybeRaiseHotViewAlert({
+            estimate, sessions, rule, now: nowDate,
+          });
+        }
       } else if (rule.rule_key === 'dark_then_return') {
         matches = !!prev && latest.startedAt - prev.endedAt >= p.minDarkDays * 86400000;
       }
-      if (!matches) continue;
+      if (!matches || !customerEmailable) continue;
       const dueAt = new Date(now + (p.fireDelayMinutes || 15) * 60000);
       const queued = await enqueueJob(estimate.id, rule, dueAt, {
         sessions: matchSessions.length,

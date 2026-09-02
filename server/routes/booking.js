@@ -2694,6 +2694,23 @@ async function createSelfBooking(payload = {}) {
           .where({ id: scheduledRow.id })
           .update({ notes: trx.raw("COALESCE(notes, '') || ' — booked beside an existing pest plan; kept as a one-off visit (no second series seeded)'") });
       }
+      // Visit groups (visit-group-scope.md §2): the primary self-booked row
+      // stamps at scheduling, same as the seeded series rows below.
+      // Gate-checked + best-effort + self-refusing inside maybeGroupRow
+      // (savepoint on the trx — a grouping failure never poisons the
+      // booking). Automatic grouping needs BOTH a catalog identity
+      // (services.groupable / group_family via service_id) and a property
+      // anchor: estimate-backed rows gain both downstream (converter
+      // catalog relink + the estimate-property-linkage regroup pass);
+      // non-estimate self-books carry no service_id by design — the
+      // catalog resolver refuses to guess a row from a funnel label
+      // (wrong identity = wrong billing/completion profile) — so they
+      // stay ungrouped until a catalog-linkage lane stamps them
+      // (GH codex #3699 r6 P2: a deliberate skip, not an oversight).
+      {
+        const { maybeGroupRow } = require('../services/visit-groups');
+        await maybeGroupRow(scheduledRow.id, { database: trx, createdBy: 'seeder' });
+      }
 
       // Mark abandoned-booking recovery intents converted ATOMICALLY with the
       // booking (same transaction), so converted_at is visible the instant the
@@ -2871,7 +2888,78 @@ async function createSelfBooking(payload = {}) {
                   ? JSON.parse(freshPricingEst.estimate_data)
                   : (freshPricingEst.estimate_data || {});
                 const frozenFee = Number(estData?.setupFeeQuote?.amount);
-                if (!(Number.isFinite(frozenFee) && frozenFee > 0)) return;
+                if (!(Number.isFinite(frozenFee) && frozenFee > 0)) {
+                  // A ZERO/ABSENT setup on a rodent draft is a WAIVER that
+                  // can lapse (codex #3591 r80 P1): the quote waived the
+                  // $99 on another qualifying family — if that family was
+                  // cancelled before this self-booking, the series would
+                  // commit with no fee, permanently. Re-derive under the
+                  // customer lock; families quoted ON THIS DRAFT still
+                  // waive (the owner rule counts estimate + account). A
+                  // claim already queued for this draft is not
+                  // family-based and stays honored.
+                  const draftLineServices = (estData?.engineResult?.lineItems || [])
+                    .map((l) => String(l?.service || '').toLowerCase());
+                  const rodentDraft = draftLineServices.includes('rodent_bait')
+                    || estData?.setupFeeQuote?.kind === 'rodent_bait_setup';
+                  if (!rodentDraft) return;
+                  // A PRE-REALIGNMENT draft is not a lapsed waiver (codex
+                  // #3591 r85 P1): the old engine emitted rodent_bait with
+                  // no setup decision at all, so a legacy draft booked
+                  // after deployment would page staff to add a fee the
+                  // in-flight quote never disclosed. Only a NEW-model
+                  // draft can lapse — an explicit persisted rodent
+                  // decision, or a rodent line carrying the realignment
+                  // markers (perApplicationBilled/stations — the same
+                  // evidence estimate-public's legacy replay pin reads).
+                  const newModelRodentDraft = estData?.setupFeeQuote?.kind === 'rodent_bait_setup'
+                    || (estData?.engineResult?.lineItems || []).some((l) => String(l?.service || '').toLowerCase() === 'rodent_bait'
+                      && (l?.perApplicationBilled === true || Number(l?.stations) > 0));
+                  if (!newModelRodentDraft) return;
+                  if (estData?.setupFeeQuote?.kind === 'rodent_bait_setup'
+                    && estData?.setupFeeQuote?.waived === 'fee_already_queued') return;
+                  // An operator-DISABLED fee is not a lapsed waiver (codex
+                  // #3591 r81 P1): rodent_setup_fee.value 0 makes the
+                  // engine emit no setup line for anyone — nothing is owed
+                  // now, so nothing pages. Same live constant the direct
+                  // resolver bills from (DB-authoritative via db-bridge).
+                  const { RODENT } = require('../services/pricing-engine/constants');
+                  if (!(Number(RODENT.baitSetupFee) > 0)) return;
+                  // The alerts name the LIVE configured amount (codex
+                  // #3591 r85 P2): a supported nonzero edit (e.g. $79.50)
+                  // must not have staff adding a hardcoded $99.
+                  const configuredSetupFee = `$${(Math.round(Number(RODENT.baitSetupFee) * 100) / 100).toFixed(2).replace(/\.00$/, '')}`;
+                  const DRAFT_WAIVING_FAMILIES = ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait'];
+                  if (draftLineServices.some((svc) => DRAFT_WAIVING_FAMILIES.includes(svc))) return;
+                  await sp('customers').where({ id: custId }).forUpdate().first('id');
+                  const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+                  const liveFamilies = (await loadExistingQualifyingServiceKeys(sp, custId, { strict: true, planGate: false }) || [])
+                    .filter((key) => key !== 'rodent_bait');
+                  if (liveFamilies.length > 0) return;
+                  // LAPSED. The booking route keeps the booked visit through
+                  // stamp errors by design (the seeding catch logs and the
+                  // visit stays), and the $99 was never disclosed to this
+                  // customer, so neither refusing nor silently stamping is
+                  // available — this is the exception lane: page the office
+                  // to re-quote or bill the setup deliberately.
+                  logger.error(`[booking:confirm] FIX: rodent quote ${freshPricingEst.id} waived the bait-station setup on a family that has since lapsed — booking ${custId} commits without the ${configuredSetupFee}; office must re-quote or bill it`);
+                  // notifyAdmin swallows insert errors and resolves null
+                  // (codex #3591 r81 P1) — this page is the only recovery
+                  // for the underbilling, so retry once and log loudly on
+                  // a double failure (same convention as the accept-path
+                  // notify retries; the FIX log above stays the Sentry
+                  // trail either way).
+                  const pageLapsedWaiver = () => require('../services/notification-service').notifyAdmin(
+                    'billing',
+                    'Rodent booking: setup waiver lapsed before self-booking',
+                    `A self-booked rodent bait quote had its ${configuredSetupFee} setup waived by another service that is no longer active. The booking stands without the fee — re-quote or add the setup deliberately.`,
+                    { link: `/admin/customers/${custId}`, metadata: { customerId: custId, estimateId: freshPricingEst.id } },
+                  ).catch(() => null);
+                  if (!(await pageLapsedWaiver()) && !(await pageLapsedWaiver())) {
+                    logger.error(`[booking:confirm] FIX: lapsed-waiver alert could NOT be persisted for booking ${custId} / quote ${freshPricingEst.id} — the ${configuredSetupFee} underbilling has no notification; reconcile from this log`);
+                  }
+                  return;
+                }
                 // Bind the stamp to the QUOTED plan: the handoff token and
                 // the slot signature verify independently, so a fee-bearing
                 // quote could otherwise be submitted with an unrelated
@@ -2886,6 +2974,15 @@ async function createSelfBooking(payload = {}) {
                     .filter(Boolean),
                 );
                 const signedFeeComponents = String(serviceKey || '').split('+').filter(Boolean);
+                // Funnel keys are coarser than engine service keys: the
+                // rodent funnel signs 'rodent' while the priced draft carries
+                // 'rodent_bait' (and termite signs 'termite' for
+                // 'termite_bait'). Normalize each signed component to the
+                // priced family before the intersection, or a standalone
+                // rodent quote never stamps its setup (codex #3591 r25 P1).
+                const FUNNEL_TO_DRAFT_FAMILY = { rodent: ['rodent_bait'], termite: ['termite_bait'] };
+                const draftHasComponent = (c) => draftServices.has(c)
+                  || (FUNNEL_TO_DRAFT_FAMILY[c] || []).some((family) => draftServices.has(family));
                 // EVERY signed component must be in the quoted plan — a
                 // composite slot (e.g. lawn+pest) paired with a solo pest
                 // quote would otherwise pass on the one overlapping
@@ -2893,7 +2990,7 @@ async function createSelfBooking(payload = {}) {
                 // composite visit (Codex #3500 r3).
                 if (draftServices.size > 0
                   && (signedFeeComponents.length === 0
-                    || !signedFeeComponents.every((c) => draftServices.has(c)))) return;
+                    || !signedFeeComponents.every(draftHasComponent))) return;
                 const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
                 const freshCustomer = await sp('customers')
                   .where({ id: custId })
@@ -2917,17 +3014,62 @@ async function createSelfBooking(payload = {}) {
                       .where({ id: freshPricingEst.id })
                       .update({ archived_at: sp.fn.now(), updated_at: sp.fn.now() });
                   } else {
+                    // Preserve the decision's KIND (codex #3591 r28 P1): the
+                    // accept-time resolver honors a zero rodent decision only
+                    // when kind survives — and strip the rodent setup row +
+                    // its one-time share from the frozen draft (and the
+                    // onetime_total scalar), or a later staff conversion
+                    // scans the leftover row and charges the waived setup.
+                    const priorKind = estData?.setupFeeQuote?.kind;
+                    const frozenData = { ...estData, setupFeeQuote: { amount: 0, waived: waivedReason, ...(priorKind ? { kind: priorKind } : {}) } };
+                    let removedSetup = 0;
+                    if (priorKind === 'rodent_bait_setup') {
+                      const { stripWaivedRodentSetupFromDraft } = require('./public-quote')._internals;
+                      removedSetup = stripWaivedRodentSetupFromDraft(frozenData);
+                    }
                     await sp('estimates')
                       .where({ id: freshPricingEst.id })
                       .update({
-                        estimate_data: { ...estData, setupFeeQuote: { amount: 0, waived: waivedReason } },
+                        estimate_data: frozenData,
+                        ...(removedSetup > 0
+                          ? { onetime_total: Math.max(0, Math.round(((Number(freshPricingEst.onetime_total) || 0) - removedSetup) * 100) / 100) || null }
+                          : {}),
                         updated_at: sp.fn.now(),
                       });
                   }
                 };
-                if (activeMember) {
+                // The account-level member waiver is the MEMBERSHIP fee's
+                // (codex #3591 r18 P1): a rodent bait-station setup is waived
+                // only by another qualifying family, which the quote already
+                // applied — a rodent-only Bronze member still owes it.
+                const rodentSetupQuote = estData?.setupFeeQuote?.kind === 'rodent_bait_setup';
+                if (activeMember && !rodentSetupQuote) {
                   await retireOrWaiveDraft('existing_member');
                   return;
+                }
+                // Rodent setup: the waiver is "any OTHER qualifying family on
+                // the account", not plan membership — and the account can have
+                // gained one between /calculate and this booking (a pest plan
+                // accepted in another tab), leaving no pending claim for the
+                // queuedElsewhere probe below to see (codex #3591 r37 P1).
+                // Re-read the canonical qualifying keys under this lock and
+                // waive when any family other than rodent_bait is present. A
+                // lookup failure throws (fail closed — never stamps a fee the
+                // rule may waive; the accept-side probes take the same posture).
+                if (rodentSetupQuote) {
+                  const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+                  // strict (codex #3591 r72 P1): the default mode converts a
+                  // failed read to [] — the throw this comment promises
+                  // never happened, and the booking stamped a waived $99.
+                  // planGate: false (codex #3591 r73 P1): the rule above is
+                  // families, not membership — an unstamped qualifying row
+                  // still waives.
+                  const otherFamilies = (await loadExistingQualifyingServiceKeys(sp, custId, { strict: true, planGate: false }) || [])
+                    .filter((key) => key !== 'rodent_bait');
+                  if (otherFamilies.length > 0) {
+                    await retireOrWaiveDraft('existing_member');
+                    return;
+                  }
                 }
                 // Stamp the obligation AND correlate it: source_estimate_id
                 // links the parent to the quote that disclosed the fee (the
@@ -2952,9 +3094,14 @@ async function createSelfBooking(payload = {}) {
                 // can still complete and mint it. A fully-cancelled series
                 // otherwise waives every future plan forever (Codex #3489
                 // follow-up).
+                // The rodent setup is per-series and never self-waives
+                // (codex #3591 r64 P1): only a claim booked from THIS
+                // estimate counts — another property's in-flight rodent
+                // stamp must not strip this series' required setup.
                 const queuedElsewhere = await sp('scheduled_services as claim')
                   .where('claim.customer_id', custId)
                   .modify((qb) => { if (stampServiceRow?.id) qb.whereNot('claim.id', stampServiceRow.id); })
+                  .modify((qb) => { if (rodentSetupQuote) qb.where('claim.source_estimate_id', freshPricingEst.id); })
                   .whereNotNull('claim.pending_setup_fee')
                   .whereNot('claim.pending_setup_fee', 0)
                   .where(function consumable() {

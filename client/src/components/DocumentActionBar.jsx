@@ -36,6 +36,54 @@ function buttonStyle() {
  * @param {string} shareTitle    navigator.share sheet title.
  * @param {string} shareUrl      Defaults to the current location.
  */
+// The ONE document-share mechanism for customer pages (this bar, the
+// estimate's returning-visitor strip). Canonical URL = origin + pathname ONLY
+// — after a Stripe redirect the pay/statement pages carry
+// payment_intent_client_secret/redirect_status params, and an estimate opened
+// with ?intent=accept or a staff-preview marker must never forward those
+// (GH codex P1 on #3708). Order: Capacitor Share plugin (Web Share / Clipboard
+// are unreliable in the webview) → Web Share → the chosen fallback:
+// 'clipboard' (this bar, with its visible "Copied" feedback) or 'sms' (an
+// sms: draft on the customer's own phone — never a Waves-sent message).
+// Returns what happened: 'native' | 'shared' | 'canceled' | 'copied' |
+// 'sms' | 'none'.
+export function canonicalShareUrl(shareUrl = null) {
+  return shareUrl || `${window.location.origin}${window.location.pathname}`;
+}
+
+// `skipWebShareInNativeShell`: an installed native binary WITHOUT the Share
+// plugin. The bar keeps its legacy path there (Web Share, then clipboard —
+// the only share control on link-only pages must never lose its attempt, GH
+// codex P0); a caller with a native-safe fallback of its own (the sms: draft)
+// passes true and goes straight to it, because Web Share in the webview can
+// swallow the tap.
+export async function shareDocumentLink({ url: shareUrl = null, title, fallback = 'clipboard', skipWebShareInNativeShell = false } = {}) {
+  const url = canonicalShareUrl(shareUrl);
+  if (canShareNative()) {
+    try { await shareUrlNative(url, title); return 'native'; } catch { /* fall through */ }
+  } else if (!(skipWebShareInNativeShell && isNativeApp())) {
+    try {
+      if (navigator.share) {
+        await navigator.share({ title, url });
+        return 'shared';
+      }
+    } catch (err) {
+      if (!err || err.name === 'AbortError') return 'canceled';
+    }
+  }
+  if (fallback === 'sms') {
+    window.location.href = `sms:?&body=${encodeURIComponent(url)}`;
+    return 'sms';
+  }
+  try {
+    if (typeof navigator.clipboard?.writeText !== 'function') return 'none';
+    await navigator.clipboard.writeText(url);
+    return 'copied';
+  } catch {
+    return 'none';
+  }
+}
+
 export default function DocumentActionBar({
   pdfUrl = null,
   printFallbackDownload = true,
@@ -50,33 +98,10 @@ export default function DocumentActionBar({
   // fallback with visible feedback; a canceled sheet or absent Clipboard API
   // (in-app webviews, non-secure contexts) is not an error and shows nothing.
   const share = async () => {
-    // origin + pathname ONLY — after a Stripe redirect the pay/statement
-    // pages carry payment_intent_client_secret/redirect_status query params,
-    // which must never ride a shared link. Tokens live in the path.
-    const url = shareUrl || `${window.location.origin}${window.location.pathname}`;
-    // Capacitor shell first: Web Share / Clipboard are unreliable in the
-    // webview, and on link-only pages (prep, statement, outlines, project
-    // reports) this button is the ONLY share control — it must never
-    // silently no-op where the native Share plugin is available.
-    if (canShareNative()) {
-      await shareUrlNative(url, shareTitle).catch(() => {});
-      return;
-    }
-    try {
-      if (navigator.share) {
-        await navigator.share({ title: shareTitle, url });
-        return;
-      }
-    } catch {
-      return; // share sheet canceled
-    }
-    try {
-      if (typeof navigator.clipboard?.writeText !== 'function') return;
-      await navigator.clipboard.writeText(url);
+    const outcome = await shareDocumentLink({ url: shareUrl, title: shareTitle, fallback: 'clipboard' });
+    if (outcome === 'copied') {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch {
-      /* clipboard unavailable */
     }
   };
 

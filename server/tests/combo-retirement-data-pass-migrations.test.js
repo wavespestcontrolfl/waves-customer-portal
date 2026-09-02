@@ -9,6 +9,7 @@
 jest.mock('../models/db', () => ({}), { virtual: false });
 const archive = require('../models/migrations/20260831000070_retire_two_program_combined_services');
 const relabel = require('../models/migrations/20260831000071_relabel_pest_termite_control_visits_to_bait');
+const resolve = require('../models/migrations/20260831000072_resolve_remaining_combined_label_visits');
 
 
 function fakeKnex(db, { missingTables = [], missingColumns = [] } = {}) {
@@ -29,9 +30,23 @@ function fakeKnex(db, { missingTables = [], missingColumns = [] } = {}) {
       },
       whereNull(col) { preds.push((r) => r[col] == null); return q; },
       whereRaw(sql, bindings) {
-        if (!/^EXISTS \(SELECT 1 FROM services WHERE id = \? AND service_key = \? AND is_active = true AND is_archived = false\)$/.test(sql)) throw new Error(`fake whereRaw: ${sql}`);
-        const [id, key] = bindings;
-        preds.push(() => (db.services || []).some((s) => s.id === id && s.service_key === key && s.is_active === true && s.is_archived === false));
+        if (/^EXISTS \(SELECT 1 FROM services WHERE id = \? AND service_key = \? AND is_active = true AND is_archived = false\)$/.test(sql)) {
+          const [id, key] = bindings;
+          preds.push(() => (db.services || []).some((s) => s.id === id && s.service_key === key && s.is_active === true && s.is_archived === false));
+          return q;
+        }
+        if (/scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled'/.test(sql)) {
+          preds.push((r) => (db.scheduled_services || []).some((v) => v.id === r.scheduled_service_id && v.status === 'cancelled'));
+          return q;
+        }
+        throw new Error(`fake whereRaw: ${sql}`);
+      },
+      whereNotExists(fn) {
+        // Only the invoice guard: NOT EXISTS invoices for this visit.
+        const sub = { table: null };
+        const b = { select() { return b; }, from(t) { sub.table = t; return b; }, whereRaw() { return b; } };
+        fn.call(b);
+        preds.push((r) => !(db[sub.table] || []).some((o) => o.scheduled_service_id === r.id));
         return q;
       },
       async select(...cols) { return rows().filter((r) => preds.every((p) => p(r))).map((r) => { const o = {}; (cols.length ? cols : Object.keys(r)).forEach((c) => { o[c] = r[c] ?? null; }); return o; }); },
@@ -158,5 +173,90 @@ describe('20260831000071 relabel pest+termite-control visits to termite bait', (
     expect(row(db, 'v1').service_id).toBe('svc-tb');
     expect(row(db, 'v1').service_key_snapshot).toBeUndefined();
     await relabel.down(fakeKnex(db, { missingTables: ['scheduled_services'] }));
+  });
+});
+
+describe('20260831000072 resolve the last four combined-label visits', () => {
+  const seed = () => ({
+    services: [
+      { id: 'svc-combo', service_key: 'pest_termite_bait_quarterly', is_active: false, is_archived: true },
+      { id: 'svc-tb', service_key: 'termite_bait', is_active: true, is_archived: false },
+    ],
+    scheduled_services: [
+      // Leg A population
+      { id: 'd1', service_type: resolve.DUP_LABEL, service_id: 'svc-combo', status: 'pending', visit_id: null, annual_prepay_term_id: null },
+      { id: 'd2', service_type: resolve.DUP_LABEL, service_id: 'svc-combo', status: 'pending', visit_id: null, annual_prepay_term_id: null },
+      { id: 'd-invoiced', service_type: resolve.DUP_LABEL, service_id: 'svc-combo', status: 'pending', visit_id: null, annual_prepay_term_id: null },
+      { id: 'd-grouped', service_type: resolve.DUP_LABEL, service_id: 'svc-combo', status: 'pending', visit_id: 'grp-1', annual_prepay_term_id: null },
+      { id: 'd-done', service_type: resolve.DUP_LABEL, service_id: 'svc-combo', status: 'completed', visit_id: null, annual_prepay_term_id: null },
+      // Leg B population
+      { id: 'b1', service_type: resolve.BOND_LABEL, service_id: null, service_key_snapshot: null, status: 'pending', visit_id: null, annual_prepay_term_id: null },
+      { id: 'b2', service_type: resolve.BOND_LABEL, service_id: null, service_key_snapshot: null, status: null, visit_id: null, annual_prepay_term_id: null },
+      { id: 'b-resched', service_type: resolve.BOND_LABEL, service_id: null, service_key_snapshot: null, status: 'rescheduled', visit_id: null, annual_prepay_term_id: null },
+      { id: 'b-termed', service_type: 'Quarterly Termite Bait Station + Termite Bond Service (5-Year Term)', service_id: null, service_key_snapshot: null, status: 'pending', visit_id: null, annual_prepay_term_id: null },
+    ],
+    appointment_reminders: [
+      { scheduled_service_id: 'd1', service_type: resolve.DUP_LABEL, cancelled: false },
+      { scheduled_service_id: 'b1', service_type: resolve.BOND_LABEL, cancelled: false },
+    ],
+    invoices: [{ scheduled_service_id: 'd-invoiced' }],
+    system_settings: [],
+  });
+  const row = (db, id) => db.scheduled_services.find((r) => r.id === id);
+  const rem = (db, id) => db.appointment_reminders.find((r) => r.scheduled_service_id === id);
+  const state = (db) => JSON.parse(db.system_settings.find((r) => r.key === resolve.STATE_KEY).value);
+
+  test('Leg A cancels only the clean duplicates (with reason + reminder closed); invoiced, grouped, or historical rows stay', async () => {
+    const db = seed();
+    await resolve.up(fakeKnex(db));
+    for (const id of ['d1', 'd2']) {
+      expect(row(db, id)).toMatchObject({ status: 'cancelled', cancellation_reason: resolve.CANCEL_REASON });
+      expect(row(db, id).cancelled_at).toBe('now');
+    }
+    expect(rem(db, 'd1').cancelled).toBe(true);
+    expect(row(db, 'd-invoiced').status).toBe('pending');
+    expect(row(db, 'd-grouped').status).toBe('pending');
+    expect(row(db, 'd-done').status).toBe('completed');
+    expect(state(db).cancelled).toEqual([{ id: 'd1', reminder: true }, { id: 'd2', reminder: false }]);
+  });
+
+  test('Leg B relabels the plain bait+bond label to Termite Bait Station with identity — never a termed label, never a placeholder', async () => {
+    const db = seed();
+    await resolve.up(fakeKnex(db));
+    for (const id of ['b1', 'b2']) {
+      expect(row(db, id)).toMatchObject({ service_type: resolve.NEW_LABEL, service_id: 'svc-tb', service_key_snapshot: 'termite_bait' });
+    }
+    expect(rem(db, 'b1').service_type).toBe(resolve.NEW_LABEL);
+    expect(row(db, 'b-resched').service_type).toBe(resolve.BOND_LABEL);
+    expect(row(db, 'b-termed').service_type).toContain('(5-Year Term)'); // a REAL sold bond keeps its label
+    expect(state(db).relabeled.map((r) => r.id)).toEqual(['b1', 'b2']);
+  });
+
+  test('re-run keeps both ledgers; down() revives only our cancels and restores only our relabels', async () => {
+    const db = seed();
+    await resolve.up(fakeKnex(db));
+    await resolve.up(fakeKnex(db));
+    expect(state(db).cancelled).toHaveLength(2);
+    row(db, 'd2').cancellation_reason = 'office cancelled for a different reason';
+    row(db, 'b2').status = 'completed';
+    await resolve.down(fakeKnex(db));
+    expect(row(db, 'd1')).toMatchObject({ status: 'pending', cancelled_at: null, cancellation_reason: null });
+    expect(rem(db, 'd1').cancelled).toBe(false);
+    expect(row(db, 'd2').status).toBe('cancelled'); // not ours any more
+    expect(row(db, 'b1')).toMatchObject({ service_type: resolve.BOND_LABEL, service_id: null, service_key_snapshot: null });
+    expect(rem(db, 'b1').service_type).toBe(resolve.BOND_LABEL);
+    expect(row(db, 'b2').service_type).toBe(resolve.NEW_LABEL); // history kept
+    expect(db.system_settings.find((r) => r.key === resolve.STATE_KEY)).toBeUndefined();
+  });
+
+  test('missing combo catalog row → Leg A no-op; missing bait row → Leg B flagged; missing tables safe', async () => {
+    const db = seed();
+    db.services = db.services.filter((s) => s.service_key !== 'pest_termite_bait_quarterly');
+    db.services[0].is_archived = true; // termite_bait archived
+    await resolve.up(fakeKnex(db));
+    expect(row(db, 'd1').status).toBe('pending');
+    expect(row(db, 'b1').service_id).toBeNull();
+    expect(state(db)).toEqual({ cancelled: [], relabeled: [], missing_catalog: true });
+    await resolve.down(fakeKnex(db, { missingTables: ['scheduled_services'] }));
   });
 });

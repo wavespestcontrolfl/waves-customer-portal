@@ -422,10 +422,13 @@ describe('grouped confirm + calendar guards (codex #3609 r12)', () => {
 
   test('a FROZEN lone-live-member visit does not advertise the reschedule CTA (codex r26 P1 follow-up): the page keys the token on the shared frozen verdict', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/appointment-public'), 'utf8');
-    const tokenExpr = src.slice(src.indexOf('rescheduleToken: (dispatchOwnedUnreviewed(svc)'), src.indexOf('? null : svc.reschedule_token'));
+    const tokenExpr = src.slice(src.indexOf('rescheduleToken: ('), src.indexOf('? null : svc.reschedule_token'));
     expect(tokenExpr).toMatch(/visitInfo\.visit\b/);
     expect(tokenExpr).toMatch(/frozenVisitVerdict\(db, svc\.visit_id\)/);
     expect(tokenExpr).toMatch(/!visitInfo\.visitUnknown/);
+    // Cancelled/inactive accounts get no CTA either (codex GH #3671 r8 P2).
+    expect(tokenExpr).toMatch(/svc\.customer_active !== true/);
+    expect(tokenExpr).toMatch(/dispatchOwnedUnreviewed\(svc\)/);
   });
 
   test('calendar eligibility is the SHARED grouped verdict (appointment-ics-eligibility.groupedIcsVerdict — the same one schedule.js advertises links from): a chained stop stays eligible after an earlier member\'s own window ended; ungrouped keeps the row rule; the token row\'s terminal state outranks (codex r24 P2 + uncapped audit)', () => {

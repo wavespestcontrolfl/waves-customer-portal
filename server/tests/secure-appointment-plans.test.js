@@ -41,14 +41,20 @@ jest.mock('../config/feature-gates', () => ({
 jest.mock('../services/estimate-converter', () => ({
   WAVEGUARD_SETUP_FEE: 99,
   recurringServiceKey: (svc = {}) => {
-    const raw = String(svc.name || '').toLowerCase();
+    const raw = String(svc.service_key || svc.name || '').toLowerCase();
     if (raw.includes('commercial')) return 'commercial_pest';
+    if (raw.includes('trapping')) return 'rodent_trapping';
     if (raw.includes('pest')) return 'pest_control';
     if (raw.includes('mosquito')) return 'mosquito';
     if (raw.includes('lawn')) return 'lawn_care';
     if (raw.includes('wdo')) return 'wdo';
+    if (raw.includes('rodent')) return 'rodent_bait';
     return raw.replace(/[^a-z0-9]+/g, '_');
   },
+}));
+let mockQualifyingKeys = async () => [];
+jest.mock('../services/waveguard-existing-services', () => ({
+  loadExistingQualifyingServiceKeys: (...args) => mockQualifyingKeys(...args),
 }));
 jest.mock('../utils/portal-url', () => ({ portalUrl: (p) => `https://portal.test${p}` }));
 jest.mock('../services/call-booking-catalog', () => ({
@@ -56,7 +62,7 @@ jest.mock('../services/call-booking-catalog', () => ({
 }));
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
 
-const { ANNUAL_PREPAY_DISCOUNT_PCT } = require('../services/pricing-engine/constants');
+const { ANNUAL_PREPAY_DISCOUNT_PCT, RODENT } = require('../services/pricing-engine/constants');
 const {
   buildSecurePlanContext,
   deriveSecurePlanContext,
@@ -66,12 +72,15 @@ const {
 
 const FUTURE = '2099-05-04';
 
-function setTables({ visit, customer, term, invoice } = {}) {
+function setTables({ visit, customer, term, invoice, catalog } = {}) {
   mockTableHandlers = {
     scheduled_services: { first: () => visit || null },
+    services: { first: () => (typeof catalog === 'function' ? catalog() : (catalog || null)) },
     customers: { first: () => customer || null },
     annual_prepay_terms: { first: () => term || null },
     invoices: { first: () => invoice || null },
+    // The realignment rollout instant (20260829000040 migration_time).
+    knex_migrations: { first: () => ({ migration_time: '2026-08-29T18:30:00.000Z' }) },
   };
 }
 
@@ -88,13 +97,244 @@ const baseVisit = {
   recurring_parent_id: null,
   pending_setup_fee: null,
   source_estimate_id: null,
+  // Booked AFTER the realignment rollout (see knex_migrations below).
+  created_at: '2026-09-01T12:00:00.000Z',
 };
 const baseCustomer = { id: 'c1', billing_mode: null, waveguard_tier: null, monthly_rate: null, property_type: 'single_family' };
 const request = { id: 'r1', scheduled_service_id: 'v1', selected_plan: null };
 
 beforeEach(() => {
   mockGateOn = true;
+  mockQualifyingKeys = async () => [];
   setTables({ visit: { ...baseVisit }, customer: { ...baseCustomer } });
+});
+
+describe('resolveDirectRodentSetupObligation — one resolver for every activation path (codex #3591 r28)', () => {
+  const { resolveDirectRodentSetupObligation } = require('../services/secure-appointment-plans');
+  const db = require('../models/db');
+  const rodentVisit = { customer_id: 'c1', service_type: 'Rodent Bait Stations', source_estimate_id: null };
+
+  test('direct rodent series with NO other qualifying family owes the live setup fee', async () => {
+    mockQualifyingKeys = async () => [];
+    await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).resolves.toBe(Number(RODENT.baitSetupFee));
+  });
+
+  test('rodent never self-waives: an existing rodent series is not "another" qualifier', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).resolves.toBe(Number(RODENT.baitSetupFee));
+  });
+
+  test('another qualifying recurring family waives it', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait', 'pest_control'];
+    await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).resolves.toBe(0);
+  });
+
+  test('estimate-origin series made its billing choice at accept → 0; non-rodent → 0; no customer → 0', async () => {
+    mockQualifyingKeys = async () => [];
+    await expect(resolveDirectRodentSetupObligation(db, { ...rodentVisit, source_estimate_id: 'est-1' })).resolves.toBe(0);
+    await expect(resolveDirectRodentSetupObligation(db, { ...rodentVisit, service_type: 'Quarterly Pest Control' })).resolves.toBe(0);
+    await expect(resolveDirectRodentSetupObligation(db, { ...rodentVisit, customer_id: null })).resolves.toBe(0);
+  });
+
+  test('a PERSISTED visit (id) is re-read by id — the caller\'s fragment never decides provenance or family', async () => {
+    mockQualifyingKeys = async () => [];
+    // Fragment claims a direct rodent series; the row says estimate-origin → 0.
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', source_estimate_id: 'est-1' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1', ...rodentVisit })).resolves.toBe(0);
+    // Fragment carries no service_type (secure-page saved-card branch); the row is rodent → owed.
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1', customer_id: 'c1' })).resolves.toBe(Number(RODENT.baitSetupFee));
+    // Missing row throws (fail closed) rather than pricing the fragment.
+    setTables({ visit: null });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'gone', ...rodentVisit })).rejects.toThrow('not found');
+  });
+
+  test('service identity is CATALOG-first: a stale label never decides the setup obligation or the plan class (codex #3591 r32 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    // Stale 'Pest Control' label, linked to the bait program → setup owed,
+    // rodent plan class on the page.
+    setTables({
+      visit: { ...baseVisit, service_type: 'Quarterly Pest Control', service_id: 'svc-rb', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+      catalog: { service_key: 'rodent_bait_quarterly', name: 'Rodent Bait Stations' },
+    });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
+    const ctx = await buildSecurePlanContext({ request, visitId: 'v1' });
+    expect(ctx.setupFee).toEqual({ amount: Number(RODENT.baitSetupFee), waivedWithPrepay: false });
+    // Stale bait label, repointed to trapping → no setup, no rodent class.
+    setTables({
+      visit: { ...baseVisit, service_type: 'Rodent Bait Station Service', service_id: 'svc-trap', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+      catalog: { service_key: 'rodent_trapping', name: 'Rodent Trapping' },
+    });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
+    expect(await buildSecurePlanContext({ request, visitId: 'v1' })).toBeNull();
+    // Unlinked legacy row: the label still classifies.
+    setTables({
+      visit: { ...baseVisit, service_type: 'Rodent Bait Station Service', service_id: null, estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+    });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
+    // A failed catalog read fails closed (throws) — never a label-only guess.
+    setTables({
+      visit: { ...baseVisit, service_type: 'Rodent Bait Station Service', service_id: 'svc-rb', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+      catalog: () => { throw new Error('catalog down'); },
+    });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).rejects.toThrow('catalog down');
+    await expect(deriveSecurePlanContext({ request, visitId: 'v1' })).rejects.toThrow('catalog down');
+  });
+
+  test('qualifier lookup failure propagates (callers fail closed, never silently $0)', async () => {
+    mockQualifyingKeys = async () => { throw new Error('db down'); };
+    await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).rejects.toThrow('db down');
+  });
+
+  test('a LIVE claims-ledger record on the anchor means the setup is already collected — never a second obligation; a voided claim invoice re-derives (codex #3591 r53 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations' } });
+    mockTableHandlers.setup_fee_claims = { select: () => [{ invoice_id: 'inv-setup' }] };
+    mockTableHandlers.invoices = { first: () => ({ status: 'paid' }) };
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
+    // The claim's invoice was voided — the obligation is live again.
+    mockTableHandlers.invoices = { first: () => ({ status: 'void' }) };
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
+    delete mockTableHandlers.setup_fee_claims;
+  });
+
+  test('a POSITIVE frozen claim on the series anchor outranks the live constant; a negative (mid-mint) stamp does not (codex #3591 r40 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    // The customer accepted $79 through /secure; the config was raised since.
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', pending_setup_fee: '79.00' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(79);
+    // The accepted figure is the obligation even after another family joined
+    // the account — ACCEPTANCE PROVENANCE (here the /secure selection)
+    // freezes the deal; the waiver decides only pre-acceptance (codex
+    // #3591 r86 P1).
+    mockQualifyingKeys = async () => ['pest_control'];
+    mockTableHandlers.scheduled_services.select = () => [{ id: 'v1' }];
+    mockTableHandlers.appointment_card_requests = { first: () => ({ id: 'acr-1' }) };
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(79);
+    delete mockTableHandlers.appointment_card_requests;
+    delete mockTableHandlers.scheduled_services.select;
+    mockQualifyingKeys = async () => [];
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', pending_setup_fee: '-99.00' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
+    // A draft fragment carries no stamp → live constant.
+    await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).resolves.toBe(Number(RODENT.baitSetupFee));
+  });
+
+  test('a BOOKING-TIME stamp with no acceptance provenance re-evaluates the waiver — a family gained since booking clears it (codex #3591 r86 P1)', async () => {
+    // Direct booking stamped the fee pre-acceptance; the customer then
+    // added a qualifying family before the /secure page rendered.
+    const updates = [];
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', pending_setup_fee: '99.00' } });
+    mockTableHandlers.scheduled_services.select = () => [{ id: 'v1' }];
+    mockTableHandlers.scheduled_services.update = (chain, patch) => { updates.push(patch); return 1; };
+    mockQualifyingKeys = async () => ['pest_control'];
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
+    expect(updates).toEqual([expect.objectContaining({ pending_setup_fee: null })]);
+    // Same stamp, no family gained — the frozen figure stands, nothing cleared.
+    updates.length = 0;
+    mockQualifyingKeys = async () => [];
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(99);
+    expect(updates).toEqual([]);
+    // A claims-ledger row on the anchor (restored/accept-billed stamp) is
+    // provenance — the figure stands even with the gained family.
+    mockQualifyingKeys = async () => ['pest_control'];
+    mockTableHandlers.setup_fee_claims = { first: () => ({ id: 'claim-1' }) };
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(99);
+    expect(updates).toEqual([]);
+    delete mockTableHandlers.setup_fee_claims;
+    // A LOST clear CAS (a completion claimed the stamp mid-waiver) is a
+    // CONFLICT, never a reported waiver (codex #3591 r87 P1) — the fresh
+    // re-read still shows a stamp, so the resolver throws into the
+    // callers' fail-closed handling instead of returning 0 while the
+    // completion invoices the setup.
+    mockTableHandlers.scheduled_services.update = () => 0;
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).rejects.toThrow(/changed mid-waiver/);
+  });
+
+  test('an UNRELATED per_application lane (palm) does not hide the rodent disclosure page; non-rodent visits stay hidden (codex #3591 r49 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    setTables({
+      visit: { ...baseVisit, service_type: 'Rodent Bait Stations' },
+      customer: { ...baseCustomer, billing_mode: 'per_application' },
+    });
+    const ctx = await buildSecurePlanContext({ request, visitId: 'v1' });
+    expect(ctx).not.toBeNull();
+    expect(ctx.setupFee).toEqual({ amount: Number(RODENT.baitSetupFee), waivedWithPrepay: false });
+    // A pest visit under the same lane keeps the card-only page.
+    setTables({
+      visit: { ...baseVisit },
+      customer: { ...baseCustomer, billing_mode: 'per_application' },
+    });
+    expect(await buildSecurePlanContext({ request, visitId: 'v1' })).toBeNull();
+  });
+
+  test('a COVERED lane (membership dues / annual-prepay lane / overlapping term) keeps the rodent disclosure page with prepay suppressed (codex #3591 r66 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    for (const customerPatch of [{ billing_mode: 'monthly_membership' }, { billing_mode: 'annual_prepay' }]) {
+      setTables({
+        visit: { ...baseVisit, service_type: 'Rodent Bait Stations' },
+        customer: { ...baseCustomer, ...customerPatch },
+      });
+      const ctx = await buildSecurePlanContext({ request, visitId: 'v1' });
+      expect(ctx).not.toBeNull();
+      expect(ctx.prepay).toBeNull();
+      expect(ctx.setupFee).toEqual({ amount: Number(RODENT.baitSetupFee), waivedWithPrepay: false });
+      expect(ctx.perVisit).toBeGreaterThan(0);
+    }
+    // An overlapping term (palm prepay) covers the year for prepay only.
+    setTables({
+      visit: { ...baseVisit, service_type: 'Rodent Bait Stations' },
+      customer: { ...baseCustomer },
+      term: { id: 't1', term_end: '2099-12-31' },
+    });
+    const overlapped = await buildSecurePlanContext({ request, visitId: 'v1' });
+    expect(overlapped).not.toBeNull();
+    expect(overlapped.prepay).toBeNull();
+    // Selecting prepay against a suppressed option is refused server-side.
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
+    expect(src).toMatch(/if \(plan === 'prepay_annual' && !context\.prepay\) throw fail\('plan_unavailable'\);/);
+  });
+
+  test('a CHILD of an ESTIMATE-origin root owes nothing — provenance resolves at the anchor (codex #3591 r47 local P0)', async () => {
+    mockQualifyingKeys = async () => [];
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0' } });
+    mockTableHandlers.scheduled_services.first = (chain) => (chain.calls.some(([op, w]) => op === 'where' && w?.id === 'v0')
+      ? { id: 'v0', pending_setup_fee: null, created_at: '2026-09-01T12:00:00.000Z', source_estimate_id: 'est-1' }
+      : { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0' });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
+    // …but a restored positive stamp on that estimate-origin root still bills (r44).
+    mockTableHandlers.scheduled_services.first = (chain) => (chain.calls.some(([op, w]) => op === 'where' && w?.id === 'v0')
+      ? { id: 'v0', pending_setup_fee: '99.00', created_at: '2026-09-01T12:00:00.000Z', source_estimate_id: 'est-1' }
+      : { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0' });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(99);
+  });
+
+  test('a PRE-rollout direct series (grandfathered signup: no estimate, no stamp) owes nothing; an unreadable rollout or root date fails closed to nothing (codex #3591 r42 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', created_at: '2026-03-01T12:00:00.000Z' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
+    // A child of a pre-rollout root resolves through the ROOT's date.
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0', created_at: '2026-09-05T12:00:00.000Z' } });
+    mockTableHandlers.scheduled_services.first = (chain) => (chain.calls.some(([op, w]) => op === 'where' && w?.id === 'v0')
+      ? { id: 'v0', pending_setup_fee: null, created_at: '2026-03-01T12:00:00.000Z' }
+      : { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0', created_at: '2026-09-05T12:00:00.000Z' });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
+    // A frozen positive stamp on that old root still bills (accepted claim).
+    mockTableHandlers.scheduled_services.first = (chain) => (chain.calls.some(([op, w]) => op === 'where' && w?.id === 'v0')
+      ? { id: 'v0', pending_setup_fee: '79.00', created_at: '2026-03-01T12:00:00.000Z' }
+      : { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0' });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(79);
+    // (A missing rollout row failing closed to 0 is pinned in
+    // estimate-membership-context.test.js — the rollout instant is cached
+    // per db handle, so it cannot be re-mocked mid-file here.)
+    // Post-rollout, no stamp → live fee (the r28 baseline).
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
+  });
 });
 
 describe('buildSecurePlanContext', () => {
@@ -131,6 +371,82 @@ describe('buildSecurePlanContext', () => {
       annualBase: 540,
       prepay: { total: 540, discount: 0, ratePctLabel: '' },
       setupFee: { amount: 99, waivedWithPrepay: true },
+    });
+  });
+
+  test('direct rodent bait series, NON-member → discount class + the unwaived $99 setup rides prepay.total (codex #3591 r9 P1)', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait']; // only its own series on the account
+    setTables({
+      visit: { ...baseVisit, service_type: 'Quarterly Rodent Bait Station Service', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+    });
+    const ctx = await buildSecurePlanContext({ request, visitId: 'v1' });
+    const coverage = Math.round(356 * (1 - ANNUAL_PREPAY_DISCOUNT_PCT) * 100) / 100;
+    const setup = Number(RODENT.baitSetupFee);
+    expect(setup).toBeGreaterThan(0);
+    expect(ctx).toMatchObject({
+      mode: 'recurring',
+      planClass: 'discount',
+      perVisit: 89,
+      visitsPerYear: 4,
+      annualBase: 356,
+      prepay: { total: Math.round((coverage + setup) * 100) / 100, coverageTotal: coverage, setupAmount: setup },
+      setupFee: { amount: setup, waivedWithPrepay: false },
+    });
+  });
+
+  test('direct rodent bait series: the setup consumed at selection is the DISCLOSED (stamped) figure, never above it (codex #3591 r15 P1)', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    setTables({
+      visit: { ...baseVisit, service_type: 'Quarterly Rodent Bait Station Service', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+    });
+    const coverage = Math.round(356 * (1 - ANNUAL_PREPAY_DISCOUNT_PCT) * 100) / 100;
+    const lowered = await buildSecurePlanContext({ request: { ...request, accepted_setup_fee: '79.00' }, visitId: 'v1' });
+    expect(lowered.setupFee).toEqual({ amount: 79, waivedWithPrepay: false });
+    expect(lowered.prepay.total).toBe(Math.round((coverage + 79) * 100) / 100);
+    const raised = await buildSecurePlanContext({ request: { ...request, accepted_setup_fee: '150.00' }, visitId: 'v1' });
+    expect(raised.setupFee.amount).toBe(Number(RODENT.baitSetupFee));
+    const first = await buildSecurePlanContext({ request, visitId: 'v1' });
+    expect(first.setupFee.amount).toBe(Number(RODENT.baitSetupFee));
+  });
+
+  test('direct rodent bait series: at SELECTION a NULL accepted_setup_fee means never disclosed → no setup billed; render still prices live (pre-push codex P0 on #3591 r30)', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    setTables({
+      visit: { ...baseVisit, service_type: 'Quarterly Rodent Bait Station Service', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+    });
+    const coverage = Math.round(356 * (1 - ANNUAL_PREPAY_DISCOUNT_PCT) * 100) / 100;
+    // Selection with no stamp (pre-column render, or a page that never
+    // showed the setup): nothing was disclosed, nothing is billed.
+    const undisclosed = await buildSecurePlanContext({ request: { ...request, accepted_setup_fee: null }, visitId: 'v1', consumeDisclosure: true });
+    expect(undisclosed.setupFee).toBeNull();
+    expect(undisclosed.prepay.total).toBe(coverage);
+    // A stamped disclosure is consumed at exactly the stamped figure.
+    const stamped = await buildSecurePlanContext({ request: { ...request, accepted_setup_fee: '79.00' }, visitId: 'v1', consumeDisclosure: true });
+    expect(stamped.setupFee).toEqual({ amount: 79, waivedWithPrepay: false });
+    // The sticky 0 sentinel (page showed no unwaived setup) stays 0.
+    const zero = await buildSecurePlanContext({ request: { ...request, accepted_setup_fee: '0.00' }, visitId: 'v1', consumeDisclosure: true });
+    expect(zero.setupFee).toBeNull();
+    // The RENDER path (default) prices live so the first render can
+    // disclose and stamp.
+    const render = await buildSecurePlanContext({ request: { ...request, accepted_setup_fee: null }, visitId: 'v1' });
+    expect(render.setupFee.amount).toBe(Number(RODENT.baitSetupFee));
+  });
+
+  test('direct rodent bait series, MEMBER (another qualifying service on the account) → no setup fee', async () => {
+    mockQualifyingKeys = async () => ['pest_control', 'rodent_bait'];
+    setTables({
+      visit: { ...baseVisit, service_type: 'Quarterly Rodent Bait Station Service', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+    });
+    const ctx = await buildSecurePlanContext({ request, visitId: 'v1' });
+    const coverage = Math.round(356 * (1 - ANNUAL_PREPAY_DISCOUNT_PCT) * 100) / 100;
+    expect(ctx).toMatchObject({
+      planClass: 'discount',
+      prepay: { total: coverage, coverageTotal: coverage, setupAmount: 0 },
+      setupFee: null,
     });
   });
 

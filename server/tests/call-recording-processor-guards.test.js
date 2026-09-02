@@ -1164,10 +1164,16 @@ describe('DNI-forwarding: staff forward / CSR numbers are internal, never keyed'
   const STAFF_FWD = '+19415550000'; // a staff cell the inbound <Dial> forwards to
   const CSR_CELL = '+19415557777';  // a CSR cell from WAVES_CSR_NUMBER_MAP
 
-  const ENV_KEYS = ['WAVES_FALLBACK_FORWARD_NUMBERS', 'WAVES_CSR_NUMBER_MAP', 'VIRGINIA_PHONE'];
+  // Every env key staffForwardLast10() reads — a local .env can set the named
+  // staff numbers (e.g. ADAM_PHONE) to a value colliding with the fixtures.
+  const ENV_KEYS = [
+    'WAVES_FALLBACK_FORWARD_NUMBERS', 'WAVES_CSR_NUMBER_MAP', 'VIRGINIA_PHONE',
+    'OWNER_PHONE', 'ADAM_PHONE', 'OFFICE_MANAGER_PHONE', 'WAVES_OFFICE_MANAGER_PHONE',
+  ];
   let saved;
   beforeEach(() => {
     saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+    ENV_KEYS.forEach((k) => { delete process.env[k]; });
     process.env.WAVES_FALLBACK_FORWARD_NUMBERS = STAFF_FWD;
     process.env.WAVES_CSR_NUMBER_MAP = `${CSR_CELL}:Virginia`;
   });

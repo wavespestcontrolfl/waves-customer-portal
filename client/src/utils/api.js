@@ -565,6 +565,12 @@ export class ApiClient {
     });
   }
 
+  // C4: a cancelled customer asks to restart — the server mints (or reuses)
+  // a normal estimate at today's price and answers { url } to open it.
+  restartPlan() {
+    return this.request('/requests/restart-plan', { method: 'POST', body: '{}' });
+  }
+
   queryCustomerPricing(prompt, targetTier) {
     return this.request('/customer-pricing/query', {
       method: 'POST',

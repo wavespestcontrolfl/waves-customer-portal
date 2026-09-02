@@ -35,6 +35,38 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(standalone[0].service.frequency).toBe('quarterly');
   });
 
+  test('a PINNED legacy rodent row converts on the legacy monthly-supplement lane, never as a per-application unit (codex #3591 r19 P0)', () => {
+    const { supplementalCompanionLines, isPinnedLegacyRodentRow } = require('../services/estimate-converter');
+    const pinned = { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 49, annual: 588, visitsPerYear: 4, legacyPinnedReplay: true, discountable: false };
+    const fresh = { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67, perApplicationBilled: true, stations: 5 };
+    expect(isPinnedLegacyRodentRow(pinned)).toBe(true);
+    expect(isPinnedLegacyRodentRow(fresh)).toBe(false);
+    // The pinned row surfaces as the legacy scalar did …
+    expect(supplementalCompanionLines({ result: { recurring: { services: [pinned] } } }))
+      .toEqual([{ name: 'Rodent Bait Stations', service: 'rodent_bait', monthly: 49 }]);
+    // … and a new-model row never does.
+    expect(supplementalCompanionLines({ result: { recurring: { services: [fresh] } } })).toEqual([]);
+    // Scheduling: the supplement becomes a fromSupplement standalone unit —
+    // counted as a unit, so pest + pinned rodent is multi-unit and the
+    // per-application single-unit derivation stays off (status-quo fallback).
+    const { standalone } = combineRecurringServicesForScheduling(
+      [{ name: 'Pest Control', service: 'pest_control', mo: 100 }],
+      { supplementalCompanions: supplementalCompanionLines({ result: { recurring: { services: [pinned] } } }) },
+    );
+    expect(standalone.some((u) => u.fromSupplement && u.catalogServiceKey === 'rodent_bait_quarterly')).toBe(true);
+  });
+
+  test('a pinned legacy rodent-ONLY plan is the monthly dues product; mixed / new-model plans are not (codex #3591 r21 P0)', () => {
+    const { isPinnedLegacyRodentOnlyPlan } = require('../services/estimate-converter');
+    const pinned = { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 49, legacyPinnedReplay: true };
+    const fresh = { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67, perApplicationBilled: true };
+    const pest = { service: 'pest_control', name: 'Pest Control', mo: 100 };
+    expect(isPinnedLegacyRodentOnlyPlan([pinned])).toBe(true);
+    expect(isPinnedLegacyRodentOnlyPlan([pinned, pest])).toBe(false);
+    expect(isPinnedLegacyRodentOnlyPlan([fresh])).toBe(false);
+    expect(isPinnedLegacyRodentOnlyPlan([])).toBe(false);
+  });
+
   test('a rodent bait line with no cadence gets the quarterly program default standalone', () => {
     const { standalone } = combineRecurringServicesForScheduling([
       { name: 'Rodent Bait Stations', service: 'rodent_bait' },
@@ -563,5 +595,31 @@ describe('combined-name downstream keys', () => {
       { name: 'Quarterly Pest Control' },
       'quarterly',
     )).toBe(60);
+  });
+});
+
+describe('manual accept of a pre-realignment quote-wizard rodent row (codex #3591 r37 P0)', () => {
+  const converter = require('../services/estimate-converter');
+  const { legacyRodentRowPredicateFor } = require('../services/billing-cadence');
+  const storedLegacy = { result: { recurring: { services: [
+    { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 49, visitsPerYear: 4 },
+  ] } } };
+  test('the unpinned monthly row rides the legacy supplement lane and reads as a legacy-only plan', () => {
+    const rows = storedLegacy.result.recurring.services;
+    const isLegacy = legacyRodentRowPredicateFor(storedLegacy);
+    expect(converter.supplementalCompanionLines(storedLegacy)).toEqual([
+      { name: 'Rodent Bait Stations', service: 'rodent_bait', monthly: 49 },
+    ]);
+    expect(converter.isPinnedLegacyRodentOnlyPlan(rows, isLegacy)).toBe(true);
+    // Pin-only check (the pre-r37 default) could not see it — the stored
+    // signal is what closes the manual-accept gap.
+    expect(converter.isPinnedLegacyRodentOnlyPlan(rows)).toBe(false);
+  });
+  test('a bracket-priced row is neither a supplement nor a legacy plan', () => {
+    const storedNew = { result: { recurring: { services: [
+      { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67, perApplicationBilled: true, stations: 5 },
+    ] } } };
+    expect(converter.supplementalCompanionLines(storedNew)).toEqual([]);
+    expect(converter.isPinnedLegacyRodentOnlyPlan(storedNew.result.recurring.services, legacyRodentRowPredicateFor(storedNew))).toBe(false);
   });
 });

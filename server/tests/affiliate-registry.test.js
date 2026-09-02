@@ -13,12 +13,12 @@ const iso = (daysAgo) => new Date(Date.now() - daysAgo * 86400000).toISOString()
 const green = (over = {}) => ({
   product_id: 'rain-gauge', status: 'active', risk_class: 'green', merchant: 'amazon',
   approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20',
-  allowed_post_types: ['protocol'], owner_approved_at: iso(5), ...over,
+  allowed_post_types: ['protocol'], allowed_placements: ['primary-rec'], owner_approved_at: iso(5), ...over,
 });
 const yellow = (over = {}) => ({
   product_id: 'ant-bait', status: 'active', risk_class: 'yellow', merchant: 'solutions',
   approved_affiliate_url: 'https://www.solutionsstores.com/x?aff=waves',
-  allowed_post_types: ['protocol'], owner_approved_at: iso(5),
+  allowed_post_types: ['protocol'], allowed_placements: ['primary-rec'], owner_approved_at: iso(5),
   epa_reg_number: '12345-67', label_url: 'https://www.solutionsstores.com/label.pdf',
   florida_registration_verified_at: iso(5), label_reviewed_at: iso(5), ...over,
 });
@@ -48,6 +48,34 @@ describe('validateProduct', () => {
     expect(registry.validateProduct(green({ approved_affiliate_url: 'https://www.amazon.com/dp/B1' })).join(' ')).toMatch(/tag=/);
     // merchant is normalized (trim + lowercase) before the Amazon rules apply (Codex r4 P1)
     expect(registry.validateProduct(green({ merchant: ' Amazon ', approved_affiliate_url: 'https://amzn.to/x' })).join(' ')).toMatch(/amazon\.com directly/);
+  });
+  test('Amazon policy keys off hostname / normalized merchant, not exact spelling; prohibited rows carry no URL (astro #503 parity)', () => {
+    expect(registry.validateProduct(green({ merchant: 'Amazon US', approved_affiliate_url: 'https://amzn.to/x' })).join(' ')).toMatch(/amazon\.com directly/);
+    expect(registry.validateProduct(green({ merchant: 'Some Store', approved_affiliate_url: 'https://www.amazon.com/dp/B1' })).join(' ')).toMatch(/tag=/);
+    expect(registry.validateProduct({ product_id: 'pro-x', status: 'prohibited', risk_class: 'red', merchant: 'x', plain_url: 'https://example.com/p' }).join(' ')).toMatch(/must not carry plain_url/);
+  });
+  test('plain_url is untracked for EVERY merchant: no query string, no network host (astro #503 parity)', () => {
+    expect(registry.validateProduct(green({ merchant: 'vendor', approved_affiliate_url: 'https://vendor.example/p?aff=waves', plain_url: 'https://vendor.example/p?ref=waves' })).join(' ')).toMatch(/no query string/);
+    expect(registry.validateProduct(green({ merchant: 'vendor', approved_affiliate_url: 'https://vendor.example/p?aff=waves', plain_url: 'https://prf.hn/click/x' })).join(' ')).toMatch(/network/);
+    expect(registry.validateProduct(green({ merchant: 'vendor', approved_affiliate_url: 'https://vendor.example/p?aff=waves', plain_url: 'https://vendor.example/p' }))).toEqual([]);
+  });
+  test('amazon plain_url is the UNTRACKED fallback: direct amazon.com, no tag/ascsubtag (Codex PR3 r4)', () => {
+    expect(registry.validateProduct(green({ plain_url: 'https://amzn.to/x' })).join(' ')).toMatch(/plain_url must be a direct amazon\.com/);
+    expect(registry.validateProduct(green({ plain_url: 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20' })).join(' ')).toMatch(/no query string|no tag=/);
+    expect(registry.validateProduct(green({ plain_url: 'https://www.amazon.com/dp/B000TEST01' }))).toEqual([]);
+    // parameter NAME is case-insensitive (Codex PR3 r8)
+    expect(registry.validateProduct(green({ plain_url: 'https://www.amazon.com/dp/B000TEST01?Tag=wavespest-20' })).join(' ')).toMatch(/no query string|no tag=/);
+    expect(registry.validateProduct(green({ approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST01?TAG=wavespest-20' }))).toEqual([]);
+    for (const empty of ['?tag=', '?TAG=', '?tag=%20']) {
+      expect(registry.validateProduct(green({ approved_affiliate_url: `https://www.amazon.com/dp/B000TEST01${empty}` })).join(' ')).toMatch(/non-empty tag=/);
+    }
+  });
+  test('allowed_placements is required (non-empty kebab-case); trailing-dot hosts normalize (Codex #3646 r7)', () => {
+    expect(registry.validateProduct(green({ allowed_placements: undefined })).join(' ')).toMatch(/allowed_placements/);
+    expect(registry.validateProduct(green({ allowed_placements: [] })).join(' ')).toMatch(/allowed_placements/);
+    expect(registry.validateProduct(green({ plain_url: 'https://amzn.to./abc' })).join(' ')).toMatch(/network|direct amazon\.com/);
+    expect(registry.validateProduct(green({ approved_affiliate_url: 'https://www.amazon.com./dp/B1?tag=wavespest-20' }))).toEqual([]);
+    expect(registry.validateProduct(green({ approved_affiliate_url: 'https://www.amazon.com../dp/B1?tag=wavespest-20' })).join(' ')).toMatch(/malformed hostname/);
   });
   test('protected post types can never be declared eligible', () => {
     for (const pt of registry.PROTECTED_POST_TYPES) {

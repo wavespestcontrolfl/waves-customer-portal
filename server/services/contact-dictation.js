@@ -144,6 +144,14 @@ Return ONLY JSON with this exact shape (empty arrays when nothing was dictated):
 }`;
 }
 
+// Bounded like every other provider call the call-processing pass can reach:
+// this is awaited while that pass holds a claim whose heartbeat beats on a
+// timer, so an unbounded fetch is indistinguishable from a hang and leaves
+// the call unreclaimable (codex #3677 P1).
+const DECODER_TIMEOUT_MS = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 0
+  ? Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS)
+  : 180000;
+
 async function fetchDecoderResponse(prompt) {
   if (!process.env.GEMINI_API_KEY) return null;
   const res = await fetch(
@@ -155,6 +163,7 @@ async function fetchDecoderResponse(prompt) {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { response_mime_type: 'application/json', temperature: 0 },
       }),
+      signal: AbortSignal.timeout(DECODER_TIMEOUT_MS),
     }
   );
   if (!res.ok) return null;

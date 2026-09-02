@@ -937,6 +937,13 @@ async function loadAnnualPrepayTermForInvoice(invoiceId) {
 // ══════════════════════════════════════════════════════════════
 // INVOICE SERVICE
 // ══════════════════════════════════════════════════════════════
+// Durable machine marker linking a rodent-setup re-bill draft to the
+// reversed invoice it replaced (codex #3591 r46 P1) — the revival sweep
+// voids unsent replacements by it.
+function rodentSetupRebillMarker(invoiceId) {
+  return `[rodent-setup-rebill:${invoiceId}]`;
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -1877,7 +1884,7 @@ const InvoiceService = {
     const visit = await dbh("scheduled_services as s")
       .leftJoin("services as sv", "s.service_id", "sv.id")
       .where("s.id", scheduledServiceId)
-      .first("s.service_type", "s.is_recurring", "s.recurring_ongoing", "s.is_callback", "s.source", "sv.service_key", "sv.service_name");
+      .first("s.service_type", "s.is_recurring", "s.recurring_ongoing", "s.is_callback", "s.source", "sv.service_key", "sv.name as service_name");
     if (!visit) return null;
     if (visit.is_callback === true) return null;
     if (!(visit.is_recurring === true || visit.recurring_ongoing === true)) return null;
@@ -4376,6 +4383,11 @@ const InvoiceService = {
     }
     if (current.status === "void") {
       await stopInvoiceFollowupSequence(id, "invoice_voided");
+      // RE-ENTRY HEALS (codex #3591 r55 local P0): a prior void whose
+      // annual-prepay sync failed post-commit left the term/claim state
+      // behind — re-running the idempotent sync here makes "retry the
+      // void" the repair path instead of a permanent stranding.
+      await require("./annual-prepay-renewals").syncTermForInvoicePayment(current);
       return current;
     }
     // 'prepaid' passes assertInvoiceVoidable so a credit-covered invoice can be
@@ -4457,6 +4469,9 @@ const InvoiceService = {
       if (!updated) {
         throw new Error("Invoice status changed while voiding — re-check and retry");
       }
+      // A voided standard invoice that billed the rodent bait-station setup
+      // puts the obligation back on the living series (codex #3591 r44 P1).
+      await this.restoreRodentSetupObligationForReversedInvoice(trx, updated);
       // A customer could have opened /pay and minted a NEW PaymentIntent between
       // the pre-lock triage above and this locked update. If the attached PI
       // changed, refuse — rolling back so the operator retries and the new PI gets
@@ -4511,8 +4526,15 @@ const InvoiceService = {
         invoice,
       );
     } catch (err) {
-      logger.warn(
-        `[invoice] annual prepay sync skipped after void ${invoice.invoice_number}: ${err.message}`,
+      // The void is COMMITTED but the term/claim restorations did not run
+      // (codex #3591 r55 local P0) — surfacing the failure makes the retry
+      // path real: re-voiding an already-void invoice re-runs the
+      // idempotent sync above.
+      logger.error(
+        `[invoice] annual prepay sync FAILED after void ${invoice.invoice_number}: ${err.message} — the invoice IS void; retry the void to rerun the sync`,
+      );
+      throw new Error(
+        `Invoice ${invoice.invoice_number} was voided, but its annual-prepay/setup restorations failed (${err.message}). Retry the void — it reruns the restorations.`,
       );
     }
     logger.info(`[invoice] Voided: ${invoice.invoice_number}`);
@@ -4707,6 +4729,18 @@ const InvoiceService = {
           "Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead",
         );
       }
+      // The void restored the rodent setup obligation (stamp or replacement
+      // draft) — unvoiding makes THIS invoice's setup line collectible
+      // again, so those artifacts are retired with the restore or the fee
+      // collects twice (codex #3591 r47 P1). UNCONDITIONAL (codex #3591
+      // r74 P1): the old exact-description gate skipped the cleanup when
+      // staff had renamed the setup line, leaving the restored stamp or
+      // replacement draft collectible beside the reinstated invoice. The
+      // helper's own provenance probes (immutable claim, then the durable
+      // rebill marker) early-return null for ordinary invoices; unvoids
+      // are rare staff actions, so the extra lookups are cheap. Errors
+      // propagate → unvoid rolls back.
+      await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(trx, id, { strict: true });
       let owningTermNow = null;
       try {
         owningTermNow = await trx("annual_prepay_terms")
@@ -5073,6 +5107,713 @@ const InvoiceService = {
    * reopen to their pre-settlement collectible status so the work is owed again.
    * NEVER reopens a cash-paid invoice. Best-effort per invoice.
    */
+  /**
+   * Put back the durable per-application setup claim a prepay mint retired
+   * (codex #3591 r34 P1). The on-site switch and the secure-plan prepay bill
+   * a DIRECT rodent series' unwaived setup on the prepay invoice and retire
+   * the series parent's pending_setup_fee so the next completion cannot
+   * bill it twice; when that prepay is voided/refunded the fee is owed
+   * again and nothing else ever re-stamps it. Keyed by the immutable
+   * setup_fee_claims record the mint wrote for the prepay invoice; the
+   * record is consumed on restore so a re-run of the cancel sync is a
+   * no-op. Re-stamped onto a NULL stamp only — a live or mid-mint claim is
+   * never overwritten. Returns the restored descriptor or null.
+   */
+  /**
+   * A STANDARD (non-prepay) invoice carrying the rodent bait-station setup
+   * line was voided/refunded while the series lives on (codex #3591 r44
+   * P1): the accept billed the setup only as this line — no claim record,
+   * no stamp — so the reversal must put the obligation back as a
+   * pending_setup_fee stamp on the series anchor or the fee is silently
+   * gone. Anchor resolution: the invoice's own scheduled_service_id's root
+   * first, else the customer's live direct rodent root. CAS onto a NULL
+   * stamp only. UNEXPECTED failures PROPAGATE (codex #3591 r46 local P0):
+   * the caller's transaction rolls back and the void/refund retries, so a
+   * transient blip can never commit a reversal that lost the obligation.
+   * Deliberate data-states (no setup line, prepay claims-ledger row,
+   * occupied stamp, no rodent anchor) return null — no-anchor pages a
+   * human rather than wedging the reversal forever. Prepay invoices are
+   * the claims ledger's job and are skipped here.
+   */
+  async restoreRodentSetupObligationForReversedInvoice(conn, invoiceRow) {
+    if (!invoiceRow || !invoiceRow.customer_id) return null;
+    // Durable claim FIRST (codex #3591 r55 P1): the claims-ledger row is
+    // immutable provenance — a staff-renamed line must not hide the setup
+    // from its own reversal. The editable description only decides for
+    // claim-less invoices (unsent accept drafts).
+    let completionClaimToConsume = null;
+    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id", "amount", "scheduled_service_id");
+    let lines = invoiceRow.line_items;
+    if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
+    const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
+    const lineAmount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
+    const claimAmount = claimRecord ? Math.round(Number(claimRecord.amount) * 100) / 100 : NaN;
+    const amount = Number.isFinite(claimAmount) && claimAmount > 0 ? claimAmount : lineAmount;
+    if (!(amount > 0)) return null;
+    if (!setupLine && !claimRecord) return null;
+    if (claimRecord) {
+      // Only TERM-BACKED prepay claims restore through the claims-ledger
+      // sync (codex #3591 r48 P1) — a COMPLETION invoice writes a claim
+      // record too (crash-resume evidence, admin-dispatch), and its
+      // reversal must put the stamp back HERE, consuming the record.
+      const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
+      if (termBacked) return null; // prepay lane — restored via the claims ledger
+      // Consumed only AFTER a successful re-stamp/re-bill (codex #3591 r53
+      // local P0): an ambiguous or failed restore keeps the durable
+      // evidence for retry / manual reconciliation.
+      completionClaimToConsume = claimRecord.id;
+    }
+    const { authoritativeServiceKey } = require("./secure-appointment-plans");
+    // The claim's anchored series is provenance (codex #3591 r69 P1): the
+    // standard/invoice-mode accept mints record the exact rodent root, so an
+    // unattached invoice (or one attached to a non-rodent first visit) on a
+    // customer with several rodent series restores onto THAT root instead of
+    // paging on the account-wide scan's ambiguity.
+    let anchorId = claimRecord?.scheduled_service_id || null;
+    if (!anchorId && invoiceRow.scheduled_service_id) {
+      const own = await conn("scheduled_services")
+        .where({ id: invoiceRow.scheduled_service_id })
+        .first("id", "recurring_parent_id", "service_type", "service_id");
+      const root = own && own.recurring_parent_id
+        ? await conn("scheduled_services").where({ id: own.recurring_parent_id }).first("id", "service_type", "service_id")
+        : own;
+      if (root && require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) anchorId = root.id;
+    }
+    if (!anchorId) {
+      // Shared liveness predicate, not a status filter (codex #3591 r73
+      // P1): a cancelled root with a live child can still consume the
+      // restored stamp — the same rule every carried-setup probe uses.
+      const { seriesCanStillConsume } = require("./secure-appointment-plans");
+      const roots = await conn("scheduled_services")
+        .where({ customer_id: invoiceRow.customer_id })
+        .whereNull("recurring_parent_id")
+        .select("id", "service_type", "service_id", "status");
+      const baitRoots = [];
+      for (const root of roots || []) {
+        if (!(await seriesCanStillConsume(conn, root))) continue;
+        if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) baitRoots.push(root.id);
+      }
+      // A UNIQUE match only (codex #3591 r51 local P0): a customer with
+      // multiple rodent series must never have an unrelated series'
+      // stamp/claim mutated — ambiguity stays anchor-less/paged.
+      if (baitRoots.length === 1) anchorId = baitRoots[0];
+    }
+    if (!anchorId) {
+      logger.error(`[invoice] FIX: reversed invoice ${invoiceRow.id} billed a $${amount.toFixed(2)} bait-station setup but no rodent series anchor was found — re-bill the setup manually`);
+      return null;
+    }
+    // Same billable-visit guard as the prepay restoration (codex #3591 r45
+    // P1): a stamp on a series with no future completion is inert — mint a
+    // collectible DRAFT re-bill instead.
+    const anchorRow = await conn("scheduled_services").where({ id: anchorId }).first("id", "status", "pending_setup_fee");
+    let billable = ["pending", "confirmed", "rescheduled"].includes(String(anchorRow?.status || "").toLowerCase());
+    if (!billable) {
+      const liveChild = await conn("scheduled_services")
+        .where({ recurring_parent_id: anchorId })
+        .whereIn("status", ["pending", "confirmed", "rescheduled"])
+        .first("id");
+      billable = !!liveChild;
+    }
+    if (!billable) {
+      const reInvoice = await this.create({
+        database: conn,
+        customerId: invoiceRow.customer_id,
+        title: "Bait Station Setup",
+        lineItems: [{
+          description: "Bait Station Setup — one-time setup fee",
+          quantity: 1,
+          unit_price: amount,
+          category: "Setup fee",
+        }],
+        notes: `Re-billed after invoice ${invoiceRow.id} was voided/refunded — the series has no future visit left to collect the setup on (visit ${anchorId}). ${rodentSetupRebillMarker(invoiceRow.id)}`,
+        dueDate: etDateString(),
+      });
+      if (completionClaimToConsume) await conn("setup_fee_claims").where({ id: completionClaimToConsume }).delete();
+      logger.info(`[invoice] reversed invoice ${invoiceRow.id}: setup re-billed as draft ${reInvoice?.invoice_number || reInvoice?.id} — dead series ${anchorId}`);
+      return { scheduledServiceId: anchorId, amount, reInvoiceId: reInvoice?.id || null };
+    }
+    const stamped = await conn("scheduled_services")
+      .where({ id: anchorId })
+      .whereNull("pending_setup_fee")
+      .update({ pending_setup_fee: amount, updated_at: new Date() });
+    if (stamped !== 1) {
+      logger.warn(`[invoice] reversed invoice ${invoiceRow.id}: rodent setup NOT re-stamped on series ${anchorId} (stamp occupied) — obligation already tracked`);
+      return null;
+    }
+    // The claim is KEPT on the stamp path (codex #3591 r74 P1): unlike the
+    // rebill branch (whose replacement invoice carries the durable
+    // rodentSetupRebillMarker), a restored stamp leaves no other provenance
+    // linking it to this invoice — a later refund failure/unvoid on a
+    // STAFF-RENAMED setup line could then never retire the restored stamp
+    // and both charges would go live. The kept row is inert while the
+    // invoice is terminal (settledSetupClaimForInvoice and the anchor-claim
+    // probes apply the live-invoice rule), re-entry stays idempotent (the
+    // occupied-stamp CAS above refuses), and the reinstatement retires the
+    // stamp from exactly this record.
+    logger.info(`[invoice] rodent setup obligation restored on series ${anchorId} ($${amount.toFixed(2)}) — invoice ${invoiceRow.id} reversed (claim kept as reinstatement provenance)`);
+      return { scheduledServiceId: anchorId, amount };
+  },
+
+  /**
+   * A refunded/disputed prepay that billed the rodent setup was REVIVED
+   * (re-paid / dispute won back) after the refund sync restored the
+   * per-application claim (codex #3591 r45 local P0): the prepay's own
+   * setup line is live again, so the restored stamp must be retired and
+   * the claims-ledger record recreated — or the next completion bills the
+   * setup a SECOND time. Idempotent (record insert is onConflict-ignored;
+   * stamp CAS by exact value). Unexpected failures PROPAGATE so the
+   * revival sync retries (codex #3591 r46 local P0); a missing anchor or
+   * mid-mint stamp pages a human instead of wedging the revival.
+   */
+  // The lost-dispute cancel re-minted the switch-superseded per-application
+  // invoice (prepay-switch-restore marker) — a REVIVED prepay's coverage
+  // makes that restored AR a duplicate (codex #3591 r54 P1): void the
+  // untouched/unpaid restorations; money attached pages a human.
+  async _retireSwitchRestoredInvoicesForRevivedPrepay(conn, prepayInvoiceId) {
+    const restored = await conn("invoices")
+      .whereIn("id", function restoredIds() {
+        // restored rows carry prepaySwitchRestoreMarker(<voidedId>) where the
+        // VOIDED row's notes carry the superseded-by marker for THIS prepay.
+        this.select(conn.raw("i2.id"))
+          .from({ i2: "invoices" })
+          .join({ v: "invoices" }, conn.raw("i2.notes like '%[prepay-switch-restore:' || v.id || ']%'"))
+          .where("v.notes", "like", `%[prepay-switch-superseded-by:${prepayInvoiceId}]%`);
+      })
+      .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
+      .select("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id", "credit_applied");
+    let voided = 0;
+    for (const inv of restored || []) {
+      const moneyAttached = inv.paid_at || inv.payment_recorded_at || inv.stripe_payment_intent_id
+        || inv.payer_statement_id || Number(inv.credit_applied) > 0
+        || ["paid", "prepaid", "processing"].includes(String(inv.status).toLowerCase());
+      if (!moneyAttached) {
+        voided += await conn("invoices")
+          .where({ id: inv.id, status: inv.status })
+          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id").where(function creditFree() { this.whereNull("credit_applied").orWhere("credit_applied", 0); })
+          .update({ status: "void", updated_at: new Date() });
+      } else {
+        logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: switch-restored invoice ${inv.id} has money attached (${inv.status}) — refund/reconcile so the coverage is not collected twice`);
+      }
+    }
+    if (voided) logger.info(`[invoice] revived prepay ${prepayInvoiceId}: ${voided} switch-restored per-application invoice(s) voided — coverage is prepaid again`);
+    return voided;
+  },
+
+  async retireRodentSetupObligationForRevivedPrepay(conn, prepayInvoiceId) {
+    if (!prepayInvoiceId) return null;
+    const invoiceRow = await conn("invoices")
+      .where({ id: prepayInvoiceId })
+      .first("id", "customer_id", "scheduled_service_id", "line_items");
+    if (!invoiceRow) return null;
+    let lines = invoiceRow.line_items;
+    if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
+    const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
+    let amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
+    const { authoritativeServiceKey, recordSetupFeeClaimForInvoice } = require("./secure-appointment-plans");
+    let anchorId = null;
+    if (invoiceRow.scheduled_service_id) {
+      const own = await conn("scheduled_services")
+        .where({ id: invoiceRow.scheduled_service_id })
+        .first("id", "recurring_parent_id", "service_type", "service_id");
+      const root = own && own.recurring_parent_id
+        ? await conn("scheduled_services").where({ id: own.recurring_parent_id }).first("id", "service_type", "service_id")
+        : own;
+      if (root && require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) anchorId = root.id;
+    }
+    let accountBaitRoots = [];
+    if (!anchorId) {
+      // Liveness via the shared predicate, not a status filter (codex #3591
+      // r73 P1): a cancelled root whose child can still complete is still
+      // the series that carries/collected the setup — dropping it by status
+      // would re-ledger the claim anchor-less while its restored stamp
+      // stays collectible.
+      const { seriesCanStillConsume } = require("./secure-appointment-plans");
+      const roots = await conn("scheduled_services")
+        .where({ customer_id: invoiceRow.customer_id })
+        .whereNull("recurring_parent_id")
+        .select("id", "service_type", "service_id", "pending_setup_fee", "status");
+      for (const root of roots || []) {
+        if (!(await seriesCanStillConsume(conn, root))) continue;
+        if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) accountBaitRoots.push(root);
+      }
+      // A UNIQUE match only (codex #3591 r51 local P0): a customer with
+      // multiple rodent series must never have an unrelated series'
+      // stamp/claim mutated — ambiguity stays anchor-less/paged.
+      if (accountBaitRoots.length === 1) anchorId = accountBaitRoots[0].id;
+    }
+    if (!setupLine || !(amount > 0)) {
+      // Renamed/repriced setup line (codex #3591 r71 P1): the refund's
+      // restore stamped the anchor with the consumed claim's EXACT amount —
+      // that restored stamp is the surviving provenance, so the revival
+      // retires it (and re-ledgers the claim) from the stamp instead of
+      // returning early and leaving both the stamp and the revived
+      // invoice's setup collectible.
+      let stampedAmount = null;
+      if (anchorId) {
+        const probe = await conn("scheduled_services").where({ id: anchorId }).first("pending_setup_fee");
+        const v = Number(probe?.pending_setup_fee);
+        if (v > 0) stampedAmount = Math.round(v * 100) / 100;
+      } else {
+        const stampedRoots = accountBaitRoots.filter((root) => Number(root.pending_setup_fee) > 0);
+        if (stampedRoots.length === 1) {
+          anchorId = stampedRoots[0].id;
+          stampedAmount = Math.round(Number(stampedRoots[0].pending_setup_fee) * 100) / 100;
+        }
+      }
+      // No stamp either (codex #3591 r75 P1): a refund on a series with no
+      // billable visits minted a marker-keyed replacement draft and consumed
+      // the claim instead of stamping — the live replacement is the
+      // surviving provenance. Fall back to its line amount and continue so
+      // the marker sweep below voids it and the claim is re-ledgered;
+      // otherwise the revived prepay and the replacement both collect.
+      if (!(stampedAmount > 0)) {
+        const markerRebill = await conn("invoices")
+          .where("notes", "like", `%${rodentSetupRebillMarker(prepayInvoiceId)}%`)
+          .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
+          .first("id", "line_items");
+        let rbLines = markerRebill?.line_items;
+        if (typeof rbLines === "string") { try { rbLines = JSON.parse(rbLines); } catch { rbLines = []; } }
+        const rbAmount = Math.round(Number(rbLines?.[0]?.amount ?? rbLines?.[0]?.unit_price) * 100) / 100;
+        if (!(rbAmount > 0)) return null;
+        logger.warn(`[invoice] revived prepay ${prepayInvoiceId}: setup line missing/renamed and no stamp — retiring the live $${rbAmount.toFixed(2)} replacement draft from its rebill marker`);
+        amount = rbAmount;
+      } else {
+        logger.warn(`[invoice] revived prepay ${prepayInvoiceId}: setup line missing/renamed — retiring the restored $${stampedAmount.toFixed(2)} stamp on series ${anchorId} from claim provenance`);
+        amount = stampedAmount;
+      }
+    }
+    // (sibling-completion retire happens after anchor resolution below)
+    // The marker sweep runs regardless of an anchor (codex #3591 r47 P1):
+    // a cancelled-root series still minted a replacement draft on the
+    // refund, and the revived prepay's own line is live again.
+    const voidedRebills = await InvoiceService._voidUntouchedRodentSetupRebills(conn, prepayInvoiceId);
+    if (!anchorId) {
+      // Ledger the claim anchor-less (the restore resolves an anchor from
+      // the term's provenance later) so a future re-refund still restores.
+      await recordSetupFeeClaimForInvoice(conn, { invoiceId: prepayInvoiceId, anchorId: null, amount });
+      logger.info(`[invoice] revived prepay ${prepayInvoiceId}: no live rodent anchor (series cancelled?) — claim re-ledgered anchor-less${voidedRebills ? `, ${voidedRebills} replacement draft(s) voided` : ""}`);
+      return { scheduledServiceId: null, amount, retired: false };
+    }
+    // SERIALIZED with completion (codex #3591 r46 P1): the parent is read
+    // FOR UPDATE so a technician's in-flight claim (negative stamp) cannot
+    // slip between an unlocked read and the CAS. A mid-claim stamp FAILS
+    // the revival — the sync rolls back and the event retries after the
+    // completion settles, instead of double-billing the setup.
+    // Taken BEFORE the sibling scan (codex #3591 r52 P1): a completion
+    // claiming/clearing the stamp between an unlocked scan and this lock
+    // would hide its freshly minted sibling from the reconciliation.
+    const parent = await conn("scheduled_services").where({ id: anchorId }).forUpdate().first("id", "pending_setup_fee");
+    const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
+    if (stamp != null && stamp < 0) {
+      throw new Error(`revived prepay ${prepayInvoiceId}: series ${anchorId} has a completion mid-claim — retrying after it settles`);
+    }
+    // A COMPLETION billed this setup while the prepay was dead (the
+    // negative-marker retry path — codex #3591 r48 P1): its claim record
+    // sits on the same anchor. The revived prepay's own line is live again,
+    // so an untouched DRAFT completion setup invoice is voided (claim
+    // consumed); anything sent/paid pages a human.
+    const siblingClaims = await conn("setup_fee_claims")
+      .where({ scheduled_service_id: anchorId })
+      .whereNot({ invoice_id: prepayInvoiceId })
+      .select("id", "invoice_id");
+    for (const sc of siblingClaims || []) {
+      const sib = await conn("invoices")
+        .where({ id: sc.invoice_id })
+        .first("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id", "credit_applied");
+      const sibTerminal = sib && ["void", "cancelled", "canceled", "refunded"].includes(String(sib.status).toLowerCase());
+      const moneyAttached = !sib || sib.paid_at || sib.payment_recorded_at || sib.stripe_payment_intent_id
+        || sib.payer_statement_id || Number(sib.credit_applied) > 0
+        || ["paid", "prepaid", "processing"].includes(String(sib?.status).toLowerCase());
+      if (sib && sibTerminal) {
+        await conn("setup_fee_claims").where({ id: sc.id }).delete();
+      } else if (!moneyAttached) {
+        // Unpaid — sent included (codex #3591 r49 local P0): a live pay
+        // link on the duplicate is a double charge waiting. The claim is
+        // consumed ONLY when the guarded void wins (codex #3591 r50 P1) —
+        // a lost CAS means money arrived mid-flight and a human reconciles.
+        const sibVoided = await conn("invoices")
+          .where({ id: sib.id, status: sib.status })
+          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id").where(function creditFree() { this.whereNull("credit_applied").orWhere("credit_applied", 0); })
+          .update({ status: "void", updated_at: new Date() });
+        if (sibVoided === 1) {
+          await conn("setup_fee_claims").where({ id: sc.id }).delete();
+          logger.info(`[invoice] revived prepay ${prepayInvoiceId}: completion setup invoice ${sib.id} voided (its claim consumed) — the prepay's own setup line is live again`);
+        } else {
+          logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: completion setup invoice ${sib.id} gained a payment anchor mid-void — refund/reconcile so the setup is not collected twice (claim kept)`);
+        }
+      } else {
+        logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: invoice ${sc.invoice_id} also carries this series' setup claim with money attached (${sib ? sib.status : "unreadable"}) — refund/reconcile so the setup is not collected twice`);
+      }
+    }
+    await recordSetupFeeClaimForInvoice(conn, { invoiceId: prepayInvoiceId, anchorId, amount });
+    let retired = 0;
+    if (stamp != null && stamp > 0) {
+      retired = await conn("scheduled_services")
+        .where({ id: anchorId, pending_setup_fee: parent.pending_setup_fee })
+        .update({ pending_setup_fee: null, updated_at: new Date() });
+    }
+    logger.info(`[invoice] revived prepay ${prepayInvoiceId}: setup claim re-ledgered on series ${anchorId}${retired === 1 ? ", restored stamp retired" : ""}${voidedRebills ? `, ${voidedRebills} replacement draft(s) voided` : ""}`);
+    return { scheduledServiceId: anchorId, amount, retired: retired === 1 };
+  },
+
+  /**
+   * The refund BOUNCED / the debit reversal failed and the invoice is
+   * leaving 'refunded' (codex #3591 r47 local P0): Stripe kept the money,
+   * so the refunded-transition side effects — the restored
+   * pending_setup_fee stamp and/or the draft re-bill — must be retired
+   * with the flip or the setup collects twice. Exact-value CAS only (a
+   * stamp that no longer equals the setup line is someone else's claim —
+   * paged, never clobbered); untouched draft re-bills are voided, anything
+   * sent/paid pages a human. Prepay invoices (claims-ledger row) are the
+   * term sync's job and are skipped. Unexpected failures PROPAGATE so the
+   * unwind retries.
+   */
+  // Void every UNPAID replacement carrying the re-bill marker for
+  // `sourceInvoiceId` — sent-but-unpaid included (codex #3591 r49 local
+  // P0: a live pay link on a duplicate setup is a double charge waiting;
+  // the voided pay page reads "no longer payable"). Only a replacement
+  // with MONEY attached (paid, payment recorded, or a PaymentIntent in
+  // flight) pages a human for an explicit refund/reconcile. Returns the
+  // voided count. Shared by the prepay revival and the reinstated-invoice
+  // cleanup (codex #3591 r46/r47 P1).
+  async _voidUntouchedRodentSetupRebills(conn, sourceInvoiceId) {
+    const rebills = await conn("invoices")
+      .where("notes", "like", `%${rodentSetupRebillMarker(sourceInvoiceId)}%`)
+      .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
+      .select("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id", "credit_applied");
+    let voided = 0;
+    for (const rb of rebills || []) {
+      // A payer-statement accrual counts as money attached (codex #3591 r50
+      // P1): a direct status flip would leave the statement charging the
+      // voided duplicate — that reconciliation is a human's.
+      const moneyAttached = rb.paid_at || rb.payment_recorded_at || rb.stripe_payment_intent_id
+        || rb.payer_statement_id || Number(rb.credit_applied) > 0
+        || ["paid", "prepaid", "processing"].includes(String(rb.status).toLowerCase());
+      if (!moneyAttached) {
+        voided += await conn("invoices")
+          .where({ id: rb.id, status: rb.status })
+          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id").where(function creditFree() { this.whereNull("credit_applied").orWhere("credit_applied", 0); })
+          .update({ status: "void", updated_at: new Date() });
+      } else {
+        logger.error(`[invoice] FIX: replacement setup invoice ${rb.id} for reversed invoice ${sourceInvoiceId} has money attached (${rb.status}) — refund/reconcile so the setup is not collected twice`);
+      }
+    }
+    return voided;
+  },
+
+  async retireRodentSetupObligationForReinstatedInvoice(conn, invoiceId, { strict = false } = {}) {
+    if (!invoiceId) return null;
+    const invoiceRow = await conn("invoices")
+      .where({ id: invoiceId })
+      .first("id", "customer_id", "scheduled_service_id", "line_items");
+    if (!invoiceRow) return null;
+    // Durable claim FIRST (codex #3591 r64 P1), the same provenance rule the
+    // reversal applies: the claims-ledger row is immutable, while the line
+    // description/amount are staff-editable — a renamed or repriced
+    // completion invoice must still retire exactly the stamp its reversal
+    // restored, or the restored stamp / replacement invoice stays
+    // collectible as a second charge once the webhook re-flips this one to
+    // paid. The editable line decides only for claim-less invoices.
+    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id", "amount", "scheduled_service_id");
+    let lines = invoiceRow.line_items;
+    if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
+    const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
+    const lineAmount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
+    const claimAmount = claimRecord ? Math.round(Number(claimRecord.amount) * 100) / 100 : NaN;
+    // No claim and no recognizable line (codex #3591 r74 P1): the dead-series
+    // reversal consumed the claim after minting its replacement draft, and a
+    // staff-renamed line hides the setup from the editable text — but the
+    // replacement carries the durable rodentSetupRebillMarker keyed to THIS
+    // invoice. A live replacement is the surviving provenance: retire from
+    // its line amount so the reinstated invoice becomes the only carrier.
+    // (The stamp-restore path keeps its claim since r74, so it resolves
+    // through claimRecord above.)
+    let markerRebillAmount = null;
+    if (!setupLine && !claimRecord) {
+      const markerRebill = await conn("invoices")
+        .where("notes", "like", `%${rodentSetupRebillMarker(invoiceRow.id)}%`)
+        .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
+        .first("id", "line_items");
+      if (!markerRebill) return null;
+      let rbLines = markerRebill.line_items;
+      if (typeof rbLines === "string") { try { rbLines = JSON.parse(rbLines); } catch { rbLines = []; } }
+      const rbAmount = Math.round(Number(rbLines?.[0]?.amount ?? rbLines?.[0]?.unit_price) * 100) / 100;
+      if (rbAmount > 0) markerRebillAmount = rbAmount;
+    }
+    const amount = Number.isFinite(claimAmount) && claimAmount > 0
+      ? claimAmount
+      : (markerRebillAmount ?? lineAmount);
+    if (!(amount > 0)) return null;
+    if (claimRecord) {
+      // Term-backed prepay claims are the term sync's revival's job; a
+      // COMPLETION invoice's own claim rides its reinstatement here
+      // (codex #3591 r48 P1 — claims are not prepay-only).
+      const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
+      if (termBacked) return null;
+    }
+    const { authoritativeServiceKey } = require("./secure-appointment-plans");
+    // The claim's own anchor is provenance too — the series the mint
+    // consumed the stamp from — so it outranks the invoice's (editable)
+    // visit link and the customer-wide root scan.
+    let anchorId = claimRecord?.scheduled_service_id || null;
+    if (!anchorId && invoiceRow.scheduled_service_id) {
+      const own = await conn("scheduled_services")
+        .where({ id: invoiceRow.scheduled_service_id })
+        .first("id", "recurring_parent_id", "service_type", "service_id");
+      const root = own && own.recurring_parent_id
+        ? await conn("scheduled_services").where({ id: own.recurring_parent_id }).first("id", "service_type", "service_id")
+        : own;
+      if (root && require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) anchorId = root.id;
+    }
+    if (!anchorId) {
+      // Shared liveness predicate, not a status filter (codex #3591 r73
+      // P1): a cancelled root with a live child can still consume — same
+      // rule as the revival lookup above.
+      const { seriesCanStillConsume } = require("./secure-appointment-plans");
+      const roots = await conn("scheduled_services")
+        .where({ customer_id: invoiceRow.customer_id })
+        .whereNull("recurring_parent_id")
+        .select("id", "service_type", "service_id", "status");
+      const baitRoots = [];
+      for (const root of roots || []) {
+        if (!(await seriesCanStillConsume(conn, root))) continue;
+        if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) baitRoots.push(root.id);
+      }
+      // A UNIQUE match only (codex #3591 r51 local P0): a customer with
+      // multiple rodent series must never have an unrelated series'
+      // stamp/claim mutated — ambiguity stays anchor-less/paged.
+      if (baitRoots.length === 1) anchorId = baitRoots[0];
+    }
+    let retired = 0;
+    if (anchorId) {
+      const parent = await conn("scheduled_services").where({ id: anchorId }).forUpdate().first("id", "pending_setup_fee");
+      const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
+      if (stamp != null && stamp < 0) {
+        // A completion is mid-claim on this very setup (codex #3591 r48
+        // P1): committing through would leave both charges live. Throwing
+        // aborts a staff unvoid outright; the webhook flip retries after
+        // the completion settles.
+        throw new Error(`invoice ${invoiceRow.id}: series ${anchorId} has a completion mid-claim on the setup — retry after it settles`);
+      }
+      // A SIBLING claim on the same series (another invoice collected the
+      // setup while this one was reversed — codex #3591 r48 P1):
+      // reinstating this invoice would make the fee doubly collectible.
+      // Strict (staff unvoid) refuses; the automated flip pages a human
+      // and proceeds (a poisoned webhook retry loop is worse than a paged
+      // reconcile).
+      // EVERY sibling claim is reconciled, not just an unordered first
+      // (codex #3591 r85 P1): a series reversed more than once can carry
+      // several sibling claims — an old terminal one AND a later paid
+      // one. Processing only the first could delete the terminal claim
+      // and retire the stamp while the paid sibling stays silently
+      // collectible alongside the reinstated invoice. Same per-sibling
+      // disposition as the prepay-revival loop above.
+      const siblingClaims = await conn("setup_fee_claims")
+        .where({ scheduled_service_id: anchorId })
+        .whereNot({ invoice_id: invoiceRow.id })
+        .select("id", "invoice_id");
+      for (const siblingClaim of siblingClaims || []) {
+        // An UNPAID sibling is retired automatically (codex #3591 r49
+        // local P0) — the reinstated invoice becomes THE setup carrier;
+        // only money attached needs a human refund/reconcile.
+        const sib = await conn("invoices")
+          .where({ id: siblingClaim.invoice_id })
+          .first("id", "status", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id", "credit_applied");
+        const sibTerminal = sib && ["void", "cancelled", "canceled", "refunded"].includes(String(sib.status).toLowerCase());
+        const moneyAttached = !sib || sib.paid_at || sib.payment_recorded_at || sib.stripe_payment_intent_id
+          || sib.payer_statement_id || Number(sib.credit_applied) > 0
+          || ["paid", "prepaid", "processing"].includes(String(sib?.status).toLowerCase());
+        if (sib && sibTerminal) {
+          await conn("setup_fee_claims").where({ id: siblingClaim.id }).delete();
+        } else if (!moneyAttached) {
+          const sibVoided = await conn("invoices")
+            .where({ id: sib.id, status: sib.status })
+            .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id").where(function creditFree() { this.whereNull("credit_applied").orWhere("credit_applied", 0); })
+            .update({ status: "void", updated_at: new Date() });
+          if (sibVoided === 1) {
+            await conn("setup_fee_claims").where({ id: siblingClaim.id }).delete();
+            logger.info(`[invoice] invoice ${invoiceRow.id} reinstated — sibling setup invoice ${sib.id} voided (claim consumed) so the fee is carried once`);
+          } else if (strict) {
+            throw new Error(`Cannot restore invoice ${invoiceRow.id} — sibling setup invoice ${sib.id} gained a payment anchor mid-void; reconcile which invoice carries the fee first`);
+          } else {
+            logger.error(`[invoice] FIX: invoice ${invoiceRow.id} left 'refunded' but sibling setup invoice ${sib.id} gained a payment anchor mid-void — refund/reconcile so the setup is not collected twice (claim kept)`);
+          }
+        } else if (strict) {
+          throw new Error(`Cannot restore invoice ${invoiceRow.id} — invoice ${siblingClaim.invoice_id} already collected this series' bait-station setup; reconcile which invoice carries the fee first`);
+        } else {
+          logger.error(`[invoice] FIX: invoice ${invoiceRow.id} left 'refunded' but invoice ${siblingClaim.invoice_id} also carries this series' setup claim with money attached — refund/reconcile so the setup is not collected twice`);
+        }
+      }
+      if (stamp != null && Math.round(stamp * 100) === Math.round(amount * 100)) {
+        retired = await conn("scheduled_services")
+          .where({ id: anchorId, pending_setup_fee: parent.pending_setup_fee })
+          .update({ pending_setup_fee: null, updated_at: new Date() });
+      } else if (stamp != null && stamp !== 0) {
+        logger.error(`[invoice] FIX: invoice ${invoiceRow.id} left 'refunded' but series ${anchorId} carries a $${stamp} stamp that is not its $${amount.toFixed(2)} setup — reconcile so the setup is not collected twice`);
+      }
+    }
+    const voidedRebills = await InvoiceService._voidUntouchedRodentSetupRebills(conn, invoiceRow.id);
+    if (retired || voidedRebills) {
+      logger.info(`[invoice] refund-bounce cleanup for invoice ${invoiceRow.id}: ${retired ? "restored setup stamp retired" : ""}${retired && voidedRebills ? ", " : ""}${voidedRebills ? `${voidedRebills} replacement draft(s) voided` : ""}`);
+    }
+    return { retired: retired === 1, voidedRebills };
+  },
+
+  async restoreRetiredSetupFeeClaimForPrepay(prepayInvoiceId, conn = db, { sourceEstimateId = null, customerId = null, coverageServiceType = null } = {}) {
+    if (!prepayInvoiceId) return null;
+    // Re-stamp + record consume run in ONE transaction with the record
+    // locked (codex #3591 r40 P1): an autocommitted re-stamp followed by a
+    // failed delete would leave a live fee AND a live record, and the next
+    // re-entry (a repeated refund sync) would restore — and bill — it again.
+    const run = async (trx) => this._restoreRetiredSetupFeeClaimLocked(trx, prepayInvoiceId, { sourceEstimateId, customerId, coverageServiceType });
+    return typeof conn.transaction === "function" && !conn.isTransaction
+      ? conn.transaction(run)
+      : run(conn);
+  },
+
+  async _restoreRetiredSetupFeeClaimLocked(conn, prepayInvoiceId, { sourceEstimateId = null, customerId = null, coverageServiceType = null } = {}) {
+    const claim = await conn("setup_fee_claims")
+      .where({ invoice_id: prepayInvoiceId })
+      .forUpdate()
+      .first("id", "scheduled_service_id", "amount");
+    if (!claim) return null;
+    const amount = Math.round(Number(claim.amount) * 100) / 100;
+    if (!(amount > 0)) return null;
+    // An ANCHOR-LESS record (codex #3591 r39 P1): the estimate-accept prepay
+    // billed the setup before any series existed (manual Mark Won seeds the
+    // series later). Resolve the rodent root NOW from the term's source
+    // estimate; with no root to carry the obligation the record is kept and
+    // a human is paged — the fee is owed and nothing else re-stamps it.
+    let anchorId = claim.scheduled_service_id || null;
+    if (!anchorId) {
+      const { authoritativeServiceKey } = require("./secure-appointment-plans");
+      // Liveness per root through the shared consumable-series predicate
+      // (codex #3591 r69 P1): a CANCELLED root whose pending/confirmed child
+      // remains is still the series the refunded setup restores onto — a
+      // status filter here left the claim anchor-less and the child
+      // completed without the $99.
+      const { seriesCanStillConsume } = require("./secure-appointment-plans");
+      if (sourceEstimateId) {
+        const roots = await conn("scheduled_services")
+          .where({ source_estimate_id: sourceEstimateId })
+          .whereNull("recurring_parent_id")
+          .select("id", "service_type", "service_id", "status");
+        // EXACTLY ONE rodent root or refuse (codex #3591 r61 P1): with two
+        // live rodent roots linked to the same estimate, first-returned
+        // ordering would re-stamp an arbitrary series and consume the
+        // immutable claim record against it — the same unique-anchor rule
+        // the neighboring reversal/revival paths enforce. Ambiguity keeps
+        // the claim anchor-less and pages for reconciliation.
+        const estimateRodentRootIds = [];
+        for (const root of roots || []) {
+          if (!(await seriesCanStillConsume(conn, root))) continue;
+          if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) estimateRodentRootIds.push(root.id);
+        }
+        if (estimateRodentRootIds.length > 1) {
+          logger.error(`[invoice] FIX: anchor-less setup-fee claim for prepay ${prepayInvoiceId} matches ${estimateRodentRootIds.length} live rodent roots on estimate ${sourceEstimateId} (${estimateRodentRootIds.join(", ")}) — pick the series that owes the $${amount.toFixed(2)} bait-station setup and restore it manually (record kept)`);
+          return null;
+        }
+        if (estimateRodentRootIds.length === 1) anchorId = estimateRodentRootIds[0];
+      }
+      // A Customer 360 prepay sold before any series existed (codex #3591
+      // r41 P1): the term's coverage names the DIRECT series the renewals
+      // seeding created afterwards.
+      if (!anchorId && customerId && coverageServiceType) {
+        const { serviceMatchesCoverage } = require("./annual-prepay-renewals");
+        const roots = await conn("scheduled_services")
+          .where({ customer_id: customerId })
+          .whereNull("recurring_parent_id")
+          .select("id", "service_type", "service_id", "source_estimate_id", "status");
+        // Same unique-anchor rule as the estimate path above (codex #3591
+        // r61 P1): coverage matching two live direct rodent roots must not
+        // restore onto whichever Postgres returned first.
+        const coverageRodentRootIds = [];
+        for (const root of roots || []) {
+          if (root.source_estimate_id || !serviceMatchesCoverage(root, coverageServiceType)) continue;
+          if (!(await seriesCanStillConsume(conn, root))) continue;
+          if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) coverageRodentRootIds.push(root.id);
+        }
+        if (coverageRodentRootIds.length > 1) {
+          logger.error(`[invoice] FIX: anchor-less setup-fee claim for prepay ${prepayInvoiceId} matches ${coverageRodentRootIds.length} live direct rodent roots for customer ${customerId} coverage "${coverageServiceType}" (${coverageRodentRootIds.join(", ")}) — pick the series that owes the $${amount.toFixed(2)} bait-station setup and restore it manually (record kept)`);
+          return null;
+        }
+        if (coverageRodentRootIds.length === 1) anchorId = coverageRodentRootIds[0];
+      }
+      if (!anchorId) {
+        logger.error(`[invoice] FIX: anchor-less setup-fee claim for prepay ${prepayInvoiceId} (estimate ${sourceEstimateId || 'none'}, coverage ${coverageServiceType || 'n/a'}) has no rodent series root to restore onto — $${amount.toFixed(2)} bait-station setup is owed again; bill it manually or re-run once the series is booked (record kept)`);
+        return null;
+      }
+    }
+    // The record itself is the provenance (codex #3591 r37 P1): only the
+    // prepay mints that billed the setup as their own line write one (switch,
+    // secure-plan, prepay-on-book, estimate-accept prepay), so an
+    // estimate-origin parent restores exactly like a direct one — a standard
+    // accept never writes a record and never lands here.
+    const parent = await conn("scheduled_services")
+      .where({ id: anchorId })
+      .first("id", "customer_id", "source_estimate_id", "pending_setup_fee", "status");
+    if (!parent) return null;
+    // A pending_setup_fee stamp is only ever consumed by a FUTURE completion
+    // mint (codex #3591 r43 P1): when the series has no billable visit left
+    // (root completed/cancelled, no live child), a re-stamp is inert and the
+    // refunded setup would never be collected. Mint a collectible DRAFT
+    // setup invoice instead (staff send it from Invoices), consuming the
+    // record the same way. Fail safe: an unreadable probe or failed mint
+    // keeps the record and pages a human.
+    const parentLive = ["pending", "confirmed", "rescheduled"].includes(String(parent.status || "").toLowerCase());
+    let billableRemains = parentLive;
+    if (!billableRemains) {
+      const liveChild = await conn("scheduled_services")
+        .where({ recurring_parent_id: parent.id })
+        .whereIn("status", ["pending", "confirmed", "rescheduled"])
+        .first("id");
+      billableRemains = !!liveChild;
+    }
+    if (!billableRemains) {
+      if (!parent.customer_id) {
+        logger.error(`[invoice] FIX: setup-fee claim for dead series ${parent.id} (prepay ${prepayInvoiceId}) has no customer to re-bill — $${amount.toFixed(2)} bait-station setup is owed; bill it manually (record kept)`);
+        return null;
+      }
+      try {
+        const reInvoice = await this.create({
+          database: conn,
+          customerId: parent.customer_id,
+          title: "Bait Station Setup",
+          lineItems: [{
+            description: "Bait Station Setup — one-time setup fee",
+            quantity: 1,
+            unit_price: amount,
+            category: "Setup fee",
+          }],
+          notes: `Re-billed after prepay invoice ${prepayInvoiceId} was voided/refunded — the series has no future visit left to collect the setup on (visit ${parent.id}). ${rodentSetupRebillMarker(prepayInvoiceId)}`,
+          dueDate: etDateString(),
+        });
+        await conn("setup_fee_claims").where({ id: claim.id }).delete();
+        logger.info(`[invoice] setup re-billed as draft ${reInvoice?.invoice_number || reInvoice?.id} — dead series ${parent.id}, prepay ${prepayInvoiceId} refunded ($${amount.toFixed(2)})`);
+        return { scheduledServiceId: parent.id, amount, reInvoiceId: reInvoice?.id || null };
+      } catch (mintErr) {
+        // PROPAGATES (codex #3591 r47 local P0): the term cancellation and
+        // this replacement mint commit TOGETHER — a swallowed mint failure
+        // committed a cancelled term no sync re-selects, stranding the
+        // claim record and the $99 forever. The throw rolls the whole
+        // refund sync back and the event retries.
+        logger.error(`[invoice] setup re-bill mint failed for dead series ${parent.id} (prepay ${prepayInvoiceId}): ${mintErr.message} — failing the reversal so it retries`);
+        throw mintErr;
+      }
+    }
+    const restored = await conn("scheduled_services")
+      .where({ id: parent.id })
+      .whereNull("pending_setup_fee")
+      .update({ pending_setup_fee: amount, updated_at: new Date() });
+    if (restored !== 1) {
+      logger.warn(`[invoice] retired setup-fee claim NOT restored on series ${parent.id}: stamp already ${parent.pending_setup_fee} — prepay ${prepayInvoiceId} dead, record kept`);
+      return null;
+    }
+    await conn("setup_fee_claims").where({ id: claim.id }).delete();
+    logger.info(`[invoice] setup-fee claim restored on series ${parent.id} ($${amount.toFixed(2)}) — prepay ${prepayInvoiceId} is dead`);
+    return { scheduledServiceId: parent.id, amount };
+  },
+
   /**
    * Restore invoices the ON-SITE PREPAY SWITCH retired, keyed by the prepay
    * invoice that superseded them (the switch stamps each voided row with
@@ -5568,6 +6309,11 @@ const InvoiceService = {
             if (voidedInvoice.payer_statement_id) {
               await require("./payer-statements").rollupStatement(voidedInvoice.payer_statement_id, trx);
             }
+            // A cancelled visit's auto-voided invoice may have billed the
+            // rodent bait-station setup (codex #3591 r58 P1) — restore the
+            // obligation to the living series exactly like voidInvoice does
+            // (billable-visit guard + dead-series re-bill inside).
+            await InvoiceService.restoreRodentSetupObligationForReversedInvoice(trx, voidedInvoice);
             return { voided: true, invoice: voidedInvoice, previousStatus: locked.status };
           });
 
@@ -5726,6 +6472,7 @@ InvoiceService._internals = {
 InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'canceled', 'cancelled'];
 InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 
+InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
 module.exports = InvoiceService;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
 module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;

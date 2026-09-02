@@ -111,6 +111,20 @@ describe('termite typed cutover — field parity contract', () => {
     );
   });
 
+  test('standard treatment methods and treated areas use termite-native dropdown vocabulary', () => {
+    const fields = PROJECT_TYPES.termite_treatment.findingsFields;
+    const areas = fields.find((field) => field.key === 'areas_treated');
+    const method = fields.find((field) => field.key === 'treatment_method');
+    expect(areas.type).toBe('chips');
+    expect(areas.options).toEqual(expect.arrayContaining([
+      'Foundation perimeter', 'Wall void', 'Bait station locations',
+    ]));
+    expect(method.options).toEqual(expect.arrayContaining([
+      'Liquid perimeter', 'Rodding', 'Foam / void injection', 'Drill-and-inject',
+      'Bait station setup', 'Cartridge replacement',
+    ]));
+  });
+
   test('flipped keys are unlisted; post-flip is healthy typed; pre-flip is a loud defect', () => {
     for (const c of CUTOVERS) {
       for (const [list, keys] of Object.entries(ALL_LISTS)) {

@@ -952,6 +952,15 @@ function customerPhoneMatches(phone, customer = {}) {
   return samePhone(phone, customer.phone);
 }
 
+// ONE merge policy for leads.extracted_data, shared with the voice-agent
+// writer (lead-from-extraction.js) so the two paths can never drift again.
+const {
+  mergeLeadExtractedData, parseLeadExtractedData, shouldRefreshLeadSummary,
+} = require('../utils/lead-extracted-data-merge');
+// Members of leads.extracted_data this file re-derives on EVERY pass, so they
+// must not fill forward from the prior row: a stale reason would outlive the
+// condition that produced it.
+const EXTRACTED_DATA_RECOMPUTED_KEYS = ['needs_confirmation', 'missing_for_qualification'];
 // Extracted VERBATIM to the shared util (codex P1 PR #3303 r19) — the
 // attribution retire path mirrors this exact gate on phone-matched
 // successors; never re-inline or duplicate it.
@@ -1865,18 +1874,13 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
 // email. Phone is implicit (caller ID). Evaluate against the MERGED record
 // (this call's extraction OR what a prior call already stored), so a follow-up
 // call that restates nothing doesn't un-qualify an already-complete lead.
-const QUALIFYING_CONTACT_FIELDS = ['first_name', 'last_name', 'service_address', 'email'];
-const QUALIFYING_CONTACT_LABELS = {
-  first_name: 'first name',
-  last_name: 'last name',
-  service_address: 'service address',
-  email: 'email',
-};
-function leadContactCompleteness(fields = {}) {
-  const present = (v) => !!String(v == null ? '' : v).trim();
-  const missing = QUALIFYING_CONTACT_FIELDS.filter((key) => !present(fields[key]));
-  return { complete: missing.length === 0, missing };
-}
+// Extracted to the shared util so the voice-agent writer applies the SAME
+// gate (codex #3675 P1) — never re-inline or duplicate it.
+const {
+  QUALIFYING_CONTACT_LABELS,
+  leadContactCompleteness,
+  leadQualification,
+} = require('../utils/lead-contact-completeness');
 
 // A real new-sales prospect we can still work even though the customer upsert
 // was skipped — almost always because the caller never stated a name (the
@@ -1905,7 +1909,105 @@ function leadContactCompleteness(fields = {}) {
 // attribution retire path mirrors this exact gate on customer-less
 // phone-matched successors; never re-inline or duplicate it.
 const { hasWorkableLeadSignal } = require('../utils/workable-lead-signal');
+// Distinct counts for a bulk run. Extracted so the rule is testable without
+// standing up the pending-query builder — the counting, not the SQL, is what
+// the admin toast reports.
+//
+// `skipped` alone does NOT mean nothing happened: spam, voicemail, a policy
+// hold and a rejected transcript are skips that COMPLETED real work and
+// persisted a terminal status. The discriminator is `success`, which this
+// pass made honest — a blocked claim, a not-ready recording and an ownership
+// loss all return success:false, every settled outcome returns success:true.
+// So a batch that classified a voicemail reports it as processed instead of
+// "Processed 0 · skipped 1" inviting a needless reprocess (pre-push audit
+// P1), and a pass that lost its claim before the terminal write never counts
+// as work done.
+function summarizeBatch(results) {
+  const blocked = results.filter((r) => r.skipped && r.success === false).length;
+  const failed = results.filter((r) => r.success === false && !r.skipped).length;
+  return {
+    processed: results.length - blocked - failed,
+    skipped: blocked,
+    failed,
+    attempted: results.length,
+  };
+}
 
+
+
+// A claim is reclaimable when it STOPPED BEATING — or when it has simply been
+// held too long, whatever the beat says.
+//
+// The heartbeat runs on a timer, so it keeps beating while the pass is alive
+// even if the WORK is not progressing: a provider call hung on an open socket
+// keeps the event loop alive, the timer keeps firing, and a heartbeat-only
+// rule would leave that claim unreclaimable forever — strictly worse than the
+// fixed window it replaced, and the 2026-08-31 failure was a pass that stalled
+// rather than crashed. The absolute ceiling is the backstop: generous enough
+// that a long transcription is never stolen mid-flight, finite so a hang is
+// always recoverable (pre-push audit P1).
+// DERIVED from the provider budgets, never a flat guess: a healthy pass can
+// legitimately run download + transcription (primary and fallback) + labeling
+// + extraction (primary and fallback) back to back, which at the shipped
+// defaults is exactly 20 minutes — so a flat 20 would have reclaimed a
+// slow-but-working pass out from under itself (pre-push audit P1).
+// A claim is reclaimable when it STOPPED BEATING. Nothing else — no ceiling,
+// for anybody.
+//
+// A ceiling was tried several ways, because a pass hung on a provider socket
+// keeps its timer beating and could never be reclaimed. The answer turned out
+// to be upstream: EVERY provider call this pass makes is now bounded — the
+// lead synopsis was the last one running on the SDK's defaults — so a stuck
+// pass fails, releases its claim and stops beating on its own. With no
+// unbounded await left, the heartbeat is a complete liveness signal, and
+// nothing has to steal a LIVE claim. That is what every ceiling ultimately
+// does, and what duplicates side effects on a customer's record when it
+// guesses wrong.
+//
+// Earlier revisions added an absolute ceiling so a pass that hangs while its
+// timer keeps beating could still be recovered. Every attempt to size that
+// ceiling failed the same way: it has to sit above the longest LEGITIMATE
+// pass, the pipeline contains provider calls with no bounded timeout (the
+// contact decoder, the synopsis call on SDK defaults), and a ceiling below
+// the true worst case lets a peer steal a live claim and run a second pass
+// concurrently — duplicate side effects on a customer's record, which is far
+// worse than the hang it was guarding.
+//
+// So the ceiling is gone from the reclaim path. What replaces it is not
+// silence: the stall watchdog still rings on a claim that has outlived every
+// budgeted path (see utils/claim-ceiling.js — a false bell costs a
+// notification, a false steal costs a duplicate), so a hung-but-beating pass
+// surfaces to a human instead of being taken by a robot on a guess.
+//
+// KNOWN RESIDUAL: recovering that hung pass needs a human today. Closing it
+// properly needs ONE end-to-end deadline enforced inside the pass, so no leg
+// can outlive it and reclaim becomes safe by construction rather than by
+// margin — a larger change than this branch carries.
+//
+// The short window applies ONLY to a claim that is actually beating. A claim
+// with a NULL heartbeat is not a dead one — during a rolling deploy an older
+// pod holds a perfectly healthy claim while knowing nothing about the column,
+// and reading its silence as death let the new pod steal a live transcription
+// after three minutes (pre-push audit P1). Those keep the conservative
+// ten-minute window they had before the heartbeat existed.
+// A heartbeat only speaks for the claim that WROTE it. One left behind by a
+// previous pass is older than this claim's start, and reading it as this
+// claim's silence made a freshly claimed row look instantly dead — an old pod
+// reclaiming a row it had processed before would have its live pass stolen at
+// once, skipping the legacy window entirely (pre-push audit P1).
+const LEGACY_CLAIM_QUIET_MINUTES = 10;
+// What a human forcing a reprocess waits for a claim that IS beating.
+const FORCE_CLAIM_QUIET_MINUTES = 3;
+// COALESCE, not a bare comparison: with a NULL processing_started_at the
+// comparison yields NULL, NOT(NULL) is NULL, and the row would match NEITHER
+// branch — permanently unreclaimable, the worst possible bug in a lock.
+const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
+  + ' AND processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)';
+const reclaimableClaim = (quietMinutes) => "("
+  + `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
+  + ` OR (NOT (${CURRENT_BEAT}) AND`
+  + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
+  + ")";
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
@@ -2251,6 +2353,143 @@ function applySameCallLeadEligibility(query, { customerId, unclaimedOnly, workab
   return out;
 }
 
+
+// Shared-phone sibling visibility. A fresh mint while ANOTHER open lead
+// exists on this phone is deliberate in several paths (the name-conflict
+// fail-closed rule for shared office lines, the ownership filters, a
+// lookup/insert race across two concurrently processed call legs) — the
+// fail-closed cost is "a recoverable duplicate". But recoverable requires
+// DISCOVERABLE, and nothing cross-referenced the rows: on 2026-08-31 a
+// property manager's voicemail lead held the sent-and-viewed estimate while
+// the owner's fuller lead sat at 'new' with no estimate, and nobody working
+// either lead could see the other. Cross-note BOTH timelines so whichever
+// row the office opens points at its sibling. Read + activity inserts only;
+// never throws, never blocks processing.
+async function noteSharedPhoneSibling(database, { leadId, phone, extracted = {}, knownSiblingId = null, knownSiblingExact = false }) {
+  if (!phone || !leadId) return null;
+  try {
+    // Sibling selection is POSITIVE membership in the canonical open set —
+    // a whereNotIn(closed-ish) silently re-includes any status it forgot
+    // (spam, cancelled), and this note must never tell staff to work a
+    // non-engageable lead (see lead-statuses.js).
+    const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
+    // A known sibling elects the pair ONLY when it is EXACT — the row a
+    // guarded write just bounced off, i.e. the specific lead this caller
+    // was being matched into. A lookup's newest-name-conflict id is NOT
+    // exact: with 2+ open prospects on a shared line it is an arbitrary
+    // newest, and electing that pair is the wrong-pair steer the
+    // ambiguity guard below exists to refuse — such mints take the
+    // fallback path instead.
+    let sibling = null;
+    if (knownSiblingId && knownSiblingId !== leadId && knownSiblingExact) {
+      // Revalidated with the SAME open-lead filters as the fallback: the
+      // conflict was observed moments ago, but the sibling can have
+      // converted or been closed since, and a consolidation note pointing
+      // at a won/lost lead would misdirect the office.
+      sibling = await database('leads')
+        .whereNull('deleted_at')
+        // Phone revalidated like the fallback (codex r5): a concurrent edit
+        // can move that lead to a different number, and the note would then
+        // draw a consolidation arrow between two unrelated timelines.
+        .where({ id: knownSiblingId, phone })
+        .whereIn('status', OPEN_LEAD_STATUSES)
+        .whereNull('converted_at')
+        .first('id', 'first_name', 'last_name', 'status', 'estimate_id');
+      // Failed revalidation of an EXACT sibling elects NOTHING — falling
+      // back to a different same-phone row would steer consolidation at a
+      // pair the caller never matched, the exact outcome revalidation
+      // exists to prevent.
+      if (!sibling) return null;
+    }
+    if (!sibling) {
+      const openSiblings = await database('leads')
+        .whereNull('deleted_at')
+        .where('phone', phone)
+        .whereNot('id', leadId)
+        .whereIn('status', OPEN_LEAD_STATUSES)
+        .whereNull('converted_at')
+        .orderBy('created_at', 'desc')
+        .limit(2);
+      // AMBIGUOUS fallback (2+ open siblings, no specific one identified):
+      // naming the newest would direct consolidation at an arbitrary pair on
+      // a shared office/household line. Note the situation on the NEW lead
+      // only, without electing a pair.
+      if (Array.isArray(openSiblings) && openSiblings.length > 1) {
+        await database('lead_activities').insert({
+          lead_id: leadId,
+          // Dedicated type (not 'note'): the staleness sweep and the
+          // estimator evidence pack both exclude it — an automated
+          // cross-note is not "someone worked this lead" and must not
+          // ground another caller's estimate.
+          activity_type: 'shared_phone_note',
+          description: 'Shared phone: multiple other open leads exist on this number. Review them together before working this one — some may be the same inquiry.',
+          performed_by: 'AI Call Processor',
+          metadata: JSON.stringify({ shared_phone_open_sibling_count: openSiblings.length }),
+        });
+        logger.info(`[call-proc] shared-phone siblings (ambiguous) noted on lead ${leadId} (${maskPhone(phone)})`);
+        return null;
+      }
+      sibling = Array.isArray(openSiblings) ? openSiblings[0] : null;
+    }
+    if (!sibling) return null;
+    const newName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name)].filter(Boolean).join(' ') || 'this caller';
+    const sibName = [sibling.first_name, sibling.last_name].filter(Boolean).join(' ') || 'an unnamed caller';
+    const sibEstimate = sibling.estimate_id ? ' That lead already carries an estimate.' : '';
+    await database('lead_activities').insert([
+      {
+        lead_id: leadId,
+        activity_type: 'shared_phone_note',
+        // The id rides in the VISIBLE text — the timeline renders only the
+        // description, so a metadata-only reference is undiscoverable when
+        // names are blank or duplicated on a shared line.
+        description: `Shared phone: an open lead for ${sibName} (status ${sibling.status}, lead ${sibling.id}) already exists on this number.${sibEstimate} If this is the same inquiry, work that lead and remove this one.`,
+        performed_by: 'AI Call Processor',
+        metadata: JSON.stringify({ shared_phone_sibling_lead_id: sibling.id }),
+      },
+      {
+        lead_id: sibling.id,
+        activity_type: 'shared_phone_note',
+        description: `Shared phone: a new call from this number just minted a separate lead for ${newName} (lead ${leadId}). If it is the same inquiry, consolidate onto one lead.`,
+        performed_by: 'AI Call Processor',
+        metadata: JSON.stringify({ shared_phone_sibling_lead_id: leadId }),
+      },
+    ]);
+    logger.info(`[call-proc] shared-phone sibling noted: lead ${leadId} <-> ${sibling.id} (${maskPhone(phone)})`);
+    return sibling.id;
+  } catch (sibErr) {
+    // Sanitized code only — the query binds the caller phone and the
+    // inserts carry names; a raw driver message can echo either (AGENTS.md
+    // non-card PII logging rule).
+    logger.warn(`[call-proc] shared-phone sibling note skipped: ${sibErr.code || sibErr.name || 'db_error'}`);
+    return null;
+  }
+}
+
+// The SLA clock for a call-born lead starts when the CUSTOMER called, not
+// when the pipeline finished minting the row. first_contact_at anchored at
+// row-insert time erased every second of processing delay from
+// response_time_minutes and from the "leads waiting over 30m for first
+// contact" card — the 2026-08-31 wedge showed a 3-minute response for a
+// caller who actually waited 23. callStartedAt() also backs the call's own
+// length out of the fallback rows the status/recording callbacks insert
+// AFTER the call ends, where created_at is already post-call.
+//
+// The 24h clamp applies ONLY when a call that had ALREADY been processed is
+// re-run — the one pass that can mint a lead from an arbitrarily old call
+// and would otherwise write a months-long response time into the SLA
+// analytics. Not keyed on `force`: the admin panel sends force=true for
+// pending and wedged rows too, so clamping on it would erase the wait from
+// the very recovery the stall watchdog's alert asks the owner to perform. A
+// pending call that sat through a multi-day outage waited multi-day days,
+// and erasing that is the exact bug this change exists to fix.
+function leadFirstContactAt(call, { reprocessOfProcessed = false } = {}) {
+  const { callStartedAt } = require('../utils/call-timeline');
+  const callAt = callStartedAt(call);
+  if (!callAt) return new Date();
+  if (!reprocessOfProcessed) return callAt;
+  return (Date.now() - callAt.getTime()) <= 24 * 3600 * 1000 ? callAt : new Date();
+}
+
 async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null, stampedLeadId = null, stampedLeadVia = null }) {
   // Same-call retry FIRST, before any contact-based branch: a retry of this
   // call (extraction_failed reprocessing) must reuse the lead an earlier
@@ -2347,7 +2586,9 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // via the REGEXP_REPLACE equivalent of normalizeNamePart; a missing name
   // on either side is compatible, so shells stay reusable and name-less
   // extractions keep today's newest-wins behavior. All-conflict → fresh
-  // mint (the newest row's id rides back for the shared-phone note).
+  // mint (phoneNameConflictLeadId reports the newest conflicting row; the
+  // shared-phone note deliberately does NOT elect it as a pair — it is an
+  // arbitrary newest, not an exact identification).
   if (phone) {
     const extractedFirst = normalizeNamePart(firstName);
     if (!extractedFirst) {
@@ -2819,7 +3060,7 @@ function canonicalizeInlineUnits(streetKey) {
 // reassert consumes can be nulled — its WHERE is self-guarded, but the
 // label must tell the truth). Runs AFTER dropFilledLeadColumns, so a
 // dropped identity key means the locked value is the live one.
-function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null } = {}) {
+function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null, extractedDataDelta = null } = {}) {
   if (!lockedLead || !updates) return { updates, contact: null, serviceInterestDropped: false };
   const stillEmpty = (v) => v === null || v === undefined || v === '';
   const out = { ...updates };
@@ -2870,11 +3111,59 @@ function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNe
       delete payload.missing_for_qualification;
       if (remergedNeedsConfirmation.length) payload.needs_confirmation = remergedNeedsConfirmation;
       if (contact.missing.length) payload.missing_for_qualification = contact.missing;
-      out.extracted_data = JSON.stringify(payload);
+      // Re-merge over the LOCKED row for the same reason every other
+      // conditional column is re-decided here: the pre-lock `current` read is
+      // stale by now, and a staff edit or concurrent call in that gap must
+      // survive. Merge only THIS pass's delta — merging `payload` (already
+      // merged over the pre-lock row) would re-apply prior-derived keys and
+      // revert the concurrent writer we are trying to protect (pre-push P1).
+      // Without a delta, fall back to the pre-lock result rather than guess.
+      // The delta still carries this pass's PRE-lock needs_confirmation /
+      // missing_for_qualification. Drop them before merging: when the
+      // lock-time re-derivation comes back EMPTY, a conditional spread adds no
+      // override, and the stale pre-lock values would merge straight back in
+      // and undo a concurrent staff correction (pre-push P1). Strip first, then
+      // add only what the lock derived — the empty case included.
+      const lockDerivedDelta = { ...extractedDataDelta };
+      for (const key of EXTRACTED_DATA_RECOMPUTED_KEYS) delete lockDerivedDelta[key];
+      if (remergedNeedsConfirmation.length) lockDerivedDelta.needs_confirmation = remergedNeedsConfirmation;
+      if (contact.missing.length) lockDerivedDelta.missing_for_qualification = contact.missing;
+      out.extracted_data = JSON.stringify(extractedDataDelta
+        ? mergeLeadExtractedData(
+          lockedLead.extracted_data,
+          lockDerivedDelta,
+          { recomputedKeys: EXTRACTED_DATA_RECOMPUTED_KEYS },
+        )
+        : payload);
       if (Object.prototype.hasOwnProperty.call(out, 'is_qualified')) {
-        out.is_qualified = ['hot', 'warm'].includes(leadQuality) && contact.complete;
+        // Same monotonic rule as the Step 4b write, re-judged against the
+        // LOCKED row: earned by this call OR retained from the row, and never
+        // over a standing human disqualification.
+        out.is_qualified = leadQualification({
+          contactComplete: contact.complete,
+          leadQuality,
+          priorQualified: lockedLead.is_qualified,
+          disqualificationReason: lockedLead.disqualification_reason,
+        });
       }
     }
+  }
+  // transcript_summary's refresh test (did this pass ADVANCE the lead?) was
+  // decided from the pre-lock `current` row. If a concurrent call or a staff
+  // edit filled that contact field or took on the quote obligation first, the
+  // fill is dropped above but the summary would still overwrite the newer,
+  // substantive one — the exact clobber this guard exists to stop. Re-judge
+  // against the locked row: dropFilledLeadColumns has already removed any
+  // FILL_ONLY key the locked row now carries, so a surviving one genuinely
+  // fills an empty column.
+  if (Object.prototype.hasOwnProperty.call(out, 'transcript_summary')) {
+    // Re-judged against the LOCKED row: the pre-lock `current` read is stale
+    // by now, so a summary a concurrent call or a staff edit wrote in that gap
+    // must be compared against, not blown past.
+    if (!shouldRefreshLeadSummary({
+      currentSummary: lockedLead.transcript_summary,
+      newSummary: out.transcript_summary,
+    })) delete out.transcript_summary;
   }
   return { updates: out, contact, serviceInterestDropped };
 }
@@ -5798,6 +6087,13 @@ async function generateLeadSynopsis(transcription) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
   try {
+    // BOUNDED, like every other provider call this pass makes. On the SDK's
+    // defaults this one could hang on an open socket indefinitely, and a pass
+    // that hangs keeps its heartbeat beating — which is what made a wedged
+    // claim unreclaimable and drove several attempts at a reclaim ceiling
+    // that could steal live work. With every call bounded, a stuck pass
+    // FAILS, releases and stops beating, and the heartbeat rule alone is
+    // enough.
     const response = await client.messages.create({
       model: MODELS.FLAGSHIP,
       max_tokens: 1200,
@@ -5841,7 +6137,12 @@ One specific, concrete step Virginia or the office should take within the next 2
 Formatting:
 Use markdown headers (##) for sections. Use bullet points. Keep the entire output under 400 words. Write like you're handing a cheat sheet to a technician sitting in the truck.`,
       }],
-    });
+      // maxRetries: 0 — the SDK defaults to 2 and applies the timeout PER
+      // ATTEMPT, so a bounded call could still hold the claim for three
+      // intervals and trip the stall watchdog on a healthy pass (codex P2).
+      // The pipeline has its own retry lanes; a claim-holding pass does not
+      // need a second one inside it.
+    }, { timeout: PROVIDER_FETCH_TIMEOUTS_MS.extraction, maxRetries: 0 });
 
     return response.content[0]?.text?.trim() || null;
   } catch (err) {
@@ -5948,6 +6249,17 @@ const CallRecordingProcessor = {
     const processingStartedAt = new Date();
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) throw new Error(`Call not found: ${callSid}`);
+    // Captured BEFORE the claim rewrites processing_status. This — not
+    // opts.force — is what "re-running a finished call" means: the admin
+    // panel sends force=true even for a pending/wedged row, so keying the
+    // SLA clamp on force would erase the real wait from exactly the manual
+    // recovery this feature's own alert tells the owner to perform. All
+    // three COMPLETED states count: a months-old voicemail or spam row
+    // re-run and newly read as a lead must not inject its original call
+    // time into the SLA analytics. The retry states (extraction_failed,
+    // no_transcription) are unfinished work and keep the real wait.
+    const COMPLETED_STATUSES = new Set(['processed', 'voicemail', 'spam']);
+    const wasAlreadyProcessed = COMPLETED_STATUSES.has(call.processing_status);
 
     // Dedup guard — skip if already fully processed (prevents duplicate
     // SMS on webhook retries). opts.force=true bypasses the guard so the
@@ -5972,6 +6284,10 @@ const CallRecordingProcessor = {
     // hands the lock to a peer, the peer's claim overwrites the token and
     // our catch-block UPDATE matches 0 rows — we leave the peer alone.
     const procToken = crypto.randomBytes(16).toString('hex');
+    // Liveness heartbeat for this claim (see the reclaim predicates): bumped
+    // every 60s while the pass runs, token-fenced so a pass that lost its
+    // claim beats into 0 rows. Cleared in the outer finally on every exit.
+    let heartbeatTimer = null;
     // This pass's MONOTONIC generation — assigned by the claim write below
     // (processing_generation + 1). The token is the claim MUTEX; the
     // generation is the pass IDENTITY that survives finalization: a cleared
@@ -5998,6 +6314,12 @@ const CallRecordingProcessor = {
           .forUpdate()
           .first('first_name', 'last_name', 'phone', 'updated_at') || null;
       }
+      // Only `force` takes the other branch. Routing operator clicks there as
+      // well skipped this branch's extraction_failed cap and 10-minute
+      // backoff, so an ordinary first-run retry could re-enter this
+      // side-effect-heavy pipeline over and over (codex P1). `operator` does
+      // one thing and one thing only: it shortens the heartbeat-quiet window
+      // INSIDE this predicate, below.
       if (!opts.force) {
         // Reclaim stale 'processing' rows older than 10 min — server crash or
         // Gemini hang between claim (this UPDATE) and terminal status write
@@ -6013,7 +6335,12 @@ const CallRecordingProcessor = {
           .whereRaw("processing_status IS DISTINCT FROM 'processed'")
           .where(function () {
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-              .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+              // A human pressing Process waits for the short quiet window; an
+              // unattended pass keeps the conservative one. Everything else
+              // about this claim — the retry cap, the backoff — is unchanged.
+              .orWhereRaw(reclaimableClaim(
+                opts.operator ? FORCE_CLAIM_QUIET_MINUTES : LEGACY_CLAIM_QUIET_MINUTES,
+              ));
           })
           // Retryable-failure guard: the sweep's cap/backoff filter only
           // protects sweep-originated runs — direct callers (the
@@ -6042,6 +6369,7 @@ const CallRecordingProcessor = {
             // In-flight state is carried by processing_token/status alone;
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
+            processing_heartbeat_at: new Date(),
             updated_at: new Date(),
           }, ['processing_generation']);
         // PG returns the updated rows ([] = claim lost); count-shaped results
@@ -6072,8 +6400,17 @@ const CallRecordingProcessor = {
         const claimed = await trx('call_log')
           .where({ twilio_call_sid: callSid })
           .where(function () {
+            // 3 minutes here vs the automatic paths' 10, measured against
+            // the LIVENESS HEARTBEAT (bumped every 60s by the owning pass),
+            // not the pass's start time: a healthy peer mid-way through a
+            // five-minute transcription keeps beating and stays protected
+            // indefinitely, while a wedged pass stops beating and a human
+            // force click recovers it in minutes instead of the 10 the
+            // 2026-08-31 wedge cost. Force is an operator explicitly asking
+            // after looking at the row; the automatic paths keep the
+            // conservative window.
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-              .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+              .orWhereRaw(reclaimableClaim(FORCE_CLAIM_QUIET_MINUTES));
           })
           .update({
             processing_status: 'processing',
@@ -6087,6 +6424,7 @@ const CallRecordingProcessor = {
             // In-flight state is carried by processing_token/status alone;
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
+            processing_heartbeat_at: new Date(),
             updated_at: new Date(),
           }, ['processing_generation']);
         // Same both-shapes tolerance as the non-force claim above.
@@ -6100,9 +6438,54 @@ const CallRecordingProcessor = {
           ? Number(claimedRows[0].processing_generation) : null;
       }
     });
-    if (claimBlocked) return { success: true, skipped: true, reason: 'already_processing' };
+    // A blocked claim did NO work — success: false so no caller can mistake
+    // it for a completed run. The owner hit exactly that on 2026-08-31: his
+    // manual Process tap during a wedged claim returned success and the UI
+    // said processed while the call sat unprocessed for 18 minutes.
+    if (claimBlocked) {
+      // Which window applies depends on the claim we are blocked BEHIND: a
+      // beating claim frees up after the short quiet window, but one with no
+      // beat of its own — a legacy row, or a pod mid-rolling-deploy — keeps
+      // the conservative legacy window. Promising the short number for both
+      // sent the operator back to a conflict for several more minutes
+      // (codex P1).
+      const beat = call.processing_heartbeat_at ? new Date(call.processing_heartbeat_at) : null;
+      const startedAt = call.processing_started_at ? new Date(call.processing_started_at) : null;
+      const beating = beat && !Number.isNaN(beat.getTime())
+        && (!startedAt || Number.isNaN(startedAt.getTime()) || beat >= startedAt);
+      return {
+        success: false,
+        skipped: true,
+        reason: 'already_processing',
+        retryAfterMinutes: beating
+          ? ((opts.force || opts.operator) ? FORCE_CLAIM_QUIET_MINUTES : LEGACY_CLAIM_QUIET_MINUTES)
+          : LEGACY_CLAIM_QUIET_MINUTES,
+      };
+    }
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
+    // The claim is ours from here. Beat while we work: transcription of a
+    // long recording is one multi-minute await with no natural checkpoints,
+    // and without a beat the reclaim predicates cannot tell that pass from a
+    // wedged one. unref() so a draining process never lingers for the timer.
+    heartbeatTimer = setInterval(() => {
+      db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({ processing_heartbeat_at: new Date() })
+        .then((rows) => {
+          // A beat that matches 0 rows means a peer reclaimed this call —
+          // the ceiling fired, or the pass went quiet long enough to look
+          // dead. Say so loudly: every terminal write from here is
+          // token-fenced and will no-op, so the pass finishes into nothing,
+          // and this line is the only trace of why.
+          if (rows === 0) {
+            logger.warn(`[call-proc] ownership LOST mid-pass for ${maskSid(callSid)} — a peer reclaimed the claim; this pass's terminal writes will no-op`);
+          }
+        })
+        .catch((e) => logger.warn(`[call-proc] heartbeat skipped for ${maskSid(callSid)}: ${e.message}`));
+    }, 60 * 1000);
+    if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
 
     // Outer guard: any unhandled throw between the claim above and the
     // terminal-status writes below would otherwise wedge the row in
@@ -6155,9 +6538,42 @@ const CallRecordingProcessor = {
         // in-memory-only clear would leave the phantom link on the row for any
         // call that takes one of those paths. The happy path re-stamps the real
         // resolved customer in Step 4 (customer_id: customerId || call.customer_id).
-        await db('call_log').where({ id: call.id }).update({ customer_id: null, updated_at: new Date() });
+        // Token-fenced: a worker resuming after an operator reclaim would
+        // otherwise clear the REPLACEMENT pass's newly linked customer_id,
+        // even after that pass finalized (codex P1).
+        await db('call_log').where({ id: call.id })
+          .where('processing_token', procToken)
+          .update({ customer_id: null, updated_at: new Date() });
       }
     }
+
+    // Ownership gate for the side-effect boundaries below.
+    //
+    // Fencing individual writes stops a stale write; it does not stop a stale
+    // PASS. Between the transcript checkpoint and the terminal write this
+    // function creates customers, mints leads, books appointments and SENDS
+    // SMS — none of which a token fence on a later UPDATE can take back. So
+    // ownership is re-checked at each of those boundaries and a superseded
+    // pass leaves before it acts, which is what makes the operator takeover
+    // safe rather than merely bounded.
+    const stillOwnsClaim = async () => {
+      // NO catch: a transient query failure is not evidence that ownership
+      // was lost. Swallowing it made the pass abandon a claim it still held
+      // and stop its heartbeat without releasing the token, leaving the call
+      // wedged in 'processing' until the stale reclaim — manufacturing the
+      // exact failure this branch exists to remove (codex P1). Let it reach
+      // the outer catch, which releases the lock to a recoverable terminal
+      // state. Only a real zero-row result means the claim is gone.
+      const row = await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .first('id');
+      return !!row;
+    };
+    const abandonToPeer = (boundary) => {
+      logger.warn(`[call-proc] ownership lost before ${boundary} for ${maskSid(callSid)} — abandoning this pass`);
+      return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
+    };
 
     // Step 1: Transcribe — OpenAI is the source of record. Gemini and Twilio are fallbacks only.
     let transcription = null;
@@ -6251,7 +6667,24 @@ const CallRecordingProcessor = {
             ...(contactPassTranscript ? { contact_pass_transcript: contactPassTranscript } : {}),
           });
         }
-        await db('call_log').where({ id: call.id }).update(transcriptUpdate);
+        // Token-fenced like the terminal writes: this runs AFTER a
+        // multi-minute provider await, by which time a peer may have
+        // reclaimed the row. Writing by id alone let a superseded pass
+        // overwrite the replacement's transcript (codex P1).
+        const wroteTranscript = await db('call_log')
+          .where({ id: call.id })
+          .where('processing_token', procToken)
+          .update(transcriptUpdate);
+        if (!wroteTranscript) {
+          // STOP, do not merely skip the write. A zero-row fence here proves
+          // a peer owns the call, and everything after this point —
+          // the unified-message update, extraction, the lead and appointment
+          // writes — is side-effectful work that peer is also doing. This is
+          // the earliest checkpoint at which a superseded pass can know, so
+          // it is where it gets out (codex P1).
+          logger.warn(`[call-proc] transcript write skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer; abandoning this pass`);
+          return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
+        }
         await updateUnifiedVoiceMessage(
           { ...call, transcription },
           { body: transcription }
@@ -6423,7 +6856,13 @@ const CallRecordingProcessor = {
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!rejectionStampSettled) {
         logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
-        return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
+        // success:false — this pass did NOT finish. It lost its claim to a
+        // peer before the terminal write, so nothing it was asked to do was
+        // recorded. Reporting success let the bulk counters and the admin
+        // UI count it as processed work (pre-push audit P1); the boolean is
+        // the one discriminator both the counters and the client's
+        // settled-vs-blocked rule read.
+        return { success: false, skipped: true, reason: 'transcription_rejected_ownership_lost' };
       }
       // Dismiss any open Needs Review cards a prior hallucinated extraction
       // filed for this call — clearing review_status alone doesn't remove them
@@ -6475,11 +6914,26 @@ const CallRecordingProcessor = {
 
     if (!transcription) {
       logger.warn(`[call-proc] No transcription available for ${callSid}`);
-      await db('call_log').where({ id: call.id }).update({
-        processing_status: 'no_transcription',
-        processing_token: null,
-        updated_at: new Date(),
-      });
+      // Token-fenced like every other terminal write: a zombie pass that
+      // lost its claim to the stale reclaim must not clobber the peer that
+      // now owns the row (the peer may be mid-transcription and about to
+      // succeed where this pass found nothing).
+      const released = await db('call_log').where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          processing_status: 'no_transcription',
+          processing_token: null,
+          updated_at: new Date(),
+        });
+      if (!released) {
+        logger.warn(`[call-proc] no_transcription release skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
+        // Ownership loss, not a transcription failure — same treatment as the
+        // extraction branch. This pass persisted nothing and the peer that
+        // now owns the row may be mid-transcription and about to succeed, so
+        // reporting a red failure would count against a call that is fine
+        // (codex P1).
+        return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
+      }
       return { success: false, error: 'No transcription available' };
     }
 
@@ -6523,14 +6977,28 @@ const CallRecordingProcessor = {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       // Increment in SQL, not from the in-memory row: the stale-reclaim path
       // means `call` can predate another run's failed attempt.
-      const [failedRow] = await db('call_log').where({ id: call.id }).update({
-        processing_status: 'extraction_failed',
-        extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
-        processing_token: null,
-        updated_at: new Date(),
-      }).returning(['extraction_attempts']);
-      const attempts = Number(failedRow?.extraction_attempts) || 0;
-      await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
+      // Token-fenced: a zombie pass whose claim was reclaimed must neither
+      // burn the peer's retry budget nor knock its live 'processing' status
+      // to a terminal one. 0 rows -> the peer owns the row; leave it alone.
+      const [failedRow] = await db('call_log').where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          processing_status: 'extraction_failed',
+          extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
+          processing_token: null,
+          updated_at: new Date(),
+        }).returning(['extraction_attempts']);
+      if (failedRow) {
+        const attempts = Number(failedRow?.extraction_attempts) || 0;
+        await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
+      } else {
+        logger.warn(`[call-proc] extraction_failed release skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
+        // Ownership loss, not an extraction failure: this pass wrote nothing
+        // and a peer owns the row. Reporting the extraction error would put
+        // a failure on a call the reclaiming pass may well complete, and
+        // would burn nothing but the operator's attention (codex P2).
+        return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
+      }
       return { success: false, error: `AI extraction failed: ${err.message}` };
     }
 
@@ -6802,7 +7270,9 @@ const CallRecordingProcessor = {
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!terminalSettled) {
         logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
-        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
+        // success:false — the claim was lost before the terminal write, so
+        // this pass finished nothing. See the note on the rejection path.
+        return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
       // A previously classified call reprocessed into spam/non-workable
       // must not leave its property_role_confirm card actionable — the
@@ -7817,7 +8287,9 @@ const CallRecordingProcessor = {
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!vetoSettled) {
         logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
-        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
+        // success:false — the claim was lost before the terminal write, so
+        // this pass finished nothing. See the note on the rejection path.
+        return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
       // Retire any open property_role_confirm card from a prior pass — the
       // veto blocks every canonical write, so its parked mutations are
@@ -7885,6 +8357,7 @@ const CallRecordingProcessor = {
       }
     }
 
+    if (!(await stillOwnsClaim())) return abandonToPeer('the customer write');
     // Step 3: Create or update customer
     let customerId = call.customer_id;
     const phone = resolveCallContactPhone(call, extracted.phone);
@@ -8884,7 +9357,15 @@ const CallRecordingProcessor = {
     // must ride the FINAL fenced status write, not the settle's own
     // transaction (pre-push P0 r12).
     let deferredNonLeadAttributionRetire = false;
-    await db('call_log').where({ id: call.id }).update({
+    // TOKEN-FENCED, not merely preceded by an ownership check: the last gate
+    // sits above the whole customer-resolution step, a thousand lines and
+    // many awaits back. A pass that lost its claim in between would otherwise
+    // overwrite the replacement pass's customer_id, extraction and summary by
+    // call id alone (codex #3677 P1). Zero rows means the claim moved.
+    const checkpointRows = await db('call_log')
+      .where({ id: call.id })
+      .where('processing_token', procToken)
+      .update({
       customer_id: customerId || call.customer_id,
       // Call-creation provenance rides the SAME durable write that links
       // the customer (Codex #3084 r24): customer_id persisted ⇒ marker
@@ -8903,6 +9384,7 @@ const CallRecordingProcessor = {
       lead_quality: extracted.lead_quality || null,
       updated_at: new Date(),
     });
+    if (!checkpointRows) return abandonToPeer('the customer checkpoint write');
 
     const v2ExtractionForAudit = v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)
       ? v2Result.extraction
@@ -8985,6 +9467,7 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);
     });
 
+    if (!(await stillOwnsClaim())) return abandonToPeer('the lead write');
     // Step 4b: Create lead in leads table for pipeline tracking
     // Note: we create the lead DIRECTLY here instead of going through lead-attribution,
     // because Step 3 already created the customer — attribution would find the customer
@@ -9082,7 +9565,7 @@ const CallRecordingProcessor = {
           workableUnnamedLead,
           unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
         };
-        const { lead: existingLead, matchedVia: existingLeadVia } = await findReusableCallLead(db, {
+        const { lead: existingLead, matchedVia: existingLeadVia, phoneNameConflictLeadId } = await findReusableCallLead(db, {
           phone,
           email: phone ? null : (extracted.email || null),
           firstName: extracted.first_name || null,
@@ -9337,7 +9820,7 @@ const CallRecordingProcessor = {
             // first_contact_channel stays 'call' — attribution sweeps and the
             // channel-mix dashboards key on it, and a voicemail IS a call.
             lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
-            first_contact_at: new Date(),
+            first_contact_at: leadFirstContactAt(call, { reprocessOfProcessed: wasAlreadyProcessed }),
             first_contact_channel: 'call',
             twilio_call_sid: call.twilio_call_sid,
             call_duration_seconds: call.duration_seconds,
@@ -9354,6 +9837,12 @@ const CallRecordingProcessor = {
           // recovery mint below) and never throw — a notify failure must never
           // break call processing.
           await notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadSourceRow, call });
+
+          // No knownSiblingId here: phoneNameConflictLeadId is the lookup's
+          // NEWEST conflicting row, not an exact identification — with 2+
+          // open prospects the helper's ambiguity guard must refuse a pair,
+          // and with exactly one it finds the same row itself.
+          await noteSharedPhoneSibling(db, { leadId, phone, extracted });
         }
 
         // Dropped-call detector, phase 1 of 2 (owner directive 2026-08-01): a
@@ -9581,9 +10070,11 @@ const CallRecordingProcessor = {
             } else if (extracted.lead_quality && isEmpty(current?.urgency)) {
               leadUpdates.urgency = 'normal';
             }
-            // Always refresh the rolling AI-derived fields — they're a snapshot
-            // of the latest call, not user-curated content.
-            if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
+            // The lead's prior extracted_data, parsed ONCE: the basis for the
+            // needs_confirmation union, the extracted_data merge, and the
+            // "did this pass actually add anything" test below.
+            const priorExtractedData = parseLeadExtractedData(current?.extracted_data);
+            let extractedDataDelta = null;
             // Qualification now requires BOTH buying intent (hot/warm) AND the
             // contact info the office needs to work the lead: first + last name,
             // a service street address, and an email. Evaluate against the MERGED
@@ -9603,16 +10094,22 @@ const CallRecordingProcessor = {
             // warnings (a quick "slab or footer?" callback was wiping
             // address_unverified/email_unverified off the lead). Union prior +
             // this call; a recovered address supersedes its stale unverified.
-            const priorNeedsConfirmation = (() => {
-              try {
-                const data = typeof current?.extracted_data === 'string'
-                  ? JSON.parse(current.extracted_data)
-                  : (current?.extracted_data || {});
-                return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
-              } catch { return []; }
-            })();
+            const priorNeedsConfirmation = Array.isArray(priorExtractedData.needs_confirmation)
+              ? priorExtractedData.needs_confirmation
+              : [];
             const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation);
-            leadUpdates.extracted_data = JSON.stringify({
+            // MERGED over the lead's prior payload, never rebuilt wholesale
+            // (server/utils/lead-extracted-data-merge.js): a follow-up call
+            // that doesn't restate the pest problem or the promised quote must
+            // not erase them. needs_confirmation / missing_for_qualification
+            // are re-derived every pass, so they are declared recomputed and
+            // do not fill forward.
+            // THIS pass's own delta, kept separately from the merged result:
+            // the under-lock reconcile must re-apply only the keys this call
+            // actually supplied, never the merged object (whose prior-derived
+            // keys came from the PRE-lock read and would revert a concurrent
+            // writer — pre-push P1).
+            extractedDataDelta = {
               pain_points: extracted.pain_points,
               preferred_date_time: extracted.preferred_date_time,
               sentiment: extracted.sentiment,
@@ -9625,11 +10122,48 @@ const CallRecordingProcessor = {
               ...(callAdditionalProps.length ? { additional_properties: callAdditionalProps } : {}),
               ...(callSecondaryContact ? { secondary_contact: callSecondaryContact } : {}),
               // Recovery-pass rows keep the audit stamp the mint used to
-              // carry — this write REPLACES extracted_data wholesale.
+              // carry (this write MERGES now, so the stamp persists across
+              // later passes rather than being rebuilt away).
               ...(raceRecovered ? { claim_race_recovery: true } : {}),
-            });
+            };
+            const mergedExtractedData = mergeLeadExtractedData(
+              priorExtractedData,
+              extractedDataDelta,
+              { recomputedKeys: EXTRACTED_DATA_RECOMPUTED_KEYS },
+            );
+            leadUpdates.extracted_data = JSON.stringify(mergedExtractedData);
+            // transcript_summary is the lead card's "Notes" — what the office
+            // reads to know what the job IS. It used to refresh unconditionally
+            // ("a snapshot of the latest call"), so the LAST call always won
+            // regardless of content: on 2026-08-31 a 14-second callback chasing
+            // an estimate replaced the 157-second summary describing the actual
+            // work. shouldRefreshLeadSummary is the shared policy (all three
+            // writers of this column use it) — refresh when the lead has no
+            // summary, when this pass filled a contact field it was missing, or
+            // when it added a material job detail.
+            if (extracted.call_summary && shouldRefreshLeadSummary({
+              currentSummary: current?.transcript_summary,
+              newSummary: extracted.call_summary,
+            })) {
+              leadUpdates.transcript_summary = extracted.call_summary;
+            }
             // hot/warm AND complete contact. Spam was already early-returned.
-            leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
+            // Qualification is MONOTONIC under evidence: this call may EARN it,
+            // or the lead may RETAIN it, and it is lost only when the contact
+            // evidence stops supporting it. The old expression read lead_quality
+            // from this call alone, so one 'cold' callback demoted a lead an
+            // earlier call had qualified — which also drops it from the Google
+            // Ads qualified-lead conversion upload (ads/data-manager.js). A real
+            // demotion is a human act and has its own column
+            // (leads.disqualification_reason) — which the shared rule now
+            // actually READS, so a staff disqualification is not undone by a
+            // hot follow-up and not preserved-as-qualified by a cold one.
+            leadUpdates.is_qualified = leadQualification({
+              contactComplete: contact.complete,
+              leadQuality: extracted.lead_quality,
+              priorQualified: current?.is_qualified,
+              disqualificationReason: current?.disqualification_reason,
+            });
             // Only ever SET the customer link, never clear it. The unnamed-lead
             // path runs with customerId null and can reuse an existing lead
             // found by phone — writing customer_id = null there would detach a
@@ -9956,6 +10490,17 @@ const CallRecordingProcessor = {
                       leadUpdates.status = 'new';
                     }
                     resupply('next_follow_up_at', quotePromisedDue);
+                    // transcript_summary joins the resupply list now that it is
+                    // written CONDITIONALLY. It used to be unconditional, so it
+                    // was always in the payload and never needed re-supplying;
+                    // with the refresh guard, a chronological restamp whose
+                    // pre-settle row already held THIS call's own summary would
+                    // omit the key, the settle would roll the column back to
+                    // baseline, and the accepted reprocessing would commit with
+                    // the lead's Notes erased. Re-supplied here and then gated
+                    // by the conditional reconcile against the POST-SETTLE row,
+                    // exactly like every other key in this block.
+                    resupply('transcript_summary', extracted.call_summary);
                   }
                 }
                 // Fill-only columns are re-decided against the LOCKED row
@@ -9971,7 +10516,7 @@ const CallRecordingProcessor = {
                 const reconciled = reconcileConditionalLeadFieldsUnderLock(
                   dropFilledLeadColumns(leadUpdates, lockedLead),
                   lockedLead,
-                  { bridgeNeedsConfirmation, leadQuality: extracted.lead_quality },
+                  { bridgeNeedsConfirmation, leadQuality: extracted.lead_quality, extractedDataDelta },
                 );
                 if (reconciled.serviceInterestDropped) {
                   persistedServiceInterestLabel = null;
@@ -10282,7 +10827,7 @@ const CallRecordingProcessor = {
                   city: extracted.city || null,
                   zip: extracted.zip || null,
                   lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
-                  first_contact_at: new Date(),
+                  first_contact_at: leadFirstContactAt(call, { reprocessOfProcessed: wasAlreadyProcessed }),
                   first_contact_channel: 'call',
                   twilio_call_sid: call.twilio_call_sid,
                   call_duration_seconds: call.duration_seconds,
@@ -10290,10 +10835,19 @@ const CallRecordingProcessor = {
                   status: 'new',
                 }).returning('*');
                 logger.warn(`[call-proc] shared-line name conflict on lead ${leadId} — minted fresh lead ${conflictFresh.id}`);
+                const conflictedSiblingId = leadId;
                 leadId = conflictFresh.id;
                 current = conflictFresh;
                 raceRecovered = true;
                 await notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadSourceRow, call });
+                // This mint is the shared-line duplicate case in person — the
+                // conflicting lead is the row the guarded write just bounced
+                // off. Cross-note both timelines like the lookup-miss mint
+                // (the helper's newest-open-sibling query finds it; never
+                // throws).
+                await noteSharedPhoneSibling(db, {
+                  leadId, phone, extracted, knownSiblingId: conflictedSiblingId, knownSiblingExact: true,
+                });
                 continue;
               } catch (raceErr) {
                 // Sanitized code only — the insert carries the caller's
@@ -10347,7 +10901,7 @@ const CallRecordingProcessor = {
                   city: extracted.city || null,
                   zip: extracted.zip || null,
                   lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
-                  first_contact_at: new Date(),
+                  first_contact_at: leadFirstContactAt(call, { reprocessOfProcessed: wasAlreadyProcessed }),
                   first_contact_channel: 'call',
                   twilio_call_sid: call.twilio_call_sid,
                   call_duration_seconds: call.duration_seconds,
@@ -10652,6 +11206,11 @@ const CallRecordingProcessor = {
         // failure must never break call processing or the lead that was just
         // created.
         if (voicemailLeadPath && leadId) {
+          // Immediately before an outbound TEXT TO A CUSTOMER: the nearest
+          // gate is thousands of lines and several awaits back, and a
+          // duplicate text is the least recoverable thing this pass can do
+          // (codex #3677 P1).
+          if (!(await stillOwnsClaim())) return abandonToPeer('the voicemail quote-link text');
           try {
             const VoicemailLeadSms = require('./voicemail-lead-sms');
             voicemailSmsResult = await VoicemailLeadSms.sendVoicemailQuoteLink({
@@ -10701,6 +11260,7 @@ const CallRecordingProcessor = {
               // Inner catch: the review card below MUST still open when the
               // send path throws — a failed text plus no card is exactly the
               // silent-cold-lead outcome this lane prevents.
+              if (!(await stillOwnsClaim())) return abandonToPeer('the dropped-call address text');
               try {
                 smsOutcome = await DroppedCallSms.sendDroppedCallAddressRequest({
                   leadId, extracted, call, phone: smsAni, expectedCustomerId: customerId || null,
@@ -11141,6 +11701,7 @@ const CallRecordingProcessor = {
       }
     }
 
+    if (!(await stillOwnsClaim())) return abandonToPeer('the appointment SMS');
     // Step 5: If appointment detected with a SPECIFIC time, send confirmation SMS
     // Guard: reject vague date/time (must contain an actual time like "10 AM", "2:30 PM", "noon")
     let appointmentResult = null;
@@ -11868,6 +12429,14 @@ const CallRecordingProcessor = {
                         .onConflict('idempotency_key')
                         .ignore()
                         .returning('*');
+                      // Visit groups (visit-group-scope.md §2): stamp at
+                      // scheduling, inside this savepoint — dispatch-owned
+                      // but NOT office-review (ai_call_pipeline_followup),
+                      // so it is join-eligible; self-refusing otherwise.
+                      // Absent on the idempotency-conflict reuse (no row).
+                      if (fuRow?.id) {
+                        await require('./visit-groups').maybeGroupRow(fuRow.id, { database: sp, createdBy: 'dispatch' });
+                      }
                       return fuRow || null;
                     });
                   } catch (fuErr) {
@@ -12377,6 +12946,12 @@ const CallRecordingProcessor = {
                   .ignore()
                   .returning('*');
                 if (created) {
+                  // Visit groups (visit-group-scope.md §2): stamp at
+                  // scheduling — a confirmed phone booking never passes
+                  // through the job-status pending→confirmed regroup hook.
+                  // Absent on the idempotency-conflict reuse branch below
+                  // (the original insert already stamped).
+                  await require('./visit-groups').maybeGroupRow(created.id, { database: trx, createdBy: 'dispatch' });
                   // Inspection credit: a booked phone sale is a REAL
                   // customer booking — durable evidence, same transaction
                   // (Codex #3178 r6 P0). The hourly sweep mints from it.
@@ -13169,7 +13744,23 @@ const CallRecordingProcessor = {
               // send; email/both also emails the confirmation.
               const AppointmentReminders = require('./appointment-reminders');
               let smsRan = false;
+              // Ownership loss INSIDE the dispatch closures cannot leave
+              // processRecording: a `return abandonToPeer(...)` there only
+              // left the closure, and the helper read the abandon object as
+              // a delivered text — then sent the 'both' email and let the
+              // pass carry on (codex #3677 P1). The closures FLAG the loss
+              // and answer "not reached"; the helper gates every leg on the
+              // same predicate so nothing later goes out; the pass abandons
+              // the moment the helper returns.
+              let ownershipLostInDispatch = false;
+              const claimStillOwned = async () => {
+                if (ownershipLostInDispatch) return false;
+                if (await stillOwnsClaim()) return true;
+                ownershipLostInDispatch = true;
+                return false;
+              };
               const confirmationReached = await AppointmentReminders.deliverConfirmationByChannel({
+                stillOwnsClaim: claimStillOwned,
                 customerId,
                 scheduledServiceId,
                 serviceLabel: serviceType,
@@ -13193,6 +13784,10 @@ const CallRecordingProcessor = {
                   // v2EmailBlocked for the email slots). The held codes
                   // never match QUIET_HOURS_HOLD, so the 8 AM sweep re-arm
                   // below cannot resurrect a consentless text.
+                  // Roughly two thousand lines of scheduling work separate
+                  // this from the Step 5 gate, and this is a TEXT TO A
+                  // CUSTOMER. Re-check immediately before it (codex P1).
+                  if (!(await claimStillOwned())) return false;
                   const sendResult = (holdImpliedSmsLeg || v2SmsBlocked)
                     ? {
                       sent: false,
@@ -13358,6 +13953,7 @@ const CallRecordingProcessor = {
                           .first()
                           .catch(() => null);
                         if (recentDup) continue;
+                        if (!(await claimStillOwned())) return false;
                         const contactResult = await sendCustomerMessage({
                           to: contact.phone,
                           body: contactBody,
@@ -13468,6 +14064,7 @@ const CallRecordingProcessor = {
                       const emailOnlySlots = (confirmationOptedOut || v2EmailBlocked) ? [] : getServiceContactSlots(freshCustomer || {})
                         .filter((s) => s.email && !s.phone);
                       if (emailOnlySlots.length) {
+                        if (!(await claimStillOwned())) return false;
                         const AppointmentEmail = require('./appointment-email');
                         const emailRes = await AppointmentEmail.sendAppointmentConfirmationEmail({
                           customerId,
@@ -13549,6 +14146,7 @@ const CallRecordingProcessor = {
                   return primaryOk;
                 },
               });
+              if (ownershipLostInDispatch) return abandonToPeer('the appointment confirmation dispatch');
               if (smsRan && confirmationReached && appointmentResult && appointmentResult.smsBlocked) {
                 // The blocked text was rescued by an email leg (the TCPA
                 // fallback above, or a 'both' channel's email) — record it so
@@ -13719,6 +14317,7 @@ const CallRecordingProcessor = {
       }
     }
 
+    if (!(await stillOwnsClaim())) return abandonToPeer('the automation enrollment');
     // Step 6: Enroll in the local new_lead automation sequence.
     // Variable name kept as `beehiivResult` for schema/log continuity;
     // carries the local enrollment result now.
@@ -13896,6 +14495,12 @@ const CallRecordingProcessor = {
     }
 
     // Step 7: Log activity
+    // BEFORE the insert, not after it: customer_interactions is explicitly
+    // non-idempotent, and the automation and newsletter awaits above are long
+    // enough for a heartbeat to go quiet and a peer to reclaim. Two passes
+    // both inserting puts the same call on the customer's timeline twice
+    // (codex P1).
+    if (customerId && !(await stillOwnsClaim())) return abandonToPeer('the customer timeline entry');
     if (customerId) {
       await db('customer_interactions').insert({
         customer_id: customerId,
@@ -13905,16 +14510,42 @@ const CallRecordingProcessor = {
       }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
     }
 
+    // The synopsis and CSR scoring below each await a provider call and then
+    // WRITE — a heartbeat can go quiet and a peer reclaim during either, so
+    // ownership is re-checked here as well as at the earlier boundaries
+    // (codex #3677 P1). This is the last gate before the terminal write,
+    // which is itself token-fenced.
+    if (!(await stillOwnsClaim())) return abandonToPeer('the synopsis and scoring writes');
     // Step 7b: Generate lead synopsis (Sales Strategist analysis)
     let synopsis = null;
     if (transcription && !extracted.is_spam && !extracted.is_voicemail) {
       try {
         synopsis = await generateLeadSynopsis(transcription);
         if (synopsis) {
-          await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
+          // generateLeadSynopsis's Step 0 gate answers with the literal
+          // "Not a new lead — no analysis needed." for, among others, "a
+          // callback or follow-up on an already-quoted job". That sentinel is
+          // a truthful per-CALL classification, so it still belongs on
+          // call_log — but it is NOT a lead-level fact, and writing it to the
+          // lead destroyed the strategist analysis the substantive call
+          // produced (2026-08-31). The column sits outside
+          // STAMPED_LEAD_RESTORE_FIELDS, so that loss is not even rollback-able.
+          const synopsisIsGateRefusal = /^\s*\**\s*not a new lead/i.test(synopsis);
+          // The gate above ran BEFORE this provider await, so ownership can
+          // have moved while the synopsis was generating. The write itself is
+          // TOKEN-FENCED rather than preceded by a check: a check-then-write
+          // still lets a peer reclaim between the two and a superseded pass
+          // overwrite the new owner's synopsis (codex #3677 P1). Zero rows
+          // means the claim moved; a thrown DB error still reaches the
+          // non-blocking catch below, as before.
+          const synopsisRows = await db('call_log')
+            .where({ id: call.id })
+            .where('processing_token', procToken)
+            .update({ lead_synopsis: synopsis });
+          if (!synopsisRows) return abandonToPeer('the synopsis write');
           await updateUnifiedVoiceMessage(call, { ai_summary: synopsis });
-          // Also write to lead if one was created
-          if (leadId) {
+          // Also write to lead if one was created — never the gate refusal.
+          if (leadId && !synopsisIsGateRefusal) {
             await db('leads').where({ id: leadId }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
           }
           logger.info(`[call-proc] Lead synopsis generated: ${synopsis.length} chars`);
@@ -13930,6 +14561,11 @@ const CallRecordingProcessor = {
     // /inbound-forward-accept webhook. Resolve that to a CSR name when mapped,
     // and fall back to 'Unknown' so analytics aren't silently booked to one name.
     let csrScoreResult = null;
+    // Re-checked here: the synopsis above is a provider await, so ownership
+    // can have moved since the last gate. Losing it ABANDONS rather than
+    // skipping scoring and carrying on into the finalization work — a
+    // superseded pass has no business doing either (codex #3677 P1).
+    if (!(await stillOwnsClaim())) return abandonToPeer('CSR scoring and finalization');
     if (transcription && transcription.length > 50) {
       try {
         const callMeta = typeof call.metadata === 'string'
@@ -13938,6 +14574,9 @@ const CallRecordingProcessor = {
         const answeredByCsr = callMeta?.forward_acceptance?.csr_name || 'Unknown';
         const CSRCoach = require('./csr/csr-coach');
         const scoreResult = await CSRCoach.scoreCall({
+          // Checked inside, immediately before the score row is written: the
+          // provider await between here and there is minutes long.
+          stillOwnsClaim,
           csrName: answeredByCsr,
           customerId: customerId || null,
           callDirection: 'inbound',
@@ -13950,6 +14589,14 @@ const CallRecordingProcessor = {
             sentiment: extracted.sentiment,
           },
         });
+        // The scorer's own post-await check found the claim gone. That is
+        // not "no score" — it is this pass being superseded, and the
+        // route-decision insert and ai_validation write below are unfenced,
+        // so a stale pass that carried on could win the unique insert or
+        // overwrite the replacement's verdict (codex #3677 P1). Abandon.
+        if (scoreResult?.skipped && scoreResult.reason === 'ownership_lost') {
+          return abandonToPeer('finalization after CSR scoring');
+        }
         csrScoreResult = { score: scoreResult?.score?.total_score, outcome: scoreResult?.score?.call_outcome };
         logger.info(`[call-proc] CSR scored: ${csrScoreResult.score}/15 (${csrScoreResult.outcome})`);
       } catch (err) {
@@ -14553,6 +15200,16 @@ const CallRecordingProcessor = {
       }
     }
 
+    // The pass did not complete if its final fenced write matched no rows: a
+    // peer reclaimed the token, this attempt's terminal status never landed,
+    // and its zero-triage layers were skipped above for the same reason.
+    // Returning success:true here was the LARGEST instance of the bug this
+    // branch exists to remove — the bulk counters read it as processed and
+    // the admin UI painted it green (pre-push audit P1).
+    if (finalized === 0) {
+      return { success: false, skipped: true, reason: 'terminal_write_ownership_lost', callSid };
+    }
+
     logger.info(`[call-proc] Completed processing for ${callSid}: customer=${customerId}, appointment=${!!extracted.appointment_confirmed}`);
 
     return {
@@ -14601,6 +15258,8 @@ const CallRecordingProcessor = {
         logger.error(`[call-proc] Failed to release lock for ${callSid}: ${releaseErr.message}`);
       }
       throw procErr;
+    } finally {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
     }
   },
 
@@ -14645,7 +15304,7 @@ const CallRecordingProcessor = {
                 // the backstop too (round-12 P1).
                 .orWhere(function () {
                   this.where('processing_status', 'processing')
-                    .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+                    .andWhereRaw(reclaimableClaim(10));
                 })
                 // A transient extraction failure on a quarantined row must
                 // keep its normal retry budget (round-13 P1): the outer
@@ -14685,7 +15344,7 @@ const CallRecordingProcessor = {
         })
         .orWhere(function () {
           this.where('processing_status', 'processing')
-            .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+            .andWhereRaw(reclaimableClaim(10));
         });
       })
       .where(function () {
@@ -14706,7 +15365,7 @@ const CallRecordingProcessor = {
         results.push({ callSid: call.twilio_call_sid, success: false, error: err.message });
       }
     }
-    return { processed: results.length, results };
+    return { ...summarizeBatch(results), results };
   },
 
   /**
@@ -15166,6 +15825,9 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
+  summarizeBatch,
+  noteSharedPhoneSibling,
+  leadFirstContactAt,
   composeLeadAddress,
   analyzeLeadAddress,
   leadAddressCompareKey,

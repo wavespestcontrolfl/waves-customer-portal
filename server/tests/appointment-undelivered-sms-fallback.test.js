@@ -12,6 +12,10 @@ jest.mock('../services/appointment-email', () => ({
   sendTechEnRouteEmail: jest.fn(async () => ({ ok: true })),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
+jest.mock('../services/estimate-card-holds', () => ({
+  cardHoldReminderLine: jest.fn(async () => ''),
+  cardHoldReminderNote: jest.fn(async () => ''),
+}));
 
 const db = require('../models/db');
 const AppointmentEmail = require('../services/appointment-email');
@@ -21,10 +25,11 @@ const AppointmentReminders = require('../services/appointment-reminders');
 // Minimal knex-style chainable query mock.
 function chain({ first } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereNotExists', 'whereRaw', 'orderBy', 'select'].forEach((m) => {
+  ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereNotExists', 'whereRaw', 'orderBy', 'select', 'join', 'leftJoin', 'andWhere'].forEach((m) => {
     q[m] = jest.fn(() => q);
   });
   q.update = jest.fn(async () => 1);
+  q.pluck = jest.fn(async () => []);
   q.first = jest.fn(async () => first);
   q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
   return q;
@@ -319,6 +324,99 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
 
     // no customers UPDATE chain was queued — a write would throw "Unexpected db table"
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('grouped 24h bounce: the fallback email is rebuilt from the CURRENT visit — earliest member time, merged label, every held member\'s note (GH codex r5 P1)', async () => {
+    // The claim OWNER (the later 10:00 member) texted the grouped 9:00
+    // reminder; Twilio later reports it undelivered. The recovery email
+    // must describe the grouped stop, not the owner's own row.
+    const { cardHoldReminderNote } = require('../services/estimate-card-holds');
+    cardHoldReminderNote.mockImplementation(async (id) => (id === 'ss-sib' ? 'Sibling hold note.' : ''));
+    const auditChain = chain({
+      first: {
+        channel: 'sms',
+        purpose: 'appointment_reminder_24h',
+        customer_id: 'c9',
+        // rendered_slot_ms = the grouped 9:00 slot the text advertised (2026-06-22 ET).
+        metadata: { original_message_type: 'reminder_24h', scheduled_service_id: 'ss-owner', rendered_slot_ms: Date.parse('2026-06-22T13:00:00.000Z') },
+      },
+    });
+    const custReadChain = chain({ first: { id: 'c9', phone: '+19415551234', email: 'c9@example.com', line_type: null } });
+    const ownerRow = { cancelled: false, customer_id: 'c9', scheduled_service_id: 'ss-owner', appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' };
+    const membersChain = chain({});
+    membersChain.select = jest.fn(async () => [
+      { appointment_time: '2026-06-22T14:00:00.000Z', scheduled_service_id: 'ss-owner', scheduled_date: '2026-06-22', window_start: '10:00:00' },
+      { appointment_time: '2026-06-22T13:00:00.000Z', scheduled_service_id: 'ss-sib', scheduled_date: '2026-06-22', window_start: '09:00:00' },
+    ]);
+    const labelChain = chain({});
+    labelChain.select = jest.fn(async () => [
+      { scheduled_service_id: 'ss-owner', label: 'Quarterly Pest Control' },
+      { scheduled_service_id: 'ss-sib', label: 'Mosquito Treatment' },
+    ]);
+
+    setDbQueues({
+      messaging_audit_log: [auditChain],
+      customers: [custReadChain],
+      appointment_reminders: [chain({ first: ownerRow }), chain({})], // owner row + email-handoff move-hold recheck (no hold)
+      scheduled_services: [chain({ first: { visit_id: 'visit-9' } })],
+      service_visits: [chain({ first: { id: 'visit-9', scheduled_date: '2026-06-22' } })],
+      'scheduled_services as ss': [membersChain, labelChain],
+      'scheduled_services as s': [chain({ first: null }), chain({ first: null })],
+      scheduled_service_addons: [chain({}), chain({})],
+    });
+
+    await AppointmentReminders.handleUndeliveredSms({
+      sid: 'SM_grouped', status: 'undelivered', errorCode: '30003', to: '+19415551234',
+    });
+
+    expect(membersChain.whereIn).toHaveBeenCalledWith('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+    expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'c9',
+      scheduledServiceId: 'ss-owner',
+      kind: '24h',
+      appointmentTime: new Date('2026-06-22T13:00:00.000Z'),
+      serviceLabel: 'Quarterly Pest Control & Mosquito Treatment',
+      cardHoldPolicyNote: 'Sibling hold note.',
+      // Visit-scoped key: dedupes against the direct email leg a
+      // 'both'-channel send already delivered for this occurrence.
+      idempotencyKey: 'appointment.reminder_24h:visit:visit-9:reminder_24h:2026-06-22',
+    }));
+    cardHoldReminderNote.mockImplementation(async () => '');
+  });
+
+  test('grouped 24h bounce AFTER the visit moved to another date: no recovery email — the new occurrence\'s key stays unconsumed (pre-push codex r8 P1)', async () => {
+    const auditChain = chain({
+      first: {
+        channel: 'sms',
+        purpose: 'appointment_reminder_24h',
+        customer_id: 'c9',
+        metadata: { original_message_type: 'reminder_24h', scheduled_service_id: 'ss-owner', rendered_slot_ms: Date.parse('2026-06-22T13:00:00.000Z') },
+      },
+    });
+    // Everything a (wrong) recovery send would need is queued, so this
+    // pins the SKIP — not an accidental read failure.
+    const movedMembers = chain({});
+    movedMembers.select = jest.fn(async () => [{ appointment_time: '2026-06-25T14:00:00.000Z', scheduled_service_id: 'ss-owner', scheduled_date: '2026-06-25', window_start: '10:00:00' }]);
+    const movedLabel = chain({});
+    movedLabel.select = jest.fn(async () => [{ scheduled_service_id: 'ss-owner', label: 'Quarterly Pest Control' }]);
+    setDbQueues({
+      messaging_audit_log: [auditChain],
+      customers: [chain({ first: { id: 'c9', phone: '+19415551234', email: 'c9@example.com', line_type: null } })],
+      appointment_reminders: [chain({ first: { cancelled: false, customer_id: 'c9', scheduled_service_id: 'ss-owner', appointment_time: '2026-06-25T14:00:00.000Z', service_type: 'Quarterly Pest Control' } }), chain({})],
+      scheduled_services: [chain({ first: { visit_id: 'visit-9' } })],
+      service_visits: [chain({ first: { id: 'visit-9', scheduled_date: '2026-06-25' } })], // moved: 22nd → 25th
+      'scheduled_services as ss': [movedMembers, movedLabel],
+      'scheduled_services as s': [chain({ first: null })],
+      scheduled_service_addons: [chain({})],
+    });
+
+    await AppointmentReminders.handleUndeliveredSms({
+      sid: 'SM_grouped_moved', status: 'undelivered', errorCode: '30003', to: '+19415551234',
+    });
+
+    expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('non-appointment message is ignored (no landline change, no email)', async () => {

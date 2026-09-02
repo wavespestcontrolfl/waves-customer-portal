@@ -241,8 +241,13 @@ function whereNoConversionBeforeEstimate(query) {
  * side-effects), it just stops appearing in open lists and the follow-up
  * stage queries exclude archived rows.
  */
-async function archiveConvertedOpenEstimates() {
-  const now = new Date();
+// The archive sweep's candidate set as a fresh knex builder (no terminal
+// call). `archiveConvertedOpenEstimates` appends `.update(...)`; the daily
+// lead-to-cash invariants sweep (services/lead-to-cash-invariants.js)
+// appends `.select('id')` after the 6:00 archive ran — any row still matching
+// means the guard failed to converge. One definition, so the two can never
+// disagree about what "converted but still open" means.
+function convertedOpenEstimatesQuery() {
   // "First-ever" is judged ACROSS signal sources: at least one eligibility
   // signal (paid invoice or completed visit) exists, and NO conversion
   // evidence of ANY kind (whereNoConversionBeforeEstimate — a deliberately
@@ -250,7 +255,7 @@ async function archiveConvertedOpenEstimates() {
   // would let a customer with a pre-estimate completed service but no prior
   // invoice match the invoice branch on a later payment and lose a live
   // upsell estimate.
-  const archivedRows = await db("estimates")
+  return db("estimates")
     .whereIn("status", ["sent", "viewed"])
     .whereNull("archived_at")
     .whereNotNull("customer_id")
@@ -267,7 +272,12 @@ async function archiveConvertedOpenEstimates() {
         .from("estimate_deposits")
         .whereRaw("estimate_deposits.estimate_id = estimates.id")
         .where("estimate_deposits.status", "received");
-    })
+    });
+}
+
+async function archiveConvertedOpenEstimates() {
+  const now = new Date();
+  const archivedRows = await convertedOpenEstimatesQuery()
     .update({
       archived_at: now,
       updated_at: now,
@@ -333,6 +343,7 @@ function excludePendingFirstBookings(query) {
 }
 
 module.exports = {
+  convertedOpenEstimatesQuery,
   customerConvertedSince,
   whereConversionEligibilitySignal,
   whereNoConversionBeforeEstimate,

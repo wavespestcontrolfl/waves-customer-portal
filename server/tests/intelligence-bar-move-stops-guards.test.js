@@ -141,9 +141,9 @@ test('mixed selection moves only non-terminal rows, reports skipped, logs each m
     ]),
   });
   const updates = [chain(), chain()];
-  // Per moved stop: the always-on advisory occupancy probe runs first, then
-  // the CAS update — interleave clean probe chains into the sequence.
-  const svcSeq = [chain(), updates[0], chain(), updates[1]];
+  // The batch transaction (pre-push r21 P1) runs EVERY advisory occupancy
+  // probe first, then the CAS updates in stop order.
+  const svcSeq = [chain(), chain(), updates[0], updates[1]];
   const logInserts = [chain(), chain()];
   const historyChain = chain();
   let svcIdx = 0;
@@ -272,16 +272,11 @@ test('a same-day move whose every stop has already elapsed errors and reports th
   expect(result.skipped_elapsed).toEqual([{ id: 'svc-late', status: 'confirmed' }]);
 });
 
-test('a stop moved concurrently (stale date/window snapshot) lands in skipped_conflict via the field CAS; the rest still move', async () => {
-  // Two ordinary moves of the same confirmed stop both satisfied the
-  // status-only predicate — the later write silently clobbered the newer
-  // date. The CAS now carries the observed scheduled_date + window_start +
-  // window_end (this mover never writes the window columns, but it stamps
-  // track_token_expires_at derived from the observed end — a concurrent
-  // END-only resize must miss too, not get a token expiry off the stale end),
-  // so the stale writer matches zero rows and the stop is reported, not
-  // rewritten. Note the re-read status is still 'confirmed': this conflict is
-  // a concurrent MOVE, which the old status-only predicate could never see.
+test('a stop moved concurrently (stale date/window snapshot) aborts the WHOLE batch via the field CAS — all-or-nothing (pre-push r21 P1)', async () => {
+  // The CAS carries the observed scheduled_date + window_start + window_end
+  // + visit_id; a stale writer matches zero rows, and the exact-effects
+  // card promised ONE frozen effect set — so ANY miss aborts every move
+  // with preview_changed instead of a partially applied batch.
   const listChain = chain({
     select: jest.fn().mockResolvedValue([
       stop('svc-stale', 'confirmed'),
@@ -289,11 +284,10 @@ test('a stop moved concurrently (stale date/window snapshot) lands in skipped_co
     ]),
   });
   const staleUpdate = chain({ update: jest.fn().mockResolvedValue(0) });
-  const staleReread = chain({ first: jest.fn().mockResolvedValue({ status: 'confirmed' }) });
   const okUpdate = chain();
   const logChain = chain();
-  // A clean advisory-probe chain precedes each stop's CAS update.
-  const svcChains = [chain(), staleUpdate, staleReread, chain(), okUpdate];
+  // Both advisory-probe chains run first, then the CAS updates in order.
+  const svcChains = [chain(), chain(), staleUpdate, okUpdate];
   let svcIdx = 0;
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') {
@@ -308,18 +302,16 @@ test('a stop moved concurrently (stale date/window snapshot) lands in skipped_co
     service_ids: ['svc-stale', 'svc-ok'], new_date: '2099-01-15', confirmed: true,
   });
 
-  expect(result).toMatchObject({ success: true, moved_count: 1, new_date: '2099-01-15' });
-  expect(result.stops.map((s) => s.id)).toEqual(['svc-ok']);
-  expect(result.skipped_conflict).toEqual([{ id: 'svc-stale', status: 'confirmed' }]);
+  expect(result.preview_changed).toBe(true);
+  expect(result.error).toMatch(/NOTHING was moved/);
   // The CAS carried the full observed snapshot — status AND the complete
-  // schedule triple (date + start + END).
+  // schedule triple (date + start + END) + membership.
   expect(staleUpdate.where).toHaveBeenCalledWith('status', 'confirmed');
   expect(staleUpdate.where).toHaveBeenCalledWith({
     scheduled_date: '2026-05-20', window_start: '09:00:00', window_end: '10:00:00', visit_id: null,
   });
-  // Exactly one audit row — the skipped stop logged nothing.
-  expect(logChain.insert).toHaveBeenCalledTimes(1);
-  expect(logChain.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_service_id: 'svc-ok' }));
+  // No audit rows — nothing committed.
+  expect(logChain.insert).not.toHaveBeenCalled();
 });
 
 test('a stop landing on an occupied block MOVES with an advisory warning naming the date (owner ruling 2026-08-25 — never a block)', async () => {
@@ -351,14 +343,13 @@ test('a stop landing on an occupied block MOVES with an advisory warning naming 
   expect(updateChain.update).toHaveBeenCalled();
 });
 
-test('every stop conflicting away concurrently yields the all-skipped error with the conflict bucket', async () => {
+test('a single conflicting stop refuses the batch with preview_changed (all-or-nothing)', async () => {
   const listChain = chain({
     select: jest.fn().mockResolvedValue([stop('svc-stale', 'confirmed')]),
   });
   const staleUpdate = chain({ update: jest.fn().mockResolvedValue(0) });
-  const staleReread = chain({ first: jest.fn().mockResolvedValue({ status: 'confirmed' }) });
   // A clean advisory-probe chain precedes the CAS update.
-  const svcChains = [chain(), staleUpdate, staleReread];
+  const svcChains = [chain(), staleUpdate];
   let svcIdx = 0;
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') {
@@ -372,8 +363,8 @@ test('every stop conflicting away concurrently yields the all-skipped error with
     service_ids: ['svc-stale'], new_date: '2099-01-15', confirmed: true,
   });
 
-  expect(result.error).toMatch(/changed concurrently/);
-  expect(result.skipped_conflict).toEqual([{ id: 'svc-stale', status: 'confirmed' }]);
+  expect(result.preview_changed).toBe(true);
+  expect(result.error).toMatch(/NOTHING was moved/);
 });
 
 test('proposal (unconfirmed) lists only movable stops and flags the terminal ones', async () => {

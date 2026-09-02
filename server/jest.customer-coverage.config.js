@@ -15,6 +15,7 @@ module.exports = {
     '<rootDir>/tests/auth-logout-route.test.js',
     '<rootDir>/tests/customer-auth-resolve-bearer.test.js',
     '<rootDir>/tests/customer-refresh-session.test.js',
+    '<rootDir>/tests/cancelled-portal-read-access.test.js',
     '<rootDir>/tests/autopay-eligibility.test.js',
     '<rootDir>/tests/portal-ach-add-bank.test.js',
     '<rootDir>/tests/customer-pricing-ai.test.js',

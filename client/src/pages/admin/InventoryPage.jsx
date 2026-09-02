@@ -1322,7 +1322,7 @@ function PriceSyncTab({ showToast }) {
         <div style={sCard}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 14 }}>
             <div>
-              <h3 style={{ margin: "0 0 4px", color: D.heading, fontSize: 18 }}>Hermes Vendor Login Discovery</h3>
+              <h3 style={{ margin: "0 0 4px", color: D.heading, fontSize: 18 }}>Hermes vendor login discovery</h3>
               <div style={{ color: D.muted, fontSize: 13 }}>
                 Queue active vendors missing login setup so Hermes can find portal, registration, and rep-contact paths.
               </div>
@@ -1642,7 +1642,7 @@ function WaveGuardForecastTab({ showToast, onUpdate }) {
     <div style={sCard}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
         <div>
-          <h3 style={{ margin: 0, color: D.heading }}>WaveGuard Inventory Forecast</h3>
+          <h3 style={{ margin: 0, color: D.heading }}>WaveGuard inventory forecast</h3>
           <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
             Upcoming lawn protocol demand compared against live product stock.
           </p>
@@ -1840,7 +1840,7 @@ function UnitReviewTab({ showToast }) {
     <div style={sCard}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
         <div>
-          <h3 style={{ margin: 0, color: D.heading }}>Inventory Unit Review</h3>
+          <h3 style={{ margin: 0, color: D.heading }}>Inventory unit review</h3>
           <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
             Clean up unsupported, missing, and ambiguous inventory units before they affect forecast or closeout math.
           </p>
@@ -2830,7 +2830,7 @@ function RestockRequestsTab({ showToast, onUpdate }) {
     <div style={sCard}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
         <div>
-          <h3 style={{ margin: 0, color: D.heading }}>Restock Requests</h3>
+          <h3 style={{ margin: 0, color: D.heading }}>Restock requests</h3>
           <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
             Product requests created from readiness and inventory exceptions.
           </p>

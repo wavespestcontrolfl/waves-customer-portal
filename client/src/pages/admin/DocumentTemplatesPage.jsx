@@ -607,7 +607,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
     <div className="mx-auto max-w-[1500px]">
       {!embedded && (
       <AdminCommandHeader
-        title="Contract Templates"
+        title="Contract templates"
         icon={FileText}
         sections={CATEGORY_TABS}
         activeKey={category}

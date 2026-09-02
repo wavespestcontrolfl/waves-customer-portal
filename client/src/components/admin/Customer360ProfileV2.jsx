@@ -120,6 +120,9 @@ function adminFetch(path, options = {}) {
       }
       const err = new Error(serverMsg || `HTTP ${r.status}`);
       err.status = r.status;
+      // Structured refusals (e.g. the annual-prepay mint's 409 naming an
+      // owed setup + anchor) ride along so a caller can act on them.
+      try { err.body = await r.clone().json(); } catch { /* not JSON */ }
       throw err;
     }
     if (r.status === 204) return null;
@@ -389,7 +392,17 @@ function deriveAnnualPrepayServiceOptions(customer, activeTerm = null, prepaidPl
 function annualPrepayPretaxBase(term) {
   if (!term) return 0;
   const subtotal = Number(term.prepayInvoiceSubtotal);
-  if (subtotal > 0) return subtotal;
+  if (subtotal > 0) {
+    // The first prepay's one-time bait-station setup rides its invoice
+    // subtotal but is NOT renewal coverage (codex #3591 r72 P1) — the
+    // renewal default must be coverage-only or it silently re-charges the
+    // $99 as unlabeled recurring money. The share comes from the immutable
+    // claim ledger via the term payload.
+    const setupShare = Number(term.prepaySetupFeeAmount) || 0;
+    const coverage = Math.round((subtotal - setupShare) * 100) / 100;
+    if (coverage > 0) return coverage;
+    return subtotal;
+  }
   return Number(term.prepayAmount) || 0;
 }
 
@@ -1294,7 +1307,7 @@ function ElectronicAuthorizationContractV2({
         <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
           <div>
             <div className="text-16 font-medium text-zinc-900">
-              Reusable Documents
+              Reusable documents
             </div>
             <div className="text-12 text-ink-secondary mt-1">
               Send service agreements, notices, prep forms, and WDO acknowledgements through the e-sign workflow.
@@ -1657,7 +1670,7 @@ function ElectronicAuthorizationContractV2({
               {" "}
               <PenLine size={16} strokeWidth={1.75} />{" "}
               <div className="text-14 font-medium text-zinc-900">
-                Signature Record
+                Signature record
               </div>{" "}
             </div>
             {latestContract?.signedAt ? (
@@ -3831,20 +3844,66 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
     setSaving(true);
     setError("");
     try {
-      const result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
-        method: "POST",
-        body: JSON.stringify({
-          amount: Number(amount),
-          serviceType: serviceType.trim(),
-          visitCount: Number.parseInt(visitCount, 10),
-          coverageCadence,
-          method,
-          termStart,
-          termEnd,
-          reference: reference.trim() || undefined,
-          note: note.trim() || undefined,
-        }),
-      });
+      const recordedPayload = {
+        amount: Number(amount),
+        serviceType: serviceType.trim(),
+        visitCount: Number.parseInt(visitCount, 10),
+        coverageCadence,
+        method,
+        termStart,
+        termEnd,
+        reference: reference.trim() || undefined,
+        note: note.trim() || undefined,
+      };
+      let result;
+      try {
+        result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
+          method: "POST",
+          body: JSON.stringify(recordedPayload),
+        });
+      } catch (err) {
+        // The route refuses (409, setupFeeRequired) when the coverage
+        // series owes the bait-station setup — confirm the collected total
+        // includes it and re-submit carrying the server-derived figure
+        // (codex #3591 r50 P1).
+        const refusal = err?.body;
+        if (err?.status === 409 && refusal?.setupFeeRequired && Number(refusal.setupFeeAmount) > 0) {
+          const setupFee = Number(refusal.setupFeeAmount);
+          // A prefilled amount is COVERAGE-ONLY (the estimate suggestion
+          // uses resolveAnnualPrepayInvoiceTotal; the renewal default
+          // subtracts the prior setup claim), while the route reads
+          // `amount` as setup-INCLUSIVE (coverage = amount − setup). Add
+          // the setup for prefills so coverage is not silently shorted by
+          // $99 (codex #3591 r77 P1); a staff-typed amount is confirmed as
+          // the collected inclusive total instead.
+          const coverageOnlyPrefill = !amountTouched || amountFromEstimateRef.current;
+          const submittedTotal = coverageOnlyPrefill
+            ? Math.round((Number(amount) + setupFee) * 100) / 100
+            : Number(amount);
+          // Commercial invoices add county tax on top of the entered
+          // pre-tax amount and the taxed total is what the ledger records
+          // as paid (codex #3591 r78 P2) — say so, or staff confirm a
+          // figure ~7% below the recorded payment.
+          const taxNote = isCommercialCustomer
+            ? ` County sales tax is added on top — approximately $${(Math.round(submittedTotal * 1.07 * 100) / 100).toFixed(2)} will be recorded as paid (the invoice finalizes the exact county rate).`
+            : "";
+          const ok = window.confirm(coverageOnlyPrefill
+            ? `${refusal.error}\n\nRecord $${Number(amount).toFixed(2)} coverage + $${setupFee.toFixed(2)} Bait Station Setup — pre-tax total $${submittedTotal.toFixed(2)}?${taxNote}`
+            : `${refusal.error}\n\nRecord the $${setupFee.toFixed(2)} Bait Station Setup as its own line on this prepay? Confirm the $${Number(amount).toFixed(2)} you entered is the pre-tax collected total INCLUDING the setup.${taxNote}`);
+          if (!ok) throw new Error("Annual prepay not recorded — the bait-station setup must ride the invoice.");
+          result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
+            method: "POST",
+            body: JSON.stringify({
+              ...recordedPayload,
+              amount: submittedTotal,
+              setupFeeAmount: setupFee,
+              ...(refusal.scheduledServiceId ? { scheduledServiceId: String(refusal.scheduledServiceId) } : {}),
+            }),
+          });
+        } else {
+          throw err;
+        }
+      }
       await onSaved?.(result);
     } catch (err) {
       setError(err.message || "Annual prepay failed");
@@ -4204,14 +4263,44 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
     setAmount(value);
   };
 
+  // The mint refuses (409, setupFeeRequired) when the coverage series is a
+  // direct non-member rodent plan that still owes its bait-station setup —
+  // omission is not a waiver (codex #3591 r37 P1). Confirm the extra line
+  // with staff and re-submit carrying the server-derived figure + anchor.
+  const mintAnnualPrepay = async (payload) => {
+    try {
+      return await adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      const refusal = err?.body;
+      // scheduledServiceId is null for a NEW rodent prepay with no series
+      // yet — the mint derives the setup from the coverage family then.
+      if (err?.status === 409 && refusal?.setupFeeRequired && Number(refusal.setupFeeAmount) > 0) {
+        const ok = window.confirm(
+          `${refusal.error}\n\nAdd the $${Number(refusal.setupFeeAmount).toFixed(2)} Bait Station Setup line to this invoice?`,
+        );
+        if (!ok) throw new Error("Annual prepay not created — the bait-station setup must ride the invoice.");
+        return adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
+          method: "POST",
+          body: JSON.stringify({
+            ...payload,
+            setupFeeAmount: Number(refusal.setupFeeAmount),
+            ...(refusal.scheduledServiceId ? { scheduledServiceId: String(refusal.scheduledServiceId) } : {}),
+          }),
+        });
+      }
+      throw err;
+    }
+  };
+
   const handleSubmit = async () => {
     if (submitDisabled) return;
     setSaving(true);
     setError("");
     try {
-      const result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
-        method: "POST",
-        body: JSON.stringify({
+      const result = await mintAnnualPrepay({
           amount: Number(amount),
           serviceType: serviceType.trim(),
           visitCount: Number.parseInt(visitCount, 10),
@@ -4231,7 +4320,6 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           ...(depositCredit && !depositCredit.payerBilled && applyCredit
             ? { depositCreditEstimateId: depositCredit.estimateId, depositCreditAmount: depositCredit.amount }
             : {}),
-        }),
       });
       // Advisory warnings (the promised first visit overlaps another job) —
       // blocking on purpose, and BEFORE the delivery check: the invoice and
@@ -4259,9 +4347,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
     setSaving(true);
     setError("");
     try {
-      const result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
-        method: "POST",
-        body: JSON.stringify({
+      const result = await mintAnnualPrepay({
           amount: Number(amount),
           serviceType: serviceType.trim(),
           visitCount: Number.parseInt(visitCount, 10),
@@ -4279,7 +4365,6 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             ? { depositCreditEstimateId: depositCredit.estimateId, depositCreditAmount: depositCredit.amount }
             : {}),
           chargeInPerson: true,
-        }),
       });
       // Same advisory-overlap surfacing as the send path (blocking: the
       // modal closes / hands off to the payment sheet right after).

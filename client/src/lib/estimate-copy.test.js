@@ -6,11 +6,25 @@ describe('estimate-copy', () => {
     const copy = estimateCopyFor('pre_slab_termiticide');
     expect(copy).not.toBe(SERVICE_COPY.pest_control);
     expect(copy.aiTitle).toBe('Waves AI reviewed the slab area before pricing this estimate');
-    expect(copy.askChips).toContain('What warranty is selected?');
+    expect(copy.askChips).toEqual([]);
   });
 
   it('falls back to pest-control copy only for unknown categories', () => {
     expect(estimateCopyFor('not_a_category')).toBe(SERVICE_COPY.pest_control);
     expect(estimateCopyFor('bora_care')).toBe(SERVICE_COPY.bora_care);
+  });
+
+  it.each(['wdo_inspection', 'termite_foam', 'trap_only'])('%s has dedicated customer copy', (category) => {
+    expect(estimateCopyFor(category)).toBe(SERVICE_COPY[category]);
+    expect(estimateCopyFor(category)).not.toBe(SERVICE_COPY.pest_control);
+  });
+
+  it('keeps the regulated WDO copy free of AI quick questions', () => {
+    expect(estimateCopyFor('wdo_inspection').askChips).toEqual([]);
+  });
+
+  it('customer-facing quick questions make no blanket treatment-safety claim', () => {
+    const chips = Object.values(SERVICE_COPY).flatMap((copy) => copy.askChips || []);
+    expect(chips.join(' ')).not.toMatch(/\b(?:pet|kid|child).*safe|safe.*\b(?:pet|kid|child)/i);
   });
 });

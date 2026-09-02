@@ -130,7 +130,7 @@ const GLASS_PEST = {
   aiTitle: 'Your price was built from your {city} home — not somebody else’s',
   aiBody: 'We didn’t guess. We measured your home, lot, roofline, and access points so your plan fits your actual property — not a generic average.',
   askChips: [
-    'Is this safe for pets and kids?',
+    'What precautions should I follow for pets and children?',
     'Can you treat inside?',
     'When am I charged?',
     'What if I still see bugs?',
@@ -225,7 +225,7 @@ const GLASS_PACKS = {
     askChips: [
       'When will I see results?',
       'What about weeds?',
-      'Is it safe for pets and kids?',
+      'What precautions should I follow for pets and children?',
       'When do visits start?',
     ],
   },
@@ -237,7 +237,7 @@ const GLASS_PACKS = {
     aiBody: 'We reviewed your lot, vegetation, and mosquito resting zones before pricing this plan — treatment goes where the pressure actually is.',
     askChips: [
       'How fast does it work?',
-      'Is it safe for pets and kids?',
+      'What precautions should I follow for pets and children?',
       'What about my pool area?',
       'When does the season start?',
     ],
@@ -301,12 +301,7 @@ const GLASS_PACKS = {
     eyebrow: 'Your pre-slab treatment quote',
     aiTitle: 'Priced from the measured slab area',
     aiBody: 'This quote comes from the measured slab area, the selected product, and your warranty option — nothing padded, nothing guessed.',
-    askChips: [
-      'What product is used?',
-      'Do I get documentation?',
-      'What warranty is selected?',
-      'When should this be done?',
-    ],
+    askChips: [],
     ctaMicro: ONE_TIME_CTA_MICRO,
   },
   bora_care: {
@@ -317,7 +312,7 @@ const GLASS_PACKS = {
     aiBody: 'We priced this from the measured attic and surface areas and the product application rate — your square footage, your price.',
     askChips: [
       'What does Bora-Care treat?',
-      'Is Bora-Care safe for pets and kids?',
+      'What precautions should I follow with Bora-Care around pets and children?',
       'How long does it last?',
       'When should this be done?',
     ],
@@ -341,6 +336,33 @@ const GLASS_PACKS = {
     ],
     ctaMicro: NEUTRAL_CTA_MICRO,
   },
+  wdo_inspection: {
+    heroH1: 'Hello {first}, your WDO inspection quote is ready!',
+    heroSub: 'A property-specific wood-destroying organism inspection with the required Florida report after the inspection is completed.',
+    eyebrow: 'Your WDO inspection quote',
+    aiTitle: 'Prepared for the property shown on this estimate',
+    aiBody: 'The inspection and reporting scope shown here applies to this property; it is not a pest-control treatment plan.',
+    askChips: [],
+    ctaMicro: ONE_TIME_CTA_MICRO,
+  },
+  termite_foam: {
+    heroH1: 'Hello {first}, your termite foam treatment quote is ready!',
+    heroSub: 'A localized foam treatment for the identified termite treatment area, priced as one-time work.',
+    eyebrow: 'Your targeted termite treatment quote',
+    aiTitle: 'Prepared for the targeted treatment area',
+    aiBody: 'This quote covers localized termite foam treatment, not recurring pest control or a whole-home liquid barrier.',
+    askChips: ['Where will the foam be applied?', 'What does this treatment cover?', 'What precautions should I follow for this application?', 'How do I schedule the treatment?'],
+    ctaMicro: ONE_TIME_CTA_MICRO,
+  },
+  trap_only: {
+    heroH1: 'Hello {first}, your trap-only monitoring plan is ready!',
+    heroSub: 'Initial setup and inspection are shown separately from the ongoing monitoring cadence, so you can see exactly how the plan is structured.',
+    eyebrow: 'Your trap-only monitoring plan',
+    aiTitle: 'Built around the monitoring cadence selected for this property',
+    aiBody: 'The priced lines separate setup, scheduled monitoring, and any additional callback allowance included in the plan.',
+    askChips: ['What is included in setup?', 'How often are traps checked?', 'What happens if I need an extra callback?', 'How is the monitoring plan billed?'],
+    ctaMicro: NEUTRAL_CTA_MICRO,
+  },
   bundle: {
     heroH1: 'Hello {first}, your complete home protection plan is ready!',
     heroSub: 'Every service on this plan was priced from your actual property — one plan, one team accountable for all of it.',
@@ -350,7 +372,7 @@ const GLASS_PACKS = {
     askChips: [
       'What’s included in this plan?',
       'How do the services work together?',
-      'Are pets and kids safe?',
+      'What precautions should I follow for pets and children?',
       'When am I charged?',
     ],
   },
@@ -386,8 +408,9 @@ const GLASS_ONE_TIME_HERO_REVIEW = {
   heroSub: 'One visit, priced from your actual property — our team reviews it and confirms scheduling with you. Licensed & insured, satisfaction guaranteed.',
 };
 
-export function glassOneTimeHeroOverlay(pack, { reviewBeforeBooking = false } = {}) {
+export function glassOneTimeHeroOverlay(pack, { reviewBeforeBooking = false, preserveServiceHero = false } = {}) {
   if (!glassCopyActive()) return null;
+  if (preserveServiceHero && pack) return pack;
   return { ...(pack || GLASS_PACKS.bundle), ...(reviewBeforeBooking ? GLASS_ONE_TIME_HERO_REVIEW : GLASS_ONE_TIME_HERO) };
 }
 
@@ -436,6 +459,12 @@ export function glassCtaMicroForKeys(keys) {
 // pest copy, so callers keep the server-provided wording on null.
 export function glassServiceSlug(keyOrLabel) {
   const raw = String(keyOrLabel || '').toLowerCase();
+  // Only the WDO report itself is the regulated certificate surface — the
+  // standalone termite_inspection (FS 482.226) keeps its ordinary termite slug.
+  if (raw.includes('wdo') || raw.includes('wood destroying')) return 'wdo_inspection';
+  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('pre slab') || raw.includes('slab_pretreat') || /slab pre-?\s?treat/.test(raw)) return 'pre_slab_termiticide';
+  if (raw.includes('trap_only') || raw.includes('trap-only')) return 'trap_only';
+  if (raw.includes('termite_foam') || (raw.includes('termite') && raw.includes('foam'))) return 'termite_foam';
   // Commercial PEST rows (commercial_pest keys / "Commercial Pest Control"
   // labels) get their own stack — but ONLY once the server has released
   // commercial glass (cta.commercialGlass → setCommercialGlass). Scoped to

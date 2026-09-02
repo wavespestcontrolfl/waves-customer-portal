@@ -166,7 +166,11 @@ const DEFAULT_TECHNICAL_REVIEWER = Object.freeze({
   fdacs_license: 'JB351547',
   bio_url: '/about/authors/adam-benetti',
 });
-const DISCLOSURE_TYPES = new Set(['pricing-transparency', 'service-area-limits', 'regulatory', 'none']);
+// 'affiliate' rides through normalization untouched — the FTC disclosure
+// the renderer keys off it would otherwise be rewritten to
+// pricing-transparency and every affiliate PR rejected at the astro gate
+// (Codex #3646 r24 P1). Guardrails enforce the links<->type biconditional.
+const DISCLOSURE_TYPES = new Set(['pricing-transparency', 'service-area-limits', 'regulatory', 'affiliate', 'none']);
 
 const CATEGORY_ALIASES = {
   pest: 'pest-control',
@@ -3518,6 +3522,31 @@ async function publishRefresh(draft, brief = {}) {
   // The refresh writes the resolved file back IN PLACE — a legacy `.md`
   // stays `.md`, so its raw HTML blocks hide the Markdown inside them.
   const refreshMdx = !/\.md$/i.test(String(filePath || ''));
+  // A legacy .md cannot RENDER MDX components — a refreshed body adding
+  // one would ship literal markup to the customer page (Codex #3646 r25
+  // P1). Fail the publish; the page migrates to .mdx through the new-post
+  // lane's migration path, not a refresh.
+  if (!refreshMdx) {
+    // The SHARED guardrails blanker (fences with CommonMark delimiter
+    // rules, indented code, inline spans, comments) — an ad-hoc regex
+    // false-flagged component text preserved inside legacy code blocks
+    // (Codex #3646 r26). It strips comments ITSELF, fence-aware: a "<!--"
+    // inside a fenced sample is code, not a comment opener — the separate
+    // fence-blind comment pre-pass erased a real component that followed
+    // the fence (Codex #3646 r33).
+    const guardrailsMod = require('../content/content-guardrails');
+    const rendered = guardrailsMod.blankNonRenderedMarkdown(newBody);
+    // Only CATALOGUED MDX components flag — uppercase standard HTML
+    // (<BR>, <DIV>) is raw HTML in a .md and renders fine (Codex #3646 r30).
+    // Quoted attribute text (<div title="<InlineCTA />">) renders no
+    // component — scan the attr-masked view (Codex #3646 r39).
+    const comp = guardrailsMod.maskJsxAttrQuotes(rendered).match(new RegExp('<(' + guardrailsMod.SAFE_MDX_COMPONENTS.join('|') + ')(?=[\\s/>])'));
+    if (comp) {
+      const err = new Error(`refresh target ${filePath} is a legacy .md file — an MDX component (<${comp[1]}>) cannot render there; migrate the page to .mdx first or drop the component`);
+      err.statusCode = 422;
+      throw err;
+    }
+  }
   // The managed-image directory is keyed by the PUBLISHED ROUTE — the
   // frontmatter slug the creating lane stamped — not the source file's
   // path: a flat file can render a nested route, and the new-post lane

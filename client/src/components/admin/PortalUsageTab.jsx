@@ -165,7 +165,7 @@ export default function PortalUsageTab({ canAdmin }) {
     <div>
       <div style={{ marginBottom: 16 }}>
         <h2 style={{ fontSize: 18, fontWeight: 500, color: D.heading, margin: 0 }}>
-          Portal Usage
+          Portal usage
         </h2>
         <p style={{ fontSize: 14, color: D.muted, margin: "6px 0 0", maxWidth: 640 }}>
           Which admin pages actually get used, how regularly, and how you reach

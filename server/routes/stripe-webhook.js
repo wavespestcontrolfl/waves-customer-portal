@@ -3426,6 +3426,10 @@ async function handleChargeRefunded(charge) {
             const refInvPi = refInvoice?.stripe_payment_intent_id ? String(refInvoice.stripe_payment_intent_id) : null;
             const rowPi = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
             if (refInvoice && refInvPi && rowPi && refInvPi === rowPi) {
+              // The rodent setup-obligation restore rides INSIDE
+              // returnAppliedCreditOnRefund's terminal transition (codex
+              // #3591 r45 P1) — by the time this legacy flip runs the
+              // status is already 'refunded', so it matches nothing.
               await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
               await trx('invoices')
                 .where({ id: invId })
@@ -3940,7 +3944,7 @@ async function handleRefundFailed(refund) {
             // Reopen like the failure path — the money never arrived.
             const termInvoice = await trx('invoices').where({ id: invId, status: 'refunded' }).first();
             if (termInvoice) {
-              await trx('invoices').where({ id: invId, status: 'refunded' }).update({
+              const reopened = await trx('invoices').where({ id: invId, status: 'refunded' }).update({
                 status: nextInvoiceStatusAfterFailedPayment(termInvoice),
                 paid_at: null,
                 stripe_payment_intent_id: null,
@@ -3948,6 +3952,12 @@ async function handleRefundFailed(refund) {
                 ach_processing_notified_at: null,
                 updated_at: new Date(),
               });
+              // Leaving 'refunded': retire the refunded-transition setup
+              // side effects (codex #3591 r47 local P0) — the reopened
+              // invoice's own line is collectible again.
+              if (reopened > 0) {
+                await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, invId);
+              }
             }
           } else if (invId) {
             const flipped = await trx('invoices')
@@ -3969,6 +3979,12 @@ async function handleRefundFailed(refund) {
                   paid_at: meta.settled_event_at || new Date().toISOString(),
                   updated_at: new Date(),
                 });
+            if (flipped > 0) {
+              // Leaving 'refunded' (codex #3591 r47 local P0): the money
+              // stood, so the restored setup stamp / draft re-bill would
+              // collect the fee twice — retire them with the flip.
+              await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, invId);
+            }
             if (flipped > 0 && !wasStillProcessing) restored.push(invId);
           }
         }
@@ -4356,6 +4372,9 @@ async function handleRefundFailed(refund) {
       if (flipped > 0) {
         invoiceRestored = linkedInvoice.invoice_number || linkedInvoice.id;
         restoredInvoiceId = linkedInvoice.id;
+        // Leaving 'refunded' (codex #3591 r47 local P0): retire the
+        // refunded-transition setup side effects with the restore.
+        await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, linkedInvoice.id);
       }
     }
 

@@ -37,9 +37,15 @@
 //   need signature verification. Untrusted POSTs that update
 //   classification or write recordings to disk are an attack
 //   surface — flag any path missing the signature check.
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import { formatAddress } from "../../utils/format-address";
+import { describeProcessResult } from "../../lib/callProcessResult";
+
+// Only the process route's documented 409 conflict is a classifiable process
+// outcome; any other non-2xx keeps the server's own message rather than
+// being flattened into "did not confirm the run" (pre-push audit P1).
+const processConflict = (err) => (err?.status === 409 && err?.body?.reason ? err.body : null);
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple/gray fold to zinc tokens. Semantic green/amber/red preserved.
@@ -62,6 +68,20 @@ const D = {
   inputBorder: "#D4D4D8",
 };
 
+// A blocked claim is amber, not red: nothing broke, but nothing ran either.
+// The inline line reads ok as ordinary body text; the toast keeps its
+// established green success look, so the two share severities, not colors.
+const PROCESS_VERDICT_COLOR = {
+  ok: D.muted,
+  blocked: D.amber,
+  failed: D.red,
+};
+const TOAST_COLOR = {
+  ok: D.green,
+  blocked: D.amber,
+  failed: D.red,
+};
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -69,8 +89,25 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      // Surface the server's message (e.g. the 409 already-processing
+      // explanation) instead of a bare status code, and carry the parsed
+      // BODY on the error: a 409 blocked claim is still a classifiable
+      // result, and describeProcessResult turns it into the precise
+      // "nothing ran, wait and hit Process again" line rather than a
+      // generic failure.
+      let message = `HTTP ${r.status}`;
+      let payload = null;
+      try {
+        payload = await r.json();
+        message = payload?.error || payload?.message || message;
+      } catch { /* non-JSON error body */ }
+      const error = new Error(message);
+      error.status = r.status;
+      error.body = payload;
+      throw error;
+    }
     return r.json();
   });
 }
@@ -191,7 +228,7 @@ export default function CallRecordingsPanel() {
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
   const [selected, setSelected] = useState(null);
-  const [toast, setToast] = useState("");
+  const [toast, setToast] = useState(null);
 
   const loadData = useCallback(async () => {
     const [s, r] = await Promise.all([
@@ -208,9 +245,13 @@ export default function CallRecordingsPanel() {
   useEffect(() => {
     loadData();
   }, [loadData]);
-  const showToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(""), 3500);
+  // A toast carries a severity, not just text: the shared toast is styled
+  // as a green check, so passing a "nothing ran" message through it kept
+  // the blocked result looking successful — the exact footgun this change
+  // exists to remove.
+  const showToast = (msg, severity = "ok") => {
+    setToast(msg ? { text: msg, severity } : null);
+    setTimeout(() => setToast(null), 3500);
   };
 
   const processAll = async () => {
@@ -219,24 +260,43 @@ export default function CallRecordingsPanel() {
       const result = await adminFetch("/admin/call-recordings/process-all", {
         method: "POST",
       });
-      showToast(`Processed ${result.processed} recording(s)`);
+      const parts = [`Processed ${result.processed ?? 0}`];
+      if (result.skipped) parts.push(`skipped ${result.skipped}`);
+      if (result.failed) parts.push(`failed ${result.failed}`);
+      // A batch that failed outright came back 200 — per-record failures are
+      // counted, not thrown — so without a severity an entirely failed run
+      // rendered in the green success style (pre-push audit P1).
+      const severity = result.failed ? "failed" : (result.skipped ? "blocked" : "ok");
+      showToast(`${parts.join(" · ")} recording(s)`, severity);
       loadData();
     } catch (e) {
-      showToast(`Failed: ${e.message}`);
+      showToast(`Failed: ${e.message}`, "failed");
     }
     setProcessing(false);
   };
 
   const processOne = async (callSid, { force = false } = {}) => {
     try {
-      const qs = force ? "?force=true" : "";
-      await adminFetch(`/admin/call-recordings/process/${callSid}${qs}`, {
-        method: "POST",
-      });
-      showToast("Recording processed");
+      // operator on every click — a human pressed the button. force only when
+      // the row already finished, since it also changes extraction policy.
+      const qs = force ? "?force=true&operator=true" : "?operator=true";
+      const res = await adminFetch(
+        `/admin/call-recordings/process/${callSid}${qs}`,
+        { method: "POST" },
+      );
+      // "Recording processed" was a lie on every skip: a blocked claim comes
+      // back HTTP 200 with success:true and nothing done.
+      const verdict = describeProcessResult(res);
+      showToast(verdict.text, verdict.severity);
       loadData();
     } catch (e) {
-      showToast(`Failed: ${e.message}`);
+      // A 409 arrives here as a thrown error but is a real, classifiable
+      // outcome — read it as one rather than reporting a bare failure.
+      const conflict = processConflict(e);
+      if (conflict) {
+        const verdict = describeProcessResult(conflict);
+        showToast(verdict.text, verdict.severity);
+      } else showToast(`Failed: ${e.message}`, "failed");
     }
   };
 
@@ -501,10 +561,15 @@ export default function CallRecordingsPanel() {
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        // User-initiated tap → always force, so a row wedged at
-                        // 'processing' from a crashed run isn't blocked by the
-                        // concurrent-run guard.
-                        processOne(r.twilio_call_sid, { force: true });
+                        // A human tap is `operator` (the short quiet window for
+                        // a wedged claim) on every row. `force` ONLY on a row
+                        // that already finished: it also changes extraction
+                        // policy, so sending it on a first run bypassed the
+                        // retry cap and backoff and left caller-stated name
+                        // corrections review-only (codex #3677 P1).
+                        processOne(r.twilio_call_sid, {
+                          force: r.processing_status === "processed",
+                        });
                       }}
                       style={{
                         ...sBtn(D.teal, D.white),
@@ -579,7 +644,7 @@ export default function CallRecordingsPanel() {
           bottom: 20,
           right: 20,
           background: D.card,
-          border: `1px solid ${D.green}`,
+          border: `1px solid ${TOAST_COLOR[toast?.severity] || D.green}`,
           borderRadius: 8,
           padding: "10px 16px",
           display: "flex",
@@ -595,8 +660,10 @@ export default function CallRecordingsPanel() {
         }}
       >
         {" "}
-        <span style={{ color: D.green }}>{"\u2713"}</span>
-        <span style={{ color: D.text }}>{toast}</span>{" "}
+        <span style={{ color: TOAST_COLOR[toast?.severity] || D.green }}>
+          {toast?.severity === "ok" || !toast?.severity ? "\u2713" : "\u26A0"}
+        </span>
+        <span style={{ color: D.text }}>{toast?.text}</span>{" "}
       </div>{" "}
     </div>
   );
@@ -606,32 +673,85 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
   const [r, setR] = useState(recording);
   const [generatingSynopsis, setGeneratingSynopsis] = useState(false);
   const [processingOne, setProcessingOne] = useState(false);
+  const [processVerdict, setProcessVerdict] = useState(null);
+  // Which process request owns the pane RIGHT NOW. An in-flight process
+  // resolves against whatever is selected when it returns, and list rows
+  // stay clickable while it runs, so every state write below is fenced on
+  // this — otherwise a slow request repaints the previous call's verdict,
+  // and its follow-up fetch drags the previous recording back into the pane.
+  //
+  // A monotonic token, not the recording id: on A -> B -> A the id alone
+  // makes a stale first request look current again, letting it overwrite a
+  // newer request for the same recording. Every selection change and every
+  // new request takes the next token, so only the latest one can write.
+  const requestTokenRef = useRef(0);
   const [synopsisExpanded, setSynopsisExpanded] = useState(true);
   const [transcriptExpanded, setTranscriptExpanded] = useState(false);
   const extraction = parseExtraction(r);
   const classification = getClassification(r);
   const action = getActionStatus(r);
 
-  // Update local state when parent selection changes
+  // Update local state when parent selection changes. The verdict is cleared
+  // with it: this component persists across selections, so a message left
+  // over from the previous call would sit under the new call's Process
+  // button and describe the wrong recording.
   useEffect(() => {
+    requestTokenRef.current += 1;
     setR(recording);
+    setProcessVerdict(null);
+    // Reset the busy flag here rather than letting a fenced-out request do
+    // it: the fence stops a stale response from writing state, so without
+    // this the new recording would inherit a disabled Process button.
+    setProcessingOne(false);
   }, [recording]);
 
   const handleProcess = async () => {
+    const requestedId = r.id;
+    const token = (requestTokenRef.current += 1);
+    const stillShowing = () => requestTokenRef.current === token;
     setProcessingOne(true);
+    setProcessVerdict(null);
     try {
-      await adminFetch(`/admin/call-recordings/process/${r.twilio_call_sid}`, {
-        method: "POST",
-      });
-      const fresh = await adminFetch(
-        `/admin/call-recordings/recording/${r.id}`,
+      const res = await adminFetch(
+        // operator, not force: a human asking on purpose selects the shorter
+        // quiet window, while force would also change extraction policy on
+        // what may be a first run. The heartbeat still protects a live pass —
+        // reclaim is on silence, not on age.
+        `/admin/call-recordings/process/${r.twilio_call_sid}?operator=true`,
+        { method: "POST" },
       );
-      if (fresh?.recording) setR(fresh.recording);
-      if (onUpdate) onUpdate();
+      if (!stillShowing()) return;
+      // This detail pane gave NO feedback at all — a blocked claim looked
+      // identical to a successful run, which is how a stuck call read as
+      // processed on 2026-08-31.
+      setProcessVerdict(describeProcessResult(res));
+      // The refresh is fail-soft and OUTSIDE the verdict's catch: the
+      // process already happened, and letting a failed re-read overwrite an
+      // accurate verdict with "Process failed" would invite the very
+      // reprocess this change exists to prevent.
+      try {
+        const fresh = await adminFetch(
+          `/admin/call-recordings/recording/${requestedId}`,
+        );
+        if (!stillShowing()) return;
+        if (fresh?.recording) setR(fresh.recording);
+        if (onUpdate) onUpdate();
+      } catch {
+        /* the row just won't repaint until the next load */
+      }
     } catch (e) {
-      /* ignore */
+      if (!stillShowing()) return;
+      // Same as processOne: a 409 blocked claim is a classifiable outcome,
+      // not a bare failure.
+      const conflict = processConflict(e);
+      setProcessVerdict(conflict ? describeProcessResult(conflict) : {
+        didWork: false,
+        severity: "failed",
+        text: `Process failed — ${e.message || "unknown error"}`,
+      });
+    } finally {
+      if (stillShowing()) setProcessingOne(false);
     }
-    setProcessingOne(false);
   };
 
   const handleGenerateSynopsis = async () => {
@@ -856,6 +976,19 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
             >
               {processingOne ? "Processing..." : "Process Recording"}
             </button>
+          )}
+          {processVerdict && (
+            <div
+              style={{
+                width: "100%",
+                fontSize: 12,
+                // Amber, not red: on a blocked claim nothing broke — but
+                // nothing ran either, and the operator has to run it again.
+                color: PROCESS_VERDICT_COLOR[processVerdict.severity],
+              }}
+            >
+              {processVerdict.text}
+            </div>
           )}
           {canGenerateSynopsis && (
             <button

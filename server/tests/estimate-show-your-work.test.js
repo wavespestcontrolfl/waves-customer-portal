@@ -255,6 +255,21 @@ describe('estimate show your work — gate off', () => {
       expect(body.estimate.id).toBe('est-syw-1');
     });
   });
+
+  // Same /data harness — the C4 restart marker (codex #3671 r27 P2) rides
+  // the same estimate projection and must be absent on every other row.
+  test('GET /:token/data marks a plan_restart quote frozen and nothing else', async () => {
+    dbRows = { estimates: estimateRow() };
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/estimates/showyourworktoken/data`)).json();
+      expect('planRestart' in body.estimate).toBe(false);
+    });
+    dbRows = { estimates: estimateRow({ source: 'plan_restart' }) };
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/estimates/showyourworktoken/data`)).json();
+      expect(body.estimate.planRestart).toBe(true);
+    });
+  });
 });
 
 describe('estimate show your work — gate on', () => {

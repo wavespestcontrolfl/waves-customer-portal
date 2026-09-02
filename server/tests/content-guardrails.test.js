@@ -353,24 +353,24 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     { product_id: 'rain-gauge', status: 'active', risk_class: 'green', merchant: 'amazon',
       approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20',
       plain_url: 'https://www.amazon.com/dp/B000TEST01',
-      allowed_post_types: ['protocol', 'seasonal'], owner_approved_at: iso(10) },
+      allowed_post_types: ['protocol', 'seasonal'], allowed_placements: ['primary-rec', 'alt-rec'], owner_approved_at: iso(10) },
     { product_id: 'ant-bait', status: 'active', risk_class: 'yellow', merchant: 'solutions',
       approved_affiliate_url: 'https://www.solutionsstores.com/test-bait?aff=waves',
-      allowed_post_types: ['protocol'], owner_approved_at: iso(10),
+      allowed_post_types: ['protocol'], allowed_placements: ['primary-rec'], owner_approved_at: iso(10),
       epa_reg_number: '12345-67', label_url: 'https://www.solutionsstores.com/label.pdf',
       florida_registration_verified_at: iso(10), label_reviewed_at: iso(10) },
     { product_id: 'stale-dunks', status: 'active', risk_class: 'yellow', merchant: 'solutions',
       approved_affiliate_url: 'https://www.solutionsstores.com/test-dunks?aff=waves',
-      allowed_post_types: ['protocol'], owner_approved_at: iso(400),
+      allowed_post_types: ['protocol'], allowed_placements: ['primary-rec'], owner_approved_at: iso(400),
       epa_reg_number: '765-43', label_url: 'https://www.solutionsstores.com/dunks-label.pdf',
       florida_registration_verified_at: iso(400), label_reviewed_at: iso(400) },
     { product_id: 'pro-termiticide', status: 'prohibited', risk_class: 'red', merchant: 'solutions' },
     { product_id: 'old-trap', status: 'paused', risk_class: 'green', merchant: 'amazon',
       approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST02?tag=wavespest-20',
-      allowed_post_types: ['protocol'], owner_approved_at: iso(90) },
+      allowed_post_types: ['protocol'], allowed_placements: ['primary-rec'], owner_approved_at: iso(90) },
     { product_id: 'bad-amazon', status: 'active', risk_class: 'green', merchant: 'amazon',
       approved_affiliate_url: 'https://amzn.to/short',
-      allowed_post_types: ['protocol'], owner_approved_at: iso(10) },
+      allowed_post_types: ['protocol'], allowed_placements: ['primary-rec'], owner_approved_at: iso(10) },
   ];
 
   let registryPath;
@@ -406,9 +406,9 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     withAffiliateEnv(() => {
       const r = guardrails.evaluate({ body: goodBody(), frontmatter: fm() }, { targetIsBlog: true });
       expect(affiliateCodes(r)).toEqual(['P0:UNREGISTERED_AFFILIATE_LINK']);
-      // PR-1 posture: AffiliateLink is deliberately NOT in SAFE_MDX_COMPONENTS
-      // yet — the astro renderer doesn't exist. Doubly dark.
-      expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
+      // AffiliateLink is cataloged now (astro #503 shipped the renderer) —
+      // the gate alone keeps the lane dark.
+      expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(false);
     }, { gate: '' });
   });
 
@@ -426,6 +426,18 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       const r = guardrails.evaluate({ body: goodBody(), frontmatter: fm() }, { targetIsBlog: true });
       expect(affiliateCodes(r)).toEqual([]);
     });
+  });
+
+  test('a code-fenced or commented <AffiliateLink> is not a rendered component (astro counting-view parity)', () => {
+    withAffiliateEnv(() => {
+      const fenced = 'Intro.\n\n## Sec\n\n```mdx\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n```\n\n{/* <AffiliateLink product="rain-gauge" placement="primary-rec">y</AffiliateLink> */}\n\nplain prose.';
+      const r = guardrails.evaluate({ body: fenced, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true });
+      expect(affiliateCodes(r)).toEqual([]);
+      // An expression-wrapped one still counts (it renders) — dark gate ⇒ P0.
+      const expr = `Intro.\n\n## Sec\n\n[quote](/quote/)\n\n{true && ${link('rain-gauge')}}`;
+      expect(affiliateCodes(guardrails.evaluate({ body: expr, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:UNREGISTERED_AFFILIATE_LINK');
+      expect(guardrails._internals.collectAffiliateLinkTags(expr)).toHaveLength(1);
+    }, { gate: '' });
   });
 
   test('raw tracking URLs stay DISALLOWED_EXTERNAL_LINK — the component is the ONLY path (no bypass)', () => {
@@ -476,6 +488,32 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       // test; pre-push Codex r1 P1).
       const textOnly = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ disclosure: { type: 'regulatory', text: 'Some links earn Waves a commission.' } }) }, { targetIsBlog: true });
       expect(affiliateCodes(textOnly)).toContain('P0:AFFILIATE_LINK_WITHOUT_DISCLOSURE');
+      // EXACT compare, both directions (astro biconditional — Codex #3646 r10):
+      // case variants and padding render nothing astro-side...
+      for (const type of ['Affiliate', ' affiliate ', 'AFFILIATE']) {
+        const r2 = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ disclosure: { type } }) }, { targetIsBlog: true });
+        expect(affiliateCodes(r2)).toContain('P0:AFFILIATE_LINK_WITHOUT_DISCLOSURE');
+      }
+      // ...and a declared affiliate disclosure with NO links is the reverse blocker.
+      const orphan = guardrails.evaluate({ body: 'Plain prose.\n\n## Section\n\nNo products here.', frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(orphan)).toContain('P0:AFFILIATE_DISCLOSURE_WITHOUT_LINKS');
+      const noDisc = guardrails.evaluate({ body: 'Plain prose.\n\n## Section\n\nNo products here.', frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true });
+      expect(affiliateCodes(noDisc)).toEqual([]);
+    });
+  });
+
+  test('affiliate posts are hub-only: declared domains/tracking.domains ⇒ P0 AFFILIATE_POST_NOT_HUB_ONLY (Codex #3646 r10)', () => {
+    withAffiliateEnv(() => {
+      const spoke = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ domains: ['bradentonpestcontrol.com'] }) }, { targetIsBlog: true });
+      expect(affiliateCodes(spoke)).toContain('P0:AFFILIATE_POST_NOT_HUB_ONLY');
+      const tracked = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ tracking: { domains: ['bradentonpestcontrol.com'] } }) }, { targetIsBlog: true });
+      expect(affiliateCodes(tracked)).toContain('P0:AFFILIATE_POST_NOT_HUB_ONLY');
+      // Empty arrays declare nothing; a domainless affiliate post stays clean.
+      const clean = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ domains: [], tracking: { domains: [] } }) }, { targetIsBlog: true });
+      expect(affiliateCodes(clean)).toEqual([]);
+      // Domains without affiliate links are the ordinary (non-affiliate) case.
+      const plain = guardrails.evaluate({ body: 'Prose.\n\n## Section\n\nNothing linked.', frontmatter: { post_type: 'protocol', domains: ['bradentonpestcontrol.com'] } }, { targetIsBlog: true });
+      expect(affiliateCodes(plain)).toEqual([]);
     });
   });
 
@@ -523,6 +561,18 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('placement mirrors the astro contract: literal + inside the row allowlist (Codex #3646 r2)', () => {
+    withAffiliateEnv(() => {
+      const at = (placement) => `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="${placement}">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: at('primary-rec'), frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+      expect(affiliateCodes(guardrails.evaluate({ body: at('sidebar'), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:AFFILIATE_PLACEMENT_NOT_ALLOWED');
+      const expr = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement={p}>x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: expr, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:AFFILIATE_PLACEMENT_NOT_ALLOWED');
+      const none = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: none, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:AFFILIATE_PLACEMENT_NOT_ALLOWED');
+    });
+  });
+
   test('density: more than 3 links, or a link before the first section heading, is P1', () => {
     withAffiliateEnv(() => {
       const four = `${goodBody()}\n\n${link('rain-gauge')} ${link('ant-bait')} ${link('rain-gauge')}`;
@@ -543,11 +593,98 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       const hidden = `Intro copy.\n\n## Measuring\n\n{/* [quote](/quote/) */}\n\n\`[quote](/quote/)\`\n\nUse ${link('rain-gauge')} for this.`;
       const r3 = guardrails.evaluate({ body: hidden, frontmatter: fm() }, { targetIsBlog: true });
       expect(affiliateCodes(r3)).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // An image or a heading inside code never satisfies structural rules (Codex #3646 r5).
+      const imgCta = `Intro copy.\n\n## Measuring\n\n![Request a quote](/quote/)\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: imgCta, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      const refDef = `Intro copy.\n\n## Measuring\n\n[cta]: /quote/\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: refDef, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      const fakeHeading = 'Intro.\n\n```md\n## fake\n```\n\n[quote](/quote/) ' + link('rain-gauge') + '\n\n## Real\n\nMore.';
+      expect(affiliateCodes(guardrails.evaluate({ body: fakeHeading, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:EXCESSIVE_AFFILIATE_LINK_DENSITY');
+      // An expression-wrapped InlineCTA never counts (parity with astro's structural view).
+      const exprCta = `Intro copy.\n\n## Measuring\n\n{true && <InlineCTA />}\n\nUse ${link('rain-gauge')} for this.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: exprCta, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // Mirrors the astro contract: the CTA must PRECEDE the first affiliate
+      // link, and a rendered <InlineCTA> counts (Codex PR3 r1 P1).
+      const after = `Intro copy.\n\n## Measuring\n\nUse ${link('rain-gauge')} for this. Then get a [free quote](/quote/).`;
+      expect(affiliateCodes(guardrails.evaluate({ body: after, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      const inline = `Intro copy.\n\n## Measuring\n\n<InlineCTA />\n\nUse ${link('rain-gauge')} for this.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: inline, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+      // An InlineCTA counts only when it leads to a service route (Codex #3646 r2).
+      const inlineSvc = `Intro copy.\n\n## Measuring\n\n<InlineCTA ctaHref="/pest-control-calculator/" />\n\nUse ${link('rain-gauge')} for this.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: inlineSvc, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+      for (const bad of ['<InlineCTA ctaHref="/pest-library/fleas/" />', '<InlineCTA ctaHref={href} />', '<InlineCTA ctaHref="https://example.com/x" />']) {
+        const b = `Intro copy.\n\n## Measuring\n\n${bad}\n\nUse ${link('rain-gauge')} for this.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      }
       // A real city-service page satisfies it too.
       const cityCta = `Intro copy.\n\n## Measuring\n\nSee [lawn care](/lawn-care-bradenton-fl/). Use ${link('rain-gauge')}.`;
       const r2 = guardrails.evaluate({ body: cityCta, frontmatter: fm() }, { targetIsBlog: true });
       expect(affiliateCodes(r2)).toEqual([]);
+      // A nested-label image leaves no `](/quote/)` residue for the
+      // destination collector — balanced image masking (Codex #3646 r9 P1).
+      const nestedImg = `Intro copy.\n\n## Measuring\n\n![Request [a quote]](/quote/)\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: nestedImg, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // Astro classifier parity (Codex #3646 r10): the exact trailing-slash
+      // route, https-only, hub hosts only, no explicit port — anything the
+      // astro gate rejects must not satisfy the portal rule either.
+      for (const dest of [
+        '/quote', // no trailing slash — astro takes the path literally
+        '/quote/extra/',
+        'http://wavespestcontrol.com/quote/', // http
+        'https://wavespestcontrol.com:444/quote/', // non-default port
+        'https://bradentonpestcontrol.com/quote/', // spoke host
+        'https://wavespestcontrol.com.evil.example/quote/',
+      ]) {
+        const b = `Intro copy.\n\n## Measuring\n\nGet a [quote](${dest}).\n\nUse ${link('rain-gauge')}.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      }
+      // An absolute https hub-host spelling of a service route counts, with
+      // or without www (and an InlineCTA to one does too).
+      for (const dest of ['https://wavespestcontrol.com/quote/', 'https://www.wavespestcontrol.com/pest-control-calculator/']) {
+        const b = `Intro copy.\n\n## Measuring\n\nGet a [quote](${dest}).\n\nUse ${link('rain-gauge')}.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+      }
+      const absInline = `Intro copy.\n\n## Measuring\n\n<InlineCTA ctaHref="https://wavespestcontrol.com/quote/" />\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: absInline, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+      // Real-link walker parity with astro markdownLinkDests (Codex #504
+      // r13): a titled destination still renders an anchor and counts...
+      for (const cta of ['[quote](/quote/ "Request service")', '[quote](https://wavespestcontrol.com/quote/ "Request service")', '[quote](</quote/>)']) {
+        const b = `Intro copy.\n\n## Measuring\n\nGet a ${cta}.\n\nUse ${link('rain-gauge')}.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+      }
+      // ...while an escaped opener renders literal text, never an anchor,
+      // and an escaped image marker leaves a REAL link that counts.
+      for (const cta of ['\\[quote](/quote/)', '\\[quote](https://wavespestcontrol.com/quote/)']) {
+        const b = `Intro copy.\n\n## Measuring\n\nGet a ${cta}.\n\nUse ${link('rain-gauge')}.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      }
+      const escapedImg = `Intro copy.\n\n## Measuring\n\n\\![Request [a quote]](/quote/)\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: escapedImg, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
     });
+  });
+
+  test('InlineCTA destination contract holds for EVERY draft, affiliate or not (Codex #3646 r9 P1)', () => {
+    const ctaCodes = (r) => r.findings.filter((f) => f.code === 'INVALID_INLINECTA_DESTINATION').map((f) => f.severity);
+    const wrap = (tag) => `Intro copy.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    for (const bad of [
+      '<InlineCTA ctaHref="javascript:alert(1)" />',
+      '<InlineCTA ctaHref="http://example.com/x" />',
+      '<InlineCTA ctaHref="/a/../b/" />',
+      '<InlineCTA ctaHref={href} />',
+      '<InlineCTA ctaHref="/quote/" ctaHref="/x/" />',
+      '<InlineCTA {...props} />',
+    ]) {
+      expect(ctaCodes(guardrails.evaluate({ body: wrap(bad) }, { targetIsBlog: true }))).toEqual(['P0']);
+    }
+    for (const ok of [
+      '<InlineCTA />',
+      '<InlineCTA ctaHref="/quote/" />',
+      '<InlineCTA ctaHref="https://wavespestcontrol.com/quote/" />',
+      '<InlineCTA headline="Use {...props} notation" />',
+      '```\n<InlineCTA ctaHref="javascript:alert(1)" />\n```',
+    ]) {
+      expect(ctaCodes(guardrails.evaluate({ body: wrap(ok) }, { targetIsBlog: true }))).toEqual([]);
+    }
   });
 
   test('refresh preserves but never adds (per product id, count-compared), fail closed without the prior body', () => {
@@ -607,6 +744,11 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(guardrails.containsAffiliateMaterial('see https://amazon.com/dp/B000TEST01/?utm_source=x&tag=wavespest-20#reviews')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://www.solutionsstores.com/test-bait?ref=1&aff=waves')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://amzn.to/abc')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://www.amazon.com/dp/B1?Tag=wavespest-20')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://www.amazon.co.uk/dp/B1?tag=waves-21')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://vendor.example/p?ref=waves')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://amzn.to./abc')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://www.amazon.com./dp/B1?tag=x-20')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://shareasale.com/r.cfm?b=1')).toBe(true);
       // Direct-merchant tracking params on an UNREGISTERED path, any host (Codex r5 P1).
       expect(guardrails.containsAffiliateMaterial('see https://www.solutionsstores.com/other-product?aff=waves')).toBe(true);
@@ -619,10 +761,475 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(guardrails.containsAffiliateMaterial('see //amzn.to/abc')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see solutionsstores.com/test-bait?aff=waves')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('visit wavespestcontrol.com/blog/ or epa.gov/pesticides')).toBe(false);
-      expect(guardrails.containsAffiliateMaterial('call 941.599.3489 e.g. today')).toBe(false);
+      expect(guardrails.containsAffiliateMaterial('call 941.318.7612 e.g. today')).toBe(false);
       expect(guardrails.containsAffiliateMaterial('per https://www.epa.gov/pesticide-labels guidance')).toBe(false);
       expect(guardrails.containsAffiliateMaterial('')).toBe(false);
     }, { gate: '' }); // gate OFF — stripping still detects
+  });
+
+  test('affiliateProductIdsIn lists distinct referenced ids (invalid props as "(invalid)")', () => {
+    expect(guardrails.affiliateProductIdsIn(`${link('rain-gauge')} ${link('rain-gauge')} ${link('ant-bait')} <AffiliateLink product={x}>y</AffiliateLink>`)).toEqual(['rain-gauge', 'ant-bait', '(invalid)']);
+    expect(guardrails.affiliateProductIdsIn('no links')).toEqual([]);
+  });
+
+  test('JSX spelled inside expression strings is TEXT — never counted or contract-validated (Codex #3646 r11)', () => {
+    withAffiliateEnv(() => {
+      // A quoted AffiliateLink never counts (no forced park on an affiliate-free draft)...
+      expect(guardrails.affiliateProductIdsIn("The docs show {'<AffiliateLink product=\"x\" />'} as markup.")).toEqual([]);
+      // ...and a quoted InlineCTA never trips the destination contract.
+      const quoted = "Intro.\n\n## Sec\n\nDocs show {'<InlineCTA ctaHref={dynamic} />'} as an example.";
+      expect(guardrails.evaluate({ body: quoted, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }).findings.filter((f) => f.code === 'INVALID_INLINECTA_DESTINATION')).toEqual([]);
+      // A REAL expression-wrapped tag is still seen (bad href still blocks).
+      const real = 'Intro.\n\n## Sec\n\n{true && <InlineCTA ctaHref={dynamic} />}';
+      expect(guardrails.evaluate({ body: real, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }).findings.some((f) => f.code === 'INVALID_INLINECTA_DESTINATION')).toBe(true);
+    });
+  });
+
+  test('component names are case-sensitive; attr text and regex/comment expression text never count (Codex #3646 r14)', () => {
+    withAffiliateEnv(() => {
+      // <inlinecta /> never mounts — it cannot satisfy the CTA rule...
+      const lower = `Intro.\n\n## Sec\n\n<inlinecta />\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: lower, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // ...and <affiliatelink> never counts as an affiliate link.
+      expect(guardrails.affiliateProductIdsIn('<affiliatelink product="x">y</affiliatelink>')).toEqual([]);
+      // Tag- or link-shaped text inside a JSX attribute renders nothing.
+      const attrCta = `Intro.\n\n## Sec\n\n<div title="<InlineCTA />">x</div>\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: attrCta, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      const attrLink = `Intro.\n\n## Sec\n\n<div title="[Request a quote](/quote/)">x</div>\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: attrLink, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // Regex and comment text inside expressions is not a component.
+      expect(guardrails.affiliateProductIdsIn('{/ <AffiliateLink product="x" placement="primary-rec">/}')).toEqual([]);
+      expect(guardrails.affiliateProductIdsIn('{true /* <AffiliateLink product="x" placement="primary-rec"> */}')).toEqual([]);
+      // A real component after a postfix division stays counted.
+      expect(guardrails.affiliateProductIdsIn('{n++ / total && <AffiliateLink product="rain-gauge" placement="primary-rec">y</AffiliateLink>}')).toEqual(['rain-gauge']);
+    });
+  });
+
+  test('template-literal species; digit-bearing tel (Codex #3646 r31)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={[{name: `x`, risk: `invalid`, where: `x`, hunt: `x`, eggSac: `x`}]} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel="-------" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel="(941) 318-7612" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
+  });
+
+  test('case-insensitive HTML href; comments inside static species arrays (Codex #3646 r33)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    // <a HREF=…> is a live link (HTML attribute names are case-insensitive)
+    // — an invented hub route still flags; display text still never does.
+    expect(codesOf(guardrails.evaluate({ body: wrap('<a HREF="https://www.wavespestcontrol.com/invented-route/">go</a>'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap('<a TITLE="https://www.wavespestcontrol.com/invented-route/" href="/quote/">go</a>'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBe(0);
+    // A lexer-legal comment inside the species array never hides an invalid
+    // row; a valid row with a comment still passes; an unterminated block
+    // comment fails CLOSED — the lexer reads it as an unterminated tag.
+    expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{ name: 'x', /* note */ risk: 'invalid', where: 'x', hunt: 'x', eggSac: 'x' }]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{ name: 'x', // note\n risk: 'invalid', where: 'x', hunt: 'x', eggSac: 'x' }]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{ name: 'x', /* note */ risk: 'nuisance', where: 'x', hunt: 'x', eggSac: 'x', source: { label: 'l', url: 'https://example.com/a' } }]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{ name: 'x', /* open risk: 'nuisance', where: 'x', hunt: 'x', eggSac: 'x' }]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    // Template backticks deeper inside an expression are JS delimiters, not
+    // code spans — prose code spans around the tag still mask normally.
+    const mixed = 'Intro.\n\n## Section\n\nUse `code` here.\n\n<SpiderIdBoard species={[{name: `x`, risk: `invalid`, where: `x`, hunt: `x`, eggSac: `x`}]} />\n\nAnd `more` prose.';
+    expect(codesOf(guardrails.evaluate({ body: mixed, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(guardrails.blankNonRenderedMarkdown('Use `a | b` here.')).toBe('Use `\u0002\u0002|\u0002\u0002` here.'.replace(/`/g, '\u0002'));
+  });
+
+  test('escaped ${ in a template-literal species string is literal text, not interpolation (Codex #3646 r34)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={[{name: `x\\${y}`, risk: `invalid`, where: `x`, hunt: `x`, eggSac: `x`}]} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={[{name: `x\\${y}`, risk: `nuisance`, where: `x`, hunt: `x`, eggSac: `x`}]} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
+    // A REAL interpolation stays opaque here (the executable-expression gate owns it).
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={[{name: `x${y}`, risk: `invalid`, where: `x`, hunt: `x`, eggSac: `x`}]} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
+  });
+
+  test('an AffiliateLink must wrap visible link text (Codex #3646 r35)', () => {
+    withAffiliateEnv(() => {
+      const at = (tag) => `Intro.\n\n## Sec\n\n[quote](/quote/) ${tag}`;
+      const bad = [
+        '<AffiliateLink product="rain-gauge" placement="primary-rec" />',
+        '<AffiliateLink product="rain-gauge" placement="primary-rec"></AffiliateLink>',
+        '<AffiliateLink product="rain-gauge" placement="primary-rec">   </AffiliateLink>',
+        '<AffiliateLink product="rain-gauge" placement="primary-rec">{/* soon */}</AffiliateLink>',
+        "<AffiliateLink product=\"rain-gauge\" placement=\"primary-rec\">{''}</AffiliateLink>",
+        '<AffiliateLink product="rain-gauge" placement="primary-rec">unclosed',
+      ];
+      for (const b of bad) expect(affiliateCodes(guardrails.evaluate({ body: at(b), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      expect(affiliateCodes(guardrails.evaluate({ body: at('<AffiliateLink product="rain-gauge" placement="primary-rec">a `rain` gauge</AffiliateLink>'), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      // A quoted closer inside an expression is rendered TEXT — it neither closes the link early nor leaves it empty.
+      expect(affiliateCodes(guardrails.evaluate({ body: at("<AffiliateLink product=\"rain-gauge\" placement=\"primary-rec\">{'</AffiliateLink>'}</AffiliateLink>"), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+    });
+  });
+
+  test('non-rendering AffiliateLink children; hidden headings; visibility read before expression blanking (Codex #3646 r36)', () => {
+    withAffiliateEnv(() => {
+      const at = (before, tag = '<AffiliateLink product="rain-gauge" placement="primary-rec">it</AffiliateLink>') => `Intro.\n\n${before}\n\n## Sec\n\nUse ${tag} here.`;
+      // Boolean/nullish child expressions render no anchor text.
+      for (const kid of ['{false}', '{null}', '{ undefined }', '{true}']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at('[quote](/quote/)', `<AffiliateLink product="rain-gauge" placement="primary-rec">${kid}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      // A hidden or spread-wrapped "## Fake" never ends the opening section.
+      const opening = (r) => r.findings.some((f) => f.code === 'EXCESSIVE_AFFILIATE_LINK_DENSITY' && /opening section/.test(f.message));
+      for (const wrap of ['<div class="hidden">\n## Fake section\n</div>', '<div {...props}>\n## Fake section\n</div>']) {
+        expect(opening(guardrails.evaluate({ body: `Intro.\n\n[quote](/quote/)\n\n${wrap}\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">it</AffiliateLink> here.\n\n## Real\n\nMore.`, frontmatter: fm() }, { targetIsBlog: true }))).toBe(true);
+      }
+      expect(opening(guardrails.evaluate({ body: 'Intro.\n\n[quote](/quote/)\n\n## Real\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">it</AffiliateLink> here.', frontmatter: fm() }, { targetIsBlog: true }))).toBe(false);
+      // open={false} renders CLOSED (no CTA); hidden={false} renders VISIBLE (CTA counts); hidden={0} is present → hidden.
+      const missing = (before) => affiliateCodes(guardrails.evaluate({ body: at(before), frontmatter: fm() }, { targetIsBlog: true })).includes('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      expect(missing('<details open={false}>[quote](/quote/)</details>')).toBe(true);
+      expect(missing('<details open={true}>[quote](/quote/)</details>')).toBe(false);
+      expect(missing('<div hidden={false}>[quote](/quote/)</div>')).toBe(false);
+      expect(missing('<div hidden={0}>[quote](/quote/)</div>')).toBe(true);
+      expect(missing('<div hidden="">[quote](/quote/)</div>')).toBe(true);
+      // A quoted tag inside an expression never opens a phantom hidden container.
+      expect(missing("{'<div hidden>'}\n\n[quote](/quote/)")).toBe(false);
+    });
+  });
+
+  test('fence-aware comment pass in the component scanners; hidden-only link children; top-level template props (Codex #3646 r37)', () => {
+    withAffiliateEnv(() => {
+      const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+      const fence = '```html\n<!-- example\n```\n';
+      // A "<!--" inside a fenced sample is code — the real component after
+      // the fence is still seen by every component scanner.
+      expect(guardrails.affiliateProductIdsIn(`${fence}<AffiliateLink product="rain-gauge" placement="primary-rec">Buy</AffiliateLink>\n-->`)).toEqual(['rain-gauge']);
+      expect(codesOf(guardrails.evaluate({ body: `Intro.\n\n## Sec\n\n${fence}<InlineCTA tel="-------" />\n-->\n\nMore.`, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+      expect(codesOf(guardrails.evaluate({ body: `Intro.\n\n## Sec\n\n${fence}<SpiderIdBoard species="x" />\n-->\n\nMore.`, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+      // A whitespace-padded MDX comment still hides its component from the scanners.
+      expect(guardrails.affiliateProductIdsIn('{ /* <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink> */ }')).toEqual([]);
+      // Hidden-only children are not visible link text; a visible span or an image is.
+      const at = (tag) => `Intro.\n\n## Sec\n\n[quote](/quote/) ${tag}`;
+      for (const kids of ['<span hidden>Buy</span>', '<span class="sr-only">Buy</span>', '<span style="display:none">Buy</span>', '<span></span>']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      for (const kids of ['<span>Buy</span>', '<img src="/images/blog/x/body-1.webp" alt="rain gauge" />', '<b>Buy</b> now']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      // A top-level interpolation-free template literal is a static string.
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel={`not-a-phone`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+      expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel={`(941) 318-7612`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
+      expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={`oops`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+      expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel={`${x}`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
+    });
+  });
+
+  test('undefined-bearing species arrays; hidden self-closing images; fence-aware heading/CTA views; responsive resets; literal trivia (Codex #3646 r38, #508 r5)', () => {
+    withAffiliateEnv(() => {
+      const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{name:'x', risk:'invalid', where:'x', hunt:'x', eggSac:'x', glyph:undefined}]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+      expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{name:'x', risk:'nuisance', where:'x', hunt:'x', eggSac:'x', glyph: undefined, sciName: undefined}]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
+      const at = (tag) => `Intro.\n\n## Sec\n\n[quote](/quote/) ${tag}`;
+      for (const kids of ['<img hidden src="/x.png" />', '<img class="hidden" src="/x.png" alt="x" />', '<img style="display:none" src="/x.png" />', '{false /* note */}', '{/* note */ null}', '{ // note\n undefined }']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      for (const kids of ['<img src="/x.png" alt="x" />', '<span class="sr-only md:not-sr-only">Buy</span>', '<span class="invisible md:visible">Buy</span>']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      // A fenced "<!--" never erases the real heading or CTA after the fence.
+      const fence = '```html\n<!-- example\n```\n';
+      const r = guardrails.evaluate({ body: `Intro.\n\n${fence}\n[quote](/quote/)\n\n## Real\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">it</AffiliateLink> here.\n\n-->\n`, frontmatter: fm() }, { targetIsBlog: true });
+      expect(r.findings.some((f) => f.code === 'EXCESSIVE_AFFILIATE_LINK_DENSITY' && /opening section/.test(f.message))).toBe(false);
+      expect(affiliateCodes(r)).not.toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // Indented/quoted prose before the link: the CTA prefix is cut on the blanker's own coordinates.
+      const r2 = guardrails.evaluate({ body: 'Intro.\n\n> quoted lead-in that is fairly long\n>   and indented\n\n[quote](/quote/)\n\n## Real\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">it</AffiliateLink> here.', frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(r2)).not.toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+    });
+  });
+
+  test('comments inside static species literals are not executable; sparse arrays; empty-array/fragment children; paired responsive resets; last style declaration wins (Codex #3646 r39, #508 r6)', () => {
+    withAffiliateEnv(() => {
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      const codes = (b) => guardrails.evaluate({ body: wrap(b), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }).findings.map((f) => f.code);
+      expect(codes("<SpiderIdBoard species={[{name:'x', /* note */ risk:'nuisance', where:'x', hunt:'x', eggSac:'x'}]} />")).toEqual([]);
+      expect(codes("<SpiderIdBoard species={[{name:'x', // note\n risk:'nuisance', where:'x', hunt:'x', eggSac:'x'}]} />")).toEqual([]);
+      expect(codes("<SpiderIdBoard species={[,{name:'x',risk:'invalid',where:'x',hunt:'x',eggSac:'x'}]} />")).toContain('INVALID_SPIDERIDBOARD_PROPS');
+      expect(codes("<SpiderIdBoard species={[{name:'x',risk:'nuisance',where:'x',hunt:'x',eggSac:'x'},,]} />")).toContain('INVALID_SPIDERIDBOARD_PROPS');
+      expect(codes("<SpiderIdBoard species={[{name:'x',risk:'nuisance',where:'x',hunt:'x',eggSac:'x'},]} />")).toEqual([]);
+      const at = (tag) => `Intro.\n\n## Sec\n\n[quote](/quote/) ${tag}`;
+      for (const kids of ['{[]}', '{[null]}', "{[false, '']}", '{[ , ]}', '<></>', '<>{null}</>', '<span class="hidden md:visible">Buy</span>', '<span class="invisible md:block">Buy</span>', '<span class="hidden sr-only md:block">Buy</span>', '<span style="display:inline; display:none">Buy</span>']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      for (const kids of ['{["Buy"]}', '<span class="hidden md:block">Buy</span>', '<span style="display:none; display:inline">Buy</span>', '<span style="visibility:hidden; visibility:visible">Buy</span>']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+    });
+  });
+
+  test('computed string keys in species arrays; InlineCTA tel must be a Waves number with or without the tel: prefix (Codex #3646 r40)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codes = (b) => guardrails.evaluate({ body: wrap(b), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }).findings.map((f) => f.code);
+    expect(codes("<SpiderIdBoard species={[{['name']:'x', risk:'invalid', where:'x', hunt:'x', eggSac:'x'}]} />")).toContain('INVALID_SPIDERIDBOARD_PROPS');
+    expect(codes('<SpiderIdBoard species={[{ ["risk"]: "invalid", name: "x", where: "x", hunt: "x", eggSac: "x" }]} />')).toContain('INVALID_SPIDERIDBOARD_PROPS');
+    expect(codes("<SpiderIdBoard species={[{['name']:'x', ['risk']:'nuisance', where:'x', hunt:'x', eggSac:'x'}]} />")).toEqual([]);
+    expect(codes("<SpiderIdBoard species={[{name:'[x', risk:'nuisance', where:']:', hunt:'x', eggSac:'x'}]} />")).toEqual([]);
+    for (const tel of ['(212) 555-1234', 'tel:+12125551234', '212-555-1234', '9999412975749']) {
+      expect(codes(`<InlineCTA tel="${tel}" />`)).toContain('DISALLOWED_EXTERNAL_LINK');
+    }
+    for (const tel of ['(941) 318-7612', 'tel:+19413187612', '941.318.7612']) {
+      expect(codes(`<InlineCTA tel="${tel}" />`)).not.toContain('DISALLOWED_EXTERNAL_LINK');
+    }
+  });
+
+  test('supporting-blog runs are blog targets; nested links reach channel egress; whitespace/entity children; CSS comments; important hides; trivia in static booleans (Codex #3646 r41, #508 r8)', () => {
+    const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+    expect(deriveSyncGuardrailOptions({}, { action_type: 'new_supporting_blog' }).targetIsBlog).toBe(true);
+    expect(deriveSyncGuardrailOptions({}, { action_type: 'x', page_type: 'supporting-blog' }).targetIsBlog).toBe(true);
+    expect(deriveSyncGuardrailOptions({}, { action_type: 'refresh_existing_page' }).targetIsBlog).toBe(false);
+    expect(guardrails.containsAffiliateMaterial('<InlineCTA description={<AffiliateLink product="x" placement="p">Buy</AffiliateLink>} />')).toBe(true);
+    withAffiliateEnv(() => {
+      const at = (tag) => `Intro.\n\n## Sec\n\n[quote](/quote/) ${tag}`;
+      for (const kids of ["{'   '}", '{"\t"}', "{[' ', null]}", '&nbsp;', '&#32;&#160;', '<span style="display:none; /* display:inline */">Buy</span>', '<span class="hidden!">Buy</span>', '<span class="!hidden">Buy</span>', '<span class="hidden! md:block">Buy</span>', '<span class="sr-only! md:not-sr-only">Buy</span>']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      for (const kids of ["{' Buy '}", '<span class="hidden! md:block!">Buy</span>', '<span class="!hidden md:!block">Buy</span>', '<span hidden={false /* intentionally visible */}>Buy</span>', '<span style="/* display:none */ display:inline">Buy</span>']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      // Trivia in a static open={} value reads the same way in the CTA view.
+      const missing = (before) => affiliateCodes(guardrails.evaluate({ body: `Intro.\n\n${before}\n\n## Sec\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">it</AffiliateLink> here.`, frontmatter: fm() }, { targetIsBlog: true })).includes('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      expect(missing('<details open={false /* closed */}>[quote](/quote/)</details>')).toBe(true);
+      expect(missing('<div hidden={false /* visible */}>[quote](/quote/)</div>')).toBe(false);
+    });
+  });
+
+  test('spread wrappers hide their CTA (astro parity, Codex #3646 r28)', () => {
+    withAffiliateEnv(() => {
+      const b = `Intro.\n\n## Sec\n\n<div {...props}>[Quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+    });
+  });
+
+  test('string-safe key quoting; statically hidden Tailwind CTAs never count (Codex #3646 r27)', () => {
+    withAffiliateEnv(() => {
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+      // Key-shaped prose INSIDE a string value never corrupts the parse —
+      // the invalid risk still flags.
+      expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{ name: '{foo: bar}', risk: 'invalid', where: 'x', hunt: 'x', eggSac: 'x' }]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+      // A CTA inside a statically hidden Tailwind wrapper never satisfies
+      // the rule; a responsive-visible wrapper still does.
+      for (const hid of ['<div class="hidden">[quote](/quote/)</div>', '<div className="invisible">[quote](/quote/)</div>', "<div className={'sr-only'}><InlineCTA /></div>"]) {
+        const b = `Intro.\n\n## Sec\n\n${hid}\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      }
+      const responsive = `Intro.\n\n## Sec\n\n<div class="hidden md:block">[quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: responsive, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+    });
+  });
+
+  test('escape decoding; SpiderIdBoard citations via exact required sources (Codex #3646 r26)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    // Hex escapes decode: the runtime value is judged.
+    expect(codesOf(guardrails.evaluate({ body: wrap("<InlineCTA tel={'not\\x2da\\x2dphone'} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+    // A species board citing an EXACT brief-required source passes the
+    // outbound gate; the same URL without the requirement stays P0.
+    const board = wrap('<SpiderIdBoard species={[{"name":"Wolf","risk":"nuisance","where":"x","hunt":"y","eggSac":"z","source":{"label":"UF/IFAS","url":"https://edis.ifas.ufl.edu/topic"}}]} />');
+    const withReq = guardrails.evaluate({ body: board, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true, requiredSourceUrls: ['https://edis.ifas.ufl.edu/topic'] });
+    expect(codesOf(withReq, 'DISALLOWED_EXTERNAL_LINK')).toBe(0);
+    const withoutReq = guardrails.evaluate({ body: board, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true });
+    expect(codesOf(withoutReq, 'DISALLOWED_EXTERNAL_LINK')).toBeGreaterThan(0);
+  });
+
+  test('lexer-aware spreads; unterminated invocations; JS keys; attr headings; attr URL text (Codex #3646 r25)', () => {
+    withAffiliateEnv(() => {
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+      // A regex brace inside an allowed expression cannot hide a later spread.
+      expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA headline={/\\{/.test(x)} {...props} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_DESTINATION')).toBeGreaterThan(0);
+      // Unterminated invocations are invalid, never silently skipped.
+      expect(codesOf(guardrails.evaluate({ body: 'Intro.\n\n## Sec\n\n<InlineCTA headline="x"', frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+      // Ordinary JS identifier keys parse — invalid risk flags.
+      expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{ name: 'x', risk: 'invalid', where: 'x', hunt: 'x', eggSac: 'x' }]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+      // A multiline title cannot fake the first section heading.
+      const attrHeading = 'Intro.\n\n<div title="\n## fake\n">x</div>\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n\n## Real\n\nMore.';
+      expect(affiliateCodes(guardrails.evaluate({ body: attrHeading, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:EXCESSIVE_AFFILIATE_LINK_DENSITY');
+      // An absolute hub URL in DISPLAY text never flags a route; one in a
+      // real href still does.
+      const titleUrl = 'Intro.\n\n## Sec\n\n<div title="https://www.wavespestcontrol.com/example-only/">x</div>\n\nProse.';
+      expect(codesOf(guardrails.evaluate({ body: titleUrl, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBe(0);
+      const hrefUrl = 'Intro.\n\n## Sec\n\n<a href="https://www.wavespestcontrol.com/definitely-not-real/">x</a>\n\nProse.';
+      expect(codesOf(guardrails.evaluate({ body: hrefUrl, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBeGreaterThan(0);
+    });
+  });
+
+  test('hub stamps pass; removing the last affiliate link on refresh blocks; JS-flavored species parse (Codex #3646 r24)', () => {
+    withAffiliateEnv(() => {
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+      // Publisher hub stamps never trip the hub-only rule; a spoke does.
+      const hubBody = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: hubBody, frontmatter: fm({ domains: ['wavespestcontrol.com'], tracking: { domains: ['wavespestcontrol.com'] } }) }, { targetIsBlog: true }))).toEqual([]);
+      expect(affiliateCodes(guardrails.evaluate({ body: hubBody, frontmatter: fm({ domains: ['wavespestcontrol.com', 'bradentonpestcontrol.com'] }) }, { targetIsBlog: true }))).toContain('P0:AFFILIATE_POST_NOT_HUB_ONLY');
+      // A refresh that removes the last live affiliate link fails closed.
+      const prior = `Old.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>`;
+      const stripped = guardrails.evaluate({ body: 'New body with no links.\n\n## Sec\n\nProse.', frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: prior });
+      expect(stripped.findings.some((f) => f.code === 'AFFILIATE_LINK_REMOVED_ON_REFRESH')).toBe(true);
+      // JS-flavored species (single quotes, trailing comma) parses and validates.
+      const jsSpecies = "<SpiderIdBoard species={[{'name': 'Wolf', 'risk': 'weird', 'where': 'x', 'hunt': 'y', 'eggSac': 'z'},]} />";
+      expect(codesOf(guardrails.evaluate({ body: wrap(jsSpecies), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    });
+  });
+
+  test('static string expressions carry real values the schemas reject (Codex #3646 r23)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    expect(codesOf(guardrails.evaluate({ body: wrap("<InlineCTA tel={'not-a-phone'} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard title={""} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={'wolf'} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap("<InlineCTA tel={'tel:+19413187612'} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
+  });
+
+  test('nested components in prop expressions validate; expression-string routes; invalid titles (Codex #3646 r22)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    // A component nested in another component's prop expression validates.
+    expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA description={<SpiderIdBoard species={42} />} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard caption={<InlineCTA tel="bad" />} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+    // Expression-string component text never flags a route.
+    const exprRoute = "Intro.\n\n## Sec\n\nDocs show {'<InlineCTA ctaHref=\"/example-only/\" />'} as markup.\n\nProse.";
+    expect(codesOf(guardrails.evaluate({ body: exprRoute, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBe(0);
+    // Invalid trailing title text renders no anchor — never the CTA.
+    const badTitle = `Intro.\n\n## Sec\n\nGet a [quote](/quote/ garbage).\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
+    withAffiliateEnv(() => {
+      expect(affiliateCodes(guardrails.evaluate({ body: badTitle, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+    });
+  });
+
+  test('bare shorthand props fail closed; CTA links need visible labels (Codex #3646 r21)', () => {
+    withAffiliateEnv(() => {
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+      // JSX shorthand passes {true} — never a string/array.
+      expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+      expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+      // An empty-label link renders an invisible anchor — not the CTA.
+      for (const cta of ['[](/quote/)', '[  ](/quote/)']) {
+        const b = `Intro.\n\n## Sec\n\nGet a ${cta}.\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      }
+    });
+  });
+
+  test('AffiliateLink nested in a prop expression is COUNTED; keyword properties are division (Codex #3646 r20)', () => {
+    withAffiliateEnv(() => {
+      // A component passed as a prop renders — it counts and parks.
+      const nested = '<InlineCTA description={<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>} />';
+      expect(guardrails.affiliateProductIdsIn(nested)).toEqual(['rain-gauge']);
+      const selfClosing = '<InlineCTA description={<AffiliateLink product="rain-gauge" placement="primary-rec" />} />';
+      expect(guardrails.affiliateProductIdsIn(selfClosing)).toEqual(['rain-gauge']);
+      // obj.return / total is division — the component after it stays counted.
+      expect(guardrails.affiliateProductIdsIn('{obj.return / total && <AffiliateLink product="rain-gauge" placement="primary-rec">y</AffiliateLink>}')).toEqual(['rain-gauge']);
+      // Quoted display text still never counts.
+      expect(guardrails.affiliateProductIdsIn('<div title="<AffiliateLink product=\u0022x\u0022 />">y</div>')).toEqual([]);
+    });
+  });
+
+  test('spread AffiliateLink props; exact post_type; attr-text and stale-example routes (Codex #3646 r19)', () => {
+    withAffiliateEnv(() => {
+      // A spread can override product/placement — rejected outright.
+      const spread = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec" {...{product: "other"}} />`;
+      expect(affiliateCodes(guardrails.evaluate({ body: spread, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:INVALID_AFFILIATELINK_PROPS');
+      // post_type compares EXACT — " Protocol " and "PROTOCOL" are not eligible.
+      for (const pt of [' protocol ', 'PROTOCOL']) {
+        const r = guardrails.evaluate({ body: `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>`, frontmatter: fm({ post_type: pt }) }, { targetIsBlog: true });
+        expect(affiliateCodes(r)).toContain('P0:AFFILIATE_LINK_ON_PROTECTED_PAGE');
+      }
+      // Attr display text never flags a route...
+      const attrText = "Intro.\n\n## Sec\n\n<div title='<InlineCTA ctaHref=\"/example-only/\" />'>x</div>\n\nProse.";
+      expect(guardrails.evaluate({ body: attrText, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }).findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+      // ...and a route living only in a fenced example of the PRIOR body
+      // grants no refresh exemption for a newly rendered occurrence.
+      const prior = 'Old intro.\n\n```mdx\n<a href="/dead-example-route/">x</a>\n```\n\nOld prose.';
+      const refreshed = 'New intro.\n\n[link](/dead-example-route/)\n\nNew prose.';
+      const r2 = guardrails.evaluate({ body: refreshed, frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: prior });
+      expect(r2.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    });
+  });
+
+  test('nested-brace prop expressions, non-rendered route examples, SpiderIdBoard contract (Codex #3646 r18)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    // A nested-brace object expression is consumed whole and rejected for a string prop.
+    const nested = guardrails.evaluate({ body: wrap('<InlineCTA headline={{"x":"y"}} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true });
+    expect(codesOf(nested, 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+    // A fenced or commented InlineCTA example never flags a route.
+    const fenced = 'Intro.\n\n## Sec\n\n```mdx\n<InlineCTA ctaHref="/example-only/" />\n```\n\n{/* <a href="/also-example/">x</a> */}\n\nProse.';
+    expect(codesOf(guardrails.evaluate({ body: fenced, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBe(0);
+    // ...while a rendered dead ctaHref still does.
+    expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA ctaHref="/definitely-not-a-real-page/" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBeGreaterThan(0);
+    // SpiderIdBoard: the vendored prop contract holds.
+    for (const bad of [
+      '<SpiderIdBoard species={42} />',
+      '<SpiderIdBoard species="wolf spider" />',
+      '<SpiderIdBoard species={[{"name":"Wolf spider","risk":"weird","where":"x","hunt":"y","eggSac":"z"}]} />',
+      '<SpiderIdBoard species={[]} />',
+      '<SpiderIdBoard madeUp="x" />',
+      '<SpiderIdBoard title="" />',
+    ]) {
+      expect(codesOf(guardrails.evaluate({ body: wrap(bad), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    }
+    const goodBoard = '<SpiderIdBoard title="SWFL spiders" species={[{"name":"Wolf spider","sciName":"Lycosidae","risk":"nuisance","glyph":"hunter","where":"Ground level","hunt":"Roams at night","eggSac":"Carried on spinnerets","source":{"label":"UF/IFAS","url":"https://entnemdept.ufl.edu/x"}}]} />';
+    expect(codesOf(guardrails.evaluate({ body: wrap(goodBoard), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
+    // Opaque species expressions stay unvalidated (astro parity).
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={speciesRows} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
+  });
+
+  test('expression-literal InlineCTA props and unknown AffiliateLink props fail closed (Codex #3646 r17)', () => {
+    withAffiliateEnv(() => {
+      const propCodes = (r) => r.findings.filter((f) => f.code === 'INVALID_INLINECTA_PROPS').length;
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      // Simple-literal expressions are parsed by the astro prop validator
+      // and rejected against the string schemas.
+      for (const bad of ['<InlineCTA tel={false} />', '<InlineCTA headline={42} />', '<InlineCTA description={null} />', '<InlineCTA ctaLabel={["a"]} />']) {
+        expect(propCodes(guardrails.evaluate({ body: wrap(bad), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBeGreaterThan(0);
+      }
+      // Opaque expressions stay unvalidated astro-side, so they pass here.
+      expect(propCodes(guardrails.evaluate({ body: wrap('<InlineCTA headline={someVar} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBe(0);
+      // An extra AffiliateLink prop is rejected before the park exists.
+      const extraProp = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec" foo="bar">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: extraProp, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:INVALID_AFFILIATELINK_PROPS');
+      const clean = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: clean, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+    });
+  });
+
+  test('the FULL InlineCTA prop contract holds: unknown props and invalid tel block every draft (Codex #3646 r16)', () => {
+    const propCodes = (r) => r.findings.filter((f) => f.code === 'INVALID_INLINECTA_PROPS').length;
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    expect(propCodes(guardrails.evaluate({ body: wrap('<InlineCTA tel="not-a-phone" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBeGreaterThan(0);
+    expect(propCodes(guardrails.evaluate({ body: wrap('<InlineCTA madeUpProp="x" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBeGreaterThan(0);
+    // Case-sensitive names: ctahref is NOT the ctaHref prop.
+    expect(propCodes(guardrails.evaluate({ body: wrap('<InlineCTA ctahref="/quote/" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBeGreaterThan(0);
+    // The full valid prop set passes.
+    const ok = '<InlineCTA eyebrow="Local help" headline="Need a hand?" description="We can treat it." ctaLabel="Get a quote" ctaHref="/quote/" phone="(941) 318-7612" tel="tel:+19413187612" />';
+    expect(propCodes(guardrails.evaluate({ body: wrap(ok), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBe(0);
+  });
+
+  test('InlineCTA ctaHref routes through the internal-route allowlist; destinations are exact (Codex #3646 r15)', () => {
+    withAffiliateEnv(() => {
+      // A root-relative ctaHref to a route this repo cannot prove exists is
+      // UNKNOWN_INTERNAL_ROUTE — a dead customer-facing CTA never publishes.
+      const dead = 'Intro.\n\n## Sec\n\n<InlineCTA ctaHref="/definitely-not-a-real-page/" />\n\nProse.';
+      const r = guardrails.evaluate({ body: dead, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true });
+      expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      const live = 'Intro.\n\n## Sec\n\n<InlineCTA ctaHref="/quote/" />\n\nProse.';
+      expect(guardrails.evaluate({ body: live, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }).findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+      // Angle-bracket destinations keep internal whitespace: /quote/%20 is
+      // not the service route (astro parity).
+      const spaced = `Intro.\n\n## Sec\n\nGet a [quote](</quote/ >).\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: spaced, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+    });
+  });
+
+  test('whitespace-padded product/placement props fail closed against the exact astro contract (Codex #3646 r11)', () => {
+    withAffiliateEnv(() => {
+      const padded = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product=" rain-gauge " placement="primary-rec">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: padded, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:UNREGISTERED_AFFILIATE_LINK');
+      const paddedPlacement = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement=" primary-rec ">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: paddedPlacement, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:AFFILIATE_PLACEMENT_NOT_ALLOWED');
+    });
   });
 
   test('every affiliate finding code has a gate-retry directive', () => {
@@ -631,7 +1238,9 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       'UNREGISTERED_AFFILIATE_LINK', 'AFFILIATE_LINK_WITHOUT_DISCLOSURE', 'AFFILIATE_LINK_IN_META',
       'AFFILIATE_LINK_ADDED_ON_REFRESH', 'AFFILIATE_LINK_ON_PROTECTED_PAGE', 'PROHIBITED_AFFILIATE_PRODUCT',
       'INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT', 'PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW',
-      'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', 'EXCESSIVE_AFFILIATE_LINK_DENSITY',
+      'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'AFFILIATE_PLACEMENT_NOT_ALLOWED',
+      'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', 'AFFILIATE_POST_NOT_HUB_ONLY', 'INVALID_INLINECTA_PROPS', 'INVALID_AFFILIATELINK_PROPS', 'INVALID_SPIDERIDBOARD_PROPS', 'AFFILIATE_LINK_REMOVED_ON_REFRESH',
+      'EMPTY_AFFILIATE_LINK_TEXT',
     ]) {
       expect(typeof GATE_RETRY_INSTRUCTIONS[code]).toBe('string');
     }
@@ -1496,8 +2105,8 @@ describe('MDX component allowlist (UNCATALOGED_COMPONENT)', () => {
     // COMPONENT_NAMES with BlogPostLayout.astro mdxComponents to exactly this
     // set — a portal drift from it re-opens the parked-PR defect class.
     expect([...guardrails.SAFE_MDX_COMPONENTS].sort()).toEqual([
-      'AppPhone', 'BottomLineBox', 'ComparisonTable', 'HomeZoneMap',
-      'HonestRejection', 'PestEvidenceGrid', 'SeasonalPressureChart',
+      'AffiliateLink', 'AppPhone', 'BottomLineBox', 'ComparisonTable', 'HomeZoneMap',
+      'HonestRejection', 'InlineCTA', 'PestEvidenceGrid', 'SeasonalPressureChart', 'SpiderIdBoard',
     ]);
   });
 

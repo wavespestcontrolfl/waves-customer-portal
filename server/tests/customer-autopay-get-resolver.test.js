@@ -12,8 +12,18 @@ jest.mock('../config/feature-gates', () => ({
   gates: {},
 }));
 jest.mock('stripe', () => jest.fn(() => ({})));
+let mockCancelledSession = false;
 jest.mock('../middleware/auth', () => ({
-  authenticate: (req, _res, next) => { req.customerId = 'cust-1'; next(); },
+  authenticate: (req, _res, next) => {
+    req.customerId = 'cust-1';
+    // The real middleware sets req.customer to the full row; the cancelled
+    // minimal projection keys off its C4 stamp.
+    req.customer = mockCancelledSession
+      ? { id: 'cust-1', active: false, pipeline_stage: 'churned' }
+      : { id: 'cust-1', active: true, pipeline_stage: 'active_customer' };
+    next();
+  },
+  isCancelledCustomerRow: (c) => !!c && c.active === false && c.pipeline_stage === 'churned',
 }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -85,7 +95,7 @@ beforeEach(() => {
   };
 });
 
-afterEach(() => jest.clearAllMocks());
+afterEach(() => { jest.clearAllMocks(); mockCancelledSession = false; });
 
 test('names the POINTER method, not whichever default+enabled row the DB returned first', async () => {
   const { status, body } = await getAutopay();
@@ -123,4 +133,19 @@ test('Auto Pay off → no selected ids, state disabled', async () => {
   const { body } = await getAutopay();
   expect(body.state).toBe('disabled');
   expect(body.autopay_selected_method_ids).toEqual([]);
+});
+
+test('a cancelled (C4) session gets status scalars only — no saved-method details', async () => {
+  // The cancelled Billing tab renders just the Auto Pay banner; brand /
+  // last-four / expiry / bank must not ride out to a long-lived cancelled
+  // session through this payload (codex GH r5 P2 — the same details the
+  // /billing/cards exclusion keeps unreadable).
+  mockCancelledSession = true;
+  const { status, body } = await getAutopay();
+  expect(status).toBe(200);
+  expect(body.payment_methods).toEqual([]);
+  expect(body.autopay_selected_method_ids).toEqual([]);
+  expect(body.autopay_payment_method_id).toBeNull();
+  expect(body.recent_events).toEqual([]);
+  expect(body.state).toBe('disabled');
 });

@@ -4,9 +4,28 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
+
+describe('regulated certificate estimate surfaces', () => {
+  it('detects a pre-slab line inside a mixed pest estimate', () => {
+    expect(estimateHasRegulatedCertificateSurface(
+      'bundle',
+      [{ key: 'pest_control', name: 'Pest Control' }],
+      [{ service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment' }],
+    )).toBe(true);
+  });
+
+  it('honors the server decision when the public breakdown no longer carries the regulated row', () => {
+    // show_one_time_option alignment shape: category bundle, synthetic pest
+    // choice row only — the WDO row is gone from the rows the client sees.
+    const alignedRows = [{ service: 'one_time_pest', label: 'One-Time Pest Control' }];
+    const pest = [{ key: 'pest_control', name: 'Pest Control' }];
+    expect(estimateHasRegulatedCertificateSurface('bundle', pest, alignedRows)).toBe(false);
+    expect(estimateHasRegulatedCertificateSurface('bundle', pest, alignedRows, true)).toBe(true);
+  });
+});
 
 describe('EstimateAskBar', () => {
   it('uses provided service-aware chips instead of the default prompts', () => {
@@ -59,6 +78,33 @@ describe('ServiceSection', () => {
 
     expect(screen.queryByText('How often?')).not.toBeInTheDocument();
     expect(screen.getByText('Skip parts you don\'t need')).toBeInTheDocument();
+  });
+
+  it('renders a frozen restart quote as fixed — cadence text, no pills, no add-on toggles', () => {
+    const quarterly = { ...baseFrequency, key: 'quarterly', label: 'Quarterly', monthly: 40, annual: 480 };
+    render(
+      <ServiceSection
+        section={{
+          key: 'pest_control',
+          label: 'Pest Control',
+          isRecurring: true,
+          isPest: true,
+          frequencies: [baseFrequency, quarterly],
+          copy: { priceWording: {} },
+        }}
+        selectedFrequencyKey="quarterly"
+        selectedAddOns={new Set(['interior_spray'])}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: true, showWaveGuardTierUi: true }}
+        waveGuardTier="Bronze"
+        frozen
+      />,
+    );
+
+    expect(screen.queryByText('How often?')).not.toBeInTheDocument();
+    expect(screen.queryByText('Skip parts you don\'t need')).not.toBeInTheDocument();
+    expect(screen.getByTestId('frozen-cadence')).toHaveTextContent('Quarterly');
   });
 
   it('does not render pest add-ons for non-pest sections', () => {
@@ -359,6 +405,25 @@ describe('ServiceSection', () => {
 });
 
 describe('OneTimeBreakdownCard', () => {
+  it('presents trap-only recurring monitoring as a monitoring plan', () => {
+    render(<OneTimeBreakdownCard breakdown={{ total: 694, items: [
+      { service: 'trap_only_retainer', label: 'Standard Trap-Only Monitoring Retainer', amount: 495 },
+      { service: 'trap_only_setup', label: 'Trap-Only Setup / Inspection', amount: 199 },
+    ] }} />);
+    expect(screen.getByText('Trap-only monitoring plan')).toBeInTheDocument();
+    expect(screen.queryByText('One-time services')).not.toBeInTheDocument();
+  });
+
+  it('uses customer-friendly labels for WDO and termite foam keys', () => {
+    render(<OneTimeBreakdownCard breakdown={{ total: 305, items: [
+      { service: 'wdo_inspection', label: 'wdo_inspection', amount: 125 },
+      { service: 'termite_foam', label: 'Termidor Foam Spot Treatment', amount: 180 },
+    ] }} />);
+    expect(screen.getByText('WDO Inspection')).toBeInTheDocument();
+    expect(screen.getByText('Termite Foam Treatment')).toBeInTheDocument();
+    expect(screen.queryByText('wdo_inspection')).not.toBeInTheDocument();
+  });
+
   it('shows quote-required specialty reasons instead of only the blocked price', () => {
     render(
       <OneTimeBreakdownCard
@@ -612,6 +677,59 @@ describe('OneTimeModeToggle labels', () => {
 });
 
 describe('estimateAddServiceOffer', () => {
+  it('pest + rodent bait is already Silver — the lawn offer takes the multi-service copy, never "Silver / 10%" (codex #3591 r12 P2)', () => {
+    const offer = estimateAddServiceOffer([{
+      key: 'bundle',
+      label: 'Recurring services',
+      isRecurring: true,
+      memberKeys: ['pest_control'],
+      frequencies: [{ perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 },
+        { service: 'rodent_bait', label: 'Rodent Bait Stations', perTreatment: 89, visitsPerYear: 4 },
+      ] }],
+    }], 'recurring');
+    expect(offer).toEqual(expect.objectContaining({ serviceKey: 'lawn_care' }));
+    expect(offer.body).not.toMatch(/Silver|10%/);
+    // Rodent trapping is not a plan service and must not move the copy.
+    const trapping = estimateAddServiceOffer([{
+      key: 'bundle', label: 'Recurring services', isRecurring: true, memberKeys: ['pest_control'],
+      frequencies: [{ perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 }] }],
+      services: [{ name: 'Rodent Trapping' }],
+    }], 'recurring');
+    expect(trapping.body).toMatch(/Silver|10%|next/);
+    // A rodent row the server flagged non-qualifying (live rodent_waveguard
+    // flags) does not count either (codex #3591 r15 P2).
+    const flaggedOff = estimateAddServiceOffer([{
+      key: 'bundle', label: 'Recurring services', isRecurring: true, memberKeys: ['pest_control'],
+      frequencies: [{ perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 },
+        { service: 'rodent_bait', label: 'Rodent Bait Stations', perTreatment: 89, visitsPerYear: 4, countsTowardWaveGuardTier: false },
+      ] }],
+    }], 'recurring');
+    expect(flaggedOff.body).toMatch(/Silver|10%|next/);
+    // …even when the section's raw memberKeys still list rodent_bait ahead
+    // of the flagged row (codex #3591 r41 P2): the row verdict wins.
+    const flaggedOffWithMemberKey = estimateAddServiceOffer([{
+      key: 'bundle', label: 'Recurring services', isRecurring: true, memberKeys: ['pest_control', 'rodent_bait'],
+      frequencies: [{ perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 },
+        { service: 'rodent_bait', label: 'Rodent Bait Stations', perTreatment: 89, visitsPerYear: 4, countsTowardWaveGuardTier: false },
+      ] }],
+    }], 'recurring');
+    expect(flaggedOffWithMemberKey.body).toMatch(/Silver|10%|next/);
+    // Discount eligibility is NOT tier qualification: a tier-counted rodent
+    // row that is merely excluded from the % still makes pest + rodent
+    // Silver, so the lawn offer takes the multi-service copy (codex #3591 r26 P1).
+    const discountOnly = estimateAddServiceOffer([{
+      key: 'bundle', label: 'Recurring services', isRecurring: true, memberKeys: ['pest_control'],
+      frequencies: [{ perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 },
+        { service: 'rodent_bait', label: 'Rodent Bait Stations', perTreatment: 89, visitsPerYear: 4, waveGuardDiscountEligible: false },
+      ] }],
+    }], 'recurring');
+    expect(discountOnly.body).not.toMatch(/Silver|10%/);
+  });
+
   it('uses member keys from collapsed bundle sections', () => {
     expect(estimateAddServiceOffer([{
       key: 'bundle',
@@ -1422,6 +1540,23 @@ describe('oneTimeExtrasForPaymentNote', () => {
       },
     };
     expect(oneTimeExtrasForPaymentNote(setupOnly, {}, 'recurring')).toBe(0);
+  });
+
+  it('subtracts the rodent bait-station setup too — it is invoiced up front, not after completion (codex #3591 r33 P1)', () => {
+    const rodent = {
+      oneTimeBreakdown: {
+        total: 348,
+        items: [
+          { service: 'flea_treatment', name: 'Flea treatment', price: 249 },
+          { service: 'rodent_bait_setup', name: 'Bait Station Setup', price: 99 },
+        ],
+      },
+    };
+    expect(oneTimeExtrasForPaymentNote(rodent, {}, 'recurring')).toBe(249);
+    const labeled = {
+      oneTimeBreakdown: { total: 149, items: [{ name: 'Rodent exclusion', price: 50 }, { name: 'Bait Station Setup', price: 99 }] },
+    };
+    expect(oneTimeExtrasForPaymentNote(labeled, {}, 'recurring')).toBe(50);
   });
 
   it('matches setup rows by label when the service key is missing', () => {

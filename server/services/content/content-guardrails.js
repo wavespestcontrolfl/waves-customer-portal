@@ -217,26 +217,20 @@ function attrValueAt(attrs, pos) {
 // (`data-config={JSON.stringify({...defaults})}`) sets nothing on the
 // element (#3595 r1). Quote-aware, brace-depth-tracked walk from `from`.
 function hasAttrSpreadAfter(attrs, from = 0) {
-  const a = String(attrs || '');
-  for (let i = Math.max(0, from); i < a.length; i += 1) {
-    const c = a[i];
-    if (c === '"' || c === "'" || c === '`') { const q = c; i += 1; while (i < a.length && a[i] !== q) i += 1; continue; }
-    if (c === '{') {
-      const attrPos = i === 0 || /\s/.test(a[i - 1]);
-      let j = i;
-      let d = 0;
-      for (; j < a.length; j += 1) {
-        const ch = a[j];
-        if (ch === '"' || ch === "'" || ch === '`') { const q = ch; j += 1; while (j < a.length && a[j] !== q) j += a[j] === '\\' ? 2 : 1; continue; }
-        if (ch === '{') d += 1;
-        else if (ch === '}') { d -= 1; if (d === 0) break; }
-      }
-      // The whole remaining text — a multiline spread may hold more than a
-      // few whitespace chars between `{` and `...` (#3595 late r2).
-      if (attrPos && /^\{\s*\.\.\./.test(a.slice(i))) return true;
-      i = j;
-      continue;
-    }
+  // Lexer-aware (astro hasJsxSpread parity — Codex #3646 r25): an allowed
+  // expression containing a regex brace ({/\{/.test(x)}) must not derail
+  // the walk past a real spread; comment trivia before the ellipsis is
+  // still a spread; unbalanced input fails closed.
+  const s = String(attrs || '').slice(Math.max(0, from));
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === '"' || c === "'" || c === '`') { i += 1; while (i < s.length && s[i] !== c) { if (s[i] === '\\') i += 1; i += 1; } continue; }
+    if (c !== '{') continue;
+    const attrPos = i === 0 || /\s/.test(s[i - 1]);
+    if (attrPos && /^\{(?:\s|\/\*[\s\S]*?\*\/)*\.\.\./.test(s.slice(i))) return true;
+    const e = closeOfExpressionAt(s, i);
+    if (e < 0) return true;
+    i = e;
   }
   return false;
 }
@@ -258,14 +252,38 @@ function hasTrueOpenAttr(attrs) {
   const afterEnd = valueStart >= 0 ? valueStart + (value ? value.length : 0) : last.index + last[0].length;
   if (hasAttrSpreadAfter(a, afterEnd)) return true; // later attribute spread may override
   if (value === undefined) return true; // bare `open`
-  return !FALSY_EXPR_RE.test(value.trim());
+  return !FALSY_EXPR_RE.test(stripJsTrivia(value).trim());
+}
+
+// `hidden` follows ASTRO attribute-rendering semantics (astro
+// hiddenAttrRendersHidden parity, Codex #3646 r36): only an expression
+// that is exactly false/null/undefined omits the attribute; any literal
+// (even ""), bare, or other expression renders it PRESENT and hides.
+// Last wins (JSX). Names are located on the masked copy so `hidden`
+// inside a quoted value is not an attribute.
+function hiddenAttrRendersHidden(attrs) {
+  const a = String(attrs || '');
+  const masked = maskAttrRegions(a);
+  const re = /(?:^|\s)hidden(\s*=\s*|(?=[\s>/]|$))/gi;
+  let m = null; let last = null;
+  while ((m = re.exec(masked)) !== null) last = m;
+  if (!last) return false;
+  const valueStart = /=/.test(last[1] || '') ? last.index + last[0].length : -1;
+  const value = valueStart >= 0 ? attrValueAt(a, valueStart) : undefined;
+  if (value === undefined) return true; // bare `hidden`
+  return !/^\{\s*(?:false|null|undefined)\s*\}$/.test(stripJsTrivia(value).trim());
+}
+// Comment trivia inside a static boolean expression ({false /* note */})
+// is not part of the value (astro parity, Codex #508 r8).
+function stripJsTrivia(expr) {
+  return String(expr || '').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*\n/g, ' ');
 }
 
 function opensDefinitelyHidden(tag) {
   if (HIDDEN_TAGS.has(tag.name)) return true;
   const a = tag.attrs || '';
   if ((tag.name === 'dialog' || tag.name === 'details') && !hasTrueOpenAttr(a)) return true;
-  if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
+  if (hiddenAttrRendersHidden(a)) return true;
   const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
   if (ariaM) {
     const v = ariaM[1].replace(/^[{"']|["'}]$/g, '').trim().toLowerCase();
@@ -279,7 +297,6 @@ function opensDefinitelyHidden(tag) {
 // `title="display:none example"` or `display: 'nonetheless'` is not hidden
 // (#3593 r1). String and literal-expression values both count; the value
 // may quote the keyword (style={{ display: 'none' }}, GH r30).
-const HIDDEN_STYLE_KEYWORD_RE = /(?:^|[^a-z0-9_-])display\s*:\s*['"`]?\s*none(?![a-z0-9_-])|(?:^|[^a-z0-9_-])visibility\s*:\s*['"`]?\s*hidden(?![a-z0-9_-])/i;
 function hiddenStyleValue(attrs) {
   const a = String(attrs || '');
   // The style ATTRIBUTE is located on the masked copy — a `style=` inside
@@ -299,7 +316,19 @@ function hiddenStyleValue(attrs) {
   if (hasAttrSpreadAfter(a, valueStart + rawValue.length)) return false;
   const ch = rawValue[0];
   const val = (ch === '"' || ch === "'" || ch === '`' || ch === '{') ? rawValue.slice(1, -1) : rawValue;
-  return HIDDEN_STYLE_KEYWORD_RE.test(val);
+  // CSS applies the LAST declaration of a property (astro parity, Codex
+  // #508 r6): "display:none; display:inline" is visible.
+  // A declaration inside a CSS comment is not a declaration (Codex #508 r8).
+  const live = val.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  return lastStyleValue(live, 'display') === 'none' || lastStyleValue(live, 'visibility') === 'hidden';
+}
+// Final value of a CSS property in a style string or JSX style-object
+// spelling (token-bounded; the value may be quoted).
+function lastStyleValue(val, prop) {
+  const re = new RegExp(`(?:^|[^a-z0-9_-])${prop}\\s*['"]?\\s*:\\s*['"\`]?\\s*([a-z-]+)`, 'gi');
+  let m; let last = null;
+  while ((m = re.exec(val)) !== null) last = m[1].toLowerCase();
+  return last;
 }
 
 function opensHiddenContent(tag) {
@@ -337,16 +366,22 @@ function blankHiddenContent(str) {
 // natively hidden containers). Used where the caller must judge the text
 // as SEEN — a CTA anchor's visible wording — without discarding merely
 // styled copy.
-function blankDefinitelyHiddenContent(str) {
-  return blankContentWhere(str, opensDefinitelyHidden, { keepSummary: true });
+// `scanText` (optional, same length): the view tags are LOCATED on —
+// expression string literals blanked so {'<div hidden>'} never opens a
+// phantom container — while attrs are read from `str` at the same
+// offsets, so open={false}/hidden={false} keep their values (astro
+// blankBalancedElements parity, Codex #3646 r36).
+function blankDefinitelyHiddenContent(str, scanText = null) {
+  return blankContentWhere(str, opensDefinitelyHidden, { keepSummary: true, scanText });
 }
 // `keepSummary`: a closed <details> hides its body, but its <summary> is
 // what the reader sees — the certainty walker keeps the first summary's
 // content visible (the attribution walker stays conservative).
-function blankContentWhere(str, opens, { keepSummary = false } = {}) {
+function blankContentWhere(str, opens, { keepSummary = false, scanText = null } = {}) {
   const text = String(str || '');
   const out = text.split('');
-  const tags = [...eachTag(text)];
+  const scan = scanText === null ? text : String(scanText);
+  const tags = [...eachTag(scan)].map((t) => (scan === text ? t : { ...t, attrs: text.slice(t.start + 1 + (t.isClose ? 1 : 0) + t.name.length, t.end) }));
   // Pass 1 — every hidden container's range.
   const ranges = [];
   for (let t = 0; t < tags.length; t += 1) {
@@ -1588,6 +1623,9 @@ function normalizeSourceUrl(u) {
 // The EXACT URLs a brief named. Compared whole, so naming a citation page
 // never widens to its host — an operator asking for one document does not
 // authorize everything that domain can serve.
+// The 64 chars before an index (attr-name lookback for expression props).
+function s0(text, idx) { return text.slice(Math.max(0, idx - 64), idx); }
+
 function allowedExactSourceUrls(requiredSourceUrls = []) {
   const urls = new Set();
   for (const u of Array.isArray(requiredSourceUrls) ? requiredSourceUrls : []) {
@@ -1619,14 +1657,29 @@ const AFFILIATE_LINK_MAX_PER_POST = 3;
 // Post types whose product rows may declare eligibility live in
 // @waves/affiliate-registry (PROTECTED_POST_TYPES is the deny side).
 // Service-CTA presence (affiliate is FALLBACK monetization — the Waves CTA
-// stays primary): any of these internal routes, or a real city-service
-// page, counts.
-const SERVICE_CTA_ROUTES = new Set([
-  '/book/', '/contact/', '/quote/', '/pest-control-quote/',
-  '/pest-control-calculator/', '/pest-control-services/',
-  '/waveguard-memberships/', '/termite-inspection/', '/termite-control/',
-  '/pest-inspection/',
-]);
+// stays primary). VERBATIM astro parity (packages/blog-schema/schema.ts
+// SERVICE_ROUTE_PATH_RE / WAVES_HUB_HOSTS / isServiceCtaHref): the astro
+// gate requires the exact trailing-slash route and, for absolute URLs,
+// https on a hub host with no explicit port — a looser portal test
+// (normalized paths, http, spoke hosts, extra cities) sends drafts into
+// affiliate review that the astro gate then rejects (Codex #3646 r10 P1).
+const SERVICE_ROUTE_PATH_RE =
+  /^\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/(?:[?#].*)?$|^\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/(?:[?#].*)?$/;
+const WAVES_HUB_HOSTS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
+function isServiceCtaHref(href) {
+  // EXACT value — no trimming (astro parity): whitespace inside a
+  // destination (</quote/ >) renders an encoded, non-service URL.
+  const t = String(href || '');
+  if (t.startsWith('/')) return SERVICE_ROUTE_PATH_RE.test(t);
+  if (!/^https:\/\//i.test(t)) return false;
+  try {
+    const u = new URL(t);
+    if (!WAVES_HUB_HOSTS.has(u.hostname.toLowerCase().replace(/\.$/, ''))) return false;
+    // URL normalizes :443 away on https — any remaining port is non-default.
+    if (u.port !== '') return false;
+    return SERVICE_ROUTE_PATH_RE.test(`${u.pathname}${u.search}${u.hash}`);
+  } catch { return false; }
+}
 
 function affiliateRegistryModule() {
   return require('../../../packages/affiliate-registry');
@@ -1664,14 +1717,322 @@ function literalAttribute(attrs, name) {
   return seen === 1 ? value : null;
 }
 
+// JSX spelled inside an expression STRING LITERAL ({'<InlineCTA/>'})
+// renders as TEXT, never as a component (astro blankExpressionStrings
+// parity — Codex #3646 r11): blank every string literal inside a balanced
+// brace span (length-preserving) so tag scans can position-check against
+// this view while still reading attrs from the unblanked text (a REAL
+// expression-wrapped tag's quoted props stay validatable).
+function blankExpressionStringLiterals(text, { attrValues = true } = {}) {
+  const s = String(text || '');
+  const out = s.split('');
+  let depth = 0;
+  let prevSig = ''; // last significant char — decides regex vs division
+  // Depth-0 context: inside a TAG a quoted attribute value is opaque
+  // (title="{" must not open a phantom expression that pairs a later real
+  // prop quote and blanks a counted component's opener — astro parity,
+  // Codex #504 r19); in prose only braces matter.
+  let inTag = false; let attrQ = null; let word = ''; let wordDot = false;
+  const parenCtl = [];
+  const braceKind = []; // true = object literal (see closeOfExpressionAt)
+  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || (OBJECT_CONTEXT_KEYWORDS.has(word) && !wordDot);
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === '\\') { i += 1; continue; }
+    if (depth === 0) {
+      // Quoted attr VALUES are blanked (quotes kept): tag-shaped text in a
+      // descendant attribute (title="</div>") never closes a wrapper or
+      // fakes a component (astro parity, Codex #504 r20).
+      if (attrQ) { if (c === attrQ) { attrQ = null; } else if (attrValues && out[i] !== '\n') { out[i] = ' '; } continue; }
+      if (inTag) {
+        if (c === '"' || c === "'" || c === '`') { attrQ = c; continue; }
+        if (c === '>') { inTag = false; continue; }
+        if (c === '{') { depth = 1; prevSig = '{'; continue; }
+        continue;
+      }
+      if (c === '<' && /[A-Za-z/!]/.test(s[i + 1] || '')) { inTag = true; continue; }
+      if (c === '{') { depth = 1; prevSig = '{'; continue; }
+      continue;
+    }
+    if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
+    if (c === '}') { depth -= 1; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
+    if (depth > 0 && c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word) && !wordDot); prevSig = '('; word = ''; continue; } // member calls are not control flow
+    if (depth > 0 && c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
+    if (depth > 0) {
+      if (c === '"' || c === "'" || c === '`') {
+        let j = i + 1;
+        for (; j < s.length; j += 1) { if (s[j] === '\\') { j += 1; continue; } if (s[j] === c) break; }
+        if (j < s.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; prevSig = c; word = ''; }
+        continue;
+      }
+      // Comments render nothing and may spell tag-shaped text — blank whole.
+      if (c === '/' && s[i + 1] === '/') {
+        let j = i;
+        while (j < s.length && s[j] !== '\n') j += 1;
+        for (let k = i; k < j; k += 1) if (out[k] !== '\n') out[k] = ' ';
+        i = j - 1; continue;
+      }
+      if (c === '/' && s[i + 1] === '*') {
+        const e = s.indexOf('*/', i + 2);
+        const j = e === -1 ? s.length : e + 2;
+        for (let k = i; k < j; k += 1) if (out[k] !== '\n') out[k] = ' ';
+        i = j - 1; continue;
+      }
+      // Regex literal (operator-position /, char-class aware) — its content
+      // is text, and its quote/tag characters must not leak into pairing.
+      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
+        let j = i + 1; let inClass = false; let closed = -1;
+        for (; j < s.length && s[j] !== '\n'; j += 1) {
+          const d = s[j];
+          if (d === '\\') { j += 1; continue; }
+          if (inClass) { if (d === ']') inClass = false; continue; }
+          if (d === '[') { inClass = true; continue; }
+          if (d === '/') { closed = j; break; }
+        }
+        if (closed > 0) { for (let k = i + 1; k < closed; k += 1) if (out[k] !== '\n') out[k] = ' '; i = closed; prevSig = '/'; continue; }
+      }
+      // ++/-- end an operand (the / after n++ is DIVISION); a / after a
+      // regex-allowing KEYWORD (return /x/) opens a regex (word check).
+      if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY — division follows it
+      if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c;
+    }
+  }
+  return out.join('');
+}
+
+// Keywords after which a `/` starts a REGEX, not division (return /x/) —
+// shared by both lexers (astro parity).
+const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'do', 'else', 'instanceof', 'yield', 'await', 'new']);
+// A `)` closing one of these keywords' condition returns to STATEMENT
+// position — `if (ok) /x/.test(y)` opens a regex (astro parity).
+const CONTROL_FLOW_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'with']);
+// Keywords after which a { is an OBJECT literal (return {}); blocks follow
+// else/do even though those allow regexes after them (astro parity).
+const OBJECT_CONTEXT_KEYWORDS = new Set(['return', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'instanceof', 'yield', 'await', 'new', 'throw']);
+
+// Index of the `}` closing the expression whose `{` is at `i` (-1 if
+// unbalanced) — string/regex/comment-aware (astro closeOfExpressionAt).
+function closeOfExpressionAt(s, i) {
+  let depth = 0; let q = null; let prevSig = ''; let word = ''; let wordDot = false;
+  const parenCtl = [];
+  // Brace KINDS: a statement block's } returns to statement position (a /
+  // after `if (ok) {}` is a regex); an object literal's } is an operand.
+  const braceKind = [];
+  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || (OBJECT_CONTEXT_KEYWORDS.has(word) && !wordDot);
+  for (let j = i; j < s.length; j += 1) {
+    const c = s[j];
+    if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; prevSig = c; continue; }
+    if (depth > 0 && c === '/' && s[j + 1] === '/') { while (j < s.length && s[j] !== '\n') j += 1; continue; }
+    if (depth > 0 && c === '/' && s[j + 1] === '*') { const e = s.indexOf('*/', j + 2); if (e === -1) return -1; j = e + 1; continue; }
+    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
+      let k = j + 1; let inClass = false; let closed = -1;
+      for (; k < s.length && s[k] !== '\n'; k += 1) {
+        const d = s[k];
+        if (d === '\\') { k += 1; continue; }
+        if (inClass) { if (d === ']') inClass = false; continue; }
+        if (d === '[') { inClass = true; continue; }
+        if (d === '/') { closed = k; break; }
+      }
+      if (closed > 0) { j = closed; prevSig = '/'; continue; }
+    }
+    if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
+    if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
+    if (c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word) && !wordDot); prevSig = '('; word = ''; continue; } // member calls are not control flow
+    if (c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
+    if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY — division follows it
+    if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c;
+  }
+  return -1;
+}
+
+// Length-preserving mask of every quoted span and expression value inside
+// JSX opening tags (astro maskJsxAttrQuotes parity): title="[q](/quote/)"
+// or title="<InlineCTA />" renders no anchor and no component, so
+// attribute text must never satisfy a Markdown-link or tag scan.
+function maskJsxAttrQuotes(src, { keepValuesOf = null } = {}) {
+  const s = String(src || '');
+  const out = s.split('');
+  // Tags are DISCOVERED on the expression-literal-masked view (astro
+  // parity): `<div` text inside a prose regex literal is not a tag.
+  const discover = blankExpressionStringLiterals(s);
+  const re = /<[A-Za-z][\w.]*/g;
+  let m;
+  while ((m = re.exec(discover)) !== null) {
+    let j = m.index + m[0].length; let q = null; let qStart = -1; let keepThis = false;
+    for (; j < s.length; j += 1) {
+      const c = s[j];
+      if (q) {
+        if (c === '\\') { j += 1; continue; }
+        if (c === q) {
+          if (!keepThis) for (let t = qStart + 1; t < j; t += 1) if (out[t] !== '\n') out[t] = ' ';
+          q = null;
+        }
+        continue;
+      }
+      if (c === '"' || c === "'" || c === '`') {
+        q = c; qStart = j;
+        // Link-carrying attribute VALUES stay readable when asked (the
+        // route scan reads href/src/ctaHref); display text still masks.
+        keepThis = false;
+        if (keepValuesOf) {
+          const nm = /([A-Za-z_][\w:-]*)\s*=\s*$/.exec(s.slice(Math.max(m.index, j - 64), j));
+          // HTML attribute names are case-insensitive (<a HREF=…> is a
+          // live link the route gate must read); JSX props are exact, so
+          // ctaHref keeps its spelling (Codex #3646 r33).
+          if (nm && (keepValuesOf.has(nm[1]) || keepValuesOf.has(nm[1].toLowerCase()))) keepThis = true;
+        }
+        continue;
+      }
+      if (c === '{') {
+        const e = closeOfExpressionAt(s, j);
+        if (e > 0) {
+          // JSX inside an attr EXPRESSION renders (description={<AffiliateLink …/>})
+          // — keep it visible; blank only string/regex/comment literals
+          // (astro parity, Codex #504 r19).
+          const lexed = blankExpressionStringLiterals(s.slice(j, e + 1));
+          for (let t = j; t <= e; t += 1) if (out[t] !== '\n' && lexed[t - j] !== s[t]) out[t] = lexed[t - j];
+          j = e; continue;
+        }
+      }
+      if (c === '>') break;
+    }
+    re.lastIndex = j;
+  }
+  return out.join('');
+}
+
+// Quote/brace-aware attribute text of the tag opening at `start` (index of
+// `<`), expressions consumed via the shared lexer — null = unterminated
+// (astro tagAttrsAt parity).
+function tagAttrsAt(text, start) {
+  const m = /^<[A-Za-z][\w.]*/.exec(text.slice(start, start + 64));
+  if (!m) return null;
+  let j = start + m[0].length; let q = null;
+  for (; j < text.length; j += 1) {
+    const c = text[j];
+    if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+    if (c === '{') {
+      const e = closeOfExpressionAt(text, j);
+      if (e < 0) return null;
+      j = e; continue;
+    }
+    if (c === '>') return text.slice(start + m[0].length, j);
+  }
+  return null;
+}
+
+// eachTag lowercases names; the astro contract is CASE-SENSITIVE
+// (tagsNamed) — MDX mounts <InlineCTA>, never <inlinecta>. True when the
+// tag at `start` spells the component name exactly.
+function isExactTagAt(text, start, name) {
+  if (!text.startsWith(`<${name}`, start)) return false;
+  const after = text[start + name.length + 1];
+  return after === undefined || /[\s/>]/.test(after);
+}
+
+// The component renders its CHILDREN as the anchor text, so a self-closing,
+// empty, comment-only, or unclosed <AffiliateLink> ships an empty, unusable
+// product link (Codex #3646 r35). The balanced close is walked on the
+// string-blanked view (a quoted '</AffiliateLink>' inside an expression
+// never closes it early); children are read from the comment-blanked view
+// with statically NON-RENDERING expressions removed — empty strings and
+// the boolean/nullish literals React drops ({false}, {null}, {undefined},
+// {true}; Codex #3646 r36).
+// A child expression that renders NOTHING: an empty string or a boolean/
+// nullish literal, with optional comment trivia around it.
+const WHITESPACE_ENTITY_RE = /&(?:nbsp|ensp|emsp|thinsp|#0*(?:32|160|8194|8195|8201)|#x0*(?:20|a0|2002|2003|2009));?/gi;
+// An ARRAY whose slots are all non-rendering (or elided) renders nothing
+// either ({[]}, {[null]}, {[false, '']}; Codex #3646 r39).
+const NON_RENDERING_CHILD_RE = (() => {
+  const trivia = '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*';
+  const lit = "(?:'\\s*'|\"\\s*\"|`\\s*`|true|false|null|undefined)"; // whitespace-only strings render nothing visible; no backreference — the array branch repeats the group
+  const arr = '\\[' + trivia + '(?:' + lit + '?' + trivia + ',' + trivia + ')*' + '(?:' + lit + trivia + ')?' + '\\]';
+  return new RegExp('\\{' + trivia + '(?:' + lit + '|' + arr + ')' + trivia + '\\}', 'g');
+})();
+function affiliateLinkTextIsEmpty(masked, strView, start, attrs) {
+  if (attrs.trimEnd().endsWith('/')) return true;
+  const openEnd = start + '<AffiliateLink'.length + attrs.length; // index of '>'
+  const tagRe = /<(\/?)AffiliateLink(?=[\s/>])/g;
+  tagRe.lastIndex = openEnd + 1;
+  let depth = 1; let t;
+  while ((t = tagRe.exec(strView)) !== null) {
+    if (t[1] === '/') {
+      depth -= 1;
+      if (depth === 0) {
+        // Definitely-hidden and statically-hidden-class markup inside the
+        // link is not visible text (<span hidden>Buy</span>; Codex #3646
+        // r37), and tag markup itself is not text — except an <img>,
+        // which renders a picture the reader can click.
+        // Tags are located on the expression-string-blanked view so a
+        // quoted tag ({'</b>'}) is rendered TEXT, not markup.
+        const kids = blankStaticHiddenClassElements(masked.slice(openEnd + 1, t.index));
+        const visible = blankDefinitelyHiddenContent(kids, blankExpressionStringLiterals(kids, { attrValues: false }));
+        let text = ''; let last = 0;
+        // A self-closing element is never blanked by the balanced walks, so
+        // a HIDDEN <img> (hidden / class="hidden" / display:none) is
+        // dropped here (Codex #3646 r38). Attr values stay readable on
+        // the tag view for that check.
+        for (const tg of eachTag(blankExpressionStringLiterals(visible, { attrValues: false }))) {
+          if (tg.name === 'img' && !opensDefinitelyHidden(tg) && !staticallyHiddenAttrs(tg.attrs)) continue;
+          text += visible.slice(last, tg.start); last = tg.end + 1;
+        }
+        text += visible.slice(last);
+        // Comment trivia around the literal ({false /* note */}) and
+        // fragment delimiters (<></>) render nothing either (Codex #508 r5/r6).
+        // Whitespace character references (&nbsp; &#32; …) decode to
+        // whitespace the anchor cannot show either (Codex #508 r8).
+        return !text.replace(/<>|<\/>/g, '').replace(NON_RENDERING_CHILD_RE, '').replace(WHITESPACE_ENTITY_RE, ' ').trim();
+      }
+    } else {
+      const a = tagAttrsAt(masked, t.index);
+      if (a !== null && !a.trimEnd().endsWith('/')) depth += 1;
+    }
+  }
+  return true; // unclosed — nothing renders
+}
+
 function collectAffiliateLinkTags(text) {
+  // Astro-parity COUNTING view: code and comments never render, so an
+  // <AffiliateLink> inside a fenced example is not a component (it would
+  // force affiliate_review and withhold auto-merge on an affiliate-free
+  // post); expressions stay ({cond && <AffiliateLink/>} renders) but a tag
+  // spelled inside an expression STRING is text and never counts. The
+  // masks are length-preserving, so tag.start offsets stay valid against
+  // the caller's original text. Channel stripping
+  // (containsAffiliateMaterial) deliberately keeps the raw scan.
+  // Product/placement are the RAW literal values — no trimming: the astro
+  // contract validates the exact string, so " rain-gauge " must fail
+  // closed here (registry miss), never validate normalized.
+  // DIRECT position scan (case-sensitive, astro tagsNamed parity) rather
+  // than eachTag: a tag nested inside another component's prop expression
+  // (<InlineCTA description={<AffiliateLink …/>} />) RENDERS and must be
+  // counted — eachTag consumes the outer tag whole and never yields it,
+  // which let a refresh add a product with no park (Codex #3646 r20 P1).
+  // strView blanks expression strings AND quoted attr display text, so
+  // neither counts; attr-expression JSX survives it.
   const tags = [];
-  for (const tag of eachTag(String(text || ''))) {
-    if (tag.isClose || tag.name !== 'affiliatelink') continue;
-    const productId = (literalAttribute(tag.attrs, 'product') || '').trim();
-    tags.push({ start: tag.start, productId: productId || null });
+  const masked = blankNonRenderedMarkdown(String(text || ''));
+  const strView = blankExpressionStringLiterals(masked);
+  const re = /<AffiliateLink(?=[\s/>])/g;
+  let m;
+  while ((m = re.exec(masked)) !== null) {
+    if (strView[m.index] === ' ') continue; // string/attr display text
+    const attrs = tagAttrsAt(masked, m.index);
+    if (attrs === null) { tags.push({ start: m.index, attrs: '', productId: null, placement: null, emptyText: true }); continue; }
+    const productId = literalAttribute(attrs, 'product');
+    const placement = literalAttribute(attrs, 'placement');
+    tags.push({ start: m.index, attrs, productId: productId || null, placement: placement || null, emptyText: affiliateLinkTextIsEmpty(masked, strView, m.index, attrs) });
   }
   return tags;
+}
+
+// Distinct product ids referenced by <AffiliateLink> tags in a body — the
+// runner uses this to force the affiliate_review park and to name the
+// products (with risk class) in the reviewer notes.
+function affiliateProductIdsIn(text) {
+  return [...new Set(collectAffiliateLinkTags(text).map((t) => t.productId || '(invalid)'))];
 }
 
 function affiliateTagCountsByProduct(text) {
@@ -1683,25 +2044,588 @@ function affiliateTagCountsByProduct(text) {
   return counts;
 }
 
+// A Markdown IMAGE renders an <img>, never a link — blank each image span
+// (length-preserving) via THE balanced walker: a flat /!\[[^\]]*\]/ regex
+// stops at a nested label's inner `]` (![Request [a quote]](/quote/)) and
+// leaves `](/quote/)` residue for the destination collector to
+// false-match. A malformed image blanks to where scanning stopped — an
+// image can never be the CTA, so over-blanking is the safe direction.
+function blankMarkdownImages(text) {
+  const out = String(text || '').split('');
+  for (const span of eachMarkdownLink(text)) {
+    if (!span.isImage) continue;
+    for (let t = span.start; t <= span.end && t < out.length; t += 1) if (out[t] !== '\n') out[t] = ' ';
+  }
+  return out.join('');
+}
+
+// Balanced blank of every element whose class/className is STATICALLY
+// hidden (hidden/invisible/sr-only with no viewport-breakpoint override —
+// quoted literal or escape-free static string expression), mirroring the
+// vendored astro predicate: a CTA a reader cannot see is no CTA
+// (Codex #3646 r27 P1). Length-preserving; dynamic classes stay visible
+// (historic posture); tag walking is expression-string-safe.
+// True when an element's class/className is STATICALLY hidden at every
+// viewport (hidden/invisible/sr-only with no breakpoint display utility or
+// visibility RESET such as md:not-sr-only / md:visible — Codex #508 r5), or
+// a wrapper SPREAD makes visibility unprovable (fail closed, astro parity;
+// Codex #3646 r28). Shared by the balanced blanker and the AffiliateLink
+// child check (Codex #3646 r38).
+function staticallyHiddenAttrs(attrs) {
+  if (hasAttrSpreadAfter(attrs)) return true;
+  let cls = null;
+  for (const a of eachJsxAttr(attrs)) {
+    const n = a.name.toLowerCase();
+    if (n !== 'class' && n !== 'classname') continue;
+    cls = a.literal !== null ? a.literal : staticStringOfExpr(a.expr);
+  }
+  if (cls === null) return false;
+  return classListStaticallyHidden(cls);
+}
+// A class list hides at EVERY viewport when any hiding utility present
+// lacks the breakpoint reset that undoes ITS property (astro parity,
+// Codex #508 r5/r6): `hidden` (display) ↔ md:block/flex/…; `invisible`
+// (visibility) ↔ md:visible; `sr-only` ↔ md:not-sr-only. Only VIEWPORT
+// breakpoints prove responsive visibility.
+// An IMPORTANT hide (Tailwind 4 `hidden!`, Tailwind 3 `!hidden`) is
+// undone only by an important reset (Codex #508 r8).
+const HIDING_UTILITY_RESETS = [
+  ['hidden', 'block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item'],
+  ['invisible', 'visible'],
+  ['sr-only', 'not-sr-only'],
+];
+function classListStaticallyHidden(cls) {
+  return HIDING_UTILITY_RESETS.some(([hide, resets]) => {
+    const h = new RegExp(`(?:^|\\s)(!?)${hide}(!?)(?=\\s|$)`).exec(cls);
+    if (!h) return false;
+    const reset = new RegExp(`(?:^|\\s)(?:sm|md|lg|xl|2xl):(!?)(?:${resets})(!?)(?=\\s|$)`).exec(cls);
+    if (!reset) return true;
+    return Boolean(h[1] || h[2]) && !(reset[1] || reset[2]);
+  });
+}
+function blankStaticHiddenClassElements(text) {
+  const s = String(text || '');
+  const out = s.split('');
+  const balanceSrc = blankExpressionStringLiterals(s);
+  const openRe = /<([A-Za-z][\w-]*)\b/g;
+  let m;
+  while ((m = openRe.exec(balanceSrc)) !== null) {
+    const name = m[1];
+    const attrs = tagAttrsAt(s, m.index);
+    if (attrs === null || /\/\s*$/.test(attrs)) continue;
+    if (!staticallyHiddenAttrs(attrs)) continue;
+    const tagRe = new RegExp('<(\\/?)' + name + '\\b', 'gi');
+    tagRe.lastIndex = m.index + 1 + name.length + attrs.length + 1;
+    let depth = 1; let t; let closeEnd = -1;
+    while ((t = tagRe.exec(balanceSrc)) !== null) {
+      if (t[1] === '/') { depth -= 1; if (depth === 0) { const gt = balanceSrc.indexOf('>', t.index); closeEnd = gt === -1 ? balanceSrc.length - 1 : gt; break; } }
+      else { const a2 = tagAttrsAt(s, t.index); if (a2 !== null && !/\/\s*$/.test(a2)) depth += 1; }
+    }
+    if (closeEnd === -1) continue;
+    for (let k = m.index; k <= closeEnd; k += 1) if (out[k] !== '\n') out[k] = ' ';
+    openRe.lastIndex = closeEnd + 1;
+  }
+  return out.join('');
+}
+
 // True when the body already carries a Waves service CTA — an allowlisted
 // CTA route or a real /{service}-{city}-fl/ page (validated against the
 // published-city set, same as internalRouteFinding).
 function hasServiceCtaLink(body) {
-  // Only a RENDERED link counts: comments, code, and definitely-hidden
-  // spans are masked first so `{/* [quote](/quote/) */}` cannot satisfy
-  // the requirement (Codex r6 P1).
-  const rendered = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(String(body || ''))));
-  for (const { norm } of collectInternalDestinations(rendered)) {
-    if (SERVICE_CTA_ROUTES.has(norm)) return true;
-    const m = CITY_SERVICE_LINK_RE.exec(norm);
-    if (m && PAGE_CITY_SLUGS.has(m[1])) return true;
+  // Mirrors the astro publish gate (validateAffiliateUsage): the CTA must
+  // appear BEFORE the first <AffiliateLink>, and a rendered <InlineCTA>
+  // counts (Codex PR3 r1 P1). Only RENDERED content counts: comments,
+  // code, and definitely-hidden spans are masked first so
+  // `{/* [quote](/quote/) */}` cannot satisfy the requirement (Codex r6 P1).
+  const text = String(body || '');
+  const firstAffiliate = collectAffiliateLinkTags(text)[0];
+  // Code and comments are blanked FIRST by the shared fence-aware blanker
+  // (a fence-blind comment pass erased real content after a fenced "<!--";
+  // Codex #3646 r38). It is NOT length-preserving — leading indentation
+  // and blockquote prefixes are stripped — so the prefix is cut on ITS
+  // coordinates, where collectAffiliateLinkTags measured tag.start.
+  const masked = blankNonRenderedMarkdown(text);
+  const prefix = firstAffiliate ? masked.slice(0, firstAffiliate.start) : masked;
+  // A Markdown IMAGE (![alt](/quote/)) renders an <img>, not a link — mask
+  // images and raw <img> tags before collecting destinations.
+  // Reference DEFINITIONS ([cta]: /quote/) render nothing — blanked too, so
+  // an unused definition can't satisfy the rule (a reference-style link
+  // whose definition is blanked simply has no destination: fail closed).
+  // MDX expressions are blanked from the structural view too (parity with
+  // the astro validator): {true && <InlineCTA/>} can only render a
+  // component, never a Markdown CTA, and must not satisfy the rule.
+  // Static-hidden-class blanking runs FIRST: it must read attr
+  // expressions ({'sr-only'}) before blankExpressions erases them.
+  // The definitely-hidden walk runs BEFORE blankExpressions: open={false}
+  // and hidden={false} are values it must read (Codex #3646 r36); tags are
+  // located on the expression-string-blanked view so a quoted tag inside
+  // an expression never opens a phantom container.
+  const ctaBase = blankStaticHiddenClassElements(prefix);
+  const rendered = blankMarkdownImages(blankLinkDefinitionsAndTitles(blankExpressions(blankDefinitelyHiddenContent(ctaBase, blankExpressionStringLiterals(ctaBase, { attrValues: false })))))
+    .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
+  // Attr-masked view: link- or tag-shaped text inside a JSX attribute
+  // (title="[q](/quote/)", title="<InlineCTA />") renders nothing — the
+  // Markdown scan runs on it, and the component scan position-checks
+  // against it (astro p3 parity; attrs still read from `rendered`).
+  const attrMasked = maskJsxAttrQuotes(rendered);
+  for (const tag of eachTag(rendered)) {
+    // CASE-SENSITIVE (astro tagsNamed parity): MDX mounts <InlineCTA>,
+    // never <inlinecta> — a lowercase spelling renders an inert element.
+    if (tag.isClose || tag.name !== 'inlinecta' || !isExactTagAt(rendered, tag.start, 'InlineCTA')) continue;
+    if (attrMasked[tag.start] === ' ') continue; // attr-quoted tag text
+    // An InlineCTA counts only when it leads to a Waves service route: no
+    // ctaHref (the component defaults to the quote page) or a quoted
+    // literal service route. A dynamic or non-service destination is not
+    // the required CTA, and a spread can override the destination at
+    // render time (fail closed — astro hasInlineCtaService parity).
+    if (hasAttrSpreadAfter(tag.attrs)) continue;
+    if (!/\bctaHref\s*=/.test(tag.attrs)) return true;
+    const href = literalAttribute(tag.attrs, 'ctaHref');
+    if (href && isServiceCtaHref(href)) return true;
+  }
+  // REAL Markdown-link destinations only, judged RAW by the astro
+  // classifier (markdownLinkDests parity): no path normalization (the
+  // astro gate takes `/quote` literally and rejects it), no raw <a href>
+  // shapes (they satisfy no astro rule), no escaped openers (\[q](/quote/)
+  // renders literal text — eachMarkdownLink deliberately still scans those
+  // for the citation rules, so the escape check lives here), and the
+  // CommonMark destination (bare or <>-wrapped) split from any title.
+  for (const span of eachMarkdownLink(attrMasked)) {
+    if (span.kind !== 'inline' || span.isImage) continue;
+    if (backslashRunBefore(attrMasked, span.labelStart) % 2 === 1) continue;
+    // [](/quote/) renders an EMPTY anchor — no visible funnel, no CTA
+    // (astro parity, Codex #3646 r21 P1).
+    if (!attrMasked.slice(span.labelStart + 1, span.labelEnd).trim()) continue;
+    const inner = attrMasked.slice(span.destStart, span.destEnd + 1).trim();
+    const dm = /^<([^<>\n]*)>|^(\S+)/.exec(inner);
+    // Only a valid quoted/parenthesized TITLE may follow the destination —
+    // [q](/quote/ garbage) renders no anchor at all (astro parity).
+    if (dm) {
+      const rest = inner.slice(dm[0].length).trim();
+      if (rest && !/^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\))$/.test(rest)) continue;
+    }
+    // Angle-bracket destinations keep INTERNAL whitespace (CommonMark:
+    // </quote/ > renders /quote/%20, not the service route) — only the
+    // syntax whitespace outside <…> is trimmed.
+    const dest = dm ? (dm[1] !== undefined ? dm[1] : dm[2]) : '';
+    if (dest && isServiceCtaHref(dest)) return true;
   }
   return false;
 }
 
+// InlineCTA writes ctaHref straight into an anchor and is allowlisted for
+// EVERY blog draft, affiliate or not — an invalid destination would only
+// surface at the astro publish gate AFTER a full generation spend (and a
+// javascript: destination is a link-safety issue besides). Mirrors the
+// vendored component contract (packages/blog-schema/schema.ts InlineCTA):
+// optional ctaHref must be a single quoted literal that is a well-formed
+// root-relative path (no dot segments) or an https URL; a spread can
+// override the destination at render time, so it never validates.
+// Code and comments never render; expressions CAN render a component, so
+// they stay visible (parity with the astro validator's unmasked view).
+const INLINE_CTA_ROOT_RELATIVE_RE = /^\/(?!\/)[A-Za-z0-9._~\-/]*(?:[?#][A-Za-z0-9._~\-/?#=&%+]*)?$/;
+// The COMPLETE vendored InlineCTA prop contract (packages/blog-schema
+// componentPropSchemas.InlineCTA): exactly these props (case-sensitive —
+// JSX), tel a phone-shaped literal. An unknown or invalid prop is rejected
+// by the astro publish gate after a full generation spend, so it blocks
+// here first (Codex #3646 r16 P1).
+const INLINE_CTA_PROP_NAMES = Object.freeze(new Set(['headline', 'description', 'ctaLabel', 'ctaHref', 'phone', 'tel', 'eyebrow']));
+// At least 7 digits — '-------' is a truthy non-number (Codex #3646 r31).
+const INLINE_CTA_TEL_RE = /^(?:tel:)?\+?(?=(?:\D*\d){7})[\d\-().\s]{7,20}$/;
+// The real string value of a STATIC quoted string expression
+// ({'x'} / {"x"}) — null for anything else. tel={'not-a-phone'} carries a
+// value the schemas must see (astro parseJsxProps parity, Codex #3646 r23).
+// Standard JS string-escape decoder (astro decodeJsStaticString parity —
+// Codex #3646 r26): the schemas judge the RUNTIME value; legacy octal
+// stays opaque (null).
+function decodeJsStaticString(raw) {
+  let out = '';
+  for (let i = 0; i < raw.length; i += 1) {
+    const c = raw[i];
+    if (c !== '\\') { out += c; continue; }
+    const n = raw[i + 1];
+    i += 1;
+    if (n === undefined) return null;
+    if (n === 'n') out += '\n';
+    else if (n === 't') out += '\t';
+    else if (n === 'r') out += '\r';
+    else if (n === 'b') out += '\b';
+    else if (n === 'f') out += '\f';
+    else if (n === 'v') out += '\v';
+    else if (n === '0' && !/[0-9]/.test(raw[i + 1] || '')) out += '\0';
+    else if (n === 'x') {
+      const hex = raw.slice(i + 1, i + 3);
+      if (!/^[0-9a-fA-F]{2}$/.test(hex)) return null;
+      out += String.fromCharCode(parseInt(hex, 16)); i += 2;
+    } else if (n === 'u') {
+      if (raw[i + 1] === '{') {
+        const close = raw.indexOf('}', i + 2);
+        const hex = close === -1 ? '' : raw.slice(i + 2, close);
+        if (!/^[0-9a-fA-F]{1,6}$/.test(hex)) return null;
+        const cp = parseInt(hex, 16);
+        if (cp > 0x10FFFF) return null; // out-of-range code point — fromCodePoint would THROW and abort the gate (Codex #504 r32)
+        out += String.fromCodePoint(cp); i = close;
+      } else {
+        const hex = raw.slice(i + 1, i + 5);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
+        out += String.fromCharCode(parseInt(hex, 16)); i += 4;
+      }
+    } else if (/[1-9]/.test(n)) return null; // legacy octal
+    else if (n === '\n') { /* line continuation */ }
+    else out += n; // identity escape
+  }
+  return out;
+}
+// True when a template literal's raw text carries an UNESCAPED `${` —
+// `\${` is literal text the decoder resolves (Codex #3646 r34).
+function hasTemplateInterpolation(raw) {
+  for (let k = 0; k < raw.length; k += 1) {
+    if (raw[k] === '\\') { k += 1; continue; }
+    if (raw[k] === '$' && raw[k + 1] === '{') return true;
+  }
+  return false;
+}
+// A top-level interpolation-free template literal (tel={`…`}) is a static
+// string like the quoted forms (Codex #3646 r37); `${` keeps it opaque.
+function staticStringOfExpr(expr) {
+  const m = /^\{\s*'((?:[^'\\]|\\.)*)'\s*\}$|^\{\s*"((?:[^"\\]|\\.)*)"\s*\}$|^\{\s*`((?:[^`\\]|\\.)*)`\s*\}$/.exec(String(expr || ''));
+  if (!m) return null;
+  if (m[3] !== undefined && hasTemplateInterpolation(m[3])) return null;
+  return decodeJsStaticString(m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]);
+}
+
+// Every attribute name with its quoted-literal value (null when
+// expression-valued/unquoted) and its RAW expression text — a balanced
+// walk via the shared lexer, so nested-brace expressions
+// (headline={{"x":"y"}}) are consumed whole instead of desyncing a flat
+// regex and hiding the prop from validation (Codex #3646 r18 P1).
+function eachJsxAttr(attrs) {
+  const s = String(attrs || '');
+  const out = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /[\s/]/.test(s[i])) i += 1;
+    if (s[i] === '{') {
+      // A spread ({...expr}) at attribute position — consume it whole so
+      // attrs AFTER it are still walked (the spread itself is rejected by
+      // each component's hasAttrSpreadAfter check).
+      const e = closeOfExpressionAt(s, i);
+      if (e < 0) break;
+      i = e + 1; continue;
+    }
+    const nm = /^[^\s=/>"'{}]+/.exec(s.slice(i));
+    if (!nm) break;
+    const name = nm[0];
+    i += name.length;
+    let k = i;
+    while (k < s.length && /\s/.test(s[k])) k += 1;
+    if (s[k] !== '=') { out.push({ name, literal: null, expr: null }); i = k; continue; }
+    k += 1;
+    while (k < s.length && /\s/.test(s[k])) k += 1;
+    const c = s[k];
+    if (c === '"' || c === "'") {
+      let j = k + 1;
+      while (j < s.length && s[j] !== c) j += 1;
+      out.push({ name, literal: s.slice(k + 1, j), expr: null });
+      i = j + 1; continue;
+    }
+    if (c === '{') {
+      const e = closeOfExpressionAt(s, k);
+      out.push({ name, literal: null, expr: e > 0 ? s.slice(k, e + 1) : s.slice(k) });
+      if (e < 0) break;
+      i = e + 1; continue;
+    }
+    const um = /^[^\s"'{}>]+/.exec(s.slice(k));
+    out.push({ name, literal: null, expr: null });
+    i = k + (um ? um[0].length : 1);
+  }
+  return out;
+}
+function inlineCtaHrefValid(v) {
+  if (INLINE_CTA_ROOT_RELATIVE_RE.test(v) && !/(^|\/)\.\.(\/|$)/.test(v)) return true;
+  if (!/^https:\/\//i.test(v)) return false;
+  try { const u = new URL(v); return u.protocol === 'https:' && !!u.hostname && !/[\s"'<>]/.test(v); } catch { return false; }
+}
+function inlineCtaContractFinding(body) {
+  const text = blankNonRenderedMarkdown(String(body || ''));
+  // {'<InlineCTA ctaHref={dynamic} />'} is rendered TEXT — a tag whose
+  // opener sits inside an expression string never validates (astro
+  // contract-loop parity; Codex #3646 r11 P1).
+  const strView = blankExpressionStringLiterals(text);
+  const attrView = maskJsxAttrQuotes(text);
+  // DIRECT position scan (astro parity): a component nested in another
+  // component's prop expression (description={<InlineCTA …/>}) renders and
+  // must validate — eachTag consumes the outer tag whole (Codex #3646 r22).
+  const ctaRe = /<InlineCTA(?=[\s/>])/g;
+  let ctaM;
+  while ((ctaM = ctaRe.exec(text)) !== null) {
+    if (strView[ctaM.index] === ' ' || attrView[ctaM.index] === ' ') continue;
+    const tag = { start: ctaM.index, attrs: tagAttrsAt(text, ctaM.index) };
+    if (tag.attrs === null) {
+      // An unterminated invocation breaks the downstream MDX build — never
+      // a clean draft (Codex #3646 r25 P1).
+      return finding('P0', 'INVALID_INLINECTA_PROPS', 'Draft contains an unterminated <InlineCTA (no closing \'>\') — malformed MDX fails the astro build.');
+    }
+    if (hasAttrSpreadAfter(tag.attrs)) {
+      return finding('P0', 'INVALID_INLINECTA_DESTINATION', 'Draft contains an <InlineCTA> carrying a JSX spread ({...}) — a spread can override the destination at render time, so the CTA cannot be validated.');
+    }
+    // The FULL vendored prop contract, not just ctaHref: unknown props and
+    // an invalid literal tel are astro publish blockers (Codex #3646 r16).
+    for (const { name, literal, expr } of eachJsxAttr(tag.attrs)) {
+      if (!INLINE_CTA_PROP_NAMES.has(name)) {
+        return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA> with unknown prop "${name}" — the component accepts only ${[...INLINE_CTA_PROP_NAMES].join(', ')}; the astro publish gate rejects unknown props.`);
+      }
+      // Every InlineCTA prop is a STRING schema — a simple-literal or
+      // JSON-container expression ({false}, {42}, {null}, {[…]}, {{…}}) is
+      // parsed by the astro prop validator and rejected against it
+      // (Codex #3646 r17 P1); opaque expressions ({someVar}) stay
+      // unvalidated there, so they pass here too.
+      if (literal === null && expr === null) {
+        // JSX shorthand (<InlineCTA tel />) passes {true} — never a string.
+        return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains a bare <InlineCTA ${name}> shorthand — JSX passes {true}, which never satisfies the component's string prop schema; use a quoted literal.`);
+      }
+      if (literal === null && expr && /^\{\s*(?:true|false|null|undefined|-?\d|\[|\{)/.test(expr)) {
+        return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA ${name}=${expr}> — a boolean/number/null/container expression never satisfies the component's string prop schema; use a quoted literal.`);
+      }
+      // A STATIC string expression carries a real value the schema sees.
+      const staticVal = literal !== null ? literal : staticStringOfExpr(expr);
+      if (name === 'tel' && staticVal !== null && !INLINE_CTA_TEL_RE.test(staticVal)) {
+        return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA tel="${staticVal}"> that is not a phone number (optionally tel:-prefixed) — the astro publish gate rejects it.`);
+      }
+      if (name === 'tel' && staticVal !== null) {
+        // The prop renders a tap-to-call target — the same owned-number
+        // rule as a tel: link applies whether or not the value carries the
+        // tel: prefix (Codex #3646 r40): dialable shape, then isWavesPhone.
+        const digits = staticVal.replace(/^tel:/i, '').replace(/\D/g, '');
+        const dialableShape = digits.length === 10 || (digits.length === 11 && digits[0] === '1');
+        const { isWavesPhone } = require('./waves-phones');
+        if (!dialableShape || !isWavesPhone(digits)) {
+          return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains an <InlineCTA tel="${staticVal}"> that is not a Waves phone number — tap-to-call targets may only dial the business's own lines.`);
+        }
+      }
+    }
+    if (!/\bctaHref\s*=/.test(maskAttrRegions(tag.attrs))) continue; // no ctaHref: the component defaults to the quote page
+    const href = literalAttribute(tag.attrs, 'ctaHref');
+    if (href === null) {
+      return finding('P0', 'INVALID_INLINECTA_DESTINATION', 'Draft contains an <InlineCTA ctaHref> that is not a single quoted literal — expression-valued or duplicated destinations cannot be validated.');
+    }
+    if (!inlineCtaHrefValid(href)) {
+      return finding('P0', 'INVALID_INLINECTA_DESTINATION', `Draft contains an <InlineCTA ctaHref="${href}"> that is not a well-formed root-relative path (no dot segments) or https URL — the astro publish gate rejects it (and executable schemes never ship).`);
+    }
+  }
+  return null;
+}
+
+// The vendored SpiderIdBoard prop contract (componentPropSchemas.
+// SpiderIdBoard): only these props; title/eyebrow non-empty strings;
+// species (optional) a JSON array of shaped records. Astro validates
+// string literals, simple literal expressions, and JSON-shaped container
+// expressions — opaque expressions stay unvalidated there and pass here
+// too (Codex #3646 r18 P1: the newly cataloged component shipped with no
+// portal-side prop contract).
+const SPIDER_ID_BOARD_PROP_NAMES = Object.freeze(new Set(['title', 'eyebrow', 'species', 'footnote', 'caption']));
+const SPIDER_RISKS = new Set(['beneficial', 'nuisance', 'medical']);
+const SPIDER_GLYPHS = new Set(['orb', 'tangle', 'crevice', 'hunter']);
+// JSX authoring is JS, not strict JSON — tolerate single-quoted strings
+// and trailing commas the way the astro static parser does (Codex #3646
+// r24 P1): convert single-quoted spans, drop trailing commas, then
+// JSON.parse. undefined = not statically parseable (opaque; astro leaves
+// those unvalidated too).
+const UNDEFINED_SENTINEL = '\u0000undefined';
+function resolveUndefinedSentinels(v) {
+  if (Array.isArray(v)) return v.map((x) => (x === UNDEFINED_SENTINEL ? undefined : resolveUndefinedSentinels(x)));
+  if (v && typeof v === 'object') {
+    const out = {};
+    for (const [k, x] of Object.entries(v)) if (x !== UNDEFINED_SENTINEL) out[k] = resolveUndefinedSentinels(x);
+    return out;
+  }
+  return v;
+}
+function tolerantStaticJson(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) return undefined;
+  try { return { value: JSON.parse(trimmed) }; } catch (_) { /* try JS-flavored */ }
+  try {
+    let out = '';
+    for (let i = 0; i < trimmed.length; i += 1) {
+      const ch = trimmed[i];
+      if (ch === '"') {
+        // Double-quoted spans ALSO decode with JS escape semantics —
+        // an identity escape ("x\\q" → xq) is valid JSX but invalid
+        // JSON, and preserving it made the whole prop opaque
+        // (Codex #3646 r30).
+        let j = i + 1; let rawInner = '';
+        while (j < trimmed.length && trimmed[j] !== '"') {
+          if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
+          rawInner += trimmed[j]; j += 1;
+        }
+        const decodedInner = decodeJsStaticString(rawInner);
+        if (decodedInner === null) return undefined; // unsupported escape — opaque
+        out += JSON.stringify(decodedInner);
+        i = j;
+      } else if (ch === '`') {
+        // Interpolation-free template literals are static strings too
+        // (Codex #3646 r31) — decoded like the quoted forms; `${`
+        // makes the whole prop opaque.
+        let j = i + 1; let rawInner = '';
+        while (j < trimmed.length && trimmed[j] !== '`') {
+          if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
+          rawInner += trimmed[j]; j += 1;
+        }
+        if (hasTemplateInterpolation(rawInner)) return undefined;
+        const decodedInner = decodeJsStaticString(rawInner);
+        if (decodedInner === null) return undefined;
+        out += JSON.stringify(decodedInner);
+        i = j;
+      } else if (ch === "'") {
+        // Single-quoted spans decode with REAL JS escape semantics —
+        // identity-stripping validated a value JS never produces
+        // ('\\beneficial' runs as backspace+eneficial; Codex #3646 r29).
+        let j = i + 1; let rawInner = '';
+        while (j < trimmed.length && trimmed[j] !== "'") {
+          if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
+          rawInner += trimmed[j]; j += 1;
+        }
+        const decodedInner = decodeJsStaticString(rawInner);
+        if (decodedInner === null) return undefined; // unsupported escape — the prop stays opaque
+        out += JSON.stringify(decodedInner);
+        i = j;
+      } else if (ch === '/' && (trimmed[i + 1] === '*' || trimmed[i + 1] === '/')) {
+        // JS comments between static values are lexer-legal and render
+        // nothing — skipped so they never poison the JSON parse into
+        // "opaque", which left an invalid risk unvalidated (Codex #3646
+        // r33). An unterminated block comment is a build error upstream;
+        // the prop stays opaque.
+        if (trimmed[i + 1] === '*') {
+          const end = trimmed.indexOf('*/', i + 2);
+          if (end === -1) return undefined;
+          i = end + 1;
+        } else {
+          const nl = trimmed.indexOf('\n', i + 2);
+          i = nl === -1 ? trimmed.length : nl;
+        }
+      } else {
+        out += ch;
+      }
+    }
+    // Identifier keys become quoted JSON keys — OUTSIDE string spans only
+    // (astro segmenter parity, Codex #3646 r27): key-shaped prose inside a
+    // value ({foo: bar} in a name) is never rewritten. Trailing commas
+    // dropped the same way.
+    const segs = [];
+    let seg = '';
+    let inStr = false;
+    for (let k = 0; k < out.length; k += 1) {
+      const ch2 = out[k];
+      if (inStr) {
+        seg += ch2;
+        if (ch2 === '\\') { seg += out[k + 1] || ''; k += 1; continue; }
+        if (ch2 === '"') { inStr = false; segs.push(seg); seg = ''; }
+        continue;
+      }
+      if (ch2 === '"') { segs.push(seg); seg = ch2; inStr = true; continue; }
+      seg += ch2;
+    }
+    segs.push(seg);
+    // A statically computed STRING key ({['name']: 'x'}) is the plain key
+    // (Codex #3646 r40): drop the brackets around a string segment that
+    // sits between "{ [" / ", [" and "] :". Numeric computed keys resolve
+    // in the keyed pass below; anything else stays opaque.
+    for (let q = 0; q + 2 < segs.length; q += 1) {
+      if (segs[q + 1].startsWith('"') && /[{,]\s*\[\s*$/.test(segs[q]) && /^\s*\]\s*:/.test(segs[q + 2])) {
+        segs[q] = segs[q].replace(/\[\s*$/, '');
+        segs[q + 2] = segs[q + 2].replace(/^\s*\]/, '');
+      }
+    }
+    // A bare `undefined` VALUE is legal JS ({glyph: undefined}) but not
+    // JSON — carried through as a sentinel and resolved with JS semantics
+    // (an object property with an undefined value is ABSENT; an array slot
+    // stays undefined) so the container is still validated (Codex #3646 r38).
+    // An array ELISION ([, x]) is an undefined slot too (Codex #3646 r39);
+    // a trailing comma is not.
+    const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/([{,]\s*)\[\s*(\d+)\s*\]\s*:/g, '$1"$2":').replace(/([:\[,]\s*)undefined(?=\s*[,\]}])/g, '$1"\\u0000undefined"').replace(/([\[,])(\s*)(?=,)/g, '$1$2"\\u0000undefined"').replace(/,\s*([\]}])/g, '$1'))).join('');
+    return { value: resolveUndefinedSentinels(JSON.parse(keyed)) };
+  } catch (_) { return undefined; }
+}
+
+function spiderSpeciesRowsValid(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  for (const r of rows) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return false;
+    for (const f of ['name', 'where', 'hunt', 'eggSac']) if (typeof r[f] !== 'string' || !r[f]) return false;
+    if (!SPIDER_RISKS.has(r.risk)) return false;
+    if (r.sciName !== undefined && (typeof r.sciName !== 'string' || !r.sciName)) return false;
+    if (r.glyph !== undefined && !SPIDER_GLYPHS.has(r.glyph)) return false;
+    if (r.source !== undefined) {
+      const src = r.source;
+      if (!src || typeof src !== 'object' || Array.isArray(src)) return false;
+      if (typeof src.label !== 'string' || !src.label) return false;
+      if (typeof src.url !== 'string' || !/^https:\/\//i.test(src.url)) return false;
+      try { void new URL(src.url); } catch { return false; }
+    }
+  }
+  return true;
+}
+function spiderIdBoardContractFinding(body) {
+  const text = blankNonRenderedMarkdown(String(body || ''));
+  const strView = blankExpressionStringLiterals(text);
+  const attrView = maskJsxAttrQuotes(text);
+  // Direct position scan — nested invocations validate (Codex #3646 r22).
+  const sibRe = /<SpiderIdBoard(?=[\s/>])/g;
+  let sibM;
+  while ((sibM = sibRe.exec(text)) !== null) {
+    if (strView[sibM.index] === ' ' || attrView[sibM.index] === ' ') continue;
+    const tag = { start: sibM.index, attrs: tagAttrsAt(text, sibM.index) };
+    if (tag.attrs === null) {
+      return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains an unterminated <SpiderIdBoard (no closing \'>\') — malformed MDX fails the astro build.');
+    }
+    if (hasAttrSpreadAfter(tag.attrs)) {
+      return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard> carrying a JSX spread ({...}) — its props cannot be validated against the schema.');
+    }
+    for (const { name, literal, expr } of eachJsxAttr(tag.attrs)) {
+      if (!SPIDER_ID_BOARD_PROP_NAMES.has(name)) {
+        return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a <SpiderIdBoard> with unknown prop "${name}" — the component accepts only ${[...SPIDER_ID_BOARD_PROP_NAMES].join(', ')}; the astro publish gate rejects unknown props.`);
+      }
+      if (name === 'species') {
+        if (literal === null && expr === null) {
+          // JSX shorthand (<SpiderIdBoard species />) passes {true} —
+          // never the required array shape (Codex #3646 r21 P1).
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a bare <SpiderIdBoard species> shorthand — JSX passes {true}, which never satisfies the species array schema.');
+        }
+        if (literal !== null || staticStringOfExpr(expr) !== null) {
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard species> string — species must be a JSON array expression of shaped records (name, risk, where, hunt, eggSac; optional sciName, glyph, source{label, https url}).');
+        }
+        if (expr && /^\{\s*(?:true|false|null|undefined|-?\d)/.test(expr)) {
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a <SpiderIdBoard species=${expr}> — a scalar literal never satisfies the species array schema.`);
+        }
+        if (expr) {
+          const parsedRes = tolerantStaticJson(expr.slice(1, -1));
+          const jsonish = parsedRes !== undefined;
+          const parsed = jsonish ? parsedRes.value : undefined;
+          if (jsonish && !spiderSpeciesRowsValid(parsed)) {
+            return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard species={…}> whose value does not validate: a non-empty JSON array of records with name/risk (beneficial|nuisance|medical)/where/hunt/eggSac (optional sciName, glyph orb|tangle|crevice|hunter, source{label, https url}) — the astro publish gate rejects it.');
+          }
+        }
+      } else {
+        const staticVal = literal !== null ? literal : staticStringOfExpr(expr);
+        if (staticVal !== null && (name === 'title' || name === 'eyebrow') && !staticVal) {
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a <SpiderIdBoard ${name}=""> — the schema requires a non-empty string.`);
+        }
+        if (literal === null && expr === null) {
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a bare <SpiderIdBoard ${name}> shorthand — JSX passes {true}, which never satisfies the string prop schema.`);
+        }
+        if (literal === null && expr && /^\{\s*(?:true|false|null|undefined|-?\d|\[|\{)/.test(expr)) {
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a <SpiderIdBoard ${name}=${expr}> — a non-string literal expression never satisfies the string prop schema.`);
+        }
+      }
+    }
+  }
+  return null;
+}
+
 // All affiliate policy findings for a draft — an ARRAY (several can apply,
 // and review/redraft needs each named). Deduped per (code, product).
-function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
+function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsBlog = false, isRefresh = false, priorBody = null, registry = null } = {}) {
   const findings = [];
   const seen = new Set();
   const push = (severity, code, key, message) => {
@@ -1715,16 +2639,55 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
     push('P0', 'AFFILIATE_LINK_IN_META', '', 'Draft carries an <AffiliateLink> in an editable meta field — affiliate links are body-only; metas stay informational.');
   }
   const tags = collectAffiliateLinkTags(body);
-  if (tags.length === 0) return findings;
+  // Disclosure is a BICONDITIONAL, exact-compare on both sides (astro
+  // validateAffiliateUsage parity — Codex #3646 r10 P1): the renderer keys
+  // the FTC block off disclosure.type === 'affiliate' EXACTLY, and a
+  // declared disclosure whose links were removed is an astro publish
+  // blocker — catch both here, before publishing or human review.
+  const disclosure = frontmatter && typeof frontmatter.disclosure === 'object' && !Array.isArray(frontmatter.disclosure) ? frontmatter.disclosure : {};
+  if (tags.length === 0) {
+    if (disclosure.type === 'affiliate') {
+      push('P0', 'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', '', 'Frontmatter declares disclosure.type "affiliate" but the body carries no <AffiliateLink> — the astro gate blocks the mismatch; remove the disclosure or restore the links.');
+    }
+    // A refresh that removes the LAST affiliate link is unpublishable: the
+    // live frontmatter is FROZEN with disclosure.type affiliate, which the
+    // astro biconditional then rejects — and the link-free draft would
+    // bypass affiliate_review entirely (Codex #3646 r24 P1).
+    if (isRefresh && typeof priorBody === 'string' && priorBody.trim() && collectAffiliateLinkTags(priorBody).length > 0) {
+      push('P0', 'AFFILIATE_LINK_REMOVED_ON_REFRESH', '', 'Refresh draft removes every <AffiliateLink> the live body carries — the frozen frontmatter keeps disclosure.type "affiliate", which the astro gate rejects without links; preserve at least one affiliate link or handle the removal through the manual lane (frontmatter edit included).');
+    }
+    return findings;
+  }
 
   // Exact 'true' at CALL time — the feature-gates `affiliateLinks` entry
   // documents the flag; reading the env here (reserviceReportCopy pattern)
   // keeps flips/tests immediate and keeps '1'/'on' dark (Codex r4 P1).
   const gateOn = process.env.GATE_AFFILIATE_LINKS === 'true';
-  const index = (targetIsBlog && gateOn) ? affiliateRegistryModule().productIndex() : new Map();
-  const postType = String(frontmatter?.post_type || '').trim().toLowerCase();
+  // `registry` (optional) overrides the vendored copy — the merge-time belt
+  // injects the LIVE astro registry.json so an astro-only row change is
+  // honored before any portal sync/deploy (Codex #3646 r15 P1).
+  const index = (targetIsBlog && gateOn) ? affiliateRegistryModule().productIndex(registry ? { registry } : undefined) : new Map();
+  // EXACT value (astro parity): the frontmatter enum and the registry
+  // eligibility compare raw — \" Protocol \" is not \"protocol\" (Codex #3646 r19).
+  const postType = typeof frontmatter?.post_type === 'string' ? frontmatter.post_type : '';
 
   for (const tag of tags) {
+    // EXACTLY product + placement (the vendored AffiliateLink prop schema)
+    // — an unknown prop is rejected by the astro prop validator after
+    // owner review, so it blocks before the park exists (Codex #3646 r17).
+    // A JSX spread can override product/placement at render time and the
+    // astro contract rejects it outright (Codex #3646 r19).
+    if (hasAttrSpreadAfter(tag.attrs)) {
+      push('P0', 'INVALID_AFFILIATELINK_PROPS', '{...}', 'Draft contains an <AffiliateLink> carrying a JSX spread ({...}) — a spread can override product/placement at render time; the astro publish gate rejects it.');
+    }
+    if (tag.emptyText) {
+      push('P0', 'EMPTY_AFFILIATE_LINK_TEXT', tag.productId || '(no-product)', 'Draft contains an <AffiliateLink> with no visible link text (self-closing, empty, comment-only, or unclosed) — the component renders its children as the anchor text, so this ships an empty, unusable product link; the astro publish gate rejects it.');
+    }
+    for (const { name } of eachJsxAttr(tag.attrs)) {
+      if (name !== 'product' && name !== 'placement') {
+        push('P0', 'INVALID_AFFILIATELINK_PROPS', name, `Draft contains an <AffiliateLink> with unknown prop "${name}" — the component accepts exactly product and placement; the astro publish gate rejects anything else.`);
+      }
+    }
     if (!tag.productId) {
       push('P0', 'UNREGISTERED_AFFILIATE_LINK', '(no-product)', 'Draft contains an <AffiliateLink> without a literal product="…" id — the component resolves ONLY registry product ids; never compute, omit, or paste a URL into it.');
       continue;
@@ -1754,6 +2717,19 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
     if (!isRefresh && (!postType || !allowed.includes(postType))) {
       push('P0', 'AFFILIATE_LINK_ON_PROTECTED_PAGE', tag.productId, `Affiliate product "${tag.productId}" is not eligible on a "${postType || '(missing post_type)'}" post (its allowed_post_types: ${allowed.join(', ') || 'none'}) — pages that capture local service intent never carry affiliate links; fail closed when the post type is unknown.`);
     }
+    // Placement mirrors the astro contract: a quoted literal placement id,
+    // inside the row's allowed_placements when the row declares any. The
+    // resolver would otherwise silently downgrade the link after the build.
+    const allowedPlacements = Array.isArray(entry.row.allowed_placements) ? entry.row.allowed_placements : [];
+    if (!tag.placement) {
+      push('P0', 'AFFILIATE_PLACEMENT_NOT_ALLOWED', `${tag.productId}:`, `<AffiliateLink product="${tag.productId}"> needs a quoted literal placement="…" id (e.g. primary-rec) — a missing or expression-valued placement cannot be validated.`);
+    } else if (!allowedPlacements.length) {
+      // A row without a placement allowlist authorizes NO placement (the
+      // registry validator requires one; this is the fail-closed backstop).
+      push('P0', 'AFFILIATE_PLACEMENT_NOT_ALLOWED', `${tag.productId}:${tag.placement}`, `Affiliate product "${tag.productId}" declares no allowed_placements — no placement is authorized until the registry row lists them.`);
+    } else if (!allowedPlacements.includes(tag.placement)) {
+      push('P0', 'AFFILIATE_PLACEMENT_NOT_ALLOWED', `${tag.productId}:${tag.placement}`, `Affiliate product "${tag.productId}" does not allow placement "${tag.placement}" (allowed: ${allowedPlacements.join(', ')}).`);
+    }
   }
 
   if (isRefresh) {
@@ -1777,21 +2753,45 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   // New drafts: disclosure, density, and service-CTA placement.
   // EXACT type only — the astro layout keys the rendered disclosure block
   // (and the Amazon Associates statement) off disclosure.type ===
-  // 'affiliate'; free text mentioning "commission" renders nothing, and
-  // "we receive no commission" would pass a keyword test.
-  const disclosure = frontmatter && typeof frontmatter.disclosure === 'object' && !Array.isArray(frontmatter.disclosure) ? frontmatter.disclosure : {};
-  if (String(disclosure.type || '').trim().toLowerCase() !== 'affiliate') {
-    push('P0', 'AFFILIATE_LINK_WITHOUT_DISCLOSURE', '', 'Draft carries an <AffiliateLink> without an affiliate disclosure — frontmatter.disclosure.type must be exactly "affiliate" (the renderer emits the FTC material-connection disclosure from that type; free text is not a substitute).');
+  // 'affiliate' with NO trimming or case folding: "Affiliate" or a
+  // whitespace-padded value renders nothing and the astro gate rejects it.
+  if (disclosure.type !== 'affiliate') {
+    push('P0', 'AFFILIATE_LINK_WITHOUT_DISCLOSURE', '', 'Draft carries an <AffiliateLink> without an affiliate disclosure — frontmatter.disclosure.type must be exactly "affiliate" (lowercase, unpadded; the renderer emits the FTC material-connection disclosure from that exact type — free text, case variants, and padding are not substitutes).');
+  }
+  // Hub-only during the pilot (astro parity — Codex #3646 r10 P1): a
+  // spoke-targeted affiliate draft would park for owner review and then be
+  // rejected by the astro gate; block it before the review item exists.
+  // The publisher stamps HUB domains on every post, so hub-only means "no
+  // NON-hub domain" (astro parity — Codex #3646 r24 P1).
+  const isHubDomain = (d) => typeof d === 'string' && ['wavespestcontrol.com', 'www.wavespestcontrol.com'].includes(d.trim().toLowerCase().replace(/\.$/, ''));
+  const declaredDomains = []
+    .concat(Array.isArray(frontmatter?.domains) ? frontmatter.domains : [])
+    .concat(Array.isArray(frontmatter?.tracking?.domains) ? frontmatter.tracking.domains : []);
+  if (declaredDomains.some((d) => !isHubDomain(d))) {
+    push('P0', 'AFFILIATE_POST_NOT_HUB_ONLY', '', 'Draft carries affiliate links and targets a non-hub domain — affiliate posts are hub-only during the pilot; remove the spoke targeting or every affiliate link.');
   }
   if (tags.length > AFFILIATE_LINK_MAX_PER_POST) {
     push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'count', `Draft carries ${tags.length} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post (affiliate is fallback monetization, never the point of the page).`);
   }
-  const firstHeading = String(body || '').search(/^#{2,3}\s/m);
+  // The first RENDERED section heading — code fences, comments, and hidden
+  // spans are masked (length-preserving, so tag offsets stay aligned): a
+  // "## fake" inside a fenced block or comment is not a section.
+  // Attr text is not a heading (<div title=\"\\n## fake\\n\"> renders no
+  // section — Codex #3646 r25): mask attr values before the heading scan.
+  // Statically hidden wrappers (class="hidden", {...props}) are blanked
+  // FIRST, as the CTA view does — an invisible "## Fake" must not end the
+  // opening section (Codex #3646 r36); the hidden walk reads attr
+  // expressions before blankExpressions erases them.
+  // Code/comments are blanked FIRST by the shared fence-aware blanker
+  // (Codex #3646 r38) — its coordinates are the ones tag.start carries.
+  const structureBase = blankStaticHiddenClassElements(blankNonRenderedMarkdown(String(body || '')));
+  const structureMasked = maskJsxAttrQuotes(blankExpressions(blankDefinitelyHiddenContent(structureBase, blankExpressionStringLiterals(structureBase, { attrValues: false }))));
+  const firstHeading = structureMasked.search(/^#{2,3}\s/m);
   if (tags.some((t) => firstHeading === -1 || t.start < firstHeading)) {
     push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'opening', 'Draft places an affiliate link in the opening section (before the first section heading) — answer the reader\'s question first; product recommendations come later in the piece.');
   }
   if (!hasServiceCtaLink(body)) {
-    push('P1', 'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', '', 'Draft carries affiliate links but no Waves service CTA link — every affiliate post keeps an internal service/quote/calculator link (affiliate is fallback monetization; the service CTA stays primary).');
+    push('P1', 'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', '', 'Draft carries affiliate links but no Waves service CTA (<InlineCTA> or an internal service/quote/calculator/city-service link) BEFORE the first affiliate link — affiliate is fallback monetization; the service CTA stays primary.');
   }
   return findings;
 }
@@ -1818,6 +2818,9 @@ const AFFILIATE_QUERY_PARAMS = Object.freeze(new Set([
   'aff', 'affid', 'aff_id', 'affiliate', 'affiliate_id', 'affiliateid', 'afid',
   'awc', 'cjevent', 'cjdata', 'clickid', 'clickref', 'irclickid', 'irgwc',
   'ranmid', 'raneaid', 'ransiteid', 'sscid', 'rfsn', 'subid', 'sub_id',
+  // generic referral/partner keys used by in-house programs (parity with the
+  // astro raw-URL guard; fail closed)
+  'ref', 'referral', 'referrer', 'partner', 'partner_id', 'partnerid', 'aff_sub', 'afftrack', 'promo_code', 'coupon',
 ]));
 function hasAffiliateQueryParam(u) {
   for (const [k, v] of u.searchParams) {
@@ -1831,11 +2834,21 @@ function hasAffiliateQueryParam(u) {
 // host + path (www-stripped, lowercased, trailing-slash-normalized) — the
 // part of a retailer URL that identifies the PRODUCT; query/fragment are
 // tracking and ordering noise.
+// DNS-normalized host: lowercase, trailing dot stripped (amzn.to. resolves
+// like amzn.to), leading www. dropped.
+function normalizeAffiliateHost(hostname) {
+  // At most ONE DNS root dot is stripped; an empty label (a..b, .host) is
+  // malformed → '' (matches nothing — the URL still fails the host allowlist).
+  const h = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  if (!h || h.startsWith('.') || h.endsWith('.') || h.includes('..')) return '';
+  return h.replace(/^www\./, '');
+}
+
 function affiliateUrlIdentity(rawUrl) {
   try {
     const u = new URL(String(rawUrl || ''));
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    const host = normalizeAffiliateHost(u.hostname);
     const path = (u.pathname || '/').replace(/\/+$/, '') || '/';
     return `${host}${path}`;
   } catch { return null; }
@@ -1846,9 +2859,13 @@ function affiliateUrlIdentity(rawUrl) {
 function urlIsAffiliate(u, registryIdentities) {
   const identity = affiliateUrlIdentity(u.href);
   if (identity && registryIdentities.has(identity)) return true;
-  const host = u.hostname.toLowerCase().replace(/^www\./, '');
+  const host = normalizeAffiliateHost(u.hostname);
   if (AFFILIATE_NETWORK_HOST_SUFFIXES.some((sfx) => host === sfx || host.endsWith(`.${sfx}`))) return true;
-  if ((host === 'amazon.com' || host.endsWith('.amazon.com')) && (u.searchParams.has('tag') || u.searchParams.has('ascsubtag'))) return true;
+  // Any Amazon marketplace (amazon.com / .co.uk / .de …) carrying an
+  // associate parameter (parity with the astro guard + registry validator).
+  if (/(^|\.)amazon\.[a-z.]+$/.test(host)) {
+    for (const [k] of u.searchParams) { const key = k.toLowerCase(); if (key === 'tag' || key === 'ascsubtag') return true; }
+  }
   if (hasAffiliateQueryParam(u)) return true;
   return false;
 }
@@ -1868,9 +2885,12 @@ function containsAffiliateMaterial(text) {
     affiliateRegistryModule().registryUrls().map(affiliateUrlIdentity).filter(Boolean),
   );
   for (const scan of decoded && decoded !== raw ? [raw, decoded] : [raw]) {
-    for (const tag of eachTag(scan)) {
-      if (!tag.isClose && tag.name === 'affiliatelink') return true;
-    }
+    // DIRECT position scan, not eachTag: a link nested in another
+    // component's prop expression (<InlineCTA description={<AffiliateLink
+    // …/>} />) renders and must be caught — eachTag consumes the outer tag
+    // whole (Codex #3646 r41). Egress is fail-closed, so even attr-quoted
+    // or string-spelled occurrences count.
+    if (/<AffiliateLink(?=[\s/>])/i.test(scan)) return true;
     const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
     let m;
     while ((m = urlRe.exec(scan)) !== null) {
@@ -2116,6 +3136,10 @@ function isLiteralExpression(expr) {
       i += 1;
       continue;
     }
+    // Lexer-valid comments are trivia, not executable syntax — a
+    // supported static container may carry them (Codex #3646 r39).
+    if (ch === '/' && body[i + 1] === '*') { const e = body.indexOf('*/', i + 2); if (e === -1) return false; i = e + 2; continue; }
+    if (ch === '/' && body[i + 1] === '/') { while (i < n && body[i] !== '\n') i += 1; continue; }
     if ('[]{},:'.includes(ch)) { i += 1; continue; }
     if (/[-+]/.test(ch) && /\d/.test(body[i + 1] || '')) { i += 1; continue; }
     if (/\d/.test(ch)) { while (i < n && /[\d._eE+-]/.test(body[i])) i += 1; continue; }
@@ -2181,7 +3205,25 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
         return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains an executable MDX expression — generated posts may carry only literal component props and comments. Write content as Markdown.');
       }
       if (/:\/\//.test(expr)) {
-        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a URL inside an MDX expression — expressions execute at render and are never citations. Write the link as Markdown.');
+        // EXCEPTION (Codex #3646 r26): a LITERAL component prop may carry
+        // brief-required citation URLs (the SpiderIdBoard source.url
+        // contract). Allowed ONLY when every :// belongs to an https URL
+        // that is an EXACT brief-required source and no affiliate material
+        // rides along; anything else keeps the P0.
+        const exprExact = allowedExactSourceUrls(requiredSourceUrls);
+        const exprUrls = expr.match(new RegExp(ABSOLUTE_URL_RE.source, 'gi')) || [];
+        const schemeHits = (expr.match(/:\/\//g) || []).length;
+        // ONLY the species data prop qualifies — an expression on src/href/
+        // any other prop stays as live as ever (r14 ruling preserved).
+        const attrName = (/([A-Za-z_][\w-]*)\s*=\s*$/.exec(s0(body, i)) || [])[1] || '';
+        const citationOnly = attrName === 'species'
+          && exprUrls.length > 0
+          && exprUrls.length === schemeHits
+          && !containsAffiliateMaterial(expr)
+          && exprUrls.every((u) => /^https:\/\//i.test(u) && exprExact.has(normalizeSourceUrl(u.replace(/[.,;:!?"']+$/, '')) || '\u0000'));
+        if (!citationOnly) {
+          return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a URL inside an MDX expression — expressions execute at render and are never citations (a literal component prop may cite ONLY exact brief-required source URLs). Write other links as Markdown.');
+        }
       }
       i = j;
     }
@@ -2361,13 +3403,22 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
 // other body-policy P0s. If the astro catalog changes again, update this
 // list to the new catalog∩renderer intersection.
 const SAFE_MDX_COMPONENTS = Object.freeze([
+  // Affiliate product link (wavespestcontrol-astro #503, owner monetization
+  // pilot 2026-08-31) — the ONLY way a body links an affiliate product;
+  // affiliateComponentFindings owns its rules.
+  'AffiliateLink',
   'AppPhone',
   'BottomLineBox',
   'ComparisonTable',
   'HomeZoneMap',
   'HonestRejection',
+  // Mid-article service CTA card — registered in BlogPostLayout since its
+  // creation, cataloged upstream 2026-08-31 (#503).
+  'InlineCTA',
   'PestEvidenceGrid',
   'SeasonalPressureChart',
+  // Cataloged + registered upstream before #503; the portal set had drifted.
+  'SpiderIdBoard',
 ]);
 
 const SAFE_MDX_COMPONENT_SET = new Set(SAFE_MDX_COMPONENTS);
@@ -2831,7 +3882,10 @@ function blankNonRenderedMarkdownWithDepths(text) {
   // REAL comment in the same stretch is still stripped.
   let afterComments = '';
   {
-    const commentRe = /<!--[\s\S]*?(?:-->|$)|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre\s*>/gi;
+    // MDX comments tolerate whitespace inside the braces ({ /* x */ }) —
+    // the same span blankComments matches, so callers that dropped that
+    // fence-blind pre-pass (Codex #3646 r33/r37) lose no coverage.
+    const commentRe = /<!--[\s\S]*?(?:-->|$)|\{\s*\/\*[\s\S]*?\*\/\s*\}|<pre\b[\s\S]*?<\/pre\s*>/gi;
     let last = 0;
     let cm;
     while ((cm = commentRe.exec(raw)) !== null) {
@@ -2861,7 +3915,25 @@ function blankNonRenderedMarkdownWithDepths(text) {
   const fenceLineRe = /^ {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:`{3,}|~{3,})/;
   // A span also stops at an ATX HEADING line — a heading starts a new
   // block and can never lazily continue the previous paragraph.
-  const spanned = afterComments.replace(new RegExp(SPAN_RE_SOURCE, 'g'), (c, run, offset, whole) => {
+  // Scanned on the ATTR-MASKED view (astro blankNonRenderedCode parity):
+  // a backtick inside a quoted JSX attribute is inert text, and a backtick
+  // inside MDX expression braces — anywhere in the expression, not only
+  // the bare {`…`} shape — is a JS TEMPLATE delimiter whose VALUE renders
+  // (species={[{name: `x`}]}), never a markdown code span (Codex #3646
+  // r31/r33). The view is length-preserving, so masks land on the real
+  // text at the view's offsets.
+  const spanView = (() => {
+    const v = maskJsxAttrQuotes(afterComments).split('');
+    let d = 0;
+    for (let k = 0; k < v.length; k += 1) {
+      if (v[k] === '{') d += 1;
+      else if (v[k] === '}') { if (d > 0) d -= 1; }
+      else if (v[k] === '`' && d > 0) v[k] = ' ';
+    }
+    return v.join('');
+  })();
+  const spannedChars = afterComments.split('');
+  spanView.replace(new RegExp(SPAN_RE_SOURCE, 'g'), (c, run, offset, whole) => {
     const lineStart = whole.lastIndexOf('\n', offset - 1) + 1;
     const lineEnd = whole.indexOf('\n', offset);
     const line = whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
@@ -2869,10 +3941,6 @@ function blankNonRenderedMarkdownWithDepths(text) {
       const open = line.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/, '').match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
       if (!open || !(open[1][0] === '`' && open[2].includes('`'))) return c;
     }
-    // A backtick run inside MDX expression braces (`href={\`/contact/\`}`)
-    // is a JS template literal whose VALUE renders — an expression, not a
-    // markdown code span. Leave it for the link scanners.
-    if (/\{\s*$/.test(whole.slice(Math.max(0, offset - 8), offset)) && /^\s*\}/.test(whole.slice(offset + c.length, offset + c.length + 8))) return c;
     // A span cannot pair across a DEEPENING blockquote line or a LIST-ITEM
     // opener (both interrupt the paragraph) — leave the candidate unpaired;
     // its content stays visible for the link/table scanners.
@@ -2883,8 +3951,11 @@ function blankNonRenderedMarkdownWithDepths(text) {
     // A pipe's preceding BACKSLASH RUN survives with it — "\\|" is escaped
     // cell CONTENT even inside code (splitCells applies the same parity),
     // so "| `a \\| b` | c |" stays a 2-cell header, not a 3-cell one.
-    return c.replace(/(\\*\|)|[^\n]/g, (ch, pipeRun) => pipeRun || '\u0002');
+    const masked = afterComments.slice(offset, offset + c.length).replace(/(\\*\|)|[^\n]/g, (ch, pipeRun) => pipeRun || '\u0002');
+    for (let k = 0; k < masked.length; k += 1) spannedChars[offset + k] = masked[k];
+    return c;
   });
+  const spanned = spannedChars.join('');
   // Pass 3 — fenced code, per line, scoped to its blockquote AND list
   // containers. Opener VALIDITY is judged on the pre-span-mask source line:
   // a span mask can blank the info-string backtick that rejects a backtick
@@ -3895,7 +4966,11 @@ function normalizeInternalPath(dest) {
 // job.)
 // Arms: markdown destinations, QUOTED href/src, reference definitions, and
 // UNQUOTED href/src (legal in HTML — `<a href=/pest-library/fleas/>`).
-const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(\/[^\s>]*)|\b(?:href|src)\s*=\s*(\/[^\s>"'`]+)/gim;
+// ctaHref included: <InlineCTA ctaHref="/…"> writes its destination into a
+// live anchor, so a root-relative value must pass the same
+// UNKNOWN_INTERNAL_ROUTE allowlist as any Markdown/href link — a dead CTA
+// route must never publish (Codex #3646 r15 P1).
+const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src|ctaHref)\s*=\s*\{?\s*["'`](\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(\/[^\s>]*)|\b(?:href|src|ctaHref)\s*=\s*(\/[^\s>"'`]+)/gim;
 
 // EVERY absolute URL in the text — markdown destinations, href/src,
 // reference definitions, CommonMark autolinks (<https://…>), and bare GFM
@@ -3928,11 +5003,26 @@ function collectInternalDestinations(text) {
   const s = String(text || '');
   const dests = [];
   let m;
+  // Quoted attr VALUES are display text (<div title='<InlineCTA
+  // ctaHref="/x/" />'> renders no anchor) — a match STARTING inside one is
+  // skipped. Link-carrying values (href/src/ctaHref) stay readable so the
+  // absolute arm still validates real destinations (Codex #3646 r19+r25).
+  const attrMasked = maskJsxAttrQuotes(s, { keepValuesOf: new Set(['href', 'src', 'ctaHref']) });
   const rel = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
-  while ((m = rel.exec(s)) !== null) dests.push(m[1] || m[2] || m[3] || m[4]);
+  while ((m = rel.exec(s)) !== null) {
+    if (attrMasked[m.index] !== s[m.index]) continue;
+    dests.push(m[1] || m[2] || m[3] || m[4]);
+  }
   const abs = new RegExp(HUB_URL_CANDIDATE_RE.source, HUB_URL_CANDIDATE_RE.flags);
   const hubHosts = hubHostSet();
   while ((m = abs.exec(s)) !== null) {
+    // Absolute candidates inside quoted attr DISPLAY text (title="https://…")
+    // render nothing either (Codex #3646 r25 P1). Real href/src values are
+    // caught the same way here — the attr mask blanks all quoted values —
+    // but an absolute hub URL in an href is equally reachable through the
+    // markdown/reference arms when rendered, and a title-text URL must not
+    // block a draft; skip masked positions.
+    if (attrMasked[m.index] !== s[m.index]) continue;
     // Bare URLs in prose drag trailing punctuation into the match
     // ("…/contact/, then…") — trim it so a valid allowlisted route never
     // normalizes to "/contact/," and false-parks the draft.
@@ -3990,8 +5080,16 @@ function isKnownGoodInternalRoute(dest) {
 // ADD more links to that dead route; only up to the prior body's count of
 // each route is preserved-legacy (see uncatalogedComponentFinding).
 function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null) {
-  const text = String(body || '');
-  if (!text) return null;
+  // Non-rendered content carries no live links: a fenced or commented
+  // example (<InlineCTA ctaHref="/example-only/">, a code-block href) must
+  // not flag UNKNOWN_INTERNAL_ROUTE — the same masking the component
+  // validators apply (Codex #3646 r18 P1). Length-preserving.
+  // Expression STRINGS are inert prose ({'<InlineCTA ctaHref=…/>'})
+  // — masked before route collection (attr VALUES kept: href/src/ctaHref
+  // are read from them; display-text matches are position-filtered in
+  // collectInternalDestinations). (Codex #3646 r22 P1.)
+  const text = blankExpressionStringLiterals(blankNonRenderedMarkdown(String(body || '')), { attrValues: false });
+  if (!text.trim()) return null;
   const allowed = new Set(ALLOWED_INTERNAL_LINKS);
   for (const link of Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []) {
     // Briefs may mandate a link as an ABSOLUTE hub URL; body occurrences
@@ -5365,7 +6463,11 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   let refreshExemptRoutes = null;
   if (refreshPriorBody) {
     refreshExemptRoutes = new Map();
-    for (const { norm } of collectInternalDestinations(refreshPriorBody)) {
+    // SAME non-rendered mask as internalRouteFinding's candidate scan — a
+    // route that lived only in a fenced/commented example of the prior
+    // body grants no exemption for a newly RENDERED occurrence (Codex
+    // #3646 r19 P1).
+    for (const { norm } of collectInternalDestinations(blankExpressionStringLiterals(blankNonRenderedMarkdown(refreshPriorBody), { attrValues: false }))) {
       refreshExemptRoutes.set(norm, (refreshExemptRoutes.get(norm) || 0) + 1);
     }
   }
@@ -5387,6 +6489,12 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // risk-class/label-review, page-class eligibility, disclosure,
     // density/CTA placement, and the refresh no-additions rule.
     ...affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsBlog, isRefresh, priorBody }),
+    // InlineCTA's destination contract holds for EVERY draft (the component
+    // is allowlisted outside affiliate posts too) — a javascript: or
+    // expression-valued ctaHref must park here, not at the astro gate after
+    // a full generation spend.
+    inlineCtaContractFinding(body),
+    spiderIdBoardContractFinding(body),
     // Brand-token covers body AND meta too, but the hub-anchor exemption applies
     // ONLY to body markdown — editable meta is scanned strictly (a literal hub
     // brand in a spoke's title/description is a real leak, not an anchor).
@@ -5473,6 +6581,9 @@ module.exports = {
   // social share lanes) — affiliate links are web-only; runs regardless of
   // GATE_AFFILIATE_LINKS so stripping holds while the lane is dark.
   containsAffiliateMaterial,
+  // distinct <AffiliateLink> product ids in a body — the runner's
+  // affiliate_review park predicate (owner: every affiliate post parks).
+  affiliateProductIdsIn,
   // single source of truth for the FAQ-section policy — consumed by
   // blog-writer, writer-agent-config, and content-quality-gate so the
   // generators/gates can never contradict the publish-time guard.
@@ -5486,6 +6597,8 @@ module.exports = {
   hasUnpreservedRawTable,
   extractRawMarkdownTables,
   blankNonRenderedMarkdown,
+  maskJsxAttrQuotes,
+  blankComments,
   blankNonRenderedMarkdownWithDepths,
   // certainty-only hidden-text blanker — the completion gate judges HTML
   // CTA anchors by their VISIBLE wording.
@@ -5544,5 +6657,5 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding },
 };
