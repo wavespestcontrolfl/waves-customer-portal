@@ -111,7 +111,9 @@ function runStatus(run) {
   return 'completed';
 }
 
-function contentRunItem(run, awaitingReplyByRun) {
+const TERMINAL_APPROVAL = { approved: 'completed', rejected: 'skipped', superseded: 'skipped', failed: 'failed' };
+
+function contentRunItem(run, awaitingReplyByRun, decidedByRun = new Map()) {
   // Titles come from the two projected JSON paths (draft_title /
   // draft_frontmatter_title) so the query never pulls whole article bodies;
   // a raw draft_payload is still honoured for callers that pass one.
@@ -145,6 +147,24 @@ function contentRunItem(run, awaitingReplyByRun) {
   const stepsDone = steps.filter((s) => s.status === 'done').length;
   const stepsTotal = steps.length;
   const awaiting = awaitingReplyByRun.get(String(run.id));
+  // A pending-review outcome never changes once decided (decideReviewItem
+  // stamps the run, not its outcome): a terminal emailed approval, the
+  // trust-build approval stamp, or a reviewer note all mean "decided".
+  const decided = decidedByRun.get(String(run.id));
+  let decidedStatus = null;
+  let decidedDetail = null;
+  if (!awaiting && status === 'awaiting_review') {
+    if (decided) {
+      decidedStatus = TERMINAL_APPROVAL[decided.status] || null;
+      decidedDetail = decidedStatus ? `${humanize(decided.status)} by email reply` : null;
+    } else if (run.trust_build_approved_at) {
+      decidedStatus = 'completed';
+      decidedDetail = 'Approved in review';
+    } else if (run.reviewer_notes) {
+      decidedStatus = 'skipped';
+      decidedDetail = 'Dismissed in review';
+    }
+  }
   const title =
     run.draft_title ||
     run.draft_frontmatter_title ||
@@ -156,6 +176,7 @@ function contentRunItem(run, awaitingReplyByRun) {
   // skip_reason (every emailed approval sits on a run that was parked).
   const detail =
     (awaiting ? `Awaiting emailed reply (${awaiting.token})` : null) ||
+    decidedDetail ||
     run.failure_message ||
     (run.skip_reason ? humanize(run.skip_reason) : null) ||
     (run.published_url ? run.published_url : null);
@@ -167,8 +188,10 @@ function contentRunItem(run, awaitingReplyByRun) {
     subtitle: [humanize(run.action_type), humanize(run.page_type), run.shadow_mode ? 'shadow' : null]
       .filter(Boolean)
       .join(' · '),
-    status: awaiting && status !== 'failed' ? 'awaiting_review' : status,
-    startedAt: iso(run.claimed_at || run.created_at),
+    status: awaiting && status !== 'failed' ? 'awaiting_review' : decidedStatus || status,
+    // An open approval is the current event: date the row by when it was
+    // raised, not by the (possibly much older) run it belongs to.
+    startedAt: iso(awaiting?.created_at || run.claimed_at || run.created_at),
     finishedAt: iso(run.completed_at),
     durationMs: run.total_ms == null ? null : Number(run.total_ms),
     steps,
@@ -257,12 +280,15 @@ function jobIsException(job) {
 // Pure: rows in → feed out. The route loads the rows; tests feed fixtures.
 function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [] }) {
   const awaitingReplyByRun = new Map();
+  const decidedByRun = new Map();
   for (const a of approvals) {
-    if (a.status === 'awaiting_reply' && a.run_id) awaitingReplyByRun.set(String(a.run_id), a);
+    if (!a.run_id) continue;
+    if (a.status === 'awaiting_reply') awaitingReplyByRun.set(String(a.run_id), a);
+    else if (TERMINAL_APPROVAL[a.status]) decidedByRun.set(String(a.run_id), a);
   }
   const exceptionJobs = jobs.filter(jobIsException);
   const items = []
-    .concat(runs.map((run) => contentRunItem(run, awaitingReplyByRun)))
+    .concat(runs.map((run) => contentRunItem(run, awaitingReplyByRun, decidedByRun)))
     .concat(drafts.map(smsDraftItem))
     .concat(exceptionJobs.map(jobItem))
     .sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')));
@@ -302,6 +328,7 @@ async function loadRows(windowHours) {
           db.raw("draft_payload->>'title' AS draft_title"),
           db.raw("draft_payload->'frontmatter'->>'title' AS draft_frontmatter_title"),
           'published_url', 'claimed_at', 'completed_at', 'created_at', 'total_ms',
+          'trust_build_approved_at', 'reviewer_notes',
           'claim_ms', 'brief_ms', 'agent_ms', 'uniqueness_gate_ms', 'quality_gate_ms', 'seo_completion_gate_ms',
           'publish_ms', 'index_submit_ms', 'link_plan_ms',
           'uniqueness_gate_result', 'quality_gate_result', 'seo_completion_gate_result',
@@ -327,26 +354,32 @@ async function loadRows(windowHours) {
     safe('job_health', () =>
       db('job_health')
         .select('job_name', 'last_started_at', 'last_finished_at', 'last_status', 'last_error', 'last_duration_ms', 'consecutive_failures')
-        .where('last_started_at', '>=', since)
+        // A job still marked running (a process that died after
+        // recordJobStart) must stay visible however old its start is.
+        .where((q) => q.where('last_started_at', '>=', since).orWhere('last_status', 'running'))
         .orderBy('last_started_at', 'desc')
         .limit(MAX_ITEMS)),
   ]);
-  // Awaiting approvals: every one on a loaded run (so no cap can drop it)
-  // PLUS any raised inside the window whose run is older than the window —
-  // the owner's open decision is what matters, not the run's age. Runs for
-  // those stragglers are loaded by id so they render like the rest.
+  // Approvals (any status — a terminal one tells us a pending-review run
+  // was decided): every row on a loaded run, PLUS any still awaiting that
+  // was raised inside the window for an older run — the owner's open
+  // decision is what matters, not the run's age. Runs for those stragglers
+  // are loaded by id so they render like the rest.
   const runIds = runs.map((r) => r.id);
   const approvals = await safe('content_email_approvals', () =>
     db('content_email_approvals')
       .select('run_id', 'token', 'status', 'kind', 'created_at')
-      .where({ status: 'awaiting_reply' })
       .where((q) => {
-        q.where('created_at', '>=', since);
+        q.where({ status: 'awaiting_reply' }).andWhere('created_at', '>=', since);
         if (runIds.length) q.orWhereIn('run_id', runIds);
       })
-      .limit(MAX_ITEMS));
+      .orderBy('created_at', 'desc')
+      .limit(MAX_ITEMS * 2));
   const loaded = new Set(runIds.map(String));
-  const missingRunIds = approvals.map((a) => a.run_id).filter((id) => id && !loaded.has(String(id)));
+  const missingRunIds = approvals
+    .filter((a) => a.status === 'awaiting_reply')
+    .map((a) => a.run_id)
+    .filter((id) => id && !loaded.has(String(id)));
   const stragglers = missingRunIds.length
     ? await safe('autonomous_runs', () => runQuery().whereIn('id', missingRunIds))
     : [];

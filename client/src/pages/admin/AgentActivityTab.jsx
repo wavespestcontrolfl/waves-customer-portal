@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
 import { Badge, Button, Card, Select, cn } from "../../components/ui";
@@ -171,17 +171,22 @@ export default function AgentActivityTab() {
   const [feed, setFeed] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Only the latest request may write state: two quick window changes can
+  // resolve out of order and the 24h rows would overwrite the 7d view.
+  const requestRef = useRef(0);
 
   const load = useCallback(async () => {
+    const requestId = ++requestRef.current;
+    const isCurrent = () => requestId === requestRef.current;
     setLoading(true);
     setError(null);
     try {
       const next = await adminFetch(`/admin/agents/activity?hours=${hours}`);
-      setFeed(next);
+      if (isCurrent()) setFeed(next);
     } catch (e) {
-      setError(e?.message || "Failed to load activity");
+      if (isCurrent()) setError(e?.message || "Failed to load activity");
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [hours]);
 

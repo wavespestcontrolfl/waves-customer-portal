@@ -103,6 +103,30 @@ describe('buildActivity', () => {
     expect(items[0].steps.find((s) => s.key === 'uniqueness_gate').detail).toBe('uniqueness gate unavailable');
   });
 
+  it('dates a straggler run by its open approval and marks decided runs completed / skipped', () => {
+    const { items } = buildActivity({
+      runs: [
+        { ...RUN_BASE, id: 'old', outcome: 'completed_pending_review', claimed_at: '2026-08-30T10:00:00Z', created_at: '2026-08-30T10:00:00Z' },
+        { ...RUN_BASE, id: 'ok', outcome: 'completed_pending_review' },
+        { ...RUN_BASE, id: 'no', outcome: 'completed_pending_review' },
+        { ...RUN_BASE, id: 'ui', outcome: 'completed_pending_review', trust_build_approved_at: '2026-09-02T12:00:00Z' },
+        { ...RUN_BASE, id: 'dis', outcome: 'completed_pending_review', reviewer_notes: '2026-09-02 dismissed by owner' },
+      ],
+      approvals: [
+        { run_id: 'old', status: 'awaiting_reply', token: 'EA-old00001', created_at: '2026-09-02T11:30:00Z' },
+        { run_id: 'ok', status: 'approved', token: 'EA-ok000001', created_at: '2026-09-02T09:00:00Z' },
+        { run_id: 'no', status: 'rejected', token: 'EA-no000001', created_at: '2026-09-02T09:00:00Z' },
+      ],
+    });
+    const by = Object.fromEntries(items.map((i) => [i.id, i]));
+    expect(by['run:old'].status).toBe('awaiting_review');
+    expect(by['run:old'].startedAt).toBe('2026-09-02T11:30:00.000Z');
+    expect(by['run:ok']).toMatchObject({ status: 'completed', detail: 'approved by email reply' });
+    expect(by['run:no']).toMatchObject({ status: 'skipped', detail: 'rejected by email reply' });
+    expect(by['run:ui']).toMatchObject({ status: 'completed', detail: 'Approved in review' });
+    expect(by['run:dis']).toMatchObject({ status: 'skipped', detail: 'Dismissed in review' });
+  });
+
   it('an open approval outranks the skip reason in the detail line', () => {
     const { items } = buildActivity({
       runs: [{ ...RUN_BASE, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review' }],

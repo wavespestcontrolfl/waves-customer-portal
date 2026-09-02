@@ -93,6 +93,19 @@ describe("AgentActivityTab", () => {
     expect(screen.getByText("Awaiting emailed reply (EA-12ab34cd)")).toBeInTheDocument();
   });
 
+  it("ignores a slower, superseded window response", async () => {
+    let resolveFirst;
+    adminFetch.mockImplementationOnce(() => new Promise((r) => { resolveFirst = r; }));
+    adminFetch.mockResolvedValueOnce({ ...FEED, items: [FEED.items[1]], summary: { ...FEED.summary, total: 1 } });
+    renderTab();
+    fireEvent.change(screen.getByLabelText(/Window/), { target: { value: "168" } });
+    expect(await screen.findByText("impact verdict digest")).toBeInTheDocument();
+    // the stale 24h response lands late and must not replace the 7d rows
+    resolveFirst(FEED);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("How to Get Rid of Ghost Ants")).not.toBeInTheDocument();
+  });
+
   it("filters by status client-side and refetches when the window changes", async () => {
     adminFetch.mockResolvedValue(FEED);
     renderTab();
