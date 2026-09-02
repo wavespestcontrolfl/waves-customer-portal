@@ -408,6 +408,19 @@ function freezeTechTips(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { tips: [], dropped: [] };
   const tips = resolveTipIds(input.ids);
   const dropped = [];
+  // Nothing the tech was told would print may vanish silently: an id the
+  // library no longer has (retired between picker load and completion, or
+  // an out-of-date client) and any pick past the cap are reported so the
+  // completion route can refuse with an actionable message.
+  const kept = new Set(tips.map((t) => t.id));
+  const seenIds = new Set();
+  for (const raw of Array.isArray(input.ids) ? input.ids : []) {
+    const id = String(raw || '').trim();
+    if (!id || seenIds.has(id)) continue;
+    seenIds.add(id);
+    if (kept.has(id)) continue;
+    dropped.push({ id, violations: [TIPS_BY_ID.has(id) ? 'over_cap' : 'unknown_tip'] });
+  }
   // Never truncated: an over-long line is rejected as `too_long` so the
   // tech rewrites it, rather than a silently shortened sentence printing.
   // Only a string is a custom line — a malformed array/object must never be

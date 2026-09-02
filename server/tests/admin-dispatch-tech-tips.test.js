@@ -57,7 +57,7 @@ function routeLayer(method, routePath) {
   return router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
 }
 
-function invoke(params = {}) {
+function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1' }) {
   const layer = routeLayer('get', '/:serviceId/tech-tips');
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   const res = {
@@ -67,7 +67,7 @@ function invoke(params = {}) {
     json(payload) { this.body = payload; return this; },
   };
   return new Promise((resolve, reject) => {
-    handler({ params }, res, (err) => (err ? reject(err) : resolve(res)))
+    handler({ params, ...actor }, res, (err) => (err ? reject(err) : resolve(res)))
       .then(() => resolve(res))
       .catch(reject);
   });
@@ -93,6 +93,7 @@ const SERVICE = {
   customer_id: 'cust-1',
   service_type: 'Mosquito Treatment',
   scheduled_date: '2026-08-15',
+  technician_id: 'tech-7',
 };
 
 afterEach(() => {
@@ -112,6 +113,19 @@ describe('GET /:serviceId/tech-tips', () => {
       expect(res.body).toEqual({ available: false });
     }
     expect(calls).toEqual([]);
+  });
+
+  test('gate on: a technician reads only their own assigned visit; admins read any', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    mockDbCurrent = scriptedDb({ service: SERVICE, calls: [] });
+    const other = await invoke({ serviceId: 'svc-1' }, { techRole: 'technician', technicianId: 'tech-9' });
+    expect(other.statusCode).toBe(403);
+    expect(other.body.code).toBe('service_not_assigned');
+    const own = await invoke({ serviceId: 'svc-1' }, { techRole: 'technician', technicianId: 'tech-7' });
+    expect(own.statusCode).toBe(200);
+    expect(own.body.available).toBe(true);
+    const admin = await invoke({ serviceId: 'svc-1' }, { techRole: 'admin', technicianId: 'admin-1' });
+    expect(admin.statusCode).toBe(200);
   });
 
   test('gate on: unknown service is a 404', async () => {
@@ -191,7 +205,7 @@ describe('completion freeze contract', () => {
     // a rejected custom line is an actionable 400 before any write, never a silent drop
     const reject = block.indexOf('if (techTipsFreeze.dropped.length) {');
     expect(reject).toBeGreaterThan(-1);
-    expect(block.slice(reject, reject + 1600)).toMatch(/return res\.status\(400\)\.json\(\{[\s\S]*TECH_TIP_COPY_REJECTED/);
+    expect(block.slice(reject, reject + 2200)).toMatch(/return res\.status\(400\)\.json\(\{[\s\S]*TECH_TIP_UNKNOWN[\s\S]*TECH_TIP_COPY_REJECTED/);
     // …and it happens before the completion transaction / idempotency claim
     expect(reject).toBeLessThan(block.indexOf('rawIdempotencyKey'));
     // the kill switch holds on the write path too
@@ -205,6 +219,9 @@ describe('route wiring contracts', () => {
   test('the handler is registered after the router-level tech-or-admin auth', () => {
     const layer = routeLayer('get', '/:serviceId/tech-tips');
     expect(layer).toBeTruthy();
+    // and applies the per-visit ownership rule inside
+    const start = source.indexOf("router.get('/:serviceId/tech-tips'");
+    expect(source.slice(start, source.indexOf('\nrouter.', start + 1))).toContain('completionOwnershipError({');
     const authIdx = router.stack.findIndex((l) => !l.route && l.name === 'adminAuthenticate');
     expect(authIdx).toBeGreaterThan(-1);
     expect(router.stack.indexOf(layer)).toBeGreaterThan(authIdx);

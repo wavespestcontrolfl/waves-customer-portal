@@ -1996,8 +1996,17 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
     if (!techTipsGateOn()) return res.json({ available: false });
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'customer_id', 'service_type', 'scheduled_date');
+      .first('id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit (the customer's tip
+    // history and irrigation status are customer data); admins keep
+    // office-wide reach — same rule as the completion routes.
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
     // The visit's calendar day as YYYY-MM-DD (same derivation the rest of
     // this file uses for scheduled_date) — never `new Date('YYYY-MM-DD')`,
     // which is UTC midnight, i.e. the previous ET evening.
@@ -5393,15 +5402,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const drop = techTipsFreeze.dropped[0];
       logger.warn(`[tech-tips] custom tip rejected on ${req.params.serviceId}: ${drop.violations.join(', ')}`);
       const overCap = drop.violations.includes('over_cap');
+      const unknownTip = drop.violations.includes('unknown_tip');
       const tooLong = drop.violations.includes('too_long') || drop.violations.includes('multi_sentence');
       return res.status(400).json({
-        error: overCap
-          ? 'Your own tip needs a free slot — three tips is the limit. Remove one, then complete.'
-          : tooLong
+        error: unknownTip
+          ? 'One of the picked tips is no longer in the library. Remove it, pick again, then complete.'
+          : overCap
+            ? 'Only three tips fit on the report. Remove one, then complete.'
+            : tooLong
             ? 'Your own tip needs to be one sentence (up to 240 characters) — it prints as one tip. Shorten it, then complete.'
             : `Your own tip needs different wording before the report can print it (flagged: ${drop.violations.join(', ')}). Reword it, then complete.`,
-        code: overCap ? 'TECH_TIP_OVER_CAP' : tooLong ? 'TECH_TIP_TOO_LONG' : 'TECH_TIP_COPY_REJECTED',
-        techTip: { copy: drop.copy, violations: drop.violations },
+        code: unknownTip ? 'TECH_TIP_UNKNOWN' : overCap ? 'TECH_TIP_OVER_CAP' : tooLong ? 'TECH_TIP_TOO_LONG' : 'TECH_TIP_COPY_REJECTED',
+        techTip: { ...(drop.id ? { id: drop.id } : {}), ...(drop.copy ? { copy: drop.copy } : {}), violations: drop.violations },
       });
     }
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([

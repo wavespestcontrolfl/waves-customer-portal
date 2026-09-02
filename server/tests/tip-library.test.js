@@ -170,6 +170,16 @@ describe('freezeTechTips', () => {
     expect(freezeTechTips({ ids: [], custom: 'Flip the mats after rain so they dry.' }).tips).toHaveLength(1);
   });
 
+  test('an unknown id and a pick past the cap are reported, never silently dropped', () => {
+    const { tips, dropped } = freezeTechTips({ ids: ['light_warm_bulbs', 'retired_tip', 'water_bromeliads', 'moisture_ac_drip', 'seal_door_sweeps'] });
+    expect(tips.map((t) => t.id)).toEqual(['light_warm_bulbs', 'water_bromeliads', 'moisture_ac_drip']);
+    expect(dropped).toEqual([
+      { id: 'retired_tip', violations: ['unknown_tip'] },
+      { id: 'seal_door_sweeps', violations: ['over_cap'] },
+    ]);
+    expect(freezeTechTips({ ids: ['light_warm_bulbs', 'light_warm_bulbs'] }).dropped).toEqual([]);
+  });
+
   test('malformed input freezes nothing', () => {
     for (const bad of [undefined, null, 'x', 42, ['light_warm_bulbs'], { ids: 'light_warm_bulbs' }]) {
       expect(freezeTechTips(bad).tips).toEqual([]);
