@@ -1457,8 +1457,13 @@ export default function CallLogTabV2() {
                           ref={playerRefFor(c.id)}
                           recordingId={c.recording_sid || c.id}
                           className="w-full h-8"
-                          onTimeUpdate={(seconds) =>
-                            setPlaybackById((prev) => ({ ...prev, [c.id]: seconds * 1000 }))
+                          // Only a row with a synced transcript pays for
+                          // timeupdate rerenders; gate off = no listener.
+                          onTimeUpdate={
+                            syncedSegmentsById.has(c.id)
+                              ? (seconds) =>
+                                  setPlaybackById((prev) => ({ ...prev, [c.id]: seconds * 1000 }))
+                              : undefined
                           }
                         />{" "}
                       </div>
