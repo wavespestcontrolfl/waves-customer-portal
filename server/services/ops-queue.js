@@ -23,6 +23,10 @@ const { computeStalledCalls, MIN_DURATION_SECONDS } = require('./call-processing
 const ITEM_LIMIT = 25;
 const SCAN_LIMIT = 200;
 const RECENT_DAYS = 7;
+// Same env + default as call-recording-processor: extraction_failed under
+// this cap is re-run by processAllPending (a retry in flight), only at the
+// cap is it terminal.
+const CALL_EXTRACTION_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.CALL_EXTRACTION_MAX_ATTEMPTS || '3', 10) || 3);
 
 function iso(v) {
   if (!v) return null;
@@ -126,9 +130,15 @@ async function laneCallProcessing() {
     const ps = r.processing_status || 'pending';
     let status = 'pending';
     let detail = ps === 'processing' ? 'transcribing / extracting' : 'waiting for the processor';
-    if (ps === 'extraction_failed' || ps === 'no_transcription') {
+    const attempts = Number(r.extraction_attempts) || 0;
+    if (ps === 'no_transcription') {
       status = 'failed';
-      detail = ps === 'no_transcription' ? 'no transcript could be produced' : `extraction failed (${r.extraction_attempts || 0} attempt${r.extraction_attempts === 1 ? '' : 's'})`;
+      detail = 'no transcript could be produced';
+    } else if (ps === 'extraction_failed' && attempts < CALL_EXTRACTION_MAX_ATTEMPTS) {
+      detail = `extraction failed, retry scheduled (${attempts}/${CALL_EXTRACTION_MAX_ATTEMPTS})`;
+    } else if (ps === 'extraction_failed') {
+      status = 'failed';
+      detail = `extraction failed after ${attempts} attempts — triage filed`;
     } else if (stalledIds.has(r.id)) {
       status = 'parked';
       detail = `stalled in ${ps} — the watchdog's stall rule`;
