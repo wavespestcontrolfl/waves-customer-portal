@@ -149,6 +149,30 @@ describe('PUT /calls/:id/customer', () => {
     expect(timeline.patch).toEqual({ __deleted: true });
   });
 
+  test('an unlink severs the durable lead links too — the lead stamp keys leave metadata and the lead no longer claims the call SID (codex #3736 gh-r9)', async () => {
+    const updates = mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: null }) });
+      expect(res.status).toBe(200);
+      expect((await res.json()).leads_unlinked).toBe(1);
+    });
+    const write = updates.find((u) => u.table === 'call_log');
+    for (const k of ['lead_id', 'lead_prior_state', 'lead_written_state', 'lead_stamp_seq', 'lead_link_via']) expect(write.patch.metadata.sql).toContain(`- '${k}'`);
+    const lead = updates.find((u) => u.table === 'leads');
+    expect(lead.patch.twilio_call_sid).toBeNull();
+    expect(JSON.stringify(lead.wheres)).toContain(SID);
+  });
+
+  test('a relink to a person leaves the lead links alone', async () => {
+    const updates = mockDb([{ id: CALL_ID, customer_id: null, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
+      expect(res.status).toBe(200);
+    });
+    expect(updates.find((u) => u.table === 'call_log').patch.metadata.sql).not.toContain("'lead_id'");
+    expect(updates.find((u) => u.table === 'leads')).toBeUndefined();
+  });
+
   test('a timeline move that fails rolls the relink back and surfaces as an error, never a half-applied success', async () => {
     mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
     const inner = db.getMockImplementation();

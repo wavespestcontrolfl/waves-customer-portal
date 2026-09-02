@@ -8016,7 +8016,11 @@ const CallRecordingProcessor = {
             mode: 'enforce',
             recordingSid: call.recording_sid,
           });
-          await db('route_decisions').insert(routeDecision).onConflict(['call_log_id', 'decision_version', 'mode', 'recording_sid']).ignore();
+          // Targetless DO NOTHING: tolerant of BOTH the legacy three-column
+          // constraint (kept until the contract migration) and the
+          // recording-keyed index, so no release depends on a constraint by
+          // name during a rolling deploy (Codex #3736 r9 P1).
+          await db('route_decisions').insert(routeDecision).onConflict().ignore();
 
           // Advisory flags (missing surname / rental / second address) reach the
           // Needs Review inbox even when the call AUTO-ROUTES — they inform, they
@@ -15225,7 +15229,7 @@ const CallRecordingProcessor = {
           });
           await db('route_decisions')
             .insert(shadowDecision)
-            .onConflict(['call_log_id', 'decision_version', 'mode', 'recording_sid'])
+            .onConflict()
             .ignore()
             .catch((err) => logger.warn(`[call-proc-v2] Shadow route decision skipped for ${maskSid(callSid)}: ${err.message}`));
         }

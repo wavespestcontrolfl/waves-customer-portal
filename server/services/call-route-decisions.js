@@ -216,7 +216,8 @@ async function writeLegacyShadowRouteDecision(input = {}) {
   try {
     const rows = await db('route_decisions')
       .insert(payload)
-      .onConflict(['call_log_id', 'decision_version', 'mode', 'recording_sid'])
+      // Targetless: tolerant of the legacy key and the recording key alike.
+      .onConflict()
       .ignore()
       .returning(['id']);
     return rows?.[0] || null;

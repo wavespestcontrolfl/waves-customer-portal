@@ -233,14 +233,28 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
         const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id');
         if (!customer) return { notFound: true };
       }
+      // An UNLINK also severs the call's durable lead linkage (Codex r9
+      // P2): the lead stamp keys the processor writes (the same set its
+      // own clear uses) and the lead's twilio_call_sid arm, which the
+      // estimator engine and the same-call lead reuse resolve through.
+      // The lead itself stays — it may be a real inquiry — it just no
+      // longer claims this call. A relink to a person leaves them alone.
+      const LEAD_STAMP_KEYS = ['lead_id', 'lead_prior_state', 'lead_written_state', 'lead_stamp_seq', 'lead_link_via'];
+      const metadataExpr = customerId
+        ? "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_link_override}', ?::jsonb, true)"
+        : `jsonb_set(COALESCE(metadata, '{}'::jsonb) ${LEAD_STAMP_KEYS.map((k) => `- '${k}'`).join(' ')}, '{customer_link_override}', ?::jsonb, true)`;
       const relinked = await trx('call_log').where({ id: call.id })
         .whereRaw("processing_status IS DISTINCT FROM 'processing'")
         .update({
           customer_id: customerId,
-          metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_link_override}', ?::jsonb, true)", [JSON.stringify(override)]),
+          metadata: db.raw(metadataExpr, [JSON.stringify(override)]),
           updated_at: new Date(),
         });
       if (!relinked) return null;
+      let leadsUnlinked = 0;
+      if (!customerId && call.twilio_call_sid) {
+        leadsUnlinked = await trx('leads').where({ twilio_call_sid: call.twilio_call_sid }).update({ twilio_call_sid: null, updated_at: new Date() });
+      }
       const timeline = trx('customer_interactions')
         .where({ interaction_type: 'call' })
         .whereRaw("metadata ->> 'call_log_id' = ?", [String(call.id)]);
@@ -261,7 +275,7 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
           .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
           .update({ review_status: null });
       }
-      return { timelineRows: rows, repaired };
+      return { timelineRows: rows, repaired, leadsUnlinked };
     });
     if (moved?.notFound) return res.status(404).json({ error: 'Customer not found' });
     if (!moved) {
@@ -280,7 +294,7 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
         });
     }
     logger.info(`[call-recordings] call ${call.id} customer link set by operator (${customerId ? 'linked' : 'unlinked'}; timeline rows moved: ${timelineMoved})`);
-    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, warnings });
+    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, leads_unlinked: moved.leadsUnlinked, warnings });
   } catch (err) { next(err); }
 });
 

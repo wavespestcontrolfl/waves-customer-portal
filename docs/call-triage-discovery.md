@@ -372,7 +372,7 @@ route_decisions (
   ai_validation_schema_version    varchar,
   enrichment_version              varchar,
   created_at                      timestamptz,
-  UNIQUE (call_log_id, decision_version, mode, recording_sid)  -- recording_sid: the recording the decision was derived from ('' when none, and on every pre-2026-09 row — never backfilled); a replaced recording's pass writes its own row
+  UNIQUE (call_log_id, decision_version, mode, recording_sid)  -- recording_sid: the recording the decision was derived from ('' when none, and on every pre-2026-09 row — never backfilled); a replaced recording's pass writes its own row; the legacy 3-column constraint is kept until the contract migration drops it (rolling-deploy expand/contract)
 );
 ```
 

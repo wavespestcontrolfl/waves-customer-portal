@@ -211,10 +211,10 @@ describe('processRecording claims are fenced to the expected recording when one 
 // outcome update addresses this recording's row only (codex #3736 gh-r7).
 describe('route decisions are keyed on the recording they were derived from', () => {
   const { body } = processRecordingBody();
-  test('both route_decisions inserts conflict on the recording-inclusive key and pass the recording', () => {
-    const targets = body.match(/onConflict\(\['call_log_id', 'decision_version', 'mode'(, 'recording_sid')?\]\)/g) || [];
-    expect(targets.length).toBe(2);
-    for (const t of targets) expect(t).toContain("'recording_sid'");
+  test('both route_decisions inserts are targetless DO NOTHING (no constraint named — rolling-deploy safe) and pass the recording', () => {
+    const inserts = body.match(/route_decisions'\)[\s\S]{0,120}?\.onConflict\(([^)]*)\)/g) || [];
+    expect(inserts.length).toBe(2);
+    for (const i of inserts) expect(i).toMatch(/\.onConflict\(\)$/);
     expect((body.match(/recordingSid: call\.recording_sid/g) || []).length).toBe(2);
   });
   test('the same-run outcome update is scoped to this recording', () => {
