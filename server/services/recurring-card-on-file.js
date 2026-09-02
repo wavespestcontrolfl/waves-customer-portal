@@ -289,12 +289,41 @@ async function resolveRecurringCardPolicyForEstimate({
 // key would replay the dead intent for the whole idempotency window). Returns
 // { clientSecret, setupIntentId } or null when Stripe isn't configured.
 const MAX_SETUP_INTENT_GENERATIONS = 5;
+
+// Tender family for the accept capture (GATE_ACCEPT_ACH_CAPTURE, owner ruling
+// 2026-09-01). card_or_bank only while the gate is on AND the estimate's
+// customer (if any) has no unhealthy ACH state — the same precheck the pay
+// page's capture-setup runs: enrollConsentedMethod refuses a bank target
+// while customers.ach_status is needs_verification/suspended, so offering the
+// bank tab there would capture a method the enrollment then rejects. A
+// lookup failure fails toward card (the tender the accept gate always
+// accepts). No customer row yet (new signup) → card_or_bank.
+async function resolveRecurringCaptureTender(estimate) {
+  if (require('../config/feature-gates').gates.acceptAchCapture !== true) return 'card';
+  if (!estimate?.customer_id) return 'card_or_bank';
+  try {
+    const row = await db('customers').where({ id: estimate.customer_id }).first('ach_status');
+    if (row?.ach_status && row.ach_status !== 'active') return 'card';
+    return 'card_or_bank';
+  } catch (err) {
+    logger.warn(`[recurring-cof] ach_status precheck failed for customer ${estimate.customer_id} — card-only capture: ${err.message}`);
+    return 'card';
+  }
+}
+
 async function createRecurringCardSetupIntentForEstimate(estimate) {
+  const paymentMethodType = await resolveRecurringCaptureTender(estimate);
   for (let generation = 0; generation < MAX_SETUP_INTENT_GENERATIONS; generation += 1) {
-    const setupIntent = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, generation });
+    const setupIntent = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, generation, paymentMethodType });
     if (!setupIntent) return null;
     if (setupIntent.status === 'canceled') continue;
-    return { clientSecret: setupIntent.client_secret, setupIntentId: setupIntent.id };
+    return {
+      clientSecret: setupIntent.client_secret,
+      setupIntentId: setupIntent.id,
+      // The capture UI keys its heading/consent copy on this — the Payment
+      // Element only shows a bank tab when the intent allows it.
+      paymentMethodTypes: paymentMethodType === 'card_or_bank' ? ['card', 'us_bank_account'] : ['card'],
+    };
   }
   logger.error(`[recurring-cof] exhausted SetupIntent generations for estimate ${estimate.id} — all replays terminal`);
   return null;
@@ -330,9 +359,34 @@ async function verifyRecurringCardIntent({ estimate, setupIntentId }) {
     return { ok: false, reason: 'intent_mismatch' };
   }
   const pm = setupIntent.payment_method;
+  const paymentMethodId = typeof pm === 'string' ? pm : pm.id;
+  // Kill-switch at the trust boundary (pre-push Codex P1): an intent minted
+  // card_or_bank while GATE_ACCEPT_ACH_CAPTURE was on stays confirmable
+  // after the gate flips off, and a customer's ACH state can turn unhealthy
+  // between mint and accept. Re-resolve the tender NOW and refuse a bank
+  // method the current policy would not have offered — the accept then 402s
+  // RECURRING_CARD_REQUIRED and the client re-mints a card-only intent.
+  const bankPossible = Array.isArray(setupIntent.payment_method_types)
+    && setupIntent.payment_method_types.includes('us_bank_account');
+  if (bankPossible) {
+    let methodType = typeof pm === 'string' ? null : pm.type;
+    if (!methodType) {
+      try {
+        methodType = (await StripeService.retrievePaymentMethod(paymentMethodId))?.type || null;
+      } catch (err) {
+        logger.warn('[recurring-cof] captured payment method lookup failed', { error: err.message });
+        return { ok: false, reason: 'verification_failed' };
+      }
+    }
+    // Unknown type on a bank-capable intent fails closed too.
+    if (methodType !== 'card' && (await resolveRecurringCaptureTender(estimate)) !== 'card_or_bank') {
+      logger.warn(`[recurring-cof] bank method refused at accept for estimate ${estimate.id} — tender no longer offered`);
+      return { ok: false, reason: 'bank_not_allowed' };
+    }
+  }
   return {
     ok: true,
-    paymentMethodId: typeof pm === 'string' ? pm : pm.id,
+    paymentMethodId,
     setupIntentId: setupIntent.id,
   };
 }
@@ -484,7 +538,9 @@ async function resolvePrepayChargeMethod({ policy = {}, verification = null, cus
           paymentMethodRowId: null, // saved at enrollment, post-commit
           methodType: pm.type || 'card',
           funding: pm.card?.funding || null,
-          last4: pm.card?.last4 || null,
+          // A bank capture (GATE_ACCEPT_ACH_CAPTURE) carries its last4 on
+          // us_bank_account — the quote copy names the debited account.
+          last4: pm.card?.last4 || pm.us_bank_account?.last4 || null,
           // The quoted method IS the one this accept just captured (Codex
           // r30 P1): only then may the client reuse the capture checkbox
           // as the prepay authorization — a saved-method quote must render

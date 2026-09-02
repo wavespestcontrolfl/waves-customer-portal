@@ -1,5 +1,5 @@
 import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
-import { CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 
 /**
  * Inline Auto Pay capture for the single-screen booking review (owner ask
@@ -37,10 +37,18 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   const elementsRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [agreed, setAgreed] = useState(false);
+  // Tender the customer picked inside the Payment Element ('card' or
+  // 'us_bank_account'). A bank tab only exists when the intent was minted
+  // card_or_bank (GATE_ACCEPT_ACH_CAPTURE); the consent copy and the
+  // surcharge line follow the selection so the recorded ACH authorization
+  // matches what was on screen.
+  const [methodType, setMethodType] = useState('card');
+  const bank = methodType === 'us_bank_account';
+  const bankOffered = Array.isArray(intent?.paymentMethodTypes) && intent.paymentMethodTypes.includes('us_bank_account');
   // The checkbox assents to the RENDERED authorization — if the variant
-  // changes (per-application Auto Pay ↔ immediate annual prepay charge),
-  // the prior check must not carry over (Codex r5 P1).
-  useEffect(() => { setAgreed(false); }, [prepay]);
+  // changes (per-application Auto Pay ↔ immediate annual prepay charge, or
+  // card ↔ bank), the prior check must not carry over (Codex r5 P1).
+  useEffect(() => { setAgreed(false); }, [prepay, methodType]);
   const [termsOpen, setTermsOpen] = useState(false);
   const [error, setError] = useState(null);
   // Stripe.js failed to load/mount: reported upward so the parent can drop
@@ -88,6 +96,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       const paymentElement = elements.create('payment');
       paymentElement.mount(mountRef.current);
       paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
+      paymentElement.on('change', (event) => { if (!cancelled) setMethodType(event?.value?.type || 'card'); });
       stripeRef.current = stripe;
       elementsRef.current = elements;
     }).catch(() => {
@@ -123,7 +132,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
           redirect: 'if_required',
         });
         if (result.error) {
-          const message = result.error.message || 'We could not save that card. Try another card.';
+          const message = result.error.message || (bank ? 'We could not save that bank account. Try a card instead.' : 'We could not save that card. Try another card.');
           setError(message);
           return { ok: false, error: message };
         }
@@ -131,31 +140,42 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         if (si && si.status === 'succeeded') {
           return { ok: true, setupIntentId: si.id };
         }
-        const message = 'That card could not be saved. Try again in a moment.';
+        // Instant-verified banks land 'succeeded' like cards; a bank that
+        // could not instant-verify never gets here (Stripe surfaces the
+        // error above) — no micro-deposit pending state exists at accept.
+        const message = bank
+          ? 'That bank account could not be verified instantly. Use a card to finish booking.'
+          : 'That card could not be saved. Try again in a moment.';
         setError(message);
         return { ok: false, error: message };
       } catch {
-        const message = 'We could not save that card. Try again.';
+        const message = bank ? 'We could not save that bank account. Try again or use a card.' : 'We could not save that card. Try again.';
         setError(message);
         return { ok: false, error: message };
       }
     },
-  }), [ready, agreed, intent]);
+  }), [ready, agreed, intent, bank]);
 
   return (
     <div style={{ marginTop: 20, paddingTop: 18, borderTop: `1px solid ${borderColor}`, textAlign: 'left' }}>
       <div style={{ fontSize: 15, fontWeight: 600, color: NAVY }}>
-        {prepay ? 'Annual prepay — your card pays for the year' : 'Auto Pay — nothing charged today'}
+        {prepay
+          ? (bank ? 'Annual prepay — your bank account pays for the year' : 'Annual prepay — your card pays for the year')
+          : 'Auto Pay — nothing charged today'}
       </div>
       <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 4 }}>
         {prepay
-          ? 'When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.'
-          : 'After each completed service, your card is charged that service’s amount automatically.'}
+          ? (bank
+            ? 'When you confirm, we show your exact 12-month total and debit this bank account. Bank transfers have no added card surcharge.'
+            : 'When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
+          : (bank
+            ? 'After each completed service, that service’s amount is debited from your bank account automatically. Bank transfers have no added card surcharge.'
+            : `After each completed service, your ${bankOffered ? 'card or bank account' : 'card'} is charged that service’s amount automatically.`)}
       </div>
       <div ref={mountRef} style={{ marginTop: 14 }} />
       <div style={{ fontSize: 14, color: bodyColor, marginTop: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
         <span aria-hidden="true">🔒</span>
-        <span>Secured by Stripe — remove your card anytime in the Waves app.</span>
+        <span>{`Secured by Stripe — remove your ${bankOffered ? 'payment method' : 'card'} anytime in the Waves app.`}</span>
       </div>
       <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 14, cursor: 'pointer' }}>
         <input
@@ -171,8 +191,12 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         />
         <span style={{ fontSize: 14, color: NAVY, lineHeight: 1.5, fontWeight: 600 }}>
           {prepay
-            ? 'I authorize Waves to save this card and charge my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.'
-            : 'I authorize Waves to charge this card after each completed service — cancel anytime.'}
+            ? (bank
+              ? 'I authorize Waves to save this bank account and debit my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.'
+              : 'I authorize Waves to save this card and charge my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.')
+            : (bank
+              ? 'I authorize Waves to debit this bank account after each completed service — cancel anytime.'
+              : 'I authorize Waves to charge this card after each completed service — cancel anytime.')}
         </span>
       </label>
       <button
@@ -182,7 +206,9 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       >{termsOpen ? 'Hide full terms' : 'View full terms'}</button>
       {termsOpen ? (
         <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 8, marginLeft: 26 }}>
-          {prepay ? PREPAY_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT}
+          {prepay
+            ? (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)
+            : (bank ? ACH_CONSENT_TEXT : CARD_CONSENT_TEXT)}
         </div>
       ) : null}
       {error ? (

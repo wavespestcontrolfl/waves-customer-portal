@@ -165,7 +165,17 @@ enrollment (consent row + enrollConsentedMethod) turns on Auto Pay so
 completed applications auto-charge, capped at the accepted per-visit
 amount (above-quote invoices route to office review instead of
 auto-charging); dark behind RECURRING_CARD_ON_FILE, and
-ESTIMATE_DEPOSIT_REQUIRED is unset only AFTER this lights).
+ESTIMATE_DEPOSIT_REQUIRED is unset only AFTER this lights.
+Response carries `paymentMethodTypes` (`['card']`, or
+`['card','us_bank_account']` behind GATE_ACCEPT_ACH_CAPTURE — bank with
+INSTANT verification only, never micro-deposits; card-only for an existing
+customer whose `customers.ach_status` is set and not `active`, and on any
+ach_status lookup failure). The accept-time verify re-resolves the same
+tender policy and refuses a captured bank method (402
+RECURRING_CARD_REQUIRED → the client re-mints card-only) once the gate is
+off or the customer's ACH state is unhealthy, so a previously minted
+bank-capable intent cannot outlive the kill switch. The one-time
+card-hold-intent route above stays card-only regardless).
 `/api/estimates/:token/service-details/:serviceKey/pdf` (read-only
 per-service details-packet PDF for the estimate view's "full details"
 buttons; live by default, kill switch GATE_SERVICE_DETAILS_PDF=false —

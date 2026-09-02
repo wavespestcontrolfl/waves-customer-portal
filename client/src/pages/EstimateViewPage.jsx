@@ -35,7 +35,7 @@ import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
-import { CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
@@ -2631,6 +2631,14 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
   const [agreed, setAgreed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  // Tender picked inside the Payment Element — a bank tab only exists when
+  // the intent was minted card_or_bank (GATE_ACCEPT_ACH_CAPTURE). Copy and
+  // the consent text follow it; the checkbox re-arms on a switch so the
+  // recorded ACH authorization is the one that was on screen.
+  const [methodType, setMethodType] = useState('card');
+  const bank = methodType === 'us_bank_account';
+  const bankOffered = Array.isArray(intent?.paymentMethodTypes) && intent.paymentMethodTypes.includes('us_bank_account');
+  useEffect(() => { setAgreed(false); }, [methodType]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2646,6 +2654,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
       const paymentElement = elements.create('payment');
       paymentElement.mount(mountRef.current);
       paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
+      paymentElement.on('change', (event) => { if (!cancelled) setMethodType(event?.value?.type || 'card'); });
       stripeRef.current = stripe;
       elementsRef.current = elements;
     }).catch(() => {
@@ -2672,7 +2681,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
         redirect: 'if_required',
       });
       if (result.error) {
-        setError(result.error.message || 'We could not save that card. Try another card.');
+        setError(result.error.message || (bank ? 'We could not save that bank account. Try a card instead.' : 'We could not save that card. Try another card.'));
         setSubmitting(false);
         return;
       }
@@ -2681,13 +2690,17 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
         onSuccess(si.id);
         return;
       }
-      setError('That card could not be saved. Try again in a moment.');
+      // Instant-verified banks land 'succeeded' like cards; there is no
+      // micro-deposit pending state at accept (GATE_ACCEPT_ACH_CAPTURE).
+      setError(bank
+        ? 'That bank account could not be verified instantly. Use a card to finish booking.'
+        : 'That card could not be saved. Try again in a moment.');
       setSubmitting(false);
     } catch {
-      setError('We could not save that card. Try again.');
+      setError(bank ? 'We could not save that bank account. Try again or use a card.' : 'We could not save that card. Try again.');
       setSubmitting(false);
     }
-  }, [intent, onSuccess]);
+  }, [intent, onSuccess, bank]);
 
   return (
     <div
@@ -2705,12 +2718,18 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
           are the non-glass fallback. */}
       <div data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>
-          {prepay ? 'Save your card — annual prepay' : 'Set up Auto Pay'}
+          {prepay
+            ? (bankOffered ? 'Save your card or bank account — annual prepay' : 'Save your card — annual prepay')
+            : 'Set up Auto Pay'}
         </div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
           {prepay
-            ? 'Save your card to confirm your plan. When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.'
-            : 'Save your card to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.'}
+            ? (bank
+              ? 'Save your bank account to confirm your plan. When you confirm, we show your exact 12-month total and debit this account. Bank transfers have no added card surcharge.'
+              : 'Save your card to confirm your plan. When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
+            : (bank
+              ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.'
+              : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.`)}
         </div>
         <div ref={mountRef} />
         <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
@@ -2721,7 +2740,11 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
             disabled={submitting}
             style={{ marginTop: 3, width: 16, height: 16, flex: 'none' }}
           />
-          <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>{prepay ? PREPAY_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT}</span>
+          <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+            {prepay
+              ? (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)
+              : (bank ? ACH_CONSENT_TEXT : CARD_CONSENT_TEXT)}
+          </span>
         </label>
         {error ? (
           <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
@@ -2732,7 +2755,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
             onClick={handleSave}
             disabled={!ready || !agreed || submitting}
             style={{ ...estimateCtaStyle, opacity: !ready || !agreed || submitting ? 0.6 : 1 }}
-          >{submitting ? 'Saving…' : 'Agree & save card'}</button>
+          >{submitting ? 'Saving…' : (bank ? 'Agree & save bank account' : 'Agree & save card')}</button>
           <button
             type="button"
             onClick={onCancel}

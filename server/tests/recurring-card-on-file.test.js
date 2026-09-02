@@ -225,6 +225,12 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
       expect(m).toEqual({ stripePaymentMethodId: 'pm_1', paymentMethodRowId: null, methodType: 'card', funding: 'credit', last4: '4242', source: 'fresh_capture' });
     });
 
+    it('resolves a fresh BANK capture (GATE_ACCEPT_ACH_CAPTURE) with no funding guard and the bank last4', async () => {
+      mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_b', type: 'us_bank_account', us_bank_account: { last4: '6789', bank_name: 'Test Bank' } });
+      const m = await resolvePrepayChargeMethod({ verification: { ok: true, paymentMethodId: 'pm_b' }, customerId: 'cust-1' });
+      expect(m).toEqual({ stripePaymentMethodId: 'pm_b', paymentMethodRowId: null, methodType: 'us_bank_account', funding: null, last4: '6789', source: 'fresh_capture' });
+    });
+
     it('resolves the auto-satisfy saved method row', async () => {
       mockDbFixtures.payment_methods = { id: 'pmrow-1', customer_id: 'cust-1', stripe_payment_method_id: 'pm_9', method_type: 'card', card_funding: 'debit', last_four: '1111' };
       const m = await resolvePrepayChargeMethod({ policy: { savedMethodRowId: 'pmrow-1' }, customerId: 'cust-1' });
@@ -452,6 +458,60 @@ describe('verifyRecurringCardIntent (trust boundary)', () => {
     expect(recurringCardIntentMatchesEstimate(GOOD_SI, 'est-1')).toBe(true);
     expect(recurringCardIntentMatchesEstimate(null, 'est-1')).toBe(false);
   });
+
+  // Kill switch at the trust boundary (pre-push Codex P1): a bank-capable
+  // intent minted while GATE_ACCEPT_ACH_CAPTURE was on must not accept a bank
+  // method once the gate is off or the customer's ACH state turned unhealthy.
+  describe('bank method re-validation (GATE_ACCEPT_ACH_CAPTURE)', () => {
+    const gates = require('../config/feature-gates').gates;
+    const BANK_SI = { ...GOOD_SI, payment_method_types: ['card', 'us_bank_account'] };
+    afterEach(() => { gates.acceptAchCapture = false; });
+
+    it('accepts a bank method while the gate is on and the customer ACH state is healthy', async () => {
+      gates.acceptAchCapture = true;
+      mockDbFixtures.customers = { ach_status: 'active' };
+      mockRetrieveSetupIntent.mockResolvedValue({ ...BANK_SI, payment_method: { id: 'pm_b', type: 'us_bank_account' } });
+      expect(await verifyRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' }))
+        .toEqual({ ok: true, paymentMethodId: 'pm_b', setupIntentId: 'seti_1' });
+      expect(mockRetrievePaymentMethod).not.toHaveBeenCalled();
+    });
+
+    it('resolves a string pm on a bank-capable intent via Stripe before judging it', async () => {
+      gates.acceptAchCapture = true;
+      mockRetrieveSetupIntent.mockResolvedValue({ ...BANK_SI, payment_method: 'pm_c' });
+      mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_c', type: 'card', card: { funding: 'debit' } });
+      expect((await verifyRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).ok).toBe(true);
+      expect(mockRetrievePaymentMethod).toHaveBeenCalledWith('pm_c');
+    });
+
+    it('refuses a bank method once the gate is OFF (intent minted earlier)', async () => {
+      gates.acceptAchCapture = false;
+      mockRetrieveSetupIntent.mockResolvedValue({ ...BANK_SI, payment_method: { id: 'pm_b', type: 'us_bank_account' } });
+      expect(await verifyRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' }))
+        .toEqual({ ok: false, reason: 'bank_not_allowed' });
+    });
+
+    it('refuses a bank method when the customer ACH state is unhealthy at accept', async () => {
+      gates.acceptAchCapture = true;
+      mockDbFixtures.customers = { ach_status: 'needs_verification' };
+      mockRetrieveSetupIntent.mockResolvedValue({ ...BANK_SI, payment_method: 'pm_b' });
+      mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_b', type: 'us_bank_account' });
+      expect((await verifyRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).reason).toBe('bank_not_allowed');
+    });
+
+    it('still accepts a CARD on a bank-capable intent with the gate off', async () => {
+      gates.acceptAchCapture = false;
+      mockRetrieveSetupIntent.mockResolvedValue({ ...BANK_SI, payment_method: { id: 'pm_k', type: 'card' } });
+      expect((await verifyRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).ok).toBe(true);
+    });
+
+    it('fails closed when the payment method lookup errors', async () => {
+      gates.acceptAchCapture = true;
+      mockRetrieveSetupIntent.mockResolvedValue({ ...BANK_SI, payment_method: 'pm_x' });
+      mockRetrievePaymentMethod.mockRejectedValue(new Error('stripe down'));
+      expect((await verifyRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).reason).toBe('verification_failed');
+    });
+  });
 });
 
 describe('createRecurringCardSetupIntentForEstimate', () => {
@@ -460,11 +520,11 @@ describe('createRecurringCardSetupIntentForEstimate', () => {
     expect(await createRecurringCardSetupIntentForEstimate(EST)).toBeNull();
   });
 
-  it('returns the client secret for the capture UI', async () => {
+  it('returns the client secret for the capture UI (card-only while GATE_ACCEPT_ACH_CAPTURE is off)', async () => {
     mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'requires_payment_method' });
     expect(await createRecurringCardSetupIntentForEstimate(EST))
-      .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1' });
-    expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledWith({ estimateId: 'est-1', generation: 0 });
+      .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1', paymentMethodTypes: ['card'] });
+    expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledWith({ estimateId: 'est-1', generation: 0, paymentMethodType: 'card' });
   });
 
   it('walks the generation salt past a canceled replay (Codex #2668 P2)', async () => {
@@ -472,9 +532,56 @@ describe('createRecurringCardSetupIntentForEstimate', () => {
       .mockResolvedValueOnce({ id: 'seti_dead', client_secret: 'cs_dead', status: 'canceled' })
       .mockResolvedValueOnce({ id: 'seti_2', client_secret: 'cs_2', status: 'requires_payment_method' });
     expect(await createRecurringCardSetupIntentForEstimate(EST))
-      .toEqual({ clientSecret: 'cs_2', setupIntentId: 'seti_2' });
-    expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(1, { estimateId: 'est-1', generation: 0 });
-    expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(2, { estimateId: 'est-1', generation: 1 });
+      .toEqual({ clientSecret: 'cs_2', setupIntentId: 'seti_2', paymentMethodTypes: ['card'] });
+    expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(1, { estimateId: 'est-1', generation: 0, paymentMethodType: 'card' });
+    expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(2, { estimateId: 'est-1', generation: 1, paymentMethodType: 'card' });
+  });
+
+  // GATE_ACCEPT_ACH_CAPTURE (owner ruling 2026-09-01): bank joins the accept
+  // capture only while the gate is on and the customer has no unhealthy ACH
+  // state — the tender the enrollment would refuse must never be offered.
+  describe('GATE_ACCEPT_ACH_CAPTURE tender resolution', () => {
+    const gates = require('../config/feature-gates').gates;
+    beforeEach(() => {
+      gates.acceptAchCapture = true;
+      mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'requires_payment_method' });
+    });
+    afterEach(() => { gates.acceptAchCapture = false; });
+
+    it('mints card_or_bank for a new signup with no customer row', async () => {
+      expect(await createRecurringCardSetupIntentForEstimate({ id: 'est-1', customer_id: null }))
+        .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1', paymentMethodTypes: ['card', 'us_bank_account'] });
+      expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledWith({ estimateId: 'est-1', generation: 0, paymentMethodType: 'card_or_bank' });
+    });
+
+    it('mints card_or_bank for an existing customer whose ach_status is healthy (null or active)', async () => {
+      mockDbFixtures.customers = { ach_status: null };
+      await createRecurringCardSetupIntentForEstimate(EST);
+      expect(mockCreateRecurringCardSetupIntent).toHaveBeenLastCalledWith(expect.objectContaining({ paymentMethodType: 'card_or_bank' }));
+      mockDbFixtures.customers = { ach_status: 'active' };
+      await createRecurringCardSetupIntentForEstimate(EST);
+      expect(mockCreateRecurringCardSetupIntent).toHaveBeenLastCalledWith(expect.objectContaining({ paymentMethodType: 'card_or_bank' }));
+    });
+
+    it('falls back to card-only when the customer ACH state is unhealthy (enrollment would refuse ach_blocked)', async () => {
+      for (const status of ['needs_verification', 'suspended']) {
+        mockDbFixtures.customers = { ach_status: status };
+        expect((await createRecurringCardSetupIntentForEstimate(EST)).paymentMethodTypes).toEqual(['card']);
+        expect(mockCreateRecurringCardSetupIntent).toHaveBeenLastCalledWith(expect.objectContaining({ paymentMethodType: 'card' }));
+      }
+    });
+
+    it('fails toward card when the ach_status lookup throws', async () => {
+      mockDbFixtures.customers = () => { throw new Error('db down'); };
+      expect((await createRecurringCardSetupIntentForEstimate(EST)).paymentMethodTypes).toEqual(['card']);
+    });
+
+    it('stays card-only with the gate off regardless of customer state', async () => {
+      gates.acceptAchCapture = false;
+      mockDbFixtures.customers = { ach_status: 'active' };
+      expect((await createRecurringCardSetupIntentForEstimate(EST)).paymentMethodTypes).toEqual(['card']);
+      expect(mockCreateRecurringCardSetupIntent).toHaveBeenLastCalledWith(expect.objectContaining({ paymentMethodType: 'card' }));
+    });
   });
 
   it('gives up (null) when every generation replays terminal', async () => {
@@ -486,7 +593,7 @@ describe('createRecurringCardSetupIntentForEstimate', () => {
   it('passes a succeeded replay straight through (modal short-circuits to onSuccess)', async () => {
     mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'succeeded' });
     expect(await createRecurringCardSetupIntentForEstimate(EST))
-      .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1' });
+      .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1', paymentMethodTypes: ['card'] });
   });
 });
 

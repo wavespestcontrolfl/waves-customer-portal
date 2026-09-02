@@ -79,3 +79,62 @@ describe('InlineAutoPayCapture Payment Element lifecycle', () => {
     expect(calls.mounts).toBe(2);
   });
 });
+
+// GATE_ACCEPT_ACH_CAPTURE: when the intent allows us_bank_account and the
+// customer picks the bank tab, the rendered authorization must be the ACH
+// text (the server snapshots the ACH consent for a bank method) and the
+// checkbox must re-arm — a card consent tick must never carry over to a
+// bank debit authorization.
+describe('InlineAutoPayCapture tender-aware consent', () => {
+  function makeTenderStub() {
+    const handlers = {};
+    const StripeCtor = vi.fn(() => ({
+      elements: vi.fn(() => ({
+        create: vi.fn(() => ({
+          mount: vi.fn(),
+          on: vi.fn((event, handler) => { handlers[event] = handler; }),
+        })),
+      })),
+      retrieveSetupIntent: vi.fn(),
+      confirmSetup: vi.fn(),
+    }));
+    return { StripeCtor, handlers };
+  }
+
+  it('switches to the ACH authorization when the Payment Element reports us_bank_account', async () => {
+    const { StripeCtor, handlers } = makeTenderStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, getByRole, queryByText } = render(
+      <InlineAutoPayCapture
+        intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'] }}
+        loadStripeSdk={loadStripeSdk}
+      />,
+    );
+    await flush();
+    expect(getByText(/charge this card after each completed service/)).toBeInTheDocument();
+
+    const checkbox = getByRole('checkbox');
+    await act(async () => { checkbox.click(); });
+    expect(checkbox).toBeChecked();
+
+    await act(async () => { handlers.change({ value: { type: 'us_bank_account' } }); });
+    expect(getByText(/debit this bank account after each completed service/)).toBeInTheDocument();
+    expect(queryByText(/charge this card after each completed service/)).toBeNull();
+    expect(checkbox).not.toBeChecked();
+
+    await act(async () => { getByText('View full terms').click(); });
+    expect(getByText(/initiate electronic ACH debits/)).toBeInTheDocument();
+  });
+
+  it('keeps the card copy when the intent is card-only', async () => {
+    const { StripeCtor, handlers } = makeTenderStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} />,
+    );
+    await flush();
+    await act(async () => { handlers.change({ value: { type: 'card' } }); });
+    expect(getByText(/your card is charged that service’s amount automatically/)).toBeInTheDocument();
+    expect(getByText(/remove your card anytime/)).toBeInTheDocument();
+  });
+});
