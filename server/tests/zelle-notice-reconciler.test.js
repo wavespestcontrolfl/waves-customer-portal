@@ -462,6 +462,8 @@ describe('sync wiring', () => {
     expect(src).toMatch(/whereNull\('auto_action'\)\.update\(\{ auto_action: ZELLE_RETRY_MARK/);
     // A failed mark write PROPAGATES the original error (the message counts as failed; classification never runs).
     expect(src).toMatch(/catch \(markErr\) \{[\s\S]{0,300}throw err;/);
+    // A MARKED email is owned: classification (which also writes auto_action) must not erase the retry record.
+    expect(src).toMatch(/throw err;\s*\}\s*return true;/);
     expect(src).toMatch(/if \(existing\.auto_action === ZELLE_RETRY_MARK\) \{\s*await offerZelleNotice\(/);
     expect(src).toMatch(/\(proofHandled \|\| approvalControl \|\| zelleHandled\) && await bellClaimColumnExists\(\)/);
     // The stale-claim sweep runs on every sync beside the bell sweep.

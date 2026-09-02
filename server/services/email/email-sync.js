@@ -232,11 +232,13 @@ async function incrementalSync(state) {
 // the email row ZELLE_RETRY_MARK — the durable retry record the
 // reconciler's per-sync sweep re-offers (reofferMarkedEmails), independent
 // of the Gmail cursor; the reconciler's own stamp overwrites the mark once
-// it decides. If the mark itself cannot be written (the same outage) the
-// error PROPAGATES: the message counts as failed, classification never
-// runs, and the full sync withholds its cursor. `true` = the reconciler
-// owns the email (skip classification); `false` = not a trusted notice,
-// flow exactly as today.
+// it decides. A MARKED email is owned (true): classification / auto-actions
+// also write emails.auto_action and would erase the only retry record. If
+// the mark itself cannot be written (the same outage) the error
+// PROPAGATES: the message counts as failed, classification never runs, and
+// the full sync withholds its cursor. `true` = the reconciler owns the
+// email (skip classification); `false` = not a trusted notice, flow
+// exactly as today.
 const { ZELLE_RETRY_MARK } = require('../zelle-notice-reconciler');
 async function offerZelleNotice(email, { backfill }) {
   try {
@@ -250,7 +252,7 @@ async function offerZelleNotice(email, { backfill }) {
       logger.error(`[email-sync] could not mark ${email.id} for Zelle retry (${markErr.message}) — failing the message so the sync retries it`);
       throw err;
     }
-    return false;
+    return true; // marked = owned until the reconciler decides
   }
 }
 
