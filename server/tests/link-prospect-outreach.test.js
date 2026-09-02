@@ -136,7 +136,8 @@ describe('sendOutreach', () => {
     const finalRow = draftedProspect({ status: 'contacted', outreach_status: 'sent' });
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),         // pre-read (fast-fail checks)
-      chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock
+      chain({ first: { c: '0' } }),
+      chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged                // [txn] dailySendCount under the lock
       chain({ returning: [draftedProspect()] }),   // [txn] CAS claim → returns the locked row
       chain({ returning: [finalRow] }),            // finalize → sent (token-gated)
     ] });
@@ -160,6 +161,7 @@ describe('sendOutreach', () => {
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),
       chain({ first: { c: '0' } }),
+      chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
       chain({ returning: [draftedProspect()] }), // CAS claim
       chain({ returning: [] }),                  // finalize matched 0 rows
     ] });
@@ -195,6 +197,7 @@ describe('sendOutreach', () => {
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),
       chain({ first: { c: '0' } }),
+      chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
       chain({ returning: [] }), // another click already flipped drafted→sending
     ] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
@@ -208,6 +211,7 @@ describe('sendOutreach', () => {
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),                            // pre-read looks complete
       chain({ first: { c: '0' } }),
+      chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
       chain({ returning: [draftedProspect({ outreach_body: '' })] }), // but the claimed row is incomplete
       release,                                                        // release our claim
     ] });
@@ -233,7 +237,8 @@ describe('sendOutreach', () => {
     const errMark = chain({ result: 1 });
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),
-      chain({ first: { c: '0' } }),               // [txn] count
+      chain({ first: { c: '0' } }),
+      chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged               // [txn] count
       chain({ returning: [draftedProspect()] }),  // [txn] CAS claims → returns row
       errMark,                                     // mark sending→send_error (token-gated)
     ] });
@@ -253,6 +258,28 @@ describe('sendOutreach', () => {
     expect(res.code).toBe('already_sent');
     expect(db.transaction).not.toHaveBeenCalled();
     expect(gmail.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test('a draft whose acquisition path moved since it was saved is NOT sent → path_moved (settled inside the send transaction, before the CAS)', async () => {
+    isEnabled.mockReturnValue(true);
+    const move = chain({ result: 1 });
+    setDbQueues({
+      seo_link_prospects: [
+        chain({ first: draftedProspect() }),
+        chain({ first: { c: '0' } }),
+        chain({ result: [{ id: 'p1', path_id: 'path-old', link_type: 'editorial', outreach_status: 'drafted', outreach_sent_at: null, outreach_send_token: null, leased_path_revision: null }] }), // settlement's row read
+        move, // the transition clears the draft
+      ],
+      seo_link_acquisition_paths: [
+        chain({ first: { id: 'path-old', superseded_by: 'path-new', submission_url: null, link_type: 'editorial' } }),
+        chain({ first: { id: 'path-new', superseded_by: null, submission_url: null, link_type: 'editorial', revision: 1, confidence: 0.7 } }),
+      ],
+    });
+    const res = await Outreach.sendOutreach({ prospectId: 'p1', approvedBy: 'Adam' });
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('path_moved');
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    expect(move.update).toHaveBeenCalledWith(expect.objectContaining({ path_id: 'path-new', outreach_status: 'none' }));
   });
 });
 

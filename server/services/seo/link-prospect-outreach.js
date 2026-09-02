@@ -211,6 +211,13 @@ async function sendOutreach({ prospectId, approvedBy = 'admin' }) {
   const claim = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(?)', [OUTREACH_LOCK_KEY]);
     if ((await dailySendCount(trx)) >= cap) return { ok: false, code: 'rate_limited' };
+    // Settle the drafted row BEFORE taking it in flight: its acquisition path
+    // may have been superseded, revised or disproven since the draft was
+    // saved. A settlement that moves the row has cleared the draft (it was
+    // composed for a retired route) — abort here rather than email obsolete
+    // copy; once the row is `sending` settlement refuses to touch it.
+    const moved = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: [prospectId] });
+    if (moved) return { ok: false, code: 'path_moved' };
     const attemptAt = new Date();
     const claimedRows = await trx('seo_link_prospects')
       .where({ id: prospectId, outreach_status: 'drafted', status: 'prospect' })
