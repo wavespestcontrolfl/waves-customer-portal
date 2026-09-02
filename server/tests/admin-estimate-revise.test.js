@@ -145,6 +145,8 @@ function makeReviseDatabase({
   // runs inside database.transaction — reuse the same recording builder as
   // the trx so assertions see the guarded update unchanged.
   database.transaction = async (callback) => callback(database);
+  // The scheduled-group guard takes the group's advisory xact lock.
+  database.raw = jest.fn(async () => ({}));
   return { database, updates, rawGuards, groupedWheres };
 }
 
@@ -995,5 +997,68 @@ describe('reviseAdminEstimate — a draft member of a SCHEDULED group refuses a 
       database: gateOff.database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
     });
     expect(gateOff.updates).toHaveLength(1);
+  });
+});
+
+describe('scheduled-group guard — dry-run preflight and destination group (GH codex P2 r7 on #3750)', () => {
+  const { assertNoFallbackRevisionInScheduledGroup } = require('../services/admin-estimate-persistence');
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  const groupedDraft = { ...sentEstimate, status: 'draft', sent_at: null, viewed_at: null, estimate_group_id: '2f5e7a10-6c3b-4d9e-9a11-3b7c5d2e8f01' };
+  beforeEach(() => {
+    clearAllEstimatePricingCache();
+    mockGateState.sendRequiresServerPricing = true;
+  });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('dryRun refuses exactly like the real save (no reprice confirm the write would then 409)', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: groupedDraft, scheduledGroupMember: { id: 'est-anchor' } });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow, dryRun: true,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/group is scheduled to send/i) });
+    expect(updates).toHaveLength(0);
+    // The unlocked preflight read takes no advisory lock.
+    expect(database.raw).not.toHaveBeenCalled();
+  });
+
+  function fakeTrx({ scheduledGroups = [] } = {}) {
+    const queried = [];
+    const chain = {
+      where: (c) => { chain.__group = c?.estimate_group_id; return chain; },
+      whereNot: () => chain,
+      whereNull: () => chain,
+      first: async () => { queried.push(chain.__group); return scheduledGroups.includes(chain.__group) ? { id: 'est-anchor' } : null; },
+    };
+    const trx = () => chain;
+    trx.raw = jest.fn(async () => ({}));
+    return { trx, queried };
+  }
+
+  test('a fallback revision that MOVES an ungrouped draft into a scheduled group is refused, after locking the destination group', async () => {
+    const { trx, queried } = fakeTrx({ scheduledGroups: ['grp-dest'] });
+    await expect(assertNoFallbackRevisionInScheduledGroup(
+      trx,
+      { id: 'est-1', estimate_group_id: null },
+      { pricing_authority: 'CLIENT_FALLBACK', estimate_group_id: 'grp-dest' },
+    )).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/group it would join is scheduled/i) });
+    expect(queried).toEqual(['grp-dest']);
+    expect(trx.raw).toHaveBeenCalledTimes(1);
+    expect(trx.raw.mock.calls[0][1]).toEqual(['estimate-group-send', 'grp-dest']);
+  });
+
+  test('a move between groups judges BOTH the current and the destination group; lock:false skips the advisory lock', async () => {
+    const { trx, queried } = fakeTrx({ scheduledGroups: [] });
+    await expect(assertNoFallbackRevisionInScheduledGroup(
+      trx,
+      { id: 'est-1', estimate_group_id: 'grp-old' },
+      { pricing_authority: 'CLIENT_FALLBACK', estimate_group_id: 'grp-new' },
+      { lock: false },
+    )).resolves.toBeUndefined();
+    expect(queried).toEqual(['grp-old', 'grp-new']);
+    expect(trx.raw).not.toHaveBeenCalled();
+    // A SERVER revision, or an ungrouped row going nowhere, never queries.
+    const quiet = fakeTrx({ scheduledGroups: ['grp-old'] });
+    await assertNoFallbackRevisionInScheduledGroup(quiet.trx, { id: 'est-1', estimate_group_id: 'grp-old' }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-old' });
+    await assertNoFallbackRevisionInScheduledGroup(quiet.trx, { id: 'est-1', estimate_group_id: null }, { pricing_authority: 'CLIENT_FALLBACK' });
+    expect(quiet.queried).toEqual([]);
   });
 });

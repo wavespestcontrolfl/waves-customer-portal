@@ -2177,20 +2177,39 @@ function assertNoFallbackRevisionOfLiveLink(row, writeFields) {
 // link's. Runs on the LOCKED row inside the write transaction; the schedule
 // route locks the sibling rows FOR UPDATE inside its own scheduling
 // transaction, so the two serialize and this read is never stale.
-async function assertNoFallbackRevisionInScheduledGroup(trx, row, writeFields) {
-  if (!row?.estimate_group_id) return;
+// Both the row's CURRENT group and the revision's DESTINATION group are
+// judged (GH codex P2 r7): a fallback revision that moves a draft into a
+// group whose anchor is scheduled would be refused by the cron's group
+// preflight later and fail that anchor. `lock` takes the group's advisory
+// xact lock first — the same lock the schedule route holds while it locks
+// the siblings and writes the schedule — so a move and a schedule of the
+// same group serialize instead of racing (the dryRun preflight reads
+// unlocked, best-effort; the locked recheck in the write is authoritative).
+async function assertNoFallbackRevisionInScheduledGroup(trx, row, writeFields, { lock = true } = {}) {
   if (String(writeFields?.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return;
   if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return;
-  const scheduledMember = await trx('estimates')
-    .where({ estimate_group_id: row.estimate_group_id, status: 'scheduled' })
-    .whereNot({ id: row.id })
-    .whereNull('archived_at')
-    .first('id');
-  if (!scheduledMember) return;
-  throw errorWithStatus(
-    'The pricing engine could not verify this revision and this property\'s multi-property group is scheduled to send — nothing was saved. Fix the inputs and try again, or unschedule the group first.',
-    409,
-  );
+  const groupIds = [...new Set([row?.estimate_group_id, writeFields?.estimate_group_id].filter(Boolean).map(String))];
+  for (const groupId of groupIds) {
+    if (lock) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-send', groupId],
+      );
+    }
+    const scheduledMember = await trx('estimates')
+      .where({ estimate_group_id: groupId, status: 'scheduled' })
+      .whereNot({ id: row?.id })
+      .whereNull('archived_at')
+      .first('id');
+    if (!scheduledMember) continue;
+    const destination = String(row?.estimate_group_id || '') !== groupId;
+    throw errorWithStatus(
+      destination
+        ? 'The pricing engine could not verify this revision and the multi-property group it would join is scheduled to send — nothing was saved. Fix the inputs and try again, or unschedule that group first.'
+        : 'The pricing engine could not verify this revision and this property\'s multi-property group is scheduled to send — nothing was saved. Fix the inputs and try again, or unschedule the group first.',
+      409,
+    );
+  }
 }
 
 // Statuses a revise can never touch. Acceptance locks the price and spins up
@@ -2593,6 +2612,11 @@ async function reviseAdminEstimate({
   // confirm, only for the identical real save to 400. Best-effort unlocked
   // read — the serialized in-transaction recheck below stays authoritative.
   if (dryRun) {
+    // Scheduled-group guard at preflight too (GH codex P2 r7): an unlocked
+    // best-effort read, so the builder never walks the operator through a
+    // reprice confirm the identical real save would refuse; the locked
+    // recheck inside the write transaction stays authoritative.
+    await assertNoFallbackRevisionInScheduledGroup(database, estimate, writeFields, { lock: false });
     if (groupDuplicateRecheckNeeded) {
       const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
       const revisedKey = normalizedEstimatePropertyKey(writeFields.address);
