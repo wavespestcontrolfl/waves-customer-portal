@@ -584,7 +584,9 @@ async function resolveFulfillment(conn, commitment, call) {
       if (leadEstimate?.estimate_id) {
         // The lead can be a REUSED one (an earlier call's), so its estimate
         // must have been sent after THIS call to count as this call's proof.
-        const est = await conn("estimates").where({ id: leadEstimate.estimate_id }).whereNotNull("sent_at").where("sent_at", ">", after).first("id", "sent_at", "status");
+        // …and CREATED after this call too: a reused lead can carry a draft an
+        // earlier call produced that was sent later for its own reasons.
+        const est = await conn("estimates").where({ id: leadEstimate.estimate_id }).whereNotNull("sent_at").where("sent_at", ">", after).where("created_at", ">", after).first("id", "sent_at", "status");
         if (est) return { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.sent_at, strength: "direct", basis: "estimate_sent_on_the_lead_this_call_created" };
       }
       if (!customerId) return null;

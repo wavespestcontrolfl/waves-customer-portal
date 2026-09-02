@@ -167,6 +167,31 @@ maybeDescribe('processRecording claim concurrency (live Postgres)', () => {
     }
   });
 
+  test('the customer timeline insert is exactly-once per call under the partial unique index', async () => {
+    const [cust] = await db('customers').insert({ first_name: 'Timeline', phone: '+15555550198' }).returning('id');
+    const callLogId = '99999999-8888-4777-8666-555555555555';
+    const insert = () => db('customer_interactions').insert({
+      customer_id: cust.id,
+      interaction_type: 'call',
+      subject: 'Inbound call — fixture',
+      body: 'fixture',
+      metadata: JSON.stringify({ call_log_id: callLogId, processing_generation: 1 }),
+    })
+      .onConflict(db.raw("((metadata ->> 'call_log_id')) WHERE interaction_type = 'call' AND metadata ->> 'call_log_id' IS NOT NULL"))
+      .ignore();
+    try {
+      await Promise.all([insert(), insert(), insert()]);
+      const rows = await db('customer_interactions').where({ customer_id: cust.id }).whereRaw("metadata ->> 'call_log_id' = ?", [callLogId]);
+      expect(rows).toHaveLength(1);
+      // Other interaction types with the same key are not constrained.
+      await db('customer_interactions').insert({ customer_id: cust.id, interaction_type: 'note', subject: 'x', metadata: JSON.stringify({ call_log_id: callLogId }) });
+      expect(await db('customer_interactions').where({ customer_id: cust.id })).toHaveLength(2);
+    } finally {
+      await db('customer_interactions').where({ customer_id: cust.id }).del();
+      await db('customers').where({ id: cust.id }).del();
+    }
+  });
+
   test('a claim that is still beating is honoured by an automatic pass and taken over only by an operator after the short quiet window', async () => {
     fetchSpy.mockClear();
     const liveToken = 'feedface'.repeat(4);

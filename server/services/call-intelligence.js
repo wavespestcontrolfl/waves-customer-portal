@@ -270,7 +270,10 @@ async function loadCallIntelligence(conn, callId) {
     .select('call_log.*', 'customers.first_name', 'customers.last_name')
     .first();
   if (!call) return null;
-  await refreshFulfillment(conn, call.id, call);
+  // Off gate: nothing is written — the rows show their last persisted
+  // state; fulfillment is refreshed only while the feature is on.
+  const { isEnabled } = require('../config/feature-gates');
+  if (isEnabled('callCommitments')) await refreshFulfillment(conn, call.id, call);
   const [commitments, outcomes] = await Promise.all([
     listForCall(conn, call.id),
     buildCallOutcomes(conn, call),

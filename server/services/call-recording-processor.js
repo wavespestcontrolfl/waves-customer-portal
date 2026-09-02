@@ -14572,27 +14572,25 @@ const CallRecordingProcessor = {
     if (customerId) {
       // One timeline entry per CALL, not per pass: a deliberate Reprocess is
       // a supported operation, and every one of them was adding another
-      // "Inbound call" row to the customer's timeline. The entry is keyed on
-      // the call_log id in its metadata; an existing entry is left alone so
-      // an office note attached to it survives too.
-      const timelineExists = await db('customer_interactions')
-        .where({ customer_id: customerId, interaction_type: 'call' })
-        .whereRaw("metadata ->> 'call_log_id' = ?", [String(call.id)])
-        .first('id')
-        .catch(() => null);
-      if (!timelineExists) {
-        await db('customer_interactions').insert({
-          customer_id: customerId,
-          interaction_type: 'call',
-          subject: `Inbound call — ${extracted.matched_service || extracted.requested_service || 'General inquiry'}`,
-          body: extracted.call_summary || `Call from ${phone}. ${extracted.pain_points || ''}`,
-          metadata: JSON.stringify({
-            call_log_id: call.id,
-            twilio_call_sid: call.twilio_call_sid || null,
-            processing_generation: procGeneration,
-          }),
-        }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
-      }
+      // "Inbound call" row to the customer's timeline. Exactly-once is the
+      // partial unique index on metadata.call_log_id (migration
+      // 20260901000011) — a check-then-insert could still race a
+      // replacement pass; ON CONFLICT cannot. An existing entry is left
+      // alone so an office note attached to it survives too.
+      await db('customer_interactions').insert({
+        customer_id: customerId,
+        interaction_type: 'call',
+        subject: `Inbound call — ${extracted.matched_service || extracted.requested_service || 'General inquiry'}`,
+        body: extracted.call_summary || `Call from ${phone}. ${extracted.pain_points || ''}`,
+        metadata: JSON.stringify({
+          call_log_id: call.id,
+          twilio_call_sid: call.twilio_call_sid || null,
+          processing_generation: procGeneration,
+        }),
+      })
+        .onConflict(db.raw("((metadata ->> 'call_log_id')) WHERE interaction_type = 'call' AND metadata ->> 'call_log_id' IS NOT NULL"))
+        .ignore()
+        .catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
     }
 
     // The synopsis and CSR scoring below each await a provider call and then

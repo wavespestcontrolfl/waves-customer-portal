@@ -154,6 +154,13 @@ Per file, with the proving test.
 - Pre-push Codex round 10 (2 P1s, fixed): a retained terminal status keeps
   its duration (a late leg callback carries CallDuration "0"); adding a
   human commitment is idempotent on its deterministic key.
+- Pre-push Codex rounds 11–13 (after the gate-contract fix): commitment
+  mutations 409 while the gate is off and the panel hides its controls;
+  settling a promise is staff-wide (relink/adopt stay admin-only);
+  intelligence reads no longer persist fulfillment while the gate is off;
+  the timeline dedupe moved from check-then-insert to a partial unique
+  index + ON CONFLICT (live-Postgres test); the direct estimate proof must
+  be created after the call, not only sent after it.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 
@@ -227,6 +234,11 @@ the transcript segments for jumps.
 
 ## 5. Database changes
 
+- `20260901000011_customer_interactions_call_unique.js` — partial unique
+  index on `customer_interactions ((metadata->>'call_log_id'))` for
+  `interaction_type = 'call'`, so the timeline entry is exactly-once per call in
+  Postgres (ON CONFLICT DO NOTHING); legacy rows without the key are
+  untouched. `down` drops the index.
 - `20260901000010_call_commitments.js` — creates `call_commitments` with the
   CHECK constraints above, the `(call_log_id, commitment_key)` unique, a
   `call_log_id` index and a partial open-queue index. `down` drops the table.

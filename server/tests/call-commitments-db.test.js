@@ -209,7 +209,11 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     const [lead] = await db('leads').insert({ phone: PHONE, twilio_call_sid: SID, estimate_id: est.id, status: 'estimate_sent' }).returning('id');
     try {
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
-      await db('estimates').where({ id: est.id }).update({ sent_at: new Date(Date.now() - 60 * 1000) });
+      // Sent after the call but CREATED before it (an earlier call's draft): still not this call's proof.
+      await db('estimates').where({ id: est.id }).update({ sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      // Created and sent after the call: direct proof.
+      await db('estimates').where({ id: est.id }).update({ created_at: new Date(Date.now() - 120 * 1000) });
       const proof = await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call);
       expect(proof).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
     } finally {

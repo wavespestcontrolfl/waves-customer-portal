@@ -104,13 +104,14 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(callSite).not.toContain('procToken');
   });
 
-  test('the customer timeline entry is keyed on the call, not the pass', () => {
+  test('the customer timeline entry is exactly-once per call in Postgres, not by a check-then-insert', () => {
     const at = body.indexOf("await db('customer_interactions').insert({");
     expect(at).toBeGreaterThan(-1);
-    const preceding = body.slice(Math.max(0, at - 700), at);
-    expect(preceding).toContain("whereRaw(\"metadata ->> 'call_log_id' = ?\", [String(call.id)])");
-    expect(preceding).toContain('if (!timelineExists) {');
-    expect(body.slice(at, at + 600)).toContain('call_log_id: call.id');
+    const stmt = body.slice(at, at + 900);
+    expect(stmt).toContain('call_log_id: call.id');
+    expect(stmt).toContain("onConflict(db.raw(\"((metadata ->> 'call_log_id')) WHERE interaction_type = 'call' AND metadata ->> 'call_log_id' IS NOT NULL\"))");
+    expect(stmt).toContain('.ignore()');
+    expect(body).not.toContain('timelineExists');
   });
 
   test('customer_creation_failed opens review and files its card — it is no longer a silent terminal', () => {
