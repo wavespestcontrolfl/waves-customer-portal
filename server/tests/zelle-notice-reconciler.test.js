@@ -65,7 +65,7 @@ function notice(over = {}) {
 }
 const openRow = (over = {}) => ({
   id: 'inv-1', invoice_number: 'WPC-2026-0500', status: 'sent', customer_id: 'cust-1', total: '117.00', credit_applied: 0,
-  service_date: '2026-09-01', customer_first_name: 'Pat', customer_last_name: 'Doe', ...over,
+  service_date: '2026-09-01', created_at: new Date('2026-09-01T12:00:00Z'), customer_first_name: 'Pat', customer_last_name: 'Doe', ...over,
 });
 
 // Per-table recorder: every call is logged; terminal reads come from queues.
@@ -388,6 +388,27 @@ describe('park reasons', () => {
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
+  test('an exact-amount invoice CREATED AFTER the notice is never auto-matched (the transfer predates that debt) ⇒ no_match, still listed as a candidate for the operator', async () => {
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [
+      openRow({ id: 'inv-later', invoice_number: 'WPC-2026-0510', created_at: new Date('2026-09-02T17:30:00Z') }), // notice received 17:00Z
+    ]));
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    const patch = closesOf('inbound_payment_notices')[0];
+    expect(patch).toMatchObject({ status: 'parked', park_reason: 'no_match' });
+    expect(JSON.parse(patch.candidates)[0]).toMatchObject({ invoice_id: 'inv-later', exact_amount: true, name_match: true });
+    expect(recordManualPayment).not.toHaveBeenCalled();
+    expect(updatesOf('inbound_payment_notices').some((u) => u.matched_invoice_id)).toBe(false);
+  });
+
+  test('an exact-amount invoice with no created_at is never auto-matched (fail closed)', async () => {
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow({ created_at: null })]));
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'no_match' });
+    expect(recordManualPayment).not.toHaveBeenCalled();
+  });
+
   test('a FULL exact-cent candidate page is ambiguous by definition ⇒ multiple_matches, never an auto-apply on a truncated view', async () => {
     claimed();
     const page = Array.from({ length: 25 }, (_, i) => openRow({ id: `inv-${i}`, invoice_number: `WPC-2026-${1000 + i}`, customer_first_name: i === 0 ? 'Pat' : 'Sam', customer_last_name: i === 0 ? 'Doe' : 'Roe' }));
@@ -534,8 +555,14 @@ describe('sync wiring', () => {
     expect(src).toMatch(/zelleHandled = await offerZelleNotice\(email, \{ backfill \}\)/);
     expect(src).toMatch(/return await maybeHandleZelleNotice\(email, \{ backfill \}\)/);
     expect(src).toMatch(/if \(!proofHandled && !approvalControl && !zelleHandled && /);
-    // A hook throw marks the row for a targeted re-offer; the existing-email
+    // A live notice candidate is born marked: the retry record commits WITH
+    // the insert (never for backfill history, never with the gate off), the
+    // race loser offers only a marked winner row, and the existing-email
     // branch re-offers ONLY marked rows (never a gate-flip replay of history).
+    expect(src).toMatch(/const preMarked = !backfill && isZelleReconcileEnabled\(\) && isZelleNoticeCandidate\(emailData\);\s*if \(preMarked\) emailData\.auto_action = ZELLE_RETRY_MARK;\s*const inserted = await db\('emails'\)\.insert\(emailData\)/);
+    // A false verdict releases the insert-time mark (only while it is still the mark) BEFORE classification runs.
+    expect(src.indexOf('if (preMarked && !zelleHandled) {')).toBeLessThan(src.indexOf("require('./email-classifier')"));
+    expect(src).toMatch(/if \(preMarked && !zelleHandled\) \{\s*await db\('emails'\)\.where\(\{ id: email\.id, auto_action: ZELLE_RETRY_MARK \}\)\.update\(\{ auto_action: null/);
     expect(src).toMatch(/whereNull\('auto_action'\)\.update\(\{ auto_action: ZELLE_RETRY_MARK/);
     // A failed mark write PROPAGATES the original error (the message counts as failed; classification never runs).
     expect(src).toMatch(/catch \(markErr\) \{[\s\S]{0,300}throw err;/);
@@ -546,9 +573,10 @@ describe('sync wiring', () => {
     // A lost retry record withholds the INCREMENTAL cursor too (fullSync already withholds on any failed message).
     expect(src).toMatch(/if \(err\.zelleRetryLost\) cursorWithheld = true;/);
     expect(src).toMatch(/last_history_id: cursorWithheld \? state\.last_history_id : latestHistoryId/);
-    // The insert-race loser reloads the winner's row and offers it when it is still unclassified + unmarked.
-    expect(src).toMatch(/if \(!inserted\.length\) \{[\s\S]{0,900}winner\.classification == null && winner\.auto_action == null[\s\S]{0,120}await offerZelleNotice\(winner, \{ backfill \}\)/);
-    expect(src).toMatch(/if \(existing\.auto_action === ZELLE_RETRY_MARK \|\| \(existing\.auto_action == null && existing\.classification == null\)\) \{\s*await offerZelleNotice\(/);
+    // The insert-race loser reloads the winner's row and offers it only while it carries the insert-time mark.
+    expect(src).toMatch(/if \(!inserted\.length\) \{[\s\S]{0,900}winner\.auto_action === ZELLE_RETRY_MARK[\s\S]{0,120}await offerZelleNotice\(winner, \{ backfill \}\)/);
+    expect(src).toMatch(/if \(existing\.auto_action === ZELLE_RETRY_MARK\) \{\s*await offerZelleNotice\(/);
+    expect(src).not.toMatch(/classification == null/);
     expect(src).toMatch(/\(proofHandled \|\| approvalControl \|\| zelleHandled\) && await bellClaimColumnExists\(\)/);
     // The stale-claim sweep runs on every sync beside the bell sweep.
     expect(src).toMatch(/sweepUnclaimedCustomerEmailBells\(\)[\s\S]{0,600}require\('\.\.\/zelle-notice-reconciler'\)\.sweepStaleClaims\(\)/);

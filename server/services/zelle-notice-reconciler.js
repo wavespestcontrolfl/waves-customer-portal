@@ -449,14 +449,26 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
     return true;
   }
 
-  const { rows: exact, truncated } = await exactOpenInvoices(parsed);
-  const candidates = await buildCandidates(parsed, exact);
+  const receivedAt = new Date(notice.received_at || email.received_at || Date.now()).getTime();
+  const { rows: exactAll, truncated } = await exactOpenInvoices(parsed);
+  const candidates = await buildCandidates(parsed, exactAll);
+  // Only debt that EXISTED when the bank sent the notice can be what the
+  // payer meant (GH codex r8 P1): an invoice issued during a sync delay —
+  // the next same-amount recurring visit — is never auto-settled by an
+  // older transfer. It stays in the parked candidates, where the operator's
+  // Apply is the explicit override. Unknown created_at ⇒ not auto-matched.
+  const exact = exactAll.filter((r) => {
+    const createdAt = r.created_at == null ? NaN : new Date(r.created_at).getTime();
+    return Number.isFinite(createdAt) && createdAt <= receivedAt;
+  });
+  if (exact.length !== exactAll.length) {
+    logger.warn(`[zelle-notice] ${email.id}: ${exactAll.length - exact.length} exact-amount invoice(s) created after the notice — excluded from auto-match`);
+  }
 
   if (await recentlyApplied(parsed)) {
     await finishParked(notice, email, 'possible_duplicate', { candidates });
     return true;
   }
-  const receivedAt = new Date(notice.received_at || email.received_at || Date.now()).getTime();
   if (Number.isFinite(receivedAt) && Date.now() - receivedAt > STALE_NOTICE_MS) {
     logger.warn(`[zelle-notice] ${email.id} is ${Math.round((Date.now() - receivedAt) / 3600000)}h old at first decision — parking as stale_notice`);
     await finishParked(notice, email, 'stale_notice', { candidates });
