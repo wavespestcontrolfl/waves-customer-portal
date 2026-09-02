@@ -196,7 +196,7 @@ async function runTurfVarianceDigest(opts = {}) {
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
-      link: '/admin/turf-height',
+      link: '/admin/estimates',
       sendEmail: () => mailer.sendOne({
         to,
         fromEmail: fromEmail(),

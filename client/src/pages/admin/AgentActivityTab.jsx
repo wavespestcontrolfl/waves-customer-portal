@@ -53,6 +53,36 @@ function fmtMs(ms) {
   return `${Math.round(ms / 60000)}m`;
 }
 
+// Digest bodies are the email's text: their URLs (absolute, or portal
+// routes written as /admin/…) must stay followable now that the email is
+// suppressed. Only http(s) and /admin paths become links; nothing is
+// rendered as HTML.
+const LINK_RE = /(https?:\/\/[^\s<>"')\]]+|(?<![\w/])\/admin\/[^\s<>"')\]]*)/g;
+function linkify(text) {
+  const out = [];
+  let last = 0;
+  let key = 0;
+  for (const m of String(text).matchAll(LINK_RE)) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const href = m[0];
+    const external = /^https?:/i.test(href) && !/^https?:\/\/(portal\.)?wavespestcontrol\.com\/admin\//i.test(href);
+    out.push(
+      external ? (
+        <a key={key++} href={href} target="_blank" rel="noreferrer" className="underline text-zinc-900 break-all">
+          {href}
+        </a>
+      ) : (
+        <Link key={key++} to={href.replace(/^https?:\/\/[^/]+/i, "")} className="underline text-zinc-900 break-all">
+          {href}
+        </Link>
+      ),
+    );
+    last = m.index + href.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
 function StepRow({ step }) {
   const glyph =
     step.status === "done"
@@ -135,7 +165,7 @@ function ActivityRow({ item, onReview }) {
                     ["failed", "blocked"].includes(item.status) ? "text-alert-fg" : "text-ink-secondary",
                   )}
                 >
-                  {item.detail}
+                  {item.kind === "digest" ? linkify(item.detail) : item.detail}
                 </div>
               )}
               {item.steps?.length > 0 && (

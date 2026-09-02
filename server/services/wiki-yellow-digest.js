@@ -161,7 +161,7 @@ async function sendYellowDigestLocked(opts = {}) {
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
-      link: '/admin/knowledge',
+      link: '/admin/knowledge?area=base&kbTab=field',
       sendEmail: () => mailer.sendOne({
         to,
         fromEmail: fromEmail(),

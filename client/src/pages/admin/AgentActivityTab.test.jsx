@@ -128,6 +128,26 @@ describe("AgentActivityTab", () => {
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/notifications/n8/read", { method: "PUT" }));
   });
 
+  it("linkifies portal routes and absolute URLs inside a digest body", async () => {
+    adminFetch.mockResolvedValueOnce({
+      ...FEED,
+      items: [{
+        id: "digest:n7", kind: "digest", agent: "Waves Ops", notificationId: "n7",
+        title: "2 reschedule requests by text with no schedule change", subtitle: "reschedule intent · needs you",
+        status: "awaiting_review", startedAt: "2026-09-02T10:00:00Z", finishedAt: null, durationMs: null,
+        steps: [], stepsDone: 0, stepsTotal: 1, link: "/admin/communications",
+        detail: "Pat Tester: thread /admin/communications?thread=abc — see https://docs.example.com/why (tap).",
+      }],
+    });
+    renderTab();
+    await screen.findByText("2 reschedule requests by text with no schedule change");
+    fireEvent.click(screen.getAllByRole("button", { name: "Expand" })[0]);
+    expect(screen.getByRole("link", { name: "/admin/communications?thread=abc" })).toHaveAttribute("href", "/admin/communications?thread=abc");
+    const ext = screen.getByRole("link", { name: "https://docs.example.com/why" });
+    expect(ext).toHaveAttribute("href", "https://docs.example.com/why");
+    expect(ext).toHaveAttribute("target", "_blank");
+  });
+
   it("ignores a slower, superseded window response", async () => {
     let resolveFirst;
     adminFetch.mockImplementationOnce(() => new Promise((r) => { resolveFirst = r; }));

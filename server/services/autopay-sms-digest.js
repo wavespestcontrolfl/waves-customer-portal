@@ -274,7 +274,7 @@ async function runAutopaySmsDigest(opts = {}) {
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
-      link: '/admin/invoices',
+      link: '/admin/communications',
       sendEmail: () => mailer.sendOne({
         to,
         fromEmail: fromEmail(),
