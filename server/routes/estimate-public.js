@@ -14801,11 +14801,24 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         if (activeMember) return { status: 400, body: ({ error: 'service_not_addable' }) };
       }
       mode = 'add';
-    } else if (actor !== 'staff' && OptOut.latestOptOutEventIsStaff(parsedData, serviceKey) && !serviceAddGateOn()) {
+    } else if (actor !== 'staff' && OptOut.latestOptOutEventIsStaff(parsedData, serviceKey)) {
       // A staff-parked offer (lead-service send) re-enters the plan only
       // under the add gate — the lane that created it. Gate off = the offer
       // is withheld from /data and refused here (pre-push codex P0).
-      return { status: 400, body: ({ error: 'service_not_addable' }) };
+      if (!serviceAddGateOn()) return { status: 400, body: ({ error: 'service_not_addable' }) };
+      // And only for a NON-member, verified LIVE and fail-closed exactly like
+      // a never-quoted add: a customer who became an active member since the
+      // send must not take the new-customer terms the park was priced on
+      // (pre-push codex P0). Staff compensation restores keep the bypass.
+      if (estimate.customer_id) {
+        let activeMember = true;
+        try { activeMember = await isActivePlanCustomer(db, estimate.customer_id); } catch (_) { activeMember = true; }
+        if (activeMember) return { status: 400, body: ({ error: 'service_not_addable' }) };
+      }
+      if (OptOut.serviceOptOutBlockedByProposal(parsedData)
+        || OptOut.serviceOptOutTierSelectionActive(parsedData, estimate.waveguard_tier)) {
+        return { status: 400, body: ({ error: 'service_not_removable' }) };
+      }
     } else if (OptOut.serviceOptOutBlockedByProposal(parsedData)
       || OptOut.serviceOptOutTierSelectionActive(parsedData, estimate.waveguard_tier)) {
       // Same refusals as removals: a proposal added AFTER the removal is the
@@ -25236,9 +25249,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // "removed" wording for a line the customer never touched. The
         // mirror office inquiry may then re-offer the line, which is the
         // pre-feature behavior.
+        // ...and withheld for a LIVE active member too (same fail-closed
+        // verdict the write applies — pre-push codex P0).
         const staffParked = staffOfferedKeys(projected);
+        const staffOffersAllowed = serviceAddGateOn() && !addStampBlockedByMembership;
         const removedKeys = currentlyOptedOutKeys(projected)
-          .filter((k) => serviceAddGateOn() || !staffParked.includes(k));
+          .filter((k) => staffOffersAllowed || !staffParked.includes(k));
         // Priced adds (GATE_ESTIMATE_SERVICE_ADD): same resolver as the PUT,
         // live accept-active rows only, never a staff draft preview.
         const addableKeys = serviceAddGateOn() && !adminDraftPreview && !addStampBlockedByMembership
