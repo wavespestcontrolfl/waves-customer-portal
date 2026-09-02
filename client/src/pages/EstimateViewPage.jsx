@@ -1140,7 +1140,7 @@ export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, show
   const smsHref = `sms:?&body=${encodeURIComponent(pageUrl)}`;
   const share = async (e) => {
     e.preventDefault();
-    await shareDocumentLink({ title: 'My Waves estimate', fallback: 'sms' });
+    await shareDocumentLink({ title: 'My Waves estimate', fallback: 'sms', skipWebShareInNativeShell: true });
   };
   const actionStyle = {
     background: 'none', border: 'none', padding: '6px 10px', fontSize: 14, fontWeight: 600,
@@ -5185,7 +5185,11 @@ function EstimateViewPageInner() {
     // (a tab left open past the session gap), and the strip must not vanish
     // mid-session for that — carry the loaded projection forward (GH codex
     // r6 P2). A fresh open always takes the server's word.
-    setData((prev) => (isRefresh && prev?.returnVisit && !body.returnVisit ? { ...body, returnVisit: prev.returnVisit } : body));
+    // Never on a payload that turned terminal (declined via the sheet, accepted,
+    // expired): the server's active-only eligibility wins there (GH codex r8 P2).
+    setData((prev) => (isRefresh && prev?.returnVisit && !body.returnVisit && body?.cta?.terminalState == null
+      ? { ...body, returnVisit: prev.returnVisit }
+      : body));
     setLoading(false);
     const defaultServiceMode = body?.estimate?.defaultServiceMode || body?.pricing?.defaultServiceMode;
     const isOneTimeOnly = body?.estimate?.isOneTimeOnly === true || defaultServiceMode === 'one_time';

@@ -51,13 +51,17 @@ export function canonicalShareUrl(shareUrl = null) {
   return shareUrl || `${window.location.origin}${window.location.pathname}`;
 }
 
-export async function shareDocumentLink({ url: shareUrl = null, title, fallback = 'clipboard' } = {}) {
+// `skipWebShareInNativeShell`: an installed native binary WITHOUT the Share
+// plugin. The bar keeps its legacy path there (Web Share, then clipboard —
+// the only share control on link-only pages must never lose its attempt, GH
+// codex P0); a caller with a native-safe fallback of its own (the sms: draft)
+// passes true and goes straight to it, because Web Share in the webview can
+// swallow the tap.
+export async function shareDocumentLink({ url: shareUrl = null, title, fallback = 'clipboard', skipWebShareInNativeShell = false } = {}) {
   const url = canonicalShareUrl(shareUrl);
-  // An installed native binary WITHOUT the Share plugin: Web Share is the
-  // unreliable path there, so go straight to the fallback.
   if (canShareNative()) {
     try { await shareUrlNative(url, title); return 'native'; } catch { /* fall through */ }
-  } else if (!isNativeApp()) {
+  } else if (!(skipWebShareInNativeShell && isNativeApp())) {
     try {
       if (navigator.share) {
         await navigator.share({ title, url });
