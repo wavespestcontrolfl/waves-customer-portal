@@ -500,7 +500,18 @@ home without touching the DB).
 Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
-preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+preferences ride estimateToggleLimiter, data/pdf ride dataLimiter.
+`/accept` fails CLOSED when the accepted plan's money cannot be resolved
+(#3751): 409 `{ error, code }` with nothing booked and call-the-office copy
+— `PER_APPLICATION_ADD_ON_UNPRICED` (an established per-application
+customer adding a unit whose per-application price cannot be derived),
+`LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE` (an in-flight count-less termite
+quote whose card discloses monthly installments — re-issued by the
+office, never converted against its card), and
+`INVOICE_MODE_PER_APPLICATION_UNRESOLVED` (an invoice-mode recurring
+accept with no resolved per-application amount — never the monthly
+display rate). Same contract via the admin manual-acceptance path, which
+preserves these 4xx verbatim).
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,

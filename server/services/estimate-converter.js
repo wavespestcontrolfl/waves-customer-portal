@@ -2375,10 +2375,13 @@ function assertPerApplicationAddOnPriced({
 // termite bait with no visit count (pre-split payloads carry the flat
 // monthly only). Its customer card still discloses "Billed $X/mo"
 // (estimate-public keeps that note for exactly this shape).
+// Billing riders (a termite bond line) are unit-count-exempt exactly as in
+// riderAwareSingleRecurringUnit: bait + bond is still ONE legacy bait unit
+// (GH codex P0 r4 — a rider's visit count would otherwise infer a quarterly
+// cadence and slip the refusal).
 function legacyFlatMonthlyTermiteUnit(recurringServices = [], monthlyRate = 0) {
-  const rows = Array.isArray(recurringServices) ? recurringServices : [];
-  if (rows.length !== 1) return false;
-  const unit = rows[0];
+  const unit = riderAwareSingleRecurringUnit(recurringServices, 0);
+  if (!unit) return false;
   if (recurringServiceKey(unit) !== 'termite_bait') return false;
   if (visitsPerYearForRecurringService(unit)) return false;
   return Number(monthlyRate) > 0;

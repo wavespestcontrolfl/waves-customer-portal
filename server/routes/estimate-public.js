@@ -1797,7 +1797,9 @@ function buildEstimateInvoiceModeDraft({
     // amount (pre-push P0 on #3751): the accept resolves the per-application
     // price (first-application amount, else the tier's per-application
     // price) and an unresolved one is a call-the-office program.
-    throw estimateAcceptError('Invoice-mode recurring acceptance requires a resolved per-application amount — please call the office to confirm this program\'s pricing.', 409);
+    const err = estimateAcceptError('Invoice-mode recurring acceptance requires a resolved per-application amount — please call the office to confirm this program\'s pricing.', 409);
+    err.code = 'INVOICE_MODE_PER_APPLICATION_UNRESOLVED';
+    throw err;
   }
   const svcType = recurringInvoiceServiceLabel(recurringSvcList);
   const cadenceLabel = String(effectiveBillingCadence?.frequencyLabel || selectedFrequency?.label || 'Recurring').toLowerCase();
@@ -12195,9 +12197,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               'billing',
               'Recurring accept booked with no per-application amount',
               'A recurring accept committed without a visit price or per-application fee on file — stamp the amount before the first visit or its completion falls back to manual invoicing.',
-              { link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, scheduledServiceIds: unpriced.map((a) => a.id) } },
+              // bell:true — an office exception that must ring under the
+              // admin bell policy, exactly like the converter's deferred
+              // per-application bell it stands in for.
+              { link: `/admin/customers/${customerId}`, bell: true, metadata: { estimateId: estimate.id, scheduledServiceIds: unpriced.map((a) => a.id) } },
             );
-            perVisitCompletenessAlertFired = !!completenessAlert;
+            // Fired = a ROW exists. notifyAdmin resolves null on a failed
+            // create and a truthy { id: null, suppressed: true } sentinel on
+            // policy suppression — neither reached the office, so neither
+            // may silence the converter's deferred bell (GH codex P1 r4).
+            perVisitCompletenessAlertFired = !!(completenessAlert && !completenessAlert.suppressed && completenessAlert.id != null);
           }
         }
       } catch (e) {

@@ -4294,6 +4294,7 @@ describe('public estimate one-time breakdown', () => {
     let thrown = null;
     try { unresolved(); } catch (err) { thrown = err; }
     expect(thrown?.status).toBe(409);
+    expect(thrown?.code).toBe('INVOICE_MODE_PER_APPLICATION_UNRESOLVED');
   });
 
   test('Bora-Care plus a positive billable adjustment is NOT treated as Bora-Care-only', () => {
