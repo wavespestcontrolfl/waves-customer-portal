@@ -4495,7 +4495,7 @@ const EstimateConverter = {
       perApplicationFeeNotification = {
         type: 'billing',
         title: 'Per-application fee not set on a new per-application customer',
-        body: `Estimate #${estimateId} converted to per-application billing, but the per-application charge could not be derived from the accepted plan (no billing cadence or visit count on the quote). Applications will complete with no billable amount until the fee is set — invoice the first application by hand or re-quote.`,
+        body: `Estimate #${estimateId} converted to per-application billing, but the per-application charge could not be derived from the accepted plan (no billing cadence or visit count on the quote). No first-application invoice was created by this acceptance, and applications will complete with no billable amount until the fee is set — invoice the first application by hand and set the per-application price, or re-quote.`,
         options: {
           icon: '\u{1F4B3}',
           link: '/admin/customers',
@@ -6101,6 +6101,14 @@ const EstimateConverter = {
           allowFallback: opts.allowFirstApplicationFallback !== false && !perApplicationUnresolved,
         })
         : 0;
+      // The unresolved-fee bell (built above, dispatched post-commit) must
+      // not tell staff to invoice a first application this acceptance is
+      // about to invoice itself (pre-push codex P1): with an explicit
+      // first-application amount on the way, point them at LATER
+      // applications only.
+      if (perApplicationFeeNotification && Number(standardFirstApplicationAmount) > 0) {
+        perApplicationFeeNotification.body = `Estimate #${estimateId} converted to per-application billing, but the per-application charge could not be derived from the accepted plan (no billing cadence or visit count on the quote). The first application (${Number(standardFirstApplicationAmount).toFixed(2)}) is invoiced by this acceptance; later applications will complete with no billable amount until the fee is set — set the per-application price or re-quote.`;
+      }
       const setupFeeApplies = billingTerm === 'standard'
         ? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringServicesForConversion, estimateData })
         : false;
