@@ -446,14 +446,24 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
   // method's type against the policy now; an unreadable type on a bank
   // capture fails closed.
   let methodType = typeof stripePaymentMethod === 'object' && stripePaymentMethod?.type ? stripePaymentMethod.type : null;
-  if (!methodType) {
+  let pmCreated = typeof stripePaymentMethod === 'object' ? Number(stripePaymentMethod?.created) : NaN;
+  if (!methodType || !Number.isFinite(pmCreated)) {
     try {
-      methodType = (await require('./stripe').retrievePaymentMethod(stripePaymentMethodId))?.type || null;
+      const pmObj = await require('./stripe').retrievePaymentMethod(stripePaymentMethodId);
+      methodType = methodType || pmObj?.type || null;
+      pmCreated = Number(pmObj?.created);
     } catch (err) {
       logger.warn(`[autopay-setup-link] captured method lookup failed for request ${request.id}: ${err.message}`);
       return { ok: false, code: 'verification_failed' };
     }
   }
+  // The AUTHORIZATION moment is when the customer submitted the method —
+  // Stripe creates the PaymentMethod at confirmSetup, so pm.created is that
+  // moment for a fresh confirm AND for a replayed succeeded intent alike
+  // (pre-push Codex P0: a POST that merely replays an old intent must not
+  // be stamped as a new authorization). The caller's timestamp is only the
+  // fallback when Stripe carries none.
+  if (Number.isFinite(pmCreated) && pmCreated > 0) authorizedAt = new Date(pmCreated * 1000);
   if (methodType !== 'card') {
     let tender;
     try {
@@ -632,23 +642,21 @@ async function completeAutopaySetupCapture({ request, setupIntentId, ip = null, 
     request,
     stripePaymentMethod: setupIntent.payment_method,
     setupIntentId: setupIntent.id,
-    authorizedAt: authorizationMoment(setupIntent),
+    // Fallback only — the tail derives the authorization moment from the
+    // PaymentMethod's creation (a replayed succeeded intent must keep its
+    // ORIGINAL authorization time, never this POST's).
+    authorizedAt: new Date(),
     ip,
     userAgent,
   });
 }
 
-// The moment the customer authorized: Stripe stamps `created` (unix seconds)
-// on the SetupIntent; the confirm follows within the same session.
-function authorizationMoment(setupIntent) {
-  const s = Number(setupIntent?.created);
-  return Number.isFinite(s) && s > 0 ? new Date(s * 1000) : null;
-}
-
 // setup_intent.succeeded backstop (purpose autopay_setup_link): the browser
 // never posted /complete. Same claim semantics as the visit lane's webhook
 // entry — a fresh completing claim reports retryable, a stale one is adopted.
-async function completeAutopaySetupCaptureFromWebhook(setupIntent) {
+// eventCreatedAt: the webhook event's timestamp — the closest confirmation
+// moment the backstop can know (never SetupIntent.created, the mint).
+async function completeAutopaySetupCaptureFromWebhook(setupIntent, { eventCreatedAt = null } = {}) {
   const requestId = setupIntent?.metadata?.request_id;
   if (!requestId) return { ok: false, code: 'no_request_id' };
   const request = await db('appointment_card_requests').where({ id: requestId }).first();
@@ -666,7 +674,7 @@ async function completeAutopaySetupCaptureFromWebhook(setupIntent) {
     request,
     stripePaymentMethod: setupIntent.payment_method,
     setupIntentId: setupIntent.id,
-    authorizedAt: authorizationMoment(setupIntent),
+    authorizedAt: eventCreatedAt instanceof Date && !Number.isNaN(eventCreatedAt.getTime()) ? eventCreatedAt : null,
   });
 }
 

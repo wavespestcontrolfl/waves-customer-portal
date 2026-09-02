@@ -439,8 +439,12 @@ describe('completion tail (page POST + webhook)', () => {
     mockTableHandlers.payment_methods = { first: () => ({ id: 'pm-row-old', customer_id: 'cust-1', method_type: 'card' }) };
     const created = new Date('2026-09-01T12:00:00Z');
     mockHasConsentSnapshotForVariant.mockResolvedValue(false);
+    const before = Date.now();
     await completeAutopaySetupCapture({ request: { ...PENDING, created_at: created }, setupIntentId: 'seti_new' });
-    expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_new', expect.objectContaining({ methodType: 'card', since: created }));
+    const sinceArg = mockHasConsentSnapshotForVariant.mock.calls[0][2].since;
+    expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_new', expect.objectContaining({ methodType: 'card' }));
+    // Page path: the POST moment, never the link's mint (which is only the fallback).
+    expect(sinceArg.getTime()).toBeGreaterThanOrEqual(before);
     expect(mockRecordConsent).toHaveBeenCalledTimes(1);
     mockRecordConsent.mockClear();
     mockHasConsentSnapshotForVariant.mockResolvedValue(true);
@@ -466,17 +470,28 @@ describe('completion tail (page POST + webhook)', () => {
     expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ methodType: 'ach' }));
   });
 
-  it('passes the SetupIntent authorization moment to enrollment so a later opt-out is honored on retry', async () => {
+  it('the AUTHORIZATION moment is the PaymentMethod creation (the submit) — never SetupIntent.created, never the POST time of a replay', async () => {
+    const submitAt = 1756850000; // pm.created (unix)
     mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_SI, created: 1756800000 });
+    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'card', created: submitAt });
     mockTableHandlers.payment_methods = { first: () => null };
     await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
-    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(1756800000 * 1000) }));
-    // The consent dedupe keys on the same authorization moment.
-    expect(mockHasConsentSnapshotForVariant).toHaveBeenLastCalledWith('cust-1', 'pm_new', expect.objectContaining({ since: new Date(1756800000 * 1000) }));
+    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(submitAt * 1000) }));
+    expect(mockHasConsentSnapshotForVariant).toHaveBeenLastCalledWith('cust-1', 'pm_new', expect.objectContaining({ since: new Date(submitAt * 1000) }));
     mockEnrollConsentedMethod.mockClear();
+    // Webhook path: an expanded pm carries created directly.
     mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING }) };
-    await completeAutopaySetupCaptureFromWebhook({ ...GOOD_SI, created: 1756800000 });
-    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(1756800000 * 1000) }));
+    await completeAutopaySetupCaptureFromWebhook({ ...GOOD_SI, payment_method: { id: 'pm_new', type: 'card', created: submitAt } }, { eventCreatedAt: new Date('2026-09-02T06:00:00Z') });
+    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(submitAt * 1000) }));
+    mockEnrollConsentedMethod.mockClear();
+    // No pm.created → the caller's fallback (event time) applies; none → guard skipped.
+    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'card' });
+    const eventAt = new Date('2026-09-02T06:00:00Z');
+    await completeAutopaySetupCaptureFromWebhook({ ...GOOD_SI }, { eventCreatedAt: eventAt });
+    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: eventAt }));
+    mockEnrollConsentedMethod.mockClear();
+    await completeAutopaySetupCaptureFromWebhook({ ...GOOD_SI });
+    expect(mockEnrollConsentedMethod.mock.calls[0][0].authorizedAt).toBeUndefined();
   });
 
   it('never reattaches a method the customer removed: PM_NOT_ATTACHED retires the link (method_removed, permanent)', async () => {
