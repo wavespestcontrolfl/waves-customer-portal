@@ -138,11 +138,18 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     const current = await trx('seo_link_prospects').whereIn('id', ids).select('id', 'path_id', 'target_url', 'link_type', 'automation_policy', 'last_classified_at');
     const byId = new Map((current || []).map((m) => [m.id, m]));
     rows = rows.map((r) => ({ ...r, ...(byId.get(r.id) || {}) }));
+    // …and a placement is leased only on a path that is LIVE and STANDING:
+    // not retired into a successor, and not DISPROVEN — the investigator
+    // zeroes a path's confidence when a covered re-investigation omits it
+    // or its URL returns 404/410 (and writes an unverified submission URL
+    // at confidence 0); neither is a route a worker may act on, whatever
+    // policy the placement still carries.
     const pathIds = [...new Set(rows.map((r) => r.path_id).filter(Boolean))];
-    const retired = new Set(pathIds.length
-      ? (await trx('seo_link_acquisition_paths').whereIn('id', pathIds).whereNotNull('superseded_by').select('id')).map((p) => p.id)
+    const blocked = new Set(pathIds.length
+      ? (await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'superseded_by', 'confidence'))
+        .filter((p) => p.superseded_by || (p.confidence != null && !(Number(p.confidence) > 0))).map((p) => p.id)
       : []);
-    rows = rows.filter((r) => !retired.has(r.path_id) && types.includes(r.link_type));
+    rows = rows.filter((r) => !blocked.has(r.path_id) && types.includes(r.link_type));
     if (effectivePolicy) rows = rows.filter((r) => r.automation_policy === effectivePolicy);
     if (rows.length === 0) return [];
     const leaseIds = rows.map((r) => r.id);

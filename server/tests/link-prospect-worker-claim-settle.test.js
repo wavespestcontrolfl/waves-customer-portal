@@ -111,3 +111,19 @@ test('a REFUSED settlement never leases the retired path, and a sent-stamped row
   expect(sentStamped).toMatchObject({ path_id: 'p-old', claimed_at: null }); // neither moved nor leased on the obsolete route
 });
 
+test('a placement on a DISPROVEN path (confidence 0, not superseded) is never leased, whatever policy it still carries (Codex PR r23 P1)', async () => {
+  const gone = { id: 'p-gone', domain_id: 'd1', submission_url: 'https://example.com/join', superseded_by: null, link_type: 'directory', confidence: 0 }; // 404'd / omitted under coverage
+  const unverified = { id: 'p-unverified', domain_id: 'd2', submission_url: 'https://other.example/apply', superseded_by: null, link_type: 'directory', confidence: 0 }; // a claim no pass has observed
+  const live = { id: 'p-live', domain_id: 'd3', submission_url: 'https://live.example/add', superseded_by: null, link_type: 'directory', confidence: 0.7 };
+  mockStore.seo_link_acquisition_paths.push(gone, unverified, live);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40 };
+  const onGone = { ...base, id: 'r-gone', target_domain: 'example.com', path_id: 'p-gone', target_url: 'https://example.com/join' };
+  const onUnverified = { ...base, id: 'r-unv', target_domain: 'other.example', path_id: 'p-unverified', target_url: 'https://other.example/apply' };
+  const onLive = { ...base, id: 'r-live', target_domain: 'live.example', path_id: 'p-live', target_url: 'https://live.example/add' };
+  mockStore.seo_link_prospects.push(onGone, onUnverified, onLive);
+  const claimed = await worker.claim({ n: 5, type: 'signup' });
+  expect(claimed.map((r) => r.id)).toEqual(['r-live']);
+  expect(onGone.claimed_at).toBeNull();
+  expect(onUnverified.claimed_at).toBeNull();
+});
+
