@@ -22,13 +22,13 @@
       "routes": [
         "USE / (inline function#3396049a)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
-        "USE /api/pay/statement (inline function#a0a80342)",
-        "USE /api/public/a2a (inline function#8312fe8a)",
-        "USE /api/public/careers (inline function#a3b3df24)",
-        "USE /api/public/lawn-assessment (inline function#5d37a393)",
-        "USE /api/public/mcp (inline function#abfffb5f)",
+        "USE /api/pay/statement (inline function#cf970c43)",
+        "USE /api/public/a2a (inline function#c621253a)",
+        "USE /api/public/careers (inline function#91580da7)",
+        "USE /api/public/lawn-assessment (inline function#8e4982f2)",
+        "USE /api/public/mcp (inline function#6af8a3db)",
         "USE /api/public/pest-forecast (inline function#a972e744)",
-        "USE /api/public/pest-identifier (inline function#39eceddc)",
+        "USE /api/public/pest-identifier (inline function#14727834)",
         "USE /api/public/secure-card (inline function#8abc12e6)"
       ]
     },
@@ -427,7 +427,7 @@
       "mount": "/api/public/lawn-assessment",
       "reason": "Public AI lawn assessment funnel (rate-limited lead-gen intake per its AGENTS.md contract); the USE entry is the router's 404-when-dark gate (always next() or 404)",
       "routes": [
-        "USE /api/public/lawn-assessment (inline function#a8c5c49e)",
+        "USE /api/public/lawn-assessment (inline function#a4a09571)",
         "POST /api/public/lawn-assessment/:id/claim",
         "POST /api/public/lawn-assessment/analyze"
       ]
@@ -560,7 +560,7 @@
       "mount": "/api/pay/statement",
       "reason": "Tokenized account-statement payment page from customer comms; the USE entry is the router's 404-when-dark gate (always next() or 404)",
       "routes": [
-        "USE /api/pay/statement (inline function#1a82455e)",
+        "USE /api/pay/statement (inline function#d7bd2d4a)",
         "GET /api/pay/statement/:token",
         "POST /api/pay/statement/:token/finalize",
         "POST /api/pay/statement/:token/quote",

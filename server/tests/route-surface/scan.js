@@ -1767,29 +1767,40 @@ class ModuleAnalysis {
       if (!fn || seen.has(fn)) return;
       seen.add(fn);
       parts.push(this.src.slice(fn.start, fn.end).replace(/\s+/g, ' '));
+      // An IMPORTED helper's body is identity too — fold its digest in
+      // (transitively via ITS module; unanalyzable imports poison the
+      // digest with a fail-closed marker). `member` names the export used
+      // through a namespace import (`helpers.dispatch`), else the binding's
+      // own member / the module's default export.
+      const foldImported = (b, member) => {
+        if (depth >= HELPER_DIGEST_DEPTH || !b || !(b.kind === 'require' || b.kind === 'requireMember')
+          || b.module === null || !this.scanner.exists(b.module)) return;
+        try {
+          const m = this.scanner.peekModule(b.module);
+          let target = null;
+          const name = member || (b.kind === 'requireMember' ? b.name : null);
+          if (name) {
+            const exp = m.exportLookup(name);
+            if (exp.kind === 'ident') target = m.bindings.get(m.canonName(exp.name));
+          } else if (m.exportCandidate) {
+            target = m.bindings.get(m.canonName(m.exportCandidate));
+          }
+          if (target && target.kind === 'function' && target.node) {
+            parts.push(`${b.module}${name ? `.${name}` : ''}#${m.bodyDigest(target.node, depth + 1)}`);
+          }
+        } catch { parts.push(`<unanalyzable:${b.module}>`); }
+      };
       walk(fn, (n) => {
+        if (n.type === 'MemberExpression' && !n.computed && n.object.type === 'Identifier'
+          && n.property.type === 'Identifier') {
+          const ob = this.bindings.get(this.canonName(n.object.name));
+          if (ob && ob.kind === 'require') foldImported(ob, n.property.name);
+          return;
+        }
         if (n.type !== 'Identifier') return;
         const b = this.bindings.get(this.canonName(n.name));
         if (b && b.kind === 'function' && b.node) visitFn(b.node);
-        else if (depth < HELPER_DIGEST_DEPTH && b && (b.kind === 'require' || b.kind === 'requireMember')
-          && b.module !== null && this.scanner.exists(b.module)) {
-          // An IMPORTED helper's body is identity too — fold its digest in
-          // (transitively via ITS module; unanalyzable imports poison the
-          // digest with a fail-closed marker).
-          try {
-            const m = this.scanner.peekModule(b.module);
-            let target = null;
-            if (b.kind === 'requireMember') {
-              const exp = m.exportLookup(b.name);
-              if (exp.kind === 'ident') target = m.bindings.get(m.canonName(exp.name));
-            } else if (m.exportCandidate) {
-              target = m.bindings.get(m.canonName(m.exportCandidate));
-            }
-            if (target && target.kind === 'function' && target.node) {
-              parts.push(`${b.module}#${m.bodyDigest(target.node, depth + 1)}`);
-            }
-          } catch { parts.push(`<unanalyzable:${b.module}>`); }
-        }
+        else foldImported(b, null);
       }, { topLevel: false, conds: [], src: this.src });
     };
     visitFn(fnNode);
@@ -2636,12 +2647,16 @@ class Scanner {
 
   makeRoute({ method, fullPath, routerFile, mountPrefix, guards, resolved, conditional, cond, extra, loc }) {
     let effective = guards.filter((g) => !isExempt(g, method, fullPath));
-    if (method === 'ALL' && effective.length) {
+    if ((method === 'ALL' || method === 'USE') && effective.length) {
       // Methods exempt from EVERY remaining guard are open; the subset is
       // part of the route's identity so an auth widening changes the key.
+      // A terminal use() responder answers every path under its prefix, so
+      // for USE the open set is the guards' exempted METHOD+PATH entries
+      // that fall under the prefix (`router.use(exceptCallback, responder)`
+      // serves GET /oauth/callback unauthenticated).
       let open = null;
       for (const g of effective) {
-        const s = exemptMethodsOn(g, fullPath);
+        const s = method === 'USE' ? exemptEntriesUnder(g, fullPath) : exemptMethodsOn(g, fullPath);
         open = open === null ? s : new Set([...open].filter((x) => s.has(x)));
         if (!open.size) break;
       }
@@ -2752,6 +2767,23 @@ function exemptMethodsOn(guard, fullPath) {
   for (const e of guard.exempts) {
     const [m, p] = e.split(/\s+/);
     if (p === rel && m !== '*') out.add(m);
+  }
+  return out;
+}
+
+/**
+ * The guard's exempted `METHOD /abs/path` entries that a terminal use()
+ * responder mounted at `usePath` would answer (the exempt path is at or
+ * under the prefix). Wildcard-method exemptions are reported as `* path`.
+ */
+function exemptEntriesUnder(guard, usePath) {
+  const out = new Set();
+  if (!guard.exempts || !guard.exempts.length || typeof usePath !== 'string') return out;
+  const base = guard.baseScope || '/';
+  for (const e of guard.exempts) {
+    const [m, p] = e.split(/\s+/);
+    const abs = (base === '/' || base === '') ? p : `${base}${p === '/' ? '' : p}`;
+    if (abs === usePath || abs.startsWith(usePath === '/' ? '/' : `${usePath}/`)) out.add(`${m} ${abs}`);
   }
   return out;
 }

@@ -2482,6 +2482,46 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(spread.publicRoutes.find((r) => r.path === '/api/x/thing')).toBeDefined();
   });
 
+  test("a NAMESPACE-imported helper (helpers.dispatch) joins a responder's digest", () => {
+    const files = (helperBody) => ({
+      'server/index.js': app([
+        "const helpers = require('./services/helpers');",
+        'function responder(req, res, next) { return helpers.dispatch(req, res, next); }',
+        "app.use('/a', responder);",
+      ].join('\n')),
+      'server/services/helpers.js': [
+        `function dispatch(req, res, next) { ${helperBody} }`,
+        'function other() {}',
+        'module.exports = { dispatch, other };',
+      ].join('\n'),
+    });
+    const a = scanOf(files('next();')).publicRoutes.find((r) => r.path === '/a');
+    const b = scanOf(files('res.json({ leak: 1 });')).publicRoutes.find((r) => r.path === '/a');
+    expect(a.extra).toMatch(/responder#[0-9a-f]{8}/);
+    expect(a.extra).not.toBe(b.extra);
+  });
+
+  test('a terminal use() responder behind a METHOD-EXEMPTING guard is public for the exempted entry', () => {
+    const registry = { guards: [{ name: 'exceptCallback', module: 'server/routes/x.js', local: true, exempts: ['GET /oauth/callback'] }] };
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry,
+      files: {
+        'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+        'server/routes/x.js': [
+          "const router = require('express').Router();",
+          'function exceptCallback(req, res, next) { next(); }',
+          'router.use(exceptCallback, (req, res) => res.json({ served: req.path }));',
+          'module.exports = { router, exceptCallback };',
+          'module.exports = router;',
+        ].join('\n'),
+      },
+    }).scan();
+    const use = res.publicRoutes.find((r) => r.method === 'USE' && r.path === '/api/x');
+    expect(use).toBeDefined();
+    expect(use.extra).toMatch(/exempt: GET \/api\/x\/oauth\/callback/);
+  });
+
   test('an UNRESOLVED static root is a problem, never a stable identity', () => {
     const res = scanOf({
       'server/index.js': app([
