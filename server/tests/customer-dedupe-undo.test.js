@@ -1058,6 +1058,7 @@ describe('revertMerge', () => {
   it("rewrites journaled operator call links (customer_link_override) back to the loser — only where they still name the winner (codex #3736 gh-r5)", async () => {
     const journal = baseJournal();
     journal.repointed_ids.customer_link_override_call_ids = ['cl1', 'cl2'];
+    journal.repointed_ids.customer_link_override_merged_at = '2026-09-02T20:00:00.000Z';
     const { trx, state } = buildRevertTrx({
       journal,
       winner: baseWinner(),
@@ -1075,9 +1076,20 @@ describe('revertMerge', () => {
     expect(back).toMatchObject({ pk: 'id', ids: ['cl1', 'cl2'] });
     expect(back.payload.updated_at).toBe('NOW()');
     const rewrite = state.rawCalls.find(([sql]) => String(sql).includes("'{customer_link_override,customer_id}'"));
-    expect(rewrite).toEqual([expect.stringContaining('jsonb_set(metadata'), [JSON.stringify(LOSER)]]);
+    // The rewrite back also drops the merge stamp it matched on.
+    expect(rewrite).toEqual([expect.stringContaining("jsonb_set(metadata #- '{customer_link_override,merged_at}'"), [JSON.stringify(LOSER)]]);
     expect(result.repointedBack['call_log.customer_link_override']).toBe(1);
     expect(result.skipped).toContainEqual({ key: 'call_log.customer_link_override', reason: 'rows_changed_during_revert', count: 1 });
+  });
+
+  it('refuses an undo whose journal has the operator call-link ids but no merge stamp — a later same-winner relink could not be told apart (codex #3764 gh-r1 P2)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.customer_link_override_call_ids = ['cl1'];
+    const { trx, state } = buildRevertTrx({ journal, winner: baseWinner(), loser: baseLoser(), tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } } });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/without row-level records/) });
+    expect(state.journalUpdate).toBe(null);
   });
 
   it('refuses an undo whose merge journaled the operator call-link rewrite count-only (409, zero writes)', async () => {

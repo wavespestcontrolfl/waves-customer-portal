@@ -164,6 +164,37 @@ describe('PUT /calls/:id/customer', () => {
     expect(JSON.stringify(lead.wheres)).toContain(SID);
   });
 
+  test('linking a call with no keyed timeline entry creates one under the same conflict target the processor uses (codex #3764 gh-r1 P2)', async () => {
+    const updates = mockDb([{ id: CALL_ID, customer_id: null, twilio_call_sid: SID, direction: 'inbound', from_phone: '+19415550111', call_summary: 'Caller asked about ants.' }, { id: CUSTOMER_ID }]);
+    const inner = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const b = inner(table);
+      // No keyed row exists for this call: the move matches nothing.
+      if (table === 'customer_interactions') b.update = (patch) => { updates.push({ table, patch }); return Promise.resolve(0); };
+      return b;
+    });
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings, rowCount: 1 }));
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ timeline_rows_moved: 0, timeline_rows_created: 1 });
+    });
+    const insert = db.raw.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO customer_interactions'));
+    expect(insert[0]).toContain("ON CONFLICT ((metadata ->> 'call_log_id')) WHERE interaction_type = 'call'");
+    expect(insert[1][0]).toBe(CUSTOMER_ID);
+    expect(insert[1][2]).toBe('Caller asked about ants.');
+    expect(JSON.parse(insert[1][3])).toMatchObject({ call_log_id: CALL_ID, twilio_call_sid: SID, linked_by_operator: true });
+  });
+
+  test('an unlink never creates a timeline entry', async () => {
+    mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: null }) });
+      expect(res.status).toBe(200);
+    });
+    expect(db.raw.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO customer_interactions'))).toBeUndefined();
+  });
+
   test('a relink to a person leaves the lead links alone', async () => {
     const updates = mockDb([{ id: CALL_ID, customer_id: null, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
     await withServer(async (base) => {
@@ -281,6 +312,23 @@ describe('POST /calls/:id/adopt-recording', () => {
     // it before the claim makes the pass refuse instead of processing audio
     // the operator never chose.
     expect(processor.processRecording).toHaveBeenCalledWith(SID, { force: true, operator: true, expectedRecordingSid: PARKED });
+    // The call's review flag follows its cards: the last card settled with
+    // nothing else open clears review_status (codex #3764 gh-r1 P2).
+    const flag = updates.find((u) => u.table === 'call_log' && u.patch.review_status === null);
+    expect(flag).toBeDefined();
+  });
+
+  test('a pass that throws after the committed swap reports adopted-and-queued, never a 500 (codex #3764 gh-r1 P2)', async () => {
+    const updates = mockDb([call()]);
+    processor.processRecording.mockRejectedValue(new Error('provider down'));
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ success: false, adopted: PARKED, queued: true, result: { threw: true, error: 'provider down' } });
+    });
+    // The swap stands; the review card is left open for the sweep's pass.
+    expect(updates.find((u) => u.table === 'call_log').patch.recording_sid).toBe(PARKED);
+    expect(updates.find((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('additional_recording'))).toBeUndefined();
   });
 
   test('a recording that a newer callback replaced before the pass claimed it is reported (409 recording_changed) and its card stays open (codex #3736 gh-r6)', async () => {

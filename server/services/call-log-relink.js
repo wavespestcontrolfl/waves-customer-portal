@@ -56,6 +56,12 @@ const REHOME_SWEEP_LIMIT = 200;
 // Verbatim sentinel from call-recording-processor.js — marks a rejected
 // empty-voicemail row whose customer link was deliberately cleared.
 const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an implausible transcription was rejected.]';
+// An operator's explicit UNLINK (admin PUT /calls/:id/customer with a null
+// customer_id) stamps metadata.customer_link_override with customer_id null
+// and leaves call_log.customer_id NULL on purpose. The sweep must never
+// write the phone match back over that decision (Codex #3764 r1 P1) — the
+// predicate is carried by the scan AND the write, like the sentinel.
+const NOT_EXPLICITLY_UNLINKED_SQL = "((metadata -> 'customer_link_override') IS NULL OR (metadata -> 'customer_link_override' ->> 'customer_id') IS NOT NULL)";
 
 function maskPhone(value) {
   const digits = String(value || '').replace(/\D/g, '');
@@ -132,6 +138,7 @@ async function relinkUnattributedCalls({ now = new Date(), conn = db } = {}) {
       // Rejected empty voicemails were DELIBERATELY unlinked by the
       // processor; sync must never re-attach them.
       .whereRaw('transcription IS DISTINCT FROM ?', [TRANSCRIPTION_REJECTED_SENTINEL])
+      .whereRaw(NOT_EXPLICITLY_UNLINKED_SQL)
       .orderBy('id', 'asc')
       .limit(PAGE_SIZE)
       .select('id', 'twilio_call_sid', 'direction', 'from_phone', 'to_phone', 'created_at');
@@ -189,6 +196,7 @@ async function relinkUnattributedCalls({ now = new Date(), conn = db } = {}) {
       .whereIn('id', callIds)
       .whereNull('customer_id')
       .whereRaw('transcription IS DISTINCT FROM ?', [TRANSCRIPTION_REJECTED_SENTINEL])
+      .whereRaw(NOT_EXPLICITLY_UNLINKED_SQL)
       .update({ customer_id: customer.id, updated_at: new Date() });
     if (updated > 0) {
       linked += updated;
@@ -247,6 +255,7 @@ module.exports = {
   phoneLookupKey,
   isLinkableKey,
   TRANSCRIPTION_REJECTED_SENTINEL,
+  NOT_EXPLICITLY_UNLINKED_SQL,
   WINDOW_DAYS,
   PAGE_SIZE,
   MAX_PAGES,

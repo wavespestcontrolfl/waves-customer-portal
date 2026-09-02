@@ -206,7 +206,7 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
     if (!req.body || !Object.prototype.hasOwnProperty.call(req.body, 'customer_id')) return res.status(400).json({ error: 'customer_id is required (a UUID to link, or null to unlink)' });
     const customerId = req.body.customer_id ?? null;
     if (customerId !== null && !UUID_RE.test(String(customerId))) return res.status(400).json({ error: 'customer_id must be a UUID or null' });
-    const call = await db('call_log').where({ id: req.params.id }).first('id', 'customer_id', 'twilio_call_sid');
+    const call = await db('call_log').where({ id: req.params.id }).first('id', 'customer_id', 'twilio_call_sid', 'direction', 'from_phone', 'to_phone', 'call_summary');
     if (!call) return res.status(404).json({ error: 'Call not found' });
     const override = {
       customer_id: customerId,
@@ -261,6 +261,29 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
       const rows = customerId
         ? await timeline.update({ customer_id: customerId })
         : await timeline.del();
+      // A call with no keyed timeline entry yet gets one on link: an earlier
+      // unlink deleted it, or the pass never wrote one (customer creation
+      // failed, or the call predates the keyed entry). The processor writes
+      // this row only during a pass and this endpoint runs none, so the
+      // corrected call would otherwise be missing from the customer's
+      // timeline (Codex #3764 r1 P2). Same conflict target as the
+      // processor's insert, so a concurrent pass cannot double it.
+      let created = 0;
+      if (customerId && rows === 0) {
+        const phone = call.direction === 'outbound' ? call.to_phone : call.from_phone;
+        const inserted = await trx.raw(
+          `INSERT INTO customer_interactions (customer_id, interaction_type, subject, body, metadata)
+           VALUES (?, 'call', ?, ?, ?::jsonb)
+           ON CONFLICT ((metadata ->> 'call_log_id')) WHERE interaction_type = 'call' AND metadata ->> 'call_log_id' IS NOT NULL DO NOTHING`,
+          [
+            customerId,
+            `${call.direction === 'outbound' ? 'Outbound' : 'Inbound'} call — linked by operator`,
+            call.call_summary || `Call${phone ? ` from ${phone}` : ''} linked to this customer by the office.`,
+            JSON.stringify({ call_log_id: call.id, twilio_call_sid: call.twilio_call_sid || null, linked_by_operator: true }),
+          ],
+        );
+        created = inserted?.rowCount ?? 0;
+      }
       // The operator's correction IS the fix for an earlier
       // customer_creation_failed: its card resolves here (no reprocess runs
       // from this endpoint), and the review flag clears only when no other
@@ -275,7 +298,7 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
           .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
           .update({ review_status: null });
       }
-      return { timelineRows: rows, repaired, leadsUnlinked };
+      return { timelineRows: rows, timelineCreated: created, repaired, leadsUnlinked };
     });
     if (moved?.notFound) return res.status(404).json({ error: 'Customer not found' });
     if (!moved) {
@@ -284,17 +307,22 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
     const timelineMoved = moved.timelineRows;
     const warnings = [];
     if (call.twilio_call_sid) {
-      // Best-effort here; the hourly call-log relink sweep re-homes any
-      // linked call whose thread still sits under another customer, so a
-      // failure is reported, not silently swallowed.
+      // Best-effort here; a failure is reported, not silently swallowed.
+      // For a LINK the hourly call-log relink sweep re-homes any linked
+      // call whose thread still sits under another customer; an UNLINK's
+      // detach (the sync moves the message to the caller's unowned thread)
+      // has no sweep behind it — the sweep only walks linked rows — so the
+      // office retries the unlink.
       await require('../services/conversations').syncVoiceMessageForCall(call.twilio_call_sid)
         .catch((e) => {
           logger.warn(`[call-recordings] voice message re-home after relink failed for ${maskSid(call.twilio_call_sid)}: ${e.message}`);
-          warnings.push('voice_message_rehome_failed: the hourly relink sweep will retry it');
+          warnings.push(customerId
+            ? 'voice_message_rehome_failed: the hourly relink sweep will retry it'
+            : 'voice_message_rehome_failed: the recording is still in the previous customer\'s thread; retry the unlink');
         });
     }
     logger.info(`[call-recordings] call ${call.id} customer link set by operator (${customerId ? 'linked' : 'unlinked'}; timeline rows moved: ${timelineMoved})`);
-    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, leads_unlinked: moved.leadsUnlinked, warnings });
+    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, timeline_rows_created: moved.timelineCreated, leads_unlinked: moved.leadsUnlinked, warnings });
   } catch (err) { next(err); }
 });
 
@@ -483,7 +511,20 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     // current row, so without the fence this endpoint would report the
     // chosen recording as adopted and processed — and close its card —
     // while the pass processed a newer one (Codex #3736 r6 P1).
-    const result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true, expectedRecordingSid: chosen.recording_sid });
+    let result;
+    try {
+      result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true, expectedRecordingSid: chosen.recording_sid });
+    } catch (passErr) {
+      // The swap is committed and the row is back in the sweep
+      // (processing_status NULL). A pass that throws — a provider or DB
+      // error it marks extraction_failed and rethrows — must not turn a
+      // successful adoption into a 500: the operator would retry the action
+      // and get a 404, the chosen SID having left the parked list (Codex
+      // #3764 r1 P2). Report the adopted-and-queued outcome instead; the
+      // review card stays open until the sweep processes it.
+      logger.warn(`[call-recordings] adopted recording ${maskSid(chosen.recording_sid)} on call ${call.id}: the immediate pass failed (${passErr.message}); queued for the sweep`);
+      result = { success: false, threw: true, error: passErr.message };
+    }
     // Settle the review card once the operator's decision on the chosen
     // recording is final — processed, or overtaken by a newer recording
     // before it could be. It closes only when no other parked recording
@@ -519,6 +560,14 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
           .whereIn('status', ['open', 'in_progress']);
         if (stillForReview.length === 0) {
           await openCard.update({ status: 'resolved', resolved_at: new Date(), resolution_note: resolutionNote });
+          // The call's review flag follows its cards: with the last one
+          // settled and nothing else open, a call that entered adoption with
+          // review_status = 'open' would otherwise stay counted in
+          // getStats().review_open for good (Codex #3764 r1 P2).
+          await trx('call_log')
+            .where({ id: call.id })
+            .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
+            .update({ review_status: null });
         } else {
           const next = stillForReview[0];
           await openCard.update({
