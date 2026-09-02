@@ -309,6 +309,7 @@ const {
   rowPassesGatedSendAuthority,
   applyLinkVisibleSiblingScope,
   estimateDeliverableUnderGate,
+  groupPassesGatedSendAuthority,
 } = require('../services/pricing-authority-gate');
 // The gated MANUAL claims (immediate, scheduled, grouped anchor + siblings)
 // re-assert the whole verdict IN SQL on the row as it is at claim time —
@@ -350,7 +351,11 @@ function shadowLogFallbackDelivery(estimate = {}, { handoff = true } = {}) {
 // grouped SIBLING that lane would publish, applied in the group preflight
 // when the caller declares options.autoSend.
 function assertAutoSendPricingAuthority(row = {}) {
-  if (String(row.pricing_authority || '').toUpperCase() === 'SERVER') return;
+  // An authored proposal (any stored proposal object) is never automation's
+  // to publish, whatever stamp the underlying draft still carries.
+  const proposalData = parseEstimateData(row.estimate_data || row.estimateData)?.proposal;
+  const isProposal = !!(proposalData && typeof proposalData === 'object');
+  if (!isProposal && String(row.pricing_authority || '').toUpperCase() === 'SERVER') return;
   const err = new Error('This estimate\'s price has no engine verification stamp (or was saved from the browser preview because the pricing engine could not verify it) — it is never auto-sent. Re-save it from the estimate tool and send it by hand.');
   err.statusCode = 422;
   err.code = 'PRICING_AUTHORITY_NOT_SERVER';
@@ -2229,6 +2234,16 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // repriced attempts as fallback deliveries). Published siblings log
   // themselves below.
   shadowLogFallbackDelivery(estimate, { handoff: stampChannels.length > 0 });
+  // Gate-off shadow count, GROUP-wide (GH codex P2 r30): a SERVER anchor
+  // delivered beside an already-published fallback sibling hands the
+  // customer that price too — the gate would refuse the send, so it counts
+  // as a would-block delivery. Published siblings are never claimed, so the
+  // per-sibling log below cannot see them.
+  if (stampChannels.length > 0 && estimate.estimate_group_id
+    && !require('../config/feature-gates').isEnabled('sendRequiresServerPricing')
+    && !(await groupPassesGatedSendAuthority(db, estimate))) {
+    logger.warn(`[pricing-authority] shadow: estimate ${estimate.id} delivered a group link whose visible siblings include a price without the SERVER stamp (GATE_SEND_REQUIRES_SERVER_PRICING off)`);
+  }
 
   const updatePayload = {
     // Finalize the claim. The row is held as `sending` for the whole send (a
@@ -3549,6 +3564,12 @@ router.put('/:id/proposal', async (req, res, next) => {
     const updatedCount = await updateQuery.update({
       estimate_data: JSON.stringify(nextData),
       category: 'COMMERCIAL',
+      // Authored totals are NOT engine output: the engine stamp a generated
+      // draft carried is cleared so the SERVER-only automation (lead
+      // auto-send) can never deliver operator-authored proposal prices; the
+      // manual send exemption rides the provenance marker instead (GH codex
+      // P1 r30 on #3750).
+      pricing_authority: null,
       monthly_total: totals.monthlyEquivalent,
       annual_total: totals.annualRecurring,
       onetime_total: totals.oneTime,

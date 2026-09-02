@@ -309,6 +309,9 @@ describe('assertAutoSendPricingAuthority — automation publishes only an engine
     expect(caught?.code).toBe('PRICING_AUTHORITY_NOT_SERVER');
     expect(caught?.message).toMatch(/never auto-sent/i);
     expect(() => assertAutoSendPricingAuthority({ pricing_authority: 'client_fallback' })).toThrow();
+    // An authored proposal keeps its generated draft's SERVER stamp until the
+    // editor clears it — automation refuses it regardless (GH codex P1 r30).
+    expect(() => assertAutoSendPricingAuthority({ pricing_authority: 'SERVER', estimate_data: { proposal: { enabled: true, buildings: [] } } })).toThrow();
   });
 
   it('fails closed on null, unknown and locked stamps; only the explicit SERVER stamp passes', () => {

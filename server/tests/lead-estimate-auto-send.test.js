@@ -152,6 +152,11 @@ describe('lead estimate auto-send policy', () => {
       .toEqual({ eligible: false, reason: 'pricing_authority_not_server' });
     expect(leadEstimateAutoSendEligibility(generatedEstimate({ pricing_authority: 'LOCKED' }), opts))
       .toEqual({ eligible: false, reason: 'pricing_authority_not_server' });
+    // An authored proposal on a generated draft that still carries SERVER is
+    // never automation's to send (GH codex P1 r30).
+    const withProposal = generatedEstimate();
+    withProposal.estimate_data = { ...withProposal.estimate_data, proposal: { enabled: true, buildings: [] } };
+    expect(leadEstimateAutoSendEligibility(withProposal, opts)).toEqual({ eligible: false, reason: 'authored_proposal' });
     expect(leadEstimateAutoSendEligibility(generatedEstimate({ pricingAuthority: 'server', pricing_authority: undefined }), opts))
       .toEqual({ eligible: true, reason: null });
     expect(leadEstimateAutoSendEligibility(generatedEstimate({ pricing_authority: 'SERVER' }), opts))
@@ -396,6 +401,7 @@ describe('claimLeadEstimateAutoSend — the claim itself re-asserts engine-autho
     expect(claimed?.status).toBe('sending');
     expect(rawGuards).toEqual(expect.arrayContaining([
       expect.stringContaining("UPPER(pricing_authority) = 'SERVER'"),
+      expect.stringContaining("estimate_data->'proposal' IS NULL"),
     ]));
   });
 });

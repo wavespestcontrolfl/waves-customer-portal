@@ -2408,10 +2408,23 @@ const REVISE_BLOCKED_STATUSES = ['accepted', 'declined', 'expired', 'sending'];
 // consumed by the revise write below and by GET /:id/edit-source so the
 // builder can explain a non-editable row instead of failing on save.
 // Returns null when editable, otherwise { message, statusCode }.
+// An EXPIRED row the pricing-authority gate refuses has no other way back
+// (GH codex P1 r30 on #3750): extension is refused until the row is
+// engine-verified, and the expiry rule refuses the revise until extended.
+// While the gate is on, such a row may be revised — the write leaves it
+// expired, and only an engine-verified reprice can land on it (a fallback
+// or NULL write is refused by the live-link guard) — so the operator
+// re-saves it through the engine and then extends it.
+function expiredRowRecoverableUnderGate(row) {
+  const gate = require('./pricing-authority-gate');
+  return gate.gatedSendAuthorityPredicateApplies() && !gate.rowPassesGatedSendAuthority(row || {});
+}
+
 function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   const parsed = estimateData === undefined
     ? parseStoredEstimateData(estimate?.estimate_data)
     : estimateData;
+  const expiredRecovery = expiredRowRecoverableUnderGate(estimate);
   if (estimate?.archived_at) {
     return { message: 'Estimate is archived. Unarchive it before editing.', statusCode: 400 };
   }
@@ -2438,7 +2451,7 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   if (status === 'sending') {
     return { message: 'This estimate is being sent right now. Wait for the send to finish, then retry.', statusCode: 409 };
   }
-  if (REVISE_BLOCKED_STATUSES.includes(status)) {
+  if (REVISE_BLOCKED_STATUSES.includes(status) && !(status === 'expired' && expiredRecovery)) {
     return { message: `A ${status} estimate can no longer be edited.`, statusCode: 409 };
   }
   // Date-expired rows the daily expiration worker hasn't flipped yet are
@@ -2446,7 +2459,7 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   // timestamp, so a revise would report saved while the customer's link keeps
   // showing nothing new. Same verdict as status='expired'.
   const expiresAt = estimate?.expires_at ? new Date(estimate.expires_at) : null;
-  if (expiresAt && !Number.isNaN(expiresAt.getTime()) && expiresAt <= now) {
+  if (expiresAt && !Number.isNaN(expiresAt.getTime()) && expiresAt <= now && !expiredRecovery) {
     return { message: 'This estimate has passed its expiration date and can no longer be edited. Extend it first, then edit.', statusCode: 409 };
   }
   return null;
@@ -2939,13 +2952,19 @@ async function reviseAdminEstimate({
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
-      .whereNotIn('status', REVISE_BLOCKED_STATUSES)
+      // The expired-row recovery (expiredRowRecoverableUnderGate) relaxes
+      // the two expiry predicates for the LOCKED row's verdict only.
+      .whereNotIn('status', expiredRowRecoverableUnderGate(lockedPrior)
+        ? REVISE_BLOCKED_STATUSES.filter((s) => s !== 'expired')
+        : REVISE_BLOCKED_STATUSES)
       .whereRaw("COALESCE(category, '') <> 'COMMERCIAL'")
       // Mirrors the pre-read's date-expiry verdict: the payload resolution
       // above (pricing recompute, DB lookups) leaves a window in which the
       // row can pass its expires_at, and a commit after that would report
       // saved while the public link already serves the expired page.
-      .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now()))
+      .modify((qb) => {
+        if (!expiredRowRecoverableUnderGate(lockedPrior)) qb.where((q) => q.whereNull('expires_at').orWhere('expires_at', '>', now()));
+      })
       .update({
         ...revisedFields,
         updated_at: now(),
@@ -3025,3 +3044,4 @@ module.exports.assertNoFallbackRevisionOfLiveLink = assertNoFallbackRevisionOfLi
 module.exports.assertLiveRowMayJoinGroup = assertLiveRowMayJoinGroup;
 module.exports.liveGroupMoveDestinationIds = liveGroupMoveDestinationIds;
 module.exports.revisionGroupLockIds = revisionGroupLockIds;
+module.exports.expiredRowRecoverableUnderGate = expiredRowRecoverableUnderGate;

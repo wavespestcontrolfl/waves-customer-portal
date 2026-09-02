@@ -130,6 +130,7 @@ function makeReviseDatabase({
         return chain;
       },
       forUpdate: () => { chain.__locked = true; return chain; },
+      modify: (fn) => { fn(chain); return chain; },
       first: async () => {
         if (chain.__groupQuery) return chain.__groupStatus === 'sending' ? sendingGroupMember : scheduledGroupMember;
         return chain.__locked && lockedEstimate ? lockedEstimate : estimate;
@@ -1243,5 +1244,49 @@ describe('the server-owned proposal is judged and carried from the LOCKED row (p
     });
     expect(updates).toHaveLength(1);
     expect(JSON.parse(updates[0].estimate_data).proposal).toEqual(lockedProposal);
+  });
+});
+
+describe('an EXPIRED row the gate refuses can be re-priced through the engine, and only that (GH codex P1 r30 on #3750)', () => {
+  const serverRecompute = async () => ({
+    recomputed: true,
+    source: 'ENGINE_REQUEST',
+    serverResult: { recurring: { grandTotal: 69, monthlyTotal: 69, annualTotal: 828, services: [{ service: 'pest_control', mo: 69 }] }, oneTime: { total: 0 } },
+    serverTotals: { monthlyTotal: 69, annualTotal: 828, onetimeTotal: 0 },
+  });
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  const expiredFallback = { ...sentEstimate, status: 'expired', expires_at: '2026-07-01T00:00:00Z', pricing_authority: 'CLIENT_FALLBACK' };
+  beforeEach(() => { clearAllEstimatePricingCache(); mockGateState.sendRequiresServerPricing = true; });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('gate on: an engine-verified reprice lands on the expired fallback row (status untouched) so it can then be extended', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: expiredFallback });
+    await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: serverRecompute, now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].pricing_authority).toBe('SERVER');
+    expect(updates[0]).not.toHaveProperty('status');
+  });
+
+  test('gate on: a fallback reprice of that expired (delivered) row is still refused — the live-link guard', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: expiredFallback });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('gate off, or an expired row the gate already accepts (SERVER): the expiry rule stands as before', async () => {
+    mockGateState.sendRequiresServerPricing = false;
+    const off = makeReviseDatabase({ estimate: expiredFallback });
+    await expect(reviseAdminEstimate({
+      database: off.database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: serverRecompute, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/no longer be edited/i) });
+    mockGateState.sendRequiresServerPricing = true;
+    const verified = makeReviseDatabase({ estimate: { ...expiredFallback, pricing_authority: 'SERVER' } });
+    await expect(reviseAdminEstimate({
+      database: verified.database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: serverRecompute, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/no longer be edited/i) });
   });
 });

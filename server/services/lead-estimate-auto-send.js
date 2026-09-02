@@ -156,6 +156,13 @@ function leadEstimateAutoSendEligibility(estimate = {}, options = {}) {
   // 2026-09-02; pre-push codex P0 — a negative CLIENT_FALLBACK check failed
   // open for null / unknown stamps). Gate or no gate; the operator re-saves
   // an unstamped or fallback row through the engine or sends it by hand.
+  // An authored commercial proposal is never automation's to send (GH codex
+  // P1 r30): its totals are the operator's, not generateEstimate's, even
+  // when the generated draft underneath still carries the SERVER stamp.
+  const proposalData = parseJsonObject(estimate.estimate_data || estimate.estimateData)?.proposal;
+  if (proposalData && typeof proposalData === 'object') {
+    return { eligible: false, reason: 'authored_proposal' };
+  }
   if (String(estimate.pricing_authority || estimate.pricingAuthority || '').toUpperCase() !== 'SERVER') {
     return { eligible: false, reason: 'pricing_authority_not_server' };
   }
@@ -450,6 +457,8 @@ async function claimLeadEstimateAutoSend(database, estimate, { now = new Date(),
     // UPDATE must lose the race — only an engine-verified price is ever
     // auto-sent (fail closed on null / unknown stamps).
     .whereRaw("UPPER(pricing_authority) = 'SERVER'")
+    // No authored proposal object on the row (GH codex P1 r30).
+    .whereRaw("estimate_data->'proposal' IS NULL")
     .update({
       status: 'sending',
       send_method: sendMethod,
