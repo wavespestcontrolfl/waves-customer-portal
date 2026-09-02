@@ -164,18 +164,27 @@ const NotificationService = {
     // both recipient types share one mechanism; no dedupeKey = unchanged
     // behavior for every existing caller. Fail closed: an unprovably-new
     // event skips the bell rather than risking a duplicate.
-    const { dedupeKey, ...createOpts } = opts;
+    // dedupeWindowMs (optional, with dedupeKey): a ROLLING window instead of
+    // forever — the key dedupes only against rows younger than the window,
+    // so a recurring signal (an estimate re-opened again tomorrow) can ring
+    // again once the window passes while two opens inside it contend on the
+    // same stable lock. One mechanism for every admin emitter (rule 15).
+    const { dedupeKey, dedupeWindowMs, ...createOpts } = opts;
     if (!dedupeKey) {
       return this.create({ recipientType: 'admin', category, title, body, ...createOpts });
     }
+    const windowMs = Number(dedupeWindowMs);
     const metadata = { ...(createOpts.metadata || {}), dedupeKey };
     try {
       const persisted = await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
-        const existing = await trx('notifications')
+        let existingQuery = trx('notifications')
           .where({ recipient_type: 'admin' })
-          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-          .first();
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]);
+        if (Number.isFinite(windowMs) && windowMs > 0) {
+          existingQuery = existingQuery.where('created_at', '>', trx.raw("NOW() - (? * interval '1 millisecond')", [Math.round(windowMs)]));
+        }
+        const existing = await existingQuery.first();
         if (existing) return { notification: existing, deduped: true };
         const created = await this.create({
           recipientType: 'admin', category, title, body, ...createOpts, metadata, connection: trx,

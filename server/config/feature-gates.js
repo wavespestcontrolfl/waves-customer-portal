@@ -56,6 +56,7 @@
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
+ *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
  *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE.
  *     ⚠ PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true
@@ -1472,6 +1473,17 @@ const gates = {
   // STRICT opt-in: this changes what gets sent and billed.
   // Enable with GATE_ESTIMATE_LEAD_SERVICE_SEND=true (needs opt-out + add on).
   estimateLeadServiceSend: process.env.GATE_ESTIMATE_LEAD_SERVICE_SEND === 'true',
+  // Owner-side "reading it now" bell: when the engagement engine's
+  // multi_view_high_intent rule matches on a page open (>= minSessions
+  // sittings inside windowHours — the DB-tunable rule params), raise ONE
+  // admin notification per estimate per 24h so the owner can call while the
+  // estimate is open in front of the customer. NOT a customer message — the
+  // customer email job path is untouched. Category estimate_hot_view is
+  // silent by default under the admin bell policy (owner ruling 2026-08-28)
+  // and the owner enables it under push settings.
+  // STRICT opt-in in EVERY environment (a local run must never ring the
+  // office). Enable with GATE_ESTIMATE_HOT_VIEW_ALERT=true.
+  estimateHotViewAlert: process.env.GATE_ESTIMATE_HOT_VIEW_ALERT === 'true',
   // Customer soft exit on a sent estimate: the "Not what you expected?" sheet.
   // Three outcomes, none of which message the customer: a reason-tagged
   // decline (PUT /:token/decline gains optional reason/competitor/note
