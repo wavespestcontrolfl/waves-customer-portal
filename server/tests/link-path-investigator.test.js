@@ -2639,4 +2639,27 @@ describe('full run', () => {
     const cited = modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: { marker: 'USD', kind: 'jsonld_price_currency', page_url: 'https://example.com/join' } });
     expect(verifyPriceEvidence([{ url: 'https://example.com/join', excerpt: text, text, html }], cited).currency_evidence).toBeNull();
   });
+
+  test('each amount needs its OWN proof of USD — the initial quote never vouches for a bare-dollar renewal (local Codex P1)', () => {
+    const { pathRowFrom, verifyPriceEvidence } = _internals;
+    const text = 'Directory listing page with membership details. Join for USD 95 the first year, then $150 per year after. Contact us.';
+    const page = { url: 'https://example.com/join', excerpt: text, text, html: '' };
+    const claim = modelPath({ price_text: 'USD 95', renewal_price_text: '$150', currency_evidence: { marker: 'USD', kind: 'quote', page_url: 'https://example.com/join' } });
+    const verified = verifyPriceEvidence([page], claim);
+    expect(verified.currency_evidence_bound).toEqual(['price']); // the marker sits in the initial quote only
+    const row = pathRowFrom({ ...claim, ...verified }, { legalTermsHash: null, now: NOW, evidence: {} });
+    expect(row.currency).toBe('USD');
+    expect(row.estimated_cost_cents).toBe(9500);
+    expect(row.renewal_cost_cents).toBeNull(); // '$150' proves nothing on its own
+    // evidence bound to the renewal only → the reverse
+    const claim2 = modelPath({ price_text: '$95', renewal_price_text: 'renews at USD 150', currency_evidence: { marker: 'USD', kind: 'quote', page_url: 'https://example.com/join' } });
+    const text2 = 'Directory listing page with membership details. Join for $95 now; renews at USD 150. Contact us.';
+    const verified2 = verifyPriceEvidence([{ ...page, excerpt: text2, text: text2 }], claim2);
+    const row2 = pathRowFrom({ ...claim2, ...verified2 }, { legalTermsHash: null, now: NOW, evidence: {} });
+    expect(row2.estimated_cost_cents).toBeNull();
+    expect(row2.renewal_cost_cents).toBe(15000);
+    // both marked → both persist (the default fixture)
+    const both = pathRowFrom({ ...modelPath(), ...verifyPriceEvidence([{ ...page, excerpt: `${text} Join for USD 95 / year. Renewal USD 95.`, text: `${text} Join for USD 95 / year. Renewal USD 95.` }], modelPath()) }, { legalTermsHash: null, now: NOW, evidence: {} });
+    expect([both.estimated_cost_cents, both.renewal_cost_cents]).toEqual([9500, 9500]);
+  });
 });

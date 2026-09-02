@@ -516,11 +516,17 @@ function pathRowFrom(modelPath, { legalTermsHash, now, evidence }) {
   // Cents exist only on paid paths — a free path with a quoted number nearby
   // (a different tier's price, injected copy) must never persist a cost.
   const paid = modelPath.payment_required === true;
+  // …and EACH amount needs its OWN proof of USD: an authoritative marker in
+  // that quote, or verified evidence bound to that quote. "USD 95" beside a
+  // bare "$150" renewal persists 9,500 cents and a null renewal — the
+  // initial price never vouches for the renewal's currency.
+  const bound = new Set(Array.isArray(modelPath.currency_evidence_bound) ? modelPath.currency_evidence_bound : []);
+  const usdProven = (text, key) => currency === 'USD' && (USD_MARKER_RE.test(String(text || '')) || bound.has(key));
   return {
     acquisition_type: modelPath.acquisition_type,
     submission_url: modelPath.submission_url || null,
-    estimated_cost_cents: paid ? centsFor(currency, modelPath.price_text) : null,
-    renewal_cost_cents: paid ? centsFor(currency, modelPath.renewal_price_text) : null,
+    estimated_cost_cents: paid && usdProven(modelPath.price_text, 'price') ? centsFor(currency, modelPath.price_text) : null,
+    renewal_cost_cents: paid && usdProven(modelPath.renewal_price_text, 'renewal') ? centsFor(currency, modelPath.renewal_price_text) : null,
     renewal_period: modelPath.renewal_period || null,
     currency,
     fee_scope: modelPath.payment_required ? modelPath.fee_scope : null,
@@ -796,11 +802,16 @@ function verifyPriceEvidence(pages, p) {
   if (p.price_text) verification.price_text = priceOk ? 'verified' : 'not_on_fetched_page';
   if (p.renewal_price_text) verification.renewal_price_text = renewalOk ? 'verified' : 'not_on_fetched_page';
   let evidence = null;
+  // which AMOUNT the evidence binds to — each cents field is persisted only
+  // when its own quote (or evidence bound to that quote) proves USD; the
+  // initial price's marker never vouches for a bare-dollar renewal
+  const boundTo = new Set();
   const ev = p.currency_evidence;
   if (ev && ev.marker) {
     if (ev.kind === 'quote') {
-      const verifiedQuotes = [priceOk ? p.price_text : '', renewalOk ? p.renewal_price_text : ''].join(' ');
-      if (markerInText(verifiedQuotes, ev.marker)) evidence = ev;
+      if (priceOk && markerInText(p.price_text, ev.marker)) boundTo.add('price');
+      if (renewalOk && markerInText(p.renewal_price_text, ev.marker)) boundTo.add('renewal');
+      if (boundTo.size) evidence = ev;
       else verification.currency_evidence = 'marker_not_in_verified_quote';
     } else if (ev.kind === 'jsonld_price_currency') {
       // The currency must come from the SAME structured offer as a VERIFIED
@@ -815,14 +826,13 @@ function verifyPriceEvidence(pages, p) {
       // matching amount in an unrelated /store offer must not validate a
       // /join membership quote it never occurs with.
       const samePage = (u) => !!u && !!ev.page_url && registry.normalizeSubmissionUrl(u) === registry.normalizeSubmissionUrl(ev.page_url);
-      const verifiedCents = [
-        priceOk && samePage(p.price_page_url) ? parsePriceTextCents(p.price_text) : null,
-        renewalOk && samePage(p.renewal_price_page_url) ? parsePriceTextCents(p.renewal_price_text) : null,
-      ].filter((c) => c != null);
-      // …and bound the same fail-closed way as the derived path: the page's
-      // priced offers must ALL carry the verified amount and agree on the
-      // claimed currency (an unrelated same-price offer binds nothing)
-      const offerMatches = !!page && verifiedCents.some((c) => boundOfferCurrency(page.html, c) === marker);
+      // …and bound the same fail-closed way as the derived path, PER
+      // AMOUNT: the page's priced offers must ALL carry that verified amount
+      // and agree on the claimed currency (an unrelated same-price offer
+      // binds nothing)
+      if (page && priceOk && samePage(p.price_page_url) && boundOfferCurrency(page.html, parsePriceTextCents(p.price_text)) === marker) boundTo.add('price');
+      if (page && renewalOk && samePage(p.renewal_price_page_url) && boundOfferCurrency(page.html, parsePriceTextCents(p.renewal_price_text)) === marker) boundTo.add('renewal');
+      const offerMatches = boundTo.size > 0;
       if (offerMatches) evidence = ev;
       else verification.currency_evidence = page ? 'jsonld_offer_not_bound_to_verified_quote' : 'jsonld_not_on_fetched_page';
     } else {
@@ -838,23 +848,26 @@ function verifyPriceEvidence(pages, p) {
   // that declaration is the evidence — page truth, not model attestation.
   if (!evidence) {
     const derived = new Map(); // currency → page_url
-    for (const [ok, text, pageUrl] of [[priceOk, p.price_text, p.price_page_url], [renewalOk, p.renewal_price_text, p.renewal_price_page_url]]) {
+    const derivedFor = [];
+    for (const [key, ok, text, pageUrl] of [['price', priceOk, p.price_text, p.price_page_url], ['renewal', renewalOk, p.renewal_price_text, p.renewal_price_page_url]]) {
       if (!ok) continue;
       const page = findPage(pages, pageUrl);
       if (!page) continue;
       const bound = boundOfferCurrency(page.html, parsePriceTextCents(text));
-      if (bound) derived.set(bound, pageUrl);
+      if (bound) { derived.set(bound, pageUrl); derivedFor.push(key); }
     }
     if (derived.size === 1) {
       const [[marker, pageUrl]] = [...derived.entries()];
       evidence = { marker, kind: 'jsonld_price_currency', page_url: pageUrl, derived: true };
       verification.currency_evidence = 'derived_from_structured_offer';
+      for (const key of derivedFor) boundTo.add(key);
     }
   }
   return {
     price_text: priceOk ? p.price_text : null,
     renewal_price_text: renewalOk ? p.renewal_price_text : null,
     currency_evidence: evidence,
+    currency_evidence_bound: evidence ? [...boundTo] : [],
     verification,
   };
 }
