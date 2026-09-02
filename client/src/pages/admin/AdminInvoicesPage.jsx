@@ -569,6 +569,9 @@ export default function AdminInvoicesPage() {
         }}
       />
       {tab === "list" && (
+        <ZelleNoticesCard showToast={showToast} onRefresh={loadStats} isMobile={isMobile} />
+      )}
+      {tab === "list" && (
         <InvoiceList
           showToast={showToast}
           onRefresh={loadStats}
@@ -622,6 +625,189 @@ export default function AdminInvoicesPage() {
         <span style={{ color: D.green }}>OK</span>
         <span style={{ color: D.text }}>{toast}</span>{" "}
       </div>{" "}
+    </div>
+  );
+}
+
+// ── Zelle payments to review (GATE_ZELLE_NOTICE_RECONCILE lane) ──
+// The park queue for Capital One Zelle notices the reconciler could not
+// settle on its own: one row per notice — payer · amount · memo · reason —
+// with the invoice candidates it found. Apply settles the chosen invoice
+// through the same Zelle + receipt path the reconciler uses (server
+// re-validates the choice); Ignore closes the notice. Hidden when nothing is
+// parked, so the list is untouched on an ordinary day.
+const NOTICE_REASON_LABELS = {
+  no_match: "No open invoice for this amount",
+  multiple_matches: "Several invoices match",
+  name_mismatch: "Amount matches, name does not",
+  possible_duplicate: "Possibly already recorded",
+  sender_unverified: "Sender could not be verified",
+  parse_failed: "Notice could not be read",
+  apply_failed: "Recording failed",
+};
+// Red only for the two reasons that are genuine alerts (a spoof or a failed
+// settlement) — everything else is an ordinary review item.
+const NOTICE_ALERT_REASONS = new Set(["apply_failed", "sender_unverified"]);
+
+// Dropdown order: exact-amount + name match first, then exact amount, then
+// the near-amount leads; stable within each band. Exported for the vitest.
+export function orderNoticeCandidates(candidates = []) {
+  const rank = (c) => (c.exact_amount && c.name_match ? 0 : c.exact_amount ? 1 : c.name_match ? 2 : 3);
+  return (Array.isArray(candidates) ? candidates : [])
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i)
+    .map(({ c }) => c);
+}
+export function noticeCandidateLabel(c = {}) {
+  const due = Number.isFinite(Number(c.amount_due_cents)) ? `$${(Number(c.amount_due_cents) / 100).toFixed(2)}` : "";
+  const flags = [c.exact_amount && "exact amount", c.name_match && "name match"].filter(Boolean).join(", ");
+  return `${c.invoice_number || c.invoice_id} · ${c.customer_name || "—"} · ${due}${flags ? ` (${flags})` : ""}`;
+}
+function noticeAmount(n) {
+  return n?.amount_cents == null ? "—" : `$${(n.amount_cents / 100).toFixed(2)}`;
+}
+
+function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
+  const [notices, setNotices] = useState([]);
+  const [choice, setChoice] = useState({});
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    try {
+      const data = await adminFetch("/admin/invoices/payment-notices?status=parked");
+      setNotices(Array.isArray(data?.notices) ? data.notices : []);
+      setError("");
+    } catch (err) {
+      // 404 = the lane's routes are not deployed yet; stay hidden quietly.
+      if (err?.status !== 404) setError(err.message || "Could not load Zelle notices");
+      setNotices([]);
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  if (!notices.length && !error) return null;
+
+  const apply = async (n) => {
+    const ordered = orderNoticeCandidates(n.candidates);
+    const invoiceId = choice[n.id] || ordered[0]?.invoice_id;
+    if (!invoiceId) return;
+    const picked = ordered.find((c) => c.invoice_id === invoiceId);
+    const label = picked ? picked.invoice_number : invoiceId;
+    if (!window.confirm(`Mark ${label} paid via Zelle (${noticeAmount(n)} from ${n.payer_name || "unknown payer"}) and send the receipt (email + SMS)?`)) return;
+    setBusy(n.id);
+    try {
+      const res = await adminFetch(`/admin/invoices/payment-notices/${encodeURIComponent(n.id)}/apply`, {
+        method: "POST",
+        body: JSON.stringify({ invoiceId }),
+      });
+      // receipt: { email, sms } from the send, or null when the invoice
+      // settled but a later step threw (server closes the notice as applied
+      // and cannot say whether the receipt went out).
+      const legs = [res?.receipt?.email?.ok && "email", res?.receipt?.sms?.ok && "SMS"].filter(Boolean).join(" + ");
+      const receiptNote = res?.receipt == null ? " — receipt unknown, check the invoice" : legs ? ` — receipt sent (${legs})` : " — receipt not delivered";
+      showToast(`${label} marked paid via Zelle${receiptNote}`);
+      await load();
+      onRefresh?.();
+    } catch (err) {
+      showToast(err.message || "Could not apply the Zelle payment");
+    } finally {
+      setBusy(null);
+    }
+  };
+  const ignore = async (n) => {
+    if (!window.confirm(`Ignore this Zelle notice (${noticeAmount(n)} from ${n.payer_name || "unknown payer"})? It will not be recorded.`)) return;
+    setBusy(n.id);
+    try {
+      await adminFetch(`/admin/invoices/payment-notices/${encodeURIComponent(n.id)}/ignore`, { method: "POST" });
+      showToast("Zelle notice ignored");
+      await load();
+    } catch (err) {
+      showToast(err.message || "Could not ignore the notice");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div style={{ ...sCard, borderColor: D.amber }} data-testid="zelle-notices-card">
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+          Zelle payments to review{notices.length ? ` (${notices.length})` : ""}
+        </div>
+        <div style={{ fontSize: 12, color: D.muted }}>
+          Capital One notices the portal could not match to one invoice on its own.
+        </div>
+      </div>
+      {error && <div style={{ fontSize: 13, color: D.red, marginBottom: 10 }}>{error}</div>}
+      {notices.map((n) => {
+        const ordered = orderNoticeCandidates(n.candidates);
+        const selected = choice[n.id] || ordered[0]?.invoice_id || "";
+        const alert = NOTICE_ALERT_REASONS.has(n.park_reason);
+        return (
+          <div
+            key={n.id}
+            style={{
+              display: "grid",
+              gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1.4fr) minmax(0, 1.6fr) auto",
+              gap: 12,
+              alignItems: "center",
+              padding: "12px 0",
+              borderTop: `1px solid ${D.border}`,
+            }}
+          >
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.text }}>
+                {n.payer_name || "Unknown payer"} · {noticeAmount(n)}
+              </div>
+              <div style={{ fontSize: 13, color: D.muted, marginTop: 2, overflowWrap: "anywhere" }}>
+                {n.memo ? `Memo: ${n.memo}` : "No memo"}
+                {n.received_at ? ` · ${new Date(n.received_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : ""}
+              </div>
+              <div style={{ marginTop: 6 }}>
+                <span style={sBadge(alert ? "#FEE2E2" : "#FEF3C7", alert ? D.red : D.amber)}>
+                  {NOTICE_REASON_LABELS[n.park_reason] || n.park_reason || "Needs review"}
+                </span>
+                {n.apply_error && <span style={{ fontSize: 12, color: D.red, marginLeft: 8 }}>{n.apply_error}</span>}
+              </div>
+            </div>
+            <div style={{ minWidth: 0 }}>
+              {ordered.length ? (
+                <select
+                  aria-label={`Invoice for ${n.payer_name || "payer"} ${noticeAmount(n)}`}
+                  value={selected}
+                  onChange={(e) => setChoice((prev) => ({ ...prev, [n.id]: e.target.value }))}
+                  style={sInput(isMobile)}
+                  disabled={busy === n.id}
+                >
+                  {ordered.map((c) => (
+                    <option key={c.invoice_id} value={c.invoice_id}>{noticeCandidateLabel(c)}</option>
+                  ))}
+                </select>
+              ) : (
+                <div style={{ fontSize: 13, color: D.muted }}>No candidate invoices — record it from the invoice if it exists, or ignore.</div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: isMobile ? "stretch" : "flex-end" }}>
+              <button
+                type="button"
+                style={{ ...sBtn(D.heading, D.white, isMobile), flex: isMobile ? 1 : undefined, opacity: !ordered.length || busy === n.id ? 0.5 : 1 }}
+                disabled={!ordered.length || busy === n.id}
+                onClick={() => apply(n)}
+              >
+                Apply &amp; send receipt
+              </button>
+              <button
+                type="button"
+                style={{ ...sBtn(D.card, D.text, isMobile), border: `1px solid ${D.border}`, flex: isMobile ? 1 : undefined, opacity: busy === n.id ? 0.5 : 1 }}
+                disabled={busy === n.id}
+                onClick={() => ignore(n)}
+              >
+                Ignore
+              </button>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
