@@ -10415,9 +10415,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const portalUrl = publicPortalUrl();
     let reportUrl = portalUrl;
     let reportToken = null;
-    // Computed BEFORE the mint: it depends only on the record's template
-    // version + status, and the token-failure bell below must know whether
-    // this visit's completion text is actually withheld by a failed mint.
+    // Retained for the withhold branch ahead of the SMS lane: the bell for a
+    // failed mint fires THERE (where the completion text is actually
+    // withheld), not here — a mint failure on a visit that was never going to
+    // text (internal-only, no phone, already handled) is a log line, not a
+    // "text withheld" bell (GitHub Codex r1 P1).
+    let reportTokenMintError = null;
     const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
     // delivery_mode 'disabled' (typed kill switch) suppresses the customer
     // report entirely — don't mint a public token at all (Codex P2). The
@@ -10428,24 +10431,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         reportToken = await ensureReportToken(record.id);
         if (reportToken) reportUrl = `${portalUrl}/report/${reportToken}`;
       } catch (err) {
+        // Post-commit: the visit still completes. A report-v1 visit's
+        // completion text is WITHHELD below (completionSmsWithheldForMissing-
+        // ReportToken) so the customer is not told "your report is ready"
+        // with a link to the portal home; that branch raises the bell.
+        reportTokenMintError = err;
         logger.error(`[dispatch] service report token mint failed: ${err.message}`);
-        // Post-commit and best-effort (never throws): the visit still
-        // completes, but a report-v1 visit's completion text is WITHHELD
-        // below (completionSmsWithheldForMissingReportToken) so the customer
-        // is not told "your report is ready" with a link to the portal home.
-        // This bell is therefore the only signal that anyone still owes them
-        // the report — same dedupe/transport as the email and PDF lane
-        // alerts. Bells ONLY when the failed mint withholds that text
-        // (pre-push Codex P1): a legacy visit keeps sending its portal-home
-        // text, so its mint failure is a log line, not a "text withheld" bell.
-        if (completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
-          const { alertServiceReportTokenMintFailed } = require('../services/service-report/failure-alerts');
-          await alertServiceReportTokenMintFailed({
-            serviceRecordId: record.id,
-            customerId: svc.customer_id,
-            error: err,
-          });
-        }
       }
     }
     // Auto-publish tech-captured visual moments to the customer report
@@ -12344,8 +12335,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // null-guards an empty url). Withhold the text instead. Marked 'failed'
       // — the existing one-shot vocabulary (closeout-status reads it as
       // completion_sms_failed, and it is NOT completionSmsAlreadyHandled, so a
-      // re-completion after the mint recovers sends normally). The bell for
-      // this state fired at the mint site; no separate SMS-failure bell.
+      // re-completion after the mint recovers sends normally). This branch
+      // is the only place the token-mint bell fires: it is reached only when
+      // a text WOULD have gone out (phone on file, not suppressed, not already
+      // handled), so the bell always corresponds to a real withheld text —
+      // same dedupe/transport as the email and PDF lane alerts. No separate
+      // SMS-failure bell on this path.
       const withheldDelta = {
         completionSmsStatus: 'failed',
         completionSmsError: 'report token unavailable — completion text withheld',
@@ -12357,6 +12352,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       record.structured_notes = withheldNotes;
       await markBundledReviewFailed();
       logger.error(`[dispatch] Completion SMS withheld for service_record ${record.id}: report token unavailable`);
+      const { alertServiceReportTokenMintFailed } = require('../services/service-report/failure-alerts');
+      await alertServiceReportTokenMintFailed({
+        serviceRecordId: record.id,
+        customerId: svc.customer_id,
+        error: reportTokenMintError || 'report token unavailable',
+      });
     } else if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
