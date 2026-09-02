@@ -123,7 +123,8 @@ async function recordManualPayment(id, {
   // Append operator note to invoice notes (don't clobber existing notes).
   let nextNotes = invoice.notes || null;
   if (trimmedNote) {
-    const stamp = new Date().toISOString().slice(0, 10);
+    // ET wall-clock date (the one convention — utils/datetime-et), not UTC.
+    const stamp = etDateString();
     const line = `[${stamp}] ${method.toUpperCase()}${trimmedReference ? ` ${trimmedReference}` : ''}: ${trimmedNote}`;
     nextNotes = nextNotes ? `${nextNotes}\n${line}` : line;
   }

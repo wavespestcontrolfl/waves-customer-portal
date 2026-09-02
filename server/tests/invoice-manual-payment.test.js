@@ -171,13 +171,13 @@ describe('recordManualPayment — settlement', () => {
 
   test('happy path returns { invoice, receipt } and fires both receipt legs by default', async () => {
     const { activity } = settle(openInvoice());
-    const out = await recordManualPayment('inv-1', { method: 'zelle', reference: 'Raakesh D', recordedBy: 'zelle-notice-reconciler' });
+    const out = await recordManualPayment('inv-1', { method: 'zelle', reference: 'Pat Doe', recordedBy: 'zelle-notice-reconciler' });
     expect(out.invoice).toBeTruthy();
     expect(out.receipt).toEqual({ email: { ok: true }, sms: { ok: true } });
     expect(sendReceiptEmail).toHaveBeenCalledWith('inv-1');
     expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv-1', expect.objectContaining({ force: true, hasEmailLeg: true, operatorInitiated: true }));
     const descriptions = activity.insert.mock.calls.map(([r]) => r.description);
-    expect(descriptions[0]).toMatch(/Manual payment recorded for WPC-2026-0400 \(\$117\.00 via zelle · ref Raakesh D\) — zelle-notice-reconciler/);
+    expect(descriptions[0]).toMatch(/Manual payment recorded for WPC-2026-0400 \(\$117\.00 via zelle · ref Pat Doe\) — zelle-notice-reconciler/);
     expect(descriptions[1]).toMatch(/Receipt sent for invoice WPC-2026-0400 \(email \+ sms\)/);
   });
 
