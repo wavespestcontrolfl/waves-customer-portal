@@ -119,8 +119,13 @@ describe('investigator output schema', () => {
   test('send-accepted terms force send-first ordering — the deadlock combination is rejected (plan L788, Codex PR r1 P1)', () => {
     const deadlock = goodPath({ terms_accepted_by_send: true, execution_after_send: false, legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
     expect(validateInvestigation(good({ paths: [deadlock] })).valid).toBe(false);
-    const sendFirst = goodPath({ terms_accepted_by_send: true, execution_after_send: true, legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
+    const outreach = { acquisition_type: 'resource_outreach', link_type: 'resource', account_required: false, email_verification: false };
+    const sendFirst = goodPath({ ...outreach, terms_accepted_by_send: true, execution_after_send: true, legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
     expect(validateInvestigation(good({ paths: [sendFirst] })).valid).toBe(true);
+    // …and only an OUTREACH path has a send that could accept terms: a
+    // signup-only type with terms_accepted_by_send is rejected (Codex #3754 r1 P1)
+    const signupSend = goodPath({ terms_accepted_by_send: true, execution_after_send: true, legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
+    expect(validateInvestigation(good({ paths: [signupSend] })).valid).toBe(false);
     // …and a send that legally accepts terms REQUIRES the attestation — an
     // internally inconsistent response cannot bypass the hash gate (Codex PR r15 P1)
     const noAttestation = goodPath({ terms_accepted_by_send: true, execution_after_send: true, legal_attestation: false });

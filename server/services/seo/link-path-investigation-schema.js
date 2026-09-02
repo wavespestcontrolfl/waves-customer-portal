@@ -151,6 +151,14 @@ const PATH_SCHEMA = {
       if: { properties: { terms_accepted_by_send: { const: true } } },
       then: { properties: { legal_attestation: { const: true } } },
     },
+    // …and only an OUTREACH path HAS a send that could accept terms: a
+    // signup-only type (paid_listing, membership, …) carrying
+    // terms_accepted_by_send would bind its terms to an event that never
+    // occurs, leaving the prerequisite graph unsatisfiable.
+    {
+      if: { properties: { terms_accepted_by_send: { const: true } } },
+      then: { properties: { acquisition_type: { enum: [...OUTREACH_ACQUISITION_TYPES] } } },
+    },
     // §3.2 type consistency (the §6.3 validity step re-asserts this in step 4).
     {
       if: { properties: { acquisition_type: { enum: ['paid_listing', 'membership', 'association', 'sponsorship'] } } },

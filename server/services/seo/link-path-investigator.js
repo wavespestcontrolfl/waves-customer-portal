@@ -289,7 +289,7 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
 const SYSTEM_PROMPT = `${WAVES_CONTEXT}
 
 You are the backlink path investigator. Given fetched pages from ONE candidate website, decide whether Waves can reproduce a backlink there and HOW — as zero or more acquisition paths. Rules:
-- Report only what the pages show. Quote price and renewal text VERBATIM (never compute or convert amounts; never emit a number for a price).
+- Report only what the pages show. Quote price and renewal text VERBATIM as displayed — digits inside those quoted strings are expected; never compute, convert or round an amount, and never invent a standalone number the page does not show.
 - currency_evidence is only an AUTHORITATIVE marker you actually observed (USD/US$ in the quote, JSON-LD priceCurrency, a payment processor's currency). A bare "$" is NOT evidence.
 - "not_reproducible" is a good answer (an editorial mention with no submission route, a private partnership); use verdict "watching" when a real path exists but is closed today (applications closed, waitlist) and say why.
 - replaces_path_id ONLY when you can see an existing path's submission URL is gone/redirected/renamed to a new one you are reporting.
@@ -1504,6 +1504,14 @@ async function investigatePaths(db, {
           // row now.
           const expected = claimState ? 'investigating' : domain.agent_state;
           if (!fresh || fresh.agent_state !== expected || (claimState && fresh.investigate_claim_token !== claimToken)) { staleClaim = true; return; }
+          // Lock order everywhere is prospect → path (worker.claim / report,
+          // saveDraft and the send valve all take the placement first, then
+          // settle through its path): this domain's UNLEASED placements are
+          // locked here, BEFORE the first path write below, so a settlement
+          // never waits on a placement while holding a path row a worker is
+          // about to settle through — the two can no longer deadlock, and a
+          // worker report after an external submission is never the victim.
+          await trx('seo_link_prospects').where({ domain_id: domain.id }).whereNull('claimed_at').forUpdate().select('id');
           const writtenIds = [];
           for (const p of writable) {
             // The model's price claims count only when the exact quote/marker
@@ -1833,7 +1841,13 @@ async function investigatePaths(db, {
             // path — failed probe, inconclusive terms, exhausted budget)
             // rechecks on the failure-backoff horizon, not the 30-day watch
             // cadence: the advertised rotated retry must actually be near.
-            let transientDowngrade = downgradeNote && (unstampedIds.size > 0 || tailDeferred);
+            // …and a `watching` the model returned OUTRIGHT while the pass
+            // left a path unverified (terms timeout, exhausted budget, an
+            // unread existing path) is just as transient: its short
+            // investigate_after would otherwise be masked by a 30-day
+            // watch_recheck_at, which the selector honors — the unverified
+            // path would sit untouched for a month.
+            let transientDowngrade = !!(downgradeNote && (unstampedIds.size > 0 || tailDeferred)) || (effectiveVerdict === 'watching' && unsettled);
             // THE CEILING: a domain still undecided after MAX consecutive
             // unsettled / no-progress passes PARKS FOR REVIEW on the normal
             // watch cadence — the chain ends (mask resets, backoff cleared)

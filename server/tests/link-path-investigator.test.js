@@ -20,6 +20,7 @@ let idSeq = 0;
 const uid = () => `00000000-0000-4000-8000-${String(++idSeq).padStart(12, '0')}`;
 
 function makeDb(seed = {}) {
+  const ops = []; // lock / write order log (table-level) for lock-order assertions
   const tables = {
     seo_link_domains: [], seo_link_acquisition_paths: [], seo_link_domain_sources: [],
     seo_competitor_backlinks: [], seo_link_prospects: [], seo_link_attempts: [],
@@ -132,7 +133,7 @@ function makeDb(seed = {}) {
       _resolve: () => resolve(),
       whereNotIn(col, arr) { state.preds.push((row, get) => !arr.includes(get(row, col))); return q; },
       join(tableExpr, on1, on2) { state.join = { tableExpr, on1, on2 }; return q; },
-      forUpdate() { return q; },
+      forUpdate() { ops.push({ op: 'lock', table }); return q; },
       groupBy() { return q; },
       select(...cols) { state.select = cols; return q; },
       orderBy(col, dir) { state.order.push({ col, dir }); return q; },
@@ -140,6 +141,7 @@ function makeDb(seed = {}) {
       limit(n) { state.limit = n; return q; },
       async first() { return resolve()[0]; },
       async update(patch) {
+        ops.push({ op: 'update', table });
         const hit = tables[table].filter(matches);
         for (const row of hit) Object.assign(row, patch);
         return hit.length;
@@ -172,6 +174,7 @@ function makeDb(seed = {}) {
     return cb(trx);
   };
   db._tables = tables;
+  db._ops = ops;
   return db;
 }
 
@@ -2682,7 +2685,7 @@ describe('full run', () => {
       }
       return q;
     };
-    db.raw = inner.raw; db.ref = inner.ref; db.transaction = inner.transaction; db._tables = inner._tables;
+    db.raw = inner.raw; db.ref = inner.ref; db.transaction = inner.transaction; db._tables = inner._tables; db._ops = inner._ops;
     expect(await settleRetiredPlacements(db, { pathIds: [old.id], successor: next, now: NOW })).toBe(0);
     expect(drafted).toMatchObject({ path_id: old.id, outreach_status: 'sending', outreach_send_token: 'tok-9', outreach_to_email: 'ed@example.com' }); // the token the finalizer will match survives
   });
@@ -2856,6 +2859,47 @@ describe('full run', () => {
     expect(fetched.filter((u) => /hint-/.test(u))[0]).toBe(leftover.source_detail); // the uncovered hint leads the queue
     expect(dom().agent_state).toBe('not_reproducible');
     expect(touches.every((t) => !t.covered_at)).toBe(true); // the close CONCLUDED the generation: the next recheck re-reads hints uncovered-first (r29)
+  });
+
+  // ---- Codex #3754 round 1 ----------------------------------------------
+
+  test('the write phase locks the domain\'s unleased placements BEFORE its first path write — prospect → path, the worker\'s order (Codex #3754 r1 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating' });
+    const free = { acquisition_type: 'self_service_account', submission_url: 'https://example.com/add-listing', account_required: true, email_verification: false, payment_required: false, fee_scope: null, renewal_period: null, price_text: null, price_page_url: null, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null };
+    const path = {
+      id: uid(), domain_id: d.id, ...free, link_type: 'directory', legal_attestation: false, agent_completable: true, terms_accepted_by_send: false, execution_after_send: true,
+      path_key: 'self_service_account:https://example.com/add-listing', superseded_by: null, baseline: false, confidence: 0.6,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const placement = { id: uid(), domain_id: d.id, path_id: path.id, claimed_at: null, link_type: 'directory', target_url: path.submission_url, automation_policy: 'submit_free', outreach_status: 'none' };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [path], seo_link_prospects: [placement] });
+    const gated = modelPath({ ...free, email_verification: true, confidence: 0.8, quotes: [], reasons: 'account signup, email verification' }); // same identity, a §3.2 input changed in place
+    const r = await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([gated]) }) }));
+    expect(path.revision).toBe(2); // the in-place change landed
+    const ops = db._ops;
+    const firstProspectLock = ops.findIndex((o) => o.op === 'lock' && o.table === 'seo_link_prospects');
+    const firstPathWrite = ops.findIndex((o) => o.op === 'update' && o.table === 'seo_link_acquisition_paths');
+    expect(firstPathWrite).toBeGreaterThan(-1);
+    expect(firstProspectLock).toBeGreaterThan(-1);
+    expect(firstProspectLock).toBeLessThan(firstPathWrite);
+  });
+
+  test('a watching verdict the model returned outright still rechecks on the failure backoff when the pass left a path unverified (Codex #3754 r1 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating' });
+    const unread = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/deep/hidden-join', link_type: 'directory',
+      path_key: 'paid_listing:https://example.com/deep/hidden-join', superseded_by: null, baseline: false, confidence: 0.6,
+      last_investigated_at: new Date('2026-06-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [unread] });
+    const fetcher = async (url) => (url.includes('hidden-join') ? { status: 500, finalUrl: url, html: null, blocked: false, error: 'http_500' } : okFetch(url));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: { ...verdictOf([], 'watching'), watch_reason: 'applications closed' } }) }));
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('watching');
+    expect(dom.investigate_after).toBeTruthy(); // the unsettled pass rides the backoff…
+    expect(dom.watch_recheck_at.getTime() - NOW.getTime()).toBeLessThanOrEqual(2 * 24 * 60 * 60 * 1000); // …and the selector's horizon agrees: not 30 days out
   });
 
   // ---- Codex PR #3687 round 30 (carried into PR 2 of the split) ------------

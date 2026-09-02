@@ -935,6 +935,21 @@ describe('lost-link recovery', () => {
       expect(r.reasons[0].reason).toContain(state);
       expect(r.results[0].outcome).toBe(state === 'investigating' ? 'deferred' : 'skipped'); // only a terminal outcome is stamped by the monitor
     }
+    // …and with the investigator ON, a domain it has not reached yet (`new`) defers the same way — never a terminal skip
+    // the monitor would stamp as handled (Codex #3754 r1 P1)
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((g) => g === 'linkInvestigator');
+    try {
+      const updates = [];
+      makeDb({
+        seo_link_domains: () => ({ agent_state: 'new' }),
+        seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', domain_id: 'd1', path_id: 'path-rec', target_url: 'https://blog.example/post' }; if (op === 'update') { updates.push(st.payload); return 1; } },
+        seo_link_acquisition_paths: () => { throw new Error('the domain state is checked before any path'); },
+      });
+      const r = await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+      expect(r.results[0].outcome).toBe('deferred');
+      expect(updates).toEqual([]);
+    } finally { spy.mockRestore(); }
   });
 
   test('board lookup matches every spelling of the target page; canonical insert form', () => {
