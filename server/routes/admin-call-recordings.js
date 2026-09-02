@@ -243,7 +243,21 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
       const rows = customerId
         ? await timeline.update({ customer_id: customerId })
         : await timeline.del();
-      return { timelineRows: rows };
+      // The operator's correction IS the fix for an earlier
+      // customer_creation_failed: its card resolves here (no reprocess runs
+      // from this endpoint), and the review flag clears only when no other
+      // open card still needs a person.
+      const repaired = await trx('triage_items')
+        .where({ call_log_id: call.id, reason_code: 'customer_creation_failed' })
+        .whereIn('status', ['open', 'in_progress'])
+        .update({ status: 'resolved', resolved_at: new Date(), resolution_note: customerId ? `Customer set by operator (${customerId})` : 'Unlinked by operator' });
+      if (repaired > 0) {
+        await trx('call_log')
+          .where({ id: call.id })
+          .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
+          .update({ review_status: null });
+      }
+      return { timelineRows: rows, repaired };
     });
     if (!moved) {
       return res.status(409).json({ error: 'A pass is still working this call. Change the customer once it finishes.', reason: 'already_processing' });

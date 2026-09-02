@@ -249,6 +249,12 @@ describe('decideRecordingAttach (pure)', () => {
     expect(decideRecordingAttach(parked, { recording_sid: REC_2 })).toEqual({ action: 'duplicate', reason: 'already_parked' });
   });
 
+  test('a finished downstream failure is load-bearing: a different recording is parked, not swapped in', () => {
+    for (const status of ['customer_creation_failed', 'lead_creation_failed']) {
+      expect(decideRecordingAttach({ recording_sid: REC_1, recording_url: URL_1, processing_status: status }, { recording_sid: REC_2 })).toEqual({ action: 'park', reason: `processing_status_${status}` });
+    }
+  });
+
   test('the same RecordingSid again is a duplicate — never a rewrite', () => {
     for (const status of [null, 'pending', 'processing', 'processed', 'voicemail']) {
       expect(decideRecordingAttach({ recording_sid: REC_1, recording_url: URL_1, processing_status: status }, { recording_sid: REC_1 }).action).toBe('duplicate');

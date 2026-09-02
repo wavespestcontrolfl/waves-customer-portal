@@ -201,7 +201,11 @@ function isPanQuarantinedRow(row) {
 // and no automatic pass will ever run again. Every OTHER status (NULL,
 // pending, voicemail, spam, no_transcription, extraction_failed) re-transcribes
 // from recording_url on its next pass, so a replacement stays consistent.
-const RECORDING_LOAD_BEARING_STATUSES = new Set(['processing', 'processed']);
+// …and the finished downstream-failure states: extraction ran and cards,
+// leads or notifications may already exist for that audio, so a different
+// recording is parked for a deliberate decision, never swapped in and
+// auto-reprocessed.
+const RECORDING_LOAD_BEARING_STATUSES = new Set(['processing', 'processed', 'customer_creation_failed', 'lead_creation_failed']);
 
 function listedRecordingReason(metadata, sid) {
   try {

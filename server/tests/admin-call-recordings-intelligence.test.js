@@ -52,6 +52,7 @@ function mockDb(firstResults) {
       where(...a) { if (typeof a[0] === 'function') { a[0].call(b); return b; } b.wheres.push(a); return b; },
       whereNull() { return b; },
       whereIn() { return b; },
+      whereNotExists() { return b; },
       whereRaw(sql, bindings) { b.wheres.push(['raw', sql, bindings]); return b; },
       first: () => Promise.resolve(queue.shift() ?? null),
       update: (patch) => { updates.push({ table, patch, wheres: [...b.wheres] }); return Object.assign(Promise.resolve(1), { catch: () => Promise.resolve(1) }); },
@@ -69,6 +70,20 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockRole = 'admin';
   isEnabled.mockReturnValue(true);
+});
+
+describe('PUT /calls/:id/customer repairs an earlier customer_creation_failed', () => {
+  test('the correction resolves that card in the same transaction and clears review when nothing else is open', async () => {
+    const updates = mockDb([{ id: CALL_ID, customer_id: null, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
+      expect(res.status).toBe(200);
+    });
+    const card = updates.find((u) => u.table === 'triage_items' && u.patch.status === 'resolved');
+    expect(card).toBeDefined();
+    expect(card.patch.resolution_note).toContain(CUSTOMER_ID);
+    expect(updates.find((u) => u.table === 'call_log' && u.patch.review_status === null)).toBeDefined();
+  });
 });
 
 describe('PUT /calls/:id/customer requires an explicit customer_id', () => {

@@ -302,6 +302,21 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(String(flag[0])).toContain('"recording_quarantined": false');
   });
 
+  test('a call with no primary recording completes once every listed recording is deleted', async () => {
+    const processor = require('../services/call-recording-processor');
+    const P = 'REparked000000000000000000000013';
+    db.raw.mockClear();
+    db.__state.call = {
+      id: 'c-list-only', recording_url: null, recording_sid: null,
+      metadata: { additional_recordings: [{ recording_sid: P, recording_url: 'https://api.twilio.com/p.mp3' }] },
+      transcription_metadata: { pan_detected: true, pan_notified: true },
+    };
+    const out = await processor.quarantineCardRecording(db.__state.call, { source: 'transcript_scrub' });
+    expect(out.parked).toEqual({ deleted: 1, pending: 0 });
+    const complete = db.raw.mock.calls.find(([sql]) => String(sql).includes('"recording_quarantined": true'));
+    expect(complete).toBeDefined();
+  });
+
   test('an unstamped call still proceeds into the Twilio lookup', async () => {
     const processor = require('../services/call-recording-processor');
     db.__state.call = { id: 'c-clean', recording_url: null, transcription_metadata: null };

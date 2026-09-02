@@ -673,6 +673,21 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
       }
     } catch (e) { logger.warn(`[call-proc] PAN quarantine notify failed: ${e.message}`); }
   }
+  // A call with no primary recording (a cached-transcript pass with audio
+  // parked beside it) never had twilioDeleted to flip the row complete; once
+  // every listed recording is gone and nothing is owed, complete it here —
+  // in SQL, on the row's current state, so a debt written meanwhile wins.
+  if ((!sid || twilioDeleted) && parked.pending === 0 && listedEntries.length) {
+    try {
+      await db('call_log').where({ id: call.id })
+        .whereRaw("COALESCE(jsonb_array_length(transcription_metadata -> 'quarantine_owed_sids'), 0) = 0")
+        .whereRaw("COALESCE(transcription_metadata ->> 'quarantine_lists_unread', 'false') <> 'true'")
+        .whereRaw("NOT (COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> '[{\"delete_pending\": true}]'::jsonb OR COALESCE(metadata -> 'superseded_recordings', '[]'::jsonb) @> '[{\"delete_pending\": true}]'::jsonb)")
+        .update({ transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || '{\"recording_quarantined\": true}'::jsonb"), updated_at: new Date() });
+    } catch (err) {
+      logger.warn(`[call-proc] PAN quarantine: completion recompute skipped for call ${call.id}: ${err.message}`);
+    }
+  }
   return { quarantined: true, twilioDeleted, alreadyQuarantined, parked };
 }
 
