@@ -177,6 +177,9 @@ Per file, with the proving test.
   call's derived timeline entry to the new customer (an unlink removes it),
   and a failed voice-thread re-home is reported in the response (the hourly
   relink sweep retries it) instead of being swallowed.
+- Pre-push Codex round 18 (1 P1, fixed): the link and the timeline move
+  commit in one transaction; a failed move rolls the relink back and
+  surfaces as an error.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 

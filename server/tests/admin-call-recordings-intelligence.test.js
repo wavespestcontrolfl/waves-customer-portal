@@ -67,6 +67,8 @@ function mockDb(firstResults) {
     return b;
   });
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  // The relink runs call_log + timeline in one transaction.
+  db.transaction = jest.fn(async (fn) => fn(db));
   return updates;
 }
 
@@ -205,6 +207,22 @@ describe('PUT /calls/:id/customer', () => {
     expect(timeline.patch).toEqual({ __deleted: true });
   });
 
+  test('a timeline move that fails rolls the relink back and surfaces as an error, never a half-applied success', async () => {
+    mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
+    const inner = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const b = inner(table);
+      if (table === 'customer_interactions') b.update = () => Promise.reject(new Error('timeline write failed'));
+      return b;
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
+      expect(res.status).toBe(500);
+      expect((await res.json()).error).toMatch(/timeline write failed/);
+    });
+    expect(require('../services/conversations').syncVoiceMessageForCall).not.toHaveBeenCalled();
+  });
+
   test('refuses a relink while a pass holds the claim', async () => {
     const updates = mockDb([{ id: CALL_ID, customer_id: null, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
     // The conditional update matches no rows while processing_status = processing.
@@ -214,6 +232,7 @@ describe('PUT /calls/:id/customer', () => {
         update: (patch) => { updates.push({ table, patch }); return Promise.resolve(0); } };
       return b;
     });
+    db.transaction = jest.fn(async (fn) => fn(db));
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
       expect(res.status).toBe(409);

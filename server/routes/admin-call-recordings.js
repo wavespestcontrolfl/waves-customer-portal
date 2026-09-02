@@ -294,27 +294,33 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
     // resolved customer for the leads, contacts and texts it is about to
     // write, so a mid-pass relink would leave those on the old customer.
     // The office retries once the pass finishes (a few minutes at most).
-    const relinked = await db('call_log').where({ id: call.id })
-      .whereRaw("processing_status IS DISTINCT FROM 'processing'")
-      .update({
-        customer_id: customerId,
-        metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_link_override}', ?::jsonb, true)", [JSON.stringify(override)]),
-        updated_at: new Date(),
-      });
-    if (!relinked) {
+    // The link and the call's own timeline entry (customer_interactions,
+    // keyed on metadata.call_log_id and unique per call) change in ONE
+    // transaction: the row is derived from the call, a reprocess cannot
+    // re-mint it under the new customer while it sits under the old one,
+    // and a relink that commits without it would report success on a
+    // half-applied correction. Any failure rolls both back and surfaces.
+    const moved = await db.transaction(async (trx) => {
+      const relinked = await trx('call_log').where({ id: call.id })
+        .whereRaw("processing_status IS DISTINCT FROM 'processing'")
+        .update({
+          customer_id: customerId,
+          metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_link_override}', ?::jsonb, true)", [JSON.stringify(override)]),
+          updated_at: new Date(),
+        });
+      if (!relinked) return null;
+      const timeline = trx('customer_interactions')
+        .where({ interaction_type: 'call' })
+        .whereRaw("metadata ->> 'call_log_id' = ?", [String(call.id)]);
+      const rows = customerId
+        ? await timeline.update({ customer_id: customerId })
+        : await timeline.del();
+      return { timelineRows: rows };
+    });
+    if (!moved) {
       return res.status(409).json({ error: 'A pass is still working this call. Change the customer once it finishes.', reason: 'already_processing' });
     }
-    // The call's own timeline entry (customer_interactions, keyed on
-    // metadata.call_log_id and unique per call) moves with the link: to the
-    // new customer, or away entirely on an unlink — the row is derived
-    // from the call, so a reprocess cannot re-mint it under the new
-    // customer while it still sits under the old one.
-    const timelineQuery = () => db('customer_interactions')
-      .where({ interaction_type: 'call' })
-      .whereRaw("metadata ->> 'call_log_id' = ?", [String(call.id)]);
-    const timelineMoved = customerId
-      ? await timelineQuery().update({ customer_id: customerId }).catch(() => 0)
-      : await timelineQuery().del().catch(() => 0);
+    const timelineMoved = moved.timelineRows;
     const warnings = [];
     if (call.twilio_call_sid) {
       // Best-effort here; the hourly call-log relink sweep re-homes any
