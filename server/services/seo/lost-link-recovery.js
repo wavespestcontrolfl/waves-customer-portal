@@ -41,6 +41,18 @@ async function claimableOutreachPath(trx, row, linkType) {
   // lane: a signup-lane path under an outreach row would leave path and
   // execution semantics inconsistent
   const stands = (p) => !!p && !p.superseded_by && p.agent_completable !== false && registry.isStandingConfidence(p.confidence) && p.link_type === registry.pathLinkTypeFor(linkType);
+  // The DOMAIN's registry state gates the reopen before any path does: the
+  // claim refuses every placement under a Watch / Reject / not_reproducible /
+  // investigating domain, and the monitor stamps a queued recovery as
+  // terminal — a reopen under such a domain would sit unclaimable forever.
+  // Owner rulings and a dead domain refuse it; an investigation in flight
+  // defers it to the next scan (the sweep re-evaluates once it settles).
+  if (row.domain_id) {
+    const dom = await trx('seo_link_domains').where({ id: row.domain_id }).first('agent_state');
+    const state = dom && dom.agent_state;
+    if (state === 'investigating') return { defer: `registry domain is ${state} — deferred until the investigation settles` };
+    if (worker.NON_CLAIMABLE_DOMAIN_STATES.includes(state)) return { refuse: `registry domain is ${state} — no worker may claim it, not reopened` };
+  }
   const cur = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first(...PATH_STANDING_COLUMNS) : null;
   if (stands(cur)) return {};
   if (!row.domain_id) return { path_id: null };
@@ -180,6 +192,7 @@ async function queueOne(loss, out, scoreMod) {
         // current path only when it already stands for a worker.
         const pathPatch = await claimableOutreachPath(trx, exists, reopenType);
         if (pathPatch.refuse) return { refused: pathPatch.refuse };
+        if (pathPatch.defer) return { deferred: pathPatch.defer };
         return trx('seo_link_prospects').where({ id: exists.id, status: 'lost' }).update({
           status: 'prospect',
           priority: 'high',
@@ -201,6 +214,11 @@ async function queueOne(loss, out, scoreMod) {
           updated_at: new Date(),
         });
       });
+      if (reopened && reopened.deferred) {
+        out.skipped++;
+        out.reasons.push({ domain, reason: reopened.deferred });
+        return 'deferred';
+      }
       if (reopened && reopened.refused) {
         out.skipped++;
         out.reasons.push({ domain, reason: reopened.refused });

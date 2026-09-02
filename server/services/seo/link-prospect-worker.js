@@ -174,9 +174,12 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // is excluded too: a live claim would refresh the URL, unclassify the row
     // and defer it (below) rather than lease it, so the preview must not show
     // it as claimable — least of all under the obsolete URL.
+    // …nor a placement whose LANE drifted from its path's (re-laned in place,
+    // same URL): a live claim would re-lane and defer it, so the preview
+    // must not show it — least of all as this lane's work.
     // Like the live claim, the preview batches until `limit` valid rows are
-    // collected or the candidates run out — the URL check runs after LIMIT,
-    // so a prefix of stale-URL rows must not hide valid rows below it.
+    // collected or the candidates run out — the URL and lane checks run
+    // after LIMIT, so a prefix of such rows must not hide valid rows below it.
     if (preview) {
       const out = [];
       const seen = [];
@@ -185,11 +188,13 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
         if (batch.length === 0) break;
         for (const r of batch) seen.push(r.id);
         const batchPathIds = [...new Set(batch.map((r) => r.path_id).filter(Boolean))];
-        const batchPaths = batchPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', batchPathIds).select('id', 'submission_url') : [];
+        const batchPaths = batchPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', batchPathIds).select('id', 'submission_url', 'link_type') : [];
         const liveUrlOf = new Map(batchPaths.map((p) => [p.id, p.submission_url]));
+        const laneOf = new Map(batchPaths.map((p) => [p.id, p.link_type || null]));
         for (const r of batch) {
           const liveUrl = r.path_id ? liveUrlOf.get(r.path_id) : null;
-          if (!(liveUrl && r.target_url !== liveUrl)) out.push({ ...r });
+          const lane = r.path_id ? laneOf.get(r.path_id) : null;
+          if (!(liveUrl && r.target_url !== liveUrl) && !(lane && lane !== r.link_type)) out.push({ ...r });
         }
       }
       return out;
@@ -546,5 +551,5 @@ async function releaseClaims(claims = []) {
 module.exports = {
   claim, report, sweepExpiredClaims, releaseClaims, settleReleasedPlacements, mapReportToPatch, businessProfile, isValidEmail,
   effectiveAutomationPolicy,
-  WORKER, SIGNUP_TYPES, OUTREACH_TYPES, MAX_ATTEMPTS,
+  WORKER, SIGNUP_TYPES, OUTREACH_TYPES, MAX_ATTEMPTS, NON_CLAIMABLE_DOMAIN_STATES,
 };

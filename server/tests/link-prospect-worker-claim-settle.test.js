@@ -337,6 +337,17 @@ test('a read-only preview excludes a placement whose target_url lags its live pa
   expect((await worker.claim({ n: 1, type: 'signup', preview: true })).map((r) => r.id)).toEqual(['r-ok']);
 });
 
+test('a read-only preview excludes a placement whose lane drifted from its path\'s — a live claim would re-lane and defer it (Codex #3720 r8 P2)', async () => {
+  const relaned = { id: 'p-x', domain_id: 'd1', submission_url: 'https://x.example/add', superseded_by: null, link_type: 'editorial', confidence: 0.7, revision: 2 };
+  const fine = { id: 'p-y', domain_id: 'd2', submission_url: 'https://y.example/add', superseded_by: null, link_type: 'directory', confidence: 0.7, revision: 1 };
+  mockStore.seo_link_acquisition_paths.push(relaned, fine);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', last_classified_at: new Date('2026-08-01'), priority: 'high', domain_rating: 40, outreach_status: 'none' };
+  const drifted = { ...base, id: 'r-x', target_domain: 'x.example', path_id: 'p-x', target_url: 'https://x.example/add' };
+  mockStore.seo_link_prospects.push(drifted, { ...base, id: 'r-y', target_domain: 'y.example', path_id: 'p-y', target_url: 'https://y.example/add', domain_rating: 30 });
+  expect((await worker.claim({ n: 1, type: 'signup', preview: true })).map((r) => r.id)).toEqual(['r-y']); // batched past the drifted row
+  expect(drifted).toMatchObject({ link_type: 'directory', claimed_at: null }); // a preview writes nothing
+});
+
 test('a read-only preview never reports a placement on a superseded path as claimable (Codex #3720 r2 P2)', async () => {
   const old = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old', superseded_by: 'p-new', link_type: 'directory', confidence: 0.7 };
   const live = { id: 'p-new', domain_id: 'd1', submission_url: 'https://example.com/new', superseded_by: null, link_type: 'directory', confidence: 0.7 };
