@@ -112,6 +112,18 @@ describe('isTrustedZelleSender', () => {
     expect(isTrustedZelleSender({ from_address: 'alerts@capitalone.com', authentication_results: forgedDkim })).toBe(false);
   });
 
+  test('dkim text nested in a quoted envelope address or a comment never counts (structural parse)', () => {
+    const inQuotedMailfrom = 'mx.google.com; dkim=none; spf=pass smtp.mailfrom="dkim=pass header.i=@capitalone.com"@evil.example';
+    expect(isTrustedZelleSender({ from_address: 'alerts@capitalone.com', authentication_results: inQuotedMailfrom })).toBe(false);
+    const inComment = 'mx.google.com; dkim=fail (dkim=pass header.i=@capitalone.com) header.i=@evil.example; spf=pass smtp.mailfrom=evil.example';
+    expect(isTrustedZelleSender({ from_address: 'alerts@capitalone.com', authentication_results: inComment })).toBe(false);
+    const inArc = 'mx.google.com; arc=pass (i=1 dkim=pass dkdomain=capitalone.com header.i=@capitalone.com); dkim=none; spf=pass smtp.mailfrom=evil.example';
+    expect(isTrustedZelleSender({ from_address: 'alerts@capitalone.com', authentication_results: inArc })).toBe(false);
+    // A genuine clause with a comment inside it still passes.
+    const genuine = 'mx.google.com; dkim=pass (2048-bit key; unprotected) header.i=@notification.capitalone.com header.s=k1 header.b="ab;cd"; spf=pass smtp.mailfrom=gmail.com';
+    expect(isTrustedZelleSender({ from_address: 'capitalone@notification.capitalone.com', authentication_results: genuine })).toBe(true);
+  });
+
   test('forwarder SPF alone (DKIM broken) → not trusted', () => {
     const spfOnly = 'mx.google.com; dkim=fail header.i=@notification.capitalone.com; spf=pass smtp.mailfrom="owner+caf_=contact=wavespestcontrol.com@gmail.com"';
     expect(isTrustedZelleSender({ from_address: 'capitalone@notification.capitalone.com', authentication_results: spfOnly })).toBe(false);
