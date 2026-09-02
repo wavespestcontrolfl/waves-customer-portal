@@ -10415,6 +10415,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const portalUrl = publicPortalUrl();
     let reportUrl = portalUrl;
     let reportToken = null;
+    // Computed BEFORE the mint: it depends only on the record's template
+    // version + status, and the token-failure bell below must know whether
+    // this visit's completion text is actually withheld by a failed mint.
+    const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
     // delivery_mode 'disabled' (typed kill switch) suppresses the customer
     // report entirely — don't mint a public token at all (Codex P2). The
     // record still exists; flipping the mode back later can mint on demand.
@@ -10426,20 +10430,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (err) {
         logger.error(`[dispatch] service report token mint failed: ${err.message}`);
         // Post-commit and best-effort (never throws): the visit still
-        // completes, but the report-lane completion text is WITHHELD below
-        // (completionSmsWithheldForMissingReportToken) so the customer is not
-        // told "your report is ready" with a link to the portal home. This
-        // bell is therefore the only signal that anyone still owes them the
-        // report — same dedupe/transport as the email and PDF lane alerts.
-        const { alertServiceReportTokenMintFailed } = require('../services/service-report/failure-alerts');
-        await alertServiceReportTokenMintFailed({
-          serviceRecordId: record.id,
-          customerId: svc.customer_id,
-          error: err,
-        });
+        // completes, but a report-v1 visit's completion text is WITHHELD
+        // below (completionSmsWithheldForMissingReportToken) so the customer
+        // is not told "your report is ready" with a link to the portal home.
+        // This bell is therefore the only signal that anyone still owes them
+        // the report — same dedupe/transport as the email and PDF lane
+        // alerts. Bells ONLY when the failed mint withholds that text
+        // (pre-push Codex P1): a legacy visit keeps sending its portal-home
+        // text, so its mint failure is a log line, not a "text withheld" bell.
+        if (completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
+          const { alertServiceReportTokenMintFailed } = require('../services/service-report/failure-alerts');
+          await alertServiceReportTokenMintFailed({
+            serviceRecordId: record.id,
+            customerId: svc.customer_id,
+            error: err,
+          });
+        }
       }
     }
-    const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
     // Auto-publish tech-captured visual moments to the customer report
     // (owner 2026-08-27, dark ship — kill switch GATE_AUTO_PUBLISH_VISUAL_MOMENTS).
     // Runs BEFORE the PDF enqueue below so the rendered artifact carries
