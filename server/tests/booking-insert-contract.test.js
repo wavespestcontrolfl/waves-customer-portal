@@ -585,43 +585,63 @@ function isBlockFunction(arg) {
 // admin-schedule). Template TEXT is blanked too; a `${…}` expression inside
 // one is real code and is kept verbatim (nested braces balanced).
 function blankStringContents(source) {
+  // Index just past the string/template that OPENS at `i` (quote char at
+  // source[i]). Templates recurse through `${…}` expressions, which may
+  // themselves hold quoted strings (`${f('}')}`) or nested templates — a
+  // brace inside one must not close the expression early, or the rest of
+  // the expression would be blanked and a mutation inside it hidden
+  // (pre-push codex P1).
+  const endOfString = (i) => {
+    const q = source[i];
+    let j = i + 1;
+    while (j < source.length && source[j] !== q) {
+      if (source[j] === '\\') { j += 2; continue; }
+      if (q !== '`' && source[j] === '\n') return j; // unterminated quote: stop at the line
+      if (q === '`' && source.startsWith('${', j)) { j = endOfExpression(j + 2); continue; }
+      j += 1;
+    }
+    return j < source.length ? j + 1 : source.length;
+  };
+  // Index just past the `}` closing a template expression whose body
+  // starts at `k`, skipping strings/templates and balancing braces.
+  const endOfExpression = (k) => {
+    let depth = 1;
+    while (k < source.length && depth > 0) {
+      const ch = source[k];
+      if (ch === "'" || ch === '"' || ch === '`') { k = endOfString(k); continue; }
+      if (ch === '{') depth += 1;
+      else if (ch === '}') depth -= 1;
+      k += 1;
+    }
+    return k;
+  };
   let out = '';
   let i = 0;
   while (i < source.length) {
     const ch = source[i];
-    if (ch === "'" || ch === '"') {
-      let j = i + 1;
-      while (j < source.length && source[j] !== ch && source[j] !== '\n') { if (source[j] === '\\') j += 1; j += 1; }
-      out += ch + source.slice(i + 1, j).replace(/[^\n]/g, ' ') + (source[j] === ch ? ch : '');
-      i = j + 1;
-      continue;
-    }
-    if (ch === '`') {
-      out += ch;
-      let j = i + 1;
-      while (j < source.length && source[j] !== '`') {
-        if (source[j] === '\\') { out += '  '; j += 2; continue; }
-        if (source.startsWith('${', j)) {
-          let depth = 1;
-          let k = j + 2;
-          while (k < source.length && depth > 0) {
-            if (source[k] === '{') depth += 1;
-            else if (source[k] === '}') depth -= 1;
-            k += 1;
-          }
-          out += source.slice(j, k);
-          j = k;
+    if (ch !== "'" && ch !== '"' && ch !== '`') { out += ch; i += 1; continue; }
+    const j = endOfString(i);
+    const literal = source.slice(i, j);
+    if (ch !== '`') {
+      // quoted string: keep the quotes, blank the contents
+      out += literal.replace(/[^\n]/g, (c, idx) => (idx === 0 || (idx === literal.length - 1 && literal.endsWith(ch) && literal.length > 1) ? c : ' '));
+    } else {
+      // template: blank the text, keep every ${…} expression verbatim
+      let k = 1;
+      let piece = '`';
+      while (k < literal.length - (literal.endsWith('`') && literal.length > 1 ? 1 : 0)) {
+        if (literal.startsWith('${', k)) {
+          const exprEnd = endOfExpression(i + k + 2) - i;
+          piece += literal.slice(k, exprEnd);
+          k = exprEnd;
           continue;
         }
-        out += source[j] === '\n' ? '\n' : ' ';
-        j += 1;
+        piece += literal[k] === '\n' ? '\n' : ' ';
+        k += 1;
       }
-      out += source[j] === '`' ? '`' : '';
-      i = j + 1;
-      continue;
+      out += piece + (literal.endsWith('`') && literal.length > 1 ? '`' : '');
     }
-    out += ch;
-    i += 1;
+    i = j;
   }
   return out;
 }
@@ -1260,6 +1280,8 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nconst hint = 'price the visit (this customer\\'s lane does not bill)';\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nif (!ok) throw httpError(\`Can't price (\${why}) today\`);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`stamping \${mutate(data)}\`);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`x \${label('}')} \${mutate(data)}\`);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`x \${\`inner \${mutate(data)}\`}\`);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
     // …the three #3702 deferred shapes: a NAMED callback is opaque and fails closed…
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach(stripAttribution);\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nconst n = rows.indexOf(first);\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
