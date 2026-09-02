@@ -46,6 +46,28 @@ describe("useAdminViewport", () => {
     expect(
       document.documentElement.style.getPropertyValue("--keyboard-inset"),
     ).toBe("268px");
+    // Keyboard-sized inset → the fixed tab bar hides (index.css keys off
+    // this attribute) instead of lifting onto the keyboard.
+    expect(document.documentElement.hasAttribute("data-keyboard-open")).toBe(true);
+    clearAdminViewportVars();
+    expect(document.documentElement.hasAttribute("data-keyboard-open")).toBe(false);
+  });
+
+  it("keeps keyboard-open while iOS pans the visual viewport to a lower field", () => {
+    // Same 280px keyboard, but the pan has grown to 250px: the layout-bottom
+    // inset is now only 30px, yet the keyboard is still up.
+    vi.stubGlobal("visualViewport", {
+      height: 520,
+      offsetTop: 250,
+      scale: 1,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    syncAdminViewportVars();
+    expect(
+      document.documentElement.style.getPropertyValue("--keyboard-inset"),
+    ).toBe("30px");
+    expect(document.documentElement.hasAttribute("data-keyboard-open")).toBe(true);
   });
 
   it("does not mistake pinch zoom for a keyboard — falls back to the layout viewport", () => {
@@ -66,6 +88,7 @@ describe("useAdminViewport", () => {
     expect(
       document.documentElement.style.getPropertyValue("--keyboard-inset"),
     ).toBe("0px");
+    expect(document.documentElement.hasAttribute("data-keyboard-open")).toBe(false);
   });
 
   it("subscribes while active and clears the vars on unmount", () => {
