@@ -921,7 +921,17 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
         throw abort;
       }
       await clearLeadServiceRevertPending(estimate.id);
-      return untouched;
+      // The row just changed (restore + marker clear): every message must
+      // compose from it, never from the caller's pre-restore object
+      // (pre-push codex P0).
+      const restoredRow = await db('estimates').where({ id: estimate.id }).first();
+      if (!restoredRow) {
+        const abort = new Error('Estimate disappeared while restoring an add-on offer. Nothing was sent.');
+        abort.statusCode = 409;
+        abort.leadServiceAbort = true;
+        throw abort;
+      }
+      return { estimate: { ...restoredRow, status: estimate.status }, parkedKey: null };
     }
     if (estData?.serviceOptOut) return untouched; // already shaped once — never re-park on a resend
     const OptOut = require('../services/estimate-service-opt-out');
@@ -1023,6 +1033,18 @@ async function revertLeadServiceForSend(estimateId, serviceKey) {
   try {
     const row = await db('estimates').where({ id: estimateId }).first();
     if (!row || row.archived_at || row.price_locked_at) return false;
+    // Idempotent: the line may already be back — the customer restored it in
+    // the park-to-claim gap, or an earlier attempt restored it and stopped
+    // before clearing the marker. The estimate's own event log is the proof;
+    // restoring again would refuse forever (pre-push codex P1).
+    let parsed = {};
+    try { parsed = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {}); }
+    catch { parsed = {}; }
+    const { currentlyOptedOutKeys } = require('../services/estimate-service-opt-out');
+    if (!currentlyOptedOutKeys(parsed).includes(serviceKey)) {
+      logger.info(`[admin-estimates] lead-service revert: ${serviceKey} already on estimate ${estimateId}; nothing to restore`);
+      return true;
+    }
     const estimatePublic = require('./estimate-public');
     const preview = await estimatePublic.applyServiceMixChange({
       estimate: cloneEstimateRow(row), body: { serviceKey, included: true, dryRun: true }, actor: 'staff',
