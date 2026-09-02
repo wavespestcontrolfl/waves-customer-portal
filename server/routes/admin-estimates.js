@@ -278,17 +278,19 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
 // the pre-read check in assertEstimateSendable and by the send CLAIMS, which
 // re-assert it as a WHERE predicate so a revision that stamps CLIENT_FALLBACK
 // between the check and the claim loses the race instead of being delivered.
-// An AUTHORED proposal by PROVENANCE, not by the blob alone: PUT /:id/proposal
-// is the only path that turns a row into a commercial proposal and it stamps
-// category='COMMERCIAL' in the same UPDATE (the generic create/revise never
-// writes category — and since #3750 never persists a browser proposal
-// either). A legacy row whose browser-supplied proposal.enabled survived an
-// older generic save carries no such stamp and gets NO exemption — from the
-// pricing-authority gate, its telemetry, or the manual-review gate (GH codex
-// P1 on #3750).
+// The server-owned provenance marker PUT /:id/proposal stamps on every
+// proposal it writes. It is the ONLY evidence that the proposal editor
+// authored the price: `category` is not provenance (the estimator engine
+// and Agent Estimate also create COMMERCIAL rows, and an older generic
+// reuse could keep the category beside a browser-supplied blob — pre-push
+// codex P0), and since #3750 the generic create/revise never persists a
+// browser proposal at all. A proposal without the marker — legacy rows
+// included, until re-saved in the editor — gets NO exemption from the
+// pricing-authority gate, its telemetry, or the manual-review gate.
+const PROPOSAL_PROVENANCE_SOURCE = 'proposal-editor';
 function isAuthoredProposalRow(estimate = {}) {
-  if (String(estimate.category || '').toUpperCase() !== 'COMMERCIAL') return false;
-  return parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true;
+  const proposal = parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal;
+  return proposal?.enabled === true && proposal?.provenance?.source === PROPOSAL_PROVENANCE_SOURCE;
 }
 
 function sendRequiresServerPricingFor(estimate = {}) {
@@ -309,9 +311,10 @@ const SERVER_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
 // The proposal flag is compared as JSONB to the literal true — never cast:
 // a legacy or malformed value would make ::boolean throw (send → 500), and
 // Postgres accepts textual booleans the JS `=== true` verdict does not.
-// This mirrors isAuthoredProposalRow exactly and fails closed (pre-push
-// codex P1).
-const GATED_SEND_AUTHORITY_SQL = "(UPPER(pricing_authority) = 'SERVER' OR (UPPER(COALESCE(category, '')) = 'COMMERCIAL' AND estimate_data->'proposal'->'enabled' = 'true'::jsonb))";
+// The provenance marker is the editor's server-owned stamp (see
+// PROPOSAL_PROVENANCE_SOURCE). Mirrors isAuthoredProposalRow exactly and
+// fails closed (pre-push codex P1 + P0).
+const GATED_SEND_AUTHORITY_SQL = "(UPPER(pricing_authority) = 'SERVER' OR (estimate_data->'proposal'->'enabled' = 'true'::jsonb AND estimate_data->'proposal'->'provenance'->>'source' = 'proposal-editor'))";
 function gatedSendAuthorityPredicateApplies() {
   return require('../config/feature-gates').isEnabled('sendRequiresServerPricing');
 }
@@ -381,7 +384,7 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
     // declined rows are terminal (price locked or refused) and stay out.
     .whereIn('status', ['draft', 'scheduled', 'send_failed', 'sent', 'viewed']);
   if (forUpdate) query = query.forUpdate();
-  const siblings = await query.select('id', 'status', 'category', 'pricing_authority', 'estimate_data');
+  const siblings = await query.select('id', 'status', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
     const authority = String(sibling.pricing_authority || '').toUpperCase();
     if (authority === 'SERVER') continue;
@@ -3477,7 +3480,14 @@ router.put('/:id/proposal', async (req, res, next) => {
     const existingData = parseEstimateData(estimate.estimate_data) || {};
     const nextData = {
       ...existingData,
-      proposal: { ...normalized, updatedAt: new Date().toISOString() },
+      proposal: {
+        ...normalized,
+        updatedAt: new Date().toISOString(),
+        // Server-owned provenance: the send gate's authored-proposal
+        // exemption keys on THIS marker (isAuthoredProposalRow /
+        // GATED_SEND_AUTHORITY_SQL), never on category or the blob alone.
+        provenance: { source: PROPOSAL_PROVENANCE_SOURCE, stampedAt: new Date().toISOString(), stampedBy: req.technicianId || null },
+      },
     };
     // The prior send's delivery state describes the PREVIOUS proposal PDF. Once
     // the operator re-authors the proposal, that emailed-PDF claim is stale, so
@@ -4423,6 +4433,7 @@ router._internals = {
   assertEstimateSendable,
   sendRequiresServerPricingFor,
   isAuthoredProposalRow,
+  PROPOSAL_PROVENANCE_SOURCE,
   shadowLogFallbackDelivery,
   SERVER_PRICING_AUTHORITY_SQL,
   GATED_SEND_AUTHORITY_SQL,

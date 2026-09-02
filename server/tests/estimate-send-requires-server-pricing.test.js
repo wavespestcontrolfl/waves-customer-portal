@@ -151,14 +151,17 @@ describe('assertEstimateSendable — engine-authoritative pricing gate', () => {
     const forged = fallbackDraft({ estimate_data: { proposal: { enabled: true, buildings: [{ name: 'Tower A', lineItems: [] }] } } });
     expect(sendRequiresServerPricingFor(forged)).toBe(true);
     expect(sendRequiresServerPricingFor({ ...forged, category: 'RESIDENTIAL' })).toBe(true);
-    expect(sendRequiresServerPricingFor({ ...forged, category: 'COMMERCIAL' })).toBe(false);
+    // category is NOT provenance (the estimator engine and Agent Estimate
+    // create COMMERCIAL rows too) — only the editor's server-owned marker is.
+    expect(sendRequiresServerPricingFor({ ...forged, category: 'COMMERCIAL' })).toBe(true);
+    expect(sendRequiresServerPricingFor(fallbackDraft({ estimate_data: { proposal: { enabled: true, provenance: { source: 'proposal-editor' }, buildings: [] } } }))).toBe(false);
+    expect(sendRequiresServerPricingFor(fallbackDraft({ estimate_data: { proposal: { enabled: true, provenance: { source: 'browser' }, buildings: [] } } }))).toBe(true);
     expect(() => assertEstimateSendable(forged)).toThrow();
   });
 
   it('exempts an authored proposal — its line items ARE the quote', () => {
     expect(caughtBy(fallbackDraft({
-      category: 'COMMERCIAL',
-      estimate_data: { proposal: { enabled: true, buildings: [{ name: 'Tower A', lineItems: [] }] } },
+      estimate_data: { proposal: { enabled: true, provenance: { source: 'proposal-editor' }, buildings: [{ name: 'Tower A', lineItems: [] }] } },
     }))).toBeNull();
   });
 
@@ -188,7 +191,7 @@ describe('shadowLogFallbackDelivery — one would-block per delivery attempt, ga
   it('stays silent for engine-priced rows, authored proposals, and while the gate is on (the assert refuses instead)', () => {
     mockGateState.sendRequiresServerPricing = false;
     expect(shadowLogFallbackDelivery(fallbackDraft({ pricing_authority: 'SERVER' }))).toBe(false);
-    expect(shadowLogFallbackDelivery(fallbackDraft({ category: 'COMMERCIAL', estimate_data: { proposal: { enabled: true, buildings: [] } } }))).toBe(false);
+    expect(shadowLogFallbackDelivery(fallbackDraft({ estimate_data: { proposal: { enabled: true, provenance: { source: 'proposal-editor' }, buildings: [] } } }))).toBe(false);
     mockGateState.sendRequiresServerPricing = true;
     expect(shadowLogFallbackDelivery(fallbackDraft())).toBe(false);
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringMatching(/shadow/));
@@ -198,7 +201,8 @@ describe('shadowLogFallbackDelivery — one would-block per delivery attempt, ga
 describe('GATED_SEND_AUTHORITY_SQL — the gated manual claims re-assert the WHOLE verdict in SQL on the row as it is at claim time (pre-push codex P0)', () => {
   it('is SERVER, or an authored proposal by provenance; a constant with no placeholders', () => {
     expect(GATED_SEND_AUTHORITY_SQL).toContain("UPPER(pricing_authority) = 'SERVER'");
-    expect(GATED_SEND_AUTHORITY_SQL).toContain("UPPER(COALESCE(category, '')) = 'COMMERCIAL'");
+    expect(GATED_SEND_AUTHORITY_SQL).toContain("estimate_data->'proposal'->'provenance'->>'source' = 'proposal-editor'");
+    expect(GATED_SEND_AUTHORITY_SQL).not.toContain('category');
     // Strict JSONB equality to literal true — no ::boolean cast (a malformed
     // legacy value must not throw, and textual booleans must not pass).
     expect(GATED_SEND_AUTHORITY_SQL).toContain("estimate_data->'proposal'->'enabled' = 'true'::jsonb");
@@ -224,12 +228,10 @@ describe('sendRequiresServerPricingFor — the predicate the send CLAIMS re-asse
     mockGateState.sendRequiresServerPricing = true;
     expect(sendRequiresServerPricingFor(fallbackDraft({ sent_at: '2026-09-01T12:00:00.000Z' }))).toBe(true);
     expect(sendRequiresServerPricingFor(fallbackDraft({
-      category: 'COMMERCIAL',
-      estimate_data: { proposal: { enabled: true, buildings: [] } },
+      estimate_data: { proposal: { enabled: true, provenance: { source: 'proposal-editor' }, buildings: [] } },
     }))).toBe(false);
     expect(sendRequiresServerPricingFor(fallbackDraft({
-      category: 'COMMERCIAL',
-      estimate_data: JSON.stringify({ proposal: { enabled: true, buildings: [] } }),
+      estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' }, buildings: [] } }),
     }))).toBe(false);
   });
 
@@ -390,10 +392,10 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
   test('gate on: SERVER siblings pass, and an authored-proposal sibling keeps the manual-send exemption', async () => {
     const server = { id: 'est-sib-ok', status: 'draft', pricing_authority: 'SERVER', estimate_data: '{}' };
     expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([server]).database })).toBeNull();
-    const proposal = { id: 'est-sib-prop', status: 'draft', category: 'COMMERCIAL', pricing_authority: 'CLIENT_FALLBACK', estimate_data: JSON.stringify({ proposal: { enabled: true, buildings: [] } }) };
+    const proposal = { id: 'est-sib-prop', status: 'draft', pricing_authority: 'CLIENT_FALLBACK', estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' }, buildings: [] } }) };
     expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([proposal]).database })).toBeNull();
     // …but a sibling whose proposal blob lacks the authoring path's category stamp blocks (GH codex P1).
-    const forged = { ...proposal, id: 'est-sib-forged', category: 'RESIDENTIAL' };
+    const forged = { ...proposal, id: 'est-sib-forged', category: 'COMMERCIAL', estimate_data: JSON.stringify({ proposal: { enabled: true, buildings: [] } }) };
     expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([forged]).database }))
       .toMatchObject({ statusCode: 409, code: 'CLIENT_FALLBACK_PRICING', sibling: { id: 'est-sib-forged' } });
   });
