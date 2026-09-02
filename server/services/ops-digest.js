@@ -36,6 +36,7 @@ function notificationService() {
 
 const CATEGORY = 'ops_digest';
 const MAX_BODY_CHARS = 8000;
+const MAX_TITLE_CHARS = 200; // notifications.title is varchar(200)
 
 function htmlToText(html) {
   return String(html || '')
@@ -80,25 +81,26 @@ function inAppEnabled() {
  * @param {string} [p.html]
  * @param {string} [p.link]     admin route the digest points at
  * @param {object} [p.metadata]
- * @param {boolean} [p.notify=true]  false when the sender ALREADY writes its
- *                              own bell row (gate on → just skip the email)
  * @param {() => Promise<any>} p.sendEmail  the sender's existing mailer call
  * @returns {{ ok: boolean, channel: 'email'|'in_app', result?: any, error?: string, id?: string|null, fallback?: boolean }}
+ *
+ * Senders that already write their own bell (GBP sync health, call-extraction
+ * eval) still get an ops_digest row here: that row is what the Activity feed
+ * lists, and it is created only on the email's cadence.
  */
-async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, notify = true, sendEmail }) {
+async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, sendEmail }) {
   if (typeof sendEmail !== 'function') throw new Error('deliverOpsDigest: sendEmail is required');
   if (!inAppEnabled()) {
     const result = await sendEmail();
     return emailOutcome(result);
   }
-  if (!notify) {
-    logger.info(`[ops-digest] ${key}: in-app mode — email skipped (sender keeps its own bell)`);
-    return { ok: true, channel: 'in_app', id: null };
-  }
   const body = String(text || htmlToText(html) || '').slice(0, MAX_BODY_CHARS);
+  // Subjects carry aggregated text (customer names, bucket lists); the row
+  // keeps the full subject in metadata while the title fits the column.
+  const title = String(subject || '').slice(0, MAX_TITLE_CHARS);
   let row = null;
   try {
-    row = await notificationService().notifyAdmin(CATEGORY, subject, body, {
+    row = await notificationService().notifyAdmin(CATEGORY, title, body, {
       link,
       bell: true,
       metadata: { opsKey: key, subject, ...metadata },

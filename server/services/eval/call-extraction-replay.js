@@ -143,13 +143,13 @@ async function emailFailure({ sendEmail, subject, textBody }) {
   const recipient = process.env.EVAL_REGRESSION_EMAIL || DEFAULT_EVAL_EMAIL;
   if (recipient === 'off') return;
   try {
-    // notify:false — notifyFailure / notifyInconclusive already wrote the
-    // eval_regression bell; in-app mode only needs the email skipped.
+    // The eval_regression bell from notifyFailure / notifyInconclusive
+    // stays; in-app mode adds the ops_digest row the Activity feed lists.
     const result = await deliverOpsDigest({
       key: 'call-extraction-eval',
       subject,
       text: textBody,
-      notify: false,
+      link: '/admin/communications',
       sendEmail: () => sendEmail({
         to: recipient,
         subject,

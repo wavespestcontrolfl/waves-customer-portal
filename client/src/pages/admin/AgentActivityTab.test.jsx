@@ -93,6 +93,23 @@ describe("AgentActivityTab", () => {
     expect(screen.getByText("Awaiting emailed reply (EA-12ab34cd)")).toBeInTheDocument();
   });
 
+  it("marks an ACT digest read when Review is followed", async () => {
+    adminFetch.mockResolvedValueOnce({
+      ...FEED,
+      items: [{
+        id: "digest:n9", kind: "digest", agent: "Waves Ops", notificationId: "n9",
+        title: "4 promised quotes never went out", subtitle: "promised estimate · needs you",
+        status: "awaiting_review", startedAt: "2026-09-02T10:00:00Z", finishedAt: null, durationMs: null,
+        steps: [], stepsDone: 0, stepsTotal: 1, link: "/admin/pipeline", detail: "Pat Tester",
+      }],
+    });
+    adminFetch.mockResolvedValue({});
+    renderTab();
+    const links = await screen.findAllByRole("link", { name: "Review" });
+    fireEvent.click(links[0]);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/notifications/n9/read", { method: "PUT" }));
+  });
+
   it("ignores a slower, superseded window response", async () => {
     let resolveFirst;
     adminFetch.mockImplementationOnce(() => new Promise((r) => { resolveFirst = r; }));

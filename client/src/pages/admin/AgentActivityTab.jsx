@@ -88,7 +88,18 @@ function StepRow({ step }) {
   );
 }
 
-function ActivityRow({ item }) {
+// An ACT digest is "awaiting review" until its bell row is read; following
+// Review from here is that read, so the row clears on the next refresh.
+async function markDigestRead(item) {
+  if (item.kind !== "digest" || !item.notificationId) return;
+  try {
+    await adminFetch(`/admin/notifications/${item.notificationId}/read`, { method: "PUT" });
+  } catch {
+    // best effort — the destination still opens
+  }
+}
+
+function ActivityRow({ item, onReview }) {
   const [open, setOpen] = useState(false);
   const meta = STATUS_META[item.status] || STATUS_META.completed;
   const expandable = item.steps?.length > 0 || item.detail;
@@ -132,6 +143,7 @@ function ActivityRow({ item }) {
           {needsAction && (
             <Link
               to={item.link}
+              onClick={() => onReview?.(item)}
               className="hidden md:inline-flex h-8 items-center rounded-sm border-hairline border-zinc-300 bg-white px-3 text-11 font-medium uppercase tracking-label text-zinc-900 no-underline hover:bg-zinc-50 u-focus-ring"
             >
               Review
@@ -154,6 +166,7 @@ function ActivityRow({ item }) {
         <div className="px-3 pb-3 md:hidden">
           <Link
             to={item.link}
+            onClick={() => onReview?.(item)}
             className="inline-flex h-11 items-center rounded-sm border-hairline border-zinc-300 bg-white px-4 text-12 font-medium uppercase tracking-label text-zinc-900 no-underline u-focus-ring"
           >
             Review
@@ -287,7 +300,7 @@ export default function AgentActivityTab() {
         ) : (
           <ol>
             {items.map((item) => (
-              <ActivityRow key={item.id} item={item} />
+              <ActivityRow key={item.id} item={item} onReview={markDigestRead} />
             ))}
           </ol>
         )}

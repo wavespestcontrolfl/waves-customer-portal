@@ -1666,12 +1666,13 @@ class GoogleBusinessService {
       let emailed = false;
       try {
         const email = require('./email');
-        // notify:false — the 'review' bell above is the claim AND the surface.
+        // The 'review' bell above stays the claim; in-app mode adds the
+        // ops_digest row the Activity feed lists (email cadence).
         const sent = await deliverOpsDigest({
           key: 'gbp-sync-health',
           subject,
           text: body,
-          notify: false,
+          link: '/admin/reviews',
           sendEmail: () => email.send({ to: 'contact@wavespestcontrol.com', subject, heading: 'Review sync health', body }),
         });
         emailed = !!sent?.ok;
