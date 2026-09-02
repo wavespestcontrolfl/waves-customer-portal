@@ -198,7 +198,7 @@ describe('POST /calls/:id/adopt-recording', () => {
     const swap = updates.find((u) => u.table === 'call_log');
     // The row leaves "processed": its transcript/extraction describe the old
     // audio, and NULL puts it back in the sweep if the immediate pass defers.
-    expect(swap.patch).toMatchObject({ recording_sid: PARKED, recording_url: 'https://api.twilio.com/x/RE2.mp3', recording_duration_seconds: 80, transcription_status: 'pending', processing_status: null, transcription: null, transcript_structured: null, transcription_provider: null });
+    expect(swap.patch).toMatchObject({ recording_sid: PARKED, recording_url: 'https://api.twilio.com/x/RE2.mp3', recording_duration_seconds: 80, transcription_status: 'pending', processing_status: null, transcription: null, transcript_structured: null, transcription_provider: null, ai_extraction: null, ai_extraction_enriched: null, call_summary: null, lead_synopsis: null });
     // Rewritten against the current array: the chosen SID is removed in SQL,
     // the replaced recording appended.
     expect(swap.patch.metadata.sql).toContain("WHERE e ->> 'recording_sid' <> ?");

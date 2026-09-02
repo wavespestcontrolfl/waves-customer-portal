@@ -355,6 +355,16 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         transcription: null,
         transcript_structured: null,
         transcription_provider: null,
+        // …and everything derived from it, so a deferred or failed reprocess
+        // never shows the previous audio's extraction beside the new one.
+        ai_extraction: null,
+        ai_extraction_enriched: null,
+        ai_extraction_validation_errors: null,
+        v2_extraction_status: null,
+        call_summary: null,
+        lead_synopsis: null,
+        sentiment: null,
+        lead_quality: null,
         // The row is no longer "processed": its transcript and extraction
         // describe the previous recording. NULL puts it back in the sweep,
         // so even if the immediate pass below defers (CDN not ready) or

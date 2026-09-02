@@ -118,6 +118,16 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(body).not.toContain('timelineExists');
   });
 
+  test('a customer that lands on a later pass resolves the customer_creation_failed card and clears review only when nothing else is open', () => {
+    const at = body.indexOf("if (written > 0 && finalStatus === 'processed' && customerLanded) {");
+    expect(at).toBeGreaterThan(-1);
+    const site = body.slice(at, at + 900);
+    expect(site).toContain("reason_code: 'customer_creation_failed'");
+    expect(site).toContain("resolution_note: 'Customer landed on a later pass'");
+    expect(site).toContain(".whereNotExists(trx('triage_items')");
+    expect(site).toContain('.update({ review_status: null })');
+  });
+
   test('customer_creation_failed opens review and files its card — it is no longer a silent terminal', () => {
     expect(body).toContain("finalStatus === 'customer_creation_failed'\n            ? { review_status: 'open' } : {}");
     // The card is filed INSIDE the finalization transaction, fenced by the

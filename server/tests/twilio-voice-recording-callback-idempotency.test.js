@@ -242,6 +242,13 @@ describe('decideRecordingAttach (pure)', () => {
     expect(decideRecordingAttach({ recording_sid: null, recording_url: null, processing_status: 'processing' }, { recording_sid: REC_1 })).toEqual({ action: 'park', reason: 'processing_status_processing' });
     expect(decideRecordingAttach({ recording_sid: null, recording_url: null, processing_status: 'processed' }, { recording_sid: REC_1 })).toEqual({ action: 'park', reason: 'processing_status_processed' });
   });
+  test('a RecordingSid this row already superseded or parked is a duplicate, never a replace or a second park', () => {
+    const row = { recording_sid: REC_2, recording_url: URL_2, processing_status: null, metadata: { superseded_recordings: [{ recording_sid: REC_1 }] } };
+    expect(decideRecordingAttach(row, { recording_sid: REC_1 })).toEqual({ action: 'duplicate', reason: 'already_superseded' });
+    const parked = { recording_sid: REC_1, recording_url: URL_1, processing_status: 'processed', metadata: { additional_recordings: [{ recording_sid: REC_2 }] } };
+    expect(decideRecordingAttach(parked, { recording_sid: REC_2 })).toEqual({ action: 'duplicate', reason: 'already_parked' });
+  });
+
   test('the same RecordingSid again is a duplicate — never a rewrite', () => {
     for (const status of [null, 'pending', 'processing', 'processed', 'voicemail']) {
       expect(decideRecordingAttach({ recording_sid: REC_1, recording_url: URL_1, processing_status: status }, { recording_sid: REC_1 }).action).toBe('duplicate');
@@ -453,6 +460,16 @@ describe('POST /recording-status', () => {
     db.mockImplementation(realImpl);
   });
 
+  test('a retry of a recording REC2 already replaced does not replace REC2 back', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: null, metadata: null });
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2 }));
+    expect(tables.call_log[0].recording_sid).toBe(REC_2);
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1 }));
+    expect(tables.call_log[0].recording_sid).toBe(REC_2);
+    expect(tables.call_log[0].metadata.additional_recordings).toBeUndefined();
+    expect(tables.triage_items).toHaveLength(0);
+  });
+
   test('a replace clears the old transcript, its structure and provider with the swap', async () => {
     tables.call_log.push({
       id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: null,
@@ -464,6 +481,9 @@ describe('POST /recording-status', () => {
     expect(row.transcription).toBeNull();
     expect(row.transcript_structured).toBeNull();
     expect(row.transcription_provider).toBeNull();
+    expect(row.ai_extraction).toBeNull();
+    expect(row.call_summary).toBeNull();
+    expect(row.lead_synopsis).toBeNull();
   });
 
   test('a park whose review card cannot be filed answers 500 so Twilio retries; the retry parks and files it', async () => {

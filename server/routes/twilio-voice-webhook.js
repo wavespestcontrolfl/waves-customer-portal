@@ -203,12 +203,28 @@ function isPanQuarantinedRow(row) {
 // from recording_url on its next pass, so a replacement stays consistent.
 const RECORDING_LOAD_BEARING_STATUSES = new Set(['processing', 'processed']);
 
+function listedRecordingReason(metadata, sid) {
+  try {
+    const m = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
+    const has = (list) => (Array.isArray(m[list]) ? m[list] : []).some((e) => e && e.recording_sid === sid);
+    if (has('superseded_recordings')) return 'already_superseded';
+    if (has('additional_recordings')) return 'already_parked';
+    return null;
+  } catch { return null; }
+}
+
 function decideRecordingAttach(row, incoming) {
   const currentSid = row?.recording_sid || null;
   const currentUrl = String(row?.recording_url || '').trim();
   if (currentSid && incoming?.recording_sid && currentSid === incoming.recording_sid) {
     return { action: 'duplicate' };
   }
+  // A retry of a recording this row already SUPERSEDED or PARKED is a
+  // duplicate too: matched only against the current SID, REC1's retry after
+  // REC2 replaced it would replace REC2 back (and process the older audio)
+  // or park REC1 with a spurious card.
+  const listed = incoming?.recording_sid ? listedRecordingReason(row?.metadata, incoming.recording_sid) : null;
+  if (listed) return { action: 'duplicate', reason: listed };
   // A pass in flight, or one that finished, on a row with NO recording yet
   // (a PAN-masked transcript pass, a manual Process on a cached Twilio
   // transcript) is load-bearing too: installing the first recording under
@@ -1593,7 +1609,7 @@ router.post('/recording-status', async (req, res) => {
       // the write skip instead of overwriting.
       const ATTACH_COLUMNS = [
         'id', 'twilio_call_sid', 'recording_sid', 'recording_url', 'recording_duration_seconds',
-        'processing_status', 'transcription_metadata',
+        'processing_status', 'transcription_metadata', 'metadata',
       ];
       let targetRow = null;
       if (ParentCallSid) {
@@ -1618,7 +1634,7 @@ router.post('/recording-status', async (req, res) => {
           recording_duration_seconds: recordingData.recording_duration_seconds,
           reason,
         });
-        if (outcome.quarantined) return;
+        if (!outcome.parked) return;
         logger.warn(`[recording-status] recording ${maskSid(RecordingSid)} for ${maskSid(row.twilio_call_sid)} parked for review (${reason}) — recording_url kept`);
       };
       for (let round = 0; round < 2 && targetRow && !isPanQuarantinedRow(targetRow); round += 1) {
@@ -1627,7 +1643,11 @@ router.post('/recording-status', async (req, res) => {
           // Exactly-once for the row: nothing to write. The processing
           // attempt below is still scheduled — it is claim-fenced and skips
           // an already-processed row, and it is what recovers a first
-          // delivery whose in-memory timers a deploy wiped.
+          // delivery whose in-memory timers a deploy wiped. A retry of a
+          // PARKED recording still goes through the park path: it writes
+          // nothing new but files the review card if the first delivery
+          // lost it.
+          if (attach.reason === 'already_parked') await park(targetRow, 'retry');
           matchedSid = targetRow.twilio_call_sid;
           logger.info(`[recording-status] duplicate delivery of ${maskSid(RecordingSid)} for ${maskSid(matchedSid)} — row untouched`);
           break;
@@ -1653,6 +1673,17 @@ router.post('/recording-status', async (req, res) => {
           write.transcription = null;
           write.transcript_structured = null;
           write.transcription_provider = null;
+          // …and everything derived from that transcript: a deferred or
+          // failed reprocess must not leave the old call's identity, service
+          // and synopsis rendered beside the new audio.
+          Object.assign(write, { ai_extraction: null,
+          ai_extraction_enriched: null,
+          ai_extraction_validation_errors: null,
+          v2_extraction_status: null,
+          call_summary: null,
+          lead_synopsis: null,
+          sentiment: null,
+          lead_quality: null, });
           // Last-wins as before, but the superseded recording is kept: the
           // dial-leg recording a voicemail replaced is still evidence.
           write.metadata = db.raw(

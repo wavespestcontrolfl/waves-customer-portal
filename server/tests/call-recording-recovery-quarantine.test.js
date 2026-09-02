@@ -289,6 +289,19 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(String(owed[0])).toContain('"recording_quarantined": false');
   });
 
+  test('a recording-list read that fails leaves the quarantine incomplete and flags the lists unread for recovery', async () => {
+    const processor = require('../services/call-recording-processor');
+    db.raw.mockClear();
+    db.__state.call = { id: 'c-unread', recording_url: 'https://api.twilio.com/m.mp3', recording_sid: 'REmain0000000000000000000000012', metadata: {}, transcription_metadata: { pan_detected: true, pan_notified: true } };
+    // First read = the stamp's locked read; second = the post-stamp list read.
+    db.__builder.first.mockImplementationOnce(async () => db.__state.call).mockImplementationOnce(async () => { throw new Error('connection reset'); });
+    const out = await processor.quarantineCardRecording(db.__state.call, { source: 'transcript_scrub' });
+    expect(out.quarantined).toBe(true);
+    const flag = db.raw.mock.calls.find(([sql]) => String(sql).includes('quarantine_lists_unread'));
+    expect(flag).toBeDefined();
+    expect(String(flag[0])).toContain('"recording_quarantined": false');
+  });
+
   test('an unstamped call still proceeds into the Twilio lookup', async () => {
     const processor = require('../services/call-recording-processor');
     db.__state.call = { id: 'c-clean', recording_url: null, transcription_metadata: null };

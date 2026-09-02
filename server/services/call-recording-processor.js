@@ -567,6 +567,8 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
     // whole call's.
     const owed = owedSids.size > 0;
     nextMeta.recording_quarantined = !owed && (twilioDeleted || meta.recording_quarantined === true);
+    // The list sweep below re-reads the row; a read that fails re-sets this.
+    delete nextMeta.quarantine_lists_unread;
     await trx('call_log').where({ id: call.id }).update({
       recording_url: null,
       transcription_metadata: JSON.stringify(nextMeta),
@@ -588,6 +590,17 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
   } catch (err) {
     logger.error(`[call-proc] PAN quarantine: recording-list read failed for call ${call.id}: ${err.message}`);
     listedEntries = [];
+    // Unread lists may still hold audio: leave the quarantine INCOMPLETE and
+    // flag the unread lists so the recovery sweep selects the row and runs
+    // this helper again, whatever the primary delete answered.
+    try {
+      await db('call_log').where({ id: call.id }).update({
+        transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || '{\"recording_quarantined\": false, \"quarantine_lists_unread\": true}'::jsonb"),
+        updated_at: new Date(),
+      });
+    } catch (flagErr) {
+      logger.error(`[call-proc] PAN quarantine: could not flag unread recording lists for call ${call.id}: ${flagErr.message}`);
+    }
   }
   // A quarantined call keeps no audio in any medium: every recording parked
   // in metadata.additional_recordings (audio that arrived before or after
@@ -15217,6 +15230,21 @@ const CallRecordingProcessor = {
       // status it describes: filed after finalization it could outlive the
       // pass — a force reprocess repairing the call while the insert was
       // pending left a stale open card (codex P1). written > 0 is the fence.
+      if (written > 0 && finalStatus === 'processed' && customerLanded) {
+        // A customer that landed on this pass repairs an earlier
+        // customer_creation_failed: its card resolves, and the review flag
+        // clears only when no other open card still needs a person.
+        const repaired = await trx('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'customer_creation_failed' })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({ status: 'resolved', resolved_at: new Date(), resolution_note: 'Customer landed on a later pass' });
+        if (repaired > 0) {
+          await trx('call_log')
+            .where({ id: call.id })
+            .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
+            .update({ review_status: null });
+        }
+      }
       if (written > 0 && finalStatus === 'customer_creation_failed') {
         await trx('triage_items').insert(buildTriageItem({
           callLogId: call.id,
@@ -15673,7 +15701,8 @@ const CallRecordingProcessor = {
         // webhook quarantined instead of parking): each is its own retry.
         const owedUnlisted = (Array.isArray(meta.quarantine_owed_sids) ? meta.quarantine_owed_sids : [])
           .filter((owedSid) => owedSid && owedSid !== retrySid && !pendingParked.includes(owedSid));
-        if (primaryOwed || pendingParked.length || owedUnlisted.length) {
+        const listsUnread = meta.quarantine_lists_unread === true;
+        if (primaryOwed || pendingParked.length || owedUnlisted.length || listsUnread) {
           try {
             // The helper sweeps every listed SID itself; with the primary
             // complete it is called with no primary recording so an
@@ -15822,7 +15851,8 @@ const CallRecordingProcessor = {
         .whereRaw("(COALESCE(transcription_metadata::jsonb ->> 'recording_quarantined', 'false') <> 'true' OR COALESCE(transcription_metadata::jsonb ->> 'pan_notified', 'false') <> 'true'"
           // A parked or superseded recording whose Twilio delete failed is owed too.
           + " OR COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> '[{\"delete_pending\": true}]'::jsonb"
-          + " OR COALESCE(metadata -> 'superseded_recordings', '[]'::jsonb) @> '[{\"delete_pending\": true}]'::jsonb)")
+          + " OR COALESCE(metadata -> 'superseded_recordings', '[]'::jsonb) @> '[{\"delete_pending\": true}]'::jsonb"
+          + " OR COALESCE(transcription_metadata::jsonb ->> 'quarantine_lists_unread', 'false') = 'true')")
         .orderBy('created_at', 'desc')
         .limit(10);
     } catch (qErr) {
