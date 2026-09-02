@@ -35,8 +35,9 @@ describe('composeTechNote', () => {
       expect(greeting).toContain('Chris');
       expect(greeting).not.toContain('CHRIS');
       expect(opener).toMatch(/^(Three things|A few things)/);
-      // never promises a return visit — one-time services get the same note
-      expect(opener).not.toMatch(/visit|before I|back/i);
+      // never promises a return visit, never names a treatment method —
+      // one-time, trapping, exclusion and bait-station visits get the same note
+      expect(opener).not.toMatch(/visit|before I|back|spray|treat/i);
     }
     expect(composeTechNote({ tips: TIPS.slice(0, 1), customerName: 'Pat', seed: 0 }).opener).toMatch(/^(One thing|If you do one thing)/);
     expect(composeTechNote({ tips: TIPS.slice(0, 2), customerName: 'Pat', seed: 0 }).opener).toMatch(/^(Two things|A couple of things)/);

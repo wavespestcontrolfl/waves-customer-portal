@@ -12124,7 +12124,13 @@ export function CompletionPanel({
       setNotes(stripParkedTaggedLines({
         notes: preGenerationNotesRef.current || "",
         parked: { found: typeof savedDraft.parkedFound === "string" ? savedDraft.parkedFound : "", next: typeof savedDraft.parkedNext === "string" ? savedDraft.parkedNext : "" },
-        labels: { found: selectedObservationLabels, next: selectedRecommendationLabels },
+        // the setSelected*Labels calls just above have not reached this closure
+        // yet — read the restored arrays from the draft itself, or the chip
+        // marker lines would be stripped as free-typed and their selections lost
+        labels: {
+          found: Array.isArray(savedDraft.selectedObservationLabels) ? savedDraft.selectedObservationLabels : [],
+          next: Array.isArray(savedDraft.selectedRecommendationLabels) ? savedDraft.selectedRecommendationLabels : [],
+        },
       }));
         // Detachment restores with the notes (codex r77) — same contract
         // as the invalidation path.

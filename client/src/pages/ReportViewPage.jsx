@@ -2305,13 +2305,13 @@ const TECH_NOTE_GREETINGS = [
   (first) => `${first},`,
   (first) => `Hello ${first},`,
 ];
-// Service-neutral on purpose: a one-time visit has no "next visit" or
-// "between visits", and the payload carries no general next-visit signal
-// to key on, so no opener may promise a return.
+// Neutral on purpose — to the schedule (a one-time visit has no "next
+// visit") AND to the treatment method (trapping, exclusion and bait
+// stations are not spray work): the opener gets no service context.
 const TECH_NOTE_OPENERS = {
-  1: ['One thing that will help more than anything I can spray:', 'If you do one thing this week, make it this:'],
-  2: ['Two things that will do more than anything I can spray:', 'A couple of things I’d take care of soon:'],
-  3: ['Three things that will do more than anything I can spray:', 'A few things I’d take care of soon:'],
+  1: ['One thing that will make a real difference:', 'If you do one thing this week, make it this:'],
+  2: ['Two things that will make a real difference:', 'A couple of things I’d take care of soon:'],
+  3: ['Three things that will make a real difference:', 'A few things I’d take care of soon:'],
 };
 
 export function techNoteSeed(value) {
