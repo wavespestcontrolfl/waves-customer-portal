@@ -58,6 +58,22 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(await db('call_commitments').where({ call_log_id: callId })).toHaveLength(0);
   });
 
+  test('after finalization the upsert is fenced on the pass generation: a newer pass or a live token refuses it', async () => {
+    const [done] = await db('call_log').insert({
+      twilio_call_sid: 'CA' + '8'.repeat(30) + 'd4', direction: 'inbound', from_phone: PHONE, to_phone: OUR_NUMBER, status: 'completed',
+      processing_status: 'processed', processing_token: null, processing_generation: 2,
+    }).returning('id');
+    cleanup.callIds.push(done.id);
+    // Wrong generation (a newer pass ran since) → nothing written.
+    expect(await cc.upsertCommitments(db, done.id, seed(), { generation: 1, procGeneration: 1 })).toEqual({ written: 0, ownershipLost: true });
+    // Right generation, token cleared by finalization → written.
+    const ok = await cc.upsertCommitments(db, done.id, seed(), { generation: 2, procGeneration: 2 });
+    expect(ok.written).toBe(3);
+    // Same generation but a LIVE token (a reclaim in flight) → refused.
+    await db('call_log').where({ id: done.id }).update({ processing_token: 'live' });
+    expect(await cc.upsertCommitments(db, done.id, seed(), { generation: 2, procGeneration: 2 })).toEqual({ written: 0, ownershipLost: true });
+  });
+
   test('first pass inserts one row per identity; the same pass again changes nothing', async () => {
     const first = await cc.upsertCommitments(db, callId, seed(), { generation: 1, procToken: 'tok-' + 'a'.repeat(28) });
     expect(first.written).toBe(3);

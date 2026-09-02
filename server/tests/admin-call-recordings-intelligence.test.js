@@ -52,12 +52,14 @@ function mockDb(firstResults) {
     const b = {
       table,
       wheres: [],
-      where(...a) { b.wheres.push(a); return b; },
+      // A grouped where(fn) records its nested clauses too, so fence
+      // assertions can see them.
+      where(...a) { if (typeof a[0] === 'function') { a[0].call(b); return b; } b.wheres.push(a); return b; },
       whereNull() { return b; },
       whereIn() { return b; },
-      whereRaw() { return b; },
+      whereRaw(sql, bindings) { b.wheres.push(['raw', sql, bindings]); return b; },
       first: () => Promise.resolve(queue.shift() ?? null),
-      update: (patch) => { updates.push({ table, patch }); return Object.assign(Promise.resolve(1), { catch: () => Promise.resolve(1) }); },
+      update: (patch) => { updates.push({ table, patch, wheres: [...b.wheres] }); return Object.assign(Promise.resolve(1), { catch: () => Promise.resolve(1) }); },
     };
     return b;
   });
@@ -183,6 +185,11 @@ describe('POST /calls/:id/adopt-recording', () => {
     expect(swap.patch).toMatchObject({ recording_sid: PARKED, recording_url: 'https://api.twilio.com/x/RE2.mp3', recording_duration_seconds: 80, transcription_status: 'pending', processing_status: null });
     const remaining = JSON.parse(swap.patch.metadata.bindings[0]);
     expect(remaining).toEqual([expect.objectContaining({ recording_sid: CURRENT, parked_because: 'replaced_by_operator' })]);
+    // Fenced to the row this request read: the recording being replaced and
+    // the parked entry being adopted must both still be there.
+    const fenceClauses = swap.wheres.map((w) => JSON.stringify(w));
+    expect(fenceClauses.some((w) => w.includes('"recording_sid"') && w.includes(CURRENT))).toBe(true);
+    expect(fenceClauses.some((w) => w.includes('additional_recordings') && w.includes(PARKED))).toBe(true);
     expect(updates.find((u) => u.table === 'triage_items').patch.status).toBe('resolved');
     expect(processor.processRecording).toHaveBeenCalledWith(SID, { force: true, operator: true });
   });

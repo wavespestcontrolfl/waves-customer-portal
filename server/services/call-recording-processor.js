@@ -6564,6 +6564,8 @@ const CallRecordingProcessor = {
         // even after that pass finalized (codex P1).
         await db('call_log').where({ id: call.id })
           .where('processing_token', procToken)
+          // Never clear a link a person set, even one set a moment ago.
+          .whereRaw("NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')")
           .update({ customer_id: null, updated_at: new Date() });
       }
     }
@@ -9422,8 +9424,16 @@ const CallRecordingProcessor = {
       .where({ id: call.id })
       .where('processing_token', procToken)
       .update({
-      // The operator's link wins over anything this pass resolved.
-      customer_id: customerLinkOverride ? (customerLinkOverride.customer_id || null) : (customerId || call.customer_id),
+      // The operator's link wins over anything this pass resolved — read
+      // from the row IN the write, not from the snapshot taken at claim
+      // time, so a relink made while this pass was running is honoured
+      // too (jsonb_exists rather than the `?` operator: knex would read
+      // `?` as a binding).
+      customer_id: db.raw(
+        "CASE WHEN jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')"
+        + " THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE ?::uuid END",
+        [customerId || call.customer_id || null],
+      ),
       // Call-creation provenance rides the SAME durable write that links
       // the customer (Codex #3084 r24): customer_id persisted ⇒ marker
       // persisted, so a recovery run can never see a call-created customer
@@ -14630,34 +14640,6 @@ const CallRecordingProcessor = {
       }
     }
 
-    // Step 7c: Commitments — what Waves promised and what the caller agreed
-    // to, as evidence-linked rows (services/call-commitments.js). Seeded
-    // from the V2 extraction plus one bounded model pass; the upsert takes
-    // the claim fence itself (SHARE lock on the token), so a superseded pass
-    // writes nothing and a human-touched row is never rewritten. Dark behind
-    // GATE_CALL_COMMITMENTS; never blocks the call.
-    if (transcription && !extracted.is_spam && isEnabled('callCommitments')) {
-      if (!(await stillOwnsClaim())) return abandonToPeer('the commitments write');
-      try {
-        const commitmentsStartedAt = Date.now();
-        const commitmentSummary = await require('./call-commitments').recordCallCommitments({
-          conn: db,
-          call: { ...call, transcript_structured: (await db('call_log').where({ id: call.id }).first('transcript_structured'))?.transcript_structured ?? call.transcript_structured },
-          transcript: transcription,
-          v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
-          v1: extracted,
-          disposition: null,
-          procToken,
-          procGeneration,
-        });
-        stageTimings.commitments_ms = Date.now() - commitmentsStartedAt;
-        logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' ownership_lost' : ''}`);
-        if (commitmentSummary.ownershipLost) return abandonToPeer('the commitments write');
-      } catch (err) {
-        logger.warn(`[call-proc] commitments step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
-      }
-    }
-
     // Step 8: CSR Coach scoring — auto-score every transcribed call.
     // The inbound <Dial> simul-rings distinct per-person numbers; the staff leg
     // that pressed 1 is recorded in metadata.forward_acceptance by the
@@ -15307,6 +15289,35 @@ const CallRecordingProcessor = {
     // stale and must not record verdicts, stamp a disposition, or enrich.
     if (finalized > 0) {
       await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription });
+
+      // Commitments — what Waves promised and what the caller agreed to, as
+      // evidence-linked rows (services/call-commitments.js). Runs AFTER the
+      // disposition is settled so the deterministic callback seed sees it,
+      // fenced on this pass's GENERATION (the token is already cleared by
+      // finalization — same fence the detached estimator lanes use). Seeds
+      // from the V2 extraction plus one bounded model pass; a human-touched
+      // row is never rewritten. Dark behind GATE_CALL_COMMITMENTS; never
+      // blocks the call.
+      if (transcription && !extracted.is_spam && isEnabled('callCommitments')) {
+        try {
+          const commitmentsStartedAt = Date.now();
+          const settled = await db('call_log').where({ id: call.id }).first('disposition', 'transcript_structured', 'processing_status');
+          if (settled && settled.processing_status !== 'spam') {
+            const commitmentSummary = await require('./call-commitments').recordCallCommitments({
+              conn: db,
+              call: { ...call, transcript_structured: settled.transcript_structured ?? call.transcript_structured },
+              transcript: transcription,
+              v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
+              v1: extracted,
+              disposition: settled.disposition || null,
+              procGeneration,
+            });
+            logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped} ms=${Date.now() - commitmentsStartedAt}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' superseded_by_newer_pass' : ''}`);
+          }
+        } catch (err) {
+          logger.warn(`[call-proc] commitments step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
+        }
+      }
     }
 
     // Reconcile-only draft-linkage pass, AFTER the fenced finalization

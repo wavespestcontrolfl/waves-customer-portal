@@ -81,6 +81,29 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(body.slice(aiValidationAt - 200, aiValidationAt)).toContain(".where('processing_token', procToken)");
   });
 
+  test('the customer checkpoint honours the LATEST operator link, read inside the write', () => {
+    // A relink made while the pass runs must not be overwritten by the
+    // pass's snapshot of the override taken at claim time.
+    const at = body.indexOf("'customer_link_override')\"\n        + \" THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE ?::uuid END\"");
+    expect(at).toBeGreaterThan(-1);
+    expect(body.slice(at - 400, at + 200)).toContain("jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')");
+    // The phantom-customer unlink never clears a person's link either.
+    const unlinkAt = body.indexOf(".update({ customer_id: null, updated_at: new Date() });");
+    expect(unlinkAt).toBeGreaterThan(-1);
+    expect(body.slice(unlinkAt - 300, unlinkAt)).toContain("NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')");
+  });
+
+  test('commitments are recorded after finalization, fenced on the pass generation, with the settled disposition', () => {
+    const zeroTriageAt = body.indexOf('await applyZeroTriageLayers({');
+    const commitmentsAt = body.indexOf("require('./call-commitments').recordCallCommitments({");
+    expect(zeroTriageAt).toBeGreaterThan(-1);
+    expect(commitmentsAt).toBeGreaterThan(zeroTriageAt);
+    const callSite = body.slice(commitmentsAt, commitmentsAt + 700);
+    expect(callSite).toContain('disposition: settled.disposition || null');
+    expect(callSite).toContain('procGeneration,');
+    expect(callSite).not.toContain('procToken');
+  });
+
   test('the customer timeline entry is keyed on the call, not the pass', () => {
     const at = body.indexOf("await db('customer_interactions').insert({");
     expect(at).toBeGreaterThan(-1);

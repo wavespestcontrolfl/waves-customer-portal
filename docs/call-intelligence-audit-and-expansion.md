@@ -129,6 +129,13 @@ Per file, with the proving test.
   NULL in the same write so the sweep re-runs voicemail/spam rows on the new
   audio; `completed` is absorbing against late busy/failed/no-answer leg
   callbacks; the commitments prompt names the company as "Waves Pest Control".
+- Pre-push Codex round 4 (3 P1s, all fixed): the Step-4 customer checkpoint
+  reads the operator link INSIDE the write (a jsonb CASE, proven on live
+  Postgres) so a relink made mid-pass is honoured, and the phantom unlink
+  never clears one; adopting a parked recording is fenced to the recording
+  it read and to the parked entry itself; commitments are recorded after
+  finalization, fenced on the pass generation, so the deterministic callback
+  seed sees the settled disposition.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 

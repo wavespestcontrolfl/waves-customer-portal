@@ -316,6 +316,15 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     const swapped = await db('call_log')
       .where({ id: call.id })
       .whereRaw("processing_status IS DISTINCT FROM 'processing'")
+      // Fenced to the row this request READ: the recording it is replacing
+      // and the parked entry it is adopting must both still be there — a
+      // second operator or a fresh callback that changed either makes this
+      // swap refuse instead of reporting a recording it did not process.
+      .where(function baselineRecording() {
+        if (call.recording_sid) this.where('recording_sid', call.recording_sid);
+        else this.whereNull('recording_sid');
+      })
+      .whereRaw("COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> ?::jsonb", [JSON.stringify([{ recording_sid: chosen.recording_sid }])])
       .update({
         recording_sid: chosen.recording_sid,
         recording_url: chosen.recording_url,
@@ -334,7 +343,7 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         ),
         updated_at: new Date(),
       });
-    if (!swapped) return res.status(409).json({ error: 'A pass claimed this call while the swap was being made. Try again.', reason: 'already_processing' });
+    if (!swapped) return res.status(409).json({ error: 'This call changed while the swap was being made (a pass claimed it, or its recordings changed). Reload and try again.', reason: 'call_changed' });
     logger.info(`[call-recordings] operator adopted recording ${maskSid(chosen.recording_sid)} on call ${call.id}; reprocessing`);
     const result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true });
     if (result?.success === true) {

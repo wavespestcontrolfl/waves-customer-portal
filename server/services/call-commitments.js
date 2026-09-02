@@ -375,10 +375,13 @@ function toRow(callLogId, item, { generation, extractorVersion }) {
 
 // Upsert the AI's view of this pass. The whole write runs in one
 // transaction that first takes a SHARE lock on the call_log row WITH the
-// processing_token fence: a peer's claim UPDATE has to wait for this commit,
-// so a pass that lost its claim cannot write, and a claim cannot move
-// between the check and the write.
-async function upsertCommitments(conn, callLogId, items, { generation = null, extractorVersion = EXTRACTOR_VERSION, procToken = null } = {}) {
+// pass's fence: while the pass holds its claim that is the
+// processing_token; after finalization (token cleared) it is the pass's
+// processing_generation with no live token — the same post-finalization
+// identity the detached estimator lanes use. A peer's claim UPDATE has to
+// wait for this commit, so a superseded pass cannot write and a claim
+// cannot move between the check and the write.
+async function upsertCommitments(conn, callLogId, items, { generation = null, extractorVersion = EXTRACTOR_VERSION, procToken = null, procGeneration = null } = {}) {
   const dedupedByKey = new Map();
   for (const item of items) {
     const key = commitmentKey(item);
@@ -391,6 +394,13 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
     if (procToken) {
       const owned = await trx('call_log').where({ id: callLogId, processing_token: procToken }).forShare().first('id');
       if (!owned) return { written: 0, ownershipLost: true };
+    } else if (procGeneration != null) {
+      const current = await trx('call_log')
+        .where({ id: callLogId, processing_generation: procGeneration })
+        .whereNull('processing_token')
+        .forShare()
+        .first('id');
+      if (!current) return { written: 0, ownershipLost: true };
     }
     let written = 0;
     for (const row of rows) {
@@ -468,7 +478,7 @@ async function recordCallCommitments({
       ...item,
       evidence: anchorEvidence(item.evidence, { segments, transcript }),
     }));
-    const result = await upsertCommitments(conn, call.id, items, { generation: procGeneration, procToken });
+    const result = await upsertCommitments(conn, call.id, items, { generation: procGeneration, procToken, procGeneration });
     summary.written = result.written;
     summary.ownershipLost = result.ownershipLost;
     return summary;
