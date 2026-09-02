@@ -14,6 +14,15 @@
  * lead-to-cash-invariants.js, so they ride its existing gate
  * (GATE_LEAD_TO_CASH_SWEEP), cadence, fail-closed runner, and FIX email.
  *
+ * Unit of evaluation is the VISIT (scheduled_services row), never a single
+ * service_records row: service_records.scheduled_service_id is intentionally
+ * one-to-many — the detailed completion form, the pest-recap rail, and a
+ * project close can each own a completed row for one visit (closeout-status.js
+ * documents the sibling model), and the report token / completion text can
+ * live on a different sibling than the row a naive scan would land on. Each
+ * predicate therefore asks "does ANY sibling carry the artifact" and only
+ * fails when none does.
+ *
  * Each predicate returns { count, ids, detail } — the adapter contract of
  * the sweep registry. ids are PII-free row ids. One SQL statement per
  * predicate: a count plus a bounded id sample, so a large backlog costs one
@@ -38,6 +47,15 @@ const BEFORE_TODAY_ET = "ss.scheduled_date < (now() AT TIME ZONE 'America/New_Yo
 // rows without either marker are not reported as missing notifications.
 const COMMS_MARKER_SINCE = '2026-07-01';
 
+// A completed record that OWES the customer a report / a completion notice:
+// not a backfill, delivery not suppressed, not a project close (the project
+// report lane owns those). Shared by the token and comms predicates.
+const OWES_CUSTOMER_ARTIFACT = `
+      sr.status = 'completed'
+      AND COALESCE(sr.structured_notes->>'backfill', 'false') <> 'true'
+      AND COALESCE(sr.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
+      AND sr.completion_source IS DISTINCT FROM 'project_completion'`;
+
 const PREDICATES = Object.freeze({
   completed_visit_without_record: {
     label: 'Completed visits (before today) with no service_records row',
@@ -50,36 +68,45 @@ const PREDICATES = Object.freeze({
          AND ${BEFORE_TODAY_ET}
          AND NOT EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id)`,
   },
+  // Siblings from DIFFERENT rails are supported history; two completed rows
+  // from the SAME rail (two detailed-form completions, two project closes)
+  // are the corruption the missing unique index cannot prevent. The
+  // pest-recap rail (completion_source NULL) updates an existing row rather
+  // than inserting, and legacy NULL rows predate the column, so NULL is not
+  // grouped — it cannot be told apart from history.
   duplicate_completed_records_per_visit: {
-    label: 'Visits with more than one completed service_records row',
+    label: 'Visits with more than one completed service_records row from the same completion rail',
     href: '/admin/dispatch',
     sql: `
       SELECT count(*)::int AS n,
              (array_agg(t.scheduled_service_id::text ORDER BY t.n DESC))[1:${SAMPLE}] AS sample
         FROM (
-          SELECT sr.scheduled_service_id, count(*) AS n
+          SELECT sr.scheduled_service_id, sr.completion_source, count(*) AS n
             FROM service_records sr
            WHERE sr.scheduled_service_id IS NOT NULL
              AND sr.status = 'completed'
-           GROUP BY sr.scheduled_service_id
+             AND sr.completion_source IN ('detailed_form', 'project_completion')
+           GROUP BY sr.scheduled_service_id, sr.completion_source
           HAVING count(*) > 1
         ) t`,
   },
   completed_record_without_report_token: {
-    label: 'Completed auto-send records (older than 2h) with no report token',
+    label: 'Completed visits (>2h) that owe a customer report and have no sibling record with a report token',
     href: '/admin/dispatch',
     sql: `
       SELECT count(*)::int AS n,
-             (array_agg(sr.id::text ORDER BY sr.created_at DESC))[1:${SAMPLE}] AS sample
-        FROM service_records sr
-        JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
-       WHERE sr.status = 'completed'
-         AND ss.status = 'completed'
-         AND sr.report_view_token IS NULL
-         AND COALESCE(sr.structured_notes->>'backfill', 'false') <> 'true'
-         AND COALESCE(sr.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
-         AND sr.completion_source IS DISTINCT FROM 'project_completion'
-         AND sr.created_at < now() - interval '2 hours'`,
+             (array_agg(ss.id::text ORDER BY ss.scheduled_date DESC))[1:${SAMPLE}] AS sample
+        FROM scheduled_services ss
+       WHERE ss.status = 'completed'
+         AND EXISTS (
+               SELECT 1 FROM service_records sr
+                WHERE sr.scheduled_service_id = ss.id
+                  AND ${OWES_CUSTOMER_ARTIFACT}
+                  AND sr.created_at < now() - interval '2 hours')
+         AND NOT EXISTS (
+               SELECT 1 FROM service_records tok
+                WHERE tok.scheduled_service_id = ss.id
+                  AND tok.report_view_token IS NOT NULL)`,
   },
   completed_visit_without_completed_at: {
     label: "Completed visits (before today) whose completed_at is NULL (tracker stamp never landed)",
@@ -93,32 +120,36 @@ const PREDICATES = Object.freeze({
          AND ${BEFORE_TODAY_ET}
          AND EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND sr.status = 'completed')`,
   },
-  // Confirmed notice = a settled completionSmsStatus (closeout-status.js
-  // comms fact vocabulary: 'sent', 'skipped_recap_sms_already_sent',
-  // 'deferred', 'blocked', …) or a sent report email. A NULL marker or
-  // 'failed' is the finding. recap_sms_sent_at is deliberately NOT
-  // evidence: it is an at-most-once CLAIM stamped before the provider
-  // call (closeout-status.js treats an aged claim alone as unverified), so
-  // a crash can leave it set with no text sent.
+  // Confirmed notice = a settled completionSmsStatus on ANY sibling
+  // (closeout-status.js comms fact vocabulary: 'sent',
+  // 'skipped_recap_sms_already_sent', 'deferred', 'blocked', …) or a sent
+  // report email on any sibling. No marker anywhere, or only 'failed', is
+  // the finding. recap_sms_sent_at is deliberately NOT evidence: it is an
+  // at-most-once CLAIM stamped before the provider call (closeout-status.js
+  // treats an aged claim alone as unverified), so a crash can leave it set
+  // with no text sent.
   completed_record_without_comms_marker: {
-    label: 'Completed non-backfill records (>24h old) with no confirmed completion notice (no/failed SMS marker, no sent report email)',
+    label: 'Completed visits (>24h) that owe a completion notice and have no sibling with a confirmed one (no/failed SMS marker, no sent report email)',
     href: '/admin/dispatch',
     sql: `
       SELECT count(*)::int AS n,
-             (array_agg(sr.id::text ORDER BY sr.created_at DESC))[1:${SAMPLE}] AS sample
-        FROM service_records sr
-        JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
+             (array_agg(ss.id::text ORDER BY ss.scheduled_date DESC))[1:${SAMPLE}] AS sample
+        FROM scheduled_services ss
        WHERE ss.status = 'completed'
-         AND sr.status = 'completed'
-         AND COALESCE(sr.structured_notes->>'backfill', 'false') <> 'true'
-         AND COALESCE(sr.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
-         AND sr.completion_source IS DISTINCT FROM 'project_completion'
-         AND COALESCE(sr.structured_notes->>'completionSmsStatus', '') IN ('', 'failed')
+         AND EXISTS (
+               SELECT 1 FROM service_records sr
+                WHERE sr.scheduled_service_id = ss.id
+                  AND ${OWES_CUSTOMER_ARTIFACT}
+                  AND sr.created_at >= '${COMMS_MARKER_SINCE}'::date
+                  AND sr.created_at < now() - interval '24 hours')
          AND NOT EXISTS (
-               SELECT 1 FROM service_report_deliveries d
-                WHERE d.service_record_id = sr.id AND d.status = 'sent')
-         AND sr.created_at >= '${COMMS_MARKER_SINCE}'::date
-         AND sr.created_at < now() - interval '24 hours'`,
+               SELECT 1 FROM service_records sib
+                WHERE sib.scheduled_service_id = ss.id
+                  AND (
+                    COALESCE(sib.structured_notes->>'completionSmsStatus', '') NOT IN ('', 'failed')
+                    OR EXISTS (
+                         SELECT 1 FROM service_report_deliveries d
+                          WHERE d.service_record_id = sib.id AND d.status = 'sent')))`,
   },
 });
 
@@ -135,5 +166,5 @@ async function runPredicate(key, knex = db) {
 module.exports = {
   PREDICATES,
   runPredicate,
-  _private: { SAMPLE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET },
+  _private: { SAMPLE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, OWES_CUSTOMER_ARTIFACT },
 };

@@ -43,12 +43,23 @@ describe('PREDICATES registry', () => {
     expect(PREDICATES.completed_record_without_comms_marker.sql).toContain(_private.COMMS_MARKER_SINCE);
   });
 
-  test('a stamped report_generated_at never hides a missing token; an unconfirmed recap claim is not delivery evidence', () => {
-    expect(PREDICATES.completed_record_without_report_token.sql).toContain('report_view_token IS NULL');
-    expect(PREDICATES.completed_record_without_report_token.sql).not.toContain('report_generated_at');
+  test('token and comms predicates are VISIT-level: any sibling carrying the artifact clears the visit', () => {
+    const token = PREDICATES.completed_record_without_report_token.sql;
+    expect(token).toMatch(/FROM scheduled_services ss/);
+    expect(token).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM service_records tok[\s\S]*report_view_token IS NOT NULL/);
+    // A stamped report_generated_at never hides a missing token.
+    expect(token).not.toContain('report_generated_at');
     const comms = PREDICATES.completed_record_without_comms_marker.sql;
+    expect(comms).toMatch(/FROM scheduled_services ss/);
+    expect(comms).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM service_records sib[\s\S]*completionSmsStatus', '\) NOT IN \('', 'failed'\)[\s\S]*service_report_deliveries d/);
+    // An unconfirmed recap claim is not delivery evidence.
     expect(comms).not.toContain('recap_sms_sent_at');
-    expect(comms).toContain("COALESCE(sr.structured_notes->>'completionSmsStatus', '') IN ('', 'failed')");
+  });
+
+  test('duplicates are counted within ONE completion rail; cross-rail siblings are supported history', () => {
+    const sql = PREDICATES.duplicate_completed_records_per_visit.sql;
+    expect(sql).toContain("completion_source IN ('detailed_form', 'project_completion')");
+    expect(sql).toContain('GROUP BY sr.scheduled_service_id, sr.completion_source');
   });
 });
 
