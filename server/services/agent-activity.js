@@ -259,7 +259,7 @@ async function loadRows(windowHours) {
       return [];
     }
   };
-  const [runs, approvals, drafts, jobs] = await Promise.all([
+  const [runs, drafts, jobs] = await Promise.all([
     safe('autonomous_runs', () =>
       db('autonomous_runs')
         .select(
@@ -271,11 +271,6 @@ async function loadRows(windowHours) {
         )
         .where('created_at', '>=', since)
         .orderBy('created_at', 'desc')
-        .limit(MAX_ITEMS)),
-    safe('content_email_approvals', () =>
-      db('content_email_approvals')
-        .select('run_id', 'token', 'status', 'kind', 'created_at')
-        .where({ status: 'awaiting_reply' })
         .limit(MAX_ITEMS)),
     safe('message_drafts', () =>
       db('message_drafts as d')
@@ -295,6 +290,16 @@ async function loadRows(windowHours) {
         .orderBy('last_started_at', 'desc')
         .limit(MAX_ITEMS)),
   ]);
+  // Approvals are scoped to the runs actually loaded (one awaiting row per
+  // run_id, unique in the schema), so no cap can drop a loaded run's row.
+  const runIds = runs.map((r) => r.id);
+  const approvals = runIds.length
+    ? await safe('content_email_approvals', () =>
+      db('content_email_approvals')
+        .select('run_id', 'token', 'status', 'kind', 'created_at')
+        .where({ status: 'awaiting_reply' })
+        .whereIn('run_id', runIds))
+    : [];
   return { runs, approvals, drafts, jobs };
 }
 
