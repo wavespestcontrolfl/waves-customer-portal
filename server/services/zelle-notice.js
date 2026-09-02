@@ -14,6 +14,7 @@
  * Capital One is never trusted — the reconciler parks it for a human.
  */
 const psl = require('psl');
+const { decodeHTML } = require('entities');
 const { hasAlignedAuth } = require('./email/inbox-hygiene');
 const { domainFromAddress } = require('./email/spam-blocker');
 const { properCase } = require('../utils/name-case');
@@ -26,27 +27,25 @@ const INVOICE_NUMBER_RE = /\bWPC-\d{4}-\d{3,6}\b/gi;
 const MEMO_MAX = 200;
 const PAYER_MAX = 120;
 
-function isZelleNoticeCandidate({ subject, body_text: bodyText, snippet } = {}) {
+function isZelleNoticeCandidate({ subject, body_text: bodyText, body_html: bodyHtml, snippet } = {}) {
   return NOTICE_MARKER_RE.test(String(subject || ''))
     || NOTICE_MARKER_RE.test(String(bodyText || '').slice(0, 4000))
-    || NOTICE_MARKER_RE.test(String(snippet || ''));
+    || NOTICE_MARKER_RE.test(String(snippet || ''))
+    // HTML-only rendering: the marker may sit past the snippet, and a tag
+    // (Zelle<sup>®</sup>) may split it — strip tags before testing.
+    || NOTICE_MARKER_RE.test(String(bodyHtml || '').slice(0, 20000).replace(/<[^>]+>/g, ''));
 }
 
 // Minimal HTML → text: drop head/style/script, turn block boundaries into
-// newlines, strip tags, decode the handful of entities Capital One's template
-// uses. Only reached when body_text is absent (the sync stores both).
+// newlines, strip tags, then decode entities with the `entities` library
+// (every named / decimal / hex form, so an accented payer name survives).
+// Only reached when body_text is absent (the sync stores both).
 function htmlToText(html) {
-  return String(html || '')
+  return decodeHTML(String(html || '')
     .replace(/<(head|style|script)[\s\S]*?<\/\1>/gi, ' ')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(p|div|tr|li|h[1-6]|td)>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&reg;/gi, '')
-    .replace(/&amp;/gi, '&')
-    .replace(/&#8217;|&rsquo;/gi, '’')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)));
+    .replace(/<[^>]+>/g, ' '));
 }
 
 // Normalise the notice text so one set of regexes covers the text and HTML

@@ -176,11 +176,13 @@ function sameFirstName(a, b) {
   return !!variants && variants.has(b);
 }
 
-// Bank-notice payer name ("RAAKESH DUSHYANTHAN", "Pat & Sam Doe", "J. Doe")
-// vs an invoice's customer. Corroborates only when the customer's last name
-// appears as a whole token AND some other token is first-name-compatible
-// (nickname-aware). Initials never satisfy the first-name leg; a missing
-// customer last name never corroborates (amount alone is not identity).
+// Bank-notice payer name ("RAAKESH DUSHYANTHAN", "Pat & Sam Doe", "J. Doe",
+// "MARIA DE LA CRUZ") vs an invoice's customer. Corroborates only when the
+// customer's last name appears as a contiguous run of payer tokens AND a
+// non-overlapping contiguous run is first-name-compatible (nickname-aware),
+// so compound names on either side ("De La Cruz", "Mary Ann") still match.
+// Initials never satisfy the first-name leg; a missing customer name part
+// never corroborates (amount alone is not identity).
 function payerNameCorroborates(payerName, customer = {}) {
   const customerLast = normalizeNamePart(customer.last_name);
   const customerFirst = normalizeNamePart(customer.first_name);
@@ -189,8 +191,14 @@ function payerNameCorroborates(payerName, customer = {}) {
     .split(/[\s,&]+|\band\b/i)
     .map(normalizeNamePart)
     .filter((t) => t.length > 1);
-  if (!tokens.includes(customerLast)) return false;
-  return tokens.some((t) => t !== customerLast && sameFirstName(t, customerFirst));
+  // Every contiguous token run, joined — the unit of comparison on both sides.
+  const runs = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    for (let j = i + 1; j <= tokens.length; j += 1) runs.push({ i, j, key: tokens.slice(i, j).join('') });
+  }
+  const lastRuns = runs.filter((r) => r.key === customerLast);
+  if (!lastRuns.length) return false;
+  return lastRuns.some((last) => runs.some((r) => (r.j <= last.i || r.i >= last.j) && sameFirstName(r.key, customerFirst)));
 }
 
 module.exports = {

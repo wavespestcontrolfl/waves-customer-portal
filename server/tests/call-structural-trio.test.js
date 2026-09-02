@@ -18,9 +18,9 @@ const {
   resolveCallSecondaryContacts,
   resolveCallBookingPropertyLinkage,
   findCustomerForCallContact,
-  sameFirstName,
   extractedNameMatchesCustomer,
 } = _test;
+const { sameFirstName } = require('../utils/name-match');
 const { normalizeSecondaryContacts } = require('../utils/normalize-extraction-v2');
 const { mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
 const { getServiceContactSlots, SERVICE_CONTACT_SLOTS } = require('../services/customer-contact');

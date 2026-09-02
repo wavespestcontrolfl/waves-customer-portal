@@ -29,6 +29,8 @@ describe('isZelleNoticeCandidate', () => {
     expect(isZelleNoticeCandidate({ subject: 'Good news: Someone sent you money with Zelle®.' })).toBe(true);
     expect(isZelleNoticeCandidate({ body_text: TEXT })).toBe(true);
     expect(isZelleNoticeCandidate({ snippet: 'PAT DOE has just SENT YOU MONEY WITH ZELLE' })).toBe(true);
+    // HTML-only rendering where a tag splits the marker and the snippet is unrelated.
+    expect(isZelleNoticeCandidate({ subject: 'Good news', snippet: 'Sign In', body_html: HTML })).toBe(true);
     expect(isZelleNoticeCandidate({ subject: 'Your statement is ready', body_text: 'nothing here' })).toBe(false);
     expect(isZelleNoticeCandidate({})).toBe(false);
   });
@@ -43,6 +45,13 @@ describe('noticeText + parseZelleNotice', () => {
   test('HTML rendering (no body_text): entities, ® superscripts and comma amounts handled', () => {
     const parsed = parseZelleNotice(noticeText({ body_text: '   ', body_html: HTML }));
     expect(parsed).toEqual({ payerName: 'Pat Doe', amountCents: 125000, memo: 'Invoice WPC-2026-0412 & wpc-2026-0413' });
+  });
+
+  test('HTML-only notice: named, decimal and hex entities decode (accented payer survives)', () => {
+    const html = '<p>JOS&Eacute; NU&Ntilde;EZ has just sent you money with Zelle<sup>&reg;</sup> in the amount of $88.00.</p>'
+      + '<p>Here&#x2019;s the message from JOS&Eacute; NU&Ntilde;EZ: Caf&eacute; &#8212; back patio</p>';
+    expect(parseZelleNotice(noticeText({ body_html: html })))
+      .toEqual({ payerName: 'José Nuñez', amountCents: 8800, memo: 'Café — back patio' });
   });
 
   test('NBSP and curly apostrophes in the text rendering do not break the memo regex', () => {
