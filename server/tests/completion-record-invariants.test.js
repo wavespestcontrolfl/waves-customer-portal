@@ -60,8 +60,21 @@ describe('PREDICATES registry', () => {
     expect(token).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM service_records tok[\s\S]*report_view_token IS NOT NULL/);
     // A stamped report_generated_at never hides a missing token.
     expect(token).not.toContain('report_generated_at');
-    // The CANONICAL (newest completed) sibling's frozen "no report owed" exempts the visit; absent = owed.
-    expect(_private.CANONICAL_SIBLING_FROZE_FALSE('requiresServiceReport')).toMatch(/ORDER BY fr\.created_at DESC\s+LIMIT 1/);
+    // The CANONICAL sibling (the newest succeeded attempt's record, else the
+    // newest completed) decides: frozen snapshot first, live catalog when the
+    // snapshot is absent or malformed — never "absent = owed".
+    const canonical = _private.CANONICAL_SIBLING_FROZE_FALSE('requiresServiceReport');
+    expect(canonical).toMatch(/FROM service_completion_attempts a\s+WHERE a\.service_id = ss\.id AND a\.status = 'succeeded'\s+ORDER BY a\.updated_at DESC\s+LIMIT 1\)\) IS TRUE DESC,\s+fr\.created_at DESC\s+LIMIT 1/);
+    expect(canonical).toContain(`WHEN ${_private.FROZEN_SNAPSHOT_VALID}`);
+    expect(canonical).toContain("THEN canonical.snap->>'requiresServiceReport' = 'false'");
+    expect(canonical).toContain('FROM services cat');
+    expect(canonical).toContain(`AND ${_private.CATALOG_NOT_OWED.requiresServiceReport})`);
+    expect(canonical).toContain("NOT IN ('', 'default', 'inferred_v1', 'fallback_inference')");
+    // Strict snapshot twin of frozenCloseoutRequirements: v=1 + every boolean typed.
+    for (const f of ['requiresServiceReport', 'requiresApplicationLog', 'requiresCustomerSignature', 'requiresCustomerNotice', 'requiresLicense']) {
+      expect(_private.FROZEN_SNAPSHOT_VALID).toContain(`jsonb_typeof(canonical.snap->'${f}') = 'boolean'`);
+    }
+    expect(_private.CATALOG_NOT_OWED.requiresCustomerNotice).toBe('COALESCE(cat.requires_customer_notice, cat.requires_application_log, false) = false');
     expect(token).toContain(`NOT EXISTS (${_private.CANONICAL_SIBLING_FROZE_FALSE('requiresServiceReport')})`);
     expect(token).not.toContain("requiresServiceReport', 'true') <> 'false'");
     const comms = PREDICATES.completed_record_without_comms_marker.sql;

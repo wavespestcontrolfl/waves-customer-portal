@@ -119,21 +119,69 @@ const VISIT_NOT_PROJECT_BACKED = `
                AND (pc.completion_source = 'project_completion'
                     OR EXISTS (SELECT 1 FROM projects pj2 WHERE pj2.service_record_id = pc.id)))`;
 
-// The CANONICAL sibling's frozen closeout requirement — the newest
-// completed record for the visit, closeout-status.js's own fallback when no
-// attempt pins a record. Reading only that row means neither a stale
-// legacy sibling without a snapshot (defaulting to "owed") nor a stale
-// sibling that froze "not owed" can out-vote the record that actually
-// closed the visit (codex P2 r5 + pre-push P1). Absent = owed.
+// The CANONICAL sibling's closeout requirement, resolved the way
+// closeout-status.js resolves it: the record pinned by the newest SUCCEEDED
+// completion attempt when that record is still a completed sibling, else the
+// newest completed record (codex P2 r5/r6 + pre-push P1). Reading only that
+// row means neither a stale legacy sibling nor a stale sibling that froze
+// "not owed" can out-vote the record that actually closed the visit.
+// FROZEN-FIRST: a strictly valid snapshot (v=1, every boolean typed, photo
+// count a non-negative number, non-empty source — the twin of
+// frozenCloseoutRequirements) decides. Absent or malformed (soft-failed
+// lookup, migration-window write) falls to the LIVE catalog like
+// closeout-status does, not to "owed" (codex P2 r6): an explicit catalog
+// rule (closeout_requirements_source outside the inferred set) with the
+// flag false exempts; the inferred path (no row / inferred source) never
+// exempts a report and only exempts a notice when its application-log
+// default is false — that default is name/category inference in JS, so the
+// sweep keeps the conservative "owed" there.
+const FROZEN_SNAPSHOT_VALID = `
+                       jsonb_typeof(canonical.snap) = 'object'
+                       AND canonical.snap->>'v' = '1'
+                       AND jsonb_typeof(canonical.snap->'requiresServiceReport') = 'boolean'
+                       AND jsonb_typeof(canonical.snap->'requiresApplicationLog') = 'boolean'
+                       AND jsonb_typeof(canonical.snap->'requiresCustomerSignature') = 'boolean'
+                       AND jsonb_typeof(canonical.snap->'requiresCustomerNotice') = 'boolean'
+                       AND jsonb_typeof(canonical.snap->'requiresLicense') = 'boolean'
+                       AND jsonb_typeof(canonical.snap->'requiredPhotoCount') = 'number'
+                       AND (canonical.snap->>'requiredPhotoCount')::numeric >= 0
+                       AND jsonb_typeof(canonical.snap->'source') = 'string'
+                       AND canonical.snap->>'source' <> ''`;
+const CATALOG_NOT_OWED = Object.freeze({
+  // bool(requires_service_report, true): only an explicit false exempts.
+  requiresServiceReport: 'cat.requires_service_report = false',
+  // bool(requires_customer_notice, bool(requires_application_log, false)).
+  requiresCustomerNotice: `COALESCE(cat.requires_customer_notice, cat.requires_application_log, false) = false`,
+});
 const CANONICAL_SIBLING_FROZE_FALSE = (requirement) => `
                  SELECT 1 FROM (
-                   SELECT fr.structured_notes->'closeoutRequirements'->>'${requirement}' AS owed_flag
+                   SELECT fr.structured_notes->'closeoutRequirements' AS snap
                      FROM service_records fr
                     WHERE fr.scheduled_service_id = ss.id AND fr.status = 'completed'
-                    ORDER BY fr.created_at DESC
+                    ORDER BY (fr.id = (SELECT a.service_record_id
+                                         FROM service_completion_attempts a
+                                        WHERE a.service_id = ss.id AND a.status = 'succeeded'
+                                        ORDER BY a.updated_at DESC
+                                        LIMIT 1)) IS TRUE DESC,
+                             fr.created_at DESC
                     LIMIT 1
                  ) canonical
-                  WHERE canonical.owed_flag = 'false'`;
+                  WHERE CASE
+                    WHEN ${FROZEN_SNAPSHOT_VALID}
+                      THEN canonical.snap->>'${requirement}' = 'false'
+                    ELSE EXISTS (
+                      SELECT 1 FROM (
+                        SELECT cat.requires_service_report, cat.requires_customer_notice,
+                               cat.requires_application_log, cat.closeout_requirements_source
+                          FROM services cat
+                         WHERE cat.id = ss.service_id
+                            OR lower(trim(cat.name)) = lower(trim(COALESCE(ss.service_type, '')))
+                         ORDER BY (cat.id = ss.service_id) IS TRUE DESC
+                         LIMIT 1
+                      ) cat
+                       WHERE COALESCE(cat.closeout_requirements_source, '') NOT IN ('', 'default', 'inferred_v1', 'fallback_inference')
+                         AND ${CATALOG_NOT_OWED[requirement]})
+                  END`;
 
 // matchSql must SELECT `id` (text-castable) and `ord` (sort key, newest
 // first). The CTE is scanned once for the count and once for a LIMIT-bounded
@@ -182,8 +230,8 @@ const PREDICATES = Object.freeze({
   },
   // A frozen catalog rule saying the service owes no report
   // (closeoutRequirements.requiresServiceReport=false) on the CANONICAL
-  // sibling (newest completed record, closeout-status's fallback) exempts
-  // the visit (codex P2 r5); absent = owed.
+  // sibling (attempt-pinned record, else newest completed) exempts the
+  // visit (codex P2 r5/r6); an absent snapshot reads the live catalog.
   completed_record_without_report_token: {
     label: 'Completed non-project visits (>2h) that owe a customer report and have no sibling record with a report token',
     href: '/admin/dispatch',
@@ -234,8 +282,9 @@ const PREDICATES = Object.freeze({
   // findings once 24h old; NULL and 'failed' are findings. A frozen catalog
   // rule saying the service owes no notice
   // (closeoutRequirements.requiresCustomerNotice=false) on the CANONICAL
-  // sibling (newest completed record, closeout-status's fallback) exempts
-  // the visit (codex P2 r5). A delivered video recap
+  // sibling (attempt-pinned record, else newest completed) exempts the
+  // visit (codex P2 r5/r6); an absent snapshot reads the live catalog.
+  // A delivered video recap
   // (service_recaps.sent_at — set only on provider confirmation,
   // recap-delivery.js) is a completion notice too (codex P2 r5).
   completed_record_without_comms_marker: {
@@ -317,7 +366,7 @@ module.exports = {
   runPredicate,
   _private: {
     SAMPLE, RECORD_FK_SINCE, TRACKING_STAMP_SINCE, REPORT_TOKEN_SINCE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, COMPLETED_TRANSITION_SINCE,
-    OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES, CANONICAL_SIBLING_FROZE_FALSE,
+    OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES, CANONICAL_SIBLING_FROZE_FALSE, FROZEN_SNAPSHOT_VALID, CATALOG_NOT_OWED,
     COMPLETED_MARKER_AT, INCOMPLETE_FOLLOWUP_GRACE_DAYS, aggregate,
   },
 };
