@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Button, Badge, Card, Input, Select } from "../../components/ui";
 import { cn } from "../../components/ui/cn";
 import {
@@ -511,6 +511,126 @@ function ProtocolMixCard({
   const fullTankLabel = plan.equipment?.tankCapacityGal
     ? `${fmtNumber(plan.equipment.tankCapacityGal, " gal")} tank`
     : "Full tank";
+  const items = plan.items || [];
+  // Without calibrated equipment every rate cell is "—"; the columns (and
+  // the phone card's rate strip) are dropped in favour of one explanation.
+  const hasAnyMix = items.some(
+    (item) =>
+      item.jobMix || item.plannedMix || item.fullTankMix || item.plannedFullTankMix,
+  );
+  const rows = items.map((item, idx) => {
+    const checked = item.conditional
+      ? selectedConditionalIds.includes(String(item.product?.id)) || item.selected
+      : true;
+    const areaMix = item.jobMix || item.plannedMix;
+    const tankMix = item.fullTankMix || item.plannedFullTankMix;
+    const plannedOnly = !item.jobMix && !!item.plannedMix;
+    const numClass = plannedOnly
+      ? "u-nums text-13 text-ink-tertiary"
+      : "u-nums text-13 font-medium text-zinc-900";
+    const dash = <div className="u-nums text-13 font-medium text-zinc-900">—</div>;
+    return {
+      key: `${idx}-${item.raw}`,
+      hasProduct: !!item.product,
+      product: (
+        <div className="flex items-start gap-2">
+          {item.conditional && item.product?.id && (
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={() => onToggleConditional(item.product.id)}
+              className="mt-0.5 h-4 w-4 accent-zinc-900"
+              aria-label={`Select ${item.product.name}`}
+            />
+          )}
+          <div className="min-w-0">
+            <div className="text-13 font-medium text-zinc-900">
+              {item.product?.name || item.raw}
+            </div>
+            <div className="text-11 text-ink-secondary leading-normal mt-1">
+              {item.raw}
+            </div>
+            <div className="mt-1 flex gap-1.5 flex-wrap">
+              {item.conditional && (
+                <Badge tone="neutral">{checked ? "Selected" : "Optional"}</Badge>
+              )}
+              {!item.matched &&
+                (item.taskLine ? (
+                  <Badge tone="neutral">Task / Scout</Badge>
+                ) : (
+                  <Badge tone="alert">Unmatched</Badge>
+                ))}
+              {item.product?.requiresSurfactant && (
+                <Badge tone="neutral">Surfactant Required</Badge>
+              )}
+            </div>
+          </div>
+        </div>
+      ),
+      label: (
+        <div>
+          <div className="text-12 text-ink-primary">
+            {item.product?.activeIngredient || "—"}
+          </div>
+          {groupText(item.product?.groups) && (
+            <div className="text-11 text-ink-secondary mt-1">
+              {groupText(item.product.groups)}
+            </div>
+          )}
+          {(item.product?.reiHours || item.product?.rainfastMinutes) && (
+            <div className="text-11 text-ink-secondary mt-1">
+              {item.product.reiHours ? `REI ${item.product.reiHours}h` : ""}
+              {item.product.reiHours && item.product.rainfastMinutes ? " · " : ""}
+              {item.product.rainfastMinutes
+                ? `Rainfast ${item.product.rainfastMinutes}m`
+                : ""}
+            </div>
+          )}
+          {item.product?.excludedTurfSpecies?.length > 0 && (
+            <div className="text-11 text-alert-fg mt-1">
+              Excludes: {item.product.excludedTurfSpecies.join(", ")}
+            </div>
+          )}
+          <LabelLinks product={item.product} className="mt-1" />
+        </div>
+      ),
+      areaMix: areaMix ? (
+        <>
+          <div className={numClass}>
+            {fmtNumber(areaMix.amount)} {areaMix.amountUnit || ""}
+          </div>
+          <div className="text-11 text-ink-secondary">
+            {fmtNumber(areaMix.ratePer1000)} {areaMix.rateUnit || ""}/1K
+          </div>
+          {plannedOnly && (
+            <div className="text-10 text-ink-tertiary">if triggered</div>
+          )}
+        </>
+      ) : (
+        dash
+      ),
+      matCost: (
+        <>
+          <div className={numClass}>{fmtMoney(areaMix?.materialCost)}</div>
+          {areaMix?.materialCostSource && (
+            <div className="text-10 text-ink-tertiary">inventory</div>
+          )}
+        </>
+      ),
+      tankMix: tankMix ? (
+        <>
+          <div className={numClass}>
+            {fmtNumber(tankMix.amount)} {tankMix.amountUnit || ""}
+          </div>
+          <div className="text-11 text-ink-secondary">
+            {fmtNumber(tankMix.carrierGallons, " gal carrier")}
+          </div>
+        </>
+      ) : (
+        dash
+      ),
+    };
+  });
 
   return (
     <div className="flex flex-col gap-3">
@@ -595,178 +715,93 @@ function ProtocolMixCard({
           <div className="text-12 text-ink-secondary leading-normal mb-4">
             {plan.visit?.objective || "No objective available for this visit."}
           </div>{" "}
-          <div className="overflow-x-auto border-hairline border-zinc-200 rounded-md">
-            {" "}
+          {!hasAnyMix && (
+            <div className="mb-3 text-12 text-ink-tertiary">
+              Area mix, material cost and tank amounts appear once calibrated
+              equipment is selected.
+            </div>
+          )}
+          {/* md+: the table. Phones: one card per product (below) — the
+              five-column table only fit by scrolling sideways, which hid
+              the label/safety column and the rates. */}
+          <div className="hidden md:block overflow-x-auto border-hairline border-zinc-200 rounded-md">
             <table className="w-full border-collapse">
-              {" "}
               <thead className="bg-zinc-50">
-                {" "}
                 <tr>
-                  {" "}
                   <th className="px-3 py-2 text-left text-11 u-label text-ink-tertiary">
                     Product
-                  </th>{" "}
+                  </th>
                   <th className="px-3 py-2 text-left text-11 u-label text-ink-tertiary">
                     Label / Safety
-                  </th>{" "}
-                  <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
-                    Area Mix
-                  </th>{" "}
-                  <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
-                    Mat$
-                  </th>{" "}
-                  <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
-                    {fullTankLabel}
-                  </th>{" "}
-                </tr>{" "}
-              </thead>{" "}
+                  </th>
+                  {hasAnyMix && (
+                    <>
+                      <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
+                        Area Mix
+                      </th>
+                      <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
+                        Mat$
+                      </th>
+                      <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
+                        {fullTankLabel}
+                      </th>
+                    </>
+                  )}
+                </tr>
+              </thead>
               <tbody>
-                {plan.items?.map((item, idx) => {
-                  const checked = item.conditional
-                    ? selectedConditionalIds.includes(
-                        String(item.product?.id),
-                      ) || item.selected
-                    : true;
-                  const areaMix = item.jobMix || item.plannedMix;
-                  const tankMix = item.fullTankMix || item.plannedFullTankMix;
-                  const plannedOnly = !item.jobMix && !!item.plannedMix;
-                  const numClass = plannedOnly
-                    ? "u-nums text-13 text-ink-tertiary"
-                    : "u-nums text-13 font-medium text-zinc-900";
-                  return (
-                    <tr
-                      key={`${idx}-${item.raw}`}
-                      className="border-t border-hairline border-zinc-100 align-top"
-                    >
-                      {" "}
-                      <td className="px-3 py-3 min-w-[260px]">
-                        {" "}
-                        <div className="flex items-start gap-2">
-                          {item.conditional && item.product?.id && (
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() =>
-                                onToggleConditional(item.product.id)
-                              }
-                              className="mt-0.5 h-4 w-4 accent-zinc-900"
-                              aria-label={`Select ${item.product.name}`}
-                            />
-                          )}
-                          <div className="min-w-0">
-                            {" "}
-                            <div className="text-13 font-medium text-zinc-900">
-                              {item.product?.name || item.raw}
-                            </div>{" "}
-                            <div className="text-11 text-ink-secondary leading-normal mt-1">
-                              {item.raw}
-                            </div>{" "}
-                            <div className="mt-1 flex gap-1.5 flex-wrap">
-                              {item.conditional && (
-                                <Badge tone="neutral">
-                                  {checked ? "Selected" : "Optional"}
-                                </Badge>
-                              )}
-                              {!item.matched &&
-                                (item.taskLine ? (
-                                  <Badge tone="neutral">Task / Scout</Badge>
-                                ) : (
-                                  <Badge tone="alert">Unmatched</Badge>
-                                ))}
-                              {item.product?.requiresSurfactant && (
-                                <Badge tone="neutral">
-                                  Surfactant Required
-                                </Badge>
-                              )}
-                            </div>{" "}
-                          </div>{" "}
-                        </div>{" "}
-                      </td>{" "}
-                      <td className="px-3 py-3 min-w-[220px]">
-                        {" "}
-                        <div className="text-12 text-ink-primary">
-                          {item.product?.activeIngredient || "—"}
-                        </div>
-                        {groupText(item.product?.groups) && (
-                          <div className="text-11 text-ink-secondary mt-1">
-                            {groupText(item.product.groups)}
-                          </div>
-                        )}
-                        {(item.product?.reiHours ||
-                          item.product?.rainfastMinutes) && (
-                          <div className="text-11 text-ink-secondary mt-1">
-                            {item.product.reiHours
-                              ? `REI ${item.product.reiHours}h`
-                              : ""}
-                            {item.product.reiHours &&
-                            item.product.rainfastMinutes
-                              ? " · "
-                              : ""}
-                            {item.product.rainfastMinutes
-                              ? `Rainfast ${item.product.rainfastMinutes}m`
-                              : ""}
-                          </div>
-                        )}
-                        {item.product?.excludedTurfSpecies?.length > 0 && (
-                          <div className="text-11 text-alert-fg mt-1">
-                            Excludes:{" "}
-                            {item.product.excludedTurfSpecies.join(", ")}
-                          </div>
-                        )}
-                        <LabelLinks product={item.product} className="mt-1" />
-                      </td>{" "}
-                      <td className="px-3 py-3 text-right whitespace-nowrap">
-                        {areaMix ? (
-                          <>
-                            <div className={numClass}>
-                              {fmtNumber(areaMix.amount)}{" "}
-                              {areaMix.amountUnit || ""}
-                            </div>
-                            <div className="text-11 text-ink-secondary">
-                              {fmtNumber(areaMix.ratePer1000)}{" "}
-                              {areaMix.rateUnit || ""}/1K
-                            </div>
-                            {plannedOnly && (
-                              <div className="text-10 text-ink-tertiary">
-                                if triggered
-                              </div>
-                            )}
-                          </>
-                        ) : (
-                          <div className="u-nums text-13 font-medium text-zinc-900">—</div>
-                        )}
-                      </td>{" "}
-                      <td className="px-3 py-3 text-right whitespace-nowrap">
-                        <div className={numClass}>
-                          {fmtMoney(areaMix?.materialCost)}
-                        </div>
-                        {areaMix?.materialCostSource && (
-                          <div className="text-10 text-ink-tertiary">
-                            inventory
-                          </div>
-                        )}
-                      </td>{" "}
-                      <td className="px-3 py-3 text-right whitespace-nowrap">
-                        {tankMix ? (
-                          <>
-                            <div className={numClass}>
-                              {fmtNumber(tankMix.amount)}{" "}
-                              {tankMix.amountUnit || ""}
-                            </div>
-                            <div className="text-11 text-ink-secondary">
-                              {fmtNumber(tankMix.carrierGallons, " gal carrier")}
-                            </div>
-                          </>
-                        ) : (
-                          <div className="u-nums text-13 font-medium text-zinc-900">—</div>
-                        )}
-                      </td>{" "}
-                    </tr>
-                  );
-                })}
-              </tbody>{" "}
-            </table>{" "}
-          </div>{" "}
+                {rows.map((row) => (
+                  <tr
+                    key={row.key}
+                    className="border-t border-hairline border-zinc-100 align-top"
+                  >
+                    <td className="px-3 py-3 min-w-[260px]">{row.product}</td>
+                    <td className="px-3 py-3 min-w-[220px]">{row.label}</td>
+                    {hasAnyMix && (
+                      <>
+                        <td className="px-3 py-3 text-right whitespace-nowrap">
+                          {row.areaMix}
+                        </td>
+                        <td className="px-3 py-3 text-right whitespace-nowrap">
+                          {row.matCost}
+                        </td>
+                        <td className="px-3 py-3 text-right whitespace-nowrap">
+                          {row.tankMix}
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="md:hidden flex flex-col gap-2">
+            {rows.map((row) => (
+              <div
+                key={row.key}
+                className="rounded-md border-hairline border-zinc-200 p-3 flex flex-col gap-2"
+              >
+                {row.product}
+                {row.hasProduct && row.label}
+                {hasAnyMix && (
+                  <div className="grid grid-cols-3 gap-2 border-t border-hairline border-zinc-100 pt-2">
+                    <div>
+                      <div className="u-label text-ink-tertiary">Area mix</div>
+                      {row.areaMix}
+                    </div>
+                    <div>
+                      <div className="u-label text-ink-tertiary">Mat$</div>
+                      {row.matCost}
+                    </div>
+                    <div>
+                      <div className="u-label text-ink-tertiary">{fullTankLabel}</div>
+                      {row.tankMix}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>{" "}
       </Card>{" "}
       <Card className="overflow-hidden">
@@ -888,6 +923,13 @@ export default function ProtocolReferenceTabV2() {
   const [programs, setPrograms] = useState(null);
   const [selectedTrack, setSelectedTrack] = useState(null);
   const [trackData, setTrackData] = useState(null);
+  const [trackError, setTrackError] = useState(null);
+  // Monotonic id of the latest protocol request: a slow earlier selection
+  // must not install its data (or its failure rollback) over a later one.
+  const trackRequestRef = useRef(0);
+  // Last selection that actually loaded — what a failed request rolls back
+  // to (the in-flight selection at request time may itself never resolve).
+  const lastLoadedRef = useRef({ key: null, data: null });
   const [loading, setLoading] = useState(true);
   const [showFullCalendar, setShowFullCalendar] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
@@ -909,15 +951,31 @@ export default function ProtocolReferenceTabV2() {
   const isServiceProgram = selectedTrack && !isLawnTrack;
 
   const loadTrack = async (key) => {
+    const requestId = ++trackRequestRef.current;
+    const isCurrent = () => requestId === trackRequestRef.current;
     setSelectedTrack(key);
     setTrackData(null);
+    setTrackError(null);
     setShowFullCalendar(false);
     const param = lawnTrackKeys.includes(key)
       ? `track=${key}`
       : `program=${key}`;
-    const d = await adminFetch(`/admin/protocols/programs?${param}`);
-    setTrackData(d.track || d.program);
-    setSelectedConditionalIds([]);
+    try {
+      const d = await adminFetch(`/admin/protocols/programs?${param}`);
+      if (!isCurrent()) return;
+      const data = d.track || d.program;
+      lastLoadedRef.current = { key, data };
+      setTrackData(data);
+      setSelectedConditionalIds([]);
+    } catch (e) {
+      if (!isCurrent()) return;
+      // Restore the previous selection so the controlled Select (phones)
+      // can re-emit a change for the failed key — re-picking the already
+      // selected option fires nothing — and offer a direct retry.
+      setSelectedTrack(lastLoadedRef.current.key);
+      setTrackData(lastLoadedRef.current.data);
+      setTrackError({ key, message: e?.message || "Request failed" });
+    }
   };
 
   useEffect(() => {
@@ -938,6 +996,7 @@ export default function ProtocolReferenceTabV2() {
               `/admin/protocols/programs?${param}`,
             );
             if (!cancelled) {
+              lastLoadedRef.current = { key: defaultTrack, data: track.track || track.program };
               setSelectedTrack(defaultTrack);
               setTrackData(track.track || track.program);
             }
@@ -1035,76 +1094,88 @@ export default function ProtocolReferenceTabV2() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex gap-2 flex-wrap overflow-x-auto">
-        {lawnTracks.map((t) => {
-          const active = selectedTrack === t.key;
-          return (
-            <button
-              key={t.key}
-              onClick={() => loadTrack(t.key)}
-              className={cn(
-                "px-4 py-2.5 rounded-md u-focus-ring flex-shrink-0 text-left transition-colors border-hairline",
-                active
-                  ? "bg-zinc-900 border-zinc-900 text-white"
-                  : "bg-white border-zinc-200 text-ink-primary hover:bg-zinc-50",
-              )}
-            >
-              {" "}
-              <div className="text-13 font-medium">
-                {t.name?.substring(0, 35) || t.key}
-              </div>{" "}
-              <div
+      {/* Protocol picker. Phones: one Select (the wrapping tile row ran to
+          four ragged lines). md+: a uniform grid so every tile is the same
+          width — lawn tracks first, then the service programs. */}
+      <div>
+        <label htmlFor="protocol-track-select" className="sr-only">
+          Protocol
+        </label>
+        <Select
+          id="protocol-track-select"
+          className="md:hidden"
+          value={selectedTrack || ""}
+          onChange={(e) => loadTrack(e.target.value)}
+        >
+          {!selectedTrack && <option value="">Choose a protocol…</option>}
+          {lawnTracks.map((t) => (
+            <option key={t.key} value={t.key}>
+              {t.name || t.key} — {t.visits} visits/year
+            </option>
+          ))}
+          {servicePrograms.map((program) => (
+            <option key={program.key} value={program.key}>
+              {program.name || program.key} — {program.visits} templates
+            </option>
+          ))}
+        </Select>
+        <div className="hidden md:grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
+          {[
+            ...lawnTracks.map((t) => ({ ...t, meta: `${t.visits} visits/year` })),
+            ...servicePrograms.map((p) => ({ ...p, meta: `${p.visits} templates` })),
+          ].map((t) => {
+            const active = selectedTrack === t.key;
+            return (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => loadTrack(t.key)}
+                aria-pressed={active}
                 className={cn(
-                  "text-11 mt-0.5 u-label",
-                  active ? "text-white/70" : "text-ink-tertiary",
+                  "min-w-0 px-4 py-2.5 rounded-md u-focus-ring text-left transition-colors border-hairline",
+                  active
+                    ? "bg-zinc-900 border-zinc-900 text-white"
+                    : "bg-white border-zinc-200 text-ink-primary hover:bg-zinc-50",
                 )}
               >
-                {t.visits} visits/year
-              </div>{" "}
-            </button>
-          );
-        })}
-        <div className="w-px bg-zinc-200 self-stretch mx-1 flex-shrink-0" />
-        {servicePrograms.map((program) => {
-          const active = selectedTrack === program.key;
-          return (
-            <button
-              key={program.key}
-              onClick={() => loadTrack(program.key)}
-              className={cn(
-                "px-4 py-2.5 rounded-md u-focus-ring flex-shrink-0 text-left transition-colors border-hairline",
-                active
-                  ? "bg-zinc-900 border-zinc-900 text-white"
-                  : "bg-white border-zinc-200 text-ink-primary hover:bg-zinc-50",
-              )}
+                <div className="text-13 font-medium leading-snug">
+                  {t.name || t.key}
+                </div>
+                <div
+                  className={cn(
+                    "text-11 mt-0.5 u-label",
+                    active ? "text-white/70" : "text-ink-tertiary",
+                  )}
+                >
+                  {t.meta}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        {trackError && (
+          <div
+            role="alert"
+            className="mt-2 flex flex-wrap items-center gap-2 text-12 text-alert-fg"
+          >
+            <span>Couldn't load that protocol: {trackError.message}</span>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => loadTrack(trackError.key)}
             >
-              {" "}
-              <div className="text-13 font-medium">
-                {program.name?.substring(0, 35) || program.key}
-              </div>{" "}
-              <div
-                className={cn(
-                  "text-11 mt-0.5 u-label",
-                  active ? "text-white/70" : "text-ink-tertiary",
-                )}
-              >
-                {program.visits} templates
-              </div>{" "}
-            </button>
-          );
-        })}
+              Retry
+            </Button>
+          </div>
+        )}
       </div>
       {trackData && (
         <div className="flex flex-col gap-3">
-          {" "}
+          {/* Month / equipment / area controls — lawn tracks only; service
+              programs have no mix inputs, so no (empty) card for them. */}
+          {isLawnTrack && (
           <Card className="overflow-hidden">
-            {" "}
             <div className="px-4 py-3 flex flex-col gap-3">
-              {" "}
-              <div className="text-16 font-medium text-ink-primary tracking-tight">
-                {trackData.name}
-              </div>
-              {isLawnTrack && (
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                   {" "}
                   <div>
@@ -1168,9 +1239,9 @@ export default function ProtocolReferenceTabV2() {
                     </div>{" "}
                   </div>{" "}
                 </div>
-              )}
             </div>{" "}
           </Card>
+          )}
           {safetyRules.length > 0 && (
             <div className="flex flex-wrap gap-2 px-3.5 py-2.5 bg-alert-bg border border-hairline border-alert-fg/30 rounded-md items-center">
               {" "}
@@ -1178,7 +1249,7 @@ export default function ProtocolReferenceTabV2() {
                 SAFETY
               </span>
               {safetyRules.map((rule, i) => (
-                <Badge key={i} tone="alert" className="whitespace-nowrap">
+                <Badge key={i} tone="alert" className="h-auto min-h-5 whitespace-normal text-left py-0.5 leading-snug">
                   {rule}
                 </Badge>
               ))}
@@ -1267,9 +1338,7 @@ export default function ProtocolReferenceTabV2() {
               <div className="overflow-x-auto">
                 {" "}
                 <table className="w-full border-collapse">
-                  {" "}
                   <thead>
-                    {" "}
                     <tr className="border-b border-hairline border-zinc-200">
                       {[
                         { k: "#", cls: "text-center" },
@@ -1292,8 +1361,8 @@ export default function ProtocolReferenceTabV2() {
                           {h.k}
                         </th>
                       ))}
-                    </tr>{" "}
-                  </thead>{" "}
+                    </tr>
+                  </thead>
                   <tbody>
                     {trackData.visits?.map((v, i) => {
                       const isCurrentMonth = v.month === currentMonthAbbr;
@@ -1305,7 +1374,6 @@ export default function ProtocolReferenceTabV2() {
                             isCurrentMonth && "bg-zinc-50",
                           )}
                         >
-                          {" "}
                           <td
                             className={cn(
                               "px-2.5 py-2 text-12 font-medium text-center align-top",
@@ -1315,7 +1383,7 @@ export default function ProtocolReferenceTabV2() {
                             )}
                           >
                             {v.visit}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 text-12 font-medium text-ink-primary whitespace-nowrap align-top">
                             {v.month}
                             {isCurrentMonth && (
@@ -1323,18 +1391,18 @@ export default function ProtocolReferenceTabV2() {
                                 NOW
                               </span>
                             )}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 text-12 text-ink-primary align-top">
                             {parseProductLines(v.primary).map((p, pi) => (
                               <CalendarLine key={pi} line={p} />
                             ))}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 text-12 text-ink-secondary align-top">
                             {parseProductLines(v.secondary).map((p, pi) => (
                               <CalendarLine key={pi} line={p} muted />
                             ))}
                             {!v.secondary && "\u2014"}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">
                             {formatProtocolCost(v.material_cost)}
                             {Number.isFinite(parseFloat(v.conditional_cost)) &&
@@ -1355,10 +1423,10 @@ export default function ProtocolReferenceTabV2() {
                                   spot
                                 </div>
                               )}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">
                             {formatProtocolCost(v.labor_cost)}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 align-top">
                             {" "}
                             <TierDotsV2
@@ -1366,15 +1434,15 @@ export default function ProtocolReferenceTabV2() {
                               tier4x={v.tier_4x}
                               tier6x={v.tier_6x}
                             />{" "}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 text-11 text-ink-tertiary whitespace-pre-wrap align-top">
                             {visitSopText(v) || "\u2014"}
-                          </td>{" "}
+                          </td>
                         </tr>
                       );
                     })}
-                  </tbody>{" "}
-                </table>{" "}
+                  </tbody>
+                </table>
               </div>{" "}
             </Card>
           )}
