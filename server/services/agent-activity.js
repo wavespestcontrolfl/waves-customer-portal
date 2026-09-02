@@ -292,11 +292,14 @@ function jobItem(job) {
 }
 
 // ops_digest bell rows (GATE_OPS_DIGESTS_IN_APP): the subject prefix is the
-// owner's action grammar — ACT: needs the owner, FIX: something is broken,
-// FIRST: / anything else is informational. A read ACT row is done.
+// owner's action grammar — ACT: (and the price-match draft's "[Review]")
+// needs the owner, FIX: something is broken, FIRST: / anything else is
+// informational. A read ACT row is done.
+const ACTION_PREFIX = /^(ACT:|\[Review\])/i;
+const DIGEST_PREFIX = /^(ACT:|FIX:|FIRST:|\[Review\])\s*/i;
 function digestItem(row) {
   const subject = String(row.title || '');
-  const isAct = /^ACT:/i.test(subject);
+  const isAct = ACTION_PREFIX.test(subject);
   const isFix = /^FIX:/i.test(subject);
   const status = isFix ? 'failed' : isAct ? (row.read_at ? 'completed' : 'awaiting_review') : 'completed';
   const meta = parseJson(row.metadata, {}) || {};
@@ -307,7 +310,7 @@ function digestItem(row) {
     // so an ACT item clears from the feed once the owner has followed it.
     notificationId: row.id,
     agent: OPS_AGENT,
-    title: subject.replace(/^(ACT|FIX|FIRST):\s*/i, ''),
+    title: subject.replace(DIGEST_PREFIX, ''),
     subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
     status,
     startedAt: iso(row.created_at),

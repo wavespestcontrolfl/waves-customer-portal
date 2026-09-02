@@ -240,6 +240,7 @@ describe('buildActivity digests', () => {
         { id: 'n2', title: 'FIX: lead-to-cash invariants — 2 violations', body: 'x', link: '/admin/invoices', metadata: JSON.stringify({ opsKey: 'lead-to-cash-invariants' }), read_at: null, created_at: '2026-09-02T06:55:00Z' },
         { id: 'n3', title: 'ACT: brain review — 1 blocked', body: 'y', link: '/admin/knowledge', metadata: null, read_at: '2026-09-02T09:00:00Z', created_at: '2026-09-02T06:00:00Z' },
         { id: 'n4', title: 'FIRST: autopay charge on a card hold', body: 'z', link: null, metadata: {}, read_at: null, created_at: '2026-09-02T05:00:00Z' },
+        { id: 'n5', title: '[Review] Price-match draft ready — 3 opportunities for Mark', body: 'w', link: '/admin/price-match', metadata: { opsKey: 'price-match-owner-copy' }, read_at: null, created_at: '2026-09-02T04:00:00Z' },
       ],
     });
     expect(items.map((i) => [i.id, i.status, i.title, i.agent])).toEqual([
@@ -247,6 +248,7 @@ describe('buildActivity digests', () => {
       ['digest:n2', 'failed', 'lead-to-cash invariants — 2 violations', 'Waves Ops'],
       ['digest:n3', 'completed', 'brain review — 1 blocked', 'Waves Ops'],
       ['digest:n4', 'completed', 'autopay charge on a card hold', 'Waves Ops'],
+      ['digest:n5', 'awaiting_review', 'Price-match draft ready — 3 opportunities for Mark', 'Waves Ops'],
     ]);
     expect(items[0].subtitle).toBe('promised estimate · needs you');
     expect(items[0].notificationId).toBe('n1');
