@@ -68,8 +68,14 @@ async function buildReferralShareForCustomer(customerId, {
   const dbx = conn || database;
   let promoter;
   try {
+    // Under an outer transaction the enroll runs in a SAVEPOINT (knex nests
+    // transactions as savepoints): a 23505 from the unique customer_phone
+    // constraint rolls back only the savepoint, so the household fallback
+    // below can still query the outer transaction — a unique violation
+    // otherwise aborts the whole Postgres transaction (25P02) (pre-push
+    // codex P1).
     ({ promoter } = await (conn
-      ? referralEngine.enrollPromoter(customerId, { conn })
+      ? conn.transaction((sp) => referralEngine.enrollPromoter(customerId, { conn: sp }))
       : referralEngine.enrollPromoter(customerId)));
   } catch (err) {
     if (err?.code !== '23505') throw err;

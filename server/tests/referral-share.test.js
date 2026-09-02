@@ -117,8 +117,31 @@ describe('buildReferralShareForCustomer', () => {
     mockEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 2500, base_url: 'https://wavespestcontrol.com' });
     mockEngine.enrollPromoter.mockResolvedValue({ promoter: { id: 'promo-1', referral_code: 'WAVES-TEST01' } });
     mockEngine.getPromoterReferralLink.mockReturnValue('https://wavespestcontrol.com/r/WAVES-TEST01');
+    // knex nests a transaction as a SAVEPOINT: the enroll runs on it so a
+    // 23505 rolls back only the savepoint and the fallback can still read.
+    const sp = jest.fn();
     const conn = jest.fn();
+    conn.transaction = jest.fn(async (fn) => fn(sp));
     await buildReferralShareForCustomer('cust-1', { conn });
-    expect(mockEngine.enrollPromoter).toHaveBeenCalledWith('cust-1', { conn });
+    expect(conn.transaction).toHaveBeenCalledTimes(1);
+    expect(mockEngine.enrollPromoter).toHaveBeenCalledWith('cust-1', { conn: sp });
+  });
+
+  test('a 23505 inside the savepoint leaves the outer transaction usable for the household fallback', async () => {
+    mockEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 2500, base_url: 'https://wavespestcontrol.com' });
+    const dupe = Object.assign(new Error('duplicate key'), { code: '23505' });
+    mockEngine.enrollPromoter.mockRejectedValue(dupe);
+    mockEngine.getPromoterReferralLink.mockReturnValue('https://wavespestcontrol.com/r/WAVES-HOUSE1');
+    const reads = [];
+    const builder = (table) => {
+      reads.push(table);
+      const b = { where: () => b, join: () => b, first: async () => (table === 'customers' ? { id: 'cust-2', phone: '9415550100', account_id: 'acct-1' } : { id: 'promo-h', referral_code: 'WAVES-HOUSE1' }) };
+      return b;
+    };
+    const conn = jest.fn(builder);
+    conn.transaction = jest.fn(async (fn) => fn(jest.fn()));
+    const out = await buildReferralShareForCustomer('cust-2', { conn });
+    expect(out.code).toBe('WAVES-HOUSE1');
+    expect(reads).toEqual(['customers', 'referral_promoters as rp']);
   });
 });
