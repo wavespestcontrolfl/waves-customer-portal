@@ -94,24 +94,34 @@ function serviceOptOutBlockedByProposal(estData = {}) {
     && !!(proposal.buildings || proposal.programs || proposal.correctiveWork);
 }
 
-// The engine's own tier for the CURRENT mix, read from the stored carriers:
-// the last opt-out commit's stamp, else the mapped result, else the raw
-// engine shapes — the top-level engineResult (engine-only estimates store the
-// tier there — without it a select-tier override on one is not recognized,
-// /data advertises the controls, and the PUT overwrites the selection; codex
-// #3684 r2 P1), a raw result stored under `result` (the shape the win/loss
-// and pricing-audit readers already accept), and a raw result at the root.
-// Null when no carrier holds one. Shared by the opt-out self-serve gate and
-// the select-tier eligibility ceiling so the two never disagree about what
-// the engine wrote.
+// The engine's own tier for the CURRENT mix, read from every stored carrier
+// the portal's readers accept, in a fixed order: the last opt-out commit's
+// stamp first; then the MAPPED shapes — under `result`, at the root of
+// estimate_data (the legacy top-level blob estimate-public resolves as
+// `estData.result || estData`), and under `engineResult` (the win/loss
+// tally reads that one); then the RAW generateEstimate shapes — the
+// top-level `engineResult` (engine-only estimates store the tier there —
+// without it a select-tier override on one is not recognized, /data
+// advertises the controls, and the PUT overwrites the selection; codex #3684
+// r2 P1), a raw result stored under `result` (quote-wizard / agent drafts;
+// the pricing audit reads it), and a raw result at the root. Null when no
+// carrier holds one. Shared by the opt-out self-serve gate and the
+// select-tier eligibility ceiling so the two never disagree about what the
+// engine wrote.
 function serviceOptOutEngineTierReference(estData = {}) {
-  return estData?.serviceOptOut?.engineTier
-    || estData?.result?.recurring?.waveGuardTier
-    || estData?.result?.recurring?.tier
-    || estData?.engineResult?.waveGuard?.tier
-    || estData?.result?.waveGuard?.tier
-    || estData?.waveGuard?.tier
-    || null;
+  const carriers = [
+    estData?.serviceOptOut?.engineTier,
+    estData?.result?.recurring?.waveGuardTier,
+    estData?.result?.recurring?.tier,
+    estData?.recurring?.waveGuardTier,
+    estData?.recurring?.tier,
+    estData?.engineResult?.recurring?.waveGuardTier,
+    estData?.engineResult?.recurring?.tier,
+    estData?.engineResult?.waveGuard?.tier,
+    estData?.result?.waveGuard?.tier,
+    estData?.waveGuard?.tier,
+  ];
+  return carriers.find((value) => value != null && String(value).trim() !== '') || null;
 }
 
 // A standing /select-tier override — the row's waveguard_tier differing from

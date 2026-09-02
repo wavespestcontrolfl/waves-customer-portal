@@ -165,6 +165,18 @@ describe('selectTierCeiling', () => {
     expect(serviceOptOutEngineTierReference({ waveGuard: { tier: 'silver' } })).toBe('silver');
   });
 
+  test('legacy top-level mapped blobs and engineResult.recurring carry the engine tier too', () => {
+    // estimate-public resolves `estData.result || estData`: the mapped result
+    // can sit at the root of estimate_data with its tier beside the rows.
+    expect(selectTierCeiling({ recurring: { waveGuardTier: 'Gold', services: [{ service: 'pest_control', mo: 37.33 }] } })).toBe('Gold');
+    expect(selectTierCeiling({ recurring: { tier: 'silver', services: [{ service: 'pest_control', mo: 37.33 }] } })).toBe('Silver');
+    expect(selectTierCeiling({ engineResult: { recurring: { tier: 'platinum' } } })).toBe('Platinum');
+    expect(serviceOptOutEngineTierReference({ recurring: { tier: 'silver' } })).toBe('silver');
+    expect(serviceOptOutEngineTierReference({ engineResult: { recurring: { waveGuardTier: 'Gold' } } })).toBe('Gold');
+    // Blank strings are not evidence — the chain keeps looking.
+    expect(serviceOptOutEngineTierReference({ recurring: { waveGuardTier: '' }, engineResult: { waveGuard: { tier: 'gold' } } })).toBe('gold');
+  });
+
   test('legacy blob with no engine tier resolves from its qualifying recurring rows (palm never counts)', () => {
     const rows = (services) => ({ result: { recurring: { services } } });
     expect(selectTierCeiling(rows([
