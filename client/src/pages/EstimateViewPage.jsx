@@ -1753,11 +1753,15 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
     ? Number(breakdown.total)
     : items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
   const totalIsQuoteRequired = hasQuoteRequired && total <= 0;
+  const hasTrapOnlyMonitoring = items.some((item) => String(item?.service || '').startsWith('trap_only_'));
+  const sectionTitle = hasTrapOnlyMonitoring
+    ? (items.every((item) => String(item?.service || '').startsWith('trap_only_')) ? 'Trap-only monitoring plan' : 'Plan services and one-time work')
+    : 'One-time services';
 
   return (
     <div style={estimateCard({ padding: 16 })}>
       <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginBottom: 12 }}>
-        One-time services
+        {sectionTitle}
       </div>
       <div style={{ display: 'grid', gap: 12 }}>
         {items.map((item, i) => {
@@ -2821,6 +2825,313 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
   );
 }
 
+// Soft exit (GATE_ESTIMATE_SOFT_EXIT) — the "Not what you expected?" sheet.
+// Chip keys are the API contract (estimate-disposition.js
+// CUSTOMER_DECLINE_REASONS / estimate-change-request.js CHANGE_REQUEST_TOPICS);
+// labels are the customer's words. Three exits, none of which message the
+// customer: a reason-tagged decline (the only one that closes the estimate),
+// a change request the office answers with a revision, and a "still
+// deciding" signal that writes one activity row and nothing else.
+export const SOFT_EXIT_REASONS = [
+  { key: 'price', label: 'Too expensive' },
+  { key: 'timing', label: 'Not the right time' },
+  { key: 'competitor', label: 'Going with someone else' },
+  { key: 'not_needed', label: "Don't need it after all" },
+  { key: 'other', label: 'Something else' },
+];
+export const SOFT_EXIT_TOPICS = [
+  { key: 'price', label: 'The price' },
+  { key: 'services', label: 'Which services are included' },
+  { key: 'schedule', label: 'How often you visit' },
+  { key: 'other', label: 'Something else' },
+];
+
+const softExitChipStyle = (on) => ({
+  padding: '8px 14px',
+  borderRadius: 999,
+  border: `1.5px solid ${on ? COLORS.glassNavy : ESTIMATE_BORDER}`,
+  background: on ? COLORS.glassNavy : COLORS.white,
+  color: on ? COLORS.white : COLORS.glassNavy,
+  fontSize: 14,
+  cursor: 'pointer',
+});
+const softExitPrimaryStyle = (enabled) => ({
+  padding: '12px 16px', borderRadius: 12, border: 'none', background: COLORS.yellow,
+  color: COLORS.glassNavy, fontSize: 15, fontWeight: 700,
+  cursor: enabled ? 'pointer' : 'default', opacity: enabled ? 1 : 0.55,
+});
+const softExitOptionStyle = {
+  width: '100%', textAlign: 'left', padding: '14px 16px', borderRadius: 12,
+  border: `1.5px solid ${ESTIMATE_BORDER}`, background: COLORS.white,
+  color: COLORS.glassNavy, fontSize: 15, fontWeight: 600, cursor: 'pointer',
+};
+const softExitInputStyle = {
+  width: '100%', boxSizing: 'border-box', borderRadius: 10, border: `1.5px solid ${ESTIMATE_BORDER}`,
+  padding: '10px 12px', fontSize: 14, fontFamily: 'inherit', color: COLORS.glassNavy,
+};
+
+export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, onClose, onDeclined }) {
+  const [step, setStep] = useState('choose'); // choose | change | decline | done
+  const [doneKind, setDoneKind] = useState(null); // change | still_deciding | decline
+  const [topics, setTopics] = useState(() => new Set());
+  const [reason, setReason] = useState(null);
+  const [note, setNote] = useState('');
+  const [competitorName, setCompetitorName] = useState('');
+  const [competitorPrice, setCompetitorPrice] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  const post = async (path, method, body) => {
+    const r = await fetch(`${API_BASE}/estimates/${token}/${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const payload = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(payload?.error || 'That didn’t go through. Try again.');
+    return payload;
+  };
+
+  const run = async (kind, fn) => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      await fn();
+      setDoneKind(kind);
+      setStep('done');
+    } catch (err) {
+      setError(err?.message || 'That didn’t go through. Try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const submitChange = () => run('change', () => post('change-request', 'POST', {
+    kind: 'change',
+    topics: Array.from(topics),
+    note: note.trim(),
+  }));
+  const submitStillDeciding = () => run('still_deciding', () => post('change-request', 'POST', { kind: 'still_deciding' }));
+  const submitDecline = () => run('decline', () => post('decline', 'PUT', {
+    reason,
+    note: note.trim() || undefined,
+    ...(reason === 'competitor' ? {
+      competitorName: competitorName.trim() || undefined,
+      competitorPrice: competitorPrice.trim() || undefined,
+    } : {}),
+  }));
+
+  const toggleTopic = (key) => setTopics((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+
+  const canSubmitChange = !submitting && note.trim().length > 0;
+  const canSubmitDecline = !submitting && !!reason && (reason !== 'other' || note.trim().length > 0);
+  // ET-pinned like the header's expiration line (codex P1, PR #2439).
+  const expiresDate = expiresAt ? new Date(expiresAt) : null;
+  const expiresDisplay = expiresDate && !Number.isNaN(expiresDate.getTime())
+    ? formatETDate(expiresDate, { month: 'long', day: 'numeric' })
+    : null;
+
+  const close = () => {
+    if (submitting) return;
+    if (step === 'done' && doneKind === 'decline') onDeclined?.();
+    onClose();
+  };
+  // Shared modal focus manager: initial focus, Tab trapping, restoration to
+  // the opener, document-level Escape (GH codex P1 — the partial onKeyDown
+  // only saw Escape once focus happened to enter the sheet).
+  const dialogRef = useModalFocus(true, close);
+  // Branch-specific fields never cross branches: a decline explanation must
+  // not become a change request, and vice versa (GH codex P2).
+  const goTo = (next) => {
+    setNote('');
+    setReason(null);
+    setTopics(new Set());
+    setCompetitorName('');
+    setCompetitorPrice('');
+    setError('');
+    setStep(next);
+  };
+
+  const heading = step === 'change' ? 'What would you like changed?'
+    : step === 'decline' ? 'What made this a no?'
+    : step === 'done' ? (doneKind === 'change' ? 'Got it — we’ll send a revised estimate'
+      : doneKind === 'still_deciding' ? 'No rush'
+      : 'Thanks for letting us know')
+    : 'Not what you expected?';
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={heading}
+      data-glass-scrim=""
+      style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+    >
+      <div ref={dialogRef} data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
+        <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.glassNavy }}>{heading}</div>
+
+        {step === 'choose' ? (
+          <>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 14px' }}>
+              Tell us where this landed. Nothing here sends you a message &mdash; it just helps us get it right.
+            </div>
+            <div style={{ display: 'grid', gap: 10 }}>
+              {/* A change request needs a customer the office can answer; an
+                  unlinked email-only estimate cannot park one (the server
+                  says so via softExitChange), so the branch is withheld
+                  rather than failing on submit (GH codex P2). */}
+              {changeEligible ? (
+                <button type="button" onClick={() => goTo('change')} style={softExitOptionStyle}>
+                  I&rsquo;d like to change something
+                </button>
+              ) : null}
+              <button type="button" onClick={submitStillDeciding} disabled={submitting} style={softExitOptionStyle}>
+                {submitting ? 'One moment…' : 'I’m still deciding'}
+              </button>
+              <button type="button" onClick={() => goTo('decline')} style={softExitOptionStyle}>
+                This isn&rsquo;t for me
+              </button>
+            </div>
+          </>
+        ) : null}
+
+        {step === 'change' ? (
+          <>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 14px' }}>
+              We&rsquo;ll send a revised estimate &mdash; usually same day. This one stays as-is until then.
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+              {SOFT_EXIT_TOPICS.map(({ key, label }) => (
+                <button key={key} type="button" onClick={() => toggleTopic(key)} aria-pressed={topics.has(key)} style={softExitChipStyle(topics.has(key))}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            <textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              maxLength={500}
+              rows={3}
+              placeholder="What should be different?"
+              aria-label="What should be different?"
+              style={{ ...softExitInputStyle, resize: 'vertical', marginBottom: 12 }}
+            />
+          </>
+        ) : null}
+
+        {step === 'decline' ? (
+          <>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 14px' }}>
+              Pick the closest reason. This closes the estimate; you can always call for a fresh one.
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+              {SOFT_EXIT_REASONS.map(({ key, label }) => (
+                <button key={key} type="button" onClick={() => setReason(key)} aria-pressed={reason === key} style={softExitChipStyle(reason === key)}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            {reason === 'competitor' ? (
+              <div style={{ display: 'grid', gap: 10, marginBottom: 12 }}>
+                <input
+                  value={competitorName}
+                  onChange={(e) => setCompetitorName(e.target.value)}
+                  maxLength={120}
+                  placeholder="Who did you go with? (optional)"
+                  aria-label="Who did you go with?"
+                  style={softExitInputStyle}
+                />
+                <input
+                  value={competitorPrice}
+                  onChange={(e) => setCompetitorPrice(e.target.value)}
+                  inputMode="decimal"
+                  maxLength={12}
+                  placeholder="Their price, if you don’t mind sharing (optional)"
+                  aria-label="Their price"
+                  style={softExitInputStyle}
+                />
+              </div>
+            ) : null}
+            {reason ? (
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                maxLength={500}
+                rows={2}
+                placeholder={reason === 'other' ? 'Tell us a little more' : 'Anything else? (optional)'}
+                aria-label={reason === 'other' ? 'Tell us a little more' : 'Anything else?'}
+                style={{ ...softExitInputStyle, resize: 'vertical', marginBottom: 12 }}
+              />
+            ) : null}
+          </>
+        ) : null}
+
+        {step === 'done' ? (
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
+            {doneKind === 'change'
+              ? 'We’ll take a look and send an updated estimate. Your current one stays as-is in the meantime, through its normal expiration date.'
+              : doneKind === 'still_deciding'
+                ? `Take your time${expiresDisplay ? ` — this estimate stays open through ${expiresDisplay}` : ''}. Questions? Call (941) 297-5749.`
+                : 'We’ve closed this estimate. If anything changes, call (941) 297-5749 and we’ll put together a fresh one.'}
+          </div>
+        ) : null}
+
+        {error ? (
+          <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginBottom: 12 }}>{error}</div>
+        ) : null}
+
+        <div style={{ display: 'grid', gap: 10 }}>
+          {step === 'change' ? (
+            <button type="button" data-glass-accent="" onClick={submitChange} disabled={!canSubmitChange} style={softExitPrimaryStyle(canSubmitChange)}>
+              {submitting ? 'Sending…' : 'Request a revised estimate'}
+            </button>
+          ) : null}
+          {step === 'decline' ? (
+            <button type="button" data-glass-accent="" onClick={submitDecline} disabled={!canSubmitDecline} style={softExitPrimaryStyle(canSubmitDecline)}>
+              {submitting ? 'Sending…' : 'Close this estimate'}
+            </button>
+          ) : null}
+          {step === 'done' ? (
+            <button type="button" data-glass-accent="" onClick={close} style={softExitPrimaryStyle(true)}>Done</button>
+          ) : null}
+          {step === 'change' || step === 'decline' ? (
+            <button type="button" onClick={() => goTo('choose')} disabled={submitting} style={{ padding: '10px 16px', borderRadius: 10, border: 'none', background: 'none', color: ESTIMATE_BODY, fontSize: 14, cursor: 'pointer' }}>
+              Back
+            </button>
+          ) : null}
+          {step === 'choose' ? (
+            <button type="button" onClick={close} disabled={submitting} style={{ padding: '10px 16px', borderRadius: 10, border: 'none', background: 'none', color: ESTIMATE_BODY, fontSize: 14, cursor: 'pointer' }}>
+              Never mind
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The sheet's entry point — a quiet text link under the page's ask/support
+// blocks. Rendered only when the payload stamped `softExit` (gate on, live
+// row, not a staff preview), so the page never offers a write it refuses.
+function SoftExitLink({ onOpen }) {
+  return (
+    <div style={{ textAlign: 'center', margin: '4px 0 12px' }}>
+      <button
+        type="button"
+        onClick={onOpen}
+        style={{ background: 'none', border: 'none', padding: '8px 12px', fontSize: 14, fontWeight: 600, color: ESTIMATE_BODY, textDecoration: 'underline', cursor: 'pointer' }}
+      >
+        Not what you expected? Tell us
+      </button>
+    </div>
+  );
+}
+
 /**
  * Acceptance line + inline "View terms" drawer (GATE_ESTIMATE_ACCEPTANCE_TERMS,
  * owner ruling 2026-08-28: same steps, least words, no extra page). Renders
@@ -3592,6 +3903,8 @@ function customerOneTimeLabel(item = {}) {
   const isTermiteInstall = item.service === 'termite_bait_installation'
     || /\b(advance|trelona)\s+installation\b/i.test(label);
   if (isTermiteInstall) return 'Termite Bait Installation';
+  if (item.service === 'wdo_inspection' || item.service === 'wdo') return 'WDO Inspection';
+  if (item.service === 'termite_foam' || item.service === 'foam_drill') return 'Termite Foam Treatment';
   return label || 'One-time service';
 }
 
@@ -4256,6 +4569,18 @@ const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']
 // payment intents into B. It also neutralizes a slow /:token/data fetch: a
 // response for A that resolves after navigating to B lands on the unmounted
 // old tree and is dropped, instead of rendering A's PII/pricing under B's URL.
+// The server's decision (estimate.regulatedCertificateSurface, computed from
+// the raw one-time rows before any breakdown alignment) wins outright; the
+// row-based derivation below is the fail-closed fallback for payloads that
+// predate the flag and for the dev-preview fixtures.
+export function estimateHasRegulatedCertificateSurface(serviceCategory, services = [], oneTimeItems = [], serverAffirmed = false) {
+  if (serverAffirmed === true) return true;
+  const regulatedCategories = new Set(['wdo_inspection', 'pre_slab_termiticide']);
+  return regulatedCategories.has(serviceCategory)
+    || services.some((service) => regulatedCategories.has(glassServiceSlug(service?.key || service?.name)))
+    || oneTimeItems.some((item) => regulatedCategories.has(glassServiceSlug(item?.service || item?.label || item?.name)));
+}
+
 export default function EstimateViewPage() {
   const { token } = useParams();
   return <EstimateViewPageInner key={token || 'no-token'} />;
@@ -4333,6 +4658,7 @@ function EstimateViewPageInner() {
   // customer challenged (null = closed). Only openable when the server
   // payload flags measurementReviewEnabled.
   const [measurementReviewBasis, setMeasurementReviewBasis] = useState(null);
+  const [softExitOpen, setSoftExitOpen] = useState(false);
   // Mirrors ctaPhase SYNCHRONOUSLY. ctaPhase is React state, so async work
   // started before a phase change — e.g. a SlotPicker AI slot search —
   // captures the OLD phase in its closure: when it resolved mid-submission
@@ -5948,6 +6274,12 @@ function EstimateViewPageInner() {
   const serviceCategory = copyCommercial
     ? (copyCommercialPest ? 'commercial' : 'commercial_neutral')
     : estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
+  const isRegulatedCertificateSurface = estimateHasRegulatedCertificateSurface(
+    serviceCategory,
+    services,
+    pricing?.oneTimeBreakdown?.items || [],
+    estimate?.regulatedCertificateSurface === true,
+  );
   const copy = estimateCopyFor(serviceCategory);
   // Glass copy pack — null unless glass is active; every service category
   // has a pack now (unknown categories fall back to the property-generic
@@ -5959,8 +6291,12 @@ function EstimateViewPageInner() {
   // guarantee) don't apply to a one-visit quote (owner 2026-07-23).
   // Review-gated quotes get the confirm-with-you variant instead of
   // "approve online and pick a day" (codex P2 r3).
+  const serviceSpecificOneTimeHero = new Set([
+    'termite_trenching', 'pre_slab_termiticide', 'bora_care',
+    'wdo_inspection', 'termite_foam', 'trap_only',
+  ]).has(serviceCategory);
   const glassPack = estimate.isOneTimeOnly === true
-    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking })
+    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking, preserveServiceHero: serviceSpecificOneTimeHero })
     : glassEstimateCopyFor(serviceCategory);
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
@@ -5997,7 +6333,9 @@ function EstimateViewPageInner() {
   // The server's intelligence.title/body outrank the static copy fallbacks in
   // WaveGuardIntelligenceCard, so the glass headline has to be applied to the
   // intelligence payload itself — metrics/signals/satellite stay untouched.
-  const intelligenceDisplay = glassPack && estimate.intelligence
+  const intelligenceDisplay = isRegulatedCertificateSurface
+    ? null
+    : glassPack && estimate.intelligence
     ? { ...estimate.intelligence, title: fillGlassTokens(glassPack.aiTitle), body: glassPack.aiBody }
     : estimate.intelligence;
   const askChips = glassPack?.askChips || pricing.askChips;
@@ -6596,7 +6934,7 @@ function EstimateViewPageInner() {
           ? <ProposalDetailCard proposal={data.proposal} pdfEmailed={proposalPdfEmailed} />
           : null}
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
-        {showAskBar ? (
+        {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar
             token={token}
             askToken={estimate.askToken}
@@ -6655,14 +6993,18 @@ function EstimateViewPageInner() {
   // during the held-slot review step too.
   const aiPanelBlock = (
     <>
-      <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
-      <EstimateAskBar
-        token={token}
-        askToken={estimate.askToken}
-        selectedFrequency={selectedFrequency}
-        serviceMode={serviceMode}
-        chips={askChips}
-      />
+      {!isRegulatedCertificateSurface ? (
+        <>
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
+          <EstimateAskBar
+            token={token}
+            askToken={estimate.askToken}
+            selectedFrequency={selectedFrequency}
+            serviceMode={serviceMode}
+            chips={askChips}
+          />
+        </>
+      ) : null}
       <EstimateAddServiceRequestCard
         offer={addServiceOffer}
         requestState={addServiceRequestState}
@@ -6727,6 +7069,17 @@ function EstimateViewPageInner() {
           token={token}
           measuredBasis={measurementReviewBasis}
           onClose={() => setMeasurementReviewBasis(null)}
+        />
+      ) : null}
+      {softExitOpen ? (
+        <SoftExitSheet
+          token={token}
+          expiresAt={estimate.expiresAt || null}
+          changeEligible={data?.softExitChange === true}
+          onClose={() => setSoftExitOpen(false)}
+          // A decline is terminal: reload so the server's terminal state
+          // (declined card, no CTAs) paints from truth, not local state.
+          onDeclined={() => loadEstimate({ preserveSelection: true })}
         />
       ) : null}
 
@@ -7125,13 +7478,17 @@ function EstimateViewPageInner() {
                   — the standalone card read as a duplicate review section). */}
               <CustomerReviews onJoinNeighbors={canShowSlotPicker ? scrollToBookingSection : null} />
               <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
-              <EstimateAskBar
-                token={token}
-                askToken={estimate.askToken}
-                selectedFrequency={selectedFrequency}
-                serviceMode={serviceMode}
-                chips={askChips}
-              />
+              {!isRegulatedCertificateSurface ? (
+                <EstimateAskBar
+                  token={token}
+                  askToken={estimate.askToken}
+                  selectedFrequency={selectedFrequency}
+                  serviceMode={serviceMode}
+                  chips={askChips}
+                />
+              ) : null}
+              {data?.softExit === true && !isRegulatedCertificateSurface && ctaPhase !== 'submitting'
+                ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
               <EstimateAddServiceRequestCard
                 offer={addServiceOffer}
                 requestState={addServiceRequestState}
@@ -7150,6 +7507,8 @@ function EstimateViewPageInner() {
         <>
           <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
           <CustomerReviews />
+          {data?.softExit === true && !isRegulatedCertificateSurface && ctaPhase !== 'submitting' && !(ctaPhase === 'review' && reservation)
+            ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
         </>
       )}
       {/* Sticky mobile book bar (glass, ≤640px via CSS): live price/period +

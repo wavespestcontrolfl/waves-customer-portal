@@ -83,7 +83,7 @@ const NotificationService = {
   // `bell` (admin recipients only) is an explicit site-level policy tag:
   // true always rings, false never rings — see notification-bell-policy.js.
   // It only has effect while GATE_ADMIN_BELL_POLICY is on.
-  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, connection = db }) {
+  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, bellDefault, connection = db }) {
     try {
       // Demo/internal test accounts (App Store review account) must not ring
       // the admin bell — their bounce alerts and junk service requests are
@@ -117,7 +117,7 @@ const NotificationService = {
             const allowed = await bellPolicy.bellAllowed({
               category,
               triggerKey: metadata?.triggerKey || null,
-              options: { bell },
+              options: { bell, bellDefault },
             });
             if (!allowed) {
               // Category + triggerKey only — titles/bodies carry customer

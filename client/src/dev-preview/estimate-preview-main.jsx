@@ -3,25 +3,40 @@
  * template") against canned fixtures so the template can be iterated in a
  * browser without a database or estimate token. NOT part of the app build
  * (vite only builds index.html); served by `npx vite` at
- * /preview-estimate.html?scenario=<pest|preslab|bundle|accepted>.
+ * /preview-estimate.html?scenario=<service-or-edge-case>.
  */
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import EstimateViewPage from '../pages/EstimateViewPage';
 import WavesShell from '../components/brand/WavesShell';
+import { ESTIMATE_SCENARIOS } from './estimate-scenarios';
+import { documentRenderAffirmed, synthesizeDocumentProposal } from './estimate-document-proposal';
+import { addETDays, etDateString } from '../lib/timezone';
+import '../index.css';
 // Brand tokens (--surface/--border/...) normally ride in via main.jsx —
 // without them the WavesShell top bar computes a transparent background and
 // the preview's colors drift from the real page.
 import '../styles/brand-tokens.css';
 
-const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'lawn_member_upgrade', 'accepted', 'proposal', 'proposal_terms', 'proposal_structured', 'proposal_programs', 'commercial'];
+export const SCENARIOS = ESTIMATE_SCENARIOS.map(([key]) => key);
 const scenario = (() => {
   const requested = new URLSearchParams(window.location.search).get('scenario');
   return SCENARIOS.includes(requested) ? requested : 'pest';
 })();
 
 // ── fixtures ────────────────────────────────────────────────────────────
+
+// Every date a freshness check inspects (estimate expiration, offered slots,
+// the linked appointment) is computed from the clock at load time — a date
+// literal goes stale the night the ET calendar passes it, and glassSlotIsStale
+// would then disable every offered slot, so the harness would stop
+// exercising the selectable-slot and post-selection states (AGENTS.md
+// "Hardcoded near-today calendar dates"). Issued/expired literals that no
+// validator inspects stay relative too so the hero block reads coherently.
+const NOW = new Date();
+const isoDaysOut = (days) => addETDays(NOW, days).toISOString();
+const etDaysOut = (days) => etDateString(addETDays(NOW, days));
 
 const CONTACT = {
   customerFirstName: 'William',
@@ -38,8 +53,8 @@ const BASE_ESTIMATE = {
   // every estimate — the harness carries real-shaped values so the block is
   // exercised in preview.
   slug: 'WPC-2026-0512',
-  createdAt: '2026-07-09T14:00:00.000Z',
-  expiresAt: '2026-07-16T14:00:00.000Z',
+  createdAt: isoDaysOut(0),
+  expiresAt: isoDaysOut(7),
   ...CONTACT,
   askToken: 'preview-ask-token',
   category: 'RESIDENTIAL',
@@ -133,6 +148,8 @@ function preslabScenario() {
     estimate: {
       ...BASE_ESTIMATE,
       serviceCategory: 'pre_slab_termiticide',
+      // Mirrors the server's regulated-surface decision on the /data payload.
+      regulatedCertificateSurface: true,
       isOneTimeOnly: true,
       defaultServiceMode: 'one_time',
     },
@@ -140,7 +157,7 @@ function preslabScenario() {
       services: [],
       renderFlags: {},
       waveGuardTier: null,
-      askChips: ['What product is used?', 'Do I get documentation?', 'What warranty is selected?', 'When should this be done?'],
+      askChips: [],
       anchorOneTimePrice: 1850,
       oneTimeBreakdown: {
         total: 1850,
@@ -236,7 +253,7 @@ function bundleScenario() {
       renderFlags: { showRecurringSummary: true, showWaveGuardSetupFee: false, showPestRecurringAddOns: false, showServiceDetailsRequest: true },
       waveGuardTier: 'Gold',
       combinedRecurring: { monthlySubtotal: 178.65, annualSubtotal: 2143.8, waveGuardTierLabel: 'Gold' },
-      askChips: ['What is included in this plan?', 'How do you handle ants?', 'Are pets and kids safe?'],
+      askChips: ['What is included in this plan?', 'How do you handle ants?', 'What precautions should I follow for pets and children?'],
       anchorOneTimePrice: 0,
       oneTimeBreakdown: { total: 0, items: [] },
       setupFee: null,
@@ -266,7 +283,7 @@ function acceptedScenario() {
         reason: null,
         appointment: {
           id: 'appt-preview-1',
-          scheduledDate: '2026-07-09',
+          scheduledDate: etDaysOut(1),
           windowStart: '09:00',
           windowEnd: '10:00',
           windowDisplay: '9:00–10:00 AM',
@@ -302,7 +319,7 @@ function lawnScenario() {
         total: 174,
         items: [{ service: 'one_time_lawn', label: 'One-Time Lawn', amount: 174, detail: 'Single treatment', kind: 'charge' }],
       },
-      askChips: ['What is included in the lawn program?', 'How fast will my lawn improve?', 'Are pets and kids safe?'],
+      askChips: ['What is included in the lawn program?', 'How fast will my lawn improve?', 'What precautions should I follow for pets and children?'],
     },
   };
 }
@@ -425,7 +442,7 @@ function bundleReferralScenario() {
           amount: 25, recurringAmount: 25, monthlyAmount: 2.08,
         },
       },
-      askChips: ['What is included in this plan?', 'How do you handle ants?', 'Are pets and kids safe?'],
+      askChips: ['What is included in this plan?', 'How do you handle ants?', 'What precautions should I follow for pets and children?'],
       anchorOneTimePrice: 0,
       oneTimeBreakdown: { total: 0, items: [] },
       setupFee: null,
@@ -774,14 +791,171 @@ function commercialScenario() {
   };
 }
 
+const recurringFixture = ({ key, label, category = key, monthly, visitsPerYear, included = [], intelligence = null }) => ({
+  estimate: { ...BASE_ESTIMATE, serviceCategory: category, intelligence },
+  pricing: {
+    services: [{
+      key,
+      label,
+      isRecurring: true,
+      isPest: key === 'pest_control',
+      waveGuardTierEligible: !key.startsWith('commercial_'),
+      defaultFrequencyKey: visitsPerYear === 12 ? 'monthly' : 'standard',
+      frequencies: [{
+        key: visitsPerYear === 12 ? 'monthly' : 'standard',
+        label: visitsPerYear === 12 ? 'Monthly' : `${visitsPerYear} applications/year`,
+        serviceCategory: category,
+        visitsPerYear,
+        monthly,
+        annual: monthly * 12,
+        perTreatment: Math.round((monthly * 12 / visitsPerYear) * 100) / 100,
+        billingFrequencyKey: 'monthly',
+        billedPerApplication: true,
+        included: included.length ? included : [{ key, label, detail: `${visitsPerYear} scheduled applications per year` }],
+        addOns: [],
+      }],
+      setupFee: null,
+      quoteRequired: false,
+      copy: { priceWording: {} },
+    }],
+    renderFlags: { showRecurringSummary: false, showWaveGuardSetupFee: false, showPestRecurringAddOns: false, showServiceDetailsRequest: true },
+    waveGuardTier: 'Bronze',
+    askChips: [],
+    anchorOneTimePrice: 0,
+    oneTimeBreakdown: { total: 0, items: [] },
+    setupFee: null,
+    annualPrepayEligible: true,
+    defaultServiceMode: 'recurring',
+  },
+  cta: { canAccept: true, terminalState: null, quoteRequired: false, quoteRequiredReason: null, reviewBeforeBooking: false },
+});
+
+const oneTimeFixture = ({ category, service, label, amount, detail, intelligence = null, reviewBeforeBooking = false, regulated = false }) => ({
+  estimate: { ...BASE_ESTIMATE, serviceCategory: category, intelligence, isOneTimeOnly: true, defaultServiceMode: 'one_time', ...(regulated ? { regulatedCertificateSurface: true } : {}) },
+  pricing: {
+    services: [],
+    renderFlags: {},
+    waveGuardTier: null,
+    askChips: [],
+    anchorOneTimePrice: amount,
+    oneTimeBreakdown: { total: amount, items: [{ service, label, amount, detail, kind: 'charge' }] },
+    setupFee: null,
+    annualPrepayEligible: false,
+    defaultServiceMode: 'one_time',
+  },
+  cta: { canAccept: true, terminalState: null, quoteRequired: false, quoteRequiredReason: null, reviewBeforeBooking },
+});
+
+function mosquitoScenario() {
+  return recurringFixture({
+    key: 'mosquito', label: 'Mosquito Control', category: 'mosquito', monthly: 59, visitsPerYear: 9,
+    intelligence: { eyebrow: 'Waves AI', title: 'Waves AI reviewed your lot and mosquito pressure before pricing this estimate', body: 'We reviewed the mapped lot, vegetation, and mosquito resting zones supplied with this estimate.', metrics: [{ label: 'Lot size', value: '0.24 acres' }, { label: 'Season', value: '9 applications' }], signals: [] },
+  });
+}
+
+function treeShrubScenario() {
+  return recurringFixture({
+    key: 'tree_shrub', label: 'Tree & Shrub Care', category: 'tree_shrub', monthly: 72, visitsPerYear: 6,
+    intelligence: { eyebrow: 'Waves AI', title: 'Waves AI reviewed your beds and trees before pricing this estimate', body: 'We reviewed the recorded bed area and plant inventory used to prepare this estimate.', metrics: [{ label: 'Bed area', value: '2,100 sq ft' }, { label: 'Recorded trees', value: '14' }], signals: [] },
+  });
+}
+
+function termiteBaitScenario() {
+  return recurringFixture({
+    key: 'termite_bait', label: 'Termite Bait Monitoring', category: 'termite_bait', monthly: 49, visitsPerYear: 4,
+    intelligence: { eyebrow: 'Waves AI', title: 'Waves AI reviewed your termite perimeter before pricing this estimate', body: 'We reviewed the measured perimeter and station count attached to this estimate.', metrics: [{ label: 'Perimeter', value: '248 linear ft' }, { label: 'Stations', value: '24' }], signals: [] },
+  });
+}
+
+function rodentScenario() {
+  return recurringFixture({
+    key: 'rodent_bait', label: 'Rodent Bait Station Monitoring', category: 'rodent', monthly: 69, visitsPerYear: 6,
+    intelligence: { eyebrow: 'Waves AI', title: 'Property conditions reviewed for this rodent plan', body: 'This plan uses the recorded exterior station count and monitoring cadence; it does not promise exclusion work.', metrics: [{ label: 'Stations', value: '6' }, { label: 'Monitoring', value: 'Every other month' }], signals: [] },
+  });
+}
+
+function wdoScenario() {
+  return oneTimeFixture({ category: 'wdo_inspection', service: 'wdo_inspection', label: 'WDO Inspection', amount: 125, detail: 'Wood-destroying organism inspection with required Florida reporting', regulated: true });
+}
+
+function termiteFoamScenario() {
+  return oneTimeFixture({ category: 'termite_foam', service: 'termite_foam', label: 'Termite Foam Treatment', amount: 180, detail: 'Localized foam treatment for the identified treatment area' });
+}
+
+function boraCareScenario() {
+  return oneTimeFixture({ category: 'bora_care', service: 'bora_care', label: 'Bora-Care Wood Treatment Service', amount: 1051, detail: 'Measured bare-wood treatment areas', reviewBeforeBooking: true });
+}
+
+function trapOnlyScenario() {
+  const base = oneTimeFixture({ category: 'trap_only', service: 'trap_only_retainer', label: 'Standard Trap-Only Monitoring Retainer', amount: 495, detail: '12-month monitoring retainer' });
+  return {
+    ...base,
+    pricing: {
+      ...base.pricing,
+      anchorOneTimePrice: 694,
+      oneTimeBreakdown: { total: 694, items: [
+        { service: 'trap_only_retainer', label: 'Standard Trap-Only Monitoring Retainer', amount: 495, detail: '12-month monitoring retainer', kind: 'charge' },
+        { service: 'trap_only_setup', label: 'Trap-Only Setup / Inspection', amount: 199, detail: 'Initial setup and property inspection', kind: 'charge' },
+      ] },
+    },
+  };
+}
+
+function quoteRequiredScenario() {
+  const base = oneTimeFixture({ category: 'pest_control', service: 'bed_bug_heat', label: 'Bed Bug Heat Treatment', amount: 0, detail: 'An inspection is required before final pricing.' });
+  return {
+    ...base,
+    pricing: { ...base.pricing, anchorOneTimePrice: 0, oneTimeBreakdown: { total: 0, items: [{ service: 'bed_bug_heat', label: 'Bed Bug Heat Treatment', amount: null, quoteRequired: true, kind: 'quote_required', customQuoteReason: 'An inspection is required before final pricing.' }] } },
+    cta: { canAccept: false, terminalState: 'quote_required', quoteRequired: true, quoteRequiredReason: 'inspection_required', reviewBeforeBooking: true },
+  };
+}
+
+function expiredScenario() {
+  const base = pestScenario();
+  return { ...base, estimate: { ...base.estimate, status: 'expired', expiresAt: isoDaysOut(-8) }, cta: { ...base.cta, canAccept: false, terminalState: 'expired' } };
+}
+
+function missingContactScenario() {
+  const base = mosquitoScenario();
+  return { ...base, estimate: { ...base.estimate, customerFirstName: null, customerName: null, customerEmail: null, customerPhone: null, address: null } };
+}
+
+function longContentScenario() {
+  const base = bundleReferralScenario();
+  return {
+    ...base,
+    estimate: {
+      ...base.estimate,
+      customerFirstName: 'Alexandria-Catherine',
+      customerName: 'Alexandria-Catherine Montgomery-Worthington for Gulf Coast Community Property Holdings, LLC',
+      customerEmail: 'alexandria.montgomery-worthington+property-management@example-development-company.com',
+      customerPhone: '9415550199',
+      address: '18472 West Lakewood Ranch Boulevard, Building 14, Suite 1208, Lakewood Ranch, Florida 34211-8472',
+      slug: 'WPC-2026-EXTREMELY-LONG-CUSTOMER-CONTENT-TEST',
+    },
+  };
+}
+
 const PAYLOADS = {
   pest: pestScenario,
+  mosquito: mosquitoScenario,
+  tree_shrub: treeShrubScenario,
+  termite_bait: termiteBaitScenario,
+  rodent: rodentScenario,
+  wdo: wdoScenario,
+  termite_foam: termiteFoamScenario,
+  bora_care: boraCareScenario,
+  trap_only: trapOnlyScenario,
+  quote_required: quoteRequiredScenario,
   preslab: preslabScenario,
   bundle: bundleScenario,
   bundle_referral: bundleReferralScenario,
   lawn: lawnScenario,
   lawn_member_upgrade: lawnMemberUpgradeScenario,
   accepted: acceptedScenario,
+  expired: expiredScenario,
+  missing_contact: missingContactScenario,
+  long_content: longContentScenario,
   proposal: proposalScenario,
   proposal_terms: proposalTermsScenario,
   proposal_structured: proposalStructuredScenario,
@@ -794,16 +968,16 @@ const PAYLOADS = {
 const SLOTS = {
   nearby: true,
   primary: [
-    { slotId: 's1', date: '2026-07-04', windowStart: '09:00', windowEnd: '10:00', routeOptimal: true, techFirstName: 'Adam' },
-    { slotId: 's2', date: '2026-07-05', windowStart: '11:00', windowEnd: '12:00' },
-    { slotId: 's3', date: '2026-07-07', windowStart: '09:00', windowEnd: '10:00' },
-    { slotId: 's4', date: '2026-07-08', windowStart: '13:00', windowEnd: '14:00' },
-    { slotId: 's5', date: '2026-07-09', windowStart: '09:00', windowEnd: '10:00', routeOptimal: true, techFirstName: 'Adam' },
-    { slotId: 's6', date: '2026-07-10', windowStart: '15:00', windowEnd: '16:00' },
+    { slotId: 's1', date: etDaysOut(1), windowStart: '09:00', windowEnd: '10:00', routeOptimal: true, techFirstName: 'Adam' },
+    { slotId: 's2', date: etDaysOut(2), windowStart: '11:00', windowEnd: '12:00' },
+    { slotId: 's3', date: etDaysOut(4), windowStart: '09:00', windowEnd: '10:00' },
+    { slotId: 's4', date: etDaysOut(5), windowStart: '13:00', windowEnd: '14:00' },
+    { slotId: 's5', date: etDaysOut(6), windowStart: '09:00', windowEnd: '10:00', routeOptimal: true, techFirstName: 'Adam' },
+    { slotId: 's6', date: etDaysOut(7), windowStart: '15:00', windowEnd: '16:00' },
   ],
   expander: [
-    { slotId: 's7', date: '2026-07-11', windowStart: '09:00', windowEnd: '10:00' },
-    { slotId: 's8', date: '2026-07-12', windowStart: '10:00', windowEnd: '11:00' },
+    { slotId: 's7', date: etDaysOut(8), windowStart: '09:00', windowEnd: '10:00' },
+    { slotId: 's8', date: etDaysOut(9), windowStart: '10:00', windowEnd: '11:00' },
   ],
 };
 
@@ -829,11 +1003,29 @@ window.fetch = async (input, init) => {
 
   if (url.includes('/api/estimates/') && url.includes('/data')) {
     // Prod sends glassDefault per eligible category with the gate unset =
-    // ALL categories, so the harness mirrors the live copy pack. The
-    // documentRender affirmation mirrors the server's gated pdf-pass payload
-    // so ?mode=pdf previews render the print document.
+    // ALL categories, so the harness mirrors the live copy pack. The pdf
+    // pass mirrors the server's gated /data payload: every estimate carries
+    // a proposal block for the print document (the authored one, or the
+    // synthesized single-building fallback that IS an ordinary estimate's
+    // pricing table), and documentRender is affirmed only when that block
+    // built with a priced line — otherwise ?mode=pdf falls through to the
+    // normal page exactly like production.
     const pdfPass = new URLSearchParams(window.location.search).get('mode') === 'pdf';
-    return respond({ ...PAYLOADS[scenario](), glassDefault: true, ...(pdfPass ? { documentRender: true } : {}) });
+    const payload = PAYLOADS[scenario]();
+    const proposal = payload.proposal || (pdfPass ? synthesizeDocumentProposal(payload) : null);
+    return respond({
+      ...payload,
+      ...(pdfPass && proposal ? { proposal } : {}),
+      glassDefault: true,
+      // softExit mirrors the GATE_ESTIMATE_SOFT_EXIT /data flag on a live row so
+      // the "Not what you expected?" sheet is exercised in preview.
+      softExit: true,
+      softExitChange: true,
+      ...(pdfPass && documentRenderAffirmed(proposal) ? { documentRender: true } : {}),
+    });
+  }
+  if (url.includes('/change-request') || url.endsWith('/decline')) {
+    return respond({ success: true, deduped: false });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;
@@ -860,14 +1052,16 @@ window.fetch = async (input, init) => {
 // ── scenario switcher chrome ────────────────────────────────────────────
 
 function ScenarioBar() {
+  if (new URLSearchParams(window.location.search).get('chrome') === '0') return null;
   return (
     <div style={{
-      position: 'fixed', bottom: 14, right: 14, zIndex: 9999,
+      position: 'fixed', bottom: 14, left: 14, right: 14, zIndex: 9999,
       background: '#0F172A', color: '#fff', borderRadius: 10,
-      padding: '8px 10px', display: 'flex', gap: 6, alignItems: 'center',
+      padding: '8px 10px', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap',
       fontFamily: "'Inter', system-ui, sans-serif", fontSize: 12,
       boxShadow: '0 8px 24px rgba(15,23,42,.35)',
     }}>
+      <a href="/preview-estimate-gallery.html" style={{ color: '#FFD700', fontWeight: 800, marginRight: 4 }}>gallery</a>
       <span style={{ opacity: 0.6, marginRight: 2 }}>preview:</span>
       {SCENARIOS.map((s) => (
         <a
