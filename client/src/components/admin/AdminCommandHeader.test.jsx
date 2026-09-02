@@ -13,17 +13,14 @@ describe("AdminCommandHeader heading hierarchy", () => {
 
     expect(
       screen.getByRole("heading", { level: 1, name: "Services" }),
-    ).toHaveClass("text-22");
-    // Sticky on all breakpoints; below md the shell bar clearance lives in
-    // .admin-main's padding-top, so the offset only cancels the 16px gutter
-    // (repeating the bar height here double-counts it — floating-header bug)
-    // while tracking --vv-offset-top with the fixed bar during iOS keyboard
-    // visual-viewport pans.
-    expect(container.firstChild).toHaveClass(
-      "sticky",
-      "top-[calc(var(--vv-offset-top)_-_16px)]",
-      "md:top-0",
-    );
+    ).toHaveClass("text-18", "md:text-22");
+    // Sticky at md+ only. Below md the header scrolls with the page: a
+    // sticky header that tracked the iOS keyboard pan covered the focused
+    // field on hub pages (SMS composer bug), so it must never carry a bare
+    // "sticky" or a --vv-offset-top inset again.
+    expect(container.firstChild).toHaveClass("md:sticky", "md:top-0");
+    expect(container.firstChild).not.toHaveClass("sticky");
+    expect(container.firstChild.className).not.toMatch(/vv-offset-top/);
     expect(container.querySelector(".border-b")).not.toBeInTheDocument();
   });
 
@@ -41,8 +38,8 @@ describe("AdminCommandHeader heading hierarchy", () => {
         level: 2,
         name: "Protocol & Readiness",
       }),
-    ).toHaveClass("text-18");
-    expect(container.firstChild).not.toHaveClass("sticky");
+    ).toHaveClass("text-16", "md:text-18");
+    expect(container.firstChild).not.toHaveClass("md:sticky");
   });
 
   it("keeps section targets touch-safe and compact on larger screens", () => {
@@ -62,7 +59,7 @@ describe("AdminCommandHeader heading hierarchy", () => {
     expect(screen.getByRole("button", { name: "Calendar" }))
       .toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("button", { name: "Auto Dispatch" }))
-      .toHaveClass("h-11", "sm:h-9", "leading-tight");
+      .toHaveClass("h-11", "md:h-9", "leading-tight");
     expect(container.querySelector(".border-b")).toBeInTheDocument();
   });
 
