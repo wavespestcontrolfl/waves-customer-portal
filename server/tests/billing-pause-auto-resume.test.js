@@ -337,11 +337,13 @@ describe('off-Stripe payment paths honor the same contract', () => {
   const path = require('path');
 
   test('record-payment and reconcile both dispatch the clear — never for payer-funded invoices', () => {
-    for (const [file, marker] of [
-      ['admin-invoices.js', "source: 'admin_record_payment'"],
-      ['admin-payments-reconcile.js', "source: 'admin_payment_reconcile'"],
+    // record-payment's settlement body lives in services/invoice-manual-
+    // payment.js (extracted 2026-09-02; the route is a thin caller).
+    for (const [dir, file, marker] of [
+      ['services', 'invoice-manual-payment.js', "source: 'admin_record_payment'"],
+      ['routes', 'admin-payments-reconcile.js', "source: 'admin_payment_reconcile'"],
     ]) {
-      const rs = fs.readFileSync(path.join(__dirname, '..', 'routes', file), 'utf8');
+      const rs = fs.readFileSync(path.join(__dirname, '..', dir, file), 'utf8');
       const idx = rs.indexOf('maybeResumeBillingPauseOnPayment');
       expect(idx).toBeGreaterThan(-1);
       const around = rs.slice(Math.max(0, idx - 1400), idx + 700);
