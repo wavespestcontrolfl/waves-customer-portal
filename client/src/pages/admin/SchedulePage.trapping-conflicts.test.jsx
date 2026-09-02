@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   completionAreasForTypedFindings,
-  acceptedTypedAreaValues,
   labelsPresentInMarkerNotes,
+  offListTypedAreaValues,
   productAreaChoices,
   pruneRestoredFindingsValues,
   specialtyActionScope,
@@ -70,20 +70,29 @@ describe("termite posted-notice pre-submit mirror", () => {
 });
 
 describe("typed area ownership", () => {
-  it("migrates only values the typed lane can publish", () => {
-    const palm = { key: "areas_treated", options: ["Front landscape palms", "Other"] };
-    expect(acceptedTypedAreaValues(["Front yard", "Front landscape palms", "Kitchen"], palm, "palm_injection"))
-      .toEqual(["Front landscape palms"]);
-    const termite = { key: "areas_treated", options: ["Foundation perimeter"] };
-    expect(acceptedTypedAreaValues(["Bait stations", "Kitchen"], termite, "termite_treatment")).toEqual(["Bait stations"]);
-  });
-  it("keeps this lane's migrated legacy chips but drops other lanes and free text", () => {
+  it("keeps every restored treatment-area value visible instead of dropping documented scope", () => {
     const field = { key: "areas_treated", type: "chips", options: ["Foundation perimeter"] };
     expect(pruneRestoredFindingsValues(
       { areas_treated: "Bait stations, Foundation perimeter, Primary bedroom, Rear addition slab" }, [field], "termite_treatment",
-    )).toEqual({ areas_treated: "Bait stations, Foundation perimeter" });
-    expect(pruneRestoredFindingsValues({ areas_treated: "Rear addition slab" }, [field], "termite_treatment")).toEqual({});
-    expect(pruneRestoredFindingsValues({ areas_treated: "Bait stations" }, [field])).toEqual({});
+    )).toEqual({ areas_treated: "Bait stations, Foundation perimeter, Primary bedroom, Rear addition slab" });
+    // Other chip fields still prune to the current options.
+    const other = { key: "work_completed", type: "chips", options: ["Trenching"] };
+    expect(pruneRestoredFindingsValues({ work_completed: "Trenching, Retired option" }, [other])).toEqual({ work_completed: "Trenching" });
+  });
+  it("flags off-list treatment areas pre-submit with the fix spelled out", () => {
+    const palm = { key: "areas_treated", options: ["Front landscape palms", "Other"] };
+    expect(offListTypedAreaValues(["Front yard", "Front landscape palms", "Kitchen"], palm, "palm_injection"))
+      .toEqual(["Front yard", "Kitchen"]);
+    const termite = { key: "areas_treated", options: ["Foundation perimeter"] };
+    expect(offListTypedAreaValues(["Bait stations", "Kitchen"], termite, "termite_treatment")).toEqual(["Kitchen"]);
+    const conflicts = typedFieldValueConflicts("termite_treatment", {
+      areas_treated: "Bait stations, Rear addition slab",
+      treatment_method: "Bait station setup",
+    }, [termite, { key: "treatment_method", type: "select", options: ["Bait station setup"] }]);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toContain('"Rear addition slab"');
+    expect(conflicts[0]).not.toContain('"Bait stations"');
+    expect(typedFieldValueConflicts("termite_treatment", { areas_treated: "Bait stations" }, [termite])).toEqual([]);
   });
   it("promotes the typed areas into the canonical completion scope", () => {
     expect(completionAreasForTypedFindings({

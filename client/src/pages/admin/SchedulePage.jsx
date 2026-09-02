@@ -6964,8 +6964,21 @@ const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
 // tech gets the inline prompt instead of the server 422 (Codex P3 r3 on
 // #2703). The method list mirrors TERMITE_PERIMETER_METHODS in
 // project-types.js; the messages mirror validateTypedFindings.
-export function typedFieldValueConflicts(schemaType, values) {
+export function typedFieldValueConflicts(schemaType, values, fields = null) {
   const conflicts = [];
+  // Legacy treatment-area values (a pre-chip free-text draft, or generic
+  // chips migrated from another lane) render as removable legacy chips; the
+  // server rejects them, so block here with the fix spelled out.
+  for (const field of Array.isArray(fields) ? fields : []) {
+    if (!TREATMENT_AREA_FIELD_KEYS.includes(field?.key) || !Array.isArray(field.options)) continue;
+    const parts = String(values?.[field.key] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    const offList = offListTypedAreaValues(parts, field, schemaType);
+    if (offList.length) {
+      conflicts.push(
+        `Legacy area${offList.length === 1 ? "" : "s"} ${offList.map((a) => `"${a}"`).join(", ")} ${offList.length === 1 ? "is" : "are"} no longer offered for this service — remove or replace with a current area`,
+      );
+    }
+  }
   if (schemaType === "termite_treatment") {
     const method = String(values?.treatment_method ?? "").trim();
     const notice = String(values?.posted_notice ?? "").trim();
@@ -7037,15 +7050,16 @@ export function typedFieldValueConflicts(schemaType, values) {
 // definition: chips keep only allowlisted tokens, selects must match an
 // option, counts must be digit-only. Free-text fields keep anything.
 // Mutates and returns `restored`.
-// Values a typed treatment-area field accepts: its own options plus this
-// lane's legacy generic chips (the server enforces the same set), so a
-// pre-typed draft's generic list migrates only what the lane can publish —
-// a palm or tree & shrub draft carrying pest chips drops them instead of
-// 422-ing at completion (local audit P1 on #3701).
-export function acceptedTypedAreaValues(areas, field, findingsType = null) {
+// Values a typed treatment-area field can publish: its own options plus this
+// lane's legacy generic chips (the server enforces the same set). A restored
+// or migrated value outside it is NOT dropped — a draft's documented scope
+// stays visible as a removable legacy chip (ProjectFindingFieldInput renders
+// off-list selections that way) and typedFieldValueConflicts blocks submit
+// until the tech removes or replaces it (local audit P1s on #3701).
+export function offListTypedAreaValues(areas, field, findingsType = null) {
   const legacy = legacyCompletionAreas.categories[legacyCompletionAreas.byFindingsType[findingsType]] || [];
   const accepted = new Set([...(Array.isArray(field?.options) ? field.options : []), ...legacy]);
-  return (Array.isArray(areas) ? areas : []).filter((area) => accepted.has(area));
+  return (Array.isArray(areas) ? areas : []).filter((area) => !accepted.has(area));
 }
 export function pruneRestoredFindingsValues(restored, fields, findingsType = null) {
   const values = restored && typeof restored === "object" ? restored : {};
@@ -7069,8 +7083,10 @@ export function pruneRestoredFindingsValues(restored, fields, findingsType = nul
       // a pre-typed draft's generic list migrates into them — but never
       // another lane's areas or free text; the server enforces the same rule.
       const parts = String(raw || "").split(",").map((s) => s.trim()).filter(Boolean);
+      // Treatment-area fields keep every restored value (legacy chips stay
+      // visible and removable); other chip fields prune to current options.
       const kept = TREATMENT_AREA_FIELD_KEYS.includes(field.key)
-        ? acceptedTypedAreaValues(parts, field, findingsType)
+        ? parts
         : parts.filter((s) => field.options.includes(s));
       if (kept.length) values[key] = kept.join(", ");
       else delete values[key];
@@ -10788,11 +10804,12 @@ export function CompletionPanel({
     if (!areasTreatedHidden) return;
     if (areasServiced.length) {
       if (typedTreatmentArea?.key) {
-        const migrated = acceptedTypedAreaValues(areasServiced, typedTreatmentArea, typedFindingsSchema?.type);
+        // Every generic chip migrates — an off-list one renders as a legacy
+        // chip the tech must remove or replace before completing.
         setFindingsValues((current) => (
-          parseApplicationAreas(current?.[typedTreatmentArea.key]).length || !migrated.length
+          parseApplicationAreas(current?.[typedTreatmentArea.key]).length
             ? current
-            : { ...current, [typedTreatmentArea.key]: migrated.join(", ") }
+            : { ...current, [typedTreatmentArea.key]: areasServiced.join(", ") }
         ));
       }
       setAreasServiced([]);
@@ -10804,7 +10821,7 @@ export function CompletionPanel({
           : prev
       ));
     }
-  }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea, typedFindingsSchema?.type]);
+  }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea?.key]);
   // Default pest tank mix (owner 2026-08-29): recurring general-pest and
   // pest re-service completions open with Taurus SC + Talstar P + the
   // non-ionic surfactant already on the Products list, totals prefilled
@@ -13343,6 +13360,7 @@ export function CompletionPanel({
       const fieldConflicts = typedFieldValueConflicts(
         typedFindingsSchema.type,
         findingsValues,
+        typedFindingsSchema.fields,
       );
       if (fieldConflicts.length) {
         completionTelemetryRef.current.requiredFieldErrorCount += 1;
@@ -13453,6 +13471,7 @@ export function CompletionPanel({
         const companionFieldConflicts = typedFieldValueConflicts(
           schema.type,
           entry.values,
+          schema.fields,
         );
         if (companionFieldConflicts.length) {
           completionTelemetryRef.current.requiredFieldErrorCount += 1;
