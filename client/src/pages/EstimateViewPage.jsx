@@ -27,6 +27,7 @@ import PublicLoadError from '../components/PublicLoadError';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
+import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import PriceCard from '../components/estimate/PriceCard';
@@ -4394,9 +4395,11 @@ export function LawnProgramCalendar({ program }) {
   const [open, setOpen] = useState(false);
   // The browser print path keeps whatever is on screen: open the seasons
   // before the print dialog so a collapsed block does not drop the program
-  // from the printed estimate (GH Codex P2).
+  // from the printed estimate (GH Codex P2). flushSync so the DOM is
+  // expanded before beforeprint returns — a batched update could land after
+  // the browser captured the page (pre-push Codex P1).
   useEffect(() => {
-    const onBeforePrint = () => setOpen(true);
+    const onBeforePrint = () => flushSync(() => setOpen(true));
     window.addEventListener('beforeprint', onBeforePrint);
     return () => window.removeEventListener('beforeprint', onBeforePrint);
   }, []);
