@@ -485,10 +485,13 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         ),
         updated_at: new Date(),
       });
+      // A missing_unit_number card stays: it is an owed dispatch-blocking
+      // question that closes only on a human verdict (AGENTS.md), never
+      // because the audio changed (Codex r3 P1).
       if (n > 0) {
         await trx('triage_items')
           .where({ call_log_id: call.id })
-          .whereNot('reason_code', 'additional_recording')
+          .whereNotIn('reason_code', ['additional_recording', 'missing_unit_number'])
           .whereIn('status', ['open', 'in_progress'])
           .update({ status: 'resolved', resolved_at: new Date(), resolution_note: supersededNote });
       }

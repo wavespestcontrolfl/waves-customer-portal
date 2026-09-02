@@ -52,6 +52,7 @@ function mockDb(firstResults) {
       where(...a) { if (typeof a[0] === 'function') { a[0].call(b); return b; } b.wheres.push(a); return b; },
       whereNull() { return b; },
       whereIn() { return b; },
+      whereNotIn(...a) { b.wheres.push(['notin', ...a]); return b; },
       whereNotExists() { return b; },
       whereNot(...a) { b.nots = [...(b.nots || []), a]; return b; },
       forUpdate() { b.locked = true; return b; },
@@ -310,13 +311,15 @@ describe('POST /calls/:id/adopt-recording', () => {
     expect(fenceClauses.some((w) => w.includes('"recording_sid"') && w.includes(CURRENT))).toBe(true);
     expect(fenceClauses.some((w) => w.includes('additional_recordings') && w.includes(PARKED))).toBe(true);
     const cardWrites = updates.filter((u) => u.table === 'triage_items');
-    const reviewCard = cardWrites.find((u) => JSON.stringify(u.wheres).includes('additional_recording'));
+    const reviewCard = cardWrites.find((u) => JSON.stringify(u.wheres).includes('"reason_code":"additional_recording"'));
     expect(reviewCard.patch.status).toBe('resolved');
     // The OLD audio's other review cards are retired in the swap's own
     // transaction, with a note naming both recordings (r10 P1).
-    const retired = cardWrites.find((u) => !JSON.stringify(u.wheres).includes('additional_recording'));
+    const retired = cardWrites.find((u) => JSON.stringify(u.wheres).includes('notin'));
     expect(retired.patch).toMatchObject({ status: 'resolved', resolution_note: expect.stringContaining(PARKED) });
     expect(retired.patch.resolution_note).toContain(CURRENT);
+    // The owed dispatch-blocking question survives the swap (codex r3 P1).
+    expect(retired.wheres).toContainEqual(['notin', 'reason_code', ['additional_recording', 'missing_unit_number']]);
     expect(db.transaction).toHaveBeenCalled();
     // The pass is fenced to the chosen recording: a callback that replaces
     // it before the claim makes the pass refuse instead of processing audio
@@ -340,7 +343,7 @@ describe('POST /calls/:id/adopt-recording', () => {
     });
     // The swap stands; the review card is left open for the sweep's pass.
     expect(updates.find((u) => u.table === 'call_log').patch.recording_sid).toBe(PARKED);
-    expect(updates.find((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('additional_recording'))).toBeUndefined();
+    expect(updates.find((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('"reason_code":"additional_recording"'))).toBeUndefined();
   });
 
   test('a recording that a newer callback replaced before the pass claimed it is reported (409 recording_changed) and its card stays open (codex #3736 gh-r6)', async () => {
@@ -354,7 +357,7 @@ describe('POST /calls/:id/adopt-recording', () => {
     });
     // The chosen recording can no longer be acted on (it left the parked
     // list with the swap): the card is settled, not left pointing at it.
-    const card = updates.find((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('additional_recording'));
+    const card = updates.find((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('"reason_code":"additional_recording"'));
     expect(card.patch.status).toBe('resolved');
     expect(card.patch.resolution_note).toContain(NEWER);
   });
@@ -386,7 +389,7 @@ describe('POST /calls/:id/adopt-recording', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ adopted: PARKED, remaining_for_review: 1 });
     });
-    const card = updates.find((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('additional_recording'));
+    const card = updates.find((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('"reason_code":"additional_recording"'));
     expect(card.patch.status).toBeUndefined();
     expect(JSON.parse(card.patch.payload.bindings[0])).toMatchObject({ recording_sid: OTHER, parked_because: 'write_contended', kept_recording_sid: PARKED, remaining_for_review: 1 });
   });
@@ -405,7 +408,7 @@ describe('POST /calls/:id/adopt-recording', () => {
     expect(db.transaction).toHaveBeenCalledTimes(2);
     const lockedReads = seen.filter((b) => b.table === 'call_log' && b.locked);
     expect(lockedReads).toHaveLength(1);
-    expect(updates.some((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('additional_recording'))).toBe(true);
+    expect(updates.some((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('"reason_code":"additional_recording"'))).toBe(true);
   });
 
   test('a review-card update that fails is reported as a warning on the successful adoption, never swallowed', async () => {
@@ -418,7 +421,7 @@ describe('POST /calls/:id/adopt-recording', () => {
       // (scoped by whereNot) is untouched.
       if (table === 'triage_items') {
         const realUpdate = b.update;
-        b.update = (patch) => (JSON.stringify(b.wheres).includes('additional_recording') ? Promise.reject(new Error('deadlock detected')) : realUpdate(patch));
+        b.update = (patch) => (JSON.stringify(b.wheres).includes('"reason_code":"additional_recording"') ? Promise.reject(new Error('deadlock detected')) : realUpdate(patch));
       }
       return b;
     });
@@ -447,7 +450,7 @@ describe('POST /calls/:id/adopt-recording', () => {
       expect(updates.find((u) => u.table === 'call_log').patch.processing_status).toBeNull();
       // The old audio's other cards are retired with the swap; the
       // additional_recording review card itself is left open.
-      expect(updates.find((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('additional_recording'))).toBeUndefined();
+      expect(updates.find((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('"reason_code":"additional_recording"'))).toBeUndefined();
     }
   });
 
