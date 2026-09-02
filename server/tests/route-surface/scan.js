@@ -1890,10 +1890,13 @@ class ModuleAnalysis {
         const b = this.bindings.get(this.canonName(n.name));
         if (b && b.kind === 'function' && b.node) visitFn(b.node);
         else if (b && b.kind === 'string') parts.push(`${n.name}='${b.value}'`);
-        else if (b && (b.kind === 'other' || b.kind === 'object') && b.node && b.node.start !== undefined
+        else if (depth === 0 && b && (b.kind === 'other' || b.kind === 'object') && b.node && b.node.start !== undefined
           && !seen.has(b.node)) {
-          // A module-level VALUE the responder branches on (`req.path ===
-          // PUBLIC_PATH`) is identity too — its initializer joins the digest.
+          // A module-level VALUE the responder ITSELF branches on (`req.path
+          // === PUBLIC_PATH`) is identity too — its initializer joins the
+          // digest. Only at depth 0: values inside imported helpers (the
+          // feature-gate table behind isGateEnabled) would re-key every
+          // gate wrapper whenever an unrelated gate is added.
           seen.add(b.node);
           parts.push(`${n.name}=${this.src.slice(b.node.start, b.node.end).replace(/\s+/g, ' ')}`);
         } else foldImported(b, null);
