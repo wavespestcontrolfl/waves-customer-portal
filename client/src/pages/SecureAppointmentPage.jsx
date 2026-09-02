@@ -625,7 +625,7 @@ export default function SecureAppointmentPage() {
           <>
             <InlineAutoPayCapture
               ref={captureRef}
-              intent={{ clientSecret: data.clientSecret, publishableKey: data.publishableKey, paymentMethodTypes: data.paymentMethodTypes }}
+              intent={{ clientSecret: data.clientSecret, publishableKey: data.publishableKey, paymentMethodTypes: data.paymentMethodTypes, capturedMethodType: data.capturedMethodType || null }}
               loadStripeSdk={loadStripeSdk}
               busy={busy}
               onStateChange={setCaptureState}

@@ -226,6 +226,11 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
     }
 
     if (!customer.phone) return skip('no_customer_phone', linkMeta);
+    // A row mid-completion is never texted or stamped (GH Codex #3726 P2):
+    // the customer is finishing right now, and its updated_at is the
+    // completion lease token — a stamp here would break the worker's
+    // guarded final write.
+    if (request.status === 'completing') return skip('completion_in_progress', linkMeta);
     // Third lever, surfaced instead of silently blocked in the pipeline
     // (GH Codex #3726 r1 P1): original_message_type 'autopay_setup_link'
     // classifies as an Auto Pay customer SMS, which sendCustomerMessage
@@ -257,9 +262,11 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
     // The text is OUT — a failed sent_at stamp must not read as a failed
     // send (an operator retry would text twice; GH Codex #3726 r1 P2).
     try {
+      // sent_at only — updated_at is the completion lease token and a
+      // pending row's stamp must not disturb a claim taken meanwhile.
       await db('appointment_card_requests')
-        .where({ id: request.id })
-        .update({ sent_at: new Date(), updated_at: new Date() });
+        .where({ id: request.id, status: 'pending' })
+        .update({ sent_at: new Date() });
     } catch (stampErr) {
       logger.warn(`[autopay-setup-link] sent_at stamp failed for request ${request.id} (text already sent): ${stampErr.message}`);
     }
@@ -296,10 +303,26 @@ async function mintOrReplaySetupIntent(request) {
         // r1 P0); the card-only generation below gives the customer a way
         // to finish with a card.
         && !bankNoLongerOffered) {
+        // A SUCCEEDED replay already holds a method the customer will not
+        // re-enter — the capture UI refuses a bank-capable succeeded replay
+        // without its tender (GH Codex #3726 P1), so resolve it here, where
+        // the secret key can (same contract as the recurring accept mint).
+        let capturedMethodType = null;
+        if (existing.status === 'succeeded' && existing.payment_method) {
+          const pm = existing.payment_method;
+          try {
+            capturedMethodType = typeof pm === 'object' && pm?.type
+              ? pm.type
+              : (await StripeService.retrievePaymentMethod(typeof pm === 'string' ? pm : pm.id))?.type || null;
+          } catch (err) {
+            logger.warn(`[autopay-setup-link] captured method type lookup failed for replayed intent ${existing.id}: ${err.message}`);
+          }
+        }
         return {
           clientSecret: existing.client_secret,
           setupIntentId: existing.id,
           paymentMethodTypes: existingTypes,
+          capturedMethodType,
         };
       }
     } catch (err) {
@@ -317,11 +340,17 @@ async function mintOrReplaySetupIntent(request) {
     });
     if (minted.status === 'canceled') continue;
     if (minted.setupIntentId !== request.stripe_setup_intent_id) {
-      await db('appointment_card_requests')
-        .where({ id: request.id })
+      // Persist ONLY on a still-pending row (GH Codex #3726 P2): a
+      // concurrent tab/webhook may have completed the request against the
+      // earlier intent — overwriting its stripe_setup_intent_id would tie
+      // the row to an unused intent. A CAS miss means the row moved on; the
+      // loader re-reads it instead of rendering a form that can't complete.
+      const n = await db('appointment_card_requests')
+        .where({ id: request.id, status: 'pending' })
         .update({ stripe_setup_intent_id: minted.setupIntentId, updated_at: new Date() });
+      if (n !== 1) return { stale: true };
     }
-    return minted;
+    return { ...minted, capturedMethodType: null };
   }
   logger.error(`[autopay-setup-link] exhausted SetupIntent generations for request ${request.id} — all replays terminal`);
   return null;
@@ -331,7 +360,7 @@ const MAX_SETUP_INTENT_GENERATIONS = 5;
 // GET /secure/:token payload for a kind='customer' row. Shares the visit
 // lane's state vocabulary (ready / secured / closed) so the page renders
 // with the same state machine; `kind` tells it which copy to use.
-async function loadAutopaySetupPageData(request) {
+async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
   const customer = request.customer_id
     ? await db('customers').where({ id: request.customer_id }).first()
     : null;
@@ -377,12 +406,20 @@ async function loadAutopaySetupPageData(request) {
     logger.error(`[autopay-setup-link] SetupIntent mint failed for request ${request.id}: ${err.message}`);
   }
   if (!intent) return { state: 'unavailable', ...base };
+  if (intent.stale) {
+    // The row left 'pending' under us (another tab / the webhook completed
+    // it) — render the row's true state, once.
+    if (reloaded) return { state: 'unavailable', ...base };
+    const fresh = await db('appointment_card_requests').where({ id: request.id }).first();
+    return fresh ? loadAutopaySetupPageData(fresh, { reloaded: true }) : { state: 'closed', ...base };
+  }
   return {
     state: 'ready',
     ...base,
     clientSecret: intent.clientSecret,
     setupIntentId: intent.setupIntentId,
     paymentMethodTypes: intent.paymentMethodTypes,
+    capturedMethodType: intent.capturedMethodType || null,
   };
 }
 
@@ -559,8 +596,12 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
     const since = authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime())
       ? authorizedAt
       : (request.created_at ? new Date(request.created_at) : null);
+    // Scoped to THIS source (GH Codex #3726 P2): an identical consent the
+    // customer gave through the portal meanwhile is its own ledger row and
+    // must not stand in for this link's authorization record.
     const alreadyRecorded = await ConsentService.hasConsentSnapshotForVariant(request.customer_id, stripePaymentMethodId, {
       methodType: consentMethodType,
+      source: PURPOSE,
       ...(since && !Number.isNaN(since.getTime()) ? { since } : {}),
     });
     if (!alreadyRecorded) {

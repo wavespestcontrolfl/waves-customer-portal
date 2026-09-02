@@ -274,6 +274,23 @@ describe('requestAutopaySetupLink — link minting and delivery', () => {
     expect(r.secureUrl).toMatch(/\/secure\//);
   });
 
+  it('sms: a mid-completion row is never texted or stamped (its updated_at is the completion lease)', async () => {
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', updated_at: new Date() }) };
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+    expect(r.reason).toBe('completion_in_progress');
+    expect(r.secureUrl).toBe('https://portal.test/secure/tok1');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'update')).toBe(false);
+  });
+
+  it('sms: the sent_at stamp touches only pending rows and never updated_at', async () => {
+    await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+    const chains = touches('appointment_card_requests');
+    const stamp = chains.find((c) => c.calls.some((x) => x[0] === 'update' && x[1].sent_at));
+    expect(stamp.calls.find((x) => x[0] === 'update')[1]).toEqual({ sent_at: expect.any(Date) });
+    expect(stamp.calls.find((x) => x[0] === 'where')[1]).toEqual(expect.objectContaining({ status: 'pending' }));
+  });
+
   it('sms: an inactive template is a dark lever — the link exists but nothing sends', async () => {
     mockRenderTemplate.mockResolvedValue(null);
     const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
@@ -395,6 +412,26 @@ describe('loadAutopaySetupPageData — state machine', () => {
     expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card', expect.objectContaining({ idempotencyKey: 'autopay_setup_link_req-1_card' }));
   });
 
+  it('a replayed SUCCEEDED intent carries capturedMethodType so the capture UI renders the matching consent (GH P1)', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_old', client_secret: 'cs_old', status: 'succeeded', payment_method: 'pm_b', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_b', type: 'us_bank_account' });
+    const d = await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_old' });
+    expect(d).toEqual(expect.objectContaining({ state: 'ready', setupIntentId: 'seti_old', capturedMethodType: 'us_bank_account' }));
+    expect(mockCreateSetupIntent).not.toHaveBeenCalled();
+  });
+
+  it('persists a replacement intent only on a still-pending row; a CAS miss re-reads the row instead of rendering a dead form (GH P2)', async () => {
+    mockTableHandlers.appointment_card_requests = {
+      first: () => ({ ...PENDING, status: 'completed' }),
+      update: (chain, patch) => (patch.stripe_setup_intent_id ? 0 : 1),
+    };
+    const d = await loadAutopaySetupPageData({ ...PENDING });
+    expect(d.state).toBe('secured');
+    const chains = touches('appointment_card_requests');
+    const persist = chains.find((c) => c.calls.some((x) => x[0] === 'update' && x[1].stripe_setup_intent_id));
+    expect(persist.calls.find((x) => x[0] === 'where')[1]).toEqual({ id: 'req-1', status: 'pending' });
+  });
+
   it('renders unavailable (not closed) when Stripe cannot mint', async () => {
     mockCreateSetupIntent.mockRejectedValue(new Error('stripe down'));
     expect((await loadAutopaySetupPageData({ ...PENDING })).state).toBe('unavailable');
@@ -442,7 +479,8 @@ describe('completion tail (page POST + webhook)', () => {
     const before = Date.now();
     await completeAutopaySetupCapture({ request: { ...PENDING, created_at: created }, setupIntentId: 'seti_new' });
     const sinceArg = mockHasConsentSnapshotForVariant.mock.calls[0][2].since;
-    expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_new', expect.objectContaining({ methodType: 'card' }));
+    // Scoped to this source: a portal consent given meanwhile is its own row.
+    expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_new', expect.objectContaining({ methodType: 'card', source: 'autopay_setup_link' }));
     // Page path: the POST moment, never the link's mint (which is only the fallback).
     expect(sinceArg.getTime()).toBeGreaterThanOrEqual(before);
     expect(mockRecordConsent).toHaveBeenCalledTimes(1);

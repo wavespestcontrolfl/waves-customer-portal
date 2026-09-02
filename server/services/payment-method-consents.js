@@ -117,11 +117,15 @@ async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId, { d
 // immediate-charge authorization in the ledger even when an older
 // future-invoice consent exists, while webhook-backstop retries must not
 // stack duplicate rows).
-async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType = 'card', variant = null, since = null, dbh = db } = {}) {
+async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType = 'card', variant = null, since = null, source = null, dbh = db } = {}) {
   if (!customerId || !stripePaymentMethodId) return false;
   const text = getConsentText(methodType, { variant });
   const q = dbh('payment_method_consents')
     .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId, consent_text_snapshot: text });
+  // `source` scopes the idempotency to ONE capture surface: an identical
+  // consent the customer gave elsewhere (portal, another link) is its own
+  // ledger row and must not stand in for this surface's record.
+  if (source) q.where({ source });
   // `since` scopes the idempotency to ONE authorization event (Codex #3492
   // r22): each opt-in is its own ledger row — a snapshot recorded for a
   // PRIOR plan's acceptance must not satisfy a NEW acceptance's record
