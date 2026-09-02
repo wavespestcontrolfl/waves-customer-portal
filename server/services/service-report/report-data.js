@@ -2298,11 +2298,17 @@ async function resolveCanonicalLawnRender(service, knex = db) {
 // and the PDF re-renders instead of matching a stale one.
 async function loadServicePremise(service, knex = db) {
   if (service?.stamped_address_diverges !== undefined && service?.address_line1 !== undefined) return service;
+  // The premise is the FROZEN one when the record carries an identity
+  // snapshot — the cache-key lookup (a partial row) and the full render
+  // must resolve the same premise or a moved customer's lawn PDF misses
+  // its cache forever (codex P1). service_data rides along so the overlay
+  // can read the snapshot even from a partial caller row.
   const row = await knex('service_records')
     .where({ 'service_records.id': service.id })
     .leftJoin('customers', 'service_records.customer_id', 'customers.id')
     .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
     .first(
+      'service_records.service_data',
       knex.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
       knex.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
       knex.raw('COALESCE(ss.service_address_city, customers.city) as city'),
@@ -2310,7 +2316,7 @@ async function loadServicePremise(service, knex = db) {
       knex.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
     );
   if (!row) throw new Error(`service_record ${service?.id || 'unknown'}: premise unavailable for the week-plan cache key`);
-  return { ...service, ...row };
+  return applyReportIdentitySnapshot({ ...service, ...row });
 }
 
 async function lawnAssessmentPdfSignature(service, knex = db) {
