@@ -1512,6 +1512,17 @@ const gates = {
   // STRICT opt-in: this changes what gets sent and billed.
   // Enable with GATE_ESTIMATE_LEAD_SERVICE_SEND=true (needs opt-out + add on).
   estimateLeadServiceSend: process.env.GATE_ESTIMATE_LEAD_SERVICE_SEND === 'true',
+  // Send requires engine-authoritative pricing (validation audit SEC-002,
+  // 2026-09-02). An admin save whose server recompute failed or had no
+  // replayable inputs persists the BROWSER preview as a NON-authoritative
+  // price (estimates.pricing_authority = CLIENT_FALLBACK — deliberately
+  // fail-open so a broken engine never blocks the save). With this gate on,
+  // the FIRST send of such a row is refused (409 CLIENT_FALLBACK_PRICING)
+  // until it is re-saved through the engine; off, the send goes out and the
+  // would-block is logged so the count can be read before the flip. The
+  // lead auto-send lane skips these rows regardless of the gate.
+  // Enable with GATE_SEND_REQUIRES_SERVER_PRICING=true; unset = revoke.
+  sendRequiresServerPricing: process.env.GATE_SEND_REQUIRES_SERVER_PRICING === 'true',
   // Lawn program calendar on the estimate page: a 12-month strip under the
   // lawn price card marking N evenly spaced application months, where N is
   // the selected frequency's visitsPerYear. Pure arithmetic on data already

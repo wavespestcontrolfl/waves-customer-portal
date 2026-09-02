@@ -141,6 +141,17 @@ describe('lead estimate auto-send policy', () => {
     });
   });
 
+  test('never auto-sends a price the engine did not verify (pricing_authority CLIENT_FALLBACK)', () => {
+    const now = new Date('2026-05-26T12:00:00.000Z');
+    const opts = { now, delayMinutes: 5, allowedReviewReasons: ['property_measurements_defaulted'] };
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ pricing_authority: 'CLIENT_FALLBACK' }), opts))
+      .toEqual({ eligible: false, reason: 'client_fallback_pricing' });
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ pricingAuthority: 'client_fallback' }), opts))
+      .toEqual({ eligible: false, reason: 'client_fallback_pricing' });
+    expect(leadEstimateAutoSendEligibility(generatedEstimate({ pricing_authority: 'SERVER' }), opts))
+      .toEqual({ eligible: true, reason: null });
+  });
+
   test('treats fresh claims as active and old claims as recoverable', () => {
     const now = new Date('2026-05-26T12:00:00.000Z');
 

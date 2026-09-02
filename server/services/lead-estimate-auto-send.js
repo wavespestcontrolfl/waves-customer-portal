@@ -151,6 +151,13 @@ function leadEstimateAutoSendEligibility(estimate = {}, options = {}) {
   }
   if (summary.status !== 'generated' || !summary.generated) return { eligible: false, reason: 'not_generated' };
   if (summary.quoteRequired) return { eligible: false, reason: 'quote_required' };
+  // A price the engine never verified (pricing_authority CLIENT_FALLBACK —
+  // the save's recompute failed or had no replayable inputs) is never
+  // auto-delivered, gate or no gate (validation audit SEC-002, 2026-09-02);
+  // the operator re-saves it through the engine or sends it by hand.
+  if (String(estimate.pricing_authority || estimate.pricingAuthority || '').toUpperCase() === 'CLIENT_FALLBACK') {
+    return { eligible: false, reason: 'client_fallback_pricing' };
+  }
   if (disallowedReview.length > 0) {
     return { eligible: false, reason: 'disallowed_review_reasons', review: disallowedReview };
   }

@@ -7,6 +7,7 @@
  * and a real end-to-end recompute through the actual engine.
  */
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
 
 const {
   createOrReuseAdminEstimate,
@@ -242,6 +243,15 @@ describe('resolveServerAuthoritativePricing', () => {
     expect(out.audit.pricing_authority).toBe('CLIENT_FALLBACK');
     expect(out.totals).toEqual({ monthlyTotal: 114.67, annualTotal: 1376, onetimeTotal: 0 });
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('CLIENT_FALLBACK reason=ENGINE_ERROR'));
+    // The exception surfaces as an admin bell at save time (SEC-002): the
+    // send gate refuses the row until it is re-saved through the engine.
+    const { notifyAdmin } = require('../services/notification-service');
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate',
+      'Estimate saved without engine pricing',
+      expect.stringContaining('engine down'),
+      expect.objectContaining({ metadata: expect.objectContaining({ pricingAuthority: 'CLIENT_FALLBACK', reason: 'ENGINE_ERROR' }) }),
+    );
     errSpy.mockRestore();
   });
 });

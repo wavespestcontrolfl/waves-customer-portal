@@ -344,6 +344,27 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     err.statusCode = 400;
     throw err;
   }
+  // Engine-authoritative pricing (validation audit SEC-002, 2026-09-02). A
+  // save whose server recompute failed or had no replayable inputs persists
+  // the BROWSER preview as a NON-authoritative price (pricing_authority
+  // CLIENT_FALLBACK — fail-open so a broken engine never blocks the save),
+  // and nothing re-verified that price before delivery. The FIRST send of
+  // such a row is refused while GATE_SEND_REQUIRES_SERVER_PRICING is on and
+  // logged as a would-block while it is off (shadow count before the flip).
+  // Re-saving from the estimate tool reprices through the engine and clears
+  // the stamp. An authored proposal IS the manual quote (exempt like the
+  // gates above); a row that already went out keeps its follow-ups (same
+  // rule as the engine-review gate) — the data audit owns historical rows.
+  if (!isAuthoredProposal && !estimate.sent_at
+    && String(estimate.pricing_authority || '').toUpperCase() === 'CLIENT_FALLBACK') {
+    if (require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) {
+      const err = new Error('This estimate\'s price was saved from the browser preview because the pricing engine could not verify it. Open it in the estimate tool and save again so the engine prices it, then send.');
+      err.statusCode = 409;
+      err.code = 'CLIENT_FALLBACK_PRICING';
+      throw err;
+    }
+    logger.warn(`[pricing-authority] shadow: estimate ${estimate.id} is being sent with CLIENT_FALLBACK pricing (GATE_SEND_REQUIRES_SERVER_PRICING off)`);
+  }
   assertEstimateManagerApprovalResolved(estimate);
   if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
     const err = new Error('Set the commercial business type before sending — it sets the pest/rodent service cadence.');

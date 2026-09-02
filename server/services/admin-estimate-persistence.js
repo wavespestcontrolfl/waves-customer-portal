@@ -1297,6 +1297,21 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   if (result.reason === 'ENGINE_ERROR') {
     // Deploy-bug signal: a billed price that came from a broken engine.
     logger.error(`[pricing-authority] CLIENT_FALLBACK reason=ENGINE_ERROR — persisted client preview as NON-authoritative price${result.error ? ` err=${result.error.message}` : ''}`);
+    // The exception surfaces (validation audit SEC-002, 2026-09-02): the
+    // send gate refuses this row until it is re-saved through the engine,
+    // so the operator hears about it at save time, not at send time.
+    // Best-effort — the bell never fails the save.
+    try {
+      const NotificationService = require('./notification-service');
+      void NotificationService.notifyAdmin(
+        'estimate',
+        'Estimate saved without engine pricing',
+        `The pricing engine failed while an estimate was saved (${result.error?.message || 'unknown error'}), so the browser preview (${Number(clientPreview.annualTotal || 0).toFixed(2)}/yr) was stored as a NON-authoritative price. Open it in the estimate tool and save again so the engine prices it before it is sent.`,
+        { icon: '\u26A0\uFE0F', link: '/admin/estimates', metadata: { pricingAuthority: 'CLIENT_FALLBACK', reason: 'ENGINE_ERROR' } },
+      ).catch((err) => logger.warn(`[pricing-authority] fallback admin notify failed: ${err.message}`));
+    } catch (err) {
+      logger.warn(`[pricing-authority] fallback admin notify setup failed: ${err.message}`);
+    }
   } else {
     // No replayable input (legacy/transitional estimate). Findable via the
     // pricing_authority column; warn rather than page.
