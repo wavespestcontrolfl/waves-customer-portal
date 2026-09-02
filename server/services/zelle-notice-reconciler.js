@@ -40,7 +40,7 @@ const {
   isZelleNoticeCandidate, noticeText, parseZelleNotice, memoInvoiceNumbers, isTrustedZelleSender,
 } = require('./zelle-notice');
 const { normalizeNamePart, payerNameCorroborates } = require('../utils/name-match');
-const { openSelfPayInvoicesByAmountDue, rowIsSelfPayDue } = require('./open-balance');
+const { openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, MAX_AMOUNT_CANDIDATES } = require('./open-balance');
 const { invoiceAmountDue } = require('./invoice-helpers');
 
 const RECORDED_BY = 'zelle-notice-reconciler';
@@ -246,13 +246,17 @@ async function settledByUs(invoiceId) {
   return row && row.status === 'paid' && row.payment_recorded_by === RECORDED_BY ? row : null;
 }
 
+// { rows, truncated }: the exact-cent query is bounded; a FULL page means
+// invoices may exist beyond it, so "exactly one corroborates" cannot be
+// decided — the caller parks instead of auto-applying on a partial view.
 async function exactOpenInvoices(parsed) {
-  const rows = await openSelfPayInvoicesByAmountDue(parsed.amountCents);
+  const rows = await openSelfPayInvoicesByAmountDue(parsed.amountCents, { limit: MAX_AMOUNT_CANDIDATES });
+  const truncated = rows.length >= MAX_AMOUNT_CANDIDATES;
   const out = [];
   for (const row of rows) {
     if (await rowIsSelfPayDue(row.customer_id, row)) out.push(row);
   }
-  return out;
+  return { rows: out, truncated };
 }
 
 // Returns true when the email was a Zelle notice this reconciler owns (the
@@ -278,11 +282,16 @@ async function maybeHandleZelleNotice(email) {
     return true;
   }
 
-  const exact = await exactOpenInvoices(parsed);
+  const { rows: exact, truncated } = await exactOpenInvoices(parsed);
   const candidates = await buildCandidates(parsed, exact);
 
   if (await recentlyApplied(parsed)) {
     await finishParked(notice, email, 'possible_duplicate', { candidates });
+    return true;
+  }
+  if (truncated) {
+    logger.warn(`[zelle-notice] ${exact.length}+ open invoices at ${parsed.amountCents} cents — candidate page full, parking as ambiguous`);
+    await finishParked(notice, email, 'multiple_matches', { candidates });
     return true;
   }
 

@@ -38,6 +38,7 @@ jest.mock('../config/feature-gates', () => ({
 jest.mock('../services/open-balance', () => ({
   openSelfPayInvoicesByAmountDue: jest.fn(async () => []),
   rowIsSelfPayDue: jest.fn(async () => true),
+  MAX_AMOUNT_CANDIDATES: 25,
 }));
 jest.mock('../services/invoice-manual-payment', () => ({
   recordManualPayment: jest.fn(async (id) => ({ invoice: { id, invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid' }, receipt: { email: { ok: true }, sms: { ok: true } } })),
@@ -144,7 +145,7 @@ describe('auto-apply', () => {
     claimed();
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
-    expect(OpenBalance.openSelfPayInvoicesByAmountDue).toHaveBeenCalledWith(11700);
+    expect(OpenBalance.openSelfPayInvoicesByAmountDue).toHaveBeenCalledWith(11700, { limit: 25 });
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', {
       method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: RECORDED_BY, sendReceipt: true, via: 'both', expectedAmountCents: 11700,
     });
@@ -240,6 +241,16 @@ describe('park reasons', () => {
     const patch = updatesOf('inbound_payment_notices')[0];
     expect(patch).toMatchObject({ status: 'parked', park_reason: 'name_mismatch' });
     expect(JSON.parse(patch.candidates)[0]).toMatchObject({ invoice_id: 'inv-1', exact_amount: true, name_match: false });
+    expect(recordManualPayment).not.toHaveBeenCalled();
+  });
+
+  test('a FULL exact-cent candidate page is ambiguous by definition ⇒ multiple_matches, never an auto-apply on a truncated view', async () => {
+    claimed();
+    const page = Array.from({ length: 25 }, (_, i) => openRow({ id: `inv-${i}`, invoice_number: `WPC-2026-${1000 + i}`, customer_first_name: i === 0 ? 'Pat' : 'Sam', customer_last_name: i === 0 ? 'Doe' : 'Roe' }));
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : page));
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    expect(OpenBalance.openSelfPayInvoicesByAmountDue).toHaveBeenCalledWith(11700, { limit: 25 });
+    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'multiple_matches' });
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
