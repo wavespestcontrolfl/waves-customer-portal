@@ -84,11 +84,12 @@ describe('getOpsQueue', () => {
       { id: 'p1', service_record_id: 'rec-33333333', status: 'rendering', created_at: ago(2) },
     ];
     fixtures.dispatch_alerts = [
-      { id: 'da-1', severity: 'warn', payload: JSON.stringify({ customerName: 'Test Customer', serviceName: 'Termite re-treat' }), created_at: ago(500) },
+      { id: 'da-1', severity: 'warn', payload: JSON.stringify({ source: 'typed_completion', customerName: 'Test Customer', serviceType: 'termite_retreat', suggestedFollowupDate: '2026-09-20' }), created_at: ago(500) },
     ];
     fixtures.admin_alerts = [
       { id: 'aa-1', type: 'closeout_contradiction', severity: 'high', title: 'Closeout contradiction on a test visit', href: '/admin/dispatch', last_seen_at: ago(20) },
       { id: 'aa-2', type: 'missing_required_photos', severity: 'low', title: 'Missing photos', last_seen_at: ago(40) },
+      { id: 'aa-3', type: 'report_delivery_incomplete', status: 'snoozed', severity: 'medium', title: 'Snooze elapsed alert', last_seen_at: ago(60) },
     ];
   });
 
@@ -117,13 +118,14 @@ describe('getOpsQueue', () => {
     expect(by.reports.items.map((i) => [i.id, i.status])).toEqual([
       ['delivery:d2', 'failed'], ['pdf:p1', 'pending'], ['delivery:d1', 'pending'], // newest first within a status
     ]);
-    expect(by.followups.items).toEqual([expect.objectContaining({ status: 'parked', title: 'Test Customer · Termite re-treat' })]);
-    expect(by.alerts.items.map((i) => [i.id, i.status])).toEqual([['aa-1', 'failed'], ['aa-2', 'parked']]);
+    expect(by.followups.items).toEqual([expect.objectContaining({ status: 'parked', title: 'Test Customer · termite retreat', detail: expect.stringContaining('suggested 2026-09-20') })]);
+    expect(by.alerts.items.map((i) => [i.id, i.status])).toEqual([['aa-1', 'failed'], ['aa-2', 'parked'], ['aa-3', 'parked']]);
+    expect(by.alerts.items[2].detail).toMatch(/snooze elapsed/);
 
     expect(by.calls).toMatchObject({ pending: 4, parked: 1, failed: 1, total: 6, error: null });
     expect(q.totals).toEqual({
       pending: 1 + 4 + 2, // digest, c2 + c5 + c6 + c7, d1 + p1
-      parked: 1 + 1 + 1 + 1 + 1 + 1 + 1, // ga4, c1, opp-1, ea-1, pa-1, da-1, aa-2
+      parked: 1 + 1 + 1 + 1 + 1 + 1 + 2, // ga4, c1, opp-1, ea-1, pa-1, da-1, aa-2 + aa-3
       failed: 1 + 1 + 1 + 1 + 1, // pricing, c3, ea-2, d2, aa-1
       truncated: false,
     });

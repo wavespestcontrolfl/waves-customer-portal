@@ -281,13 +281,15 @@ async function laneFollowUps() {
     .select('id', 'severity', 'payload', 'created_at');
   const items = rows.map((r) => {
     const p = typeof r.payload === 'string' ? (() => { try { return JSON.parse(r.payload); } catch { return {}; } })() : (r.payload || {});
-    const who = p.customerName || p.customer_name || 'customer';
-    const what = p.serviceName || p.service_name || 'follow-up visit';
+    // Keys as written by typed-followup-obligation.parkFollowupAlert.
+    const who = p.customerName || 'customer';
+    const what = p.serviceType ? String(p.serviceType).replace(/_/g, ' ') : 'follow-up visit';
+    const due = p.suggestedFollowupDate ? ` · suggested ${p.suggestedFollowupDate}` : '';
     return {
       id: r.id,
       title: `${who} · ${what}`,
       status: 'parked',
-      detail: `follow-up not yet scheduled${r.severity && r.severity !== 'info' ? ` · ${r.severity}` : ''}`,
+      detail: `follow-up not yet scheduled${due}${r.severity && r.severity !== 'info' ? ` · ${r.severity}` : ''}`,
       at: iso(r.created_at),
       href: '/admin/dispatch',
     };
@@ -296,16 +298,22 @@ async function laneFollowUps() {
 }
 
 async function laneAdminAlerts() {
+  // Open, plus snoozed alerts whose snooze has elapsed — they are due again.
   const rows = await db('admin_alerts')
-    .where('status', 'open')
+    .where(function whereDue() {
+      this.where('status', 'open')
+        .orWhere(function whereSnoozeElapsed() {
+          this.where('status', 'snoozed').where('snoozed_until', '<=', new Date());
+        });
+    })
     .orderBy('last_seen_at', 'desc')
     .limit(SCAN_LIMIT)
-    .select('id', 'type', 'severity', 'title', 'href', 'detected_at', 'last_seen_at');
+    .select('id', 'type', 'status', 'severity', 'title', 'href', 'detected_at', 'last_seen_at');
   const items = rows.map((r) => ({
     id: r.id,
     title: r.title || String(r.type || '').replace(/_/g, ' '),
     status: r.severity === 'critical' || r.severity === 'high' ? 'failed' : 'parked',
-    detail: `${r.severity} · ${String(r.type || '').replace(/_/g, ' ')}`,
+    detail: `${r.severity} · ${String(r.type || '').replace(/_/g, ' ')}${r.status === 'snoozed' ? ' · snooze elapsed' : ''}`,
     at: iso(r.last_seen_at || r.detected_at),
     href: r.href || null,
   }));
