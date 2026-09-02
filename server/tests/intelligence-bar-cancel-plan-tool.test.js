@@ -142,3 +142,18 @@ describe('cancel_plan confirmed (server-derived)', () => {
     expect(result).toEqual({ error: 'not attributable', code: 'scoped_cancellation_unattributed' });
   });
 });
+
+describe('cancel_plan refuses unexecutable previews before a card exists (deferred P2 from #3666 r32)', () => {
+  it('an ineligible account is a tool failure, not a card whose Confirm fails with nothing_to_cancel', async () => {
+    mockPreview.mockResolvedValueOnce({ ...PREVIEW, eligible: false });
+    const out = await executeTool('cancel_plan', { customer_id: CUSTOMER });
+    expect(out).toEqual({ error: expect.stringMatching(/nothing|no active plan/i), code: 'nothing_to_cancel' });
+    expect(mockCommit).not.toHaveBeenCalled();
+  });
+  it('an unsupported scoped selection is a tool failure carrying the scope error', async () => {
+    mockPreview.mockResolvedValueOnce({ ...PREVIEW, wholeAccount: false, scope: ['lawn_care'], scopeLabels: ['Lawn Care'], scopedSupported: false, scopeError: 'scoped_covers_prepaid' });
+    const out = await executeTool('cancel_plan', { customer_id: CUSTOMER, families: ['lawn_care'] });
+    expect(out).toEqual({ error: expect.stringMatching(/annual prepay/i), code: 'scoped_covers_prepaid' });
+    expect(mockCommit).not.toHaveBeenCalled();
+  });
+});
