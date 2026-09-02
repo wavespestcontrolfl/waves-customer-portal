@@ -25,12 +25,14 @@
  *
  * Each predicate returns { count, ids, detail } — the adapter contract of
  * the sweep registry. ids are PII-free row ids. One SQL statement per
- * predicate: a count plus a bounded id sample, so a large backlog costs one
- * aggregate, never a row scan into memory.
+ * predicate: a full count plus a LIMIT-bounded id sample (the sample is
+ * bounded BEFORE aggregation — array_agg over the whole match set would
+ * materialise every id exactly when a backlog is largest).
  *
  * Nothing here writes. Repairs stay with their owners: the dispatch
  * backfill path for missing records, ensureReportToken (pdf-queue.js) for
- * missing tokens, Billing Recovery for the money side.
+ * missing tokens, Billing Recovery for the money side, the schedule for an
+ * incomplete visit's follow-up.
  */
 
 const db = require('../models/db');
@@ -39,7 +41,8 @@ const SAMPLE = 25;
 
 // Yesterday-and-older in ET wall-clock terms: today's visits are still
 // closing and are the dashboard's job.
-const BEFORE_TODAY_ET = "ss.scheduled_date < (now() AT TIME ZONE 'America/New_York')::date";
+const TODAY_ET = "(now() AT TIME ZONE 'America/New_York')::date";
+const BEFORE_TODAY_ET = `ss.scheduled_date < ${TODAY_ET}`;
 
 // The completion-SMS status marker (structured_notes.completionSmsStatus)
 // and the report delivery ledger both post-date the oldest records; the
@@ -51,6 +54,17 @@ const COMMS_MARKER_SINCE = '2026-07-01';
 // not_required (a settled outcome); everything else is pending or failed.
 const TERMINAL_SMS_STATUSES = Object.freeze(['sent', 'skipped_recap_sms_already_sent', 'blocked']);
 
+// How long an operator has to reschedule or follow up a visit the tech
+// marked incomplete before the sweep lists it (closeout-alerts shows it on
+// the day; this is the long tail).
+const INCOMPLETE_FOLLOWUP_GRACE_DAYS = 7;
+
+// The instant a record last became "complete" for grace-period purposes:
+// a recap-rail re-completion of an office-handoff record keeps its original
+// created_at and bumps updated_at, so created_at alone would age a freshly
+// completed record straight past the grace window (codex P2).
+const COMPLETED_MARKER_AT = 'GREATEST(sr.created_at, COALESCE(sr.updated_at, sr.created_at))';
+
 // A completed record that OWES the customer a report / a completion notice:
 // not a backfill, delivery not suppressed, not a project close (the project
 // report lane owns those). Shared by the token and comms predicates.
@@ -60,17 +74,27 @@ const OWES_CUSTOMER_ARTIFACT = `
       AND COALESCE(sr.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
       AND sr.completion_source IS DISTINCT FROM 'project_completion'`;
 
+// matchSql must SELECT `id` (text-castable) and `ord` (sort key, newest
+// first). The CTE is scanned once for the count and once for a LIMIT-bounded
+// sample, so the sample never aggregates the whole backlog.
+function aggregate(matchSql) {
+  return `
+      WITH m AS (${matchSql})
+      SELECT (SELECT count(*)::int FROM m) AS n,
+             (SELECT array_agg(s.id::text ORDER BY s.ord DESC)
+                FROM (SELECT m.id, m.ord FROM m ORDER BY m.ord DESC LIMIT ${SAMPLE}) s) AS sample`;
+}
+
 const PREDICATES = Object.freeze({
   completed_visit_without_record: {
     label: 'Completed visits (before today) with no service_records row',
     href: '/admin/dispatch',
-    sql: `
-      SELECT count(*)::int AS n,
-             (array_agg(ss.id::text ORDER BY ss.scheduled_date DESC))[1:${SAMPLE}] AS sample
-        FROM scheduled_services ss
-       WHERE ss.status = 'completed'
-         AND ${BEFORE_TODAY_ET}
-         AND NOT EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id)`,
+    sql: aggregate(`
+        SELECT ss.id, ss.scheduled_date AS ord
+          FROM scheduled_services ss
+         WHERE ss.status = 'completed'
+           AND ${BEFORE_TODAY_ET}
+           AND NOT EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id)`),
   },
   // Siblings from DIFFERENT rails are supported history; two completed rows
   // from the SAME rail (two detailed-form completions, two project closes)
@@ -81,18 +105,14 @@ const PREDICATES = Object.freeze({
   duplicate_completed_records_per_visit: {
     label: 'Visits with more than one completed service_records row from the same completion rail',
     href: '/admin/dispatch',
-    sql: `
-      SELECT count(*)::int AS n,
-             (array_agg(t.scheduled_service_id::text ORDER BY t.n DESC))[1:${SAMPLE}] AS sample
-        FROM (
-          SELECT sr.scheduled_service_id, sr.completion_source, count(*) AS n
-            FROM service_records sr
-           WHERE sr.scheduled_service_id IS NOT NULL
-             AND sr.status = 'completed'
-             AND sr.completion_source IN ('detailed_form', 'project_completion')
-           GROUP BY sr.scheduled_service_id, sr.completion_source
-          HAVING count(*) > 1
-        ) t`,
+    sql: aggregate(`
+        SELECT sr.scheduled_service_id AS id, count(*) AS ord
+          FROM service_records sr
+         WHERE sr.scheduled_service_id IS NOT NULL
+           AND sr.status = 'completed'
+           AND sr.completion_source IN ('detailed_form', 'project_completion')
+         GROUP BY sr.scheduled_service_id, sr.completion_source
+        HAVING count(*) > 1`),
   },
   // A frozen catalog rule saying the service owes no report
   // (closeoutRequirements.requiresServiceReport=false) exempts the record,
@@ -100,33 +120,31 @@ const PREDICATES = Object.freeze({
   completed_record_without_report_token: {
     label: 'Completed visits (>2h) that owe a customer report and have no sibling record with a report token',
     href: '/admin/dispatch',
-    sql: `
-      SELECT count(*)::int AS n,
-             (array_agg(ss.id::text ORDER BY ss.scheduled_date DESC))[1:${SAMPLE}] AS sample
-        FROM scheduled_services ss
-       WHERE ss.status = 'completed'
-         AND EXISTS (
-               SELECT 1 FROM service_records sr
-                WHERE sr.scheduled_service_id = ss.id
-                  AND ${OWES_CUSTOMER_ARTIFACT}
-                  AND COALESCE(sr.structured_notes->'closeoutRequirements'->>'requiresServiceReport', 'true') <> 'false'
-                  AND sr.created_at < now() - interval '2 hours')
-         AND NOT EXISTS (
-               SELECT 1 FROM service_records tok
-                WHERE tok.scheduled_service_id = ss.id
-                  AND tok.report_view_token IS NOT NULL)`,
+    sql: aggregate(`
+        SELECT ss.id, ss.scheduled_date AS ord
+          FROM scheduled_services ss
+         WHERE ss.status = 'completed'
+           AND EXISTS (
+                 SELECT 1 FROM service_records sr
+                  WHERE sr.scheduled_service_id = ss.id
+                    AND ${OWES_CUSTOMER_ARTIFACT}
+                    AND COALESCE(sr.structured_notes->'closeoutRequirements'->>'requiresServiceReport', 'true') <> 'false'
+                    AND ${COMPLETED_MARKER_AT} < now() - interval '2 hours')
+           AND NOT EXISTS (
+                 SELECT 1 FROM service_records tok
+                  WHERE tok.scheduled_service_id = ss.id
+                    AND tok.report_view_token IS NOT NULL)`),
   },
   completed_visit_without_completed_at: {
     label: "Completed visits (before today) whose completed_at is NULL (tracker stamp never landed)",
     href: '/admin/dispatch',
-    sql: `
-      SELECT count(*)::int AS n,
-             (array_agg(ss.id::text ORDER BY ss.scheduled_date DESC))[1:${SAMPLE}] AS sample
-        FROM scheduled_services ss
-       WHERE ss.status = 'completed'
-         AND ss.completed_at IS NULL
-         AND ${BEFORE_TODAY_ET}
-         AND EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND sr.status = 'completed')`,
+    sql: aggregate(`
+        SELECT ss.id, ss.scheduled_date AS ord
+          FROM scheduled_services ss
+         WHERE ss.status = 'completed'
+           AND ss.completed_at IS NULL
+           AND ${BEFORE_TODAY_ET}
+           AND EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND sr.status = 'completed')`),
   },
   // Confirmed notice = a TERMINAL completionSmsStatus on ANY sibling —
   // the closeout-status.js comms vocabulary's done / not_required outcomes
@@ -142,28 +160,51 @@ const PREDICATES = Object.freeze({
   completed_record_without_comms_marker: {
     label: 'Completed visits (>24h) that owe a completion notice and have no sibling with a terminal one (sent / recap sent / consent-blocked SMS, or sent report email)',
     href: '/admin/dispatch',
-    sql: `
-      SELECT count(*)::int AS n,
-             (array_agg(ss.id::text ORDER BY ss.scheduled_date DESC))[1:${SAMPLE}] AS sample
-        FROM scheduled_services ss
-       WHERE ss.status = 'completed'
-         AND EXISTS (
-               SELECT 1 FROM service_records sr
-                WHERE sr.scheduled_service_id = ss.id
-                  AND ${OWES_CUSTOMER_ARTIFACT}
-                  AND COALESCE(sr.structured_notes->'closeoutRequirements'->>'requiresCustomerNotice', 'true') <> 'false'
-                  AND sr.created_at >= '${COMMS_MARKER_SINCE}'::date
-                  AND sr.created_at < now() - interval '24 hours')
-         AND NOT EXISTS (
-               SELECT 1 FROM service_records sib
-                WHERE sib.scheduled_service_id = ss.id
-                  AND (
-                    sib.structured_notes->>'completionSmsStatus' IN (${TERMINAL_SMS_STATUSES.map((s) => `'${s}'`).join(', ')})
-                    OR EXISTS (
-                         SELECT 1 FROM service_report_deliveries d
-                          WHERE d.service_record_id = sib.id AND d.status = 'sent')))`,
+    sql: aggregate(`
+        SELECT ss.id, ss.scheduled_date AS ord
+          FROM scheduled_services ss
+         WHERE ss.status = 'completed'
+           AND EXISTS (
+                 SELECT 1 FROM service_records sr
+                  WHERE sr.scheduled_service_id = ss.id
+                    AND ${OWES_CUSTOMER_ARTIFACT}
+                    AND COALESCE(sr.structured_notes->'closeoutRequirements'->>'requiresCustomerNotice', 'true') <> 'false'
+                    AND sr.created_at >= '${COMMS_MARKER_SINCE}'::date
+                    AND ${COMPLETED_MARKER_AT} < now() - interval '24 hours')
+           AND NOT EXISTS (
+                 SELECT 1 FROM service_records sib
+                  WHERE sib.scheduled_service_id = ss.id
+                    AND (
+                      sib.structured_notes->>'completionSmsStatus' IN (${TERMINAL_SMS_STATUSES.map((s) => `'${s}'`).join(', ')})
+                      OR EXISTS (
+                           SELECT 1 FROM service_report_deliveries d
+                            WHERE d.service_record_id = sib.id AND d.status = 'sent')))`),
+  },
+  // visitOutcome 'incomplete' leaves scheduled_services.status='completed'
+  // with a service_records row of status 'incomplete' (admin-dispatch.js);
+  // closeout-alerts lists it on the day as "reschedule or follow up". After
+  // the grace window it must stay visible until a completed sibling lands
+  // (recap-rail re-completion) or a live follow-up visit exists (the
+  // followup_source_service_id link the completion's own follow-up park
+  // uses) — otherwise the not-performed work silently ages out (codex P2).
+  aged_incomplete_visit_records: {
+    label: `Visits the tech marked incomplete more than ${INCOMPLETE_FOLLOWUP_GRACE_DAYS} days ago with no completed record and no live follow-up visit`,
+    href: '/admin/dispatch',
+    sql: aggregate(`
+        SELECT ss.id, ss.scheduled_date AS ord
+          FROM scheduled_services ss
+         WHERE ss.status = 'completed'
+           AND ss.scheduled_date < ${TODAY_ET} - ${INCOMPLETE_FOLLOWUP_GRACE_DAYS}
+           AND EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND sr.status = 'incomplete')
+           AND NOT EXISTS (SELECT 1 FROM service_records c WHERE c.scheduled_service_id = ss.id AND c.status = 'completed')
+           AND NOT EXISTS (
+                 SELECT 1 FROM scheduled_services f
+                  WHERE f.followup_source_service_id = ss.id
+                    AND f.status NOT IN ('cancelled', 'skipped', 'no_show'))`),
   },
 });
+
+const PREDICATE_KEYS = Object.freeze(Object.keys(PREDICATES));
 
 async function runPredicate(key, knex = db) {
   const predicate = PREDICATES[key];
@@ -177,6 +218,10 @@ async function runPredicate(key, knex = db) {
 
 module.exports = {
   PREDICATES,
+  PREDICATE_KEYS,
   runPredicate,
-  _private: { SAMPLE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, OWES_CUSTOMER_ARTIFACT, TERMINAL_SMS_STATUSES },
+  _private: {
+    SAMPLE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, OWES_CUSTOMER_ARTIFACT, TERMINAL_SMS_STATUSES,
+    COMPLETED_MARKER_AT, INCOMPLETE_FOLLOWUP_GRACE_DAYS, aggregate,
+  },
 };

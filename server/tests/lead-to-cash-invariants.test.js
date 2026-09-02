@@ -43,8 +43,9 @@ jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }
 jest.mock('../services/completion-record-invariants', () => {
   const keys = ['completed_visit_without_record', 'duplicate_completed_records_per_visit',
     'completed_record_without_report_token', 'completed_visit_without_completed_at',
-    'completed_record_without_comms_marker'];
+    'completed_record_without_comms_marker', 'aged_incomplete_visit_records'];
   return {
+    PREDICATE_KEYS: keys,
     PREDICATES: Object.fromEntries(keys.map((k) => [k, { label: `P ${k}`, href: '/admin/dispatch', sql: 'SELECT 1' }])),
     runPredicate: jest.fn(),
   };
@@ -343,7 +344,7 @@ describe('detector adapters', () => {
   test('completion-record predicates are registered one adapter each and delegate by key', async () => {
     const keys = ['completed_visit_without_record', 'duplicate_completed_records_per_visit',
       'completed_record_without_report_token', 'completed_visit_without_completed_at',
-      'completed_record_without_comms_marker'];
+      'completed_record_without_comms_marker', 'aged_incomplete_visit_records'];
     for (const key of keys) {
       runPredicate.mockResolvedValueOnce({ count: 2, ids: ['a', 'b'], detail: { sampleCap: 25 } });
       const d = byKey(key);

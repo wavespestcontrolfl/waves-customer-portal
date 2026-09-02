@@ -3,7 +3,7 @@
  * count/sample adapter. The SQL itself is exercised against the local
  * schema by the syntax check in the PR (psql), not here (no DB in jest).
  */
-const { PREDICATES, runPredicate, _private } = require('../services/completion-record-invariants');
+const { PREDICATES, PREDICATE_KEYS, runPredicate, _private } = require('../services/completion-record-invariants');
 
 const KEYS = [
   'completed_visit_without_record',
@@ -11,18 +11,22 @@ const KEYS = [
   'completed_record_without_report_token',
   'completed_visit_without_completed_at',
   'completed_record_without_comms_marker',
+  'aged_incomplete_visit_records',
 ];
 
 describe('PREDICATES registry', () => {
-  test('exactly the five audited mismatch classes, each with label, href, one SELECT count + bounded sample', () => {
+  test('exactly the six audited mismatch classes, each with label, href, and a bounded count+sample aggregate', () => {
     expect(Object.keys(PREDICATES).sort()).toEqual([...KEYS].sort());
+    expect(PREDICATE_KEYS).toEqual(Object.keys(PREDICATES));
     expect(Object.isFrozen(PREDICATES)).toBe(true);
     for (const key of KEYS) {
       const p = PREDICATES[key];
       expect(typeof p.label).toBe('string');
       expect(p.href.startsWith('/admin/')).toBe(true);
-      expect(p.sql).toMatch(/count\(\*\)::int AS n/);
-      expect(p.sql).toContain(`[1:${_private.SAMPLE}] AS sample`);
+      // Count over the whole match, sample bounded BEFORE aggregation.
+      expect(p.sql).toMatch(/WITH m AS \(/);
+      expect(p.sql).toMatch(/\(SELECT count\(\*\)::int FROM m\) AS n/);
+      expect(p.sql).toContain(`ORDER BY m.ord DESC LIMIT ${_private.SAMPLE}) s) AS sample`);
       // Read-only by construction.
       expect(p.sql).not.toMatch(/\b(update|delete|insert)\b/i);
     }
@@ -41,6 +45,12 @@ describe('PREDICATES registry', () => {
       expect(sql).toContain("completion_source IS DISTINCT FROM 'project_completion'");
     }
     expect(PREDICATES.completed_record_without_comms_marker.sql).toContain(_private.COMMS_MARKER_SINCE);
+  });
+
+  test('grace periods age from the record\'s latest completion marker, not its original created_at', () => {
+    expect(_private.COMPLETED_MARKER_AT).toBe('GREATEST(sr.created_at, COALESCE(sr.updated_at, sr.created_at))');
+    expect(PREDICATES.completed_record_without_report_token.sql).toContain(`${_private.COMPLETED_MARKER_AT} < now() - interval '2 hours'`);
+    expect(PREDICATES.completed_record_without_comms_marker.sql).toContain(`${_private.COMPLETED_MARKER_AT} < now() - interval '24 hours'`);
   });
 
   test('token and comms predicates are VISIT-level: any sibling carrying the artifact clears the visit', () => {
@@ -69,6 +79,15 @@ describe('PREDICATES registry', () => {
     const sql = PREDICATES.duplicate_completed_records_per_visit.sql;
     expect(sql).toContain("completion_source IN ('detailed_form', 'project_completion')");
     expect(sql).toContain('GROUP BY sr.scheduled_service_id, sr.completion_source');
+  });
+
+  test('incomplete visits stay visible after the grace window until a completed sibling or a live follow-up exists', () => {
+    const sql = PREDICATES.aged_incomplete_visit_records.sql;
+    expect(_private.INCOMPLETE_FOLLOWUP_GRACE_DAYS).toBe(7);
+    expect(sql).toContain(`- ${_private.INCOMPLETE_FOLLOWUP_GRACE_DAYS}`);
+    expect(sql).toMatch(/EXISTS \(SELECT 1 FROM service_records sr WHERE sr\.scheduled_service_id = ss\.id AND sr\.status = 'incomplete'\)/);
+    expect(sql).toMatch(/NOT EXISTS \(SELECT 1 FROM service_records c WHERE c\.scheduled_service_id = ss\.id AND c\.status = 'completed'\)/);
+    expect(sql).toMatch(/f\.followup_source_service_id = ss\.id[\s\S]*f\.status NOT IN \('cancelled', 'skipped', 'no_show'\)/);
   });
 });
 

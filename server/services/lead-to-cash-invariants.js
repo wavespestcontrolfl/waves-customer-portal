@@ -215,11 +215,7 @@ const DETECTORS = Object.freeze([
   // `pending` facts, so a missing record / token / tracker stamp / customer
   // text that failed silently on day one was invisible from day two on.
   // One adapter per predicate so each reads as its own OK/FAIL line.
-  ...['completed_visit_without_record',
-    'duplicate_completed_records_per_visit',
-    'completed_record_without_report_token',
-    'completed_visit_without_completed_at',
-    'completed_record_without_comms_marker'].map((key) => {
+  ...require('./completion-record-invariants').PREDICATE_KEYS.map((key) => {
     const { PREDICATES } = require('./completion-record-invariants');
     return {
       key,
