@@ -167,6 +167,30 @@ maybeDescribe('processRecording claim concurrency (live Postgres)', () => {
     }
   });
 
+  test('the timeline unique-index migration dedupes pre-existing duplicates (keeping the earliest) before it indexes', async () => {
+    const migration = require('../models/migrations/20260901000011_customer_interactions_call_unique');
+    const [cust] = await db('customers').insert({ first_name: 'Dedupe', phone: '+15555550197' }).returning('id');
+    const callLogId = '88888888-7777-4666-8555-444444444444';
+    try {
+      await migration.down(db);
+      const t0 = new Date(Date.now() - 60000);
+      await db('customer_interactions').insert([
+        { customer_id: cust.id, interaction_type: 'call', subject: 'first', metadata: JSON.stringify({ call_log_id: callLogId }), created_at: t0 },
+        { customer_id: cust.id, interaction_type: 'call', subject: 'later copy', metadata: JSON.stringify({ call_log_id: callLogId }), created_at: new Date(t0.getTime() + 1000) },
+        { customer_id: cust.id, interaction_type: 'note', subject: 'note stays', metadata: JSON.stringify({ call_log_id: callLogId }), created_at: t0 },
+      ]);
+      await migration.up(db);
+      const rows = await db('customer_interactions').where({ customer_id: cust.id }).orderBy('subject');
+      expect(rows.map((r) => r.subject)).toEqual(['first', 'note stays']);
+      expect((await db('pg_indexes').where({ indexname: 'customer_interactions_call_log_unique' })).length).toBe(1);
+    } finally {
+      await db('customer_interactions').where({ customer_id: cust.id }).del();
+      await db('customers').where({ id: cust.id }).del();
+      // Whatever happened above, leave the schema as the migration chain expects.
+      await migration.up(db);
+    }
+  });
+
   test('the customer timeline insert is exactly-once per call under the partial unique index', async () => {
     const [cust] = await db('customers').insert({ first_name: 'Timeline', phone: '+15555550198' }).returning('id');
     const callLogId = '99999999-8888-4777-8666-555555555555';

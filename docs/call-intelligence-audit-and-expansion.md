@@ -183,6 +183,10 @@ Per file, with the proving test.
 - Pre-push Codex round 19 (1 P1, fixed): a confirmed slot no longer seeds a
   "send the confirmation" promise — the status proves the booking, not a
   promise; an explicit one needs the model pass and verbatim evidence.
+- Pre-push Codex round 20 (1 P1, fixed): the timeline unique-index
+  migration dedupes any pre-existing duplicates (keeping the earliest row)
+  before creating the index, so it can never block a deploy; live-Postgres
+  test runs down → duplicates → up.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 
