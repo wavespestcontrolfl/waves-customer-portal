@@ -159,13 +159,13 @@ test('disproven and retired paths are filtered BEFORE the claim limit — a dead
     { ...base, id: 'r-ret', target_domain: 'ret.example', path_id: 'p-ret', target_url: 'https://ret.example/old', domain_rating: 80, claimed_at: null },
     { ...base, id: 'r-live', target_domain: 'live.example', path_id: 'p-live', target_url: 'https://live.example/add', domain_rating: 10 },
   );
-  // claim 1: the disproven row is filtered before the cut; the retired-path row is the top candidate and is
-  // SETTLED (moved onto its successor, unclassified) — consumed exactly once, never leased
-  expect(await worker.claim({ n: 1, type: 'signup' })).toEqual([]);
+  // ONE claim: the disproven row is filtered before the cut; the retired-path row is the top candidate and is
+  // SETTLED (moved onto its successor, unclassified, consumed exactly once, never leased) — and the claim keeps
+  // batching until a live row is leased, so a one-shot worker never sees an empty batch while work exists (hook P1)
+  expect((await worker.claim({ n: 1, type: 'signup' })).map((r) => r.id)).toEqual(['r-live']);
   const ret = mockStore.seo_link_prospects.find((r) => r.id === 'r-ret');
   expect(ret).toMatchObject({ path_id: 'p-ret-live', target_url: 'https://ret.example/new', automation_policy: null, claimed_at: null });
-  // claim 2: nothing dead or retired stands ahead any more — the valid prospect is served
-  expect((await worker.claim({ n: 1, type: 'signup' })).map((r) => r.id)).toEqual(['r-live']);
+  expect(await worker.claim({ n: 1, type: 'signup' })).toEqual([]); // nothing left
 });
 
 test('claim refreshes a placement\'s execution URL from the live path when the route moved to its working origin (Codex PR r26 P2)', async () => {

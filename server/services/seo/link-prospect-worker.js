@@ -83,6 +83,9 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     : null;
 
   return db.transaction(async (trx) => {
+    // The candidate query is a FACTORY: a claim may need more than one batch
+    // (below), and each batch excludes the candidates already consumed.
+    const candidates = () => {
     let q = trx('seo_link_prospects')
       .where({ status: 'prospect' })
       .whereIn('link_type', types)
@@ -145,10 +148,16 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       // An explicit-but-empty allowlist matches nothing (don't silently claim all).
       q = q.whereRaw('1 = 0');
     }
-    const base = q
-      .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
-      .orderBy('domain_rating', 'desc')
-      .limit(limit);
+    return q;
+    };
+    const ranked = (n2, exclude) => {
+      let q = candidates();
+      if (exclude.length) q = q.whereNotIn('id', exclude);
+      return q
+        .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
+        .orderBy('domain_rating', 'desc')
+        .limit(n2);
+    };
 
     // Read-only preview (dry-run): return matching rows WITHOUT leasing them — no
     // claimed_at/claimed_by write, no lease_token — so a dry run honors its no-writes
@@ -156,13 +165,23 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // SETTLE rows on superseded paths (moved, unclassified, not leased), so the
     // preview excludes them rather than report a retired URL as claimable.
     if (preview) {
-      const previewRows = await base.whereNotIn('path_id', trx('seo_link_acquisition_paths').select('id').whereNotNull('superseded_by'));
+      const previewRows = await ranked(limit, []).whereNotIn('path_id', trx('seo_link_acquisition_paths').select('id').whereNotNull('superseded_by'));
       return previewRows.map((r) => ({ ...r }));
     }
 
-    let rows = await base.forUpdate().skipLocked();
-
-    if (rows.length === 0) return [];
+    // Batches until `limit` live rows are leased or the candidates run out:
+    // the LIMIT is applied before settlement, so a batch whose top rows are
+    // all retired (settled, unclassified, not leased) must not make a
+    // one-shot worker conclude there is no work while claimable rows sit
+    // below them. Every batch excludes the candidates already consumed;
+    // bounded rounds keep a pathological board from looping.
+    const out = [];
+    const consumed = [];
+    const now = new Date();
+    for (let round = 0; round < 8 && out.length < limit; round++) {
+    let rows = await ranked(limit - out.length, consumed).forUpdate().skipLocked();
+    if (rows.length === 0) break;
+    for (const r of rows) consumed.push(r.id);
     const ids = rows.map((r) => r.id);
     // Settle BEFORE leasing, under the row locks just taken: a placement
     // whose path the investigator superseded (while it was leased, or since
@@ -200,7 +219,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     const blocked = new Set(paths.filter((p) => p.superseded_by || (p.confidence != null && !(Number(p.confidence) > 0)) || p.agent_completable === false).map((p) => p.id));
     rows = rows.filter((r) => !blocked.has(r.path_id) && types.includes(r.link_type));
     if (effectivePolicy) rows = rows.filter((r) => r.automation_policy === effectivePolicy);
-    if (rows.length === 0) return [];
+    if (rows.length === 0) continue;
     // The LIVE path's submission_url is the execution truth: when the
     // investigator moved a route to its working origin (www / http) while
     // this placement was leased, its target_url still names the dead apex —
@@ -219,9 +238,8 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       }
     }
     rows = rows.filter((r) => !deferred.has(r.id));
-    if (rows.length === 0) return [];
+    if (rows.length === 0) continue;
     const leaseIds = rows.map((r) => r.id);
-    const now = new Date();
     // The lease UPDATE re-asserts the owner's ruling: a Watch / Reject that
     // committed between the candidate SELECT and this statement (the txn
     // locks prospect rows, not domains) must win, so the non-claimable-
@@ -239,12 +257,11 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // only what the UPDATE actually leased is handed out
     const leased = await trx('seo_link_prospects').whereIn('id', leaseIds).where('claimed_at', now).select('id');
     const leasedIds = new Set((leased || []).map((l) => l.id));
-    rows = rows.filter((r) => leasedIds.has(r.id));
-    if (rows.length === 0) return [];
-
     // lease_token = the claim timestamp; the worker echoes it back in /report so
     // a late report from a swept/reclaimed lease can't clobber a newer claim.
-    return rows.map((r) => ({ ...r, claimed_at: now, claimed_by: WORKER, lease_token: now.toISOString() }));
+    for (const r of rows) if (leasedIds.has(r.id)) out.push({ ...r, claimed_at: now, claimed_by: WORKER, lease_token: now.toISOString() });
+    }
+    return out;
   });
 }
 
