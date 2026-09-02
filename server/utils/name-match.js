@@ -194,12 +194,14 @@ function sameFirstName(a, b) {
 // person's surname — the trailing token run, or everything before the comma
 // in "Last, First" form — and the LEADING run of the remaining tokens must be
 // first-name-compatible (nickname-aware; compound "Mary Ann" joins; a middle
-// name never counts). A single-token person shares the surname of the last person on
+// name never counts). Generational suffixes (Jr, Sr, II…) are ignored. A single-token person shares the surname of the last person on
 // the line ("Pat & Robert Doe"). Initials never satisfy the first-name leg;
 // a missing customer name part never corroborates (amount alone is not
 // identity).
+// Generational suffixes are never part of a surname on the customer record.
+const NAME_SUFFIXES = new Set(['jr', 'sr', 'ii', 'iii', 'iv']);
 function tokensOf(text) {
-  return String(text || '').split(/\s+/).map(normalizeNameFolded).filter((t) => t.length > 1);
+  return String(text || '').split(/\s+/).map(normalizeNameFolded).filter((t) => t.length > 1 && !NAME_SUFFIXES.has(t));
 }
 // The given name is the LEADING run of a person's given tokens ("Mary Ann"
 // joins; "Robert James" is Robert with a middle name, never James) — so a
@@ -214,10 +216,20 @@ function personsOf(payerName) {
   const people = String(payerName || '').split(/\s*&\s*|\s+and\s+/i).map((p) => p.trim()).filter(Boolean);
   const parsed = people.map((person) => {
     const comma = person.indexOf(',');
-    if (comma > -1) return { surname: tokensOf(person.slice(0, comma)), given: tokensOf(person.slice(comma + 1)), fixedSurname: true };
+    if (comma > -1) {
+      const given = tokensOf(person.slice(comma + 1));
+      // "Doe, Robert" is Last, First; "Robert Doe, Sr." is a suffix comma —
+      // nothing but suffixes after it means the line is First Last.
+      if (given.length) return { surname: tokensOf(person.slice(0, comma)), given, fixedSurname: true };
+    }
     return { all: tokensOf(person) };
   });
-  // Shared surname for single-token people: borrow the final person's.
+  // Shared surname ONLY for single-token people ("PAT & ROBERT DOE"). A
+  // multi-token earlier person ("MARY ANN & ROBERT SMITH", "ALICE JONES &
+  // ROBERT DOE") is ambiguous — "Ann" and "Jones" are indistinguishable
+  // without a dictionary — so it is read as written and, when that reading
+  // corroborates nobody, the notice parks for a human. Borrowing the final
+  // surname there would let "Alice Jones" settle Alice Doe's invoice.
   const last = parsed[parsed.length - 1];
   const borrowed = last && !last.fixedSurname && last.all && last.all.length > 1 ? last.all.slice(1) : null;
   return parsed.map((p) => (p.all && p.all.length === 1 && borrowed ? { all: [...p.all, ...borrowed] } : p));

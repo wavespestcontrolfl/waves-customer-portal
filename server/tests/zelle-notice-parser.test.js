@@ -67,6 +67,11 @@ describe('noticeText + parseZelleNotice', () => {
     expect(parseZelleNotice('')).toBeNull();
   });
 
+  test('an empty memo line never swallows the next paragraph', () => {
+    const t = noticeText({ body_text: "PAT DOE has just sent you money with Zelle in the amount of $50.00.\nHere's the message from PAT DOE:\n\nThe money has already been deposited in your account." });
+    expect(parseZelleNotice(t)).toEqual({ payerName: 'Pat Doe', amountCents: 5000, memo: null });
+  });
+
   test('a $0.00 or malformed amount is not a notice', () => {
     expect(parseZelleNotice('PAT DOE has just sent you money with Zelle in the amount of $0.00.')).toBeNull();
     expect(parseZelleNotice('PAT DOE has just sent you money with Zelle in the amount of $12.')).toBeNull();
@@ -92,6 +97,13 @@ describe('isTrustedZelleSender', () => {
   test('aligned Capital One DKIM on a forwarded notice → trusted', () => {
     expect(isTrustedZelleSender({ from_address: 'capitalone@notification.capitalone.com', authentication_results: FORWARDED_AUTH })).toBe(true);
     expect(isTrustedZelleSender({ from_address: 'Capital One <alerts@capitalone.com>', authentication_results: 'mx.google.com; dkim=pass header.i=@capitalone.com; spf=pass smtp.mailfrom=bounce.capitalone.com' })).toBe(true);
+  });
+
+  test('SPF can never establish trust — only a Capital One DKIM signature (forged quoted local part)', () => {
+    const forged = 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x@capitalone.com"@evil.example designates 1.2.3.4 as permitted sender) smtp.mailfrom="x@capitalone.com"@evil.example';
+    expect(isTrustedZelleSender({ from_address: 'alerts@capitalone.com', authentication_results: forged })).toBe(false);
+    const forgedDkim = 'mx.google.com; dkim=pass header.i="x@capitalone.com"@evil.example header.d=evil.example';
+    expect(isTrustedZelleSender({ from_address: 'alerts@capitalone.com', authentication_results: forgedDkim })).toBe(false);
   });
 
   test('forwarder SPF alone (DKIM broken) → not trusted', () => {

@@ -84,6 +84,18 @@ describe('payerNameCorroborates', () => {
     expect(payerNameCorroborates('ALICE & ROBERT DOE', { first_name: 'Alice', last_name: 'Doe' })).toBe(true);
   });
 
+  test('generational suffixes never block the surname', () => {
+    expect(payerNameCorroborates('ROBERT DOE JR', customer)).toBe(true);
+    expect(payerNameCorroborates('ROBERT DOE II', customer)).toBe(true);
+    expect(payerNameCorroborates('Robert Doe, Sr.', customer)).toBe(true);
+  });
+
+  test('a multi-token earlier person on a joint line never borrows the final surname (ambiguous → human)', () => {
+    // "Ann" (given) and "Jones" (surname) are indistinguishable here; both park.
+    expect(payerNameCorroborates('MARY ANN & ROBERT SMITH', { first_name: 'Mary Ann', last_name: 'Smith' })).toBe(false);
+    expect(payerNameCorroborates('ALICE JONES & ROBERT DOE', { first_name: 'Alice', last_name: 'Doe' })).toBe(false);
+  });
+
   test('accented bank names corroborate ASCII customer records', () => {
     expect(payerNameCorroborates('JOSÉ NUÑEZ', { first_name: 'Jose', last_name: 'Nunez' })).toBe(true);
     expect(payerNameCorroborates('Jose Nunez', { first_name: 'José', last_name: 'Nuñez' })).toBe(true);

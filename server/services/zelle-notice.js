@@ -15,7 +15,6 @@
  */
 const psl = require('psl');
 const { decodeHTML } = require('entities');
-const { hasAlignedAuth } = require('./email/inbox-hygiene');
 const { domainFromAddress } = require('./email/spam-blocker');
 const { properCase } = require('../utils/name-case');
 
@@ -78,7 +77,9 @@ function parsePayerName(text) {
 }
 
 function parseMemo(text) {
-  const m = text.match(/Here's the message from [^:\n]{1,120}:\s*([^\n]*)/i);
+  // Horizontal whitespace only after the colon — an empty memo must not swallow
+  // the next paragraph.
+  const m = text.match(/Here's the message from [^:\n]{1,120}:[ \t]*([^\n]*)/i);
   if (!m) return null;
   const memo = m[1].trim().slice(0, MEMO_MAX);
   return memo || null;
@@ -99,18 +100,36 @@ function memoInvoiceNumbers(memo) {
   return [...new Set(found.map((n) => n.toUpperCase()))];
 }
 
+// Capital One's OWN DKIM signature is the only proof accepted: the forwarded
+// notice keeps it intact, whereas SPF at contact@ authenticates the
+// forwarder's envelope (gmail.com) — and an SPF clause is forgeable in a
+// way DKIM is not (a quoted local part such as "x@capitalone.com"@evil.example
+// would put capitalone.com after the FIRST '@'). So: dkim=pass clauses only,
+// the signing identity read after its LAST '@', org-domain must be
+// capitalone.com (public-suffix aware, so capitalone.com.evil.example fails).
+function dkimSignedByCapitalOne(authResults) {
+  const auth = String(authResults || '').toLowerCase();
+  for (const clause of auth.match(/dkim=pass[^;]*/g) || []) {
+    const m = clause.match(/header\.[di]=([^\s;]+)/);
+    if (!m) continue;
+    const identity = m[1].replace(/^"+|"+$/g, '');
+    const signer = identity.slice(identity.lastIndexOf('@') + 1);
+    if (signer && psl.get(signer) === ZELLE_SENDER_ORG_DOMAIN) return true;
+  }
+  return false;
+}
+
 // Fail closed: only an authenticated Capital One sender is trusted. The
 // header must exist (Gmail wrote it — gmail-client keeps only Google's own
-// Authentication-Results), the From org-domain must be capitalone.com
-// (public-suffix aware, so capitalone.com.evil.example is NOT), and the
-// DKIM/SPF alignment must hold for that From domain.
+// Authentication-Results), the From org-domain must be capitalone.com, AND
+// a Capital One DKIM signature must have verified (SPF never suffices).
 function isTrustedZelleSender({ from_address: fromAddress, authentication_results: authResults } = {}) {
   if (authResults == null) return false;
   // The sync stores the bare address; tolerate a "Name <addr>" form anyway.
   const angle = String(fromAddress || '').match(/<([^<>]+)>/);
   const domain = domainFromAddress(angle ? angle[1] : fromAddress);
   if (!domain || psl.get(domain) !== ZELLE_SENDER_ORG_DOMAIN) return false;
-  return hasAlignedAuth(authResults, domain);
+  return dkimSignedByCapitalOne(authResults);
 }
 
 module.exports = {
