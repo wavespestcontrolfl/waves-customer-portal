@@ -660,12 +660,11 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
       // Alert DELIVERED — only now mark it, so a failed/interrupted send
       // retries on the next quarantine/recovery touch (round-17 P2).
       try {
-        const fresh = await db('call_log').where({ id: call.id }).first('transcription_metadata');
-        const rawFresh = fresh?.transcription_metadata;
-        let freshMeta = {};
-        try { freshMeta = typeof rawFresh === 'string' ? JSON.parse(rawFresh) : (rawFresh && typeof rawFresh === 'object' ? rawFresh : {}); } catch { freshMeta = {}; }
+        // One key merged in SQL — never a re-read blob written back: a
+        // tombstone, an owed-SID append or a peer's stamp landing between
+        // the read and the write would be erased with it.
         await db('call_log').where({ id: call.id }).update({
-          transcription_metadata: JSON.stringify({ ...freshMeta, pan_notified: true }),
+          transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || '{\"pan_notified\": true}'::jsonb"),
           updated_at: new Date(),
         });
       } catch (stampErr) {

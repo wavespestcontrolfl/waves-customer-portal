@@ -317,6 +317,19 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(complete).toBeDefined();
   });
 
+  test('the office-alert stamp is a one-key SQL merge, never a re-read blob written back', async () => {
+    const processor = require('../services/call-recording-processor');
+    db.raw.mockClear();
+    db.__builder.update.mockClear();
+    db.__state.call = { id: 'c-notify', recording_url: null, recording_sid: null, metadata: {}, transcription_metadata: { pan_detected: true, quarantine_owed_sids: ['REowed00000000000000000000000002'] } };
+    await processor.quarantineCardRecording(db.__state.call, { source: 'transcript_scrub' });
+    const stamp = db.raw.mock.calls.find(([sql]) => String(sql).includes('"pan_notified": true'));
+    expect(stamp).toBeDefined();
+    // No plain-JSON transcription_metadata write carries pan_notified.
+    const blob = db.__builder.update.mock.calls.map((c) => c[0]).find((patch) => typeof patch.transcription_metadata === 'string' && patch.transcription_metadata.trim().startsWith('{') && patch.transcription_metadata.includes('pan_notified'));
+    expect(blob).toBeUndefined();
+  });
+
   test('an unstamped call still proceeds into the Twilio lookup', async () => {
     const processor = require('../services/call-recording-processor');
     db.__state.call = { id: 'c-clean', recording_url: null, transcription_metadata: null };
