@@ -420,7 +420,19 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   // but a sync racing an older pod must not fail the insert.
   if (backfill && await bellClaimColumnExists()) emailData.customer_bell_settled_at = new Date();
   const inserted = await db('emails').insert(emailData).onConflict('gmail_id').ignore().returning('*');
-  if (!inserted.length) return false; // lost an insert race with a concurrent sync; already stored
+  if (!inserted.length) {
+    // Lost the insert race with a concurrent sync — already stored. The
+    // winner may have died after its insert and before the Zelle hook: a
+    // stored row with neither classification nor auto_action is that crash
+    // state, and this pass would otherwise advance the shared cursor past
+    // it. Offer it here (the claim is at-most-once; a live winner's own
+    // offer wins the claim and this one decides nothing).
+    const winner = await db('emails').where('gmail_id', parsed.gmail_id).first();
+    if (winner && winner.classification == null && winner.auto_action == null) {
+      await offerZelleNotice(winner, { backfill });
+    }
+    return false;
+  }
   // A new inbound email from someone on the customer list rings the admin
   // bell like a text does (owner ruling 2026-08-28) — but only AFTER the
   // async classifier has had its say (spam / marketing_newsletter arrive

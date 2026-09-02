@@ -208,7 +208,7 @@ async function finishApplied(notice, email, invoice, matchMethod, receipt) {
     }
   }
   await stampEmail(email.id, `zelle_notice_applied:${invoice.invoice_number}`);
-  const legs = receipt === null ? 'unknown — check the invoice' : ([receipt?.email?.ok && 'email', receipt?.sms?.ok && 'sms'].filter(Boolean).join(' + ') || 'no receipt delivered');
+  const legs = receipt === null ? 'unknown — check the invoice' : receipt?.queued ? 'queued on the receipt queue' : ([receipt?.email?.ok && 'email', receipt?.sms?.ok && 'sms'].filter(Boolean).join(' + ') || 'no receipt delivered');
   await notifyOwner(
     'Zelle payment applied',
     `${notice.payer_name} · $${(notice.amount_cents / 100).toFixed(2)} → ${invoice.invoice_number} (${matchMethod.replace(/_/g, ' ')}; receipt: ${legs})`,
@@ -548,9 +548,15 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
       // Re-checks payer / statement / live payer resolution on the locked
       // invoice — a reassignment after exactOpenInvoices() refuses.
       requireSelfPay: true,
-      // Nobody is tapping a button: the receipt honors the customer's
-      // payment_receipt / email_enabled opt-outs like the automatic queue.
+      // Nobody is tapping a button: the receipt rides the automatic receipt
+      // queue (opt-outs, send window, retries).
       automated: true,
+      // Under the invoice lock, on the payment connection: our claim must
+      // still be ours — a swept-and-reclaimed claim never commits.
+      settlementFence: (trx) => trx('inbound_payment_notices')
+        .where({ id: notice.id, status: 'processing', claim_token: notice.claim_token })
+        .first('id')
+        .then(Boolean),
     });
   } catch (err) {
     // A statusCode-shaped refusal settled nothing. Anything else may have

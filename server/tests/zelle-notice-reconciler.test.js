@@ -42,7 +42,7 @@ jest.mock('../services/open-balance', () => ({
   MAX_AMOUNT_CANDIDATES: 25,
 }));
 jest.mock('../services/invoice-manual-payment', () => ({
-  recordManualPayment: jest.fn(async (id) => ({ invoice: { id, invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid' }, receipt: { email: { ok: true }, sms: { ok: true } } })),
+  recordManualPayment: jest.fn(async (id) => ({ invoice: { id, invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid' }, receipt: { queued: true } })),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => undefined) }));
 
@@ -168,11 +168,16 @@ describe('auto-apply', () => {
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     expect(OpenBalance.openSelfPayInvoicesByAmountDue).toHaveBeenCalledWith(11700, { limit: 25 });
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', {
-      method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: RECORDED_BY, sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true, automated: true,
+      method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: RECORDED_BY, sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true, automated: true, settlementFence: expect.any(Function),
     });
+    // The fence checks OUR claim (id + processing + token) on the payment connection.
+    const fenceTrx = jest.fn(() => ({ where: jest.fn((w) => { fenceTrx.where = w; return { first: jest.fn(async () => ({ id: 'notice-1' })) }; }) }));
+    expect(await recordManualPayment.mock.calls[0][1].settlementFence(fenceTrx)).toBe(true);
+    expect(fenceTrx).toHaveBeenCalledWith('inbound_payment_notices');
+    expect(fenceTrx.where).toEqual({ id: 'notice-1', status: 'processing', claim_token: 'tok-1' });
     expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', match_method: 'amount_name', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: RECORDED_BY });
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500', classification: 'other' });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('receipt: email + sms'), expect.anything());
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('receipt: queued on the receipt queue'), expect.anything());
   });
 
   test('the memo invoice number picks one of several exact-cent invoices', async () => {
@@ -529,6 +534,8 @@ describe('sync wiring', () => {
     // A lost retry record withholds the INCREMENTAL cursor too (fullSync already withholds on any failed message).
     expect(src).toMatch(/if \(err\.zelleRetryLost\) cursorWithheld = true;/);
     expect(src).toMatch(/last_history_id: cursorWithheld \? state\.last_history_id : latestHistoryId/);
+    // The insert-race loser reloads the winner's row and offers it when it is still unclassified + unmarked.
+    expect(src).toMatch(/if \(!inserted\.length\) \{[\s\S]{0,900}winner\.classification == null && winner\.auto_action == null[\s\S]{0,120}await offerZelleNotice\(winner, \{ backfill \}\)/);
     expect(src).toMatch(/if \(existing\.auto_action === ZELLE_RETRY_MARK \|\| \(existing\.auto_action == null && existing\.classification == null\)\) \{\s*await offerZelleNotice\(/);
     expect(src).toMatch(/\(proofHandled \|\| approvalControl \|\| zelleHandled\) && await bellClaimColumnExists\(\)/);
     // The stale-claim sweep runs on every sync beside the bell sweep.

@@ -28,11 +28,17 @@
  * writes nothing.
  *
  * automated (optional, the Zelle reconciler's auto-settlement): nobody tapped
- * a button, so the receipt honors the customer's opt-outs exactly like the
- * automatic receipt queue (receipt-delivery-queue.js): payment_receipt=false
- * skips both legs ('receipt_opted_out'), email_enabled=false skips the email
- * leg ('email_opted_out'), a prefs lookup failure skips both (fail closed);
- * the SMS leg is not operator-initiated. Operator paths leave it false.
+ * a button, so the receipt is NOT sent inline — it is enqueued on the
+ * automatic receipt queue (receipt-delivery-queue.js), the one mechanism
+ * that honors payment_receipt / email_enabled opt-outs, the SMS send window
+ * (quiet-hours hold + reschedule) and the retry ladder. `receipt` then
+ * reads { queued: true }. Operator paths leave it false and send inline.
+ *
+ * settlementFence (optional, both Zelle paths): async (trx) => boolean, run
+ * under the invoice row lock right before the paid flip. The Zelle callers
+ * verify their notice claim (id + status + claim_token) on the payment
+ * connection so a worker whose claim was swept and RECLAIMED can never
+ * commit a second invoice for one transfer. false → 409, nothing written.
  *
  * Refusals throw an Error carrying `statusCode` (400 / 404 / 409) and
  * `isOperational`; the lost-race 409 also carries `currentStatus`. Anything
@@ -96,6 +102,7 @@ async function recordManualPayment(id, {
   expectedAmountCents = null,
   requireSelfPay = false,
   automated = false,
+  settlementFence = null,
 } = {}) {
   if (expectedAmountCents != null && !(Number.isSafeInteger(expectedAmountCents) && expectedAmountCents > 0)) {
     throw refusal(400, 'expectedAmountCents must be a positive integer number of cents');
@@ -235,6 +242,7 @@ async function recordManualPayment(id, {
       const selfPay = !locked.payer_id && !locked.payer_statement_id && await rowIsSelfPayDue(locked.customer_id, locked, { database: trx });
       if (!selfPay) return { notSelfPay: true };
     }
+    if (settlementFence && !(await settlementFence(trx))) return { fenceLost: true };
     const [row] = await trx('invoices')
       .where({ id })
       .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
@@ -307,6 +315,9 @@ async function recordManualPayment(id, {
   if (updatedInvoice?.amountMismatch) {
     const { expectedCents, actualCents } = updatedInvoice.amountMismatch;
     throw refusal(409, `Invoice amount due is $${(actualCents / 100).toFixed(2)}, not the $${(expectedCents / 100).toFixed(2)} being recorded — nothing was recorded`, { amountMismatch: updatedInvoice.amountMismatch });
+  }
+  if (updatedInvoice?.fenceLost) {
+    throw refusal(409, 'The settlement claim was lost before the payment could be recorded (the notice was reclaimed) — nothing was recorded');
   }
   if (updatedInvoice?.notSelfPay) {
     throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');
@@ -385,33 +396,25 @@ async function recordManualPayment(id, {
   // Optional inline receipt — same pipeline as /:id/send-receipt.
   let emailResult = null;
   let smsResult = null;
-  if (sendReceipt) {
+  let queued = false;
+  if (sendReceipt && automated) {
+    // The customer sent the money themselves (a Zelle transfer minutes ago),
+    // so the receipt is customer-initiated for the send-window decision —
+    // the queue still holds/reschedules per its own rules and honors every
+    // opt-out.
+    const ReceiptDeliveryQueue = require('./receipt-delivery-queue');
+    await ReceiptDeliveryQueue.enqueueReceiptDelivery({ invoiceId: id, source: 'zelle_notice_reconciler', customerInitiated: true });
+    ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
+    queued = true;
+  } else if (sendReceipt) {
     const { sendReceiptEmail } = require('./invoice-email');
-    let emailLeg = via === 'email' || via === 'both';
-    let smsLeg = via === 'sms' || via === 'both';
-    if (automated) {
-      // Same predicate as the automatic receipt queue; a lookup failure must
-      // NOT read as "no opt-out".
-      let lookupFailed = false;
-      const prefs = await db('notification_prefs').where({ customer_id: updatedInvoice.customer_id }).first().catch(() => { lookupFailed = true; return null; });
-      const skipBoth = lookupFailed ? 'receipt prefs lookup failed' : prefs?.payment_receipt === false ? 'receipt_opted_out' : null;
-      if (skipBoth) {
-        emailResult = emailLeg ? { ok: false, error: skipBoth } : null;
-        smsResult = smsLeg ? { ok: false, error: skipBoth } : null;
-        emailLeg = false; smsLeg = false;
-      } else if (prefs?.email_enabled === false && emailLeg) {
-        emailResult = { ok: false, error: 'email_opted_out' };
-        emailLeg = false;
-      }
-    }
+    const emailLeg = via === 'email' || via === 'both';
     if (emailLeg) {
       emailResult = await sendReceiptEmail(id).catch((err) => ({ ok: false, error: err.message }));
     }
-    if (smsLeg) {
+    if (via === 'sms' || via === 'both') {
       try {
-        // hasEmailLeg = an email sidecar actually carries the receipt — false
-        // when the automated opt-out check dropped the email leg.
-        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, ...(automated ? {} : { operatorInitiated: true }) });
+        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, operatorInitiated: true });
         smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
       } catch (err) {
         smsResult = { ok: false, error: err.message };
@@ -432,7 +435,7 @@ async function recordManualPayment(id, {
   const final = await db('invoices').where({ id }).first();
   return {
     invoice: final,
-    receipt: sendReceipt ? { email: emailResult, sms: smsResult } : null,
+    receipt: !sendReceipt ? null : queued ? { queued: true } : { email: emailResult, sms: smsResult },
   };
 }
 

@@ -38,12 +38,14 @@ jest.mock('../services/project-report-hold', () => ({ scheduleHoldReleaseSweep: 
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
 jest.mock('../services/payment-plans', () => ({ completeActivePlansForInvoice: jest.fn(async () => undefined) }));
 jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn(async () => true) }));
+jest.mock('../services/receipt-delivery-queue', () => ({ enqueueReceiptDelivery: jest.fn(async () => ({ enqueued: true })), scheduleReceiptDeliveryDrain: jest.fn() }));
 
 const db = require('../models/db');
 const StripeService = require('../services/stripe');
 const InvoiceService = require('../services/invoice');
 const { sendReceiptEmail } = require('../services/invoice-email');
 const { rowIsSelfPayDue } = require('../services/open-balance');
+const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const { recordManualPayment, VALID_PAYMENT_METHODS } = require('../services/invoice-manual-payment');
 
 function recorder({ first = null, returning = [] } = {}) {
@@ -262,31 +264,41 @@ describe('recordManualPayment — settlement', () => {
     expect(descriptions[1]).toMatch(/Receipt sent for invoice WPC-2026-0400 \(email \+ sms\)/);
   });
 
-  test('automated: payment_receipt=false skips BOTH receipt legs (receipt_opted_out) — the reconciler never emails an opted-out customer', async () => {
-    settle(openInvoice(), { prefs: { payment_receipt: false } });
+  test('automated: the receipt is ENQUEUED on the automatic receipt queue (opt-outs, send window, retries live there), nothing sent inline', async () => {
+    settle(openInvoice());
     const out = await recordManualPayment('inv-1', { method: 'zelle', automated: true });
-    expect(out.receipt).toEqual({ email: { ok: false, error: 'receipt_opted_out' }, sms: { ok: false, error: 'receipt_opted_out' } });
+    expect(out.receipt).toEqual({ queued: true });
+    expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).toHaveBeenCalledWith({ invoiceId: 'inv-1', source: 'zelle_notice_reconciler', customerInitiated: true });
+    expect(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain).toHaveBeenCalled();
     expect(sendReceiptEmail).not.toHaveBeenCalled();
     expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
-  });
-
-  test('automated: email_enabled=false skips the email leg only; the SMS leg is not operator-initiated', async () => {
-    settle(openInvoice(), { prefs: { email_enabled: false } });
-    const out = await recordManualPayment('inv-1', { method: 'zelle', automated: true });
-    expect(out.receipt).toEqual({ email: { ok: false, error: 'email_opted_out' }, sms: { ok: true } });
-    expect(sendReceiptEmail).not.toHaveBeenCalled();
-    expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv-1', expect.not.objectContaining({ operatorInitiated: true }));
-    expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv-1', expect.objectContaining({ hasEmailLeg: false })); // no email sidecar actually carries the receipt
-  });
-
-  test('automated: a prefs lookup failure sends nothing (fail closed); the operator path never reads prefs', async () => {
-    settle(openInvoice(), { prefsLookupFails: true });
-    const out = await recordManualPayment('inv-1', { method: 'zelle', automated: true });
-    expect(out.receipt).toEqual({ email: { ok: false, error: 'receipt prefs lookup failed' }, sms: { ok: false, error: 'receipt prefs lookup failed' } });
-    expect(sendReceiptEmail).not.toHaveBeenCalled();
-    settle(openInvoice(), { prefs: { payment_receipt: false } });
+    // The operator path is unchanged: inline, operator-initiated.
+    settle(openInvoice());
     const op = await recordManualPayment('inv-1', { method: 'zelle' });
     expect(op.receipt).toEqual({ email: { ok: true }, sms: { ok: true } });
+    expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).toHaveBeenCalledTimes(1);
+  });
+
+  test('settlementFence runs under the invoice lock on the payment trx right before the paid flip; false → 409, nothing written', async () => {
+    db.mockImplementation(() => recorder({ first: openInvoice() }));
+    let paymentsInsert = null;
+    let seenTrx = null;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') return recorder({ first: openInvoice(), returning: [] });
+        if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    const fence = jest.fn(async (trx) => { seenTrx = trx; return false; });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', settlementFence: fence }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/settlement claim was lost/);
+    expect(typeof seenTrx).toBe('function'); // the payment connection, not a third one
+    expect(paymentsInsert).toBeNull();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
   });
 
   test('sendReceipt:false records the payment and sends nothing', async () => {

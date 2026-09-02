@@ -758,6 +758,13 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
         // The self-pay check above is likewise pre-lock: re-run on the
         // locked invoice so a payer assigned meanwhile refuses.
         requireSelfPay: true,
+        // The OPERATOR tapped Apply: the receipt is operator-initiated,
+        // exactly like Add payment (automated stays false). Under the
+        // invoice lock: our claim must still be ours.
+        settlementFence: (trx) => trx('inbound_payment_notices')
+          .where({ id, status: 'processing', claim_token: claimToken })
+          .first('id')
+          .then(Boolean),
       });
     } catch (err) {
       // A statusCode-shaped refusal settled nothing. Anything else may have
