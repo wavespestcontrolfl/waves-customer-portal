@@ -271,6 +271,19 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
   };
 }
 
+// True when the engine-authoritative pricing gate applies to THIS send: gate
+// on, not an authored proposal (its line items ARE the quote), not a row that
+// already went out (follow-ups keep flowing). Shared by the pre-read check in
+// assertEstimateSendable and by the send CLAIMS, which re-assert it as a WHERE
+// predicate so a revision that stamps CLIENT_FALLBACK between the check and
+// the claim loses the race instead of being delivered (pre-push codex P0).
+function sendRequiresServerPricingFor(estimate = {}) {
+  if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return false;
+  if (estimate.sent_at) return false;
+  return parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled !== true;
+}
+const SEND_CLAIM_PRICING_AUTHORITY_SQL = "COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'";
+
 function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } = {}) {
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
@@ -357,7 +370,7 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   // rule as the engine-review gate) — the data audit owns historical rows.
   if (!isAuthoredProposal && !estimate.sent_at
     && String(estimate.pricing_authority || '').toUpperCase() === 'CLIENT_FALLBACK') {
-    if (require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) {
+    if (sendRequiresServerPricingFor(estimate)) {
       const err = new Error('This estimate\'s price was saved from the browser preview because the pricing engine could not verify it. Open it in the estimate tool and save again so the engine prices it, then send.');
       err.statusCode = 409;
       err.code = 'CLIENT_FALLBACK_PRICING';
@@ -839,6 +852,14 @@ router.post('/:id/send', async (req, res, next) => {
         // deliver the old recipient's content after that commit.
         .whereNull('archived_at')
         .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
+        // Re-assert the pricing-authority gate ON the claim (pre-push codex
+        // P0): assertEstimateSendable checked the pre-read row, and a revision
+        // committing CLIENT_FALLBACK between that check and this claim must
+        // lose the race — a zero-row claim 409s, and the refreshed retry
+        // meets the gate's own message.
+        .modify((q) => {
+          if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SEND_CLAIM_PRICING_AUTHORITY_SQL);
+        })
         .update({ status: 'sending', updated_at: db.fn.now() });
       if (!claimed) {
         return res.status(409).json({
@@ -1279,6 +1300,10 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
         // Same archive guard as the standalone claim (codex P0, PR #3304).
         .whereNull('archived_at')
         .whereNotIn('status', ['accepted', 'declined', 'expired'])
+        // Same pricing-authority re-assertion as the standalone claim.
+        .modify((q) => {
+          if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SEND_CLAIM_PRICING_AUTHORITY_SQL);
+        })
         .update({ status: 'sending', updated_at: trx.fn.now() });
       if (!anchorClaimed) {
         const err = new Error('This estimate is being sent or is locked right now. Wait a moment and retry.');
@@ -4144,6 +4169,8 @@ router._internals = {
   resolveBlockingAutomationForProposal,
   clearStaleProposalDelivery,
   assertEstimateSendable,
+  sendRequiresServerPricingFor,
+  SEND_CLAIM_PRICING_AUTHORITY_SQL,
   assertEstimateManagerApprovalResolved,
   leadEstimateAutomationSummary,
   estimateDataHasBlockingLeadAutomation,

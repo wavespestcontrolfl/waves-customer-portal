@@ -60,7 +60,11 @@ jest.mock('../config/feature-gates', () => {
 });
 
 const logger = require('../services/logger');
-const { assertEstimateSendable } = require('../routes/admin-estimates')._internals;
+const {
+  assertEstimateSendable,
+  sendRequiresServerPricingFor,
+  SEND_CLAIM_PRICING_AUTHORITY_SQL,
+} = require('../routes/admin-estimates')._internals;
 
 const fallbackDraft = (extra = {}) => ({
   id: 'est-client-fallback-1',
@@ -128,5 +132,34 @@ describe('assertEstimateSendable — engine-authoritative pricing gate', () => {
     mockGateState.sendRequiresServerPricing = false;
     expect(caughtBy(fallbackDraft({ pricing_authority: 'SERVER' }))).toBeNull();
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringMatching(/shadow/));
+  });
+});
+
+describe('sendRequiresServerPricingFor — the predicate the send CLAIMS re-assert', () => {
+  // The claims add SEND_CLAIM_PRICING_AUTHORITY_SQL to their WHERE exactly
+  // when this returns true, so a revision that stamps CLIENT_FALLBACK between
+  // the pre-read check and the claim loses the race (pre-push codex P0).
+  beforeEach(() => { mockGateState.sendRequiresServerPricing = true; });
+
+  it('applies to a first send of an ordinary estimate while the gate is on', () => {
+    expect(sendRequiresServerPricingFor(fallbackDraft())).toBe(true);
+    expect(sendRequiresServerPricingFor(fallbackDraft({ pricing_authority: 'SERVER' }))).toBe(true);
+  });
+
+  it('never applies with the gate off, to a delivered row, or to an authored proposal', () => {
+    mockGateState.sendRequiresServerPricing = false;
+    expect(sendRequiresServerPricingFor(fallbackDraft())).toBe(false);
+    mockGateState.sendRequiresServerPricing = true;
+    expect(sendRequiresServerPricingFor(fallbackDraft({ sent_at: '2026-09-01T12:00:00.000Z' }))).toBe(false);
+    expect(sendRequiresServerPricingFor(fallbackDraft({
+      estimate_data: { proposal: { enabled: true, buildings: [] } },
+    }))).toBe(false);
+    expect(sendRequiresServerPricingFor(fallbackDraft({
+      estimate_data: JSON.stringify({ proposal: { enabled: true, buildings: [] } }),
+    }))).toBe(false);
+  });
+
+  it('the claim predicate excludes only CLIENT_FALLBACK rows, case-insensitively, and tolerates NULL', () => {
+    expect(SEND_CLAIM_PRICING_AUTHORITY_SQL).toBe("COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'");
   });
 });
