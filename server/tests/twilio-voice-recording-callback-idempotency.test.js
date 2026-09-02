@@ -157,9 +157,26 @@ function makeDb(tables) {
       },
       insert(obj) {
         const inserted = { id: `row-${rows.length + 1}`, ...obj };
-        const conflict = { onConflict: () => ({ ignore: () => Promise.resolve([inserted]) }) };
-        rows.push(inserted);
-        return Object.assign(Promise.resolve([inserted]), conflict);
+        // The partial unique index the real table carries: one open card per
+        // (call, reason). ignore() keeps the existing one; merge() folds the
+        // new parked SID into its payload the way the SQL does.
+        const open = table === 'triage_items'
+          ? rows.find((r) => r.call_log_id === obj.call_log_id && r.reason_code === obj.reason_code && ['open', 'in_progress'].includes(r.status))
+          : null;
+        const conflict = { onConflict: () => ({
+          ignore: () => { if (!open) rows.push(inserted); return Promise.resolve([inserted]); },
+          merge: (patch) => {
+            if (!open) { rows.push(inserted); return Promise.resolve([inserted]); }
+            const cur = JSON.parse(open.payload || '{}');
+            const sids = new Set([...(cur.parked_recording_sids || []), ...(cur.recording_sid ? [cur.recording_sid] : []), patch.payload.bindings[0]]);
+            open.payload = JSON.stringify({ ...cur, parked_recording_sids: [...sids] });
+            return Promise.resolve([open]);
+          },
+        }) };
+        // A bare insert (no onConflict) lands on await; the conflict paths
+        // decide for themselves above.
+        const base = Promise.resolve([inserted]);
+        return Object.assign({}, conflict, { then: (res, rej) => { if (!open) rows.push(inserted); return base.then(res, rej); }, catch: (rej) => base.catch(rej) });
       },
       then(resolve, reject) {
         return Promise.resolve(rows.filter((r) => evalGroup(r, sb.clauses)).map((r) => ({ ...r }))).then(resolve, reject);
@@ -453,6 +470,17 @@ describe('POST /recording-status', () => {
     expect(again.sendStatus).toHaveBeenCalledWith(200);
     expect(tables.call_log[0].metadata.additional_recordings).toHaveLength(1);
     expect(tables.triage_items).toHaveLength(1);
+  });
+
+  test('a second parked recording rides the open review card instead of hiding behind it', async () => {
+    const REC_3 = 'RE' + '3'.repeat(32);
+    const URL_3 = `https://api.twilio.com/2010-04-01/Accounts/ACx/Recordings/${REC_3}`;
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: 'processed' });
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2 }));
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_3, RecordingUrl: URL_3 }));
+    expect(tables.call_log[0].metadata.additional_recordings.map((r) => r.recording_sid)).toEqual([REC_2, REC_3]);
+    expect(tables.triage_items).toHaveLength(1);
+    expect(JSON.parse(tables.triage_items[0].payload).parked_recording_sids.sort()).toEqual([REC_2, REC_3].sort());
   });
 
   test('a replace on a voicemail row (rejected dial-leg audio) resets processing_status so the sweep re-runs it on the new audio', async () => {

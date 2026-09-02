@@ -320,10 +320,20 @@ async function parkAdditionalRecording(row, extra) {
         ),
       });
     if (appended > 0) {
+      // One open card per call: a SECOND parked recording rides the open
+      // card's payload (parked_recording_sids) instead of vanishing behind
+      // the conflict target, so the office sees every recording it can adopt.
       await trx('triage_items')
         .insert(card())
         .onConflict(trx.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
-        .ignore();
+        .merge({
+          payload: trx.raw(
+            "jsonb_set(COALESCE(triage_items.payload, '{}'::jsonb), '{parked_recording_sids}',"
+            + " (SELECT COALESCE(jsonb_agg(DISTINCT v), '[]'::jsonb) FROM (SELECT e AS v FROM jsonb_array_elements(COALESCE(triage_items.payload -> 'parked_recording_sids', '[]'::jsonb)) e"
+            + " UNION SELECT to_jsonb(triage_items.payload ->> 'recording_sid') WHERE triage_items.payload ->> 'recording_sid' IS NOT NULL UNION SELECT to_jsonb(?::text)) u), true)",
+            [entry.recording_sid],
+          ),
+        });
     }
   }).catch((err) => {
     err.parkFailed = true;
