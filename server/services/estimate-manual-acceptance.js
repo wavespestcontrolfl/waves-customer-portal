@@ -893,6 +893,21 @@ async function markEstimateManuallyAccepted({
         logger.warn(`[estimate-manual-acceptance] commercial-schedule admin notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
       }
     }
+    // Deferred per-application fee park (DATA-001) — same post-commit contract.
+    if (conversion?.perApplicationFeeNotification) {
+      const feeNotify = conversion.perApplicationFeeNotification;
+      try {
+        const NotificationService = require('./notification-service');
+        void NotificationService.notifyAdmin(
+          feeNotify.type,
+          feeNotify.title,
+          feeNotify.body,
+          feeNotify.options,
+        ).catch((err) => logger.warn(`[estimate-manual-acceptance] per-application fee admin notify failed for estimate ${acceptedEstimate.id}: ${err.message}`));
+      } catch (err) {
+        logger.warn(`[estimate-manual-acceptance] per-application fee admin notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
+      }
+    }
     // Deferred combined-tier upgrade review notification — same post-commit
     // contract as the commercial-schedule notify above.
     if (conversion?.tierUpgradeNotification) {

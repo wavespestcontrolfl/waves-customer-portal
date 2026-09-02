@@ -58,19 +58,31 @@ describe('perApplicationChargeAmount', () => {
     expect(amount).toBe(98);
   });
 
-  test('unknown visit count falls back to the cadence amount', () => {
+  test('unknown visit count on a MONTHLY cadence is unknown, never the display rate (DATA-001)', () => {
+    // The monthly figure is a tier plan's display rate; with no visit count
+    // it is NOT a per-visit price — stamping it repeated the 2026-07-18 bug.
     expect(perApplicationChargeAmount({
       billingCadence: tsStandardCadence,
       annualRate: 621,
       monthlyRate: 51.75,
       visitsPerYear: null,
-    })).toBe(51.75);
+    })).toBeNull();
     expect(perApplicationChargeAmount({
       billingCadence: tsStandardCadence,
       annualRate: 621,
       monthlyRate: 51.75,
       visitsPerYear: 0,
-    })).toBe(51.75);
+    })).toBeNull();
+  });
+
+  test('unknown visit count on a per-visit cadence still bills the cadence amount', () => {
+    const quarterly = resolveBillingCadence({ monthlyRate: 37.33, annualRate: 448, frequencyKey: 'quarterly' });
+    expect(perApplicationChargeAmount({
+      billingCadence: quarterly,
+      annualRate: 448,
+      monthlyRate: 37.33,
+      visitsPerYear: null,
+    })).toBe(quarterly.amount);
   });
 
   test('an annual that diverges from monthly x 12 is not the plan annual — derives from the monthly', () => {
@@ -792,5 +804,62 @@ describe('annualPrepayCoverageVisits — prepay coverage inherits the accepted-s
   test('count-less lines map from cadence; underivable shapes return null', () => {
     expect(annualPrepayCoverageVisits({ name: 'Pest Control', service: 'pest_control' }, 'quarterly', null)).toBe(4);
     expect(annualPrepayCoverageVisits({ name: 'Pest Control', service: 'pest_control' }, null, null)).toBeNull();
+  });
+});
+
+describe('resolveConvertedPerApplicationFee — customer-level stamp at conversion (DATA-001)', () => {
+  const { resolveConvertedPerApplicationFee } = EstimateConverter;
+
+  test('a single recurring unit with a derived per-visit charge stamps that charge', () => {
+    expect(resolveConvertedPerApplicationFee({
+      customer: {}, recurringUnitCount: 1, perApplicationAmount: 112,
+    })).toBe(112);
+  });
+
+  test('an unresolved per-visit charge stamps NULL — never the monthly figure', () => {
+    expect(resolveConvertedPerApplicationFee({
+      customer: {}, recurringUnitCount: 1, perApplicationAmount: null,
+    })).toBeNull();
+    expect(resolveConvertedPerApplicationFee({
+      customer: {}, recurringUnitCount: 1, perApplicationAmount: 0,
+    })).toBeNull();
+  });
+
+  test('multi-unit plans leave the customer-level fee NULL (per-row precedence)', () => {
+    expect(resolveConvertedPerApplicationFee({
+      customer: {}, recurringUnitCount: 2, perApplicationAmount: 112,
+    })).toBeNull();
+  });
+
+  test('an established per-application customer keeps their fee on an add-on accept', () => {
+    expect(resolveConvertedPerApplicationFee({
+      customer: { billing_mode: 'per_application', per_application_fee: 98 },
+      recurringUnitCount: 1,
+      perApplicationAmount: 112,
+    })).toBe(98);
+  });
+
+  test('a current monthly member keeps their existing (possibly null) fee', () => {
+    expect(resolveConvertedPerApplicationFee({
+      preservesExistingMembership: true,
+      customer: { per_application_fee: 45 },
+      recurringUnitCount: 1,
+      perApplicationAmount: 112,
+    })).toBe(45);
+    expect(resolveConvertedPerApplicationFee({
+      preservesExistingMembership: true,
+      customer: {},
+      recurringUnitCount: 1,
+      perApplicationAmount: 112,
+    })).toBeNull();
+  });
+
+  test('a pinned legacy rodent-only plan (monthly dues lane) has no per-application fee', () => {
+    expect(resolveConvertedPerApplicationFee({
+      pinnedLegacyRodentOnlyPlan: true,
+      customer: {},
+      recurringUnitCount: 1,
+      perApplicationAmount: 59,
+    })).toBeNull();
   });
 });

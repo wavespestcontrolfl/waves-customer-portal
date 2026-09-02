@@ -2310,6 +2310,29 @@ function recurringMixHasMembershipFeeService(recurringServices = []) {
 // existing-member waiver (struck-through display) and the annual-prepay
 // waiver (fee shown, waived on prepay selection). Set only through the
 // confirm-gated operatorPriceAdjustment tool param.
+// Customer-level per-application fee stamped at conversion — the completion
+// fallback for per-app visits carrying no row price (precedence commentary at
+// the call site). Returns null when the fee cannot be derived: the retired
+// monthly-rate fallback stamped a quarterly plan's MONTHLY figure as its
+// per-visit charge and under-collected two thirds of every visit (validation
+// audit DATA-001, 2026-09-02) — a NULL fee makes completion say "no billable
+// amount on file — invoice manually" instead.
+function resolveConvertedPerApplicationFee({
+  pinnedLegacyRodentOnlyPlan = false,
+  preservesExistingMembership = false,
+  customer = {},
+  recurringUnitCount = 0,
+  perApplicationAmount = null,
+} = {}) {
+  if (pinnedLegacyRodentOnlyPlan && !preservesExistingMembership) return null;
+  if (preservesExistingMembership) return customer.per_application_fee ?? null;
+  if (customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0) {
+    return Number(customer.per_application_fee);
+  }
+  if (recurringUnitCount === 1 && Number(perApplicationAmount) > 0) return Number(perApplicationAmount);
+  return null;
+}
+
 function estimateOperatorSetupFeeWaived(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
   return data?.operatorPriceAdjustment?.waiveSetupFee === true;
@@ -4299,18 +4322,33 @@ const EstimateConverter = {
     // lane (billing_mode monthly_membership below — codex #3591 r21 P0):
     // no per-application fee exists for it. The customers-row stamp stays
     // the ONE fallback authority, so the legacy branch lives here.
-    const stampedPerApplicationFee = (pinnedLegacyRodentOnlyPlan && !preservesExistingMembership)
-      ? null
-      : preservesExistingMembership
-      ? (customer.per_application_fee ?? null)
-      : ((customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)
-        ? Number(customer.per_application_fee)
-        : ((recurringUnitCount === 1
-          && billingCadence && Number(billingCadence.amount) > 0)
-          ? Number(perApplicationAmount)
-          : (recurringUnitCount === 1 && Number(monthlyRate) > 0
-            ? Number(monthlyRate)
-            : null)));
+    const stampedPerApplicationFee = resolveConvertedPerApplicationFee({
+      pinnedLegacyRodentOnlyPlan,
+      preservesExistingMembership,
+      customer,
+      recurringUnitCount,
+      perApplicationAmount,
+    });
+    // Fail closed (validation audit DATA-001, 2026-09-02): when the single
+    // recurring unit's per-visit charge cannot be derived — no inferable
+    // billing cadence, or a monthly-billed tier plan whose visit count is
+    // unknown — the fee stays NULL and completion reports "no billable
+    // amount on file — invoice manually" instead of silently collecting the
+    // MONTHLY figure on every visit. The owner hears about it post-commit,
+    // deferred exactly like the commercial-schedule bell so a rolled-back
+    // accept never pages. Annual prepay is covered by its term, not this fee.
+    let perApplicationFeeNotification = null;
+    if (!suppressRecurringConversion && billingTerm !== 'prepay_annual'
+      && !pinnedLegacyRodentOnlyPlan && !preservesExistingMembership
+      && recurringUnitCount === 1 && stampedPerApplicationFee == null) {
+      logger.warn(`[estimate-converter] per-application fee unresolved for estimate ${estimateId} (customer ${customerId}) — left NULL; completions bill nothing until it is set`);
+      perApplicationFeeNotification = {
+        type: 'billing',
+        title: 'Per-visit fee not set on a new per-application customer',
+        body: `Estimate #${estimateId} converted to per-application billing, but the per-visit charge could not be derived from the accepted plan (no billing cadence or visit count on the quote). Visits will complete with no billable amount until the fee is set — invoice the first visit by hand or re-quote.`,
+        options: { icon: '\u{1F4B3}', link: '/admin/customers', bell: true, metadata: { estimateId, customerId } },
+      };
+    }
     // 1. Update customer to active. Clear deleted_at: admin screens filter
     //    on whereNull('deleted_at'), so reactivating a soft-deleted customer
     //    without clearing it would create an actively-billed customer no
@@ -6553,6 +6591,23 @@ const EstimateConverter = {
       }
     }
 
+    // Per-application fee park (DATA-001) — same dispatch-or-defer contract
+    // as the commercial-schedule bell above.
+    if (perApplicationFeeNotification && opts.deferCommercialScheduleNotification !== true) {
+      try {
+        const NotificationService = require('./notification-service');
+        void NotificationService.notifyAdmin(
+          perApplicationFeeNotification.type,
+          perApplicationFeeNotification.title,
+          perApplicationFeeNotification.body,
+          perApplicationFeeNotification.options
+        ).catch((err) => logger.warn(`[estimate-converter] per-application fee admin notify failed: ${err.message}`));
+      } catch (err) {
+        logger.warn(`[estimate-converter] per-application fee admin notify setup failed: ${err.message}`);
+      }
+      perApplicationFeeNotification = null; // fired — nothing to defer
+    }
+
     // Combined-tier upgrade review (owner case 2026-08-05): when this
     // accept RAISED the customer's membership tier by combining with existing
     // plans, staff must decide whether the new tier's discount also extends
@@ -6845,6 +6900,8 @@ const EstimateConverter = {
       // it (dispatched inline otherwise) — so callers can dispatch whatever
       // comes back without double-send risk.
       commercialScheduleNotification,
+      // Same deferral contract as commercialScheduleNotification (DATA-001).
+      perApplicationFeeNotification,
       // Same deferral contract as commercialScheduleNotification.
       tierUpgradeNotification,
       planRateReviewNotification,
@@ -7004,3 +7061,4 @@ module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
 module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;
 module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmountForConversion;
 module.exports.applyFrozenExistingServiceExtension = applyFrozenExistingServiceExtension;
+module.exports.resolveConvertedPerApplicationFee = resolveConvertedPerApplicationFee;

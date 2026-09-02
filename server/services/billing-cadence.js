@@ -84,8 +84,12 @@ function intervalPriceFromAnnual(annualAmount, frequencyKey) {
  * plan's exact annual divided by its visits. Stamping the monthly display
  * rate instead undercollects on every calendar month without a visit
  * (tree & shrub audit 2026-07-18: six completions x annual/12 collects half
- * the accepted annual). Falls back to the cadence amount whenever the visit
- * count is unknown, so cadence-matched plans are byte-identical.
+ * the accepted annual). With an unknown visit count a per-visit cadence
+ * (quarterly / bimonthly / every-6-weeks — one charge per visit) still bills
+ * the cadence amount; a MONTHLY cadence is a tier plan's display rate whose
+ * visit count could not be read, so the amount is unknown (null) and the
+ * converter parks the fee instead of repeating that under-collection
+ * (validation audit DATA-001, 2026-09-02).
  */
 function perApplicationChargeAmount({
   billingCadence = null,
@@ -95,7 +99,14 @@ function perApplicationChargeAmount({
 } = {}) {
   const cadenceAmount = roundMoney(billingCadence?.amount);
   const visits = Number(visitsPerYear);
-  if (!Number.isFinite(visits) || visits <= 0) return cadenceAmount;
+  if (!Number.isFinite(visits) || visits <= 0) {
+    // Unknown visit count: a per-visit cadence still bills the cadence
+    // amount (one charge per visit by construction). A MONTHLY cadence is
+    // the display rate of a tier plan whose visit count we could not read —
+    // stamping it repeats the T&S 2026-07-18 under-collection, so the
+    // amount is unknown and the converter parks the fee (DATA-001).
+    return String(billingCadence?.frequencyKey || '') === 'monthly' ? null : cadenceAmount;
+  }
   const annual = Number(annualRate || 0);
   const monthly = Number(monthlyRate ?? billingCadence?.monthlyRate ?? 0);
   // Same correspondence guard as resolveBillingCadence: an annual that

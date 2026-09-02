@@ -12290,6 +12290,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.error(`[estimate-accept] commercial-schedule admin notify setup failed: ${e.message}`);
       }
     }
+    // Deferred per-application fee park (DATA-001) — same post-commit contract.
+    if (acceptConversion?.perApplicationFeeNotification) {
+      const feeNotify = acceptConversion.perApplicationFeeNotification;
+      try {
+        const NotificationService = require('../services/notification-service');
+        void NotificationService.notifyAdmin(
+          feeNotify.type,
+          feeNotify.title,
+          feeNotify.body,
+          feeNotify.options,
+        ).catch((e) => logger.error(`[estimate-accept] per-application fee admin notify failed: ${e.message}`));
+      } catch (e) {
+        logger.error(`[estimate-accept] per-application fee admin notify setup failed: ${e.message}`);
+      }
+    }
     // Deferred combined-tier upgrade review notification — same post-commit
     // contract as the commercial-schedule notify above.
     if (acceptConversion?.tierUpgradeNotification) {
