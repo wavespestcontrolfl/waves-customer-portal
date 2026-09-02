@@ -26,7 +26,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // search, recipients, attachments, credit-context, followup) and every
 // mutation require the admin role.
 const SINGLE_INVOICE_GET_RE = /^\/[A-Za-z0-9-]+$/;
-const NAMED_INVOICE_GETS = new Set(['/stats', '/customers']);
+const NAMED_INVOICE_GETS = new Set(['/stats', '/customers', '/payment-notices']);
 router.use((req, res, next) => (
   req.method === 'GET'
     && SINGLE_INVOICE_GET_RE.test(req.path)
@@ -651,6 +651,106 @@ router.post('/email-message/ai', requireAdmin, async (req, res, next) => {
 });
 
 // GET /:id/recipients — preview invoice delivery recipients before sending
+// ── Zelle payment notices (GATE_ZELLE_NOTICE_RECONCILE lane) ──────────────
+// The park queue for Capital One Zelle notices the reconciler could not
+// settle on its own (services/zelle-notice-reconciler.js). Static paths —
+// declared BEFORE every /:id route so Express never reads "payment-notices"
+// as an invoice id, and listed in NAMED_INVOICE_GETS so the single-invoice
+// staff exemption above does not apply (admin only). These stay live with
+// the gate off so parked history remains actionable after a kill.
+const PAYMENT_NOTICE_LIST_MAX = 100;
+router.get('/payment-notices', requireAdmin, async (req, res, next) => {
+  try {
+    const status = req.query.status === 'all' ? null : 'parked';
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit, 10) || 50), PAYMENT_NOTICE_LIST_MAX);
+    const q = db('inbound_payment_notices').orderBy('received_at', 'desc').limit(limit);
+    if (status) q.where({ status });
+    const rows = await q.select('*');
+    res.json({ notices: rows });
+  } catch (err) { next(err); }
+});
+
+// POST /payment-notices/:id/apply { invoiceId } — the operator's one-click
+// resolution of a parked notice: settle `invoiceId` through the SAME
+// recordManualPayment path the reconciler uses (Zelle tender, receipt email +
+// SMS — owner ruling 2026-09-02), then close the notice. The server re-checks
+// the invoice: it must be one of the notice's stored candidates OR an open
+// self-pay invoice whose amount due equals the notice to the cent — the
+// client's choice is never trusted on its own.
+router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const invoiceId = typeof req.body?.invoiceId === 'string' ? req.body.invoiceId.trim() : '';
+    if (!invoiceId) return res.status(400).json({ error: 'invoiceId is required' });
+    const notice = await db('inbound_payment_notices').where({ id }).first();
+    if (!notice) return res.status(404).json({ error: 'Payment notice not found' });
+    if (notice.status !== 'parked') {
+      return res.status(409).json({ error: `Payment notice is ${notice.status}, not parked`, status: notice.status });
+    }
+    const stored = Array.isArray(notice.candidates) ? notice.candidates : [];
+    let eligible = stored.some((c) => c && c.invoice_id === invoiceId);
+    if (!eligible && notice.amount_cents != null) {
+      const { openSelfPayInvoicesByAmountDue } = require('../services/open-balance');
+      const exact = await openSelfPayInvoicesByAmountDue(notice.amount_cents);
+      eligible = exact.some((r) => r.id === invoiceId);
+    }
+    if (!eligible) {
+      return res.status(400).json({ error: 'Invoice is not a candidate for this notice — pick one of the listed invoices or an open invoice with the same amount due' });
+    }
+    const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+    const { invoice, receipt } = await recordManualPayment(invoiceId, {
+      method: 'zelle',
+      reference: notice.payer_name || 'Zelle',
+      note: notice.memo ? `Zelle memo: ${notice.memo}` : '',
+      recordedBy,
+      sendReceipt: true,
+      via: 'both',
+    });
+    // CAS parked → applied. A miss here means a concurrent apply/ignore won
+    // after our payment landed — the payment stands (the invoice is paid
+    // either way); log it so the two rows can be reconciled by hand.
+    const closed = await db('inbound_payment_notices')
+      .where({ id, status: 'parked' })
+      .update({
+        status: 'applied',
+        match_method: 'manual',
+        matched_invoice_id: invoiceId,
+        matched_customer_id: invoice?.customer_id || null,
+        applied_at: db.fn.now(),
+        applied_by: recordedBy,
+        updated_at: db.fn.now(),
+      });
+    if (!closed) logger.warn(`[admin-invoices:payment-notices] notice ${id} was no longer parked after applying ${invoiceId} — payment recorded, notice left as-is`);
+    await db('emails').where({ id: notice.email_id }).update({ auto_action: `zelle_notice_applied:${invoice?.invoice_number || invoiceId}`, updated_at: new Date() })
+      .catch((err) => logger.warn(`[admin-invoices:payment-notices] auto_action stamp failed: ${err.message}`));
+    res.json({ ok: true, invoice, receipt });
+  } catch (err) {
+    if ([400, 404, 409].includes(err.statusCode)) {
+      return res.status(err.statusCode).json({
+        error: err.message,
+        ...(err.currentStatus !== undefined ? { current_status: err.currentStatus } : {}),
+      });
+    }
+    logger.error(`[admin-invoices] payment-notice apply failed: ${err.message}`);
+    next(err);
+  }
+});
+
+router.post('/payment-notices/:id/ignore', requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const changed = await db('inbound_payment_notices')
+      .where({ id, status: 'parked' })
+      .update({ status: 'ignored', updated_at: db.fn.now() });
+    if (!changed) {
+      const notice = await db('inbound_payment_notices').where({ id }).first('status');
+      if (!notice) return res.status(404).json({ error: 'Payment notice not found' });
+      return res.status(409).json({ error: `Payment notice is ${notice.status}, not parked`, status: notice.status });
+    }
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
 router.get('/:id/recipients', requireAdmin, async (req, res, next) => {
   try {
     const recipients = await getInvoiceDeliveryRecipients(req.params.id);

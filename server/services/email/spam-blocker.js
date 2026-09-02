@@ -77,6 +77,10 @@ const OPERATIONAL_EMAIL_DOMAINS = new Set([
   // lapsed; these can never be classified into a destructive action).
   'flhins.com',
   'rdmarina.com',
+  // Capital One Zelle payment notices (forwarded from the owner's inbox)
+  // feed the Zelle notice reconciler — a money signal that must never be
+  // quarantined or unsubscribed by a classifier verdict (2026-09-02).
+  'capitalone.com',
 ]);
 
 // Mirrors inbox-hygiene / email-actions (which mirror CLOSED_STATUSES in

@@ -413,17 +413,34 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   // to false (Codex r10).
   const approvalControl = approvalControlEarly;
 
+  // Capital One Zelle payment notices are deterministic money signals —
+  // matched and settled (or parked) BEFORE any AI classification, awaited
+  // so the sync cursor never advances past a notice whose ledger write /
+  // receipt has not finished. Gated + fail-closed inside the handler
+  // (GATE_ZELLE_NOTICE_RECONCILE); a throw here must never break the sync
+  // loop. `true` = the reconciler owns the email (skip classification);
+  // `false` = not a trusted notice, flow exactly as today.
+  let zelleHandled = false;
+  if (!proofHandled && !approvalControl) {
+    try {
+      const { maybeHandleZelleNotice } = require('../zelle-notice-reconciler');
+      zelleHandled = await maybeHandleZelleNotice(email);
+    } catch (err) {
+      logger.error(`[email-sync] Zelle notice check failed for ${email.id}: ${err?.message || err}`);
+    }
+  }
+
   // Control messages never ring AND must never reach the recovery sweep,
   // which would otherwise read their unclassified row as a crash recovery
   // and run the classifier (auto-actions) over them. Pre-claim the bell so
   // the sweep skips them (hook P1). Best-effort: a miss here is caught by
   // the sweep's own control check.
-  if ((proofHandled || approvalControl) && await bellClaimColumnExists()) {
+  if ((proofHandled || approvalControl || zelleHandled) && await bellClaimColumnExists()) {
     await settleCustomerEmailBell(email.id).catch(() => {});
   }
 
   // Classify in background (don't block sync)
-  if (!proofHandled && !approvalControl && (!email.classification || email.classification === 'vendor')) {
+  if (!proofHandled && !approvalControl && !zelleHandled && (!email.classification || email.classification === 'vendor')) {
     const { classifyEmail } = require('./email-classifier');
     if (bellCandidate) {
       // Bell candidates only: classification + bell are AWAITED so the sync
