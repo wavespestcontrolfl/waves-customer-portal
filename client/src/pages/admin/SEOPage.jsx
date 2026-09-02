@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, lazy, Suspense } from "react";
+import { Fragment, useState, useEffect, useRef, lazy, Suspense } from "react";
 import { createPortal } from "react-dom";
 import useIsMobile from "../../hooks/useIsMobile";
 import { formatETDate } from "../../lib/timezone";
@@ -2918,6 +2918,437 @@ function OutreachDraftModal({ prospect, onClose, onSaved }) {
 // =========================================================================
 // BACKLINK AGENT PANEL
 // =========================================================================
+// Registry view (plan v2 §11 items 2 + step 3): what intake wrote, what the
+// investigator concluded, and the owner's Watch / Reject / Reopen actions.
+// "Acquire anyway" is step 4 (it needs a stamped authority, not a state flip).
+const REGISTRY_STATES = [
+  "new",
+  "investigating",
+  "qualified",
+  "ready_to_acquire",
+  "acquiring",
+  "acquired",
+  "watching",
+  "not_reproducible",
+  "rejected",
+];
+const LANE_OWNED_STATES = ["ready_to_acquire", "acquiring", "acquired"];
+
+function BacklinkRegistryCard() {
+  const [rows, setRows] = useState([]);
+  const [stateFilter, setStateFilter] = useState("");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [expandedId, setExpandedId] = useState(null);
+  const [detail, setDetail] = useState(null);
+  const expandedRef = useRef(null);
+  // current controls, readable from async continuations whose closure is
+  // stale (an action started before the operator changed filter/page)
+  const controlsRef = useRef({ stateFilter, search, page });
+  controlsRef.current = { stateFilter, search, page };
+  const [busyId, setBusyId] = useState(null);
+  const [runBusy, setRunBusy] = useState(false);
+  const [runResult, setRunResult] = useState(null);
+  const [error, setError] = useState(null);
+  const loadGen = useRef(0);
+
+  const load = async (state = stateFilter, q = search, p = page) => {
+    // request generation: a superseded load (filter/page changed while it was
+    // in flight) must never write its rows under the newer controls
+    const gen = ++loadGen.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams({ limit: 50, page: p });
+      if (state) params.set("agent_state", state);
+      if (q.trim()) params.set("q", q.trim());
+      const r = await adminFetch(`/admin/backlink-agent/registry?${params}`);
+      if (gen !== loadGen.current) return;
+      setRows(r?.items || []);
+      setPage(p);
+    } catch (e) {
+      if (gen !== loadGen.current) return;
+      setError(e?.message || "Registry load failed");
+    } finally {
+      if (gen === loadGen.current) setLoading(false);
+    }
+  };
+  useEffect(() => {
+    load();
+  }, []);
+
+  const toggleExpand = async (id) => {
+    if (expandedId === id) {
+      setExpandedId(null);
+      expandedRef.current = null;
+      return;
+    }
+    setExpandedId(id);
+    expandedRef.current = id;
+    setDetail(null);
+    // detail carries the row id it answers — a slow response for a row the
+    // operator has since left never renders under the newly expanded one,
+    // and (via the ref check) never OVERWRITES the loaded detail of the row
+    // they moved to — that would strand the expanded row on "Loading…"
+    try {
+      const r = await adminFetch(`/admin/backlink-agent/registry/${id}`);
+      if (expandedRef.current !== id) return;
+      setDetail({ forId: id, ...r });
+    } catch (e) {
+      if (expandedRef.current !== id) return;
+      setDetail({ forId: id, error: e?.message || "Detail load failed" });
+    }
+  };
+
+  const doAction = async (id, action) => {
+    setBusyId(id);
+    setError(null);
+    try {
+      await adminFetch(`/admin/backlink-agent/registry/${id}`, {
+        method: "PATCH",
+        body: { action },
+      });
+      // refresh with the CURRENT controls — this closure's stateFilter/
+      // search/page are from the render the action started on
+      const c = controlsRef.current;
+      await load(c.stateFilter, c.search, c.page);
+    } catch (e) {
+      setError(e?.message || `${action} failed`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const runInvestigator = async (dryRun) => {
+    setRunBusy(true);
+    setRunResult(null);
+    try {
+      const r = await adminPost("/admin/backlink-agent/registry/jobs/investigate", { dryRun });
+      setRunResult(r);
+      if (!dryRun) { const c = controlsRef.current; load(c.stateFilter, c.search, c.page); } // same stale-closure rule as doAction
+    } catch (e) {
+      setRunResult({ error: e?.message || "Investigator run failed" });
+    } finally {
+      setRunBusy(false);
+    }
+  };
+
+  const bestPathLabel = (d) => {
+    if (!d.best_path) return "—";
+    const p = d.best_path;
+    const cost =
+      p.payment_required && p.estimated_cost_cents != null
+        ? ` · $${(p.estimated_cost_cents / 100).toFixed(2)}`
+        : p.payment_required
+          ? ` · paid (${p.currency})`
+          : "";
+    return `${p.acquisition_type}${cost} · ${p.expected_rel}`;
+  };
+
+  const smallBtn = (disabled) => ({
+    padding: "6px 12px",
+    minHeight: 32,
+    borderRadius: 8,
+    border: `1px solid ${D.border}`,
+    background: "#fff",
+    color: D.text,
+    fontSize: 12,
+    cursor: "pointer",
+    opacity: disabled ? 0.5 : 1,
+  });
+
+  return (
+    <Card>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 8,
+          flexWrap: "wrap",
+          marginBottom: 4,
+        }}
+      >
+        <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
+          Registry
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={() => runInvestigator(true)}
+            disabled={runBusy}
+            style={smallBtn(runBusy)}
+          >
+            Preview investigator
+          </button>
+          <button
+            onClick={() => runInvestigator(false)}
+            disabled={runBusy}
+            style={{
+              ...smallBtn(runBusy),
+              background: D.teal,
+              color: "#fff",
+              border: "none",
+            }}
+          >
+            {runBusy ? "Working…" : "Run investigator"}
+          </button>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: D.muted, marginBottom: 10 }}>
+        One row per candidate domain: how a link can be acquired, what it
+        costs, and where it stands. Investigation fetches pages and spends up
+        to two model calls per domain (one, plus a repair retry when the first
+        answer fails validation); it never contacts or pays anyone.
+      </div>
+      {runResult && (
+        <div
+          style={{
+            marginBottom: 8,
+            fontSize: 12,
+            color: runResult.error ? D.red : runResult.gated ? D.amber : D.green,
+          }}
+        >
+          {runResult.error
+            ? runResult.error
+            : runResult.gated
+              ? `Held by GATE_LINK_INVESTIGATOR (${runResult.selected} selected, nothing fetched)`
+              : runResult.dryRun
+                ? `Preview: ${runResult.selected} selected, up to ${runResult.wouldFetch ?? 0} fetches and ${runResult.wouldCall ?? 0} model calls`
+                : runResult.skipped === "lease_held"
+                  ? "Another investigator run already holds the lease — nothing new was started."
+                : runResult.skipped === "probe_failed"
+                  ? "Could not check the investigator lease (database busy) — nothing was started; try again."
+                : runResult.started
+                  ? "Investigator started in the background — runs are serialized; refresh the table to see results."
+                  : `Investigated ${runResult.investigated}/${runResult.selected}: ${runResult.qualified} qualified, ${runResult.watching} watching, ${runResult.notReproducible} not reproducible, ${runResult.pathsWritten} paths written${runResult.failed?.length ? `, ${runResult.failed.length} failed` : ""}${runResult.skipped ? " (skipped: run already in progress)" : ""}`}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        <select
+          value={stateFilter}
+          onChange={(e) => {
+            setStateFilter(e.target.value);
+            load(e.target.value, search, 1);
+          }}
+          style={{
+            padding: "8px 10px",
+            borderRadius: 8,
+            border: `1px solid ${D.inputBorder}`,
+            background: "#fff",
+            color: D.text,
+            fontSize: 13,
+          }}
+        >
+          <option value="">All states</option>
+          {REGISTRY_STATES.map((s) => (
+            <option key={s} value={s}>
+              {s.replace(/_/g, " ")}
+            </option>
+          ))}
+        </select>
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && load(stateFilter, search, 1)}
+          placeholder="Search domain…"
+          style={{
+            flex: 1,
+            minWidth: 160,
+            padding: "8px 10px",
+            borderRadius: 8,
+            border: `1px solid ${D.inputBorder}`,
+            background: "#fff",
+            color: D.text,
+            fontSize: 13,
+          }}
+        />
+        <button onClick={() => load(stateFilter, search, 1)} disabled={loading} style={smallBtn(loading)}>
+          {loading ? "Loading…" : "Search"}
+        </button>
+      </div>
+      {error && (
+        <div style={{ marginBottom: 8, fontSize: 12, color: D.red }}>{error}</div>
+      )}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Domain</th>
+              <th style={thR}>DR</th>
+              <th style={thR}>Traffic</th>
+              <th style={thR}>Spam</th>
+              <th style={thR}>Comp.</th>
+              <th style={thStyle}>Best path</th>
+              <th style={thR}>Score</th>
+              <th style={thStyle}>State</th>
+              <th style={thStyle}>Source</th>
+              <th style={thStyle}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td style={{ ...tdStyle, color: D.muted }} colSpan={10}>
+                  {loading ? "Loading…" : "No registry rows match."}
+                </td>
+              </tr>
+            )}
+            {rows.map((d) => (
+              <Fragment key={d.id}>
+                <tr
+                  onClick={() => toggleExpand(d.id)}
+                  style={{ cursor: "pointer" }}
+                >
+                  <td style={tdStyle}>{d.domain}</td>
+                  <td style={tdR}>{d.domain_rating ?? "—"}</td>
+                  <td style={tdR}>{d.organic_traffic != null ? Number(d.organic_traffic).toLocaleString() : "—"}</td>
+                  <td style={tdR}>{d.spam_score ?? "—"}</td>
+                  <td style={tdR}>{d.competitors_linked ?? 0}</td>
+                  <td style={{ ...tdStyle, fontFamily: "inherit" }}>{bestPathLabel(d)}</td>
+                  <td style={tdR}>{d.score ?? "—"}</td>
+                  <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                    {d.agent_state.replace(/_/g, " ")}
+                    {d.discovery_priority === "owner_seed" ? " ★" : ""}
+                  </td>
+                  <td style={{ ...tdStyle, fontFamily: "inherit" }}>{d.source}</td>
+                  <td style={{ ...tdStyle, fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                    {!LANE_OWNED_STATES.includes(d.agent_state) && (
+                      <span
+                        style={{ display: "inline-flex", gap: 6 }}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {d.agent_state !== "watching" && (
+                          <button onClick={() => doAction(d.id, "watch")} disabled={busyId === d.id} style={smallBtn(busyId === d.id)}>
+                            Watch
+                          </button>
+                        )}
+                        {d.agent_state !== "rejected" && (
+                          <button
+                            onClick={() => doAction(d.id, "reject")}
+                            disabled={busyId === d.id}
+                            style={{ ...smallBtn(busyId === d.id), color: D.red }}
+                          >
+                            Reject
+                          </button>
+                        )}
+                        {["watching", "rejected", "qualified", "not_reproducible"].includes(d.agent_state) && (
+                          <button onClick={() => doAction(d.id, "reopen")} disabled={busyId === d.id} style={smallBtn(busyId === d.id)}>
+                            Reopen
+                          </button>
+                        )}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+                {expandedId === d.id && (
+                  <tr>
+                    <td style={{ ...tdStyle, fontFamily: "inherit", background: D.bg }} colSpan={10}>
+                      {detail?.forId !== d.id && <span style={{ color: D.muted }}>Loading…</span>}
+                      {detail?.forId === d.id && detail.error && <span style={{ color: D.red }}>{detail.error}</span>}
+                      {detail?.forId === d.id && !detail.error && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                          {d.score_reasons && (
+                            <div style={{ fontSize: 12, color: D.muted }}>{d.score_reasons}</div>
+                          )}
+                          <div>
+                            <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
+                              Paths
+                            </div>
+                            {(detail.paths || []).length === 0 && (
+                              <div style={{ fontSize: 12, color: D.muted }}>None yet — not investigated.</div>
+                            )}
+                            {(detail.paths || []).map((p) => {
+                              let ev = null;
+                              try { ev = typeof p.investigation === "string" ? JSON.parse(p.investigation) : p.investigation; } catch { /* unparseable evidence stays hidden */ }
+                              return (
+                                <div key={p.id} style={{ fontSize: 12, color: D.text, padding: "4px 0", borderBottom: `1px solid ${D.border}` }}>
+                                  <span style={{ fontFamily: MONO }}>{p.acquisition_type}</span>
+                                  {p.submission_url ? ` · ${p.submission_url}` : ""}
+                                  {` · conf ${p.confidence ?? "—"}`}
+                                  {p.payment_required
+                                    ? ` · ${p.estimated_cost_cents != null ? `$${(p.estimated_cost_cents / 100).toFixed(2)}` : `price ${p.currency || "unknown"}`}${
+                                        // a distinct renewal charge renders separately — "$95.00/annual"
+                                        // would present the initial fee as the recurring amount
+                                        p.renewal_cost_cents != null
+                                          ? ` · renews $${(p.renewal_cost_cents / 100).toFixed(2)}${p.renewal_period && p.renewal_period !== "none" ? `/${p.renewal_period}` : ""}`
+                                          : p.renewal_period === "none"
+                                            ? " · one-time"
+                                            : p.renewal_period ? ` · renews ${p.renewal_period}, amount unverified` : ""
+                                      }`
+                                    : " · free"}
+                                  {p.superseded_by ? " · superseded" : ""}
+                                  {p.baseline ? " · baseline import" : ""}
+                                  {ev?.reasons && (
+                                    <div style={{ color: D.muted, marginTop: 2 }}>{ev.reasons}</div>
+                                  )}
+                                  {(ev?.disproven_reason || ev?.submission_verification || ev?.terms_verification) && (
+                                    <div style={{ color: D.muted, marginTop: 2 }}>
+                                      {[ev.disproven_reason, ev.submission_verification && `submission: ${ev.submission_verification}`, ev.terms_verification && `terms: ${ev.terms_verification}`]
+                                        .filter(Boolean).join(" · ")}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          {(detail.attempts || []).length > 0 && (
+                            <div>
+                              <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
+                                Attempts
+                              </div>
+                              {detail.attempts.map((a) => (
+                                <div key={a.id} style={{ fontSize: 12, color: D.text, padding: "2px 0" }}>
+                                  {formatETDate(a.created_at)} · {a.provider} · {a.action} → {a.outcome}
+                                  {a.cost_cents ? ` · $${(a.cost_cents / 100).toFixed(2)}` : ""}
+                                  {a.sandbox ? " · sandbox" : ""}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          <div style={{ fontSize: 12, color: D.muted }}>
+                            Seen by: {(detail.touches || []).map((t) => t.source).filter((v, i, a) => a.indexOf(v) === i).join(", ") || "—"}
+                            {(detail.placements || []).length > 0 && ` · ${detail.placements.length} placement${detail.placements.length === 1 ? "" : "s"} on the board`}
+                          </div>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          alignItems: "center",
+          gap: 8,
+          marginTop: 10,
+        }}
+      >
+        <button
+          onClick={() => load(stateFilter, search, page - 1)}
+          disabled={loading || page <= 1}
+          style={smallBtn(loading || page <= 1)}
+        >
+          Prev
+        </button>
+        <span style={{ fontSize: 12, color: D.muted }}>Page {page}</span>
+        <button
+          onClick={() => load(stateFilter, search, page + 1)}
+          disabled={loading || rows.length < 50}
+          style={smallBtn(loading || rows.length < 50)}
+        >
+          Next
+        </button>
+      </div>
+    </Card>
+  );
+}
+
 function BacklinkAgentPanel() {
   const [stats, setStats] = useState(null);
   const [queue, setQueue] = useState([]);
@@ -3385,6 +3816,8 @@ function BacklinkAgentPanel() {
             </div>
           )}
         </Card>
+        {/* Registry view + investigator (plan v2 step 3) */}
+        <BacklinkRegistryCard />
         {/* Manual URL Input */}
         <Card>
           {" "}
