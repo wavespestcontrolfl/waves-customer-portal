@@ -15263,8 +15263,12 @@ const CallRecordingProcessor = {
         // statement into "current transaction is aborted" — let it roll the
         // finalization back and retry. Only the metadata parse is guarded.
         {
+          // The lists AS THEY ARE NOW (a callback can have parked another
+          // recording since this pass claimed the row), read inside the
+          // finalization transaction.
+          const nowRow = await trx('call_log').where({ id: call.id }).first('metadata');
           let m = {};
-          try { m = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {}); } catch { m = {}; }
+          try { m = typeof nowRow?.metadata === 'string' ? JSON.parse(nowRow.metadata) : (nowRow?.metadata || {}); } catch { m = {}; }
           const adopted = m?.adopted_recording?.recording_sid || null;
           if (adopted && adopted === call.recording_sid) {
             const waiting = (Array.isArray(m.additional_recordings) ? m.additional_recordings : [])
