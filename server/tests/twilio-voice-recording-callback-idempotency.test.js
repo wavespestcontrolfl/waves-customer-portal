@@ -545,11 +545,14 @@ describe('POST /recording-status', () => {
     tables.call_log.push({
       id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 12,
       processing_status: 'voicemail', transcription_status: 'rejected', transcription: '[Recording had no usable speech; an implausible transcription was rejected.]', metadata: null,
+      extraction_attempts: 3,
     });
     await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
     const row = tables.call_log[0];
     expect(row.recording_sid).toBe(REC_2);
     expect(row.processing_status).toBeNull();
+    // The retry budget was spent on the OLD audio (codex #3736 gh-r11).
+    expect(row.extraction_attempts).toBe(0);
     expect(row.transcription_status).toBe('pending');
     expect(row.metadata.superseded_recordings[0]).toMatchObject({ recording_sid: REC_1 });
   });

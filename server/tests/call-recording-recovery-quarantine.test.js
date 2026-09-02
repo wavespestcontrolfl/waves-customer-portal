@@ -316,6 +316,16 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(complete.quarantine_lists_unread).toBeUndefined();
   });
 
+  test('a transcript-only PAN call with no recording anywhere completes on the first pass instead of being reselected forever (codex #3736 gh-r11)', async () => {
+    const processor = require('../services/call-recording-processor');
+    db.raw.mockClear();
+    db.__state.call = { id: 'c-empty', recording_url: null, recording_sid: null, metadata: {}, transcription_metadata: { pan_detected: true, pan_notified: true } };
+    const out = await processor.quarantineCardRecording(db.__state.call, { source: 'transcript_scrub' });
+    expect(out.parked).toEqual({ deleted: 0, pending: 0 });
+    const complete = db.raw.mock.calls.find(([sql]) => String(sql).includes('"recording_quarantined": true'));
+    expect(complete).toBeDefined();
+  });
+
   test('a call with no primary recording completes once every listed recording is deleted', async () => {
     const processor = require('../services/call-recording-processor');
     const P = 'REparked000000000000000000000013';

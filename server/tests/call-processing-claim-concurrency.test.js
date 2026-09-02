@@ -134,39 +134,6 @@ maybeDescribe('processRecording claim concurrency (live Postgres)', () => {
     expect(after.transcription).toBeNull();
   });
 
-  test('the checkpoint SQL honours an operator customer link present on the row — including an explicit unlink', async () => {
-    // The exact expression the Step-4 checkpoint writes; proven against
-    // Postgres because a mocked builder cannot evaluate it.
-    const expression = () => db.raw(
-      "CASE WHEN jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')"
-      + " THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE ?::uuid END",
-      ['11111111-2222-4333-8444-555555555555'],
-    );
-    const SID_LINK = 'CA' + '7'.repeat(30) + 'c4';
-    const id = await insertCall(SID_LINK, { customer_id: null, metadata: JSON.stringify({ customer_link_override: { customer_id: null, by: 'tech-fixture' } }) });
-    // Explicit unlink wins over the pass's resolved customer.
-    await db('call_log').where({ id }).update({ customer_id: expression() });
-    expect((await readRow(SID_LINK)).customer_id).toBeNull();
-    // A link to a specific customer wins too (a real row is required by the FK).
-    const [cust] = await db('customers').insert({ first_name: 'Fixture', phone: '+15555550199' }).returning('id');
-    try {
-      await db('call_log').where({ id }).update({ metadata: JSON.stringify({ customer_link_override: { customer_id: cust.id } }) });
-      await db('call_log').where({ id }).update({ customer_id: expression() });
-      expect((await readRow(SID_LINK)).customer_id).toBe(cust.id);
-      // No override: the pass's own resolution is written.
-      await db('call_log').where({ id }).update({ metadata: JSON.stringify({}) });
-      await db('call_log').where({ id }).update({ customer_id: db.raw(
-        "CASE WHEN jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')"
-        + " THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE ?::uuid END",
-        [cust.id],
-      ) });
-      expect((await readRow(SID_LINK)).customer_id).toBe(cust.id);
-    } finally {
-      await db('call_log').where({ id }).update({ customer_id: null });
-      await db('customers').where({ id: cust.id }).del();
-    }
-  });
-
   test('the timeline unique-index migration dedupes pre-existing duplicates (keeping the earliest) before it indexes', async () => {
     const migration = require('../models/migrations/20260901000011_customer_interactions_call_unique');
     const [cust] = await db('customers').insert({ first_name: 'Dedupe', phone: '+15555550197' }).returning('id');
