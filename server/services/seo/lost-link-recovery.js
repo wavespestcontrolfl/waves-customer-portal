@@ -25,6 +25,53 @@ const { claimProspectDomain, lockProspectDomain, canonicalProspectDomain, byDoma
 // worker actually claims. Derived, never copied, so a reclassification there
 // flows through here.
 const NON_OUTREACH_TYPES = new Set(worker.SIGNUP_TYPES);
+
+/**
+ * The `path_id` patch for a reopened lost row: unchanged when its current path
+ * is live and agent-completable; otherwise the active outreach path for the
+ * reopened lane + pitch URL on the row's domain (find-or-create against the
+ * registry's partial unique key), or null — left for the periodic catch-up to
+ * link — when the registry has not yet given the row a domain.
+ */
+const PATH_STANDING_COLUMNS = ['id', 'superseded_by', 'agent_completable', 'confidence', 'link_type'];
+async function claimableOutreachPath(trx, row, linkType) {
+  const registry = require('./link-registry');
+  // A path STANDS for the reopened row when it is live, agent-completable,
+  // of positive confidence (the claim refuses NULL/zero) AND on the reopened
+  // lane: a signup-lane path under an outreach row would leave path and
+  // execution semantics inconsistent
+  const stands = (p) => !!p && !p.superseded_by && p.agent_completable !== false && registry.isStandingConfidence(p.confidence) && p.link_type === registry.pathLinkTypeFor(linkType);
+  // The DOMAIN's registry state gates the reopen before any path does: the
+  // claim refuses every placement under a Watch / Reject / not_reproducible /
+  // investigating domain, and the monitor stamps a queued recovery as
+  // terminal — a reopen under such a domain would sit unclaimable forever.
+  // Owner rulings and a dead domain refuse it; an investigation in flight
+  // defers it to the next scan (the sweep re-evaluates once it settles).
+  if (row.domain_id) {
+    const dom = await trx('seo_link_domains').where({ id: row.domain_id }).first('agent_state');
+    const state = dom && dom.agent_state;
+    if (state === 'investigating') return { defer: `registry domain is ${state} — deferred until the investigation settles` };
+    if (worker.NON_CLAIMABLE_DOMAIN_STATES.includes(state)) return { refuse: `registry domain is ${state} — no worker may claim it, not reopened` };
+  }
+  const cur = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first(...PATH_STANDING_COLUMNS) : null;
+  if (stands(cur)) return {};
+  if (!row.domain_id) return { path_id: null };
+  const path = registry.acquisitionPathFromLegacyRow({ link_type: linkType, target_url: row.target_url || null });
+  const active = () => trx('seo_link_acquisition_paths').where({ domain_id: row.domain_id, path_key: path.path_key }).whereNull('superseded_by').first(...PATH_STANDING_COLUMNS);
+  let existing = await active();
+  if (!existing) {
+    await trx('seo_link_acquisition_paths').insert({ ...path, domain_id: row.domain_id })
+      .onConflict(trx.raw('(domain_id, path_key) WHERE superseded_by IS NULL')).ignore();
+    existing = await active();
+    if (!existing) throw new Error(`lost-link recovery: lost race creating path ${path.path_key}`);
+  }
+  // The find-or-create keys on the lane's derived path identity, so it can
+  // hand back the very path just rejected above (the current one already
+  // carries that key) or another non-standing one: a reopen onto a path no
+  // worker may claim would look queued and never be drafted — refuse it.
+  if (!stands(existing)) return { refuse: `outreach path ${path.path_key} is not claimable (disproven, human-only or off-lane) — not reopened` };
+  return { path_id: existing.id };
+}
 const OUTREACH_TYPES = new Set(worker.OUTREACH_TYPES);
 // Board states that mean "someone is already on this" — never reopened here.
 // Recovery excludes EVERY board row for the domain (see prospect-domain-lock).
@@ -107,7 +154,7 @@ async function queueOne(loss, out, scoreMod) {
     // it to 'lost' when the inbound link disappears — that EXACT-page row is
     // REOPENED as a fresh prospect (the worker only claims status='prospect').
     // Rows rejected by the owner are left alone.
-    const exists = await byDomain(db('seo_link_prospects'), domain).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type');
+    const exists = await byDomain(db('seo_link_prospects'), domain).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type', 'domain_id', 'path_id', 'target_url');
     if (exists && exists.status === 'lost' && NON_OUTREACH_TYPES.has(exists.link_type)) {
       // A lost signup-lane placement (citation/directory/social) is not an
       // outreach target; reopening it would hand it to the citation runner.
@@ -135,10 +182,22 @@ async function queueOne(loss, out, scoreMod) {
       const reopened = await db.transaction(async (trx) => {
         const { inFlight: raced } = await claimProspectDomain(trx, domain, { statuses: IN_FLIGHT_STATUSES, lanes: 'all' });
         if (raced) return { raced };
+        // The reopened row must sit on a path a worker may CLAIM. A baseline-
+        // imported placement is linked to its baseline path, which is
+        // deliberately not agent-completable (the link was never acquired by
+        // an agent) — the worker refuses such paths, so the reopen would look
+        // queued and never be drafted. Re-pitching is a NEW outreach route:
+        // link the row to the claimable outreach path for its lane + pitch
+        // page (find-or-create, the catch-up's own identity), keeping the
+        // current path only when it already stands for a worker.
+        const pathPatch = await claimableOutreachPath(trx, exists, reopenType);
+        if (pathPatch.refuse) return { refused: pathPatch.refuse };
+        if (pathPatch.defer) return { deferred: pathPatch.defer };
         return trx('seo_link_prospects').where({ id: exists.id, status: 'lost' }).update({
           status: 'prospect',
           priority: 'high',
           link_type: reopenType,
+          ...pathPatch,
           claimed_at: null, claimed_by: null,
           attempts: 0,
           // The prior attempt is APPENDED to quality_signals.prior_outreach_attempts
@@ -155,6 +214,16 @@ async function queueOne(loss, out, scoreMod) {
           updated_at: new Date(),
         });
       });
+      if (reopened && reopened.deferred) {
+        out.skipped++;
+        out.reasons.push({ domain, reason: reopened.deferred });
+        return 'deferred';
+      }
+      if (reopened && reopened.refused) {
+        out.skipped++;
+        out.reasons.push({ domain, reason: reopened.refused });
+        return;
+      }
       if (reopened && reopened.raced) {
         out.skipped++;
         out.reasons.push({ domain, reason: `already on board (concurrent ${reopened.raced.status}${reopened.raced.target_page ? ` for ${targetPathOf(reopened.raced.target_page)}` : ''})` });
@@ -344,7 +413,7 @@ async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
         notes: q.raw("COALESCE(notes, '') || ?", [`${closeNote} Placement for ${returnedPage} is tracked by prospect ${owner.id} (${owner.status}); this recovery row is superseded.`]),
         updated_at: now,
       });
-      if (n) superseded += n; else pending++;
+      if (n) { superseded += n; await require('./link-registry').settleRetiredPlacements(q, { prospectIds: [row.id], now }); } else pending++;
       continue;
     }
     const n = await unsentRow(row.id).update({
@@ -360,7 +429,9 @@ async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
       notes: q.raw("COALESCE(notes, '') || ?", [samePage ? closeNote : `${closeNote} Target page moved ${row.target_page} → ${returnedPage} to follow the returned link.`]),
       updated_at: now,
     });
-    if (n) resolved += n; else pending++;
+    // closed as live / rejected = released into a NON-claimable state: the
+    // placement follows a superseded or changed path in this same transaction
+    if (n) { resolved += n; await require('./link-registry').settleRetiredPlacements(q, { prospectIds: [row.id], now }); } else pending++;
   }
   if (resolved || superseded || pending) logger.info(`[lost-link-recovery] ${domain}: link restored on its own — ${resolved} recovery prospect(s) closed as live, ${superseded} superseded, ${pending} moved on concurrently (left for reconciliation)`);
   return { resolved, superseded, pending };

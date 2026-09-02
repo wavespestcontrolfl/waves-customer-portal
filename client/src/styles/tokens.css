@@ -72,3 +72,18 @@
     transform: translate(-50%, -50%);
   }
 }
+
+/* Single-row horizontal scroller for tab strips on phones (AdminCommandHeader
+   sections below md). Scrollbar hidden on every engine; momentum scrolling
+   on iOS. Children must opt out of shrinking (shrink-0) so the row overflows
+   instead of squeezing. */
+.u-scroll-strip {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+.u-scroll-strip::-webkit-scrollbar {
+  display: none;
+}

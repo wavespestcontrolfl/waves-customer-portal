@@ -29,17 +29,17 @@ export default function StaleVisitsCard({ data }) {
             <a
               key={item.id}
               href={item.href || "#"}
-              className="flex items-center justify-between gap-3 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-13 text-zinc-900 hover:bg-white"
+              className="flex flex-col items-start gap-1 xl:flex-row xl:items-center xl:justify-between xl:gap-3 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-13 text-zinc-900 hover:bg-white"
             >
-              <span className="flex items-center gap-2 min-w-0">
+              <span className="flex items-center gap-2 min-w-0 w-full xl:w-auto">
                 <span className="h-2 w-2 rounded-full flex-shrink-0 bg-amber-500" />
                 <span className="truncate">
                   {item.customer?.name || "Unknown customer"} ·{" "}
                   {item.metadata?.serviceType || "Scheduled service"}
                 </span>
               </span>
-              <span className="flex items-center gap-2 flex-shrink-0 text-12 text-ink-secondary">
-                <span className="u-nums">{item.metadata?.scheduledDate}</span>
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-4 xl:pl-0 xl:flex-shrink-0 text-12 text-ink-secondary">
+                <span className="u-nums whitespace-nowrap">{item.metadata?.scheduledDate}</span>
                 <span>
                   {String(item.metadata?.status || "").replace("_", " ")} ·{" "}
                   {item.metadata?.daysOverdue}d overdue

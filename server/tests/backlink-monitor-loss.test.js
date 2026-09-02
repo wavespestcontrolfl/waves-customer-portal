@@ -23,7 +23,7 @@ function makeDb(handlers) {
     const b = {
       where: jest.fn((...a) => { if (typeof a[0] === 'function') a[0](b); else state.wheres.push(a); return b; }),
       whereIn: jest.fn((col, vals) => { state.ins.push([col, vals]); return b; }),
-      whereNull: jest.fn((c) => { state.nulls.push(c); return b; }), orWhere: jest.fn(() => b),
+      whereNull: jest.fn((c) => { state.nulls.push(c); return b; }), whereNotNull: jest.fn(() => b), forUpdate: jest.fn(() => b), orWhere: jest.fn(() => b),
       whereNotIn: jest.fn((col, vals) => { state.notIns.push([col, vals]); return b; }),
       whereNot: jest.fn((col, val) => { state.wheres.push(['NOT', col, val]); return b; }),
       whereRaw: jest.fn((sql, bind) => { state.raws.push([sql, bind]); return b; }),
@@ -863,6 +863,78 @@ describe('lost-link recovery', () => {
     updates.length = 0;
     await recovery.queueLostDomains([{ ...loss, link_type: 'unknown' }], { scorer: { scoreCandidates: jest.fn() } });
     expect(updates[0].link_type).toBe('resource');
+  });
+
+  // the claimable outreach path the relink lands on (what acquisitionPathFromLegacyRow inserts for a resource row)
+  const STANDING_REC = { id: 'path-rec', superseded_by: null, agent_completable: true, confidence: 0.2, link_type: 'resource' };
+  const DOMAIN_OK = () => ({ agent_state: 'qualified' });
+  test('a reopened baseline placement (path not agent-completable) is relinked to a claimable outreach path for its lane + pitch page (Codex #3720 r6 P1)', async () => {
+    const updates = []; const pathOps = [];
+    makeDb({
+      seo_link_domains: DOMAIN_OK, seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', domain_id: 'd1', path_id: 'path-base', target_url: 'https://blog.example/post' }; if (op === 'update') { updates.push(st.payload); return 1; } },
+      seo_link_acquisition_paths: (op, st) => {
+        pathOps.push({ op, wheres: st.wheres, payload: st.payload });
+        if (op === 'first' && st.wheres[0][0].id === 'path-base') return { id: 'path-base', superseded_by: null, agent_completable: false }; // the baseline path
+        if (op === 'first') return pathOps.some((o) => o.op === 'insert') ? STANDING_REC : null; // no active outreach path for this key until the insert
+        if (op === 'insert') return 1;
+      },
+    });
+    const r = await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+    expect(r.queued).toBe(1);
+    expect(updates[0]).toEqual(expect.objectContaining({ status: 'prospect', link_type: 'resource', path_id: 'path-rec' }));
+    const ins = pathOps.find((o) => o.op === 'insert').payload;
+    expect(ins).toEqual(expect.objectContaining({ domain_id: 'd1', link_type: 'resource', agent_completable: true, submission_url: 'https://blog.example/post', baseline: false }));
+    expect(pathOps.find((o) => o.op === 'first' && o.wheres[0][0].path_key)).toBeTruthy(); // find-or-create against the registry key
+    // …while a row already on a live, agent-completable path keeps it
+    updates.length = 0;
+    makeDb({
+      seo_link_domains: DOMAIN_OK, seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', domain_id: 'd1', path_id: 'path-live', target_url: 'https://blog.example/post' }; if (op === 'update') { updates.push(st.payload); return 1; } },
+      seo_link_acquisition_paths: (op) => { if (op === 'first') return { id: 'path-live', superseded_by: null, agent_completable: true, confidence: 0.7, link_type: 'resource' }; throw new Error('no path write expected'); },
+    });
+    await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+    expect(updates[0]).not.toHaveProperty('path_id');
+    // …but NOT a path that stands on the other lane, nor one with NULL confidence (the claim refuses both)
+    for (const cur of [{ id: 'path-dir', superseded_by: null, agent_completable: true, confidence: 0.7, link_type: 'directory' }, { id: 'path-nc', superseded_by: null, agent_completable: true, confidence: null, link_type: 'resource' }]) {
+      updates.length = 0;
+      makeDb({
+        seo_link_domains: DOMAIN_OK, seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', domain_id: 'd1', path_id: cur.id, target_url: 'https://blog.example/post' }; if (op === 'update') { updates.push(st.payload); return 1; } },
+        seo_link_acquisition_paths: (op, st) => { if (op === 'first' && st.wheres[0][0].id === cur.id) return cur; if (op === 'first') return STANDING_REC; },
+      });
+      await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+      expect(updates[0]).toEqual(expect.objectContaining({ path_id: 'path-rec' }));
+    }
+  });
+
+  test('the fallback lookup must STAND too: a derived-key path that is disproven, human-only or off-lane refuses the reopen with a reason (Codex #3720 r7 P2)', async () => {
+    for (const rec of [{ ...STANDING_REC, confidence: 0 }, { ...STANDING_REC, agent_completable: false }, { ...STANDING_REC, link_type: 'directory' }]) {
+      const updates = [];
+      makeDb({
+        // the current path already carries the derived key, so the find-or-create hands back the very path just rejected
+        seo_link_domains: DOMAIN_OK, seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', domain_id: 'd1', path_id: 'path-rec', target_url: 'https://blog.example/post' }; if (op === 'update') { updates.push(st.payload); return 1; } },
+        seo_link_acquisition_paths: (op) => { if (op === 'first') return rec; throw new Error('no path write expected'); },
+      });
+      const r = await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+      expect(r.queued).toBe(0);
+      expect(r.skipped).toBe(1);
+      expect(r.reasons[0].reason).toMatch(/not claimable/);
+      expect(updates).toEqual([]); // the lost row is left as it is — not a phantom reopen nothing can claim
+    }
+  });
+
+  test('a lost row under a Watch / Reject / not_reproducible domain is never reopened (the claim refuses it); an investigating domain defers to the next scan (Codex #3720 r8 P1)', async () => {
+    for (const state of ['watching', 'rejected', 'not_reproducible', 'investigating']) {
+      const updates = [];
+      makeDb({
+        seo_link_domains: () => ({ agent_state: state }),
+        seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', domain_id: 'd1', path_id: 'path-rec', target_url: 'https://blog.example/post' }; if (op === 'update') { updates.push(st.payload); return 1; } },
+        seo_link_acquisition_paths: () => { throw new Error('the domain state is checked before any path'); },
+      });
+      const r = await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+      expect(r.queued).toBe(0);
+      expect(updates).toEqual([]);
+      expect(r.reasons[0].reason).toContain(state);
+      expect(r.results[0].outcome).toBe(state === 'investigating' ? 'deferred' : 'skipped'); // only a terminal outcome is stamped by the monitor
+    }
   });
 
   test('board lookup matches every spelling of the target page; canonical insert form', () => {

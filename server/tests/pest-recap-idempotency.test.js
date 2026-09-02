@@ -127,7 +127,7 @@ function makeKnex(store) {
       // columnInfo probe still throws, keeping the tier snapshot in its
       // legacy (empty) shape for these tests.
       ...(table === 'service_records'
-        ? { columnInfo: jest.fn(async () => ({ structured_notes: {}, recap_sms_sent_at: {}, service_id: {}, service_type: {} })) }
+        ? { columnInfo: jest.fn(async () => ({ structured_notes: {}, recap_sms_sent_at: {}, service_id: {}, service_type: {}, service_line: {} })) }
         : {}),
       del: jest.fn(() => {
         if (table === 'service_products') {
@@ -163,6 +163,7 @@ function makeKnex(store) {
             status: latest.status || null,
             service_id: latest.service_id || null,
             service_type: latest.service_type || null,
+            service_line: latest.service_line ?? null,
           }
           : undefined;
       }
@@ -172,7 +173,7 @@ function makeKnex(store) {
     q.insert = jest.fn((row) => {
       if (table === 'service_records') {
         const id = `rec-${store.records.length + 1}`;
-        store.records.push({ id, recap_sms_sent_at: row.recap_sms_sent_at || null, structured_notes: row.structured_notes || null, service_data: row.service_data || null });
+        store.records.push({ id, recap_sms_sent_at: row.recap_sms_sent_at || null, structured_notes: row.structured_notes || null, service_line: row.service_line ?? null, service_data: row.service_data || null });
         return { returning: jest.fn().mockResolvedValue([{ id }]) };
       }
       if (table === 'service_products') {
@@ -1308,5 +1309,34 @@ describe('pest-recap: freeze identity (GH codex r2 P2)', () => {
     expect(resolveCloseoutRequirementsSnapshotForCompletion).toHaveBeenCalledWith(expect.objectContaining({
       serviceId: SERVICE_ID,
     }));
+  });
+  test('the inserted record freezes its report line (column-guarded, same detection the readers fall back to)', async () => {
+    const store = { serviceStatus: 'scheduled', records: [] };
+    const knex = makeKnex(store);
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Treated kitchen + garage.',
+      products: [],
+      customerRecap: 'Service complete.',
+      sendSms: false,
+      knex,
+    });
+    expect(result.ok).toBe(true);
+    expect(store.records).toHaveLength(1);
+    expect(store.records[0].service_line).toBe('pest'); // 'Quarterly Pest Control' → pest line
+  });
+
+  test('a re-completion of a record with no line fills it (and leaves a stamped one alone)', async () => {
+    const store = { serviceStatus: 'scheduled', records: [{ id: 'rec-old', recap_sms_sent_at: null, structured_notes: null, service_type: 'Lawn Care Visit', service_line: null }] };
+    const knex = makeKnex(store);
+    const args = { serviceId: SERVICE_ID, actorType: 'tech', actorId: 'tech-1', technicianNotes: 'Done.', products: [], customerRecap: 'Service complete.', sendSms: false, knex };
+    expect((await submitRecap(args)).ok).toBe(true);
+    expect(store.recordUpdates.some((u) => u.service_line === 'lawn')).toBe(true); // the RECORD's own identity, not the visit label
+    store.records[0].service_line = 'lawn';
+    store.recordUpdates = [];
+    expect((await submitRecap(args)).ok).toBe(true);
+    expect(store.recordUpdates.some((u) => Object.prototype.hasOwnProperty.call(u, 'service_line'))).toBe(false);
   });
 });

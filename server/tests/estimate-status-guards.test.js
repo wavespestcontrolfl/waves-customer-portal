@@ -278,13 +278,31 @@ describe('public select-tier / preferences post-lock TOCTOU guard', () => {
     archived_at: null,
   };
 
+  // The select-tier ceiling (validation audit SEC-001, 2026-09-02) refuses a
+  // tier above the ENGINE-written tier before the guarded UPDATE ever runs,
+  // so the TOCTOU cases request a tier the fixture actually earns: the stored
+  // result carrier says Gold (an existing member's prior services fold in
+  // there); the row tier stays Bronze — the ceiling never reads it.
+  const goldEligibleEstimate = {
+    ...activeEstimate,
+    estimate_data: JSON.stringify({
+      baseMonthly: 100,
+      result: {
+        recurring: {
+          waveGuardTier: 'Gold',
+          services: [{ service: 'pest_control', name: 'Pest Control', mo: 100, frequency: 'quarterly' }],
+        },
+      },
+    }),
+  };
+
   // Mirrors the accept transaction's full status guard — the UPDATE refuses
   // every non-active status, not just the terminal three.
   const GUARDED_STATUSES = ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'];
 
   test('select-tier returns 409 when the conditional update hits a locked row', async () => {
     const handler = routeHandler(estimatePublicRouter, '/:token/select-tier', 'put');
-    const readBuilder = makeBuilder({ first: { ...activeEstimate } });
+    const readBuilder = makeBuilder({ first: { ...goldEligibleEstimate } });
     const writeBuilder = makeBuilder({ updateCount: 0 });
     db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder);
 
@@ -299,7 +317,7 @@ describe('public select-tier / preferences post-lock TOCTOU guard', () => {
 
   test('select-tier succeeds when the row is still unlocked', async () => {
     const handler = routeHandler(estimatePublicRouter, '/:token/select-tier', 'put');
-    const readBuilder = makeBuilder({ first: { ...activeEstimate } });
+    const readBuilder = makeBuilder({ first: { ...goldEligibleEstimate } });
     const writeBuilder = makeBuilder({ updateCount: 1 });
     db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder);
 

@@ -126,6 +126,9 @@ const ONE_TIME_GENERIC_BY_DESIGN = [
   'tick_control',
   'bee_wasp_removal',
   'mud_dauber_removal',
+  // Seeded by 20260401000105 in fresh/CI catalogs (generic posture via
+  // 20260730400000); ABSENT from prod (live-catalog audit 2026-09-02). Stays
+  // listed until a migration retires the key in every environment.
   'pest_initial_cleanout',
   // Owner ruling 2026-07-31 (migration 20260731400000): the typed bed_bug
   // form was retired the same way — basic form + AI photo analysis; the

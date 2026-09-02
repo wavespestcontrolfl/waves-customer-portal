@@ -235,7 +235,10 @@ the token cannot be used to spray documents at arbitrary addresses; same
 gate-404 + token format gate + customer-viewable + service-on-estimate
 checks as the GET, 6 req/hour limit, email sends idempotent per
 estimate+service+day, suppression-blocked addresses return 409 with no
-send, generic errors — no PII in responses or logs).
+send, generic errors — no PII in responses or logs; while
+GATE_SEND_REQUIRES_SERVER_PRICING is on, a row or group link that fails
+the engine-pricing-authority verdict (#3750) answers the same generic 404
+before either provider path).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes
@@ -259,7 +262,10 @@ quoted).)
 expired, I still want this" from the React estimate page's expired/
 not-found screen. Estimate token format gate (same slug-or-64-hex regex as
 the slots router), generic 404 — unknown token, malformed token, ineligible
-row, and gate-off are indistinguishable — 5 req/hr per-IP limit, dark
+row, gate-off, and (while GATE_SEND_REQUIRES_SERVER_PRICING is on) a row or
+group link that fails the engine-pricing-authority verdict (#3750; judged
+before the auto-grant claim, nothing burned) are indistinguishable — 5
+req/hr per-IP limit, dark
 behind GATE_ESTIMATE_EXTENSION_REQUEST (the rate limiter `skip`s while the
 gate is off so a dark probe sees only generic 404s, never a revealing 429,
 and keys via the shared /64-collapsing `rateLimitKey`). Eligibility
@@ -516,6 +522,17 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+`/select-tier` refuses any tier above the tier the ENGINE wrote for the
+estimate's qualifying services (400 `tier_not_available_for_current_services`
++ `maxTier`; downgrades stay allowed): the ceiling is the last opt-out
+commit's `serviceOptOut.engineTier` stamp, else the stored `result` /
+`engineResult` tier (every carrier shape the portal's readers accept), else
+Bronze — fail closed, never a re-count of the stored rows under today's
+qualifying policy, and never the row's own `waveguard_tier`, which holds the
+customer's last selection once the route writes it back (validation audit
+SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
+estimates). A membership reconcile that reprices the mix refreshes the
+opt-out stamp with the row tier.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,
