@@ -6615,6 +6615,12 @@ const CallRecordingProcessor = {
       call.customer_id = customerLinkOverride.customer_id || null;
       logger.info(`[call-proc] ${maskSid(callSid)}: honouring operator customer link (${customerLinkOverride.customer_id ? 'linked' : 'unlinked'})`);
     }
+    // An explicit UNLINK (override with a null customer_id) means this call
+    // belongs to no customer: the pass must not find or mint one from the
+    // caller's phone or name — the checkpoint would write the link back to
+    // null, but the customer it touched, the lead, and the timeline entry
+    // would already carry the call.
+    const explicitUnlink = !!customerLinkOverride && !customerLinkOverride.customer_id;
     const contactPhone = resolveCallContactPhone(call);
     // Forwarding-masked call: the inbound leg recorded one of our own internal
     // numbers (a tracking number, or the staff cell it forwarded to) as the caller,
@@ -8531,7 +8537,7 @@ const CallRecordingProcessor = {
     }
 
     const sharedPhoneAmbiguity = {};
-    if (!customerId && phone) {
+    if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
       // signal (single owner / AV-address / household) — see the cascade.

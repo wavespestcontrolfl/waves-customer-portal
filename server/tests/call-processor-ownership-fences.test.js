@@ -93,6 +93,15 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(body.slice(unlinkAt - 300, unlinkAt)).toContain("NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')");
   });
 
+  test('an explicit operator unlink stops the pass from finding or minting a customer, not only from writing the link back', () => {
+    expect(body).toContain("const explicitUnlink = !!customerLinkOverride && !customerLinkOverride.customer_id;");
+    // The one branch that finds-or-creates a customer from the caller's
+    // phone/name is guarded by it; the name-reconciliation branch already
+    // skips any override.
+    expect(body).toContain('if (!customerId && phone && !explicitUnlink) {');
+    expect(body).toContain('if (customerId && extracted.first_name && phone && !customerLinkOverride) {');
+  });
+
   test('the customer timeline entry is exactly-once per call in Postgres, not by a check-then-insert', () => {
     // One statement: the insert is fenced on the processing token AND
     // exactly-once on the call_log_id partial unique index — a stale pass
