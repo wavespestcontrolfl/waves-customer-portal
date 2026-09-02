@@ -322,6 +322,16 @@ describe('fail-closed marker handling (GH codex r4 P1 x2)', () => {
     expect(mockMixCalls).toHaveLength(0);
   });
 
+  test('an ATTEMPTED handoff with no witness is ambiguous: the send aborts and the office is paged, nothing restored (pre-push codex P1)', async () => {
+    const row = newCustomerRow();
+    const claimed = claimedRowFor(row);
+    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), leadServiceHandoffAttempt: { parkId: 'p1', at: 't' }, serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', parkId: 'p1', at: 't1' }] } });
+    mockRows.queue = [claimed, claimed, claimed];
+    await expect(applyLeadServiceForSend(row)).rejects.toMatchObject({ statusCode: 409, leadServiceAbort: true });
+    expect(mockMixCalls).toHaveLength(0);
+    expect(mockNotify.calls).toHaveLength(1);
+  });
+
   test('a marker superseded by a newer customer event is cleared and NOT retried (GH codex r7 P2)', async () => {
     const row = newCustomerRow();
     const claimed = claimedRowFor(row);

@@ -899,10 +899,21 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
     {
       const parkedEvent = OptOut.staffOfferedEvents(pendingData || {})[0] || null;
       const witnessedParkId = pendingData?.leadServiceHandoffParkId || null;
-      const structuralPending = parkedEvent
-        && !(parkedEvent.parkId ? witnessedParkId === parkedEvent.parkId : Boolean(pendingData?.leadServiceHandoffAt))
-        ? parkedEvent.serviceKey
-        : null;
+      const unwitnessed = parkedEvent
+        && !(parkedEvent.parkId ? witnessedParkId === parkedEvent.parkId : Boolean(pendingData?.leadServiceHandoffAt));
+      // AMBIGUOUS: a provider handoff was ATTEMPTED for this very park (the
+      // pre-handoff intent stamp) but no witness landed — the customer may
+      // already hold the reduced quote, so it is neither restored nor
+      // resent; the send aborts and the office reviews (pre-push codex P1).
+      const attempt = pendingData?.leadServiceHandoffAttempt || null;
+      if (unwitnessed && attempt && parkedEvent.parkId && attempt.parkId === parkedEvent.parkId) {
+        await pageOfficeAmbiguousPark(estimate, parkedEvent.serviceKey).catch(() => {});
+        const abort = new Error('This estimate needs a review: an earlier send may have delivered a single-service quote whose delivery could not be confirmed. Nothing was sent.');
+        abort.statusCode = 409;
+        abort.leadServiceAbort = true;
+        throw abort;
+      }
+      const structuralPending = unwitnessed ? parkedEvent.serviceKey : null;
       // The marker is bound to its park: a customer who restored the offer
       // from the delivered link and then deliberately removed the same
       // service has superseded the park, and the retry must not restore
@@ -1070,6 +1081,36 @@ function cloneEstimateRow(row) {
   return copy;
 }
 
+// Pre-handoff INTENT stamp for a park: written before the first provider
+// call so a witness write that fails after a real handoff (then a crash
+// before finalization) leaves an unambiguous "attempted" trace — the next
+// send treats that park as ambiguous (abort + office review) instead of
+// restoring a quote the customer may already hold (pre-push codex P1). If
+// this stamp itself cannot be written, the send aborts BEFORE any provider
+// call and the wrapper's compensation restores the park.
+async function stampLeadHandoffAttempt(estimate, options) {
+  const ref = options?.leadShapeRef;
+  if (!ref || !ref.parkedKey) return;
+  await db('estimates')
+    .where({ id: estimate.id })
+    .update({
+      estimate_data: db.raw(
+        "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceHandoffAttempt}', ?::jsonb)",
+        [JSON.stringify({ parkId: String(ref.parkId || ''), at: new Date().toISOString() })],
+      ),
+    });
+}
+
+async function pageOfficeAmbiguousPark(estimate, serviceKey) {
+  const NotificationService = require('../services/notification-service');
+  await NotificationService.notifyAdmin(
+    'estimate',
+    `Estimate needs review: ${estimate.customer_name || 'customer'} — delivery of a single-service quote unconfirmed`,
+    'A send may have delivered the single-service quote but its handoff could not be recorded. Confirm what the customer received before resending.',
+    { link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id || null, serviceKey }, bell: true },
+  );
+}
+
 // DURABLE per-park handoff witness, written the moment a provider accepted a
 // message — inside the provider branch, before the next channel leg starts —
 // so a termination between the SMS and email legs can never leave a
@@ -1081,18 +1122,24 @@ async function stampLeadHandoffWitness(estimate, options) {
   if (!ref || !ref.parkedKey) return;
   ref.delivered = true;
   if (ref.witnessStamped) return;
-  try {
-    await db('estimates')
-      .where({ id: estimate.id })
-      .update({
-        estimate_data: db.raw(
-          "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceHandoffAt}', to_jsonb(?::text)), '{leadServiceHandoffParkId}', to_jsonb(?::text))",
-          [new Date().toISOString(), String(ref.parkId || '')],
-        ),
-      });
-    ref.witnessStamped = true;
-  } catch (err) {
-    logger.error(`[admin-estimates] lead-service handoff witness failed for estimate ${estimate.id}: ${err.message}`);
+  // Three attempts; a persistent failure is logged loudly and the pre-handoff
+  // intent stamp keeps the park classified as ambiguous, never undelivered.
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const n = await db('estimates')
+        .where({ id: estimate.id })
+        .update({
+          estimate_data: db.raw(
+            "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceHandoffAt}', to_jsonb(?::text)), '{leadServiceHandoffParkId}', to_jsonb(?::text))",
+            [new Date().toISOString(), String(ref.parkId || '')],
+          ),
+        });
+      if (!n) throw new Error('zero rows updated');
+      ref.witnessStamped = true;
+      return;
+    } catch (err) {
+      logger.error(`[admin-estimates] lead-service handoff witness attempt ${attempt} failed for estimate ${estimate.id}: ${err.message}`);
+    }
   }
 }
 
@@ -1567,6 +1614,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     }
     estimate = { ...postClaim, status: estimate.status };
   }
+
+  // Intent stamp BEFORE any provider call (see stampLeadHandoffAttempt).
+  if (leadShape.parkedKey) await stampLeadHandoffAttempt(estimate, options);
 
   const now = typeof options.now === 'function' ? options.now : () => new Date();
   const nextExpiresAt = estimateExpiresAt(now);
