@@ -125,6 +125,19 @@ describe("useSpeechDictation upload fallback", () => {
     expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
   });
 
+  it("releases the microphone when start() throws synchronously", async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ available: true }) });
+    window.MediaRecorder = class extends FakeRecorder { start() { throw new Error("InvalidStateError"); } };
+    const { result } = renderHook(() => useSpeechDictation(vi.fn(), { uploadServiceId: "svc-1" }));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    expect(track.stop).toHaveBeenCalled();
+    expect(result.current.listening).toBe(false);
+    expect(alert).toHaveBeenCalledWith("Dictation error: InvalidStateError");
+    await act(async () => { result.current.toggle(); });
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+  });
+
   it("never touches the upload path when SpeechRecognition exists", async () => {
     window.webkitSpeechRecognition = class { start() {} stop() {} abort() {} };
     const { result } = renderHook(() => useSpeechDictation(vi.fn(), { uploadServiceId: "svc-1" }));

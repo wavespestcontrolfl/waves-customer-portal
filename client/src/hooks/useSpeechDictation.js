@@ -165,8 +165,17 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       setListening(false);
       alert("Dictation error: recording failed");
     };
+    try {
+      rec.start();
+    } catch (e) {
+      // start() can throw synchronously (state / device errors): release the
+      // mic and reset so the next tap starts clean.
+      stream.getTracks().forEach((t) => t.stop());
+      startingRef.current = false;
+      alert(`Dictation error: ${e?.message || "could not start recording"}`);
+      return;
+    }
     recorderRef.current = rec;
-    rec.start();
     startingRef.current = false;
     setListening(true);
   }, [uploadClip, uploading]);
