@@ -2355,8 +2355,13 @@ function assertPerApplicationAddOnPriced({
   if (billingTerm === 'prepay_annual') return;
   if (!(customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)) return;
   const err = new Error('This add-on\'s per-visit price could not be derived from the accepted plan, and it must not bill at the account\'s existing per-visit fee — nothing was booked. Please call the office to add it.');
-  err.statusCode = 409;
   err.code = 'PER_APPLICATION_ADD_ON_UNPRICED';
+  // Same operational-error contract as the converter's other fail-closed
+  // refusals (palmRecurringLineInvalidError): the public accept route
+  // translates err.status, the global handler honours isOperational.
+  err.isOperational = true;
+  err.status = 409;
+  err.statusCode = 409;
   throw err;
 }
 
@@ -4142,15 +4147,15 @@ const EstimateConverter = {
           serviceKey: singleRecurringUnit ? recurringServiceKey(singleRecurringUnit) : null,
         })
       : null;
-    // A monthly-billed single unit whose per-visit charge could not be derived
-    // (visit count unknown — perApplicationChargeAmount returned null): the
-    // monthly figure is a display rate, so NO downstream fallback may stand
-    // in for the visit price (validation audit DATA-001 / pre-push codex P0).
-    // Consumers: the first-application invoice amount (allowFallback off) and
-    // the customer-level fee stamp (null → park).
+    // A single recurring unit whose per-visit charge could not be derived —
+    // no inferable billing cadence at all, or a monthly-billed tier plan
+    // whose visit count is unknown (perApplicationChargeAmount returned
+    // null): NO downstream fallback may stand in for the visit price
+    // (validation audit DATA-001 / pre-push codex P0s — the cadence-less
+    // case bypassed a monthly-only definition). Consumers: the first-
+    // application invoice amount (allowFallback off), the customer-level fee
+    // stamp (null → park) and the established-customer add-on refusal.
     const perApplicationUnresolved = !!singleRecurringUnit
-      && !!billingCadence
-      && String(billingCadence.frequencyKey || '') === 'monthly'
       && !(Number(perApplicationAmount) > 0);
 
     // A CURRENT monthly member accepting an add-on/upgrade estimate keeps

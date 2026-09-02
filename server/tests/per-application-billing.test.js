@@ -942,6 +942,8 @@ describe('assertPerApplicationAddOnPriced — an established per-application cus
       assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer });
     } catch (e) { caught = e; }
     expect(caught?.statusCode).toBe(409);
+    expect(caught?.status).toBe(409);
+    expect(caught?.isOperational).toBe(true);
     expect(caught?.code).toBe('PER_APPLICATION_ADD_ON_UNPRICED');
     expect(caught?.message).toMatch(/nothing was booked/i);
   });
