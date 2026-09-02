@@ -412,6 +412,11 @@ router.patch('/registry/:id', async (req, res, next) => {
     const n = await db('seo_link_domains')
       .where({ id: domain.id }).whereNotIn('agent_state', ['ready_to_acquire', 'acquiring', 'acquired'])
       .update(patch);
+    // a new generation (Watch park, Reopen) releases the provenance-hint
+    // cursor with the probe mask — hints are re-read uncovered-first
+    if (n && patch.probe_coverage_mask === 0) {
+      await db('seo_link_domain_sources').where({ domain_id: domain.id }).whereNotNull('covered_at').update({ covered_at: null });
+    }
     if (!n) {
       const current = await db('seo_link_domains').where({ id: domain.id }).first('agent_state');
       if (!current) return res.status(404).json({ error: 'not found' });

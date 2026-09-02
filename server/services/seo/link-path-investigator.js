@@ -239,11 +239,10 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
   // (covered_at null — the persisted hint cursor) go first, rotated by the
   // pass offset among themselves, so a hint-rich domain cannot keep the
   // same prefix forever and starve the sixth hint that IS the route.
-  const uncoveredTouches = touches.filter((t) => !t.covered_at);
-  const coveredTouches = touches.filter((t) => !!t.covered_at);
-  const tm = uncoveredTouches.length || 1;
-  const tStart = ((probeOffset % tm) + tm) % tm;
-  for (const t of [...uncoveredTouches.slice(tStart), ...uncoveredTouches.slice(0, tStart), ...coveredTouches]) {
+  const rotate = (list) => { const m = list.length || 1; const s = ((probeOffset % m) + m) % m; return [...list.slice(s), ...list.slice(0, s)]; };
+  const uncoveredTouches = rotate(touches.filter((t) => !t.covered_at));
+  const coveredTouches = rotate(touches.filter((t) => !!t.covered_at)); // covered ones rotate too — no fixed prefix within a generation
+  for (const t of [...uncoveredTouches, ...coveredTouches]) {
     for (const m of touchUrls(t)) push(m);
   }
   // The probe list is longer than what the fetch cap leaves after the
@@ -941,6 +940,33 @@ function canonicalizeTerms(html) {
 }
 
 /**
+ * Deterministic disproof that needs no model verdict: active non-baseline
+ * paths whose own URL came back 404/410 or redirected off the domain this
+ * pass are retired (confidence 0, stamped, reason in the evidence) and the
+ * domain's best_path_id is cleared if it pointed at one. Used by the
+ * no-evidence defer path — a pass where EVERY route is dead is exactly the
+ * pass that must not leave those routes claimable.
+ */
+async function disproveGonePaths(trx, domain, goneKeys, now) {
+  if (!goneKeys.size) return 0;
+  const active = await trx('seo_link_acquisition_paths')
+    .where({ domain_id: domain.id, baseline: false }).whereNull('superseded_by').select('id', 'submission_url', 'investigation');
+  const dead = active.filter((p) => p.submission_url && goneKeys.has(registry.normalizeSubmissionUrl(p.submission_url)));
+  for (const p of dead) {
+    let prior = {};
+    try { prior = typeof p.investigation === 'string' ? JSON.parse(p.investigation) : (p.investigation || {}); } catch { prior = {}; }
+    await trx('seo_link_acquisition_paths').where({ id: p.id }).update({
+      confidence: 0, last_investigated_at: now, updated_at: now,
+      investigation: JSON.stringify({ ...prior, disproven_at: now.toISOString(), disproven_reason: 'submission URL is gone (404/410) or redirects off the registry domain' }),
+    });
+  }
+  if (dead.some((p) => p.id === domain.best_path_id)) {
+    await trx('seo_link_domains').where({ id: domain.id, best_path_id: domain.best_path_id }).update({ best_path_id: null, updated_at: now });
+  }
+  return dead.length;
+}
+
+/**
  * A failed claim-state investigation defers the domain with exponential
  * backoff instead of leaving it first in line for the next hourly sweep; the
  * failure ceiling parks it as `watching` on the normal recheck cadence.
@@ -969,7 +995,9 @@ async function deferFailedDomain(db, domain, now, { claim = true, observedState 
     // mandate.
     const guard = { id: domain.id, agent_state: observedState || (claim ? 'investigating' : domain.agent_state) };
     if (claim && !observedState && claimToken) guard.investigate_claim_token = claimToken;
-    await db('seo_link_domains').where(guard).update(patch);
+    const n = await db('seo_link_domains').where(guard).update(patch);
+    // a long-term park concludes the generation for the hint cursor too
+    if (n && patch.probe_coverage_mask === 0) await db('seo_link_domain_sources').where({ domain_id: domain.id }).whereNotNull('covered_at').update({ covered_at: null });
   } catch (err) {
     logger.error(`[link-investigator] defer failed for ${domain.domain}: ${err.message}`);
   }
@@ -1231,6 +1259,24 @@ async function investigatePaths(db, {
         // a terminal verdict on the domain's NAME alone) — treat it as a
         // failed investigation (backoff applies) and spend no model call.
         if (!pages.some((pg) => pg.text.length >= MIN_COVERAGE_TEXT_CHARS)) {
+          // …but DETERMINISTIC disproof needs no model: a pass where every
+          // route 404s or redirects off-site must retire those routes (and
+          // clear best_path_id) before deferring, or the worker keeps leasing
+          // a path this pass just proved dead. Reconciled like goneKeys:
+          // a key any page loaded for is never gone.
+          const loadedKeys = new Set(pages.map((pg) => registry.normalizeSubmissionUrl(pg.url)).concat(pages.map((pg) => registry.normalizeSubmissionUrl(pg.requestedUrl || pg.url))));
+          const earlyGone = new Set(fetchErrors
+            .filter((f) => /^(status_(404|410)|offsite_redirect)$/.test(String(f.reason)))
+            .map((f) => registry.normalizeSubmissionUrl(f.url))
+            .filter((k) => !loadedKeys.has(k)));
+          if (earlyGone.size) {
+            await db.transaction(async (trx) => {
+              const fresh = await trx('seo_link_domains').where({ id: domain.id }).forUpdate().first('agent_state', 'investigate_claim_token', 'best_path_id');
+              const expected = claimState ? 'investigating' : domain.agent_state;
+              if (!fresh || fresh.agent_state !== expected || (claimState && fresh.investigate_claim_token !== claimToken)) return;
+              await disproveGonePaths(trx, { ...domain, best_path_id: fresh.best_path_id }, earlyGone, now);
+            });
+          }
           out.failed.push({ id: domain.id, domain: host, reason: pages.length ? 'no_substantive_page_evidence' : 'no_page_evidence' });
           await deferFailedDomain(db, domain, now, { claim: claimState, claimToken });
           continue;
@@ -1800,6 +1846,13 @@ async function investigatePaths(db, {
             if (downgradeNote) patch.score_reasons = `${patch.score_reasons} · downgraded: ${downgradeNote}`;
           }
           await trx('seo_link_domains').where({ id: domain.id }).update(patch);
+          // A CONCLUDED generation (mask reset to 0) also releases the hint
+          // cursor: the next generation re-reads provenance hints uncovered-
+          // first, so a 90-day recheck cannot re-read the same prefix and
+          // miss a tail hint that became the route in the meantime.
+          if (patch.probe_coverage_mask === 0) {
+            await trx('seo_link_domain_sources').where({ domain_id: domain.id }).whereNotNull('covered_at').update({ covered_at: null });
+          }
         });
         if (staleClaim) {
           out.staleClaims += 1;

@@ -2070,7 +2070,7 @@ describe('full run', () => {
 
   // ---- Codex PR round 17 -------------------------------------------------
 
-  test('a URL-changing supersession moves the placement EXECUTION URL with it; a URL-less successor leaves it (Codex PR r17 P1)', async () => {
+  test('a URL-changing supersession moves the placement EXECUTION URL with it; a URL-less successor clears it (Codex PR r17 P1 / r29 P2)', async () => {
     const d = domainRow();
     const oldPath = {
       id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/old-join',
@@ -2095,7 +2095,7 @@ describe('full run', () => {
     const outreach = modelPath({ acquisition_type: 'editorial_outreach', link_type: 'editorial', submission_url: null, payment_required: false, price_text: null, renewal_price_text: null, price_page_url: null, renewal_price_page_url: null, currency_evidence: null, fee_scope: null, renewal_period: null, replaces_path_id: old2.id });
     await investigatePaths(db2, runOpts(db2, { fetchPage: goneFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([outreach]) }) }));
     const fresh2 = db2._tables.seo_link_acquisition_paths.find((p) => p.id !== old2.id);
-    expect(db2._tables.seo_link_prospects[0]).toMatchObject({ path_id: fresh2.id, target_url: 'https://example.com/old-join' });
+    expect(db2._tables.seo_link_prospects[0]).toMatchObject({ path_id: fresh2.id, target_url: null }); // a URL-less successor CLEARS the retired route (r29): the drafter must not fetch a dead page
   });
 
   test('origin fallbacks never consume the reserved probe slots — a hint-rich www-only domain still probes (Codex PR r17 P1)', async () => {
@@ -2378,7 +2378,7 @@ describe('full run', () => {
     const outreach = modelPath({ acquisition_type: 'editorial_outreach', link_type: 'editorial', submission_url: null, replaces_path_id: oldPath.id, ...bare });
     await investigatePaths(db, runOpts(db, { fetchPage: goneFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([outreach]) }) }));
     const fresh = db._tables.seo_link_acquisition_paths.find((p) => p.id !== oldPath.id);
-    expect(placement).toMatchObject({ path_id: fresh.id, link_type: 'editorial', automation_policy: null, last_classified_at: null, target_url: 'https://example.com/old-join' });
+    expect(placement).toMatchObject({ path_id: fresh.id, link_type: 'editorial', automation_policy: null, last_classified_at: null, target_url: null });
   });
 
   test('an http fallback homepage reconciles the https apex identity — an apex 404 is not a disproof of the baseline (Codex PR r20 P2)', async () => {
@@ -2849,11 +2849,34 @@ describe('full run', () => {
     expect(touches.filter((t) => t.covered_at).length).toBe(7); // …and the seven read are stamped
     expect(dom().agent_state).toBe('watching'); // no close while a hint URL was never offered a fetch
     expect(dom().score_reasons).toContain('unfetched candidate URLs remain');
-    // pass 2: the uncovered hint leads the queue; all hints covered → the verdict may close
+    // pass 2: the one hint left uncovered leads the queue; all hints covered → the verdict may close
+    const leftover = touches.find((t) => !t.covered_at);
     fetched.length = 0;
     await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), now: dom().watch_recheck_at, domainIds: [d.id] });
-    const eighth = touches.find((t) => !fetched.length || true) && touches.every((t) => t.covered_at);
-    expect(eighth).toBe(true);
+    expect(fetched.filter((u) => /hint-/.test(u))[0]).toBe(leftover.source_detail); // the uncovered hint leads the queue
     expect(dom().agent_state).toBe('not_reproducible');
+    expect(touches.every((t) => !t.covered_at)).toBe(true); // the close CONCLUDED the generation: the next recheck re-reads hints uncovered-first (r29)
+  });
+
+  // ---- Codex PR round 29 -------------------------------------------------
+
+  test('a pass where every route is dead disproves the existing path BEFORE the no-evidence defer (Codex PR r29 P1)', async () => {
+    const d = domainRow({ agent_state: 'qualified' });
+    const path = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join', link_type: 'directory',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    d.best_path_id = path.id;
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [path] });
+    const llm = jest.fn();
+    const fetcher = async (url) => ({ status: 404, finalUrl: url, html: null, blocked: false }); // the whole site 404s
+    const r = await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), domainIds: [d.id] });
+    expect(llm).not.toHaveBeenCalled(); // no evidence → no model call, as before
+    expect(r.failed).toEqual([expect.objectContaining({ reason: 'no_page_evidence' })]);
+    expect(path.confidence).toBe(0); // …but the dead route is retired, not left claimable
+    expect(path.last_investigated_at).toEqual(NOW);
+    expect(db._tables.seo_link_domains[0].best_path_id).toBeNull();
   });
 });

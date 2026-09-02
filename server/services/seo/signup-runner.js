@@ -187,6 +187,10 @@ async function leaseGuardedReclassify(p, patch) {
     // domain back to submit_free) before the 30-day reclassify window.
     .update({ ...patch, claimed_at: null, claimed_by: null, last_classified_at: new Date(), updated_at: new Date() });
   if (n === 0) logger.warn(`[signup-runner] stale lease on ${p.target_domain} — reclassify skipped (row was reclaimed)`);
+  // This IS a lease release (often into a parked policy nothing will claim
+  // again): the placement follows a superseded path now, like every other
+  // release — best-effort inside the worker helper.
+  else await worker.settleReleasedPlacements([p.id]);
   return n;
 }
 

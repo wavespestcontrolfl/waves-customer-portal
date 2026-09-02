@@ -7,7 +7,10 @@
  * terminal not_reproducible close waits until every hint has been offered
  * a fetch — the same discipline the fixed probe list already has via
  * probe_coverage_mask, persisted per touch because hints are unbounded.
- * Reopen / long-term parks do not clear it: a hint, once read, was read.
+ * Like the mask, it is a GENERATION cursor: a concluded verdict, a
+ * long-term park, an owner Watch or Reopen clears it, so the next
+ * generation re-reads hints uncovered-first (a route can appear on a hint
+ * page during the 90 days between rechecks).
  */
 exports.up = async function up(knex) {
   const cols = await knex('seo_link_domain_sources').columnInfo();

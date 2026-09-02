@@ -15,7 +15,8 @@ jest.mock('../models/db', () => {
     let limitN = null;
     const get = (row, col) => row[String(col).includes('.') ? String(col).split('.')[1] : col];
     const rows = () => { const r = mockStore[table].filter((row) => preds.every((p) => p(row))); return limitN == null ? r : r.slice(0, limitN); };
-    const cmp = (op, l, r) => (op === '<' ? l < r : op === '<=' ? l <= r : l === r);
+    const eq = (l, r) => (l instanceof Date && r instanceof Date ? l.getTime() === r.getTime() : l === r);
+    const cmp = (op, l, r) => (op === '<' ? l < r : op === '<=' ? l <= r : eq(l, r));
     const vals = (arr) => (arr && typeof arr._rows === 'function' ? arr._rows().map((r) => r[(arr._select || ['id'])[0]]) : arr); // a sub-builder resolves lazily as a sub-select
     const q = {
       where(a, b, c) {
@@ -34,7 +35,7 @@ jest.mock('../models/db', () => {
         }
         if (typeof a === 'object') preds.push((row) => Object.entries(a).every(([k, v]) => get(row, k) === v));
         else if (c !== undefined) preds.push((row) => cmp(b, get(row, a), c));
-        else preds.push((row) => get(row, a) === b);
+        else preds.push((row) => eq(get(row, a), b));
         return q;
       },
       whereIn(col, arr) { preds.push((row) => vals(arr).includes(get(row, col))); return q; },
@@ -110,7 +111,7 @@ test('a moved placement never keeps a policy classified for the old path — and
 
   expect(await worker.claim({ n: 5, type: 'signup' })).toEqual([]); // nothing eligible: both moved, both unclassified
   expect(toPaid).toMatchObject({ path_id: 'p-paid', target_url: 'https://example.com/sponsor', link_type: 'directory', automation_policy: null, last_classified_at: null, claimed_at: null });
-  expect(toOutreach).toMatchObject({ path_id: 'p-outreach', target_url: 'https://gated.example/free', link_type: 'editorial', automation_policy: null, claimed_at: null }); // left the signup lane; URL-less successor keeps target_url
+  expect(toOutreach).toMatchObject({ path_id: 'p-outreach', target_url: null, link_type: 'editorial', automation_policy: null, claimed_at: null }); // left the signup lane; a URL-less successor clears the retired route (r29)
   expect(await worker.claim({ n: 5, type: 'signup' })).toEqual([]); // still not the free lane's until the classifier has read the successor
 });
 
@@ -201,4 +202,16 @@ test('a retired path that was ALSO disproven still reaches settlement — the pr
   expect(row).toMatchObject({ path_id: 'p-new', target_url: 'https://example.com/new', automation_policy: null, claimed_at: null }); // settled, not stranded
 });
 
+test('a lease released through report() settles the placement onto its successor even though it will never be claimed again (Codex PR r29 P1)', async () => {
+  const old = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old-join', superseded_by: 'p-live', link_type: 'directory', confidence: 0.7 };
+  const live = { id: 'p-live', domain_id: 'd1', submission_url: 'https://example.com/join', superseded_by: null, link_type: 'directory', confidence: 0.7 };
+  mockStore.seo_link_acquisition_paths.push(old, live);
+  const lease = new Date('2026-09-02T01:00:00.000Z');
+  // leased on p-old when the investigator superseded it; the runner now reports a terminal failure (MAX_ATTEMPTS → rejected: never claimable again)
+  const row = { id: 'r1', status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: lease, claimed_by: worker.WORKER, attempts: worker.MAX_ATTEMPTS - 1, automation_policy: 'submit_free', priority: 'high', domain_rating: 40, target_domain: 'example.com', path_id: 'p-old', target_url: 'https://example.com/old-join', quality_signals: null };
+  mockStore.seo_link_prospects.push(row);
+  const rep = await worker.report({ prospect_id: 'r1', outcome: 'failed', lease_token: lease.toISOString() });
+  expect(rep.ok).toBe(true);
+  expect(row).toMatchObject({ status: 'rejected', claimed_at: null, path_id: 'p-live', target_url: 'https://example.com/join', automation_policy: null }); // released AND settled in the same report
+});
 

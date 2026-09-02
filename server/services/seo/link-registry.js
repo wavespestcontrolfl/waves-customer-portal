@@ -418,8 +418,12 @@ function movePatch(row, target, now) {
   // on, or the row awaits human reconciliation; the retired path stays
   // (nothing can claim it) and the attempt/send stays attributed to it
   if (OUTREACH_LOCKED.has(row.outreach_status) || row.outreach_sent_at) return null;
+  // the execution URL follows the successor; a URL-less successor (outreach)
+  // CLEARS it — the retired route must not survive as the page the outreach
+  // drafter fetches and cites, so the drafter falls back to the homepage
   const patch = { path_id: target.id, updated_at: now, automation_policy: null, last_classified_at: null };
   if (target.submission_url) patch.target_url = target.submission_url;
+  else if (target.id !== row.path_id) patch.target_url = null; // a real supersession onto a URL-less path; a same-path refresh leaves it
   // an UNSENT draft was written for the path it is leaving — on EVERY move
   // (same lane included) it is cleared with its token, so the approval
   // endpoint can never send a message composed for a retired route
