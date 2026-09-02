@@ -2374,6 +2374,17 @@ function inlineCtaContractFinding(body) {
       if (name === 'tel' && staticVal !== null && !INLINE_CTA_TEL_RE.test(staticVal)) {
         return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA tel="${staticVal}"> that is not a phone number (optionally tel:-prefixed) — the astro publish gate rejects it.`);
       }
+      if (name === 'tel' && staticVal !== null) {
+        // The prop renders a tap-to-call target — the same owned-number
+        // rule as a tel: link applies whether or not the value carries the
+        // tel: prefix (Codex #3646 r40): dialable shape, then isWavesPhone.
+        const digits = staticVal.replace(/^tel:/i, '').replace(/\D/g, '');
+        const dialableShape = digits.length === 10 || (digits.length === 11 && digits[0] === '1');
+        const { isWavesPhone } = require('./waves-phones');
+        if (!dialableShape || !isWavesPhone(digits)) {
+          return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains an <InlineCTA tel="${staticVal}"> that is not a Waves phone number — tap-to-call targets may only dial the business's own lines.`);
+        }
+      }
     }
     if (!/\bctaHref\s*=/.test(maskAttrRegions(tag.attrs))) continue; // no ctaHref: the component defaults to the quote page
     const href = literalAttribute(tag.attrs, 'ctaHref');
@@ -2498,13 +2509,23 @@ function tolerantStaticJson(text) {
       seg += ch2;
     }
     segs.push(seg);
+    // A statically computed STRING key ({['name']: 'x'}) is the plain key
+    // (Codex #3646 r40): drop the brackets around a string segment that
+    // sits between "{ [" / ", [" and "] :". Numeric computed keys resolve
+    // in the keyed pass below; anything else stays opaque.
+    for (let q = 0; q + 2 < segs.length; q += 1) {
+      if (segs[q + 1].startsWith('"') && /[{,]\s*\[\s*$/.test(segs[q]) && /^\s*\]\s*:/.test(segs[q + 2])) {
+        segs[q] = segs[q].replace(/\[\s*$/, '');
+        segs[q + 2] = segs[q + 2].replace(/^\s*\]/, '');
+      }
+    }
     // A bare `undefined` VALUE is legal JS ({glyph: undefined}) but not
     // JSON — carried through as a sentinel and resolved with JS semantics
     // (an object property with an undefined value is ABSENT; an array slot
     // stays undefined) so the container is still validated (Codex #3646 r38).
     // An array ELISION ([, x]) is an undefined slot too (Codex #3646 r39);
     // a trailing comma is not.
-    const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/([:\[,]\s*)undefined(?=\s*[,\]}])/g, '$1"\\u0000undefined"').replace(/([\[,])(\s*)(?=,)/g, '$1$2"\\u0000undefined"').replace(/,\s*([\]}])/g, '$1'))).join('');
+    const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/([{,]\s*)\[\s*(\d+)\s*\]\s*:/g, '$1"$2":').replace(/([:\[,]\s*)undefined(?=\s*[,\]}])/g, '$1"\\u0000undefined"').replace(/([\[,])(\s*)(?=,)/g, '$1$2"\\u0000undefined"').replace(/,\s*([\]}])/g, '$1'))).join('');
     return { value: resolveUndefinedSentinels(JSON.parse(keyed)) };
   } catch (_) { return undefined; }
 }

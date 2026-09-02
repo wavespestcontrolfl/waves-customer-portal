@@ -761,7 +761,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(guardrails.containsAffiliateMaterial('see //amzn.to/abc')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see solutionsstores.com/test-bait?aff=waves')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('visit wavespestcontrol.com/blog/ or epa.gov/pesticides')).toBe(false);
-      expect(guardrails.containsAffiliateMaterial('call 941.599.3489 e.g. today')).toBe(false);
+      expect(guardrails.containsAffiliateMaterial('call 941.318.7612 e.g. today')).toBe(false);
       expect(guardrails.containsAffiliateMaterial('per https://www.epa.gov/pesticide-labels guidance')).toBe(false);
       expect(guardrails.containsAffiliateMaterial('')).toBe(false);
     }, { gate: '' }); // gate OFF — stripping still detects
@@ -810,7 +810,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
     expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={[{name: `x`, risk: `invalid`, where: `x`, hunt: `x`, eggSac: `x`}]} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
     expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel="-------" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
-    expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel="(941) 599-3489" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel="(941) 318-7612" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
   });
 
   test('case-insensitive HTML href; comments inside static species arrays (Codex #3646 r33)', () => {
@@ -908,7 +908,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       // A top-level interpolation-free template literal is a static string.
       const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
       expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel={`not-a-phone`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
-      expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel={`(941) 599-3489`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
+      expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel={`(941) 318-7612`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
       expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={`oops`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
       expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel={`${x}`} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
     });
@@ -955,6 +955,21 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
         expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
       }
     });
+  });
+
+  test('computed string keys in species arrays; InlineCTA tel must be a Waves number with or without the tel: prefix (Codex #3646 r40)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codes = (b) => guardrails.evaluate({ body: wrap(b), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }).findings.map((f) => f.code);
+    expect(codes("<SpiderIdBoard species={[{['name']:'x', risk:'invalid', where:'x', hunt:'x', eggSac:'x'}]} />")).toContain('INVALID_SPIDERIDBOARD_PROPS');
+    expect(codes('<SpiderIdBoard species={[{ ["risk"]: "invalid", name: "x", where: "x", hunt: "x", eggSac: "x" }]} />')).toContain('INVALID_SPIDERIDBOARD_PROPS');
+    expect(codes("<SpiderIdBoard species={[{['name']:'x', ['risk']:'nuisance', where:'x', hunt:'x', eggSac:'x'}]} />")).toEqual([]);
+    expect(codes("<SpiderIdBoard species={[{name:'[x', risk:'nuisance', where:']:', hunt:'x', eggSac:'x'}]} />")).toEqual([]);
+    for (const tel of ['(212) 555-1234', 'tel:+12125551234', '212-555-1234', '9999412975749']) {
+      expect(codes(`<InlineCTA tel="${tel}" />`)).toContain('DISALLOWED_EXTERNAL_LINK');
+    }
+    for (const tel of ['(941) 318-7612', 'tel:+19413187612', '941.318.7612']) {
+      expect(codes(`<InlineCTA tel="${tel}" />`)).not.toContain('DISALLOWED_EXTERNAL_LINK');
+    }
   });
 
   test('spread wrappers hide their CTA (astro parity, Codex #3646 r28)', () => {
@@ -1042,7 +1057,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     expect(codesOf(guardrails.evaluate({ body: wrap("<InlineCTA tel={'not-a-phone'} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
     expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard title={""} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
     expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={'wolf'} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
-    expect(codesOf(guardrails.evaluate({ body: wrap("<InlineCTA tel={'tel:+19415993489'} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap("<InlineCTA tel={'tel:+19413187612'} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
   });
 
   test('nested components in prop expressions validate; expression-string routes; invalid titles (Codex #3646 r22)', () => {
@@ -1167,7 +1182,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     // Case-sensitive names: ctahref is NOT the ctaHref prop.
     expect(propCodes(guardrails.evaluate({ body: wrap('<InlineCTA ctahref="/quote/" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBeGreaterThan(0);
     // The full valid prop set passes.
-    const ok = '<InlineCTA eyebrow="Local help" headline="Need a hand?" description="We can treat it." ctaLabel="Get a quote" ctaHref="/quote/" phone="(941) 599-3489" tel="tel:+19415993489" />';
+    const ok = '<InlineCTA eyebrow="Local help" headline="Need a hand?" description="We can treat it." ctaLabel="Get a quote" ctaHref="/quote/" phone="(941) 318-7612" tel="tel:+19413187612" />';
     expect(propCodes(guardrails.evaluate({ body: wrap(ok), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBe(0);
   });
 
