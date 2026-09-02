@@ -150,6 +150,55 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(recordingsSpy).not.toHaveBeenCalledWith('REmain0000000000000000000000003');
   });
 
+  test('PAN detected on a call that already holds parked recordings deletes every parked SID and tombstones each entry', async () => {
+    const processor = require('../services/call-recording-processor');
+    const recordingsSpy = require('twilio').__recordingsSpy;
+    recordingsSpy.mockClear();
+    db.raw.mockClear();
+    const MAIN = 'REmain0000000000000000000000004';
+    const P1 = 'REparked000000000000000000000004';
+    const P2 = 'REparked000000000000000000000005';
+    db.__state.call = {
+      id: 'c-multi', recording_url: 'https://api.twilio.com/m.mp3', recording_sid: MAIN,
+      metadata: { additional_recordings: [
+        { recording_sid: P1, recording_url: 'https://api.twilio.com/p1.mp3' },
+        { recording_sid: P2, recording_url: null, quarantined_at: 'T', delete_pending: false }, // already gone
+      ] },
+      transcription_metadata: { pan_detected: true, pan_notified: true },
+    };
+    const out = await processor.quarantineCardRecording(db.__state.call, { source: 'transcript_scrub' });
+    expect(out).toMatchObject({ twilioDeleted: true, parked: { deleted: 1, pending: 0 } });
+    expect(recordingsSpy).toHaveBeenCalledWith(MAIN);
+    expect(recordingsSpy).toHaveBeenCalledWith(P1);
+    expect(recordingsSpy).not.toHaveBeenCalledWith(P2);
+    const tombs = db.raw.mock.calls.filter(([sql]) => String(sql).includes("'{additional_recordings}'")).map(([, b]) => b[0]);
+    expect(tombs).toEqual([P1]);
+  });
+
+  test('a recording parked between the quarantine\'s first read and its PAN stamp is still swept (the parked list is read after the stamp)', async () => {
+    const processor = require('../services/call-recording-processor');
+    const recordingsSpy = require('twilio').__recordingsSpy;
+    recordingsSpy.mockClear();
+    db.raw.mockClear();
+    const LATE = 'REparked000000000000000000000006';
+    db.__state.call = {
+      id: 'c-late-park', recording_url: null, recording_sid: null,
+      metadata: { additional_recordings: [] },
+      transcription_metadata: { pan_detected: true, pan_notified: true },
+    };
+    // The park commits right after the stamp UPDATE (before it, the park's
+    // own quarantine predicate would have refused it).
+    db.__builder.update.mockImplementationOnce(async (patch) => {
+      if (patch.transcription_metadata) db.__state.call.metadata.additional_recordings.push({ recording_sid: LATE, recording_url: 'https://api.twilio.com/late.mp3' });
+      return 1;
+    });
+    const out = await processor.quarantineCardRecording(db.__state.call, { source: 'transcript_scrub' });
+    expect(out.parked).toEqual({ deleted: 1, pending: 0 });
+    expect(recordingsSpy).toHaveBeenCalledWith(LATE);
+    const tombs = db.raw.mock.calls.filter(([sql]) => String(sql).includes("'{additional_recordings}'")).map(([, b]) => b[0]);
+    expect(tombs).toEqual([LATE]);
+  });
+
   test('an unstamped call still proceeds into the Twilio lookup', async () => {
     const processor = require('../services/call-recording-processor');
     db.__state.call = { id: 'c-clean', recording_url: null, transcription_metadata: null };

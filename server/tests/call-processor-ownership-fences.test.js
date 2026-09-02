@@ -105,12 +105,15 @@ describe('processRecording call_log writes are ownership-fenced', () => {
   });
 
   test('the customer timeline entry is exactly-once per call in Postgres, not by a check-then-insert', () => {
-    const at = body.indexOf("await db('customer_interactions').insert({");
+    // One statement: the insert is fenced on the processing token AND
+    // exactly-once on the call_log_id partial unique index — a stale pass
+    // that lost its claim between the check and the write inserts nothing.
+    const at = body.indexOf('INSERT INTO customer_interactions (customer_id, interaction_type, subject, body, metadata)');
     expect(at).toBeGreaterThan(-1);
     const stmt = body.slice(at, at + 900);
-    expect(stmt).toContain('call_log_id: call.id');
-    expect(stmt).toContain("onConflict(db.raw(\"((metadata ->> 'call_log_id')) WHERE interaction_type = 'call' AND metadata ->> 'call_log_id' IS NOT NULL\"))");
-    expect(stmt).toContain('.ignore()');
+    expect(stmt).toContain('WHERE EXISTS (SELECT 1 FROM call_log WHERE id = ? AND processing_token = ?)');
+    expect(stmt).toContain("ON CONFLICT ((metadata ->> 'call_log_id')) WHERE interaction_type = 'call' AND metadata ->> 'call_log_id' IS NOT NULL DO NOTHING");
+    expect(stmt).toContain('call.id,\n          procToken,');
     expect(body).not.toContain('timelineExists');
   });
 

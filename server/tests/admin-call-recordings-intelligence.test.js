@@ -139,6 +139,17 @@ describe('commitment writes are staff-wide but fail closed when the gate is off'
   });
 });
 
+describe('PUT /calls/:id/customer requires an explicit customer_id', () => {
+  test('a body without customer_id is a 400, never an unlink', async () => {
+    const updates = mockDb([{ id: CALL_ID, customer_id: CUSTOMER_ID, twilio_call_sid: SID }]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+      expect(res.status).toBe(400);
+    });
+    expect(updates).toHaveLength(0);
+  });
+});
+
 describe('customer relink and recording adoption stay admin-only', () => {
   test.each([
     ['PUT', `/calls/${CALL_ID}/customer`, { customer_id: CUSTOMER_ID }],
@@ -342,21 +353,22 @@ describe('POST /calls/:id/adopt-recording', () => {
     const row = { ...call(), transcription_metadata: JSON.stringify({ pan_detected: true }) };
     row.metadata.additional_recordings.push({ recording_sid: OTHER, recording_url: 'https://api.twilio.com/x/RE3.mp3', parked_because: 'write_contended' });
     const updates = mockDb([row]);
-    processor.quarantineCardRecording.mockResolvedValue({ quarantined: true, twilioDeleted: true });
+    processor.quarantineCardRecording.mockResolvedValue({ quarantined: true, twilioDeleted: true, parked: { deleted: 2, pending: 0 } });
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
       expect(res.status).toBe(409);
       expect(await res.json()).toMatchObject({ reason: 'pan_quarantined', deleted: 2, delete_pending: 0 });
     });
     expect(updates.find((u) => u.table === 'call_log')).toBeUndefined();
+    // One helper call: it sweeps every parked recording (OTHER included) itself.
+    expect(processor.quarantineCardRecording).toHaveBeenCalledTimes(1);
     expect(processor.quarantineCardRecording).toHaveBeenCalledWith(expect.objectContaining({ recording_sid: PARKED }), { source: 'adopt_recording_post_quarantine' });
-    expect(processor.quarantineCardRecording).toHaveBeenCalledWith(expect.objectContaining({ recording_sid: OTHER }), { source: 'adopt_recording_post_quarantine' });
     expect(processor.processRecording).not.toHaveBeenCalled();
   });
 
   test('a parked delete that fails at Twilio is reported as still pending, never as deleted', async () => {
     mockDb([{ ...call(), transcription_metadata: JSON.stringify({ pan_detected: true }) }]);
-    processor.quarantineCardRecording.mockResolvedValue({ quarantined: true, twilioDeleted: false });
+    processor.quarantineCardRecording.mockResolvedValue({ quarantined: true, twilioDeleted: false, parked: { deleted: 0, pending: 1 } });
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
       expect(res.status).toBe(409);

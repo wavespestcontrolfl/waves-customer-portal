@@ -144,6 +144,29 @@ describe('groundModelCommitments', () => {
     expect(MIN_MODEL_CONFIDENCE).toBeGreaterThan(0.3);
   });
 
+  test('a quote proves a party only from that party\'s speaker turn: a caller line cannot ground a Waves promise, an agent line cannot ground a customer one', () => {
+    const out = groundModelCommitments([
+      // The caller's own words, filed by the model as a Waves obligation.
+      { party: 'waves', kind: 'other', description: 'Text photos', confidence: 0.9, evidence: [{ quote: "I'll text you a couple of photos", speaker: 'agent' }] },
+      // The agent's promise, filed as the customer's.
+      { party: 'customer', kind: 'other', description: 'Email an estimate', confidence: 0.9, evidence: [{ quote: "I'll email you an estimate this afternoon", speaker: 'caller' }] },
+      // Right party, wrong model speaker tag: the turn decides, the tag is corrected.
+      { party: 'waves', kind: 'callback', description: 'Call back', confidence: 0.9, evidence: [{ quote: 'someone will call you back tomorrow morning', speaker: 'caller' }] },
+    ], TRANSCRIPT);
+    expect(out.kept.map((k) => k.kind)).toEqual(['callback']);
+    expect(out.kept[0].evidence[0].speaker).toBe('agent');
+    expect(out.droppedUngrounded).toBe(2);
+  });
+
+  test('a transcript with no speaker labels falls back to flat grounding', () => {
+    const flat = TRANSCRIPT.replace(/^(Agent|Caller): /gm, '');
+    const out = groundModelCommitments([
+      { party: 'waves', kind: 'send_estimate', description: 'Email an estimate', confidence: 0.9, evidence: [{ quote: "I'll email you an estimate this afternoon", speaker: 'agent' }] },
+    ], flat);
+    expect(out.kept).toHaveLength(1);
+    expect(out.kept[0].evidence[0].speaker).toBe('agent');
+  });
+
   test('grounding is case- and punctuation-insensitive but never fuzzy on words', () => {
     const out = groundModelCommitments([
       { party: 'customer', kind: 'send_photos', description: 'Text photos', confidence: 0.8, evidence: [{ quote: "i'll TEXT you a couple of photos", speaker: 'caller' }] },
@@ -240,5 +263,27 @@ describe('model contract', () => {
     expect(MODEL_OUTPUT_SCHEMA.properties.commitments.items.properties.kind.enum).toEqual(COMMITMENT_KINDS);
     const migration = require('../models/migrations/20260901000010_call_commitments');
     expect(migration.COMMITMENT_KINDS).toEqual([...COMMITMENT_KINDS]);
+  });
+});
+
+describe('lead lookups on a call with no lead key', () => {
+  const { buildCallOutcomes } = require('../services/call-commitments');
+  test('buildCallOutcomes queries nothing for an imported call (no lead_id, no SID, no customer)', async () => {
+    // Any other table answers empty; a leads read is the unscoped query
+    // this guards against and fails the test outright.
+    const empty = () => {
+      let first = false;
+      const b = new Proxy({}, { get(_, k) {
+        if (k === 'then') return (resolve) => resolve(first ? null : []);
+        if (k === 'first') return () => { first = true; return b; };
+        return () => b;
+      } });
+      return b;
+    };
+    const conn = jest.fn((table) => { if (table === 'leads') throw new Error('unscoped query on leads'); return empty(); });
+    const out = await buildCallOutcomes(conn, { id: 'c', created_at: new Date().toISOString(), metadata: null, twilio_call_sid: null, customer_id: null });
+    expect(out.lead).toBeNull();
+    expect(out.estimates).toEqual([]);
+    expect(conn.mock.calls.map((c) => c[0])).not.toContain('leads');
   });
 });

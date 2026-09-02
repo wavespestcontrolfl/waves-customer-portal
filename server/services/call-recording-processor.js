@@ -457,30 +457,50 @@ function parkedDeletesPending(metadata) {
   }
 }
 
+// Delete one recording at Twilio. True when it is gone — including a 404,
+// which is a complete delete, not one to retry forever; false (logged) when
+// the delete is still owed.
+async function deleteRecordingAtTwilio(sid) {
+  try {
+    const client = twilioClient();
+    if (!client) return false;
+    await client.recordings(sid).remove();
+    return true;
+  } catch (err) {
+    if (err?.status === 404 || err?.code === 20404) return true;
+    logger.error(`[call-proc] PAN quarantine: Twilio recording delete failed for ${maskSid(sid)}: ${err.message}`);
+    return false;
+  }
+}
+
+// Rewrite one parked entry in place: URL gone, quarantined_at stamped,
+// delete_pending while the Twilio delete is still owed (the recovery sweep
+// reads it to retry). Atomic on the current array — a park landing between
+// the read and this write is kept, not overwritten.
+async function tombstoneParkedRecording(callId, sid, deleted) {
+  await db('call_log')
+    .where({ id: callId })
+    .whereRaw("COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> ?::jsonb", [JSON.stringify([{ recording_sid: sid }])])
+    .update({
+      metadata: db.raw(
+        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}',"
+        + " (SELECT COALESCE(jsonb_agg(CASE WHEN e ->> 'recording_sid' = ? THEN e || ?::jsonb ELSE e END), '[]'::jsonb)"
+        + " FROM jsonb_array_elements(COALESCE(metadata -> 'additional_recordings', '[]'::jsonb)) e), true)",
+        [sid, JSON.stringify({ recording_url: null, quarantined_at: new Date().toISOString(), delete_pending: !deleted })],
+      ),
+      updated_at: new Date(),
+    });
+}
+
 async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {}) {
   if (!call?.id) return { quarantined: false };
   const recordingUrl = call.recording_url || null;
   const sid = call.recording_sid
     || (recordingUrl && (recordingUrl.match(/\/Recordings\/(RE[a-f0-9]{32})/i) || [])[1])
     || null;
-  let twilioDeleted = false;
-  if (sid) {
-    try {
-      const client = twilioClient();
-      if (client) {
-        await client.recordings(sid).remove();
-        twilioDeleted = true;
-      }
-    } catch (err) {
-      // Already gone at Twilio is a complete delete, not one to retry forever.
-      if (err?.status === 404 || err?.code === 20404) {
-        twilioDeleted = true;
-      } else {
-        logger.error(`[call-proc] PAN quarantine: Twilio recording delete failed for ${maskSid(sid)}: ${err.message}`);
-      }
-    }
-  }
+  const twilioDeleted = sid ? await deleteRecordingAtTwilio(sid) : false;
   let alreadyQuarantined = false;
+  let parkedEntries = [];
   try {
     const row = await db('call_log').where({ id: call.id }).first('transcription_metadata');
     // jsonb columns come back as OBJECTS from Postgres, strings from mocks/
@@ -521,27 +541,41 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
   } catch (err) {
     logger.error(`[call-proc] PAN quarantine: call_log strip failed for call ${call.id}: ${err.message}`);
   }
-  // The same SID parked in metadata.additional_recordings loses its URL NOW
-  // — the intelligence panel and adopt-recording never see playable card
-  // audio, whatever Twilio answered — and carries delete_pending while the
-  // delete is still owed, which the recovery sweep reads to retry it.
-  if (sid) {
+  // Read the parked list AFTER the stamp above committed, never before: a
+  // /recording-status park that commits between a pre-stamp read and the
+  // stamp would be missing from the sweep with its URL intact and no
+  // delete_pending, and a complete-looking row is never re-selected. Once
+  // pan_detected is on the row, every later park is refused by the park
+  // write's quarantine predicate, so this read is the whole set.
+  try {
+    const after = await db('call_log').where({ id: call.id }).first('metadata');
+    const m = typeof after?.metadata === 'string' ? JSON.parse(after.metadata) : (after?.metadata || {});
+    parkedEntries = Array.isArray(m?.additional_recordings) ? m.additional_recordings : [];
+  } catch (err) {
+    logger.error(`[call-proc] PAN quarantine: parked-list read failed for call ${call.id}: ${err.message}`);
+    parkedEntries = [];
+  }
+  // A quarantined call keeps no audio in any medium: every recording parked
+  // in metadata.additional_recordings (audio that arrived before or after
+  // the card was heard) is deleted at Twilio and its entry rewritten in
+  // place — URL gone NOW, whatever Twilio answered, so the intelligence
+  // panel and adopt-recording never see playable card audio; delete_pending
+  // while a delete is still owed, which the recovery sweep reads to retry.
+  const parked = { deleted: 0, pending: 0 };
+  for (const entry of parkedEntries) {
+    const parkedSid = entry?.recording_sid;
+    if (!parkedSid) continue;
+    let deleted;
+    if (parkedSid === sid) deleted = twilioDeleted;
+    else if (entry.recording_url == null && entry.delete_pending !== true) continue; // already gone
+    else deleted = await deleteRecordingAtTwilio(parkedSid);
     try {
-      await db('call_log')
-        .where({ id: call.id })
-        .whereRaw("COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> ?::jsonb", [JSON.stringify([{ recording_sid: sid }])])
-        .update({
-          metadata: db.raw(
-            "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}',"
-            + " (SELECT COALESCE(jsonb_agg(CASE WHEN e ->> 'recording_sid' = ? THEN e || ?::jsonb ELSE e END), '[]'::jsonb)"
-            + " FROM jsonb_array_elements(COALESCE(metadata -> 'additional_recordings', '[]'::jsonb)) e), true)",
-            [sid, JSON.stringify({ recording_url: null, quarantined_at: new Date().toISOString(), delete_pending: !twilioDeleted })],
-          ),
-          updated_at: new Date(),
-        });
+      await tombstoneParkedRecording(call.id, parkedSid, deleted);
     } catch (err) {
       logger.error(`[call-proc] PAN quarantine: parked-entry strip failed for call ${call.id}: ${err.message}`);
+      deleted = false;
     }
+    if (deleted) parked.deleted += 1; else parked.pending += 1;
   }
   // Clear the recording media already synced onto the unified voice message
   // — recording_url null keeps the helper from re-adding it, and the
@@ -575,7 +609,7 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
       }
     } catch (e) { logger.warn(`[call-proc] PAN quarantine notify failed: ${e.message}`); }
   }
-  return { quarantined: true, twilioDeleted, alreadyQuarantined };
+  return { quarantined: true, twilioDeleted, alreadyQuarantined, parked };
 }
 
 // PAN-quarantine stamps are DURABLE (Codex #2676 round-9 P1): the recovery
@@ -14623,20 +14657,26 @@ const CallRecordingProcessor = {
       // 20260901000011) — a check-then-insert could still race a
       // replacement pass; ON CONFLICT cannot. An existing entry is left
       // alone so an office note attached to it survives too.
-      await db('customer_interactions').insert({
-        customer_id: customerId,
-        interaction_type: 'call',
-        subject: `Inbound call — ${extracted.matched_service || extracted.requested_service || 'General inquiry'}`,
-        body: extracted.call_summary || `Call from ${phone}. ${extracted.pain_points || ''}`,
-        metadata: JSON.stringify({
-          call_log_id: call.id,
-          twilio_call_sid: call.twilio_call_sid || null,
-          processing_generation: procGeneration,
-        }),
-      })
-        .onConflict(db.raw("((metadata ->> 'call_log_id')) WHERE interaction_type = 'call' AND metadata ->> 'call_log_id' IS NOT NULL"))
-        .ignore()
-        .catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
+      // The ownership check above and this insert are not one statement: a
+      // replacement pass can reclaim between them, and a stale pass that
+      // then wins the unique key makes its old customer and summary the
+      // permanent entry (the replacement's correct insert is the one
+      // ignored). The insert is therefore fenced on the processing token
+      // IN the statement — a pass that no longer holds it inserts nothing.
+      await db.raw(
+        `INSERT INTO customer_interactions (customer_id, interaction_type, subject, body, metadata)
+         SELECT ?, 'call', ?, ?, ?::jsonb
+         WHERE EXISTS (SELECT 1 FROM call_log WHERE id = ? AND processing_token = ?)
+         ON CONFLICT ((metadata ->> 'call_log_id')) WHERE interaction_type = 'call' AND metadata ->> 'call_log_id' IS NOT NULL DO NOTHING`,
+        [
+          customerId,
+          `Inbound call — ${extracted.matched_service || extracted.requested_service || 'General inquiry'}`,
+          extracted.call_summary || `Call from ${phone}. ${extracted.pain_points || ''}`,
+          JSON.stringify({ call_log_id: call.id, twilio_call_sid: call.twilio_call_sid || null, processing_generation: procGeneration }),
+          call.id,
+          procToken,
+        ],
+      ).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
     }
 
     // The synopsis and CSR scoring below each await a provider call and then
@@ -15600,11 +15640,13 @@ const CallRecordingProcessor = {
         const pendingParked = parkedDeletesPending(call.metadata);
         if (primaryOwed || pendingParked.length) {
           try {
-            if (primaryOwed) await quarantineCardRecording({ ...call, recording_sid: retrySid }, { source: 'recovery_quarantine_retry' });
-            for (const parkedSid of pendingParked) {
-              if (primaryOwed && parkedSid === retrySid) continue;
-              await quarantineCardRecording({ ...call, recording_sid: parkedSid, recording_url: null }, { source: 'recovery_quarantine_retry' });
-            }
+            // The helper sweeps every parked SID itself; with the primary
+            // complete it is called with no primary recording so an
+            // already-deleted one is not re-deleted.
+            await quarantineCardRecording(
+              primaryOwed ? { ...call, recording_sid: retrySid } : { ...call, recording_sid: null, recording_url: null },
+              { source: 'recovery_quarantine_retry' },
+            );
           } catch (qErr) {
             logger.warn(`[call-proc] recovery quarantine retry failed for ${maskSid(callSid)}: ${qErr.message}`);
           }

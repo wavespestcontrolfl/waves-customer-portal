@@ -278,7 +278,11 @@ router.patch('/commitments/:id', requireCommitmentsEnabled, async (req, res, nex
 router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
-    const customerId = req.body?.customer_id ?? null;
+    // An unlink is an explicit JSON null, never a missing field: a body
+    // that merely parses as {} must not stamp a permanent override and
+    // drop the call's timeline entry.
+    if (!req.body || !Object.prototype.hasOwnProperty.call(req.body, 'customer_id')) return res.status(400).json({ error: 'customer_id is required (a UUID to link, or null to unlink)' });
+    const customerId = req.body.customer_id ?? null;
     if (customerId !== null && !UUID_RE.test(String(customerId))) return res.status(400).json({ error: 'customer_id must be a UUID or null' });
     const call = await db('call_log').where({ id: req.params.id }).first('id', 'customer_id', 'twilio_call_sid');
     if (!call) return res.status(404).json({ error: 'Call not found' });
@@ -374,20 +378,15 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     // delete_pending while a failed Twilio delete is owed to the recovery
     // sweep), so a swallowed failure can never leave card audio reachable.
     const quarantineParked = async () => {
-      const outcome = { deleted: 0, delete_pending: 0 };
-      for (const entry of parked) {
-        if (!entry?.recording_sid) continue;
-        if (entry.recording_url == null && entry.delete_pending !== true) continue;
-        const q = await CallRecordingProcessor.quarantineCardRecording(
-          { ...call, recording_sid: entry.recording_sid, recording_url: entry.recording_url || null },
-          { source: 'adopt_recording_post_quarantine' },
-        ).catch((e) => {
-          logger.error(`[call-recordings] parked recording quarantine delete failed for ${maskSid(entry.recording_sid)}: ${e.message}`);
-          return { twilioDeleted: false };
-        });
-        if (q?.twilioDeleted) outcome.deleted += 1; else outcome.delete_pending += 1;
-      }
-      return outcome;
+      const q = await CallRecordingProcessor.quarantineCardRecording(
+        { ...call, recording_sid: chosen.recording_sid, recording_url: chosen.recording_url || null },
+        { source: 'adopt_recording_post_quarantine' },
+      ).catch((e) => {
+        logger.error(`[call-recordings] parked recording quarantine delete failed for ${maskSid(chosen.recording_sid)}: ${e.message}`);
+        return null;
+      });
+      // The helper sweeps every parked recording, not only the chosen one.
+      return q ? { deleted: q.parked?.deleted ?? 0, delete_pending: q.parked?.pending ?? 0 } : { deleted: 0, delete_pending: parked.length };
     };
     const quarantinedResponse = (res, outcome, prefix) => res.status(409).json({
       error: outcome.delete_pending

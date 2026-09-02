@@ -315,24 +315,48 @@ function parseLooseJsonObject(text) {
   return JSON.parse(raw.slice(start, end + 1));
 }
 
-// Drop anything the transcript does not literally support. Returns the
-// surviving items plus counts for the processing log.
+// The transcript's labelled turns, normalized, by speaker. Null when the
+// transcript carries no Agent:/Caller: labels at all (a flat fallback
+// transcript), in which case only flat grounding is possible.
+const PARTY_SPEAKER = { waves: 'agent', customer: 'caller' };
+function speakerTurns(transcript) {
+  const turns = { agent: [], caller: [] };
+  let labelled = false;
+  for (const line of String(transcript || '').split('\n')) {
+    const m = line.match(/^\s*(agent|caller|customer)\s*:\s*(.*)$/i);
+    if (!m) continue;
+    labelled = true;
+    turns[m[1].toLowerCase() === 'agent' ? 'agent' : 'caller'].push(normalizeForMatch(m[2]));
+  }
+  return labelled ? turns : null;
+}
+
+// Drop anything the transcript does not literally support. A quote proves
+// a PARTY's commitment only when it sits in a turn of that party's speaker
+// (waves → Agent, customer → Caller): matched anywhere in the flat text, a
+// caller's own promise could be filed as an open Waves obligation on a
+// swapped label or a model speaker error. Returns the surviving items plus
+// counts for the processing log.
 function groundModelCommitments(items, transcript) {
   const flat = normalizeForMatch(transcript);
+  const turns = speakerTurns(transcript);
   const kept = [];
   let droppedUngrounded = 0;
   let droppedLowConfidence = 0;
   let droppedMismatched = 0;
   for (const item of Array.isArray(items) ? items : []) {
-    const grounded = (item.evidence || []).filter((e) => {
-      const q = normalizeForMatch(e?.quote);
-      return q.length >= 3 && flat.includes(q);
-    });
-    if (!grounded.length) { droppedUngrounded += 1; continue; }
-    if (typeof item.confidence !== 'number' || item.confidence < MIN_MODEL_CONFIDENCE) { droppedLowConfidence += 1; continue; }
     // The schema already restricts party and kind individually; the pairing
     // is a cross-field rule the schema cannot express.
     if (!kindBelongsToParty(item.party, item.kind)) { droppedMismatched += 1; continue; }
+    const speaker = PARTY_SPEAKER[item.party] || null;
+    const grounded = (item.evidence || []).filter((e) => {
+      const q = normalizeForMatch(e?.quote);
+      if (q.length < 3) return false;
+      if (!turns || !speaker) return flat.includes(q);
+      return turns[speaker].some((turn) => turn.includes(q));
+    });
+    if (!grounded.length) { droppedUngrounded += 1; continue; }
+    if (typeof item.confidence !== 'number' || item.confidence < MIN_MODEL_CONFIDENCE) { droppedLowConfidence += 1; continue; }
     kept.push({
       party: item.party,
       kind: COMMITMENT_KINDS.includes(item.kind) ? item.kind : 'other',
@@ -342,7 +366,9 @@ function groundModelCommitments(items, transcript) {
       due_basis: item.due_at ? 'stated' : null,
       due_text: item.due_text || null,
       confidence: item.confidence,
-      evidence: grounded.map((e) => ({ quote: String(e.quote).trim(), speaker: e.speaker })),
+      // With labelled turns the speaker is the one whose turn carried the
+      // words, not the model's claim.
+      evidence: grounded.map((e) => ({ quote: String(e.quote).trim(), speaker: turns && speaker ? speaker : e.speaker })),
       origin: 'model',
     });
   }
@@ -589,14 +615,15 @@ async function resolveFulfillment(conn, commitment, call) {
       // Direct: the estimate on the lead this call minted (or that carries
       // this call's SID). Association: any later estimate sent to the
       // call's customer inside the window.
-      const leadEstimate = await conn("leads")
+      // Same guard as buildCallOutcomes: no lead key, no lead lookup.
+      const leadEstimate = (leadId || call.twilio_call_sid) ? await conn("leads")
         .where(function scope() {
           if (leadId) this.orWhere("id", leadId);
           if (call.twilio_call_sid) this.orWhere("twilio_call_sid", call.twilio_call_sid);
         })
         .whereNotNull("estimate_id")
         .first("estimate_id")
-        .catch(() => null);
+        .catch(() => null) : null;
       if (leadEstimate?.estimate_id) {
         // The lead can be a REUSED one (an earlier call's), so its estimate
         // must have been sent after THIS call to count as this call's proof.
@@ -823,7 +850,10 @@ async function buildCallOutcomes(conn, call) {
     const meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
     leadId = meta?.lead_id || null;
   } catch { leadId = null; }
-  const lead = await conn('leads')
+  // No lead key at all (an imported call: no stamped lead_id, no SID) means
+  // no lead — an empty scope would read the first lead in the table and
+  // hang its estimates and revenue on this call.
+  const lead = (leadId || call.twilio_call_sid) ? await conn('leads')
     .where(function scope() {
       if (leadId) this.orWhere('id', leadId);
       if (call.twilio_call_sid) this.orWhere('twilio_call_sid', call.twilio_call_sid);
@@ -831,7 +861,7 @@ async function buildCallOutcomes(conn, call) {
     .whereNull('deleted_at')
     .orderBy('created_at', 'asc')
     .first('id', 'status', 'lost_reason', 'customer_id', 'estimate_id', 'converted_at', 'created_at')
-    .catch(() => null);
+    .catch(() => null) : null;
   if (lead) {
     out.lead = { id: lead.id, status: lead.status, lost_reason: lead.lost_reason, converted_at: lead.converted_at, basis: leadId && lead.id === leadId ? 'stamped_on_call' : 'lead_carries_call_sid' };
   }
