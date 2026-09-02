@@ -35,6 +35,8 @@ describe('composeTechNote', () => {
       expect(greeting).toContain('Chris');
       expect(greeting).not.toContain('CHRIS');
       expect(opener).toMatch(/^(Three things|A few things)/);
+      // never promises a return visit — one-time services get the same note
+      expect(opener).not.toMatch(/visit|before I|back/i);
     }
     expect(composeTechNote({ tips: TIPS.slice(0, 1), customerName: 'Pat', seed: 0 }).opener).toMatch(/^(One thing|If you do one thing)/);
     expect(composeTechNote({ tips: TIPS.slice(0, 2), customerName: 'Pat', seed: 0 }).opener).toMatch(/^(Two things|A couple of things)/);
@@ -80,6 +82,17 @@ describe('TechNoteCard', () => {
     expect(render(<TechNoteCard data={payload()} mode="pdf" />).container).toBeEmptyDOMElement();
     cleanup();
     expect(render(<TechNoteCard data={payload()} mode="static" />).container).toBeEmptyDOMElement();
+  });
+
+  it('a failed photo does not leak into the next report rendered by the same mount', () => {
+    const withPhoto = (url) => ({ technician: { name: 'Adam B.', photoUrl: url, initials: 'AB' }, techVisitCard: true });
+    const { rerender } = render(<TechNoteCard data={payload({ ...withPhoto('https://cdn.example/broken.jpg'), serviceRecordId: 'rec-1' })} mode="live" />);
+    const img = document.querySelector('#tech-note img');
+    expect(img).not.toBeNull();
+    img.dispatchEvent(new Event('error'));
+    expect(document.querySelector('#tech-note img')).toBeNull();
+    rerender(<TechNoteCard data={payload({ ...withPhoto('https://cdn.example/adam.jpg'), serviceRecordId: 'rec-2' })} mode="live" />);
+    expect(document.querySelector('#tech-note img')).toHaveAttribute('src', 'https://cdn.example/adam.jpg');
   });
 
   it('shows the technician photo only behind its own gate (techVisitCard), the initial otherwise', () => {

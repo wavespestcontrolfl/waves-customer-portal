@@ -2305,10 +2305,13 @@ const TECH_NOTE_GREETINGS = [
   (first) => `${first},`,
   (first) => `Hello ${first},`,
 ];
+// Service-neutral on purpose: a one-time visit has no "next visit" or
+// "between visits", and the payload carries no general next-visit signal
+// to key on, so no opener may promise a return.
 const TECH_NOTE_OPENERS = {
-  1: ['One thing that will help between visits:', 'If you do one thing before I’m back, make it this:'],
-  2: ['Two things that will do more between visits than anything I can spray:', 'A couple of things I’d take care of before my next visit:'],
-  3: ['Three things that will do more between visits than anything I can spray:', 'A few things I’d take care of before my next visit:'],
+  1: ['One thing that will help more than anything I can spray:', 'If you do one thing this week, make it this:'],
+  2: ['Two things that will do more than anything I can spray:', 'A couple of things I’d take care of soon:'],
+  3: ['Three things that will do more than anything I can spray:', 'A few things I’d take care of soon:'],
 };
 
 export function techNoteSeed(value) {
@@ -2335,7 +2338,11 @@ export function composeTechNote({ tips = [], customerName = '', seed = 0 } = {})
 export function TechNoteCard({ data, mode = 'live' }) {
   // A photo that fails to load falls back to the initial instead of a
   // broken-image glyph beside the name (hook first: it runs on every render).
+  // The page stays mounted across /report/:token navigations, so the failure
+  // resets whenever the report or the photo URL changes.
   const [photoBroken, setPhotoBroken] = useState(false);
+  const photoKey = `${data?.serviceRecordId || data?.token || ''}|${data?.technician?.photoUrl || ''}`;
+  useEffect(() => { setPhotoBroken(false); }, [photoKey]);
   const note = data?.techNote;
   const tips = Array.isArray(note?.tips) ? note.tips.filter((t) => t && t.copy) : [];
   if (mode !== 'live' || !tips.length) return null;

@@ -11288,6 +11288,9 @@ export function CompletionPanel({
   // A restored draft can carry a tip id the library has since retired; the
   // freeze would drop it silently, so prune to the loaded library (and let
   // the count follow) as soon as it lands.
+  // Re-runs on the selection too: a draft restored AFTER the library landed
+  // must be pruned as well (the guard returns the same array when nothing
+  // changes, so this never loops).
   useEffect(() => {
     if (techTips?.available !== true) return;
     const known = new Set((techTips.groups || []).flatMap((g) => (g.tips || []).map((t) => t.id)));
@@ -11295,7 +11298,7 @@ export function CompletionPanel({
       const kept = prev.filter((id) => known.has(id));
       return kept.length === prev.length ? prev : kept;
     });
-  }, [techTips]);
+  }, [techTips, selectedTipIds]);
 
   useEffect(() => {
     let cancelled = false;
