@@ -67,8 +67,20 @@ const CUTOVER_IN_FLIGHT_KEYS = {
   // bed_bug_treatment, one_time_pest_control (#2675 — now typed) and
   // rodent_monitoring (#2673 — repointed, catalog row inactive).
   palm_treatment: { before: 'generic', to: 'palm_injection', note: 'owner 2026-07-12 — repoint to the typed palm form, DEFERRED pending typed-palm closeout-gate parity (#2675 r3)' },
-  lawn_inspection: { before: 'consultation', to: null, note: 'owner 2026-07-12 — tie to the lawn-assessment experience; customers get a report (typed target TBD)' },
 };
+
+// Owner 2026-09-02: the Waves Assessment (lawn_inspection) visit's customer
+// deliverable IS the tech Lawn Diagnostic report (tech-lawn-diagnostic.js →
+// the tokenized public-lawn-diagnostic page) — an assessment experience, not
+// a service report. The typed-target question open since 2026-07-12 is
+// closed: no generic or typed Service Report for this key. Enforced end
+// state is the same consultation posture billing riders use (completion
+// mode 'internal_only', no pointer): the only posture the runtime honors
+// for non-typed suppression, keeping the service_records audit row while
+// suppressing the report token and completion comms.
+const ASSESSMENT_EXPERIENCE_KEYS = [
+  'lawn_inspection',
+];
 
 // Owner 2026-07-12: scheduled as services, but billing riders — invoice line
 // + post-service report REFERENCE only. No standalone completion report, and
@@ -165,6 +177,7 @@ const ALL_LISTS = {
   pending_compliance_review: PENDING_COMPLIANCE_REVIEW_KEYS,
   cutover_in_flight: Object.keys(CUTOVER_IN_FLIGHT_KEYS),
   billing_rider: BILLING_RIDER_KEYS,
+  assessment_experience: ASSESSMENT_EXPERIENCE_KEYS,
   recurring_generic_by_design: RECURRING_GENERIC_BY_DESIGN,
   one_time_generic_by_design: ONE_TIME_GENERIC_BY_DESIGN,
 };
@@ -244,18 +257,19 @@ function classifyCatalogRow(row) {
     }
     return { lane, flags };
   }
-  if (lane === 'billing_rider') {
-    // Riders must not run their own customer report lane. The ONLY posture
-    // the runtime honors for non-typed suppression is completion_mode
-    // 'internal_only' (resolveCompletionDeliveryPosture ignores
-    // delivery_mode on generic profiles — Codex r2), so anything else is a
-    // live report lane the owner ruled out.
+  if (lane === 'billing_rider' || lane === 'assessment_experience') {
+    // Neither may run its own customer report lane (the rider is a billing
+    // reference; the assessment's report is the Lawn Diagnostic). The ONLY
+    // posture the runtime honors for non-typed suppression is
+    // completion_mode 'internal_only' (resolveCompletionDeliveryPosture
+    // ignores delivery_mode on generic profiles — Codex r2), so anything
+    // else is a live report lane the owner ruled out.
     if (!hasProfile) {
-      flags.push('billing_rider_missing_profile:falls_through_to_generic_report');
+      flags.push(`${lane}_missing_profile:falls_through_to_generic_report`);
     } else if (row.project_type) {
-      flags.push('billing_rider_has_typed_pointer');
+      flags.push(`${lane}_has_typed_pointer`);
     } else if (row.completion_mode !== 'internal_only') {
-      flags.push(`billing_rider_report_lane_active:${row.completion_mode || 'none'}_expected_internal_only`);
+      flags.push(`${lane}_report_lane_active:${row.completion_mode || 'none'}_expected_internal_only`);
     }
     return { lane, flags };
   }
@@ -311,6 +325,7 @@ module.exports = {
   PENDING_COMPLIANCE_REVIEW_KEYS,
   CUTOVER_IN_FLIGHT_KEYS,
   BILLING_RIDER_KEYS,
+  ASSESSMENT_EXPERIENCE_KEYS,
   RECURRING_GENERIC_BY_DESIGN,
   ALL_LISTS,
   classifyCatalogRow,
