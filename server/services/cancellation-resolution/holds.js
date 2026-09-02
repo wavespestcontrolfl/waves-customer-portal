@@ -24,6 +24,7 @@ const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { CANCELLABLE_STATUSES } = require('../cancellation-eligibility');
 const { lockCustomerComms } = require('../../utils/customer-comms-lock');
+const { resolveBillingLane } = require('../billing-lane');
 
 const HOLDABLE_FAMILIES = ['lawn_care', 'mosquito', 'tree_shrub'];
 
@@ -127,7 +128,6 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
   // monthly_membership lane; the old rate>0 shortcut demanded attribution
   // for prepay/per-visit rows the dues cron never bills (Codex #3669 r3 P2).
   const customer = await db('customers').where({ id: customerId }).first('monthly_rate', 'billing_mode', 'waveguard_tier', 'tier_protected_until');
-  const { resolveBillingLane } = require('../billing-lane');
   const monthlyLane = resolveBillingLane(customer).mode === 'monthly_membership';
   let heldRate = null;
   if (monthlyLane) {
@@ -170,8 +170,23 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): a hold rewrites
       // the plan ledger and the customer's rate — the writes the scoped
-      // cancellation wind-down serializes on under the same key.
+      // cancellation wind-down serializes on under the same key. The money
+      // facts are RE-READ under the lock: the pre-lock reads above only
+      // decided eligibility, and a wind-down or ledger writer committing
+      // during the visit moves would otherwise leave the hold recording
+      // (and later restoring) a stale rate. A family that lost its
+      // component in the gap fails the hold (rolled back, visits
+      // compensated) instead of suspending billing it can no longer prove.
       await lockCustomerComms(trx, customerId);
+      const live = await trx('customers').where({ id: customerId }).first('monthly_rate', 'billing_mode', 'waveguard_tier', 'tier_protected_until');
+      if (!live) throw new Error('customer vanished before the hold could be written');
+      if (resolveBillingLane(live).mode === 'monthly_membership') {
+        const liveComponent = await trx('customer_plan_rates').where({ customer_id: customerId, family_key: familyKey }).first('monthly_rate');
+        if (!liveComponent) throw new Error(`${familyKey} lost its monthly component before the hold could be written`);
+        heldRate = Number(liveComponent.monthly_rate) || 0;
+      } else {
+        heldRate = null;
+      }
       const [hold] = await trx('plan_holds').insert({
         customer_id: customerId,
         cancellation_case_id: caseId || null,
@@ -190,8 +205,8 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
         const scalar = Math.round(rows.reduce((sum, r) => sum + (Number(r.monthly_rate) || 0), 0) * 100) / 100;
         await trx('customers').where({ id: customerId }).update({ monthly_rate: scalar, updated_at: new Date() });
       }
-      const protectedUntil = customer?.tier_protected_until && String(customer.tier_protected_until).slice(0, 10) > resume
-        ? customer.tier_protected_until
+      const protectedUntil = live.tier_protected_until && String(live.tier_protected_until).slice(0, 10) > resume
+        ? live.tier_protected_until
         : resume;
       await trx('customers').where({ id: customerId }).update({ tier_protected_until: protectedUntil, updated_at: new Date() });
     });
@@ -224,13 +239,18 @@ async function cancelHold(holdId, { compensateVisits = true } = {}) {
   if (!hold || hold.status !== 'active') return false;
   await db.transaction(async (trx) => {
     await lockCustomerComms(trx, hold.customer_id); // rung 6 — see startHold
+    // The saved rate is re-read under the lock: a scoped wind-down reprices
+    // plan_holds.held_monthly_rate for a held family, and restoring the
+    // pre-lock copy would resurrect the pre-demotion price.
+    const live = await trx('plan_holds').where({ id: holdId }).first('status', 'held_monthly_rate');
+    if (!live || live.status !== 'active') return;
     const claimed = await trx('plan_holds').where({ id: holdId, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
     if (!claimed) return;
-    if (hold.held_monthly_rate != null) {
+    if (live.held_monthly_rate != null) {
       const component = await trx('customer_plan_rates').where({ customer_id: hold.customer_id, family_key: hold.family_key }).first('source');
       if (component && component.source === 'plan_hold') {
         await trx('customer_plan_rates').where({ customer_id: hold.customer_id, family_key: hold.family_key })
-          .update({ monthly_rate: Number(hold.held_monthly_rate), source: 'plan_hold_revert', effective_at: new Date(), updated_at: new Date() });
+          .update({ monthly_rate: Number(live.held_monthly_rate), source: 'plan_hold_revert', effective_at: new Date(), updated_at: new Date() });
         const rows = await trx('customer_plan_rates').where({ customer_id: hold.customer_id }).select('monthly_rate');
         const scalar = Math.round(rows.reduce((sum, r) => sum + (Number(r.monthly_rate) || 0), 0) * 100) / 100;
         await trx('customers').where({ id: hold.customer_id }).update({ monthly_rate: scalar, updated_at: new Date() });
@@ -386,11 +406,23 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
       }
       await db.transaction(async (trx) => {
         await lockCustomerComms(trx, hold.customer_id); // rung 6 — see startHold
+        // Re-read under the lock (see cancelHold): the wind-down reprices a
+        // held family's saved rate, and the component may have left
+        // plan_hold ownership since the obsolete check above.
+        const live = await trx('plan_holds').where({ id: hold.id }).first('status', 'held_monthly_rate');
+        if (!live || live.status !== 'active') return;
+        if (live.held_monthly_rate != null) {
+          const liveComponent = await trx('customer_plan_rates').where({ customer_id: hold.customer_id, family_key: hold.family_key }).first('source');
+          if (!liveComponent || liveComponent.source !== 'plan_hold') {
+            await trx('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
+            return;
+          }
+        }
         const claimed = await trx('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'resumed', resumed_at: new Date(), updated_at: new Date() });
         if (!claimed) return;
-        if (hold.held_monthly_rate != null) {
+        if (live.held_monthly_rate != null) {
           await trx('customer_plan_rates').where({ customer_id: hold.customer_id, family_key: hold.family_key })
-            .update({ monthly_rate: Number(hold.held_monthly_rate), source: 'plan_hold_resume', effective_at: new Date(), updated_at: new Date() });
+            .update({ monthly_rate: Number(live.held_monthly_rate), source: 'plan_hold_resume', effective_at: new Date(), updated_at: new Date() });
           const rows = await trx('customer_plan_rates').where({ customer_id: hold.customer_id }).select('monthly_rate');
           const scalar = Math.round(rows.reduce((s, r) => s + (Number(r.monthly_rate) || 0), 0) * 100) / 100;
           await trx('customers').where({ id: hold.customer_id }).update({ monthly_rate: scalar, updated_at: new Date() });

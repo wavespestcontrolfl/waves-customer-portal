@@ -378,9 +378,22 @@ describe('scoped wind-down under the rung-6 writer lock (#3666 r34 — the prici
       components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 }, { customer_id: 'c1', family_key: 'pest_control', monthly_rate: 60 }],
       visits: [visitRow('lawn_care'), visitRow('pest_control')],
     });
-    require('../models/db').raw.mockClear();
-    const res = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) });
-    expect(res.holdId).toBeTruthy();
+    const db = require('../models/db');
+    db.raw.mockClear();
+    // A ledger writer commits just before the hold's transaction opens: the
+    // rate the hold records must be the one read UNDER the lock, not the
+    // eligibility read from before the visit moves.
+    const openTrx = db.transaction;
+    db.transaction = async (cb) => {
+      mockState.tables.customer_plan_rates.find((c) => c.family_key === 'lawn_care').monthly_rate = 75;
+      return openTrx(cb);
+    };
+    try {
+      const res = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) });
+      expect(res.holdId).toBeTruthy();
+    } finally { db.transaction = openTrx; }
     expect(lockCalls()).toContainEqual(['customer-comms:c1']);
+    expect(Number(mockState.tables.plan_holds[0].held_monthly_rate)).toBe(75);
+    expect(Number(mockState.tables.customers[0].monthly_rate)).toBe(60);
   });
 });

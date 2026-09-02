@@ -4652,8 +4652,12 @@ const EstimateConverter = {
       && Math.round(ledgerAdvisoryScalar * 100) !== Math.round(convertedMonthlyRate * 100)) {
       try {
         const PlanRateLedger = require('./plan-rate-ledger');
-        await database.transaction((sp) => PlanRateLedger
-          .resetLedgerToScalar(sp, customerId, convertedMonthlyRate, { source: 'gate_off_divergence' }));
+        await database.transaction(async (sp) => {
+          // Rung 6 when this opens the outermost transaction (standalone
+          // path); a caller transaction already holds it (taken above).
+          if (!database.isTransaction) await lockCustomerComms(sp, customerId);
+          return PlanRateLedger.resetLedgerToScalar(sp, customerId, convertedMonthlyRate, { source: 'gate_off_divergence' });
+        });
       } catch (divergenceErr) {
         logger.warn(`[estimate-converter] gate-off ledger divergence reset failed for customer ${customerId}: ${divergenceErr.message}`);
       }
