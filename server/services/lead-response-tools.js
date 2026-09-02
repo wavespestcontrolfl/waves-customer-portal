@@ -160,7 +160,11 @@ async function executeLeadTool(toolName, input) {
         for (let offset = 0; ; offset += PAGE) {
           const rows = await baseQuery().orderBy('created_at', 'desc').offset(offset).limit(PAGE);
           for (const row of rows) {
-            if (viewable.length < LIMIT && await customerCanOpen(row)) viewable.push(row);
+            // Rows past the cap are neither evaluated nor counted (uncapped
+            // codex P1 r36): the hidden count reports only rows the
+            // customer cannot open, never valid estimates beyond the limit.
+            if (viewable.length >= LIMIT) break;
+            if (await customerCanOpen(row)) viewable.push(row);
             else hiddenCount += 1;
           }
           if (viewable.length >= LIMIT || rows.length < PAGE) break;

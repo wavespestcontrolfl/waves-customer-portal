@@ -98,11 +98,19 @@ describe('check_existing_estimates viewability', () => {
     expect(out.unviewableEstimates).toBe(15);
   });
 
-  test('stops at five viewable rows', async () => {
+  test('stops at five viewable rows; valid rows beyond the cap are never counted as hidden', async () => {
     pages.push(Array.from({ length: 15 }, (_, i) => row({ id: `v${i}` })));
     const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' });
     expect(out.estimates).toHaveLength(5);
+    expect(out.unviewableEstimates).toBeUndefined();
     expect(builder.limit).toHaveBeenCalledTimes(1);
+  });
+
+  test('the hidden count reports only rows evaluated as not openable', async () => {
+    pages.push([row({ id: 'e-expired', status: 'expired' }), ...Array.from({ length: 14 }, (_, i) => row({ id: `v${i}` }))]);
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' });
+    expect(out.estimates.map((e) => e.id)).toEqual(['v0', 'v1', 'v2', 'v3', 'v4']);
+    expect(out.unviewableEstimates).toBe(1);
   });
 
   test('gate on: a viewable row the verdict refuses lists without price, token, or URL', async () => {
