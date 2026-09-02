@@ -536,13 +536,29 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
     // P1). A delete that succeeded clears a matching saved SID.
     const deleteIncomplete = !!sid && !twilioDeleted;
     const nextMeta = { ...meta, pan_detected: true, quarantine_source: meta.quarantine_source || source };
-    if (deleteIncomplete) nextMeta.quarantine_recording_sid = sid;
-    else if (twilioDeleted && nextMeta.quarantine_recording_sid === sid) delete nextMeta.quarantine_recording_sid;
-    // Complete only while NO recording's delete is still owed: a saved retry
-    // SID for another recording (an earlier failure) keeps the row
-    // incomplete even when this delete succeeded, so recovery still retries
-    // that SID instead of reading one success as the whole call's.
-    const owed = !!nextMeta.quarantine_recording_sid;
+    // EVERY owed SID is kept (quarantine_owed_sids): the webhook quarantines
+    // an incoming recording and then the row's own, and a second failure
+    // must not overwrite the first — the incoming one sits in no metadata
+    // list, so this set is the only place recovery can find it.
+    // quarantine_recording_sid stays the first owed SID (the legacy single
+    // slot the provenance merge and older rows carry).
+    const owedSids = new Set([
+      ...(Array.isArray(meta.quarantine_owed_sids) ? meta.quarantine_owed_sids : []),
+      ...(meta.quarantine_recording_sid ? [meta.quarantine_recording_sid] : []),
+    ]);
+    if (deleteIncomplete) owedSids.add(sid);
+    else if (twilioDeleted && sid) owedSids.delete(sid);
+    if (owedSids.size) {
+      nextMeta.quarantine_owed_sids = [...owedSids];
+      nextMeta.quarantine_recording_sid = [...owedSids][0];
+    } else {
+      delete nextMeta.quarantine_owed_sids;
+      delete nextMeta.quarantine_recording_sid;
+    }
+    // Complete only while NO recording's delete is still owed, so recovery
+    // keeps retrying every owed SID instead of reading one success as the
+    // whole call's.
+    const owed = owedSids.size > 0;
     nextMeta.recording_quarantined = !owed && (twilioDeleted || meta.recording_quarantined === true);
     await db('call_log').where({ id: call.id }).update({
       recording_url: null,
@@ -650,6 +666,7 @@ async function withPanStamps(callId, metadata) {
       // leaves recovery with nothing to retry a failed Twilio delete
       // against, and dropping pan_notified re-fires the office alert.
       if (prior.quarantine_recording_sid && !out.quarantine_recording_sid) out.quarantine_recording_sid = prior.quarantine_recording_sid;
+      if (Array.isArray(prior.quarantine_owed_sids) && prior.quarantine_owed_sids.length && !out.quarantine_owed_sids) out.quarantine_owed_sids = prior.quarantine_owed_sids;
       if (prior.pan_notified === true) out.pan_notified = true;
     }
   } catch (err) {
@@ -15627,15 +15644,22 @@ const CallRecordingProcessor = {
         // Parked recordings whose delete is still owed (a multi-recording
         // call can have more than one): each is its own retry.
         const pendingParked = parkedDeletesPending(call.metadata);
-        if (primaryOwed || pendingParked.length) {
+        // Owed SIDs that sit in no metadata list (an incoming recording the
+        // webhook quarantined instead of parking): each is its own retry.
+        const owedUnlisted = (Array.isArray(meta.quarantine_owed_sids) ? meta.quarantine_owed_sids : [])
+          .filter((owedSid) => owedSid && owedSid !== retrySid && !pendingParked.includes(owedSid));
+        if (primaryOwed || pendingParked.length || owedUnlisted.length) {
           try {
-            // The helper sweeps every parked SID itself; with the primary
+            // The helper sweeps every listed SID itself; with the primary
             // complete it is called with no primary recording so an
             // already-deleted one is not re-deleted.
             await quarantineCardRecording(
               primaryOwed ? { ...call, recording_sid: retrySid } : { ...call, recording_sid: null, recording_url: null },
               { source: 'recovery_quarantine_retry' },
             );
+            for (const owedSid of owedUnlisted) {
+              await quarantineCardRecording({ ...call, recording_sid: owedSid, recording_url: null }, { source: 'recovery_quarantine_retry' });
+            }
           } catch (qErr) {
             logger.warn(`[call-proc] recovery quarantine retry failed for ${maskSid(callSid)}: ${qErr.message}`);
           }

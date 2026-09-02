@@ -234,6 +234,35 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(JSON.parse(tomb[1][1])).toMatchObject({ recording_url: null, delete_pending: false });
   });
 
+  test('two failed deletes on one call are BOTH owed: the second does not overwrite the first, and recovery retries the unlisted one', async () => {
+    const processor = require('../services/call-recording-processor');
+    const recordingsSpy = require('twilio').__recordingsSpy;
+    const INCOMING = 'REincoming0000000000000000000009';
+    const CURRENT = 'REcurrent00000000000000000000009';
+    const failing = () => ({ remove: async () => { throw Object.assign(new Error('twilio 503'), { status: 503 }); } });
+    recordingsSpy.mockImplementationOnce(failing).mockImplementationOnce(failing);
+    db.__builder.update.mockClear();
+    db.__state.call = { id: 'c-double', recording_url: 'https://api.twilio.com/cur.mp3', recording_sid: CURRENT, metadata: {}, transcription_metadata: { pan_detected: true, pan_notified: true } };
+    // The webhook's order: the incoming recording first, then the row's own.
+    await processor.quarantineCardRecording({ ...db.__state.call, recording_sid: INCOMING, recording_url: 'https://api.twilio.com/in.mp3' }, { source: 'recording_status_post_quarantine' });
+    let stamp = db.__builder.update.mock.calls.map((c) => c[0]).filter((patch) => patch.transcription_metadata).pop();
+    db.__state.call.transcription_metadata = JSON.parse(stamp.transcription_metadata);
+    await processor.quarantineCardRecording(db.__state.call, { source: 'recording_status_post_quarantine' });
+    stamp = db.__builder.update.mock.calls.map((c) => c[0]).filter((patch) => patch.transcription_metadata).pop();
+    const meta = JSON.parse(stamp.transcription_metadata);
+    expect(meta.recording_quarantined).toBe(false);
+    expect(meta.quarantine_owed_sids.sort()).toEqual([CURRENT, INCOMING].sort());
+    // Recovery: the primary retry covers CURRENT (the saved single slot), and the
+    // unlisted INCOMING gets its own delete.
+    recordingsSpy.mockClear();
+    db.__state.call.transcription_metadata = { ...meta, quarantine_recording_sid: CURRENT };
+    db.__state.call.recording_url = null;
+    const out = await processor.recoverRecordingForCall('CAtest0000000000000000000000000010');
+    expect(out).toMatchObject({ skipped: true, reason: 'pan_quarantined' });
+    expect(recordingsSpy).toHaveBeenCalledWith(CURRENT);
+    expect(recordingsSpy).toHaveBeenCalledWith(INCOMING);
+  });
+
   test('an unstamped call still proceeds into the Twilio lookup', async () => {
     const processor = require('../services/call-recording-processor');
     db.__state.call = { id: 'c-clean', recording_url: null, transcription_metadata: null };
