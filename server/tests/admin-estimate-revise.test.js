@@ -1129,3 +1129,27 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
     expect(quiet.queried).toEqual([]);
   });
 });
+
+describe('null / unknown pricing authority counts as unverified in the live-link and grouped-send guards (pre-push codex P1)', () => {
+  const { writeStampsUnverifiedPricing, fallbackRevisionGroupIds, assertNoFallbackRevisionOfLiveLink } = require('../services/admin-estimate-persistence');
+  beforeEach(() => { mockGateState.sendRequiresServerPricing = true; });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('the stamp predicate: NULL (quote-required), CLIENT_FALLBACK and unknown are unverified; SERVER is not; an absent key is not a pricing write', () => {
+    expect(writeStampsUnverifiedPricing({ pricing_authority: null })).toBe(true);
+    expect(writeStampsUnverifiedPricing({ pricing_authority: 'CLIENT_FALLBACK' })).toBe(true);
+    expect(writeStampsUnverifiedPricing({ pricing_authority: 'weird' })).toBe(true);
+    expect(writeStampsUnverifiedPricing({ pricing_authority: 'SERVER' })).toBe(false);
+    expect(writeStampsUnverifiedPricing({ address: 'x' })).toBe(false);
+    expect(writeStampsUnverifiedPricing(null)).toBe(false);
+  });
+
+  test('a NULL-authority revision of a live link is refused like a fallback one; the grouped guards lock its groups', () => {
+    expect(() => assertNoFallbackRevisionOfLiveLink({ sent_at: '2026-07-10T11:59:00Z' }, { pricing_authority: null })).toThrow(/already with the customer/i);
+    expect(() => assertNoFallbackRevisionOfLiveLink({ status: 'scheduled' }, { pricing_authority: null })).toThrow(/scheduled to send/i);
+    expect(() => assertNoFallbackRevisionOfLiveLink({ sent_at: '2026-07-10T11:59:00Z' }, { pricing_authority: 'SERVER' })).not.toThrow();
+    expect(fallbackRevisionGroupIds({ estimate_group_id: 'grp-a' }, { pricing_authority: null, estimate_group_id: 'grp-b' })).toEqual(['grp-a', 'grp-b']);
+    expect(fallbackRevisionGroupIds({ estimate_group_id: 'grp-a' }, { pricing_authority: 'SERVER' })).toEqual([]);
+    expect(fallbackRevisionGroupIds({ estimate_group_id: 'grp-a' }, { address: 'no pricing write' })).toEqual([]);
+  });
+});

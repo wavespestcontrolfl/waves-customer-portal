@@ -74,6 +74,7 @@ const {
   assertAutoSendPricingAuthority,
   notifyPricingFallbackAfterCommit,
   shadowLogFallbackDelivery,
+  GATED_SEND_AUTHORITY_SQL,
 } = adminEstimatesRouter._internals;
 const { createOrReuseAdminEstimate, reviseAdminEstimate } = require('../services/admin-estimate-persistence');
 const { notifyAdmin } = require('../services/notification-service');
@@ -191,6 +192,15 @@ describe('shadowLogFallbackDelivery — one would-block per delivery attempt, ga
     mockGateState.sendRequiresServerPricing = true;
     expect(shadowLogFallbackDelivery(fallbackDraft())).toBe(false);
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringMatching(/shadow/));
+  });
+});
+
+describe('GATED_SEND_AUTHORITY_SQL — the gated manual claims re-assert the WHOLE verdict in SQL on the row as it is at claim time (pre-push codex P0)', () => {
+  it('is SERVER, or an authored proposal by provenance; a constant with no placeholders', () => {
+    expect(GATED_SEND_AUTHORITY_SQL).toContain("UPPER(pricing_authority) = 'SERVER'");
+    expect(GATED_SEND_AUTHORITY_SQL).toContain("UPPER(COALESCE(category, '')) = 'COMMERCIAL'");
+    expect(GATED_SEND_AUTHORITY_SQL).toContain("(estimate_data->'proposal'->>'enabled')::boolean");
+    expect(GATED_SEND_AUTHORITY_SQL).not.toContain('?');
   });
 });
 

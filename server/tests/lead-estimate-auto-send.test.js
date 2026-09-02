@@ -427,10 +427,27 @@ describe('updateAutoSendMetadata — a pricing-authority block is written only w
     expect(blocked).toBeUndefined();
   });
 
-  test('without a guard the block write is unconditional, as before', async () => {
+  test('without a guard the metadata write is unconditional, as before', async () => {
     const { database, rawGuards } = recordingDatabase();
     const blocked = await updateAutoSendMetadata(database, { id: 'estimate-1', status: 'draft' }, { blockedAt: 'now', blockedReason: 'quote_required' }, 'draft', {});
     expect(rawGuards).toEqual([]);
     expect(blocked?.id).toBe('estimate-1');
+  });
+
+  test('a null status writes NO status column — a block never moves a row a concurrent send carried past the stale candidate status (pre-push codex P1)', async () => {
+    let written = null;
+    const chain = {
+      where: () => chain,
+      whereNull: () => chain,
+      whereRaw: () => chain,
+      update: (p) => { written = p; return chain; },
+      returning: async () => [{ id: 'estimate-1', status: 'sending' }],
+    };
+    const database = () => chain;
+    database.fn = { now: () => 'NOW()' };
+    database.raw = (sql) => sql;
+    await updateAutoSendMetadata(database, { id: 'estimate-1', status: 'draft' }, { blockedAt: 'now', blockedReason: 'quote_required' }, null, {});
+    expect(written).not.toHaveProperty('status');
+    expect(written).toHaveProperty('estimate_data');
   });
 });

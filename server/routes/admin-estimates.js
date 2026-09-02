@@ -985,6 +985,10 @@ router.post('/:id/send', async (req, res, next) => {
         if (blockingSibling) return { blockingSibling };
         const claimed = await trx('estimates')
           .where({ id: estimate.id })
+          // Same observed-membership pin as the immediate claim (GH codex
+          // P1 r8): the sibling preflight above judged THIS group's rows —
+          // a move to another group since the read must lose the race.
+          .where({ estimate_group_id: estimate.estimate_group_id || null })
           .whereNull('price_locked_at')
           // Archived rows can never re-enter the send pipeline (codex P0,
           // PR #3304): a stale scheduling request racing an invalidation
@@ -1041,6 +1045,13 @@ router.post('/:id/send', async (req, res, next) => {
     if (!estimate.estimate_group_id) {
       const claimed = await db('estimates')
         .where({ id: estimate.id })
+        // Claim ONLY the membership this send observed (GH codex P1 r8): a
+        // SERVER revision grouping this row between the read above and this
+        // claim would otherwise hand sendEstimateNow a stale ungrouped
+        // object that skips the group claim while the public link renders
+        // every viewable sibling — a fallback sibling included. Zero rows →
+        // 409, the refreshed retry runs the grouped path.
+        .whereNull('estimate_group_id')
         .whereNull('price_locked_at')
         // An ARCHIVED row is never claimable for send (codex P0, PR
         // #3304): linkage invalidation archives stale wrong-lead drafts
@@ -1503,7 +1514,10 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
     let anchorClaimedInLock = false;
     if (String(estimate.status || '') !== 'sending') {
       const anchorClaimed = await trx('estimates')
-        .where({ id: estimate.id, status: estimate.status })
+        // Observed-membership pin (GH codex P1 r8): the siblings enumerated
+        // below are THIS group's; an anchor moved elsewhere since the read
+        // must not be published beside them.
+        .where({ id: estimate.id, status: estimate.status, estimate_group_id: estimate.estimate_group_id })
         .whereNull('price_locked_at')
         // Same archive guard as the standalone claim (codex P0, PR #3304).
         .whereNull('archived_at')
