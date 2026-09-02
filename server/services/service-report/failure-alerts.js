@@ -131,6 +131,10 @@ async function alertServiceReportTokenMintFailed({ serviceRecordId, customerId, 
     logger.warn(`[service-report-alerts] report token mint failed for record=${serviceRecordId || 'unknown'}`);
 
     return await trigger('service_report_token_mint_failed', {
+      // customerId lets triggerNotification's internal-test-account gate
+      // run; serviceRecordId keys the per-record push tag (pushTagFor).
+      customerId: context.customerId,
+      serviceRecordId,
       customerName: context.customerName,
       serviceLabel: context.serviceLabel,
       errorMessage,
@@ -156,6 +160,8 @@ async function alertCompletionSmsFailed({ serviceRecordId, customerId, smsType, 
     logger.warn(`[service-report-alerts] completion SMS failed for record=${serviceRecordId || 'unknown'} class=${errorClass || 'unknown'}`);
 
     return await trigger('completion_sms_failed', {
+      customerId: context.customerId,
+      serviceRecordId,
       customerName: context.customerName,
       serviceLabel: context.serviceLabel,
       smsType: smsType || null,

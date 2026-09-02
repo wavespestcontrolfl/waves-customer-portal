@@ -141,6 +141,8 @@ describe('service report failure alerts', () => {
     }, { knex, trigger });
 
     expect(trigger).toHaveBeenCalledWith('service_report_token_mint_failed', expect.objectContaining({
+      customerId: 'cust-3',
+      serviceRecordId: 'svc-3',
       customerName: 'Rae Kim',
       serviceLabel: 'Lawn Care · 2026-09-01',
       link: '/admin/customers?customerId=cust-3',
@@ -173,6 +175,8 @@ describe('service report failure alerts', () => {
     }, { knex, trigger });
 
     expect(trigger).toHaveBeenCalledWith('completion_sms_failed', expect.objectContaining({
+      customerId: 'cust-4',
+      serviceRecordId: 'svc-4',
       customerName: 'Ben Ortiz',
       smsType: 'service_report_v1',
       errorClass: 'TWILIO_30007',
@@ -215,6 +219,14 @@ describe('service report failure alerts', () => {
     expect(builtSms.body).toContain('Ben Ortiz');
     expect(builtSms.body).toContain('TWILIO_30007');
     expect(builtSms.body).toContain('service_report_v1');
+  });
+
+  test('push tags are per service record so concurrent failures do not replace each other', () => {
+    const { pushTagFor } = require('../services/notification-triggers').__private;
+    expect(pushTagFor('completion_sms_failed', { serviceRecordId: 'svc-a' }))
+      .not.toBe(pushTagFor('completion_sms_failed', { serviceRecordId: 'svc-b' }));
+    expect(pushTagFor('service_report_token_mint_failed', { serviceRecordId: 'svc-a' }))
+      .toBe('waves-service_report_token_mint_failed-svc-a');
   });
 
   test('sanitizeErrorText redacts emails and long tokens and caps length', () => {

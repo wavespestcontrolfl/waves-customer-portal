@@ -12335,12 +12335,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // null-guards an empty url). Withhold the text instead. Marked 'failed'
       // — the existing one-shot vocabulary (closeout-status reads it as
       // completion_sms_failed, and it is NOT completionSmsAlreadyHandled, so a
-      // re-completion after the mint recovers sends normally). This branch
-      // is the only place the token-mint bell fires: it is reached only when
-      // a text WOULD have gone out (phone on file, not suppressed, not already
-      // handled), so the bell always corresponds to a real withheld text —
-      // same dedupe/transport as the email and PDF lane alerts. No separate
-      // SMS-failure bell on this path.
+      // resumed completion after the mint recovers sends normally). This
+      // branch is the only place the token-mint bell fires: it is reached only
+      // when a text WOULD have gone out (phone on file, not suppressed, not
+      // already handled), so the bell always corresponds to a real withheld
+      // text — same dedupe/transport as the email and PDF lane alerts. No
+      // separate SMS-failure bell on this path.
       const withheldDelta = {
         completionSmsStatus: 'failed',
         completionSmsError: 'report token unavailable — completion text withheld',
@@ -12357,6 +12357,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         serviceRecordId: record.id,
         customerId: svc.customer_id,
         error: reportTokenMintError || 'report token unavailable',
+      });
+      // The withheld text must stay RECOVERABLE (GitHub Codex r2 P1): if this
+      // handler ran on to markCompletionAttemptSucceeded, every later submit
+      // would replay the stored response / 409 service_already_completed and
+      // never re-enter this lane, and there is no manual report-send action.
+      // So exit through the same release-for-resume + 503 the required-mint
+      // and manual-billing alert failures use: the service_record is already
+      // committed, the attempt goes back to side_effects_pending, and the
+      // tech's retry re-enters here — ensureReportToken runs again and, once
+      // it succeeds, the 'failed' marker above is not completionSmsAlreadyHandled
+      // so the report text sends normally.
+      const withheldErr = reportTokenMintError || new Error('report token unavailable');
+      const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, withheldErr);
+      if (!released) {
+        logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+      }
+      return res.status(503).json({
+        error: released
+          ? 'The service report link could not be created, so the completion text was NOT sent — the closeout is saved but NOT finalized. Retry the closeout.'
+          : `The service report link could not be created, so the completion text was NOT sent — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+        code: 'service_report_token_mint_failed',
+        ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+        serviceRecordId: record.id,
       });
     } else if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit) {
       try {
@@ -12835,7 +12858,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 serviceRecordId: record.id,
                 customerId: svc.customer_id,
                 smsType: sentSmsType,
-                errorClass: smsResult.code || 'provider_failure',
+                // sendCustomerMessage wraps every provider failure as the
+                // generic code PROVIDER_FAILURE and carries the actionable
+                // Twilio classification (21610, 21614, 20429 …) in
+                // providerErrorCode — same precedence as dropped-call-sms.js.
+                errorClass: smsResult.providerErrorCode || smsResult.code || 'provider_failure',
                 error: smsResult.reason || smsResult.code || 'SMS send failed',
               });
             }
@@ -12913,14 +12940,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         record.structured_notes = failedNotes;
         await markBundledReviewFailed();
         logger.error(`Completion SMS failed: ${e.message}`);
-        const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
-        await alertCompletionSmsFailed({
-          serviceRecordId: record.id,
-          customerId: svc.customer_id,
-          smsType: null,
-          errorClass: e.code || e.name || 'exception',
-          error: e,
-        });
+        // sendCustomerMessage attaches providerOutcome to the error it throws
+        // when Twilio ACCEPTED the message but the audit row failed to
+        // persist (send-customer-message.js auditErr). That text most likely
+        // reached the customer — a "not delivered, re-send it" bell would
+        // direct a duplicate completion / pay-link text, so it is logged as
+        // an accepted-but-unaudited handoff instead (GitHub Codex r2 P1).
+        if (e.providerOutcome?.sent === true) {
+          logger.warn(`[dispatch] Completion SMS for service_record ${record.id} was accepted by the provider (${e.providerOutcome.providerMessageId || 'no message id'}) but its audit failed — no failure bell, do not re-send`);
+        } else {
+          const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
+          await alertCompletionSmsFailed({
+            serviceRecordId: record.id,
+            customerId: svc.customer_id,
+            smsType: null,
+            errorClass: e.code || e.name || 'exception',
+            error: e,
+          });
+        }
       }
     } else if (effectiveSendCompletionSms && svc.cust_phone && recapSmsAlreadySentForVisit) {
       // Record the skip in structured_notes so the audit trail (and the

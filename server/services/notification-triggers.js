@@ -341,7 +341,7 @@ const TRIGGER_REGISTRY = {
     group: 'Alerts',
     build: (p) => ({
       title: 'Service report link unavailable — completion text withheld',
-      body: `${p.customerName || 'A customer'}'s service report link could not be created${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.errorMessage ? ` — ${p.errorMessage}` : ''}. No "report ready" text was sent; re-complete or re-send from the customer's service.`,
+      body: `${p.customerName || 'A customer'}'s service report link could not be created${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.errorMessage ? ` — ${p.errorMessage}` : ''}. No "report ready" text was sent; the closeout is held for retry — retry it from the tech portal.`,
       link: p.link || '/admin/dispatch',
     }),
   },
@@ -749,6 +749,11 @@ function pushTagFor(triggerKey, payload = {}) {
     // Per-application tag: two applications arriving before the owner opens
     // notifications must not collapse into one push (same-tag replacement).
     return `waves-new_job_application-${payload.applicationId || 'unknown-application'}`;
+  }
+  if (triggerKey === 'service_report_token_mint_failed' || triggerKey === 'completion_sms_failed') {
+    // Per-service-record tag: an outage that fails several completions must
+    // not let later customers' banners silently replace earlier ones.
+    return `waves-${triggerKey}-${payload.serviceRecordId || 'unknown-record'}`;
   }
   return `waves-${triggerKey}`;
 }
