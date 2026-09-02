@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
 import { Badge, Button, Card, Select, cn } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import { etDateString, formatETDate, formatETTime } from "../../lib/timezone";
 
 // Agents → Activity: one timeline of agent runs, parked drafts and cron
 // jobs, from GET /admin/agents/activity (server/services/agent-activity.js).
@@ -28,20 +29,21 @@ const STATUS_META = {
 };
 const STATUS_ORDER = ["running", "awaiting_review", "blocked", "failed", "completed", "skipped"];
 
+// Wall-clock in Eastern (client/src/lib/timezone.js), never the browser zone.
 function fmtTime(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return formatETTime(d);
 }
 
+// Day label only when the event is not ET-today.
 function fmtDay(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
-  const today = new Date();
-  if (d.toDateString() === today.toDateString()) return "";
-  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+  if (etDateString(d) === etDateString()) return "";
+  return formatETDate(d, { month: "short", day: "numeric" });
 }
 
 function fmtMs(ms) {
