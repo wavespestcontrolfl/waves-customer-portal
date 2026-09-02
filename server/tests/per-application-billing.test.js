@@ -991,16 +991,22 @@ describe('legacy count-less termite units — refused before acceptance, never c
   const legacy = { name: 'Termite Bait', service: 'termite_bait', mo: 34, monthly: 34 };
   const current = { name: 'Termite Bait', service: 'termite_bait', mo: 34, monthly: 34, perTreatment: 102, visitsPerYear: 4 };
 
-  test('the predicate: exactly one count-less termite line with a monthly figure — billing riders (bond, station rental) do not count as units', () => {
+  test('the predicate: ANY count-less termite line with a monthly figure — singleton or bundled; billing riders (bond, station rental) are not components', () => {
     expect(legacyFlatMonthlyTermiteUnit([legacy], 34)).toBe(true);
+    // Bundled with pest (pre-push codex P0 r8): the termite card still
+    // promises monthly installments — refuse, never a combined cadence.
+    expect(legacyFlatMonthlyTermiteUnit([legacy, { name: 'Pest Control', service: 'pest_control', mo: 37.33, visitsPerYear: 12 }], 71.33)).toBe(true);
+    expect(legacyFlatMonthlyTermiteUnit([{ name: 'Mosquito', service: 'mosquito', mo: 60, visitsPerYear: 8 }, legacy], 94)).toBe(true);
     // bait + bond rider is still ONE legacy bait unit (GH codex P0 r4): the
     // rider's own visit count must not turn this into a per-application plan.
     expect(legacyFlatMonthlyTermiteUnit([legacy, { name: 'Termite Bond', service: 'termite_bond', mo: 8, visitsPerYear: 4 }], 42)).toBe(true);
     expect(legacyFlatMonthlyTermiteUnit([legacy, { name: 'Station Rental', service: 'termite_station_rental', mo: 5 }], 39)).toBe(true);
     expect(legacyFlatMonthlyTermiteUnit([current], 34)).toBe(false);
     expect(legacyFlatMonthlyTermiteUnit([{ name: 'Pest Control', service: 'pest_control', mo: 37.33 }], 37.33)).toBe(false);
-    expect(legacyFlatMonthlyTermiteUnit([legacy, { name: 'Pest Control', service: 'pest_control', mo: 37.33 }], 71.33)).toBe(false);
-    expect(legacyFlatMonthlyTermiteUnit([legacy], 0)).toBe(false);
+    // A current termite row bundled with pest is fine — it carries its count.
+    expect(legacyFlatMonthlyTermiteUnit([current, { name: 'Pest Control', service: 'pest_control', mo: 37.33 }], 71.33)).toBe(false);
+    // No monthly figure anywhere: not the legacy flat-monthly shape.
+    expect(legacyFlatMonthlyTermiteUnit([{ name: 'Termite Bait', service: 'termite_bait' }], 0)).toBe(false);
     expect(legacyFlatMonthlyTermiteUnit([], 34)).toBe(false);
   });
 

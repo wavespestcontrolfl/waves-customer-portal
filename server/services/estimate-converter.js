@@ -2375,16 +2375,24 @@ function assertPerApplicationAddOnPriced({
 // termite bait with no visit count (pre-split payloads carry the flat
 // monthly only). Its customer card still discloses "Billed $X/mo"
 // (estimate-public keeps that note for exactly this shape).
-// Billing riders (a termite bond line) are unit-count-exempt exactly as in
-// riderAwareSingleRecurringUnit: bait + bond is still ONE legacy bait unit
-// (GH codex P0 r4 — a rider's visit count would otherwise infer a quarterly
-// cadence and slip the refusal).
+// ANY count-less flat-monthly termite component refuses — a singleton or a
+// bundle with pest / mosquito / anything else (pre-push codex P0 r8: a
+// bundled legacy termite line would otherwise convert to per-application
+// billing on a combined cadence amount while its card promises monthly
+// installments). Billing riders (bond, station rental) are not components
+// (riderAwareSingleRecurringUnit's rule). The line's own monthly figure is
+// the evidence; a singleton also honours the estimate-level monthly rate
+// (pre-split payloads sometimes carry the figure only there).
 function legacyFlatMonthlyTermiteUnit(recurringServices = [], monthlyRate = 0) {
-  const unit = riderAwareSingleRecurringUnit(recurringServices, 0);
-  if (!unit) return false;
-  if (recurringServiceKey(unit) !== 'termite_bait') return false;
-  if (visitsPerYearForRecurringService(unit)) return false;
-  return Number(monthlyRate) > 0;
+  const lines = (Array.isArray(recurringServices) ? recurringServices : [])
+    .filter((svc) => svc && !isTermiteBillingRiderLine(svc));
+  return lines.some((line) => {
+    if (recurringServiceKey(line) !== 'termite_bait') return false;
+    if (visitsPerYearForRecurringService(line)) return false;
+    const lineMonthly = Number(line.mo ?? line.monthly ?? line.monthlyRate ?? 0);
+    if (lineMonthly > 0) return true;
+    return lines.length === 1 && Number(monthlyRate) > 0;
+  });
 }
 
 // An in-flight legacy count-less termite estimate is REFUSED before any
