@@ -78,6 +78,8 @@ describe('payerNameCorroborates', () => {
     expect(payerNameCorroborates('ALICE JONES & ROBERT DOE', customer)).toBe(true);
     // The surname is the trailing run: "Robert James Doe" is not "James Robert".
     expect(payerNameCorroborates('ROBERT JAMES DOE', { first_name: 'James', last_name: 'Robert' })).toBe(false);
+    // A middle name never satisfies the first-name leg: "Robert James Doe" is not James Doe.
+    expect(payerNameCorroborates('ROBERT JAMES DOE', { first_name: 'James', last_name: 'Doe' })).toBe(false);
     // A single-token person shares the line's final surname.
     expect(payerNameCorroborates('ALICE & ROBERT DOE', { first_name: 'Alice', last_name: 'Doe' })).toBe(true);
   });
