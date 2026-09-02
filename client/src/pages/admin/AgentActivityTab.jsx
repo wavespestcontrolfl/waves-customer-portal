@@ -240,6 +240,11 @@ export default function AgentActivityTab() {
         </Button>
       </div>
 
+      {feed?.unavailableSources?.length > 0 && (
+        <div className="text-12 text-alert-fg" role="alert">
+          Not migrated on this deployment, so not shown: {feed.unavailableSources.join(", ")}.
+        </div>
+      )}
       {summary && feed?.available && (
         <div className="text-12 text-ink-secondary">
           <span className="font-medium text-zinc-900 u-nums">{summary.total}</span> runs in the window

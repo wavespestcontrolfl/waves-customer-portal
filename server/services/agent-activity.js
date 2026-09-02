@@ -24,6 +24,7 @@ const STATUSES = ['running', 'awaiting_review', 'blocked', 'completed', 'failed'
 const MAX_WINDOW_HOURS = 24 * 14;
 const DEFAULT_WINDOW_HOURS = 24;
 const MAX_ITEMS = 200;
+const MISSING_TABLE_SQLSTATE = '42P01';
 
 const CONTENT_AGENT = 'Blog Content Engine';
 const SMS_AGENT = 'Customer Assistant';
@@ -250,13 +251,21 @@ function clampWindowHours(value) {
 
 async function loadRows(windowHours) {
   const since = new Date(Date.now() - windowHours * 3600 * 1000);
+  // Only a MISSING table (Postgres 42P01 — a ledger not yet migrated on
+  // this deployment) degrades to an empty source, reported back as
+  // unavailable. Any other failure (outage, permissions, broken query) is
+  // thrown so the endpoint 500s and the tab shows a load error — a
+  // monitoring surface must never present a failure as "nothing happened".
+  const unavailable = [];
   const safe = async (label, query) => {
     try {
       return await query();
     } catch (err) {
-      // One missing table must not blank the whole feed (rule 6).
-      console.warn(`[agent-activity] ${label} query failed: ${err.message}`);
-      return [];
+      if (err && err.code === MISSING_TABLE_SQLSTATE) {
+        unavailable.push(label);
+        return [];
+      }
+      throw err;
     }
   };
   const [runs, drafts, jobs] = await Promise.all([
@@ -300,7 +309,7 @@ async function loadRows(windowHours) {
         .where({ status: 'awaiting_reply' })
         .whereIn('run_id', runIds))
     : [];
-  return { runs, approvals, drafts, jobs };
+  return { runs, approvals, drafts, jobs, unavailable };
 }
 
 async function getActivity({ windowHours } = {}) {
@@ -308,7 +317,13 @@ async function getActivity({ windowHours } = {}) {
   const hours = clampWindowHours(windowHours);
   const rows = await loadRows(hours);
   const feed = buildActivity(rows);
-  return { available: true, windowHours: hours, generatedAt: new Date().toISOString(), ...feed };
+  return {
+    available: true,
+    windowHours: hours,
+    generatedAt: new Date().toISOString(),
+    unavailableSources: rows.unavailable,
+    ...feed,
+  };
 }
 
-module.exports = { getActivity, buildActivity, runStatus, STATUSES, clampWindowHours };
+module.exports = { getActivity, buildActivity, runStatus, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE };
