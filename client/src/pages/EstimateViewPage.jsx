@@ -78,9 +78,11 @@ import {
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
 import useModalFocus from '../hooks/useModalFocus';
+import { canonicalShareUrl, shareDocumentLink } from '../components/DocumentActionBar';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
-import { formatETDate, formatETDateTime } from '../lib/timezone';
+import { etParts, formatETDate, formatETDateTime } from '../lib/timezone';
+import ReferralShareCard from '../components/referral/ReferralShareCard';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
 import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
 
@@ -150,6 +152,7 @@ const SECTION_KICKER_STYLE = {
 const BOOKING_SECTION_ID = 'estimate-booking-section';
 const PRICE_SECTION_ID = 'estimate-price-section';
 const PAYMENT_SECTION_ID = 'estimate-payment-section';
+const ASK_SECTION_ID = 'estimate-ask-section';
 const REVIEW_SECTION_ID = 'estimate-review-section';
 
 function scrollToPriceSection() {
@@ -159,6 +162,11 @@ function scrollToPriceSection() {
 
 function scrollToBookingSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(BOOKING_SECTION_ID) : null;
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function scrollToAskSection() {
+  const el = typeof document !== 'undefined' ? document.getElementById(ASK_SECTION_ID) : null;
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -1104,6 +1112,68 @@ const ESTIMATE_ASK_PROMPTS = [
   'Who is Waves?',
 ];
 
+// Returning-visitor strip (GATE_ESTIMATE_RETURN_VISIT). Renders only when the
+// payload carries `returnVisit` (second or later VISIT, sessionized server-
+// side). Every change line is server-named from a durable stamp; the strip
+// never says "something changed" on its own — and never claims "nothing
+// changed" either (pre-push codex P1: only two stamps are recognized, so an
+// empty list proves nothing). The empty state just says the page is current. "Text this to someone" is the
+// CUSTOMER'S share sheet (navigator.share, else an sms: draft on their phone)
+// — never a Waves-sent message.
+// `showAsk` — the page passes whether an Ask Waves bar actually renders on
+// this presentation: regulated certificate surfaces (WDO / pre-treatment)
+// carry no ask bar by contract, and the review-before-booking branch renders
+// none, so the action would scroll nowhere (GH codex P1 on #3708).
+export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, showAsk = true }) {
+  if (!returnVisit || Number(returnVisit.visitNumber) < 2) return null;
+  const lastDate = returnVisit.lastVisitAt ? new Date(returnVisit.lastVisitAt) : null;
+  const lastDisplay = lastDate && !Number.isNaN(lastDate.getTime())
+    ? formatETDate(lastDate, { month: 'long', day: 'numeric' })
+    : null;
+  const changes = Array.isArray(returnVisit.changes) ? returnVisit.changes.filter((c) => c && c.label) : [];
+  const since = lastDisplay ? ` since ${lastDisplay}` : '';
+  // The page's ONE share mechanism (DocumentActionBar's), with the sms:
+  // draft as this control's fallback: canonical origin + pathname, so an
+  // ?intent=accept or staff-preview marker never rides the shared link (GH
+  // codex r6 P1). The href is the same canonical sms: draft for a plain tap.
+  const pageUrl = typeof window !== 'undefined' ? canonicalShareUrl() : '';
+  const smsHref = `sms:?&body=${encodeURIComponent(pageUrl)}`;
+  const share = async (e) => {
+    e.preventDefault();
+    await shareDocumentLink({ title: 'My Waves estimate', fallback: 'sms', skipWebShareInNativeShell: true });
+  };
+  const actionStyle = {
+    background: 'none', border: 'none', padding: '6px 10px', fontSize: 14, fontWeight: 600,
+    color: COLORS.glassNavy, textDecoration: 'underline', cursor: 'pointer',
+  };
+  return (
+    <section data-glass="card" aria-label="Another look" style={{ ...estimateCard(), display: 'grid', gap: 8 }}>
+      {/* Estimate-level wording, never "you": the link may be opened by a
+          spouse or bookkeeper after the share action, and views carry no
+          viewer identity (GH codex P2 on #3708). */}
+      <div style={{ ...HEADER_EYEBROW_STYLE }}>Another look</div>
+      {changes.length ? (
+        <>
+          <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+            This is visit {returnVisit.visitNumber} to this estimate &mdash; here&rsquo;s what&rsquo;s changed on it{since}:
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 20, fontSize: 16, color: COLORS.glassNavy, lineHeight: 1.5 }}>
+            {changes.map((c, i) => <li key={`${c.kind}-${c.at || i}`}>{c.label}</li>)}
+          </ul>
+        </>
+      ) : (
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+          This is visit {returnVisit.visitNumber} to this estimate{lastDisplay ? ` (the last one was ${lastDisplay})` : ''} &mdash; the estimate below is current as of today.
+        </div>
+      )}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
+        <a href={smsHref} onClick={share} style={actionStyle}>Text this to someone</a>
+        {showAsk ? <button type="button" onClick={onAsk} style={actionStyle}>Ask a question</button> : null}
+      </div>
+    </section>
+  );
+}
+
 export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'recurring', chips }) {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
@@ -1155,7 +1225,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   }, [asking, askToken, question, selectedFrequency, serviceMode, token]);
 
   return (
-    <section style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
+    <section id={ASK_SECTION_ID} style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
       <div>
         <div style={{
           fontSize: 12,
@@ -2825,6 +2895,313 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
   );
 }
 
+// Soft exit (GATE_ESTIMATE_SOFT_EXIT) — the "Not what you expected?" sheet.
+// Chip keys are the API contract (estimate-disposition.js
+// CUSTOMER_DECLINE_REASONS / estimate-change-request.js CHANGE_REQUEST_TOPICS);
+// labels are the customer's words. Three exits, none of which message the
+// customer: a reason-tagged decline (the only one that closes the estimate),
+// a change request the office answers with a revision, and a "still
+// deciding" signal that writes one activity row and nothing else.
+export const SOFT_EXIT_REASONS = [
+  { key: 'price', label: 'Too expensive' },
+  { key: 'timing', label: 'Not the right time' },
+  { key: 'competitor', label: 'Going with someone else' },
+  { key: 'not_needed', label: "Don't need it after all" },
+  { key: 'other', label: 'Something else' },
+];
+export const SOFT_EXIT_TOPICS = [
+  { key: 'price', label: 'The price' },
+  { key: 'services', label: 'Which services are included' },
+  { key: 'schedule', label: 'How often you visit' },
+  { key: 'other', label: 'Something else' },
+];
+
+const softExitChipStyle = (on) => ({
+  padding: '8px 14px',
+  borderRadius: 999,
+  border: `1.5px solid ${on ? COLORS.glassNavy : ESTIMATE_BORDER}`,
+  background: on ? COLORS.glassNavy : COLORS.white,
+  color: on ? COLORS.white : COLORS.glassNavy,
+  fontSize: 14,
+  cursor: 'pointer',
+});
+const softExitPrimaryStyle = (enabled) => ({
+  padding: '12px 16px', borderRadius: 12, border: 'none', background: COLORS.yellow,
+  color: COLORS.glassNavy, fontSize: 15, fontWeight: 700,
+  cursor: enabled ? 'pointer' : 'default', opacity: enabled ? 1 : 0.55,
+});
+const softExitOptionStyle = {
+  width: '100%', textAlign: 'left', padding: '14px 16px', borderRadius: 12,
+  border: `1.5px solid ${ESTIMATE_BORDER}`, background: COLORS.white,
+  color: COLORS.glassNavy, fontSize: 15, fontWeight: 600, cursor: 'pointer',
+};
+const softExitInputStyle = {
+  width: '100%', boxSizing: 'border-box', borderRadius: 10, border: `1.5px solid ${ESTIMATE_BORDER}`,
+  padding: '10px 12px', fontSize: 14, fontFamily: 'inherit', color: COLORS.glassNavy,
+};
+
+export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, onClose, onDeclined }) {
+  const [step, setStep] = useState('choose'); // choose | change | decline | done
+  const [doneKind, setDoneKind] = useState(null); // change | still_deciding | decline
+  const [topics, setTopics] = useState(() => new Set());
+  const [reason, setReason] = useState(null);
+  const [note, setNote] = useState('');
+  const [competitorName, setCompetitorName] = useState('');
+  const [competitorPrice, setCompetitorPrice] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  const post = async (path, method, body) => {
+    const r = await fetch(`${API_BASE}/estimates/${token}/${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const payload = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(payload?.error || 'That didn’t go through. Try again.');
+    return payload;
+  };
+
+  const run = async (kind, fn) => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      await fn();
+      setDoneKind(kind);
+      setStep('done');
+    } catch (err) {
+      setError(err?.message || 'That didn’t go through. Try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const submitChange = () => run('change', () => post('change-request', 'POST', {
+    kind: 'change',
+    topics: Array.from(topics),
+    note: note.trim(),
+  }));
+  const submitStillDeciding = () => run('still_deciding', () => post('change-request', 'POST', { kind: 'still_deciding' }));
+  const submitDecline = () => run('decline', () => post('decline', 'PUT', {
+    reason,
+    note: note.trim() || undefined,
+    ...(reason === 'competitor' ? {
+      competitorName: competitorName.trim() || undefined,
+      competitorPrice: competitorPrice.trim() || undefined,
+    } : {}),
+  }));
+
+  const toggleTopic = (key) => setTopics((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+
+  const canSubmitChange = !submitting && note.trim().length > 0;
+  const canSubmitDecline = !submitting && !!reason && (reason !== 'other' || note.trim().length > 0);
+  // ET-pinned like the header's expiration line (codex P1, PR #2439).
+  const expiresDate = expiresAt ? new Date(expiresAt) : null;
+  const expiresDisplay = expiresDate && !Number.isNaN(expiresDate.getTime())
+    ? formatETDate(expiresDate, { month: 'long', day: 'numeric' })
+    : null;
+
+  const close = () => {
+    if (submitting) return;
+    if (step === 'done' && doneKind === 'decline') onDeclined?.();
+    onClose();
+  };
+  // Shared modal focus manager: initial focus, Tab trapping, restoration to
+  // the opener, document-level Escape (GH codex P1 — the partial onKeyDown
+  // only saw Escape once focus happened to enter the sheet).
+  const dialogRef = useModalFocus(true, close);
+  // Branch-specific fields never cross branches: a decline explanation must
+  // not become a change request, and vice versa (GH codex P2).
+  const goTo = (next) => {
+    setNote('');
+    setReason(null);
+    setTopics(new Set());
+    setCompetitorName('');
+    setCompetitorPrice('');
+    setError('');
+    setStep(next);
+  };
+
+  const heading = step === 'change' ? 'What would you like changed?'
+    : step === 'decline' ? 'What made this a no?'
+    : step === 'done' ? (doneKind === 'change' ? 'Got it — we’ll send a revised estimate'
+      : doneKind === 'still_deciding' ? 'No rush'
+      : 'Thanks for letting us know')
+    : 'Not what you expected?';
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={heading}
+      data-glass-scrim=""
+      style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+    >
+      <div ref={dialogRef} data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
+        <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.glassNavy }}>{heading}</div>
+
+        {step === 'choose' ? (
+          <>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 14px' }}>
+              Tell us where this landed. Nothing here sends you a message &mdash; it just helps us get it right.
+            </div>
+            <div style={{ display: 'grid', gap: 10 }}>
+              {/* A change request needs a customer the office can answer; an
+                  unlinked email-only estimate cannot park one (the server
+                  says so via softExitChange), so the branch is withheld
+                  rather than failing on submit (GH codex P2). */}
+              {changeEligible ? (
+                <button type="button" onClick={() => goTo('change')} style={softExitOptionStyle}>
+                  I&rsquo;d like to change something
+                </button>
+              ) : null}
+              <button type="button" onClick={submitStillDeciding} disabled={submitting} style={softExitOptionStyle}>
+                {submitting ? 'One moment…' : 'I’m still deciding'}
+              </button>
+              <button type="button" onClick={() => goTo('decline')} style={softExitOptionStyle}>
+                This isn&rsquo;t for me
+              </button>
+            </div>
+          </>
+        ) : null}
+
+        {step === 'change' ? (
+          <>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 14px' }}>
+              We&rsquo;ll send a revised estimate &mdash; usually same day. This one stays as-is until then.
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+              {SOFT_EXIT_TOPICS.map(({ key, label }) => (
+                <button key={key} type="button" onClick={() => toggleTopic(key)} aria-pressed={topics.has(key)} style={softExitChipStyle(topics.has(key))}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            <textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              maxLength={500}
+              rows={3}
+              placeholder="What should be different?"
+              aria-label="What should be different?"
+              style={{ ...softExitInputStyle, resize: 'vertical', marginBottom: 12 }}
+            />
+          </>
+        ) : null}
+
+        {step === 'decline' ? (
+          <>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 14px' }}>
+              Pick the closest reason. This closes the estimate; you can always call for a fresh one.
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+              {SOFT_EXIT_REASONS.map(({ key, label }) => (
+                <button key={key} type="button" onClick={() => setReason(key)} aria-pressed={reason === key} style={softExitChipStyle(reason === key)}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            {reason === 'competitor' ? (
+              <div style={{ display: 'grid', gap: 10, marginBottom: 12 }}>
+                <input
+                  value={competitorName}
+                  onChange={(e) => setCompetitorName(e.target.value)}
+                  maxLength={120}
+                  placeholder="Who did you go with? (optional)"
+                  aria-label="Who did you go with?"
+                  style={softExitInputStyle}
+                />
+                <input
+                  value={competitorPrice}
+                  onChange={(e) => setCompetitorPrice(e.target.value)}
+                  inputMode="decimal"
+                  maxLength={12}
+                  placeholder="Their price, if you don’t mind sharing (optional)"
+                  aria-label="Their price"
+                  style={softExitInputStyle}
+                />
+              </div>
+            ) : null}
+            {reason ? (
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                maxLength={500}
+                rows={2}
+                placeholder={reason === 'other' ? 'Tell us a little more' : 'Anything else? (optional)'}
+                aria-label={reason === 'other' ? 'Tell us a little more' : 'Anything else?'}
+                style={{ ...softExitInputStyle, resize: 'vertical', marginBottom: 12 }}
+              />
+            ) : null}
+          </>
+        ) : null}
+
+        {step === 'done' ? (
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
+            {doneKind === 'change'
+              ? 'We’ll take a look and send an updated estimate. Your current one stays as-is in the meantime, through its normal expiration date.'
+              : doneKind === 'still_deciding'
+                ? `Take your time${expiresDisplay ? ` — this estimate stays open through ${expiresDisplay}` : ''}. Questions? Call (941) 297-5749.`
+                : 'We’ve closed this estimate. If anything changes, call (941) 297-5749 and we’ll put together a fresh one.'}
+          </div>
+        ) : null}
+
+        {error ? (
+          <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginBottom: 12 }}>{error}</div>
+        ) : null}
+
+        <div style={{ display: 'grid', gap: 10 }}>
+          {step === 'change' ? (
+            <button type="button" data-glass-accent="" onClick={submitChange} disabled={!canSubmitChange} style={softExitPrimaryStyle(canSubmitChange)}>
+              {submitting ? 'Sending…' : 'Request a revised estimate'}
+            </button>
+          ) : null}
+          {step === 'decline' ? (
+            <button type="button" data-glass-accent="" onClick={submitDecline} disabled={!canSubmitDecline} style={softExitPrimaryStyle(canSubmitDecline)}>
+              {submitting ? 'Sending…' : 'Close this estimate'}
+            </button>
+          ) : null}
+          {step === 'done' ? (
+            <button type="button" data-glass-accent="" onClick={close} style={softExitPrimaryStyle(true)}>Done</button>
+          ) : null}
+          {step === 'change' || step === 'decline' ? (
+            <button type="button" onClick={() => goTo('choose')} disabled={submitting} style={{ padding: '10px 16px', borderRadius: 10, border: 'none', background: 'none', color: ESTIMATE_BODY, fontSize: 14, cursor: 'pointer' }}>
+              Back
+            </button>
+          ) : null}
+          {step === 'choose' ? (
+            <button type="button" onClick={close} disabled={submitting} style={{ padding: '10px 16px', borderRadius: 10, border: 'none', background: 'none', color: ESTIMATE_BODY, fontSize: 14, cursor: 'pointer' }}>
+              Never mind
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The sheet's entry point — a quiet text link under the page's ask/support
+// blocks. Rendered only when the payload stamped `softExit` (gate on, live
+// row, not a staff preview), so the page never offers a write it refuses.
+function SoftExitLink({ onOpen }) {
+  return (
+    <div style={{ textAlign: 'center', margin: '4px 0 12px' }}>
+      <button
+        type="button"
+        onClick={onOpen}
+        style={{ background: 'none', border: 'none', padding: '8px 12px', fontSize: 14, fontWeight: 600, color: ESTIMATE_BODY, textDecoration: 'underline', cursor: 'pointer' }}
+      >
+        Not what you expected? Tell us
+      </button>
+    </div>
+  );
+}
+
 /**
  * Acceptance line + inline "View terms" drawer (GATE_ESTIMATE_ACCEPTANCE_TERMS,
  * owner ruling 2026-08-28: same steps, least words, no extra page). Renders
@@ -3744,6 +4121,104 @@ export function ExistingPlanUpgradeCard({ membership, waveGuardTier, readOnly = 
   );
 }
 
+// Referral share card on the accepted / just-accepted screens
+// (GATE_ESTIMATE_SUCCESS_REFERRAL). The render payload carries only the
+// headline + CTA; the tap POSTs /:token/referral-link, which enrolls the
+// promoter — so a render never does. Same shared card as the service report.
+// `staffView` — a staff preview of a PUBLISHED accepted estimate
+// (?adminPreview=1) must never enroll the customer as a promoter: the card
+// renders its staff state and never fetches, and the fetch it would make
+// carries the same marker so the route refuses it too (GH codex P1 on #3710).
+export function EstimateReferralCard({ referral, token, staffView = false }) {
+  const fetchLink = async () => {
+    const url = `${API_BASE}/estimates/${token}/referral-link${staffView ? '?adminPreview=1' : ''}`;
+    const response = await fetch(url, { method: 'POST' });
+    if (!response.ok) throw new Error(`referral link ${response.status}`);
+    return response.json();
+  };
+  return (
+    <ReferralShareCard
+      referral={referral}
+      fetchLink={fetchLink}
+      staffView={staffView}
+      className="estimate-referral-card"
+      style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), marginTop: 16 }}
+      // The estimate page has no report stylesheet — the card's class hooks
+      // are inert here, so the estimate's own card typography rides inline.
+      styles={{
+        heading: { fontSize: 20, lineHeight: 1.35, fontWeight: 600, color: COLORS.navy, margin: '0 0 14px' },
+        button: { ...estimateCtaStyle, display: 'inline-block', fontSize: 15 },
+        link: { ...estimateCtaStyle, display: 'inline-block', fontSize: 15, textDecoration: 'none', margin: '10px 6px 0' },
+        code: { fontSize: 20, fontWeight: 700, color: COLORS.navy, letterSpacing: '0.04em', marginRight: 10 },
+        copy: { ...estimateSecondaryCtaStyle, padding: '6px 12px', fontSize: 14 },
+      }}
+    />
+  );
+}
+
+// Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): a 12-month strip
+// starting at the current ET month, with N evenly spaced application months
+// where N is the selected frequency's visitsPerYear. Pure arithmetic on data
+// already on the card — no product, step, or fertilizer names (owner-owned
+// business logic). The owner's 2026-07-23 ruling removed the "N applications
+// per year" HEADLINE from the price card; this is a separate visual block
+// behind its own gate.
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Returns 12 entries starting at startMonthIndex (0 = January): { label, marked }.
+// Applications are spread evenly across the year (12 / N months apart) from
+// the first month, rounded so 9 apps land ~every 1.33 months, 12 every
+// month, 4 every quarter. N > 12 saturates to every month.
+export function lawnCalendarMonths(visitsPerYear, startMonthIndex) {
+  const n = Math.min(12, Math.max(0, Math.round(Number(visitsPerYear) || 0)));
+  const start = ((Number(startMonthIndex) || 0) % 12 + 12) % 12;
+  const marked = new Set();
+  for (let i = 0; i < n; i += 1) marked.add(Math.round((i * 12) / n) % 12);
+  return Array.from({ length: 12 }, (_, offset) => ({
+    label: MONTH_ABBR[(start + offset) % 12],
+    marked: marked.has(offset),
+  }));
+}
+
+export function LawnProgramCalendar({ visitsPerYear, now = null }) {
+  const n = Math.round(Number(visitsPerYear) || 0);
+  if (!(n > 0)) return null;
+  const startMonthIndex = etParts(now || new Date()).month - 1;
+  const months = lawnCalendarMonths(n, startMonthIndex);
+  const weeks = Math.max(1, Math.round(52 / Math.min(n, 12)));
+  return (
+    <div aria-label="Your lawn program calendar" style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+        Your program
+      </div>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.5 }}>
+        {n} applications a year — about every {weeks} weeks
+      </div>
+      <div role="list" style={{ display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))', gap: 6, marginTop: 10 }}>
+        {months.map((m, i) => (
+          <div
+            key={`${m.label}-${i}`}
+            role="listitem"
+            aria-label={`${m.label}${m.marked ? ': application' : ''}`}
+            data-marked={m.marked ? 'true' : 'false'}
+            style={{
+              textAlign: 'center', padding: '6px 0', borderRadius: 999, fontSize: 14, fontWeight: 600,
+              border: `1.5px solid ${m.marked ? COLORS.glassNavy : ESTIMATE_BORDER}`,
+              background: m.marked ? COLORS.glassNavy : 'transparent',
+              color: m.marked ? COLORS.white : ESTIMATE_MUTED,
+            }}
+          >
+            {m.label}
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5 }}>
+        Timing shifts a little with weather and turf condition.
+      </div>
+    </div>
+  );
+}
+
 export function ServiceSection({
   section,
   servicesLength = 1,
@@ -3785,6 +4260,9 @@ export function ServiceSection({
   // Opens the "Does the lawn size look off?" sheet. Wired only when the
   // server payload flags measurementReviewEnabled (gate-on, non-preview).
   onMeasurementChallenge = null,
+  // Lawn program calendar under the lawn price card — wired only when the
+  // payload flags lawnCalendar (gate on) and the plan is recurring.
+  showLawnCalendar = false,
 }) {
   // On phones the corner-pinned WaveGuard badge's 170px heading clearance
   // eats most of the card width and crunches the headline — stack the badge
@@ -3978,6 +4456,10 @@ export function ServiceSection({
             // removing it there would drop the page's only guarantee claim
             // (codex P2 r3).
           />
+        ) : null}
+
+        {showLawnCalendar && section.key === 'lawn_care' && current ? (
+          <LawnProgramCalendar visitsPerYear={current.visitsPerYear} />
         ) : null}
 
         {/* Termite station rental rider (owner 2026-07-26): stations are
@@ -4351,6 +4833,7 @@ function EstimateViewPageInner() {
   // customer challenged (null = closed). Only openable when the server
   // payload flags measurementReviewEnabled.
   const [measurementReviewBasis, setMeasurementReviewBasis] = useState(null);
+  const [softExitOpen, setSoftExitOpen] = useState(false);
   // Mirrors ctaPhase SYNCHRONOUSLY. ctaPhase is React state, so async work
   // started before a phase change — e.g. a SlotPicker AI slot search —
   // captures the OLD phase in its closure: when it resolved mid-submission
@@ -4634,7 +5117,11 @@ function EstimateViewPageInner() {
   // aborts whichever load is in flight, not just the mount-time one.
   const lifetimeAbortRef = useRef(null);
 
-  const loadEstimate = useCallback(async ({ preserveSelection = false } = {}) => {
+  // countView: keep the refresh UI semantics (no skeleton) but let the server
+  // COUNT this open — the revived fetch after an expired-screen extension is
+  // a real visit, and tagging it refresh=1 would leave the returning-visitor
+  // projection one session behind (GH codex P2 on #3708).
+  const loadEstimate = useCallback(async ({ preserveSelection = false, countView = false } = {}) => {
     const signal = lifetimeAbortRef.current?.signal;
     const isRefresh = initialViewCountedRef.current;
     // Refreshes keep the loaded UI on screen instead of dropping back to the
@@ -4643,7 +5130,7 @@ function EstimateViewPageInner() {
     if (!isRefresh) setLoading(true);
     setLoadError(false);
     const params = [];
-    if (isRefresh) params.push('refresh=1');
+    if (isRefresh && !countView) params.push('refresh=1');
     if (pdfDocumentMode) {
       params.push('mode=pdf');
       if (pdfDocPin) params.push(`dpin=${encodeURIComponent(pdfDocPin)}`);
@@ -4693,7 +5180,16 @@ function EstimateViewPageInner() {
     // same ordering rule — before setData) so the commercial copy pack and
     // the residential fallback can never render torn on one paint.
     setCommercialGlass(body?.cta?.commercialGlass === true);
-    setData(body);
+    // A refresh belongs to the sitting already on screen: the server withholds
+    // returnVisit on a refresh it cannot prove is inside a recorded sitting
+    // (a tab left open past the session gap), and the strip must not vanish
+    // mid-session for that — carry the loaded projection forward (GH codex
+    // r6 P2). A fresh open always takes the server's word.
+    // Never on a payload that turned terminal (declined via the sheet, accepted,
+    // expired): the server's active-only eligibility wins there (GH codex r8 P2).
+    setData((prev) => (isRefresh && prev?.returnVisit && !body.returnVisit && body?.cta?.terminalState == null
+      ? { ...body, returnVisit: prev.returnVisit }
+      : body));
     setLoading(false);
     const defaultServiceMode = body?.estimate?.defaultServiceMode || body?.pricing?.defaultServiceMode;
     const isOneTimeOnly = body?.estimate?.isOneTimeOnly === true || defaultServiceMode === 'one_time';
@@ -5886,10 +6382,11 @@ function EstimateViewPageInner() {
             // up until /data actually 200s (then the live estimate renders
             // in place); on failure nothing changes and the card—with its
             // success copy and retry button—survives. The server counts the
-            // revived estimate's first real view regardless (?refresh=1 is
-            // only honored once viewed_at is set).
+            // revived estimate's open as a real view: countView keeps the
+            // refresh UI but omits ?refresh=1, so the returning-visitor
+            // projection sees this sitting (GH codex P2 on #3708).
             initialViewCountedRef.current = true;
-            loadEstimate().catch(() => {});
+            loadEstimate({ countView: true }).catch(() => {});
           }}
         />
       </Page>
@@ -6229,6 +6726,7 @@ function EstimateViewPageInner() {
                 bondBusy={bondBusy}
                 onToggleInteriorService={onToggleInteriorService}
                 interiorBusy={interiorBusy}
+                showLawnCalendar={data?.lawnCalendar === true && serviceMode === 'recurring'}
                 onMeasurementChallenge={data?.measurementReviewEnabled && !adminDraftPreview
                   ? (basis) => setMeasurementReviewBasis(basis || {})
                   : null}
@@ -6578,6 +7076,7 @@ function EstimateViewPageInner() {
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
           <AcceptanceRecordCard acceptance={data.acceptance} />
+          {data.referral ? <EstimateReferralCard referral={data.referral} token={token} staffView={adminPreviewRequested} /> : null}
           <AppShowcaseCard />
           <EstimateAddServiceRequestCard
             offer={addServiceOffer}
@@ -6598,6 +7097,13 @@ function EstimateViewPageInner() {
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
         {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+        {/* Returning-visitor strip: the server projects it for any accept-active
+            row, which includes quote-required presentations that land here
+            (GH codex P2 on #3708). The Ask action follows this branch's own
+            ask-bar condition below. */}
+        {data.returnVisit
+          ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={showAskBar && !isRegulatedCertificateSurface} />
+          : null}
         {/* Commercial proposal: the what-happens-next card sits directly under
             the hero identity block (owner 2026-08-08) — at the bottom it
             repeated the hero's "your formal proposal is ready" and read as a
@@ -6675,6 +7181,9 @@ function EstimateViewPageInner() {
               : null)}
           recurring={serviceMode !== 'one_time'}
         />
+        {/* The success screen renders from the accept response without a
+            /data refetch, so the referral card rides acceptResult.referral. */}
+        {acceptResult?.referral ? <EstimateReferralCard referral={acceptResult.referral} token={token} staffView={adminPreviewRequested} /> : null}
       </Page>
     );
   }
@@ -6724,6 +7233,9 @@ function EstimateViewPageInner() {
           subline={fillGlassTokens(glassPack?.heroSub) || null}
         />
         {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+        {/* aiPanelBlock below renders the Ask bar on this branch (regulated
+            certificate surfaces excepted), so the action follows that. */}
+        {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
@@ -6749,6 +7261,8 @@ function EstimateViewPageInner() {
 
       {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
 
+      {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
+
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
         <SlotIssueBanner
           kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
@@ -6761,6 +7275,17 @@ function EstimateViewPageInner() {
           token={token}
           measuredBasis={measurementReviewBasis}
           onClose={() => setMeasurementReviewBasis(null)}
+        />
+      ) : null}
+      {softExitOpen ? (
+        <SoftExitSheet
+          token={token}
+          expiresAt={estimate.expiresAt || null}
+          changeEligible={data?.softExitChange === true}
+          onClose={() => setSoftExitOpen(false)}
+          // A decline is terminal: reload so the server's terminal state
+          // (declined card, no CTAs) paints from truth, not local state.
+          onDeclined={() => loadEstimate({ preserveSelection: true })}
         />
       ) : null}
 
@@ -7168,6 +7693,8 @@ function EstimateViewPageInner() {
                   chips={askChips}
                 />
               ) : null}
+              {data?.softExit === true && !isRegulatedCertificateSurface && ctaPhase !== 'submitting'
+                ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
               <EstimateAddServiceRequestCard
                 offer={addServiceOffer}
                 requestState={addServiceRequestState}
@@ -7186,6 +7713,8 @@ function EstimateViewPageInner() {
         <>
           <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
           <CustomerReviews />
+          {data?.softExit === true && !isRegulatedCertificateSurface && ctaPhase !== 'submitting' && !(ctaPhase === 'review' && reservation)
+            ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
         </>
       )}
       {/* Sticky mobile book bar (glass, ≤640px via CSS): live price/period +

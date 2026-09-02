@@ -1011,14 +1011,43 @@ window.fetch = async (input, init) => {
     // built with a priced line — otherwise ?mode=pdf falls through to the
     // normal page exactly like production.
     const pdfPass = new URLSearchParams(window.location.search).get('mode') === 'pdf';
+    // returnVisit mirrors the GATE_ESTIMATE_RETURN_VISIT projection on a
+    // second visit so the welcome-back strip is exercised in preview
+    // (?visit=first suppresses it).
+    const firstVisit = new URLSearchParams(window.location.search).get('visit') === 'first';
+    const returnVisit = firstVisit ? {} : {
+      returnVisit: {
+        visitNumber: 3,
+        lastVisitAt: '2026-07-10T15:30:00.000Z',
+        changes: scenario === 'lawn'
+          ? [{ kind: 'extension_granted', label: 'Your expiration date was extended.', at: '2026-07-11T12:00:00.000Z' }]
+          : [],
+      },
+    };
     const payload = PAYLOADS[scenario]();
     const proposal = payload.proposal || (pdfPass ? synthesizeDocumentProposal(payload) : null);
+    // lawnCalendar / referral mirror the GATE_ESTIMATE_LAWN_CALENDAR and
+    // GATE_ESTIMATE_SUCCESS_REFERRAL /data flags so both blocks render in preview.
+    const referral = scenario === 'accepted' ? { referral: { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' } } : {};
     return respond({
       ...payload,
       ...(pdfPass && proposal ? { proposal } : {}),
       glassDefault: true,
+      ...returnVisit,
+      lawnCalendar: true,
+      ...referral,
+      // softExit mirrors the GATE_ESTIMATE_SOFT_EXIT /data flag on a live row so
+      // the "Not what you expected?" sheet is exercised in preview.
+      softExit: true,
+      softExitChange: true,
       ...(pdfPass && documentRenderAffirmed(proposal) ? { documentRender: true } : {}),
     });
+  }
+  if (url.includes('/referral-link')) {
+    return respond({ code: 'WAVES-PREVIEW1', link: 'https://wavespestcontrol.com/r/WAVES-PREVIEW1', smsBody: 'We use Waves Pest Control and they’ll take $25 off your first service with my code WAVES-PREVIEW1. wavespestcontrol.com/r/WAVES-PREVIEW1', emailSubject: '$25 off Waves Pest Control', emailBody: 'We use Waves Pest Control and they’ll take $25 off your first service with my code WAVES-PREVIEW1.\n\nhttps://wavespestcontrol.com/r/WAVES-PREVIEW1' });
+  }
+  if (url.includes('/change-request') || url.endsWith('/decline')) {
+    return respond({ success: true, deduped: false });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;

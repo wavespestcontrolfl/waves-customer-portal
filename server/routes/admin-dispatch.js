@@ -4444,6 +4444,13 @@ const {
   splitTerminalCompletionInvoice,
   COMPLETION_TERMINAL_INVOICE_STATUSES,
 } = require('../services/completion-invoice-candidate');
+const {
+  observationsForSpecialtyService,
+  specialtyProtocolActionScopes,
+  specialtyServiceKey,
+  validateSpecialtyAreas,
+  validateSpecialtyClosureCombination,
+} = require('../../shared/specialty-service-closeouts');
 
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
@@ -4482,6 +4489,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       protocolActionsCompleted,
       protocolActionScopesCompleted,
       observations,
+      structuredObservations,
       recommendations,
       // technician-internal next steps (parked [Next] lines) — merged below,
       // never into the form-provenance list
@@ -5368,7 +5376,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     ]);
     // Structured scope for each completed action — authoritative interior/
     // exterior signal for the re-entry advisory (see report-data treatmentScope).
-    const reportProtocolActionScopes = (Array.isArray(protocolActionScopesCompleted) ? protocolActionScopesCompleted : [])
+    // Specialty preset lanes replace this list with server-derived metadata
+    // once the lane resolves below — the client-supplied scope/treatmentApplied
+    // is never persisted for them.
+    let reportProtocolActionScopes = (Array.isArray(protocolActionScopesCompleted) ? protocolActionScopesCompleted : [])
       .map((entry) => {
         if (!entry || typeof entry !== 'object') return null;
         const scope = String(entry.scope || '').toLowerCase();
@@ -5380,8 +5391,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         };
       })
       .filter(Boolean);
+    const submittedObservations = normalizeCompletionTextArray(
+      Array.isArray(observations) ? observations : [],
+    );
     const reportObservations = normalizeCompletionTextArray([
-      ...(Array.isArray(observations) ? observations : []),
+      ...submittedObservations,
       ...taggedCompletionNoteLines(technicianNotes, ['found']),
     ]);
     const reportRecommendations = normalizeCompletionTextArray([
@@ -5409,6 +5423,100 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const techTipsFreeze = techTipsGateOn()
       ? freezeTechTips(req.body?.techTips)
       : { tips: [], dropped: [] };
+    // Typed lanes (mosquito_event, one-time pest, …) record their work in the
+    // typed findings schema, never through the specialty presets, even when
+    // their profile key aliases onto a specialty lane (mosquito_one_time →
+    // mosquito). The preset checks below apply only to preset closeouts
+    // (local audit P1 on #3701).
+    const resolvedSpecialtyServiceKey = typedFindingsType ? null : specialtyServiceKey({
+      serviceKey: completionProfile?.serviceKey,
+      serviceType: svc.service_type,
+    });
+    // Preset-only protocol actions are enforced when the profile names the
+    // lane; a keyless legacy row resolved by display name may still complete
+    // with the dynamic actions its older client offered.
+    const explicitSpecialtyLane = Boolean(specialtyServiceKey({ serviceKey: completionProfile?.serviceKey }));
+    const allowedStructuredObservations = new Set(
+      observationsForSpecialtyService(resolvedSpecialtyServiceKey),
+    );
+    // New clients separate controlled dropdown values from free text. For an
+    // older specialty client that lacks that field, recover only exact values
+    // from this service lane's server-owned allowlist; arbitrary form text and
+    // [Found] technician-note markers remain internal.
+    const structuredObservationsProvided = Object.prototype.hasOwnProperty.call(
+      req.body || {},
+      'structuredObservations',
+    );
+    const formObservations = structuredObservationsProvided
+      ? normalizeCompletionTextArray(
+        Array.isArray(structuredObservations) ? structuredObservations : [],
+      )
+      : submittedObservations.filter((value) => allowedStructuredObservations.has(value));
+    const invalidStructuredObservation = formObservations.find(
+      (value) => !allowedStructuredObservations.has(value),
+    );
+    if (invalidStructuredObservation) {
+      return res.status(422).json({
+        error: 'A structured observation is not valid for customer report publication.',
+        code: 'invalid_structured_observation',
+      });
+    }
+    // Findings are also checked against the completed protocol actions (a
+    // no-work finding beside performed work, or vice versa) and an exclusive
+    // inspection/deferred action is rejected beside other preset actions or
+    // applied products — none of it may reach the immutable customer report
+    // from a stale or direct API client (codex P2 r8 #3701 + local audit).
+    const structuredObservationConflict = validateSpecialtyClosureCombination(
+      resolvedSpecialtyServiceKey,
+      {
+        observations: formObservations,
+        actions: reportProtocolActions,
+        productCount: Array.isArray(products)
+          ? products.filter((prod) => prod && typeof prod === 'object').length
+          : 0,
+        enforcePresetActions: explicitSpecialtyLane,
+      },
+    );
+    if (structuredObservationConflict) {
+      return res.status(422).json({
+        error: structuredObservationConflict,
+        code: 'conflicting_structured_observations',
+      });
+    }
+    // The treated areas drive the derived action scope below, so they are
+    // validated against the lane first (codex P1 r13 #3701).
+    // Product application areas are scope signals too (report-data
+    // scopeTextValues) — a restored product can carry a stale area the visit
+    // no longer lists, so they face the same lane check (codex P1 r14).
+    const productApplicationAreas = (Array.isArray(products) ? products : [])
+      .flatMap((prod) => String(prod?.applicationArea || prod?.area || '').split(','))
+      .map((area) => area.trim())
+      .filter(Boolean);
+    const invalidSpecialtyArea = validateSpecialtyAreas(resolvedSpecialtyServiceKey, [...completionAreas, ...productApplicationAreas], {
+      enforcePresetAreas: explicitSpecialtyLane,
+    });
+    if (invalidSpecialtyArea) {
+      return res.status(422).json({ error: invalidSpecialtyArea, code: 'invalid_specialty_area' });
+    }
+    // report-data treats treatmentApplied as authoritative for applicationMade,
+    // re-entry and aftercare, so for specialty lanes the persisted metadata is
+    // derived from the shared preset (treatmentApplied) and the treated areas
+    // (scope) — never from the request body (local audit P1 on #3701).
+    const derivedSpecialtyScopes = specialtyProtocolActionScopes(resolvedSpecialtyServiceKey, {
+      actions: reportProtocolActions,
+      areas: completionAreas,
+    });
+    if (derivedSpecialtyScopes) {
+      // Legacy dynamic actions a keyless row still carries keep their
+      // client-supplied scope entry; every preset label is server-derived.
+      const derivedLabels = new Set(derivedSpecialtyScopes.map((entry) => entry.label));
+      reportProtocolActionScopes = [
+        ...derivedSpecialtyScopes,
+        ...reportProtocolActionScopes.filter((entry) => entry.label
+          && !derivedLabels.has(entry.label)
+          && reportProtocolActions.includes(entry.label)),
+      ];
+    }
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('service_products').columnInfo().catch(() => ({})),
@@ -6896,6 +7004,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             protocolActionScopesCompleted: reportProtocolActionScopes,
             observations: reportObservations,
             recommendations: reportRecommendations,
+            formObservations,
             formRecommendations,
             ...(techTipsFreeze.tips.length ? { techTips: techTipsFreeze.tips } : {}),
             // Tech-speed telemetry from the typed CompletionPanel (contract
@@ -7373,7 +7482,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               || (Array.isArray(products) && products.some((p) => isSprayApplicationMethod(
                 p?.applicationMethod || p?.method || p?.application_method,
               )))
-              || reportProtocolActionScopes.some((s) => s.treatmentApplied)
+              || reportProtocolActionScopes.some((s) => s.treatmentApplied && s.dryDown !== false)
+              // Typed work fields record applications too (codex P1 r12 #3701).
+              || ActivityIndicators.typedTreatmentEvidence(typedFindingsType, typedFindings?.values).applied
               // Catalog identity: a non-bait pesticide product is evidence even
               // under the client's defaulted station_check (codex inline r9).
               || await productIdentityEvidence(trx, products || []);
@@ -7663,8 +7774,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // Pressure recurring-issue component matches completed records'
         // service_findings by service_line) and surface on customer-facing
         // findings reads — neither is wanted for an advisory walkthrough.
-        if (useServiceReportV1 && serviceFindingsAvailable && reportObservations.length && !isInternalOnlyCompletion) {
-          const findingRows = reportObservations.map((title) => ({
+        // Specialty dropdown findings are rendered from the provenance-kept
+        // structured snapshot below. Do not duplicate them as bare findings:
+        // the PDF's raw-note guard intentionally removes bare-title rows.
+        const customerFindingObservations = resolvedSpecialtyServiceKey
+          ? []
+          : submittedObservations;
+        if (useServiceReportV1 && serviceFindingsAvailable && customerFindingObservations.length && !isInternalOnlyCompletion) {
+          const findingRows = customerFindingObservations.map((title) => ({
             service_record_id: record.id,
             category: title.toLowerCase().includes('concern') ? 'conducive_condition' : 'observation',
             severity: completionFindingSeverity(title),

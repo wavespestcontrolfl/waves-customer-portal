@@ -280,6 +280,27 @@ function isSprayApplicationMethod(method) {
 // station / cartridge / monitor families never count.
 const BAIT_FAMILY_RE = /bait|station|cartridge|monitor/i;
 const PESTICIDE_CLASS_RE = /pestic|termitic|insectic|herbic|fungic|rodentic/i;
+// "Did a product get applied?" for an application ROW — the server mirror
+// of client/src/lib/product-application.js isProductApplication, so the
+// report payload's applicationMade verdict and the web/PDF surfaces answer
+// with ONE rule. Termite / rodent monitoring devices and baits are never
+// applications whatever the method; an ordinary applied pest bait or a trunk
+// injection IS an application (it just carries no dry-down — see
+// isSprayApplicationMethod for re-entry evidence).
+function isProductApplicationRow(app) {
+  if (!app) return false;
+  const product = app.product || {};
+  const identity = `${product.product_type || ''} ${product.category || ''} ${product.name || ''}`;
+  const monitoringLine = /\b(termite|termitic\w*|rodent|rodentic\w*|rats?|mouse|mice)\b/i.test(identity);
+  if (monitoringLine && /station|cartridge|monitor/i.test(identity)) return false;
+  if (monitoringLine && /bait/i.test(identity)) return false;
+  if ((app.method || 'perimeter_spray') !== 'station_check') return true;
+  if (/bait/i.test(identity)) return false;
+  const epaReg = String(product.epa_reg || '').trim();
+  if (epaReg && !/^n\/?a$/i.test(epaReg) && !/^none$/i.test(epaReg)) return true;
+  return /pestic|termitic|insectic|herbic|fungic|rodentic/.test(`${product.product_type || ''} ${product.category || ''}`.toLowerCase());
+}
+
 function isNonBaitPesticideProduct({ name = '', category = '', productType = '', epaReg = '' } = {}) {
   const identity = `${productType || ''} ${category || ''} ${name || ''}`;
   if (BAIT_FAMILY_RE.test(identity)) return false;
@@ -336,6 +357,7 @@ module.exports = {
   isCockroachServiceType,
   isSprayApplicationMethod,
   isNonBaitPesticideProduct,
+  isProductApplicationRow,
   isTermiteNoReentryServiceType,
   getAdvisoryDefaults,
   detectServiceLine,

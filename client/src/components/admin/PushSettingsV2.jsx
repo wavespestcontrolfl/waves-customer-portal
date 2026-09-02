@@ -67,6 +67,8 @@ const BELL_CATEGORY_LABELS = {
   job_application: "Job applications",
   estimate_converted: "Estimate conversion follow-ups",
   estimate_measurement_review: "Estimate measurement challenges",
+  estimate_hot_view: "Estimate hot views",
+  estimate_change_request: "Estimate change requests",
   alert: "Operational alerts",
   system: "System events",
   service: "Service events",

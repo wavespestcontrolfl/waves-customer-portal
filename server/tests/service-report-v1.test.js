@@ -483,6 +483,191 @@ describe('service report v1', () => {
       expect(normalized).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 120 });
     });
 
+    test('mixed flea area chips retain both interior and exterior scope', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { areas_serviced: JSON.stringify(['Furniture / upholstery', 'Front lawn']) },
+      });
+      expect(normalized).toMatchObject({ interior_reentry_min: 120, exterior_reentry_min: 30 });
+    });
+
+    test.each([
+      'Thin / stressed turf areas', 'Weed breakthrough areas', 'Insect activity areas', 'Disease-affected areas',
+    ])('one-time lawn area chip %s alone classifies as exterior scope', (area) => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { areas_serviced: JSON.stringify([area]) },
+      });
+      expect(normalized).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
+    });
+
+    test('the dynamic re-entry context drops targets for a declared no-treatment closeout', () => {
+      const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
+      const base = {
+        id: 'svc-1',
+        started_at: '2026-05-16T13:00:00.000Z',
+        ended_at: '2026-05-16T13:20:00.000Z',
+        areas_serviced: JSON.stringify(['Eaves / soffit']),
+        advisory: { exterior_reentry_min: 30, interior_reentry_min: 0 },
+        structured_notes: { protocolActionScopesCompleted: [
+          { label: 'Inspection and identification only', scope: 'exterior', treatmentApplied: false },
+        ] },
+      };
+      const now = new Date('2026-05-16T13:25:00.000Z');
+      expect(buildReentryContextFromRecord({ ...base, applications: [] }, now)).toBeUndefined();
+      // Unknown evidence keeps the stored target; a spray row proves treatment.
+      expect(buildReentryContextFromRecord({ ...base, applications: [], applicationsLoadFailed: true }, now)?.targets)
+        .toHaveLength(1);
+      expect(buildReentryContextFromRecord({ ...base, applications: [{ application_method: 'perimeter_spray' }] }, now)?.targets)
+        .toHaveLength(1);
+      // Bait-only rows are definitely not dry-down evidence: the declared no-treatment closeout clears.
+      expect(buildReentryContextFromRecord({ ...base, applications: [{ application_method: 'bait_placement' }] }, now)).toBeUndefined();
+      // A station check without product identity stays unknown: the stored timer stands.
+      expect(buildReentryContextFromRecord({ ...base, applications: [{ application_method: 'station_check' }] }, now)?.targets)
+        .toHaveLength(1);
+      // Bait-only TYPED work (applied, no dry-down) with a bait-placement row clears too.
+      const baitOnlyTyped = {
+        id: 'svc-3', started_at: base.started_at, ended_at: base.ended_at,
+        service_type: 'One-Time Pest Treatment',
+        areas_serviced: JSON.stringify(['Kitchen']),
+        advisory: { exterior_reentry_min: 0, interior_reentry_min: 120 },
+        service_data: { typedReportSnapshot: { type: 'one_time_pest_treatment', values: { work_completed: 'Bait placement' } } },
+      };
+      expect(buildReentryContextFromRecord({ ...baitOnlyTyped, applications: [{ application_method: 'bait_placement' }] }, now)).toBeUndefined();
+      expect(buildReentryContextFromRecord({ ...baitOnlyTyped, applications: [] }, now)).toBeUndefined();
+      // A productless typed lawn application is dry-down evidence for the dynamic context too.
+      const typedLawn = {
+        id: 'svc-2', started_at: base.started_at, ended_at: base.ended_at,
+        service_type: 'One-Time Lawn Treatment',
+        advisory: { exterior_reentry_min: 30, interior_reentry_min: 0 },
+        service_data: { typedReportSnapshot: { type: 'one_time_lawn_treatment', values: { work_completed: 'Weed control applied' } } },
+      };
+      expect(buildReentryContextFromRecord({ ...typedLawn, applications: [] }, now)?.targets).toHaveLength(1);
+      expect(buildReentryContextFromRecord({
+        ...typedLawn,
+        applications: [],
+        service_data: { typedReportSnapshot: { type: 'one_time_lawn_treatment', values: { work_completed: 'Inspection completed' } } },
+      }, now)).toBeUndefined();
+    });
+
+    test('a declared no-treatment closeout zeros both re-entry targets when nothing was applied', () => {
+      const inspectionOnly = {
+        areas_serviced: JSON.stringify(['Eaves / soffit', 'Attic']),
+        structured_notes: {
+          protocolActionScopesCompleted: [
+            { label: 'Inspection and identification only', scope: 'exterior', treatmentApplied: false },
+          ],
+        },
+      };
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: inspectionOnly, treatmentEvidence: false }))
+        .toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
+      // Unknown evidence (product load failed) never zeroes; recorded evidence keeps the scope rules.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: inspectionOnly }))
+        .toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 120 });
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: inspectionOnly, treatmentEvidence: true }))
+        .toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 120 });
+      // A person's per-side correction survives.
+      expect(normalizeAdvisoryForTreatmentScope(
+        { ...advisory, reentry_adjusted: { exterior: true, interior: false } },
+        { service: inspectionOnly, treatmentEvidence: false },
+      )).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
+      // A non-chemical treatment (heat) is still treatment: the stored guidance stands.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          areas_serviced: JSON.stringify(['Primary bedroom']),
+          structured_notes: { protocolActionScopesCompleted: [
+            { label: 'Heat treatment', scope: 'interior', treatmentApplied: false, treatmentPerformed: true },
+          ] },
+        },
+        treatmentEvidence: false,
+      })).toMatchObject({ interior_reentry_min: 120 });
+      // No declared actions at all: legacy records keep today's behavior.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { areas_serviced: JSON.stringify(['Eaves / soffit']) }, treatmentEvidence: false,
+      })).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
+    });
+
+    test('a typed inspection-only closeout zeros re-entry; an area-less outdoor application keeps exterior', () => {
+      const inspectionOnly = {
+        service_type: 'One-Time Pest Treatment',
+        areas_serviced: JSON.stringify(['Foundation perimeter']),
+        service_data: { typedReportSnapshot: { type: 'one_time_pest_treatment', values: { work_completed: 'Inspection / identification only' } } },
+      };
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: inspectionOnly, treatmentEvidence: false }))
+        .toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: inspectionOnly }))
+        .toMatchObject({ exterior_reentry_min: 30 });
+      // A bait protocol action (dryDown: false) is an application with no dry-down: targets clear.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          service_type: 'Fire Ant Treatment',
+          areas_serviced: JSON.stringify(['Front lawn']),
+          structured_notes: { protocolActionScopesCompleted: [
+            { label: 'Broadcast bait application', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true, dryDown: false },
+          ] },
+        },
+        treatmentEvidence: false,
+      })).toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
+      // Bait-only typed work is an application but carries no dry-down: targets clear.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          service_type: 'One-Time Pest Treatment',
+          areas_serviced: JSON.stringify(['Kitchen']),
+          service_data: { typedReportSnapshot: { type: 'one_time_pest_treatment', values: { work_completed: 'Bait placement' } } },
+        },
+        treatmentEvidence: false,
+      })).toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
+      // Termite bait-station work is device work: the generic termite timer clears.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          service_type: 'Termite Treatment',
+          areas_serviced: JSON.stringify(['Bait stations']),
+          service_data: { typedReportSnapshot: { type: 'termite_treatment', values: { treatment_method: 'Bait station setup' } } },
+        },
+        treatmentEvidence: false,
+      })).toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
+      const areaLessLawn = {
+        service_type: 'One-Time Lawn Treatment',
+        service_data: { typedReportSnapshot: { type: 'one_time_lawn_treatment', values: { work_completed: 'Weed control applied' } } },
+      };
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: areaLessLawn, treatmentEvidence: true }))
+        .toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
+      // The same area-less record with no evidence at all still has no exterior scope.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { service_type: 'One-Time Lawn Treatment' }, treatmentEvidence: false,
+      })).toMatchObject({ exterior_reentry_min: 0 });
+    });
+
+    test('companion snapshot treatment areas contribute scope', () => {
+      const combined = {
+        service_type: 'Quarterly Pest Control',
+        areas_serviced: JSON.stringify(['Kitchen']),
+        service_data: {
+          typedReportSnapshot: { type: 'one_time_pest_treatment', values: { areas_treated: 'Kitchen', work_completed: 'Interior crack & crevice application' } },
+          companionReportSnapshots: [{ type: 'tree_shrub', values: { areas_treated: 'Front landscape, Foundation beds', treatments_completed: 'Insect treatment' } }],
+        },
+      };
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: combined, treatmentEvidence: true }))
+        .toMatchObject({ interior_reentry_min: 120, exterior_reentry_min: 30 });
+      // Without the companion areas the same interior primary would zero the exterior side.
+      const primaryOnly = { ...combined, service_data: { typedReportSnapshot: combined.service_data.typedReportSnapshot } };
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: primaryOnly, treatmentEvidence: true }))
+        .toMatchObject({ interior_reentry_min: 120, exterior_reentry_min: 0 });
+    });
+
+    test('an "Other" area on a lawn application keeps the exterior dry-down target', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { service_type: 'One-Time Lawn Treatment', areas_serviced: JSON.stringify(['Other']) },
+        applications: [{ application_method: 'broadcast_spray' }],
+      });
+      expect(normalized).toMatchObject({ exterior_reentry_min: 30 });
+    });
+
+    test('pet-resting area chips retain interior scope beside lawn treatment', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { areas_serviced: JSON.stringify(['Pet resting areas', 'Front lawn']) },
+      });
+      expect(normalized).toMatchObject({ interior_reentry_min: 120, exterior_reentry_min: 30 });
+    });
+
     test('conflict: exterior area + interior action ⇒ interior fires', () => {
       const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
         service: {
@@ -1130,6 +1315,41 @@ describe('service report v1', () => {
 
     expect(data.findings).toHaveLength(0);
     expect(data.recommendations).toEqual(['Seal the gap under the front threshold.']);
+  });
+
+  test('renders provenance-kept form observations without exposing tagged technician notes', async () => {
+    const fixtures = {
+      service_products: [], property_geometries: [], property_zones: [],
+      service_findings: [], service_photos: [],
+    };
+    const knex = (table) => {
+      const rows = fixtures[table] || [];
+      const query = {
+        where: () => query,
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+    const data = await buildReportV1Data({
+      id: 'service-structured-observation', customer_id: 'customer-1',
+      service_line: 'pest', service_type: 'Bee Removal',
+      service_date: '2026-05-16', status: 'completed',
+      first_name: 'Van', last_name: 'Lee',
+      technician_notes: '[Found] Internal access instruction',
+      structured_notes: JSON.stringify({
+        observations: ['Yellowjacket', 'Internal access instruction'],
+        formObservations: ['Yellowjacket'],
+      }),
+      service_data: '{}',
+    }, 'token-structured-observation', knex);
+
+    expect(data.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: 'Yellowjacket', detail: 'Recorded during the structured service closeout.' }),
+    ]));
+    expect(data.findings.some((finding) => finding.title.includes('Internal access'))).toBe(false);
   });
 
   test('elapsed time parser matches completion panel duration strings', () => {

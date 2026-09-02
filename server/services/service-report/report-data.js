@@ -3,7 +3,7 @@ const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
-const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
 const { cockroachSnapshotOf, resolveCockroachProgram, cockroachProgramSignature } = require('./cockroach-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
@@ -450,12 +450,31 @@ function serviceDisplayName(service) {
   return raw || 'Waves service';
 }
 
+// Typed area fields frozen in the primary and companion snapshots — a
+// combined visit's companion (an exterior tree & shrub section beside an
+// interior pest primary) records its own treated areas there, and its
+// productless applied work is treatment evidence, so its scope must count
+// too (local audit P1 on #3701).
+const TYPED_AREA_FIELD_KEYS = ['areas_treated', 'spot_treatment_areas', 'treatment_zones'];
+function snapshotAreaValues(service = {}) {
+  const serviceData = parseJsonObject(service.service_data);
+  const snapshots = [
+    serviceData.typedReportSnapshot,
+    ...(Array.isArray(serviceData.companionReportSnapshots) ? serviceData.companionReportSnapshots : []),
+  ].filter((snap) => snap && typeof snap === 'object' && snap.values && typeof snap.values === 'object');
+  return snapshots.flatMap((snap) => TYPED_AREA_FIELD_KEYS.flatMap((key) => String(snap.values[key] ?? '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)));
+}
+
 function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
   const structured = parseJsonObject(service.structured_notes);
   const values = [
     ...parseJsonArray(service.areas_serviced),
     ...parseJsonArray(structured.areasServiced),
     ...parseJsonArray(structured.areasTreated),
+    ...snapshotAreaValues(service),
   ];
 
   for (const app of applications || []) {
@@ -488,42 +507,100 @@ function structuredActionScope(service = {}) {
   let hasInterior = false;
   let hasExterior = false;
   let hasTreatment = false;
+  // Dry-down-capable application (re-entry evidence): a treatment-applied
+  // action unless its metadata says dryDown: false (granular bait, codex P1
+  // r15 #3701). Entries without the field (legacy) keep counting.
+  let hasDryDownTreatment = false;
+  let hasActions = false;
+  // Non-chemical treatment (heat, steam — treatmentPerformed without
+  // treatmentApplied): treatment occurred, so aftercare and the stored
+  // re-entry guidance stand, but it is never pesticide-application evidence.
+  let hasNonChemicalTreatment = false;
   for (const entry of entries) {
-    if (!entry || typeof entry !== 'object' || entry.treatmentApplied !== true) continue;
+    if (!entry || typeof entry !== 'object') continue;
+    hasActions = true;
+    if (entry.treatmentApplied !== true) {
+      if (entry.treatmentPerformed === true) hasNonChemicalTreatment = true;
+      continue;
+    }
+    if (entry.dryDown !== false) hasDryDownTreatment = true;
     const scope = String(entry.scope || '').toLowerCase();
     if (scope === 'interior') { hasInterior = true; hasTreatment = true; }
     else if (scope === 'exterior') { hasExterior = true; hasTreatment = true; }
   }
-  return { hasInterior, hasExterior, hasTreatment };
+  return { hasInterior, hasExterior, hasTreatment, hasDryDownTreatment, hasActions, hasNonChemicalTreatment };
 }
 
-function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
-  const text = scopeTextValues({ service, applications, zones })
-    .join(' ')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ');
-  // Area chips are a controlled vocabulary and remain a valid scope signal.
-  // attic covers the termite/rodent "Attic" area label (2026-08-27) — an
-  // indoor space whose treatment carries an interior wait (codex inline r8).
-  const textInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet|attic)\b/.test(text);
-  // fence/trash cover the controlled pest-area chips "Fence line" and
-  // "Trash area" — clearly exterior choices that previously fell through
-  // and (under the explicit-exterior rule) would wrongly zero the
-  // customer's dry-down timer (codex P1 #3007).
-  // screened/enclosure, standing water, deck, station(s), crawlspace, slab
-  // edge and wood contact cover the termite + mosquito area vocabularies
-  // added 2026-08-27 ("Screened enclosure", "Standing water areas", "Under
-  // deck / patio", "Bait stations", "Crawlspace", "Garage / slab edge",
-  // "Wood contact points") — exterior choices that would otherwise fall
-  // through and zero the customer's dry-down timer (codex inline r6).
-  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash|screened|enclosure|standing water|deck|stations?|crawlspace|slab edge|wood contact)\b/.test(text);
+// Controlled treatment-area labels carry an explicit scope
+// (shared/treatment-area-scopes.json — every chip vocabulary the completion
+// panel offers is classified there, and a test enumerates them). The regex
+// heuristics below remain only for free text: legacy off-list area values,
+// product target names and traced zone labels (codex P1 r8 #3701).
+const AREA_SCOPES = require('../../../shared/treatment-area-scopes.json');
+
+function normalizeScopeText(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+const AREA_SCOPE_BY_LABEL = new Map([
+  ...AREA_SCOPES.interior.map((label) => [normalizeScopeText(label), 'interior']),
+  ...AREA_SCOPES.exterior.map((label) => [normalizeScopeText(label), 'exterior']),
+  ...AREA_SCOPES.unscoped.map((label) => [normalizeScopeText(label), 'unscoped']),
+]);
+
+// attic covers the termite/rodent "Attic" area label (2026-08-27) — an
+// indoor space whose treatment carries an interior wait (codex inline r8).
+const INTERIOR_SCOPE_RE = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet|attic|furniture|upholstery|carpet|rugs?|cabinets?|sinks?|appliance|wall void|mattress|box spring|bed frame|headboard|nightstands?|office|sleeping area|shared wall|outlets?|luggage|storage area|monitors?|interceptors?|garage|pet resting areas?)\b/;
+// fence/trash cover the controlled pest-area chips "Fence line" and
+// "Trash area" — clearly exterior choices that previously fell through
+// and (under the explicit-exterior rule) would wrongly zero the
+// customer's dry-down timer (codex P1 #3007). screened/enclosure, standing
+// water, deck, station(s), crawlspace, slab edge and wood contact cover the
+// termite + mosquito vocabularies added 2026-08-27 (codex inline r6);
+// turf / weed breakthrough / insect activity areas / disease affected the
+// one-time lawn chips (codex P1 r7 #3701).
+const EXTERIOR_SCOPE_RE = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash|screened|enclosure|standing water|deck|stations?|crawlspace|slab edge|wood contact|turf|weed breakthrough|insect activity areas|disease affected)\b/;
+
+// Lines whose work is outdoors by definition: an unscoped area choice
+// ("Other", "Localized activity area") on them is exterior treatment, so the
+// required dry-down guidance survives. On mixed indoor/outdoor lines the
+// same choice says nothing about scope and is left out of the classification
+// entirely — never "explicit scope with no side" (codex P1 r12 #3701).
+const EXTERIOR_ONLY_SERVICE_LINES = new Set(['lawn', 'mosquito', 'tree_shrub', 'palm']);
+
+function classifyScopeValue(value, serviceLine) {
+  const text = normalizeScopeText(value);
+  const known = AREA_SCOPE_BY_LABEL.get(text);
+  if (known === 'unscoped') {
+    return EXTERIOR_ONLY_SERVICE_LINES.has(serviceLine)
+      ? { interior: false, exterior: true, text }
+      : null;
+  }
+  if (known) return { interior: known === 'interior', exterior: known === 'exterior', text };
+  return { interior: INTERIOR_SCOPE_RE.test(text), exterior: EXTERIOR_SCOPE_RE.test(text), text };
+}
+
+function treatmentScope({ service = {}, applications = [], zones = [], treatmentEvidence } = {}) {
+  const serviceLine = service.service_line || detectServiceLine(service.service_type);
+  const classified = scopeTextValues({ service, applications, zones })
+    .map((value) => classifyScopeValue(value, serviceLine))
+    .filter(Boolean);
+  const text = classified.map((entry) => entry.text).join(' ');
+  const textInterior = classified.some((entry) => entry.interior);
+  // Typed area fields are optional, so an outdoor-only line can record an
+  // application with no area at all — the application itself is the
+  // exterior evidence there (codex P1 r13 #3701).
+  const outdoorApplication = EXTERIOR_ONLY_SERVICE_LINES.has(serviceLine)
+    && !classified.length
+    && (treatmentEvidence === true || applications.length > 0 || structuredActionScope(service).hasTreatment);
+  const textExterior = classified.some((entry) => entry.exterior) || outdoorApplication;
   // Structured action scope is additive: an interior treatment fires interior
   // even when only exterior areas were chipped (and vice-versa).
   const action = structuredActionScope(service);
   return {
     hasInterior: textInterior || action.hasInterior,
     hasExterior: textExterior || action.hasExterior,
-    hasExplicitScope: text.trim().length > 0 || action.hasTreatment,
+    hasExplicitScope: text.trim().length > 0 || action.hasTreatment || outdoorApplication,
     // TRUE only when a recognized interior/exterior LOCATION signal exists.
     // Target-only text (product target names) makes hasExplicitScope true
     // without classifying anything — the write-path defer must key on this
@@ -533,7 +610,11 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
   };
 }
 
-function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [], deferUnknownExteriorZeroing = false } = {}) {
+// `treatmentEvidence` is the caller's read-time application verdict (the
+// same boolean the payload publishes as applicationMade): false = products
+// loaded and nothing spray-class or treatment-tagged was recorded; undefined
+// = unknown (product load failed), which never zeroes anything.
+function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [], deferUnknownExteriorZeroing = false, treatmentEvidence } = {}) {
   const normalized = { ...parseJsonObject(advisory) };
   // Admin re-entry correction (PATCH /admin/dispatch/:serviceId/reentry):
   // a typed window is authoritative FOR ITS SIDE ONLY. The marker is
@@ -545,7 +626,30 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   const adjustedMarker = normalized.reentry_adjusted;
   const sideAdjusted = (side) => adjustedMarker === true
     || (!!adjustedMarker && typeof adjustedMarker === 'object' && adjustedMarker[side] === true);
-  const scope = treatmentScope({ service, applications, zones });
+  const scope = treatmentScope({ service, applications, zones, treatmentEvidence });
+
+  // A closeout that DECLARED its protocol actions and marked none of them as
+  // treatment (inspection-only, deferred, no treatment recommended) applied
+  // nothing — the inspected areas are location, not treatment scope. With
+  // no application evidence either, both re-entry targets must be zero so
+  // the report never shows a "ready in" countdown beside "No treatment was
+  // applied" (codex P1 r10 #3701). Typed closeouts declare the same thing
+  // through their work fields (inspection-only / deferred options, codex P1
+  // r13). Only the read-time caller knows the product-load verdict, so the
+  // rule is gated on an explicit `false`.
+  const declared = structuredActionScope(service);
+  const typed = require('./activity-indicators').typedTreatmentEvidenceForRecord(service);
+  // Declared work with nothing dry-down-capable in it: inspection-only /
+  // deferred, bait-only, station-only. Non-chemical treatment (heat, steam)
+  // keeps the stored guidance on both the protocol and typed paths.
+  const declaredWork = declared.hasActions || typed.declared;
+  const keepsGuidance = declared.hasDryDownTreatment || declared.hasNonChemicalTreatment
+    || typed.dryDown || (typed.performed && !typed.applied);
+  if (treatmentEvidence === false && declaredWork && !keepsGuidance) {
+    if (!sideAdjusted('interior') && normalized.interior_reentry_min != null) normalized.interior_reentry_min = 0;
+    if (!sideAdjusted('exterior') && normalized.exterior_reentry_min != null) normalized.exterior_reentry_min = 0;
+    return normalized;
+  }
 
   if (!sideAdjusted('interior') && normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
     normalized.interior_reentry_min = 0;
@@ -1510,6 +1614,10 @@ function buildProtocolPayload(record) {
       ...parseJsonArray(structured.observations),
       ...taggedNoteLines(record.technician_notes, ['found']),
     ]),
+    // Safe customer-facing provenance: completion form/chip values only.
+    // Never substitute the merged observations list, which also contains
+    // raw [Found] technician-note lines.
+    structuredObservations: uniqueStrings(parseJsonArray(structured.formObservations)),
     recommendations: uniqueStrings([
       ...parseJsonArray(protocol.recommendations),
       ...parseJsonArray(structured.recommendations),
@@ -3111,7 +3219,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   }
 
 
-  for (const observation of protocol.observations) {
+  for (const observation of protocol.structuredObservations) {
     if (findings.some((finding) => finding.title.toLowerCase() === observation.toLowerCase())) continue;
     findings.push({
       id: `observation-${findings.length + 1}`,
@@ -3119,7 +3227,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       category: 'observation',
       severity: findingSeverityForObservation(observation),
       title: observation,
-      detail: '',
+      detail: 'Recorded during the structured service closeout.',
       recommendation: '',
     });
   }
@@ -3957,9 +4065,34 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       productType: app.product?.product_type,
       epaReg: app.product?.epa_reg,
     });
+  // Typed lanes record their work in the frozen snapshot's values (products
+  // and protocol actions are optional there) — an application-bearing typed
+  // option is treatment evidence too (codex P1 r12 #3701).
+  const typedEvidence = require('./activity-indicators').typedTreatmentEvidenceForRecord(service);
+  // Dry-down (re-entry) evidence: spray-class product rows, an inferred
+  // pesticide, a treatment-applied protocol action, or a dry-down-capable typed
+  // option. Bait / gel / trunk-injection typed work is an application but never
+  // re-entry evidence (codex P1 r14 #3701).
+  const declaredActions = structuredActionScope(service);
   const readTimeSprayEvidence = applications.some((app) => isSprayApplicationMethod(app.method) || isInferredPesticideApplication(app))
-    || parseJsonArray(parseJsonObject(service.structured_notes).protocolActionScopesCompleted)
-      .some((s) => s && s.treatmentApplied === true);
+    || declaredActions.hasDryDownTreatment
+    || typedEvidence.dryDown;
+  // Application verdict (applicationMade): any product application, dry-down
+  // or not — an applied pest bait / gel / trunk-injection row or a bait
+  // protocol action counts here (the same rule the web and PDF apply to
+  // rows), never a termite / rodent monitoring device (local audit P1).
+  const applicationEvidence = readTimeSprayEvidence
+    || declaredActions.hasTreatment
+    || applications.some(isProductApplicationRow)
+    || typedEvidence.applied;
+  // Treatment occurred, chemical or not — the aftercare/precaution gate for
+  // the PDF; applicationMade stays the pesticide-application verdict.
+  const treatmentPerformed = applicationEvidence || declaredActions.hasNonChemicalTreatment || typedEvidence.performed;
+  // Published verdicts: true when evidence exists, false only when the product
+  // load succeeded and nothing was recorded, null when the load failed —
+  // clients keep the fail-closed treatment presentation on null (codex P1 r11).
+  const applicationMadeVerdict = applicationEvidence ? true : (productsLoadFailed ? null : false);
+  const treatmentPerformedVerdict = treatmentPerformed ? true : (productsLoadFailed ? null : false);
   const storedAdvisory = parseJsonObject(service.advisory);
   // Legacy no-spray termite records (bait/monitoring/inspection completed
   // before the 0/0 rule) persisted the old 30/120 line defaults, and the
@@ -3992,6 +4125,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     service,
     applications,
     zones: payloadTracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
+    treatmentEvidence: productsLoadFailed ? undefined : readTimeSprayEvidence,
   });
   const metrics = buildMetrics(config, {
     onSiteMin,
@@ -4061,6 +4195,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceType: service.service_type,
     serviceDisplayName: linkedServiceName,
     serviceDate: service.service_date,
+    applicationMade: applicationMadeVerdict,
+    treatmentPerformed: treatmentPerformedVerdict,
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,
@@ -5039,6 +5175,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceLine,
     serviceLineDisplay: config.displayName,
     serviceDate: service.service_date,
+    applicationMade: applicationMadeVerdict,
+    treatmentPerformed: treatmentPerformedVerdict,
     coverageServiceType: coverageServiceType(serviceLine),
     technicianName,
     technician: {

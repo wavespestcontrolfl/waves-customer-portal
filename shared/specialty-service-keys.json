@@ -1,0 +1,18 @@
+{
+  "aliases": {
+    "mosquito_monthly": "mosquito",
+    "mosquito_seasonal": "mosquito",
+    "mosquito_one_time": "mosquito",
+    "bed_bug": "bed_bug_treatment"
+  },
+  "serviceTypePatterns": [
+    { "pattern": "mosquito", "key": "mosquito" },
+    { "pattern": "dethatch", "key": "dethatching" },
+    { "pattern": "lawn\\s*plugg|sod\\s*plugg", "key": "plugging" },
+    { "pattern": "bed\\s*bug", "key": "bed_bug_treatment" },
+    { "pattern": "fire\\s*ant", "key": "fire_ant" },
+    { "pattern": "\\btick", "key": "tick_control" },
+    { "pattern": "mud\\s*dauber", "key": "mud_dauber_removal" },
+    { "pattern": "\\bbee\\b|\\bwasp\\b|yellow\\s*jacket|yellowjacket|hornet", "key": "bee_wasp_removal" }
+  ]
+}

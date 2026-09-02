@@ -1,0 +1,924 @@
+{
+  "dethatching": {
+    "areas": [
+      "Front lawn",
+      "Back lawn",
+      "Side lawns",
+      "Thin / stressed turf areas",
+      "Heavy-thatch areas",
+      "Along driveway / sidewalk",
+      "Slope / drainage area"
+    ],
+    "findingGroups": [
+      {
+        "key": "dethatching_scope",
+        "options": [
+          "Full quoted area completed",
+          "Partial quoted area completed",
+          "Inspection only",
+          "Work deferred"
+        ]
+      },
+      {
+        "key": "dethatching_debris",
+        "options": [
+          "Light debris removed",
+          "Moderate debris removed",
+          "Heavy debris removed",
+          "Debris consolidated onsite",
+          "Debris removal not included",
+          "Not applicable"
+        ]
+      }
+    ],
+    "exclusions": [
+      {
+        "value": "Inspection only",
+        "excludes": [
+          "Light debris removed",
+          "Moderate debris removed",
+          "Heavy debris removed",
+          "Debris consolidated onsite"
+        ]
+      },
+      {
+        "value": "Work deferred",
+        "excludes": [
+          "Light debris removed",
+          "Moderate debris removed",
+          "Heavy debris removed",
+          "Debris consolidated onsite"
+        ]
+      }
+    ],
+    "protocols": [
+      {
+        "label": "Inspection only",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      },
+      {
+        "label": "Single-pass dethatching completed",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Double-pass dethatching completed",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Loose thatch collected",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Debris removed from property",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Work deferred; office follow-up required",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      }
+    ],
+    "workState": {
+      "noWork": {
+        "Inspection only": [
+          "Inspection only"
+        ],
+        "Work deferred": [
+          "Work deferred; office follow-up required"
+        ]
+      },
+      "completed": [
+        "Full quoted area completed",
+        "Partial quoted area completed",
+        "Light debris removed",
+        "Moderate debris removed",
+        "Heavy debris removed",
+        "Debris consolidated onsite"
+      ]
+    }
+  },
+  "plugging": {
+    "areas": [
+      "Front lawn",
+      "Back lawn",
+      "Side lawns",
+      "Bare areas",
+      "Thin turf areas",
+      "Damaged turf areas",
+      "Along driveway / sidewalk",
+      "Slope / drainage area"
+    ],
+    "findingGroups": [
+      {
+        "key": "plug_spacing",
+        "options": [
+          "6-inch spacing",
+          "9-inch spacing",
+          "12-inch spacing",
+          "Mixed spacing per site conditions",
+          "Not installed"
+        ]
+      },
+      {
+        "key": "plugging_scope",
+        "options": [
+          "Full quoted area completed",
+          "Partial quoted area completed",
+          "Inspection only",
+          "Work deferred"
+        ]
+      }
+    ],
+    "exclusions": [
+      {
+        "value": "Not installed",
+        "excludes": [
+          "Full quoted area completed",
+          "Partial quoted area completed"
+        ]
+      },
+      {
+        "value": "Inspection only",
+        "excludes": [
+          "6-inch spacing",
+          "9-inch spacing",
+          "12-inch spacing",
+          "Mixed spacing per site conditions"
+        ]
+      },
+      {
+        "value": "Work deferred",
+        "excludes": [
+          "6-inch spacing",
+          "9-inch spacing",
+          "12-inch spacing",
+          "Mixed spacing per site conditions"
+        ]
+      }
+    ],
+    "protocols": [
+      {
+        "label": "Inspection only",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      },
+      {
+        "label": "Sod plugs installed at quoted spacing",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Installation adjusted for site conditions",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Installed plugs watered in",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Installation areas reviewed with customer",
+        "scope": "exterior",
+        "treatmentApplied": false
+      },
+      {
+        "label": "Work deferred; office follow-up required",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      }
+    ],
+    "workState": {
+      "noWork": {
+        "Inspection only": [
+          "Inspection only"
+        ],
+        "Work deferred": [
+          "Work deferred; office follow-up required"
+        ],
+        "Not installed": [
+          "Inspection only",
+          "Work deferred; office follow-up required"
+        ]
+      },
+      "completed": [
+        "Full quoted area completed",
+        "Partial quoted area completed",
+        "6-inch spacing",
+        "9-inch spacing",
+        "12-inch spacing",
+        "Mixed spacing per site conditions"
+      ]
+    }
+  },
+  "mosquito": {
+    "areas": [
+      "Yard vegetation",
+      "Shrubs / landscape beds",
+      "Fence line / yard edge",
+      "Under deck / patio",
+      "Lanai / pool cage",
+      "Pool deck / seating area",
+      "Property perimeter",
+      "Gutters / drains",
+      "Planters / bromeliads",
+      "Standing-water source",
+      "Mosquito station location"
+    ],
+    "findingGroups": [
+      {
+        "key": "mosquito_activity",
+        "options": [
+          "No mosquito activity observed",
+          "Light mosquito activity",
+          "Moderate mosquito activity",
+          "Heavy mosquito activity",
+          "Customer-reported activity only"
+        ]
+      },
+      {
+        "key": "mosquito_source",
+        "options": [
+          "No standing-water source found",
+          "Removable standing water found",
+          "Breeding source could not be removed",
+          "Drainage or irrigation issue observed",
+          "Likely off-property pressure",
+          "Source not determined"
+        ]
+      }
+    ],
+    "protocols": [
+      {
+        "label": "Inspection and source assessment only",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      },
+      {
+        "label": "Directed barrier treatment",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Standing water removed where practical",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Larvicide applied to labeled water source",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Mosquito stations installed or serviced",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Event or heavy-pressure treatment",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Treatment deferred because conditions were unsuitable",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      }
+    ]
+  },
+  "fire_ant": {
+    "areas": [
+      "Front lawn",
+      "Back lawn",
+      "Side lawns",
+      "Landscape beds",
+      "Driveway / sidewalk edges",
+      "Foundation perimeter",
+      "Pool / lanai perimeter",
+      "Fence line",
+      "Drainage area",
+      "Utility / irrigation boxes",
+      "Playground / pet area"
+    ],
+    "findingGroups": [
+      {
+        "key": "fire_ant_evidence",
+        "options": [
+          "Active mounds observed",
+          "Foraging activity observed",
+          "Mounds and foraging activity observed",
+          "Customer-reported activity only",
+          "No active fire ants observed",
+          "Identification uncertain"
+        ]
+      },
+      {
+        "key": "fire_ant_distribution",
+        "options": [
+          "One isolated area",
+          "Several localized areas",
+          "Scattered throughout property",
+          "Widespread activity",
+          "Unable to fully determine"
+        ]
+      }
+    ],
+    "exclusions": [
+      {
+        "value": "No active fire ants observed",
+        "excludes": [
+          "One isolated area",
+          "Several localized areas",
+          "Scattered throughout property",
+          "Widespread activity",
+          "Unable to fully determine"
+        ]
+      }
+    ],
+    "findingActionExclusions": [
+      {
+        "value": "No active fire ants observed",
+        "excludesActions": [
+          "Individual mound treatment",
+          "Two-step treatment: broadcast plus mound treatment"
+        ]
+      }
+    ],
+    "protocols": [
+      {
+        "label": "Inspection only",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      },
+      {
+        "label": "Individual mound treatment",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Broadcast bait application",
+        "scope": "exterior",
+        "treatmentApplied": true,
+        "dryDown": false
+      },
+      {
+        "label": "Broadcast contact treatment",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Two-step treatment: broadcast plus mound treatment",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Targeted treatment around structures or equipment",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Treatment deferred because conditions were unsuitable",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      }
+    ]
+  },
+  "tick_control": {
+    "areas": [
+      "Pet resting area",
+      "Kennel / dog run",
+      "Front lawn",
+      "Back lawn",
+      "Side lawns",
+      "Shaded turf",
+      "Landscape beds / leaf litter",
+      "Fence line / yard edge",
+      "Dense vegetation",
+      "Under deck / patio",
+      "Lanai / screened enclosure",
+      "Garage",
+      "Interior pet areas",
+      "Baseboards / wall edges",
+      "Furniture near pet areas"
+    ],
+    "findingGroups": [
+      {
+        "key": "tick_evidence",
+        "options": [
+          "Live tick observed",
+          "Multiple live ticks observed",
+          "Tick found on pet",
+          "Customer-reported tick activity",
+          "Evidence in monitoring device",
+          "No tick activity observed",
+          "Identification uncertain"
+        ]
+      },
+      {
+        "key": "tick_identification",
+        "options": [
+          "Brown dog tick",
+          "American dog tick",
+          "Gulf Coast tick",
+          "Lone star tick",
+          "Other identified tick",
+          "Species not confirmed"
+        ]
+      }
+    ],
+    "exclusions": [
+      {
+        "value": "No tick activity observed",
+        "excludes": [
+          "Brown dog tick",
+          "American dog tick",
+          "Gulf Coast tick",
+          "Lone star tick",
+          "Other identified tick"
+        ]
+      }
+    ],
+    "protocols": [
+      {
+        "label": "Inspection only",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      },
+      {
+        "label": "Monitoring devices placed or checked",
+        "scope": "interior",
+        "treatmentApplied": false
+      },
+      {
+        "label": "Targeted exterior habitat treatment",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Yard-edge or perimeter treatment",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Pet-resting or kennel-area treatment",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Interior crack-and-crevice treatment",
+        "scope": "interior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Vacuuming or mechanical removal",
+        "scope": "interior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Treatment deferred or office review required",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      }
+    ]
+  },
+  "bee_wasp_removal": {
+    "areas": [
+      "Eaves / soffit",
+      "Roofline",
+      "Exterior wall",
+      "Wall void / structural opening",
+      "Interior wall void / structural opening",
+      "Attic",
+      "Lanai / pool cage",
+      "Porch / entry",
+      "Garage / carport",
+      "Tree / shrub",
+      "Ground cavity",
+      "Utility / irrigation box",
+      "Fence / detached structure"
+    ],
+    "findingGroups": [
+      {
+        "key": "stinging_insect_identification",
+        "options": [
+          "Paper wasp",
+          "Yellowjacket",
+          "Hornet",
+          "Honey bee",
+          "Carpenter bee",
+          "Other solitary wasp",
+          "Other wasp",
+          "Identification uncertain"
+        ]
+      },
+      {
+        "key": "nest_type",
+        "options": [
+          "Exposed paper nest",
+          "Enclosed structural void",
+          "Ground nest",
+          "Carpenter bee gallery",
+          "Honey bee swarm",
+          "Established honey bee colony",
+          "Flying activity with no nest located",
+          "Inactive or abandoned nest"
+        ]
+      },
+      {
+        "key": "nest_activity",
+        "options": [
+          "Active",
+          "Light activity",
+          "Heavy activity",
+          "Inactive",
+          "Unable to confirm"
+        ]
+      }
+    ],
+    "exclusions": [
+      {
+        "value": "Inactive or abandoned nest",
+        "excludes": [
+          "Active",
+          "Light activity",
+          "Heavy activity",
+          "Unable to confirm"
+        ]
+      }
+    ],
+    "findingActionExclusions": [
+      {
+        "value": "Inactive or abandoned nest",
+        "excludesActions": [
+          "Exposed nest treated",
+          "Void nest treated",
+          "Ground nest treated",
+          "Treatment followed by nest removal",
+          "Honey bee colony eradication performed"
+        ]
+      },
+      {
+        "value": "Inactive",
+        "excludesActions": [
+          "Exposed nest treated",
+          "Void nest treated",
+          "Ground nest treated",
+          "Treatment followed by nest removal",
+          "Honey bee colony eradication performed"
+        ]
+      }
+    ],
+    "protocols": [
+      {
+        "label": "Inspection and identification only",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      },
+      {
+        "label": "Exposed nest treated",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Void nest treated",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Ground nest treated",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Nest physically removed",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Treatment followed by nest removal",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Carpenter bee gallery treatment",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Honey bee removal performed",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Honey bee colony eradication performed",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "No treatment recommended",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      },
+      {
+        "label": "Area inaccessible; office follow-up required",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      }
+    ]
+  },
+  "mud_dauber_removal": {
+    "areas": [
+      "Eaves / soffit",
+      "Lanai / pool cage",
+      "Porch / patio",
+      "Entry doorway",
+      "Garage / carport",
+      "Exterior walls",
+      "Windows / shutters",
+      "Attic / structural interior",
+      "Fence",
+      "Shed / detached structure"
+    ],
+    "findingGroups": [
+      {
+        "key": "mud_dauber_evidence",
+        "options": [
+          "Active mud nests",
+          "Sealed nests; activity uncertain",
+          "Inactive or abandoned nests",
+          "Empty nest remnants",
+          "Mud dauber activity without completed nests",
+          "No current evidence observed",
+          "Identification uncertain"
+        ]
+      },
+      {
+        "key": "mud_dauber_count",
+        "options": [
+          "1–3 nests",
+          "4–10 nests",
+          "11–20 nests",
+          "More than 20 nests",
+          "Exact count not practical"
+        ]
+      }
+    ],
+    "exclusions": [
+      {
+        "value": "No current evidence observed",
+        "excludes": [
+          "1–3 nests",
+          "4–10 nests",
+          "11–20 nests",
+          "More than 20 nests",
+          "Exact count not practical"
+        ]
+      },
+      {
+        "value": "Mud dauber activity without completed nests",
+        "excludes": [
+          "1–3 nests",
+          "4–10 nests",
+          "11–20 nests",
+          "More than 20 nests",
+          "Exact count not practical"
+        ]
+      }
+    ],
+    "findingActionExclusions": [
+      {
+        "value": "No current evidence observed",
+        "excludesActions": [
+          "Active nests treated",
+          "Active nests treated and removed"
+        ]
+      },
+      {
+        "value": "Inactive or abandoned nests",
+        "excludesActions": [
+          "Active nests treated",
+          "Active nests treated and removed"
+        ]
+      },
+      {
+        "value": "Empty nest remnants",
+        "excludesActions": [
+          "Active nests treated",
+          "Active nests treated and removed"
+        ]
+      }
+    ],
+    "protocols": [
+      {
+        "label": "Inspection only",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      },
+      {
+        "label": "Inactive nests removed",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Active nests treated",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Active nests treated and removed",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Nest remnants and accessible webbing removed",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Localized labeled application",
+        "scope": "exterior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "No treatment recommended",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      },
+      {
+        "label": "Inaccessible nests documented",
+        "scope": "exterior",
+        "treatmentApplied": false,
+        "exclusive": true
+      }
+    ]
+  },
+  "bed_bug_treatment": {
+    "areas": [
+      "Primary bedroom",
+      "Guest bedroom",
+      "Child's bedroom",
+      "Living room",
+      "Family room",
+      "Office",
+      "Other sleeping area",
+      "Adjacent room",
+      "Shared wall / adjoining unit",
+      "Mattress seams",
+      "Box spring",
+      "Bed frame",
+      "Headboard",
+      "Baseboards",
+      "Cracks / crevices",
+      "Furniture / upholstery",
+      "Nightstands",
+      "Closets",
+      "Wall voids / outlets",
+      "Luggage / storage area",
+      "Monitors / interceptors"
+    ],
+    "findingGroups": [
+      {
+        "key": "bed_bug_visit_stage",
+        "options": [
+          "Initial inspection",
+          "Initial treatment",
+          "Scheduled follow-up treatment",
+          "Post-treatment inspection",
+          "Callback or renewed activity inspection"
+        ]
+      },
+      {
+        "key": "bed_bug_evidence",
+        "options": [
+          "Live adults",
+          "Live nymphs",
+          "Eggs",
+          "Cast skins",
+          "Fecal spotting",
+          "Bed bugs captured in monitor",
+          "Customer-reported bites only",
+          "Customer-reported sighting",
+          "No confirmed evidence",
+          "Evidence inconclusive"
+        ]
+      },
+      {
+        "key": "bed_bug_prep",
+        "options": [
+          "Preparation complete",
+          "Preparation mostly complete",
+          "Preparation partially complete",
+          "Preparation not completed",
+          "Preparation not required for this visit"
+        ]
+      }
+    ],
+    "protocols": [
+      {
+        "label": "Inspection only",
+        "scope": "interior",
+        "treatmentApplied": false,
+        "exclusive": true
+      },
+      {
+        "label": "Monitoring devices installed or checked",
+        "scope": "interior",
+        "treatmentApplied": false
+      },
+      {
+        "label": "Vacuuming performed",
+        "scope": "interior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Steam treatment performed",
+        "scope": "interior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Crack-and-crevice treatment",
+        "scope": "interior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Residual application",
+        "scope": "interior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Dust applied to labeled voids",
+        "scope": "interior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Mattress or box-spring encasement installed",
+        "scope": "interior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Chemical / IPM treatment",
+        "scope": "interior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Heat treatment",
+        "scope": "interior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      },
+      {
+        "label": "Hybrid heat and chemical treatment",
+        "scope": "interior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Targeted follow-up treatment",
+        "scope": "interior",
+        "treatmentApplied": true
+      },
+      {
+        "label": "Treatment limited because preparation was incomplete",
+        "scope": "interior",
+        "treatmentApplied": false,
+        "treatmentPerformed": true
+      }
+    ]
+  }
+}

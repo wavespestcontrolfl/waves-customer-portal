@@ -475,6 +475,25 @@ describe('bellAllowed decision order', () => {
     })).resolves.toBe(false);
   });
 
+  test('a DEFAULT_ON category rings with no saved override and is reported enabled by the settings default', async () => {
+    mockTables({ notification_preferences: chainMock([]) });
+    bellPolicy.clearOverrideCache();
+    expect(bellPolicy.DEFAULT_ON_CATEGORIES.has('estimate_change_request')).toBe(true);
+    await expect(bellPolicy.bellAllowed({ category: 'estimate_change_request' })).resolves.toBe(true);
+    bellPolicy.clearOverrideCache();
+  });
+
+  test('options.bellDefault rings without a saved override, and a saved "off" override still wins (GH codex P2 on #3706)', async () => {
+    mockTables({ notification_preferences: chainMock([]) });
+    await expect(bellPolicy.bellAllowed({ category: 'estimate_change_request', options: { bellDefault: true } }))
+      .resolves.toBe(true);
+    mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:estimate_change_request', bell_enabled: false }]) });
+    bellPolicy.clearOverrideCache();
+    await expect(bellPolicy.bellAllowed({ category: 'estimate_change_request', options: { bellDefault: true } }))
+      .resolves.toBe(false);
+    bellPolicy.clearOverrideCache();
+  });
+
   test('twilio_failure no longer rings by default (owner ruling 2026-08-28)', async () => {
     mockTables({ notification_preferences: chainMock([]) });
     await expect(bellPolicy.bellAllowed({ category: 'system', triggerKey: 'twilio_failure' }))

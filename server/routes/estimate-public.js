@@ -13666,7 +13666,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       } catch (e) { logger.error(`[termite-agreement] accept hook failed: ${e.message}`); }
     }
 
-    res.json(buildAcceptSuccessPayload({
+    // The success screen renders from THIS payload without a /data refetch,
+    // so the referral card rides here too (same gate + program check as
+    // /data; the row is accepted by construction at this point).
+    const acceptReferral = await estimateReferralCardFor({ id: estimate.id, status: 'accepted', customer_id: customerId || estimate.customer_id });
+
+    res.json({
+      ...(acceptReferral ? { referral: acceptReferral } : {}),
+      ...buildAcceptSuccessPayload({
       invoiceMode,
       invoiceLinkDelivered,
       invoiceId,
@@ -13697,7 +13704,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         ? prepayChargePlan.quote.totalCents / 100
         : null,
       prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
-    }));
+      }),
+    });
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
     // (e.g. reservation expiring between the pre-tx check and the commit).
@@ -14977,6 +14985,11 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       serviceKey,
       label,
       included,
+      // Provenance is persisted at the source: this route is the customer's
+      // own tap. The returning-visitor strip announces only non-customer
+      // events (a customer's own click was made from an open page), so an
+      // authoritative actor must exist on every event (pre-push codex P1).
+      actor: 'customer',
       at: new Date().toISOString(),
       removedInputs: included === false ? applied.removedInputs : null,
       provenance: provenance && Object.keys(provenance).length ? provenance : null,
@@ -15290,6 +15303,178 @@ router.post('/:token/bundle-inquiry', addServiceRequestLimiter, async (req, res,
 // legacy admin slug tokens (nameSlug-8hex) AND the 64-hex format every
 // post-estimate-versions token uses. Malformed tokens 404 before any DB read.
 const EXTENSION_REQUEST_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
+
+// Referral card eligibility on the estimate screens (GATE_ESTIMATE_SUCCESS_
+// REFERRAL): an ACCEPTED estimate with a linked customer. The render payload
+// (/data, the accept response, the already-accepted retry) carries only the
+// static headline + CTA; the customer's code is fetched on the tap. Null on
+// any settings failure — never advertise a reward the program cannot honor.
+async function estimateReferralCardFor(estimate) {
+  if (!featureGates.isEnabled('estimateSuccessReferral')) return null;
+  if (!estimate || estimate.status !== 'accepted' || !estimate.customer_id) return null;
+  try {
+    return await require('../services/referral-share').composeReferralCard();
+  } catch (err) {
+    logger.warn(`[estimate-public] referral card suppressed for estimate ${estimate.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// Mirrors extensionRequestLimiter: gate-aware skip so a dark gate answers the
+// generic 404 on every probe, shared IPv6-safe key.
+const referralLinkLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.isEnabled('estimateSuccessReferral'),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
+// Mirrors measurementReviewLimiter: gate-aware skip so a dark gate answers the
+// generic 404 on every probe, shared IPv6-safe key.
+const softExitLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.isEnabled('estimateSoftExit'),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
+// POST /api/estimates/:token/referral-link — the referral card's "Send My
+// Referral Link" tap on an accepted estimate (GATE_ESTIMATE_SUCCESS_REFERRAL).
+// A POST on the TAP, not part of the /data render: enrolling the promoter is
+// a durable write and a public GET must stay read-only. Same composer as the
+// service report's tap (services/referral-share.js). 404 covers dark gate /
+// malformed token / unknown token / not-accepted / no customer / inactive
+// program uniformly.
+router.post('/:token/referral-link', referralLinkLimiter, async (req, res) => {
+  if (!featureGates.isEnabled('estimateSuccessReferral')) {
+    return res.status(404).json({ error: 'Estimate not found' });
+  }
+  // A staff preview tap (the SPA's ?adminPreview=1 marker) must never enroll
+  // the customer as a promoter — the card is inert in staff view, and this
+  // is the server-side half of that contract (GH codex P1 on #3710).
+  if (req.query.adminPreview === '1') {
+    return res.status(404).json({ error: 'Estimate not found' });
+  }
+  if (!req.params.token || !EXTENSION_REQUEST_TOKEN_RE.test(req.params.token)) {
+    return res.status(404).json({ error: 'Estimate not found' });
+  }
+  // Log identity: the estimate id once resolved, NEVER the token — legacy
+  // slug tokens carry part of the customer's name (pre-push codex P1).
+  let estimateId = null;
+  try {
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    estimateId = estimate?.id || null;
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    // Same viewability contract as /data plus the accepted-only rule the
+    // card composer applies, so the tap can never enroll from a row whose
+    // page does not render the card.
+    if (!estimate || !isEstimateCustomerViewable(estimate) || estimate.status !== 'accepted' || !estimate.customer_id) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    // The durable promoter row is written under the estimate row lock with
+    // the call-side linkage verdict re-run on the LOCKED row and HELD through
+    // enrollment (estimates → leads → call_log → customers), so a linkage
+    // correction landing after the pre-check can never enroll the wrong
+    // customer (pre-push codex P1). Every gate re-checked on the locked row.
+    const share = await db.transaction(async (trx) => {
+      const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+      if (!locked || !isEstimateCustomerViewable(locked) || locked.status !== 'accepted' || !locked.customer_id) return null;
+      const linkData = parseEstimateDataSafe(locked);
+      const eng = linkData?.estimatorEngine;
+      if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return null;
+      if (await callSideBlockForEstimateData(trx, linkData)) return null;
+      const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+      if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
+        await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
+      }
+      if (linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true })) return null;
+      return require('../services/referral-share').buildReferralShareForCustomer(locked.customer_id, { conn: trx });
+    });
+    if (!share) return res.status(404).json({ error: 'Estimate not found' });
+    if (share.unavailable) {
+      return res.status(503).json({ error: 'Referral link unavailable — please try again' });
+    }
+    return res.json(share);
+  } catch (err) {
+    // err.code only, never err.message: PG constraint violations quote the
+    // conflicting phone number (AGENTS.md PII-in-logs rule).
+    logger.warn(`[estimate-public] referral-link failed (code=${err?.code || 'none'}, estimate=${estimateId || 'unresolved'})`);
+    return res.status(503).json({ error: 'Referral link unavailable — please try again' });
+  }
+});
+
+// POST /api/estimates/:token/change-request — the non-decline half of the
+// soft-exit sheet (GATE_ESTIMATE_SOFT_EXIT). body.kind:
+//   'change'         → parks ONE service_requests row + admin bell (note
+//                      required; topics optional chips)
+//   'still_deciding' → one activity_log row, no bell, no request row
+// Neither touches the estimate or messages the customer. Contract mirrors
+// measurement-review: gate + token-format gate + generic 404 (unknown /
+// malformed / ineligible / gate-off indistinguishable) + gate-aware limiter,
+// call-side verdict re-checked on the locked row for the request write.
+router.post('/:token/change-request', softExitLimiter, async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('estimateSoftExit')) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!req.params.token || !EXTENSION_REQUEST_TOKEN_RE.test(req.params.token)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const estimateRow = await db('estimates').where({ token: req.params.token }).first();
+    if (estimateRow && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimateRow))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const { createEstimateChangeRequest, recordEstimateStillDeciding } = require('../services/estimate-change-request');
+    // Same locked-row linkage re-check the measurement review runs: lead
+    // locked before call_log, verdict HELD through customer resolution and
+    // the insert.
+    const callSideBlockedFor = async (trx, lockedRow) => {
+      const linkData = parseEstimateDataSafe(lockedRow);
+      const eng = linkData?.estimatorEngine;
+      if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
+      if (await callSideBlockForEstimateData(trx, linkData)) return true;
+      const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+      if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
+        await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
+      }
+      return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true }));
+    };
+    const kind = String(req.body?.kind || 'change');
+    // Unknown kinds are a validation error, never a silent change request
+    // (pre-push codex P1) — but only once the token has cleared the public
+    // eligibility gates, so a probe cannot tell gate state from a 400.
+    if (!['change', 'still_deciding'].includes(kind)) {
+      const { isSoftExitEligible } = require('../services/estimate-change-request');
+      if (estimateRow && isEstimateCustomerViewable(estimateRow) && isSoftExitEligible(estimateRow)) {
+        return res.status(400).json({ error: 'kind must be change or still_deciding' });
+      }
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const result = kind === 'still_deciding'
+      ? await recordEstimateStillDeciding({ estimateToken: req.params.token, callSideBlockedFor })
+      : await createEstimateChangeRequest({
+        estimateToken: req.params.token,
+        topics: req.body?.topics,
+        note: req.body?.note,
+        callSideBlockedFor,
+      });
+    res.status(result.deduped ? 200 : 201).json(result);
+  } catch (err) {
+    const status = Number(err.status || err.statusCode || 0);
+    if (status >= 400 && status < 500) {
+      return res.status(status).json({ error: err.message || 'Request could not be processed' });
+    }
+    next(err);
+  }
+});
 
 // Mirrors extensionRequestLimiter exactly (codex #3376 r2): the shared
 // add-service limiter runs BEFORE the handler's gate check, so a dark gate
@@ -15667,6 +15852,18 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
     const guard = resolveEstimateDeclineGuard(estimate);
     if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
     if (guard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
+    // Customer-stated reason (GATE_ESTIMATE_SOFT_EXIT): optional, validated
+    // against the same normalized loss codes the staff modal writes. With the
+    // gate dark the fields are ignored outright — the plain decline stays
+    // byte-identical to today — so a probe cannot detect the gate by a 400.
+    // Validated only after the guard cleared the token for the same reason.
+    let customerReason = null;
+    if (featureGates.isEnabled('estimateSoftExit')) {
+      const { customerDispositionUpdates } = require('../services/estimate-disposition');
+      const parsedReason = customerDispositionUpdates(req.body || {});
+      if (parsedReason.error) return res.status(400).json({ error: parsedReason.error });
+      customerReason = parsedReason.updates;
+    }
     // LIVE call-linkage revalidation ATOMIC with the decline write (codex
     // P0 r26, P1 GH r6): the whole transition runs in ONE transaction
     // with the call row locked FOR UPDATE and held through the UPDATE — a
@@ -15711,13 +15908,23 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
           status: 'declined',
           declined_at: trx.fn.now(),
           updated_at: trx.fn.now(),
-          // Normalized loss disposition (estimator audit 2026-08-29): this
-          // is the one CUSTOMER-authored decline path — no reason is
-          // collected, the classification IS the reason. COALESCE keeps any
-          // earlier staff stamp.
-          disposition: trx.raw("COALESCE(disposition, 'declined_by_customer')"),
+          // Normalized loss disposition (estimator audit 2026-08-29): the
+          // CUSTOMER-authored decline path. Without a stated reason the
+          // classification IS the reason; with one (soft-exit sheet) the
+          // customer's own code lands. COALESCE keeps any earlier staff
+          // stamp either way — a staff ruling on a live row is rare and
+          // deliberate, and the customer's words survive in the note.
+          disposition: customerReason
+            ? trx.raw('COALESCE(disposition, ?)', [customerReason.disposition])
+            : trx.raw("COALESCE(disposition, 'declined_by_customer')"),
           disposition_source: trx.raw("COALESCE(disposition_source, 'customer')"),
           disposition_at: trx.raw('COALESCE(disposition_at, NOW())'),
+          ...(customerReason ? {
+            disposition_note: trx.raw('COALESCE(disposition_note, ?)', [customerReason.disposition_note]),
+            competitor_name: trx.raw('COALESCE(competitor_name, ?)', [customerReason.competitor_name]),
+            competitor_price: trx.raw('COALESCE(competitor_price, ?)', [customerReason.competitor_price]),
+            decline_reason: trx.raw('COALESCE(decline_reason, ?)', [customerReason.decline_reason]),
+          } : {}),
         });
       // Click-to-estimate mints only (GitHub #3391 round P1, mirrors the
       // acceptance path): the customer just REJECTED the very thing the
@@ -15768,7 +15975,10 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
     // Notify admin of declined estimate
     try {
       const NotificationService = require('../services/notification-service');
-      await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo`, { icon: '\u274C', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
+      const reasonSuffix = customerReason
+        ? ` \u2014 ${customerReason.decline_reason}${customerReason.competitor_name ? ` (${customerReason.competitor_name}${customerReason.competitor_price != null ? ` at $${customerReason.competitor_price}` : ''})` : ''}`
+        : '';
+      await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo${reasonSuffix}`, { icon: '\u274C', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id, reason: customerReason?.disposition || null } });
     } catch (e) { logger.error(`[notifications] Estimate declined notification failed: ${e.message}`); }
 
     res.json({ success: true });
@@ -17954,7 +18164,9 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
     }
   }
 
+  const retryReferral = await estimateReferralCardFor(estimate);
   return {
+    ...(retryReferral ? { referral: retryReferral } : {}),
     ...buildAcceptSuccessPayload({
       // A settled invoice is not an open payable — invoiceMode stays false so
       // no consumer (including the client's legacy invoiceMode fallback) can
@@ -24351,6 +24563,13 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // ?mode=pdf by hand still counts as the view it is (unlike the refresh
     // param above, no public input can dodge first-view tracking).
     const verifiedPdfRenderPass = isPdfRenderPass && docRenderPin !== null;
+    // Whether THIS request is represented in estimate_views: an internal
+    // refresh belongs to the sitting that was already counted; a fresh open
+    // counts only once its row actually lands. The returning-visitor
+    // projection below refuses to run otherwise — it would treat the last
+    // stored session as current and report a visit number one too low (GH
+    // codex P2 on #3708).
+    let currentViewRecorded = isInternalRefresh;
     if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && shouldCountView(req, ip, estimate)) {
       // ONE transaction for the aggregate counter + the per-open row: written
       // separately, a failure of either half leaves view_count permanently
@@ -24372,6 +24591,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
             user_agent: ua || null,
           });
         });
+        currentViewRecorded = true;
       } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
 
       // Engagement-engine hook — same contract as the legacy HTML view
@@ -24803,9 +25023,59 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // Strict on the headless document pass: the rendered PDF must carry the
     // record or fail the render (which then fails the pdfkit fallback too).
     const acceptanceRecord = await acceptanceRecordForEstimate(estimate, { strict: isPdfRenderPass });
+    // Referral card (GATE_ESTIMATE_SUCCESS_REFERRAL): accepted estimates only;
+    // include-when-present so every other response stays byte-identical.
+    const successReferral = await estimateReferralCardFor(estimate);
+
+    // Returning-visitor strip (GATE_ESTIMATE_RETURN_VISIT). Include-when-TRUE
+    // only: gate on, a live accept-active row, never a staff draft preview or
+    // the headless document pass. The current open's estimate_views row was
+    // inserted above (before this composition), so the sessionizer already
+    // counts this visit; an internal ?refresh=1 re-fetch inserts nothing and
+    // still lands inside the current session. Best-effort: a sessionizer
+    // failure never breaks the customer-facing endpoint.
+    let returnVisitBlock = {};
+    if (featureGates.isEnabled('estimateReturnVisit') && !adminDraftPreview && !isPdfRenderPass
+      && currentViewRecorded && isEstimateAcceptActive(estimate)) {
+      try {
+        const { sessionsForEstimate } = require('../services/estimate-engagement-sessions');
+        const { buildReturnVisitPayload } = require('../services/estimate-return-visit');
+        const sessions = await sessionsForEstimate(estimate.id);
+        // An internal refresh must belong to a RECORDED sitting: if the
+        // initial open's view row never landed, a later preference/booking
+        // refresh would otherwise project from the last historical session
+        // as though it were current (GH codex r6 P2). Proof = the latest
+        // session is still inside the session gap right now.
+        if (isInternalRefresh) {
+          const { SESSION_GAP_MINUTES } = require('../services/estimate-engagement-sessions');
+          const latest = sessions[sessions.length - 1];
+          const latestEnd = latest?.endedAt ? new Date(latest.endedAt).getTime() : 0;
+          if (!latestEnd || Date.now() - latestEnd > SESSION_GAP_MINUTES * 60000) {
+            throw Object.assign(new Error('refresh outside a recorded sitting'), { skipReturnVisit: true });
+          }
+        }
+        const returnVisit = buildReturnVisitPayload({
+          sessions,
+          extensionAutoGrantedAt: estimate.extension_auto_granted_at || null,
+        });
+        if (returnVisit) returnVisitBlock = { returnVisit };
+      } catch (e) {
+        if (!e?.skipReturnVisit) logger.warn(`[estimate-data] return-visit projection skipped: ${e.message}`);
+      }
+    }
 
     res.json({
       ...(propertyGroup ? { propertyGroup } : {}),
+      ...returnVisitBlock,
+      ...(successReferral ? { referral: successReferral } : {}),
+      // Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): the page draws
+      // the strip from visitsPerYear already in the section payload, so this
+      // is a render flag only. Include-when-true; a recurring lawn section
+      // must exist or there is nothing to draw.
+      ...(featureGates.isEnabled('estimateLawnCalendar')
+        && (Array.isArray(pricingBundle.services) ? pricingBundle.services : [])
+          .some((section) => section && section.key === 'lawn_care' && section.isRecurring === true)
+        ? { lawnCalendar: true } : {}),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.
@@ -24838,6 +25108,19 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
+      // Soft-exit sheet (GATE_ESTIMATE_SOFT_EXIT). Include-when-TRUE only:
+      // gate on, a live accept-active row, never a staff draft preview (the
+      // write 404s a draft). Absent otherwise so gate-off responses stay
+      // byte-identical.
+      ...(featureGates.isEnabled('estimateSoftExit') && !adminDraftPreview && isEstimateAcceptActive(estimate)
+        ? {
+          softExit: true,
+          // The change branch needs a customer the resolver can attach or
+          // create (linked id, or a phone to create from); an unlinked
+          // email-only estimate would 400 on submit, so the page withholds
+          // the branch instead (GH codex P2). Include-when-true.
+          ...(estimate.customer_id || String(estimate.customer_phone || '').trim() ? { softExitChange: true } : {}),
+        } : {}),
       // Services this customer has opted out of. Present only when there is
       // something to report, so a gate-off (or never-used) response stays
       // byte-identical to today. The page renders the "Add it back" row from
@@ -25276,6 +25559,7 @@ module.exports.estimateInvoicePayUrlParams = estimateInvoicePayUrlParams;
 module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVisits;
 module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
+module.exports.estimateReferralCardFor = estimateReferralCardFor;
 module.exports.buildAlreadyAcceptedSuccessPayload = buildAlreadyAcceptedSuccessPayload;
 module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
 module.exports.isCommercialAutoAcceptEstimate = isCommercialAutoAcceptEstimate;
