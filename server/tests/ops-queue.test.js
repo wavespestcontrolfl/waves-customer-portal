@@ -35,6 +35,10 @@ jest.mock('../services/intelligence-bar/job-health-tools', () => ({
 jest.mock('../services/content/autonomous-review-queue', () => ({
   listReviewItems: (...a) => mockReviewItems(...a),
 }));
+// The stall rule is the watchdog's; here it is a fixture: c1 is stalled.
+jest.mock('../services/call-processing-stall-watchdog', () => ({
+  computeStalledCalls: (rows) => rows.filter((r) => r.id === 'c1'),
+}));
 
 const { getOpsQueue, LANES } = require('../services/ops-queue');
 
@@ -50,9 +54,9 @@ describe('getOpsQueue', () => {
       { job: 'digest', state: 'running', last_started_at: ago(2) },
       { job: 'healthy-one', state: 'healthy', last_success_at: ago(5) },
     ] });
-    mockReviewItems.mockResolvedValue([
+    mockReviewItems.mockResolvedValue({ status: 'pending_review', counts: {}, items: [
       { id: 'opp-1', skip_reason: 'affiliate_review', brief: { title: 'Best ant bait for lanais' }, run: { completed_at: ago(60) } },
-    ]);
+    ] });
     fixtures.call_log = [
       { id: 'c1', from_phone: '+15550000100', direction: 'inbound', processing_status: 'processing', processing_started_at: ago(45), created_at: ago(50) },
       // A live heartbeat beats an old start: still pending, not stalled.
@@ -97,6 +101,7 @@ describe('getOpsQueue', () => {
       ['c3', 'failed'], ['c1', 'parked'], ['c2', 'pending'], ['c5', 'pending'],
     ]);
     expect(by.calls.items[1].detail).toMatch(/stalled in processing/);
+    expect(by.calls.items.find((i) => i.id === 'c5').status).toBe('pending');
 
     expect(by.content.items).toEqual([expect.objectContaining({ id: 'opp-1', status: 'parked', title: 'Best ant bait for lanais', detail: 'parked: affiliate review' })]);
     expect(by.approvals.items.map((i) => [i.id, i.status])).toEqual([['ea-2', 'failed'], ['ea-1', 'parked']]);
@@ -120,10 +125,12 @@ describe('getOpsQueue', () => {
   test('a lane that throws degrades to an error row and never takes the view down', async () => {
     fixtures.content_email_approvals = new Error('relation "content_email_approvals" does not exist');
     mockJobHealth.mockRejectedValue(new Error('job_health missing'));
+    mockReviewItems.mockResolvedValue({ items: [], counts: {}, unavailable: true });
     const q = await getOpsQueue();
     const by = Object.fromEntries(q.lanes.map((l) => [l.key, l]));
     expect(by.approvals).toMatchObject({ error: expect.stringMatching(/does not exist/), items: [], total: 0 });
     expect(by.jobs).toMatchObject({ error: 'job_health missing', items: [] });
+    expect(by.content).toMatchObject({ error: 'review tables unavailable', items: [] });
     expect(by.calls.total).toBe(4);
   });
 
@@ -146,7 +153,7 @@ describe('getOpsQueue scan cap', () => {
   test('a lane that hits the scan cap reports truncated so counts read as a floor', async () => {
     for (const k of Object.keys(fixtures)) delete fixtures[k];
     mockJobHealth.mockResolvedValue({ jobs: [] });
-    mockReviewItems.mockResolvedValue([]);
+    mockReviewItems.mockResolvedValue({ items: [] });
     fixtures.ib_pending_actions = Array.from({ length: 200 }, (_, i) => ({ id: `pa-${i}`, tool_name: 'send_sms', expires_at: ago(-5), created_at: ago(i) }));
     const q = await getOpsQueue();
     const ib = q.lanes.find((l) => l.key === 'ib');

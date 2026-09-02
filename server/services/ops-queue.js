@@ -18,13 +18,11 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools');
+const { computeStalledCalls } = require('./call-processing-stall-watchdog');
 
 const ITEM_LIMIT = 25;
 const SCAN_LIMIT = 200;
 const RECENT_DAYS = 7;
-// Mirrors call-processing-stall-watchdog: a claim older than this with no
-// terminal status is a stall, not work in progress.
-const CALL_STALL_MINUTES = 10;
 
 function iso(v) {
   if (!v) return null;
@@ -98,8 +96,10 @@ async function laneCallProcessing() {
     // newest-first cap would hide exactly the rows this lane exists for.
     .orderByRaw('COALESCE(processing_heartbeat_at, processing_started_at, updated_at, created_at) ASC')
     .limit(SCAN_LIMIT)
-    .select('id', 'from_phone', 'direction', 'processing_status', 'processing_heartbeat_at', 'processing_started_at', 'updated_at', 'created_at', 'extraction_attempts');
-  const stallBefore = Date.now() - CALL_STALL_MINUTES * 60000;
+    .select('id', 'from_phone', 'direction', 'processing_status', 'processing_heartbeat_at', 'processing_started_at', 'updated_at', 'created_at', 'extraction_attempts', 'recording_url', 'recording_duration_seconds', 'duration_seconds', 'transcription', 'transcription_metadata');
+  // One stall definition, the watchdog's (grace window, live-claim heartbeat,
+  // alert ceiling, eligibility) — the tab must never disagree with the bell.
+  const stalledIds = new Set(computeStalledCalls(rows).map((r) => r.id));
   const items = rows.map((r) => {
     const ps = r.processing_status || 'pending';
     let status = 'pending';
@@ -107,14 +107,9 @@ async function laneCallProcessing() {
     if (ps === 'extraction_failed' || ps === 'no_transcription') {
       status = 'failed';
       detail = ps === 'no_transcription' ? 'no transcript could be produced' : `extraction failed (${r.extraction_attempts || 0} attempt${r.extraction_attempts === 1 ? '' : 's'})`;
-    } else {
-      // The heartbeat is the authoritative liveness signal (the processor
-      // stamps it mid-run); start/updated are the fallback for old rows.
-      const lastAlive = new Date(r.processing_heartbeat_at || r.processing_started_at || r.updated_at || r.created_at).getTime();
-      if (lastAlive && lastAlive < stallBefore) {
-        status = 'parked';
-        detail = `stalled in ${ps} for over ${CALL_STALL_MINUTES} minutes`;
-      }
+    } else if (stalledIds.has(r.id)) {
+      status = 'parked';
+      detail = `stalled in ${ps} — the watchdog's stall rule`;
     }
     return {
       id: r.id,
@@ -130,8 +125,10 @@ async function laneCallProcessing() {
 
 async function laneContentParks() {
   const { listReviewItems } = require('./content/autonomous-review-queue');
-  const reviews = await listReviewItems({ status: 'pending_review', limit: SCAN_LIMIT });
-  const items = (reviews || []).map((it) => ({
+  const result = await listReviewItems({ status: 'pending_review', limit: SCAN_LIMIT });
+  if (result?.unavailable) throw new Error('review tables unavailable');
+  const reviews = Array.isArray(result?.items) ? result.items : [];
+  const items = reviews.map((it) => ({
     id: it.id,
     title: it.brief?.title || it.brief?.topic || it.opportunity_key || it.key || `Opportunity ${String(it.id).slice(0, 8)}`,
     status: 'parked',
