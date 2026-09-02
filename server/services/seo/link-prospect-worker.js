@@ -34,12 +34,15 @@ const OUTREACH_TYPES = ['editorial', 'resource', 'guest_post', 'haro'];
 // Registry domain states under which no placement is leased (plan §7: the
 // registry must not be new / investigating / not_reproducible / rejected /
 // watching): the owner's Watch / Reject rulings, an investigation in flight,
-// and a domain no route could be reproduced on. `new` is deliberately NOT
-// listed yet: on the legacy board every backfilled domain sits at `new` and
-// nothing on main moves it (the investigator that qualifies a domain is PR 2
-// of this split), so listing it would halt every claim — it joins this list
-// with the investigator.
+// and a domain no route could be reproduced on. `new` (never investigated)
+// joins the list only while the investigator is ON (GATE_LINK_INVESTIGATOR):
+// with it dark nothing moves a domain out of `new` — every legacy-board
+// domain sits there — so listing it would halt every claim; once the
+// investigator qualifies domains, an uninvestigated one waits its turn.
 const NON_CLAIMABLE_DOMAIN_STATES = ['investigating', 'not_reproducible', 'watching', 'rejected'];
+function nonClaimableDomainStates() {
+  return require('../../config/feature-gates').isEnabled('linkInvestigator') ? ['new', ...NON_CLAIMABLE_DOMAIN_STATES] : NON_CLAIMABLE_DOMAIN_STATES;
+}
 const MAX_ATTEMPTS = 4;
 
 // Recipient sanity check, shared by the outreach send valve (link-prospect-outreach
@@ -125,7 +128,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       // on a domain the owner parked (Watch) or refused (Reject) is never
       // leased, whatever its own status/policy/confidence still read
       .where((b) => b.whereNull('domain_id').orWhereNotIn('domain_id',
-        trx('seo_link_domains').select('id').whereIn('agent_state', NON_CLAIMABLE_DOMAIN_STATES)));
+        trx('seo_link_domains').select('id').whereIn('agent_state', nonClaimableDomainStates())));
     // The in-process auto-drafter emails a stored contact and can't fill a web form,
     // so it claims only prospects that already have a contact_email — leaving
     // form-only prospects untouched (status='prospect') for manual handling rather
@@ -293,7 +296,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       await trx('seo_link_prospects')
         .where({ id: r.id }).whereNull('claimed_at')
         .where((b) => b.whereNull('domain_id').orWhereNotIn('domain_id',
-          trx('seo_link_domains').select('id').whereIn('agent_state', NON_CLAIMABLE_DOMAIN_STATES)))
+          trx('seo_link_domains').select('id').whereIn('agent_state', nonClaimableDomainStates())))
         .update({ claimed_at: now, claimed_by: WORKER, leased_path_revision: r.path_id ? revisionOf.get(r.path_id) ?? null : null, updated_at: now });
     }
     // only what the UPDATE actually leased is handed out
@@ -551,5 +554,5 @@ async function releaseClaims(claims = []) {
 module.exports = {
   claim, report, sweepExpiredClaims, releaseClaims, settleReleasedPlacements, mapReportToPatch, businessProfile, isValidEmail,
   effectiveAutomationPolicy,
-  WORKER, SIGNUP_TYPES, OUTREACH_TYPES, MAX_ATTEMPTS, NON_CLAIMABLE_DOMAIN_STATES,
+  WORKER, SIGNUP_TYPES, OUTREACH_TYPES, MAX_ATTEMPTS, nonClaimableDomainStates,
 };

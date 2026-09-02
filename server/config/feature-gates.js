@@ -794,6 +794,16 @@ const gates = {
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
 
+  // Backlink path investigator (Manager v2 step 3) — the hourly job that
+  // fetches ≤8 pages per registry domain and spends ONE WORKHORSE LLM call to
+  // classify HOW a link can be acquired (plan §5). PAY-PER-DOMAIN (fetches +
+  // LLM), so opt-in in EVERY env (not default-on in dev) — a dev box with a
+  // real ANTHROPIC_API_KEY must not burn batches on boot. Investigation only:
+  // it never sends, pays, or leases work. While ON, a registry domain still
+  // at `new` (never investigated) is not claimable either (plan §7) — the
+  // worker reads this gate for that rule.
+  linkInvestigator: process.env.GATE_LINK_INVESTIGATOR === 'true',
+
   // Backlink profile → astro sameAs sync — weekly job that opens a PR adding
   // verifier-confirmed (status live/indexed) directory/citation/social profile
   // URLs from seo_link_prospects to the marketing site's entity-profiles.auto.json

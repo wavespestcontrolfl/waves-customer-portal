@@ -51,7 +51,7 @@ async function claimableOutreachPath(trx, row, linkType) {
     const dom = await trx('seo_link_domains').where({ id: row.domain_id }).first('agent_state');
     const state = dom && dom.agent_state;
     if (state === 'investigating') return { defer: `registry domain is ${state} — deferred until the investigation settles` };
-    if (worker.NON_CLAIMABLE_DOMAIN_STATES.includes(state)) return { refuse: `registry domain is ${state} — no worker may claim it, not reopened` };
+    if (worker.nonClaimableDomainStates().includes(state)) return { refuse: `registry domain is ${state} — no worker may claim it, not reopened` };
   }
   const cur = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first(...PATH_STANDING_COLUMNS) : null;
   if (stands(cur)) return {};
