@@ -187,6 +187,9 @@ describe('pay page — other ways to pay (Zelle)', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Copy Zelle address' })).toBeEnabled());
     expect(gets).toBe(2);
     expect(await screen.findByRole('status')).toHaveTextContent(/just updated/);
+    // Validated: the anchors are back in the tab order and activation is not cancelled.
+    expect(screen.getByRole('link', { name: 'Open Zelle' })).not.toHaveAttribute('tabindex');
+    expect(fireEvent.click(screen.getByRole('link', { name: 'Open Zelle' }))).toBe(true);
     // The panel re-rendered from the fresh payload: new Zelle number, and Copy copies the NEW number.
     expect(screen.getByRole('link', { name: '(941) 555-9999' })).toHaveAttribute('href', 'tel:+19415559999');
     expect(screen.queryByText('(941) 555-1234')).not.toBeInTheDocument();
@@ -234,8 +237,17 @@ describe('pay page — other ways to pay (Zelle)', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(/Could not confirm/);
     expect(gets).toBe(2);
     expect(screen.getByRole('button', { name: 'Copy Zelle address' })).toBeDisabled();
-    expect(screen.getByRole('link', { name: '(941) 555-1234' })).toHaveAttribute('aria-disabled', 'true');
-    expect(screen.getByRole('link', { name: 'Open Zelle' })).toHaveAttribute('aria-disabled', 'true');
+    const call = screen.getByRole('link', { name: '(941) 555-1234' });
+    const open = screen.getByRole('link', { name: 'Open Zelle' });
+    expect(call).toHaveAttribute('aria-disabled', 'true');
+    expect(open).toHaveAttribute('aria-disabled', 'true');
+    // Keyboard activation is blocked too (pre-push P1): Enter on a focused
+    // anchor fires click — it must be cancelled, and the anchors leave the
+    // tab order so they cannot be focused in the first place.
+    expect(call).toHaveAttribute('tabindex', '-1');
+    expect(open).toHaveAttribute('tabindex', '-1');
+    expect(fireEvent.click(call)).toBe(false);
+    expect(fireEvent.click(open)).toBe(false);
   });
 
   it('once /setup has minted a PI, a changed invoice from the panel read forces a full reload (never a data swap beside the mounted form)', async () => {

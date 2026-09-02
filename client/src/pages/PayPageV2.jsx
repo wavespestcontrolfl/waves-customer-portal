@@ -535,6 +535,12 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
   // shown and copied is always the latest server truth.
   const [validated, setValidated] = useState(false);
   const validating = !validated;
+  // aria-disabled + pointer-events:none only stops the mouse — Enter on a
+  // focused anchor still navigates (pre-push P1). Drop it from the tab order
+  // and cancel activation while a fresh read is pending or has failed.
+  const anchorGuard = validating
+    ? { tabIndex: -1, onClick: (e) => e.preventDefault() }
+    : {};
   const readFresh = async () => {
     const res = await fetch(`${API_BASE}/pay/${token}`);
     const fresh = await res.json().catch(() => null);
@@ -693,14 +699,14 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
                 <div style={{ fontSize: FS.body, color: DOC.muted, marginTop: 2, overflowWrap: 'anywhere' }}>
                   {hint}
                   {isPhone ? (
-                    <a href={telHref(recipient)} aria-disabled={validating || undefined} style={{ color: DOC.ink, fontWeight: FW.medium, display: 'block', whiteSpace: 'nowrap', ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>{value}</a>
+                    <a href={telHref(recipient)} aria-disabled={validating || undefined} {...anchorGuard} style={{ color: DOC.ink, fontWeight: FW.medium, display: 'block', whiteSpace: 'nowrap', ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>{value}</a>
                   ) : (
                     <span style={{ color: DOC.ink, fontWeight: FW.medium, display: 'block', whiteSpace: 'nowrap' }}>{value}</span>
                   )}
                 </div>
               </div>
             </div>
-            <a href="https://www.zellepay.com/get-started" target="_blank" rel="noopener noreferrer" data-glass-accent="" aria-disabled={validating || undefined} style={{ ...goldChipButton, ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>
+            <a href="https://www.zellepay.com/get-started" target="_blank" rel="noopener noreferrer" data-glass-accent="" aria-disabled={validating || undefined} {...anchorGuard} style={{ ...goldChipButton, ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>
               Open Zelle
             </a>
             <CopyValueButton value={value} label="Zelle address" disabled={validating} />
