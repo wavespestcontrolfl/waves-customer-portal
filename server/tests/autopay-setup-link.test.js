@@ -44,7 +44,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockResolveForInvoice = jest.fn(async () => null);
 jest.mock('../services/payer', () => ({ resolveForInvoice: (...a) => mockResolveForInvoice(...a) }));
 const mockCustomerOnAutopay = jest.fn(async () => false);
-jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: (...a) => mockCustomerOnAutopay(...a) }));
+jest.mock('../services/autopay-eligibility', () => ({
+  customerOnAutopay: (...a) => mockCustomerOnAutopay(...a),
+  isPaused: (c) => !!c?.autopay_paused_until,
+}));
 const mockFindConsentedChargeableCard = jest.fn(async () => null);
 const mockHasConsentSnapshotForVariant = jest.fn(async () => false);
 const mockRecordConsent = jest.fn(async () => ({ id: 'consent-1' }));
@@ -145,6 +148,23 @@ describe('requestAutopaySetupLink — ordered checks', () => {
     expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).reason).toBe('autopay_already_active');
   });
 
+  it('treats a PAUSED enrollment as already configured (never a silent resume)', async () => {
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, autopay_enabled: true, autopay_paused_until: '2099-01-01' }) };
+    expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).reason).toBe('autopay_paused');
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+  });
+
+  it('skips lanes whose visits are covered (monthly dues, annual prepay) or one-time — the per-visit promise would be false', async () => {
+    for (const mode of ['monthly_membership', 'annual_prepay', 'one_time']) {
+      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: mode }) };
+      expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).reason).toBe('unsupported_billing_lane');
+    }
+    for (const mode of ['per_visit', 'per_application']) {
+      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: mode }) };
+      expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).action).toBe('link_created');
+    }
+  });
+
   it('auto-secures from a consented saved card (enrolls, mints no row, sends nothing)', async () => {
     mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7', stripe_payment_method_id: 'pm_7' });
     const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
@@ -186,8 +206,20 @@ describe('requestAutopaySetupLink — link minting and delivery', () => {
     expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'insert')).toBe(false);
   });
 
-  it('treats a mid-completion row as live: reuses its token and never mints a second link', async () => {
-    mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', expires_at: PAST }) };
+  it('an EXPIRED mid-completion row: a fresh claim reports completion_in_progress, a stale one is retired and a new link mints', async () => {
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', expires_at: PAST, updated_at: new Date() }) };
+    expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).reason).toBe('completion_in_progress');
+    mockDbTouches = [];
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', expires_at: PAST, updated_at: new Date(Date.now() - 20 * 60 * 1000) }) };
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1' });
+    expect(r.action).toBe('link_created');
+    expect(r.reason).toBe('created');
+    const calls = touches('appointment_card_requests').flatMap((c) => c.calls);
+    expect(calls.find((c) => c[0] === 'update')[1]).toEqual(expect.objectContaining({ status: 'expired' }));
+  });
+
+  it('treats a live mid-completion row as live: reuses its token and never mints a second link', async () => {
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', expires_at: FUTURE }) };
     const r = await requestAutopaySetupLink({ customerId: 'cust-1' });
     expect(r).toEqual(expect.objectContaining({ action: 'link_created', reason: 'request_exists', secureUrl: 'https://portal.test/secure/tok1' }));
     const calls = touches('appointment_card_requests').flatMap((c) => c.calls);
@@ -278,6 +310,14 @@ describe('loadAutopaySetupPageData — state machine', () => {
       expect(d).toEqual(expect.objectContaining({ state: 'secured', kind: 'customer', firstName: 'Pat', cancelFeeNote: null }));
     }
     expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completing' })).state).toBe('saving');
+    // Expiry wins over the claim state.
+    expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completing', expires_at: PAST })).state).toBe('closed');
+    expect(mockCreateSetupIntent).not.toHaveBeenCalled();
+  });
+
+  it('renders closed when the customer moved to a lane the per-visit promise does not fit', async () => {
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'monthly_membership' }) };
+    expect((await loadAutopaySetupPageData({ ...PENDING })).state).toBe('closed');
     expect(mockCreateSetupIntent).not.toHaveBeenCalled();
   });
 
@@ -369,7 +409,7 @@ describe('completion tail (page POST + webhook)', () => {
     mockTableHandlers.payment_methods = { first: () => null };
     const r = await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new', ip: '1.2.3.4', userAgent: 'jest' });
     expect(r).toEqual({ ok: true });
-    expect(mockSavePaymentMethod).toHaveBeenCalledWith('cust-1', 'pm_new', { enableAutopay: false, makeDefault: false });
+    expect(mockSavePaymentMethod).toHaveBeenCalledWith('cust-1', 'pm_new', { enableAutopay: false, makeDefault: false, requireAttached: true });
     expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', stripePaymentMethodId: 'pm_new', source: 'autopay_setup_link', methodType: 'card', ip: '1.2.3.4' }));
     expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-row-1', source: 'save_card_consent' }));
     const updates = touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'update').map((c) => c[1]);
@@ -417,12 +457,36 @@ describe('completion tail (page POST + webhook)', () => {
     expect(d.paymentMethodTypes).toEqual(['card']);
   });
 
-  it('records the ACH consent variant when the saved method is a bank account', async () => {
+  it('snapshots the ACH consent from the STRIPE-verified type, even when the local row carries a null/alias method_type', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
+    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'us_bank_account' });
+    mockTableHandlers.payment_methods = { first: () => ({ id: 'pm-row-legacy', customer_id: 'cust-1', method_type: null }) };
+    await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
+    expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_new', expect.objectContaining({ methodType: 'ach' }));
+    expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ methodType: 'ach' }));
+  });
+
+  it('passes the SetupIntent authorization moment to enrollment so a later opt-out is honored on retry', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_SI, created: 1756800000 });
+    mockTableHandlers.payment_methods = { first: () => null };
+    await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
+    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(1756800000 * 1000) }));
+    mockEnrollConsentedMethod.mockClear();
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING }) };
+    await completeAutopaySetupCaptureFromWebhook({ ...GOOD_SI, created: 1756800000 });
+    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(1756800000 * 1000) }));
+  });
+
+  it('never reattaches a method the customer removed: PM_NOT_ATTACHED retires the link (method_removed, permanent)', async () => {
     mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
     mockTableHandlers.payment_methods = { first: () => null };
-    mockSavePaymentMethod.mockResolvedValue({ id: 'pm-row-b', method_type: 'ach' });
-    await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
-    expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ methodType: 'ach' }));
+    const err = new Error('detached'); err.code = 'PM_NOT_ATTACHED';
+    mockSavePaymentMethod.mockRejectedValue(err);
+    const r = await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
+    expect(r).toEqual({ ok: false, code: 'method_removed' });
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+    const updates = touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'update').map((c) => c[1]);
+    expect(updates[updates.length - 1]).toEqual(expect.objectContaining({ status: 'expired' }));
   });
 
   it.each([
@@ -481,6 +545,15 @@ describe('completion tail (page POST + webhook)', () => {
     mockTableHandlers.customers = { first: () => { throw new Error('db blip'); } };
     expect((await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).code).toBe('verification_failed');
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+  });
+
+  it('refuses to enable Auto Pay when the billing lane moved to a covered lane since the page loaded (permanent), retryable on a lookup blip', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'monthly_membership' }) };
+    expect((await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).code).toBe('no_longer_needed');
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    mockTableHandlers.customers = { first: () => { throw new Error('db blip'); } };
+    expect((await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).code).toBe('verification_failed');
   });
 
   it('refuses when the customer became payer-billed since the page loaded', async () => {

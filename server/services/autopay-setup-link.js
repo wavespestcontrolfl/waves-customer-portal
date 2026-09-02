@@ -57,6 +57,24 @@ function isExpired(request, now = new Date()) {
   return !!request?.expires_at && new Date(request.expires_at).getTime() <= now.getTime();
 }
 
+// Lanes whose billing IS "each completed visit is charged to the saved
+// method" — the only cadence the setup copy promises.
+const SUPPORTED_LANES = new Set(['per_visit', 'per_application']);
+function billingLaneSupported(customer) {
+  try {
+    return SUPPORTED_LANES.has(require('./billing-lane').resolveBillingLane(customer).mode);
+  } catch {
+    return false;
+  }
+}
+
+// Consent vocabulary from the Stripe-verified type (GH Codex #3726 r3 P1):
+// a legacy local row may carry a null or alias method_type, and the consent
+// snapshot must follow what Stripe says the method IS.
+function consentMethodTypeFor(stripeType) {
+  return stripeType === 'us_bank_account' ? 'ach' : 'card';
+}
+
 // Tender for the capture — identical policy to the accept capture: bank is
 // offered only while the customer's ACH state is healthy, because
 // enrollConsentedMethod refuses a bank target under needs_verification /
@@ -116,8 +134,18 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
     const exempt = await payerExemption(customerId);
     if (exempt) return skip(exempt);
 
-    const { customerOnAutopay } = require('./autopay-eligibility');
+    const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
     if (await customerOnAutopay(customer)) return skip('autopay_already_active');
+    // A PAUSED enrollment is still configured (method + pointer intact) —
+    // customerOnAutopay says false, but "set up" here would neither resume
+    // the pause nor add anything (GH Codex #3726 r3 P2). Resuming is the
+    // customer's/office's explicit action, never a side effect of this link.
+    if (customer.autopay_enabled && isPaused(customer)) return skip('autopay_paused');
+    // Per-visit and per-application lanes are the ones where "each completed
+    // visit is charged" is TRUE. Monthly dues and annual prepay cover their
+    // visits (no completion charge), one-time has no recurring relationship
+    // — the page/SMS copy would misstate the cadence (GH Codex #3726 r3 P1).
+    if (!billingLaneSupported(customer)) return skip('unsupported_billing_lane');
 
     // A consented, chargeable saved card covers the ask — enroll it and
     // send nothing (mirrors the visit lane's auto-secure, minus the row:
@@ -147,11 +175,23 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
       .where({ customer_id: customerId, kind: KIND })
       .whereIn('status', ['pending', 'completing'])
       .first();
-    let request = existing && (existing.status === 'completing' || !isExpired(existing)) ? existing : null;
+    // Expiry takes precedence over status (GH Codex #3726 r3 P2): an expired
+    // pending row retires; an expired COMPLETING row retires only once its
+    // claim is stale (a live claim's worker may still finish or revert).
+    let request = existing && !isExpired(existing) ? existing : null;
     if (existing && !request) {
-      await db('appointment_card_requests')
-        .where({ id: existing.id, status: 'pending' })
-        .update({ status: 'expired', updated_at: new Date() });
+      if (existing.status === 'completing') {
+        const claimAge = existing.updated_at ? Date.now() - new Date(existing.updated_at).getTime() : Infinity;
+        if (claimAge <= STALE_CLAIM_MS) return skip('completion_in_progress');
+        await db('appointment_card_requests')
+          .where({ id: existing.id, status: 'completing' })
+          .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS))
+          .update({ status: 'expired', updated_at: new Date() });
+      } else {
+        await db('appointment_card_requests')
+          .where({ id: existing.id, status: 'pending' })
+          .update({ status: 'expired', updated_at: new Date() });
+      }
     }
     if (!request) {
       const token = crypto.randomBytes(16).toString('base64url');
@@ -304,13 +344,19 @@ async function loadAutopaySetupPageData(request) {
     cancelFeeNote: null,
   };
   if (request.status === 'completed' || request.status === 'satisfied') return { state: 'secured', ...base };
+  // Expiry before any live state: an expired link is closed whatever its
+  // claim status (completion refuses it too).
+  if (isExpired(request) || !customer) return { state: 'closed', ...base };
   // Mid-completion (page POST or webhook holds the claim): the intent
   // succeeded, but the tail can still revert the row — say "finishing up",
   // never "set up" (pre-push Codex P1). The card form is not re-shown
   // either (a second entry mid-save is the worse failure).
   if (request.status === 'completing') return { state: 'saving', ...base };
-  if (request.status !== 'pending' || isExpired(request) || !customer) return { state: 'closed', ...base };
+  if (request.status !== 'pending') return { state: 'closed', ...base };
   if (await payerExemption(request.customer_id)) return { state: 'closed', ...base };
+  // Lane can change after the link went out (office moved the customer to
+  // monthly dues) — the promised cadence would then be false.
+  if (!billingLaneSupported(customer)) return { state: 'closed', ...base };
   // Auto Pay turned on elsewhere since the link went out (portal, another
   // link) — heal the row and render secured rather than ask again.
   try {
@@ -362,7 +408,7 @@ async function alertNeedsReview({ customerId, requestId, reason }) {
 // Shared completion tail: claim → save → consent → enroll → completed.
 // Same claim mechanics as the visit lane (pending → completing mutex with a
 // stale-claim lease; any failure reverts and stays retryable).
-async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntentId, ip = null, userAgent = null }) {
+async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntentId, authorizedAt = null, ip = null, userAgent = null }) {
   const stripePaymentMethodId = typeof stripePaymentMethod === 'string' ? stripePaymentMethod : stripePaymentMethod?.id;
   // expires_at is the standalone row's liveness contract (pre-push Codex
   // P0): the page stops rendering at expiry, but a direct POST or a late
@@ -379,6 +425,18 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
     if (resolved?.payerId) return { ok: false, code: 'no_longer_needed' };
   } catch (err) {
     logger.warn(`[autopay-setup-link] payer re-check failed at completion for request ${request.id}: ${err.message}`);
+    return { ok: false, code: 'verification_failed' };
+  }
+  // Billing lane re-check at completion (pre-push Codex P0): the office can
+  // move the customer to monthly dues / annual prepay between page load and
+  // confirm — enabling per-visit Auto Pay then would authorize a cadence the
+  // page no longer describes. Permanent refusal; a lookup failure is
+  // retryable.
+  try {
+    const laneRow = await db('customers').where({ id: request.customer_id }).first('billing_mode', 'waveguard_tier', 'monthly_rate');
+    if (!laneRow || !billingLaneSupported(laneRow)) return { ok: false, code: 'no_longer_needed' };
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] billing-lane re-check failed at completion for request ${request.id}: ${err.message}`);
     return { ok: false, code: 'verification_failed' };
   }
   // Live tender policy at completion (pre-push Codex P0): an intent minted
@@ -456,11 +514,29 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
     }
     if (!saved) {
       const StripeService = require('./stripe');
-      saved = await StripeService.savePaymentMethod(request.customer_id, stripePaymentMethodId, {
-        enableAutopay: false,
-        makeDefault: false,
-      });
+      try {
+        saved = await StripeService.savePaymentMethod(request.customer_id, stripePaymentMethodId, {
+          enableAutopay: false,
+          makeDefault: false,
+          // A retry after the customer REMOVED the method (row deleted,
+          // Stripe detached) must not resurrect it (GH Codex #3726 r3 P1) —
+          // the succeeded SetupIntent attached it, so "not attached now"
+          // means the customer took it off.
+          requireAttached: true,
+        });
+      } catch (saveErr) {
+        if (saveErr.code === 'PM_NOT_ATTACHED') {
+          logger.info(`[autopay-setup-link] pm ${stripePaymentMethodId} no longer attached (customer removed it) — retiring request ${request.id}`);
+          // The link's intent is spent; a fresh link is the office's call.
+          await db('appointment_card_requests')
+            .where({ id: request.id, status: 'completing', updated_at: claimStamp })
+            .update({ status: 'expired', updated_at: new Date() });
+          return { ok: false, code: 'method_removed' };
+        }
+        throw saveErr;
+      }
     }
+    const consentMethodType = consentMethodTypeFor(methodType);
     const ConsentService = require('./payment-method-consents');
     // One ledger row per AUTHORIZATION EVENT (GH Codex #3726 r1 P1): a
     // consent recorded for this method before this link was minted (an
@@ -469,18 +545,19 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
     // request (rows at/after the link's mint) dedupe.
     const since = request.created_at ? new Date(request.created_at) : null;
     const alreadyRecorded = await ConsentService.hasConsentSnapshotForVariant(request.customer_id, stripePaymentMethodId, {
-      methodType: saved?.method_type || 'card',
+      methodType: consentMethodType,
       ...(since && !Number.isNaN(since.getTime()) ? { since } : {}),
     });
     if (!alreadyRecorded) {
       // The page rendered the locked consent for the tender the customer
-      // picked (card or ACH variant) before confirmSetup.
+      // picked (card or ACH variant) before confirmSetup — snapshot the
+      // variant for the tender Stripe verified, never a legacy row alias.
       await ConsentService.recordConsent({
         customerId: request.customer_id,
         paymentMethodId: saved?.id || null,
         stripePaymentMethodId,
         source: PURPOSE,
-        methodType: saved?.method_type || 'card',
+        methodType: consentMethodType,
         ip,
         userAgent,
       });
@@ -494,6 +571,11 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
       paymentMethodId: saved?.id,
       source: 'save_card_consent',
       details: { via: PURPOSE, setup_intent_id: setupIntentId },
+      // The SetupIntent's authorization moment (GH Codex #3726 r3 P1): a
+      // retry (stale lease / webhook) after the customer turned Auto Pay
+      // OFF must not re-enable it from the stale authorization —
+      // enrollConsentedMethod refuses opted_out_after_authorization.
+      ...(authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime()) ? { authorizedAt } : {}),
     });
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
       logger.warn(`[autopay-setup-link] enrollment refused (${enrollment.reason}) for customer ${request.customer_id} — completion stays retryable`);
@@ -545,9 +627,17 @@ async function completeAutopaySetupCapture({ request, setupIntentId, ip = null, 
     request,
     stripePaymentMethod: setupIntent.payment_method,
     setupIntentId: setupIntent.id,
+    authorizedAt: authorizationMoment(setupIntent),
     ip,
     userAgent,
   });
+}
+
+// The moment the customer authorized: Stripe stamps `created` (unix seconds)
+// on the SetupIntent; the confirm follows within the same session.
+function authorizationMoment(setupIntent) {
+  const s = Number(setupIntent?.created);
+  return Number.isFinite(s) && s > 0 ? new Date(s * 1000) : null;
 }
 
 // setup_intent.succeeded backstop (purpose autopay_setup_link): the browser
@@ -571,6 +661,7 @@ async function completeAutopaySetupCaptureFromWebhook(setupIntent) {
     request,
     stripePaymentMethod: setupIntent.payment_method,
     setupIntentId: setupIntent.id,
+    authorizedAt: authorizationMoment(setupIntent),
   });
 }
 
