@@ -97,6 +97,7 @@ import {
   DialogTitle,
   DialogBody,
   DialogFooter,
+  Select,
   cn,
 } from "../../components/ui";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
@@ -741,6 +742,8 @@ export function libraryLinkClause(link) {
 }
 
 function SmsTab() {
+  // Prep-guide sender lives with the composer's other outbound actions.
+  const [prepSendOpen, setPrepSendOpen] = useState(false);
   // Server-verified role: draft APPROVAL is owner-only (PUT /approve and
   // /revise 403 for technicians). A tech following a draftId deep link
   // still gets the prefilled text/recipient, but sends as a plain manual
@@ -2185,11 +2188,7 @@ function SmsTab() {
       {/* Compose */}
       <Card id="sms-compose-v2" className="p-5 mb-5">
         {" "}
-        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-          {" "}
-          <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
-            Send SMS
-          </div>{" "}
+        <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
           <button
             type="button"
             onClick={toggleAiAutoReply}
@@ -2687,7 +2686,21 @@ function SmsTab() {
               ? "Adding…"
               : "Insert Link"}
           </Button>{" "}
+          <Button
+            variant="secondary"
+            className="gap-2"
+            onClick={() => setPrepSendOpen(true)}
+            aria-haspopup="dialog"
+            aria-expanded={prepSendOpen}
+          >
+            <BookOpen size={15} strokeWidth={1.9} aria-hidden />
+            Send prep guide
+          </Button>
         </div>
+        <PrepSendDialog
+          open={prepSendOpen}
+          onClose={() => setPrepSendOpen(false)}
+        />
         <InsertLinkSheet
           open={showLinkSheet}
           onClose={() => setShowLinkSheet(false)}
@@ -2798,44 +2811,33 @@ function SmsTab() {
               </span>{" "}
             </div>{" "}
           </div>
-          {/* PR 4 — filter chip row */}
-          <div className="flex gap-1.5 mb-3 flex-wrap">
-            {[
-              { key: "all", label: "All", count: chipCounts.all },
-              { key: "unread", label: "Unread", count: chipCounts.unread },
-              {
-                key: "unanswered",
-                label: "Unanswered",
-                count: chipCounts.unanswered,
-              },
-              { key: "unknown", label: "Unknown", count: chipCounts.unknown },
-            ].map((chip) => {
-              const active = statusFilter === chip.key;
-              return (
-                <button
-                  key={chip.key}
-                  type="button"
-                  onClick={() => setStatusFilter(chip.key)}
-                  className={cn(
-                    "inline-flex items-center gap-1.5 px-3 py-2.5 md:py-1 min-h-[44px] md:min-h-0 rounded-full text-14 md:text-12 font-medium border-hairline u-focus-ring",
-                    active
-                      ? "bg-zinc-900 text-white border-zinc-900"
-                      : "bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900 hover:text-zinc-900",
-                  )}
-                >
-                  {chip.label}
-                  <span
-                    className={cn(
-                      "u-nums text-11",
-                      active ? "text-zinc-300" : "text-ink-tertiary",
-                    )}
-                  >
-                    {chip.count}
-                  </span>{" "}
-                </button>
-              );
-            })}
-          </div>{" "}
+          {/* Status filter — one dropdown instead of a pill row so it
+              costs a single line on phones; counts ride in the labels. */}
+          <div className="mb-3">
+            <label htmlFor="sms-thread-filter" className="sr-only">
+              Filter conversations
+            </label>
+            <Select
+              id="sms-thread-filter"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+            >
+              {[
+                { key: "all", label: "All", count: chipCounts.all },
+                { key: "unread", label: "Unread", count: chipCounts.unread },
+                {
+                  key: "unanswered",
+                  label: "Unanswered",
+                  count: chipCounts.unanswered,
+                },
+                { key: "unknown", label: "Unknown", count: chipCounts.unknown },
+              ].map((opt) => (
+                <option key={opt.key} value={opt.key}>
+                  {opt.label} ({opt.count})
+                </option>
+              ))}
+            </Select>
+          </div>
           <div className="md:max-h-[600px] md:overflow-y-auto">
             {filteredThreads.length === 0 ? (
               <div className="p-5 text-center text-13 text-ink-secondary">
@@ -3239,7 +3241,6 @@ export default function CommunicationsPageV2() {
   const [tab, setTab] = useState("sms");
   // SMS / Email are sub-views of the single Message Templates tab.
   const [templateKind, setTemplateKind] = useState("sms");
-  const [prepSendOpen, setPrepSendOpen] = useState(false);
   // Server-verified role from the shell's Outlet context (never localStorage).
   const outletContext = useOutletContext();
   const isAdminRole = outletContext?.user?.role === "admin";
@@ -3292,15 +3293,6 @@ export default function CommunicationsPageV2() {
       <AdminCommandHeader
         title="Communications"
         icon={MessageSquare}
-        actions={[
-          {
-            key: "send-prep",
-            label: "Send prep guide",
-            icon: BookOpen,
-            variant: "secondary",
-            onClick: () => setPrepSendOpen(true),
-          },
-        ]}
         sections={tabs}
         activeKey={tab}
         onSectionChange={setTab}
@@ -3311,10 +3303,6 @@ export default function CommunicationsPageV2() {
         onSecondaryChange={setTemplateKind}
         secondaryAriaLabel="Template kind"
         secondaryNavGridClassName="grid-cols-2"
-      />
-      <PrepSendDialog
-        open={prepSendOpen}
-        onClose={() => setPrepSendOpen(false)}
       />
       {tab === "events" && <NotificationEventsTabV2 />}
       {tab === "sms" && <SmsTab />}

@@ -10545,6 +10545,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         err.status = 409;
         throw err;
       }
+      // Bind the accept to the SetupIntent it verified (Codex #3723 r2 P1):
+      // the setup_intent.succeeded backstop enrolls ONLY this intent — a
+      // superseded capture (e.g. a bank intent refused by the kill switch,
+      // then replaced by a card-only one) must never enroll later. Atomic
+      // JSON-path write, same discipline as the prepay job stamp.
+      if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+        await trx('estimates').where({ id: estimate.id }).update({
+          estimate_data: trx.raw(
+            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardSetupIntentId}', to_jsonb(?::text))",
+            [recurringCardVerification.setupIntentId],
+          ),
+        });
+      }
 
       // Click-to-estimate mints only (GitHub #3391 P1): acceptance is the
       // customer self-booking the very thing the CTA request row asked
@@ -10689,6 +10702,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           await createDefaultCustomerRows(trx, customerId);
         }
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
+      }
+
+      // Bank tender re-judged UNDER THE CUSTOMER LOCK against the customer the
+      // accept actually landed on (Codex #3723 r3 P1): the pre-transaction
+      // verify judged a prospective match, and the ACH state — or the
+      // resolved customer itself — can move before commit. A refused bank
+      // aborts the accept the same way the pre-check does (402
+      // RECURRING_CARD_REQUIRED → the client re-mints card-only); nothing
+      // has been committed yet.
+      if (recurringCardVerification?.ok
+        && !(await RecurringCards.bankTenderAllowedUnderLock(trx, { customerId, methodType: recurringCardVerification.methodType }))) {
+        const err = new Error('Save a card for Auto Pay to confirm your recurring plan');
+        err.status = 402;
+        err.code = 'RECURRING_CARD_REQUIRED';
+        throw err;
       }
 
       // Commercial identity for a ONE-TIME accept (codex #3594 r2 P1): the

@@ -230,8 +230,14 @@ async function confirmationChannelAvailability(customer) {
   }
   if (channels.sms) {
     try {
+      // Same candidate lookup as the sender's suppression validator: STOP
+      // rows carry the canonical E.164 value, a legacy customer phone can
+      // be stored formatted — an exact-only match would promise a text the
+      // send then blocks (deferred P2 from #3666 r34).
+      const { toE164 } = require('../utils/phone');
+      const candidates = [...new Set([customer.phone, toE164(customer.phone)].filter(Boolean))];
       const suppressed = await db('messaging_suppression')
-        .where({ phone: customer.phone, active: true }).first('id');
+        .whereIn('phone', candidates).where({ active: true }).first('id');
       if (suppressed) channels.sms = false;
     } catch (err) { logger.warn(`channel availability: suppression read failed for ${customer.id}: ${err.message}`); }
   }
@@ -254,8 +260,13 @@ async function confirmationChannelAvailability(customer) {
     // an unseeded template still catches the global types.
     try {
       const EmailTemplateLibrary = require('./email-template-library');
-      const template = await EmailTemplateLibrary.loadTemplateByKey('account.cancellation_received');
-      const suppression = await EmailTemplateLibrary.activeSuppressionFor(template || {}, customer.email, null);
+      // loadTemplateByKey returns { template, activeVersion }; the
+      // suppression check wants the INNER template (its
+      // transactional_required classification decides which suppressions
+      // apply) — passing the wrapper hid it and over-blocked (deferred P2
+      // from #3666 r34).
+      const loaded = await EmailTemplateLibrary.loadTemplateByKey('account.cancellation_received');
+      const suppression = await EmailTemplateLibrary.activeSuppressionFor((loaded && loaded.template) || {}, customer.email, null);
       if (suppression) channels.email = false;
     } catch (err) { logger.warn(`channel availability: email suppression read failed for ${customer.id}: ${err.message}`); }
   }
