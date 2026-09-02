@@ -1178,6 +1178,10 @@ function tagsNamed(src: string, name: string): Array<{ start: number; attrs: str
   return found;
 }
 
+// A child expression that renders NOTHING: an empty string or a boolean/
+// nullish literal, with optional comment trivia around it.
+const NON_RENDERING_CHILD_RE = new RegExp('\\{' + '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*' + '(?:([\'"`])\\1|true|false|null|undefined)' + '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*' + '\\}', 'g');
+
 // Definitely-hidden element predicates, shared by the structural view and
 // the AffiliateLink child check (Codex #3646 r37).
 function elementRendersHidden(attrs: string): boolean {
@@ -1215,7 +1219,7 @@ function classStaticallyHidden(attrs: string): boolean {
   // only elements hidden at EVERY breakpoint.
   // Only VIEWPORT breakpoints prove responsive visibility — print:/
   // hover:/focus: variants leave the element hidden in ordinary viewing.
-  return !/\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(cls);
+  return !/\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item|not-sr-only|visible)\b/.test(cls); // visibility RESETS (md:not-sr-only, md:visible) un-hide too (Codex #508 r5)
 }
 const NON_RENDERED_CONTAINERS = ['template', 'script', 'style', 'noscript', 'datalist'];
 
@@ -1250,11 +1254,18 @@ function affiliateLinkTextIsEmpty(src: string, strView: string, start: number, a
           let end: number; // index of '>'
           if (tm[0][1] === '/') { end = tagView.indexOf('>', tm.index); if (end === -1) break; }
           else { const a3 = tagAttrsAt(visible, tm.index); if (a3 === null) break; end = tm.index + tm[0].length + a3.length; }
-          if (tm[1].toLowerCase() !== 'img') { text += visible.slice(last, tm.index); last = end + 1; }
+          // A self-closing element is never blanked by the balanced walk, so a
+          // HIDDEN <img> (hidden / class="hidden" / display:none) is dropped
+          // here (Codex #3646 r38).
+          const imgAttrs = visible.slice(tm.index + tm[0].length, end);
+          const keepImg = tm[1].toLowerCase() === 'img' && !(elementRendersHidden(imgAttrs) || classStaticallyHidden(imgAttrs));
+          if (!keepImg) { text += visible.slice(last, tm.index); last = end + 1; }
           tagRe2.lastIndex = end + 1;
         }
         text += visible.slice(last);
-        return !text.replace(/\{\s*(?:(['"`])\1|true|false|null|undefined)\s*\}/g, '').trim();
+        // Comment trivia around the literal ({false /* note */}) renders
+        // nothing either (Codex #508 r5).
+        return !text.replace(NON_RENDERING_CHILD_RE, '').trim();
       }
     } else {
       const a = tagAttrsAt(src, t.index);
@@ -2078,6 +2089,17 @@ function hasTemplateInterpolation(raw: string): boolean {
   return false;
 }
 
+const UNDEFINED_SENTINEL = '\u0000undefined';
+function resolveUndefinedSentinels(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map((x) => (x === UNDEFINED_SENTINEL ? undefined : resolveUndefinedSentinels(x)));
+  if (v && typeof v === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) if (x !== UNDEFINED_SENTINEL) out[k] = resolveUndefinedSentinels(x);
+    return out;
+  }
+  return v;
+}
+
 // Strict JSON.parse wrapper. Wrapped result distinguishes "parsed to a
 // value" (including null) from "not statically parseable" (undefined).
 function tryParseStaticJson(body: string): { value: unknown } | undefined {
@@ -2177,8 +2199,13 @@ function tryParseStaticJson(body: string): { value: unknown } | undefined {
         seg += ch2;
       }
       segs.push(seg);
-      const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/,\s*([\]}])/g, '$1'))).join('');
-      return { value: JSON.parse(keyed) };
+      // A bare `undefined` VALUE is legal JS ({glyph: undefined}) but not
+      // JSON — carried through as a sentinel and resolved with JS semantics
+      // (an object property with an undefined value is ABSENT; an array
+      // slot stays undefined) so the container is still validated
+      // (Codex #3646 r38).
+      const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/([:\[,]\s*)undefined(?=\s*[,\]}])/g, '$1"\\u0000undefined"').replace(/,\s*([\]}])/g, '$1'))).join('');
+      return { value: resolveUndefinedSentinels(JSON.parse(keyed)) };
     } catch {
       return undefined;
     }

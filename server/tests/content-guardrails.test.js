@@ -914,6 +914,30 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('undefined-bearing species arrays; hidden self-closing images; fence-aware heading/CTA views; responsive resets; literal trivia (Codex #3646 r38, #508 r5)', () => {
+    withAffiliateEnv(() => {
+      const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{name:'x', risk:'invalid', where:'x', hunt:'x', eggSac:'x', glyph:undefined}]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+      expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{name:'x', risk:'nuisance', where:'x', hunt:'x', eggSac:'x', glyph: undefined, sciName: undefined}]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
+      const at = (tag) => `Intro.\n\n## Sec\n\n[quote](/quote/) ${tag}`;
+      for (const kids of ['<img hidden src="/x.png" />', '<img class="hidden" src="/x.png" alt="x" />', '<img style="display:none" src="/x.png" />', '{false /* note */}', '{/* note */ null}', '{ // note\n undefined }']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      for (const kids of ['<img src="/x.png" alt="x" />', '<span class="sr-only md:not-sr-only">Buy</span>', '<span class="invisible md:visible">Buy</span>']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      // A fenced "<!--" never erases the real heading or CTA after the fence.
+      const fence = '```html\n<!-- example\n```\n';
+      const r = guardrails.evaluate({ body: `Intro.\n\n${fence}\n[quote](/quote/)\n\n## Real\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">it</AffiliateLink> here.\n\n-->\n`, frontmatter: fm() }, { targetIsBlog: true });
+      expect(r.findings.some((f) => f.code === 'EXCESSIVE_AFFILIATE_LINK_DENSITY' && /opening section/.test(f.message))).toBe(false);
+      expect(affiliateCodes(r)).not.toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // Indented/quoted prose before the link: the CTA prefix is cut on the blanker's own coordinates.
+      const r2 = guardrails.evaluate({ body: 'Intro.\n\n> quoted lead-in that is fairly long\n>   and indented\n\n[quote](/quote/)\n\n## Real\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">it</AffiliateLink> here.', frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(r2)).not.toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+    });
+  });
+
   test('spread wrappers hide their CTA (astro parity, Codex #3646 r28)', () => {
     withAffiliateEnv(() => {
       const b = `Intro.\n\n## Sec\n\n<div {...props}>[Quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;

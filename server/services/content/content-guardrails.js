@@ -1924,6 +1924,9 @@ function isExactTagAt(text, start, name) {
 // with statically NON-RENDERING expressions removed — empty strings and
 // the boolean/nullish literals React drops ({false}, {null}, {undefined},
 // {true}; Codex #3646 r36).
+// A child expression that renders NOTHING: an empty string or a boolean/
+// nullish literal, with optional comment trivia around it.
+const NON_RENDERING_CHILD_RE = new RegExp('\\{' + '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*' + '(?:([\'"`])\\1|true|false|null|undefined)' + '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*' + '\\}', 'g');
 function affiliateLinkTextIsEmpty(masked, strView, start, attrs) {
   if (attrs.trimEnd().endsWith('/')) return true;
   const openEnd = start + '<AffiliateLink'.length + attrs.length; // index of '>'
@@ -1943,9 +1946,18 @@ function affiliateLinkTextIsEmpty(masked, strView, start, attrs) {
         const kids = blankStaticHiddenClassElements(masked.slice(openEnd + 1, t.index));
         const visible = blankDefinitelyHiddenContent(kids, blankExpressionStringLiterals(kids, { attrValues: false }));
         let text = ''; let last = 0;
-        for (const tg of eachTag(blankExpressionStringLiterals(visible))) { if (tg.name === 'img') continue; text += visible.slice(last, tg.start); last = tg.end + 1; }
+        // A self-closing element is never blanked by the balanced walks, so
+        // a HIDDEN <img> (hidden / class="hidden" / display:none) is
+        // dropped here (Codex #3646 r38). Attr values stay readable on
+        // the tag view for that check.
+        for (const tg of eachTag(blankExpressionStringLiterals(visible, { attrValues: false }))) {
+          if (tg.name === 'img' && !opensDefinitelyHidden(tg) && !staticallyHiddenAttrs(tg.attrs)) continue;
+          text += visible.slice(last, tg.start); last = tg.end + 1;
+        }
         text += visible.slice(last);
-        return !text.replace(/\{\s*(?:(['"`])\1|true|false|null|undefined)\s*\}/g, '').trim();
+        // Comment trivia around the literal ({false /* note */}) renders
+        // nothing either (Codex #508 r5).
+        return !text.replace(NON_RENDERING_CHILD_RE, '').trim();
       }
     } else {
       const a = tagAttrsAt(masked, t.index);
@@ -2027,6 +2039,24 @@ function blankMarkdownImages(text) {
 // vendored astro predicate: a CTA a reader cannot see is no CTA
 // (Codex #3646 r27 P1). Length-preserving; dynamic classes stay visible
 // (historic posture); tag walking is expression-string-safe.
+// True when an element's class/className is STATICALLY hidden at every
+// viewport (hidden/invisible/sr-only with no breakpoint display utility or
+// visibility RESET such as md:not-sr-only / md:visible — Codex #508 r5), or
+// a wrapper SPREAD makes visibility unprovable (fail closed, astro parity;
+// Codex #3646 r28). Shared by the balanced blanker and the AffiliateLink
+// child check (Codex #3646 r38).
+function staticallyHiddenAttrs(attrs) {
+  if (hasAttrSpreadAfter(attrs)) return true;
+  let cls = null;
+  for (const a of eachJsxAttr(attrs)) {
+    const n = a.name.toLowerCase();
+    if (n !== 'class' && n !== 'classname') continue;
+    cls = a.literal !== null ? a.literal : staticStringOfExpr(a.expr);
+  }
+  if (cls === null) return false;
+  if (!/(?:^|\s)(?:hidden|invisible|sr-only)(?=\s|$)/.test(cls)) return false;
+  return !/\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item|not-sr-only|visible)\b/.test(cls);
+}
 function blankStaticHiddenClassElements(text) {
   const s = String(text || '');
   const out = s.split('');
@@ -2037,22 +2067,7 @@ function blankStaticHiddenClassElements(text) {
     const name = m[1];
     const attrs = tagAttrsAt(s, m.index);
     if (attrs === null || /\/\s*$/.test(attrs)) continue;
-    // A wrapper SPREAD can inject hidden/style at render time — blanked
-    // like the astro validator does (fail closed; Codex #3646 r28 P1).
-    let hide = hasAttrSpreadAfter(attrs);
-    if (!hide) {
-      let cls = null;
-      for (const a of eachJsxAttr(attrs)) {
-        const n = a.name.toLowerCase();
-        if (n !== 'class' && n !== 'classname') continue;
-        cls = a.literal !== null ? a.literal : staticStringOfExpr(a.expr);
-      }
-      if (cls === null) continue;
-      if (!/(?:^|\s)(?:hidden|invisible|sr-only)(?=\s|$)/.test(cls)) continue;
-      if (/\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(cls)) continue;
-      hide = true;
-    }
-    if (!hide) continue;
+    if (!staticallyHiddenAttrs(attrs)) continue;
     const tagRe = new RegExp('<(\\/?)' + name + '\\b', 'gi');
     tagRe.lastIndex = m.index + 1 + name.length + attrs.length + 1;
     let depth = 1; let t; let closeEnd = -1;
@@ -2078,7 +2093,13 @@ function hasServiceCtaLink(body) {
   // `{/* [quote](/quote/) */}` cannot satisfy the requirement (Codex r6 P1).
   const text = String(body || '');
   const firstAffiliate = collectAffiliateLinkTags(text)[0];
-  const prefix = firstAffiliate ? text.slice(0, firstAffiliate.start) : text;
+  // Code and comments are blanked FIRST by the shared fence-aware blanker
+  // (a fence-blind comment pass erased real content after a fenced "<!--";
+  // Codex #3646 r38). It is NOT length-preserving — leading indentation
+  // and blockquote prefixes are stripped — so the prefix is cut on ITS
+  // coordinates, where collectAffiliateLinkTags measured tag.start.
+  const masked = blankNonRenderedMarkdown(text);
+  const prefix = firstAffiliate ? masked.slice(0, firstAffiliate.start) : masked;
   // A Markdown IMAGE (![alt](/quote/)) renders an <img>, not a link — mask
   // images and raw <img> tags before collecting destinations.
   // Reference DEFINITIONS ([cta]: /quote/) render nothing — blanked too, so
@@ -2093,8 +2114,8 @@ function hasServiceCtaLink(body) {
   // and hidden={false} are values it must read (Codex #3646 r36); tags are
   // located on the expression-string-blanked view so a quoted tag inside
   // an expression never opens a phantom container.
-  const ctaBase = blankComments(blankStaticHiddenClassElements(prefix));
-  const rendered = blankMarkdownImages(blankLinkDefinitionsAndTitles(blankNonRenderedMarkdown(blankExpressions(blankDefinitelyHiddenContent(ctaBase, blankExpressionStringLiterals(ctaBase, { attrValues: false }))))))
+  const ctaBase = blankStaticHiddenClassElements(prefix);
+  const rendered = blankMarkdownImages(blankLinkDefinitionsAndTitles(blankExpressions(blankDefinitelyHiddenContent(ctaBase, blankExpressionStringLiterals(ctaBase, { attrValues: false })))))
     .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
   // Attr-masked view: link- or tag-shaped text inside a JSX attribute
   // (title="[q](/quote/)", title="<InlineCTA />") renders nothing — the
@@ -2353,6 +2374,16 @@ const SPIDER_GLYPHS = new Set(['orb', 'tangle', 'crevice', 'hunter']);
 // r24 P1): convert single-quoted spans, drop trailing commas, then
 // JSON.parse. undefined = not statically parseable (opaque; astro leaves
 // those unvalidated too).
+const UNDEFINED_SENTINEL = '\u0000undefined';
+function resolveUndefinedSentinels(v) {
+  if (Array.isArray(v)) return v.map((x) => (x === UNDEFINED_SENTINEL ? undefined : resolveUndefinedSentinels(x)));
+  if (v && typeof v === 'object') {
+    const out = {};
+    for (const [k, x] of Object.entries(v)) if (x !== UNDEFINED_SENTINEL) out[k] = resolveUndefinedSentinels(x);
+    return out;
+  }
+  return v;
+}
 function tolerantStaticJson(text) {
   const trimmed = String(text || '').trim();
   if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) return undefined;
@@ -2439,8 +2470,12 @@ function tolerantStaticJson(text) {
       seg += ch2;
     }
     segs.push(seg);
-    const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/,\s*([\]}])/g, '$1'))).join('');
-    return { value: JSON.parse(keyed) };
+    // A bare `undefined` VALUE is legal JS ({glyph: undefined}) but not
+    // JSON — carried through as a sentinel and resolved with JS semantics
+    // (an object property with an undefined value is ABSENT; an array slot
+    // stays undefined) so the container is still validated (Codex #3646 r38).
+    const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/([:\[,]\s*)undefined(?=\s*[,\]}])/g, '$1"\\u0000undefined"').replace(/,\s*([\]}])/g, '$1'))).join('');
+    return { value: resolveUndefinedSentinels(JSON.parse(keyed)) };
   } catch (_) { return undefined; }
 }
 
@@ -2678,8 +2713,10 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   // FIRST, as the CTA view does — an invisible "## Fake" must not end the
   // opening section (Codex #3646 r36); the hidden walk reads attr
   // expressions before blankExpressions erases them.
-  const structureBase = blankComments(blankStaticHiddenClassElements(String(body || '')));
-  const structureMasked = maskJsxAttrQuotes(blankNonRenderedMarkdown(blankExpressions(blankDefinitelyHiddenContent(structureBase, blankExpressionStringLiterals(structureBase, { attrValues: false })))));
+  // Code/comments are blanked FIRST by the shared fence-aware blanker
+  // (Codex #3646 r38) — its coordinates are the ones tag.start carries.
+  const structureBase = blankStaticHiddenClassElements(blankNonRenderedMarkdown(String(body || '')));
+  const structureMasked = maskJsxAttrQuotes(blankExpressions(blankDefinitelyHiddenContent(structureBase, blankExpressionStringLiterals(structureBase, { attrValues: false }))));
   const firstHeading = structureMasked.search(/^#{2,3}\s/m);
   if (tags.some((t) => firstHeading === -1 || t.start < firstHeading)) {
     push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'opening', 'Draft places an affiliate link in the opening section (before the first section heading) — answer the reader\'s question first; product recommendations come later in the piece.');
