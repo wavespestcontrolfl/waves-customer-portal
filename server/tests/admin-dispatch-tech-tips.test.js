@@ -242,6 +242,14 @@ describe('route wiring contracts', () => {
     for (const forbidden of ['.update(', '.insert(', '.del(', 'sendCustomerMessage', 'markComplete', 'transitionJobStatus', 'twilio']) {
       expect(block).not.toContain(forbidden);
     }
+    // parked [Next] lines arrive as internalRecommendations: merged into the
+    // internal list, never the form-provenance list the report prints verbatim
+    const cstart = source.indexOf("router.post('/:serviceId/complete'");
+    const cblock = source.slice(cstart, source.indexOf('\nrouter.', cstart + 1));
+    const internalMerge = cblock.indexOf('const reportRecommendations = normalizeCompletionTextArray([');
+    expect(cblock.slice(internalMerge, internalMerge + 600)).toContain('internalRecommendations');
+    const formBlock = cblock.slice(cblock.indexOf('const formRecommendations = normalizeCompletionTextArray('), cblock.indexOf('const formRecommendations = normalizeCompletionTextArray(') + 200);
+    expect(formBlock).not.toContain('internalRecommendations');
     // "sent" = a report the customer could open: undelivered postures are excluded
     expect(block).toContain("COALESCE(structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'");
     // the 90-day window is an ET calendar day bound from the shared helpers,

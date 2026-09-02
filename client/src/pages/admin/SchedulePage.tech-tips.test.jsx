@@ -3,7 +3,7 @@
 // vocabulary they use at the truck lands on the right tip first), and the
 // option subtext is the copy's first sentence, trimmed.
 import { describe, expect, test } from 'vitest';
-import { rankTechTips, techTipSubtext, techTipSentLabel, parkTaggedNoteLines, TECH_TIP_MAX } from './SchedulePage.jsx';
+import { rankTechTips, techTipSubtext, techTipSentLabel, parkTaggedNoteLines, stripParkedTaggedLines, TECH_TIP_MAX } from './SchedulePage.jsx';
 
 const TIPS = [
   { id: 'water_bromeliads', label: 'Flush bromeliads weekly', keywords: ['bromeliad', 'cups', 'water'], copy: 'If you have bromeliads, the cup holds water. Flush weekly.' },
@@ -91,6 +91,20 @@ describe('parkTaggedNoteLines', () => {
   test('nothing to park is null, so state is left untouched', () => {
     expect(parkTaggedNoteLines({ notes: 'Plain prose only.', tag: 'found', current: 'keep me' })).toBeNull();
     expect(parkTaggedNoteLines({ notes, tag: 'found', labels: ['Ant trail at the slider track', 'moisture under the kitchen sink', 'German roach activity'] })).toBeNull();
+  });
+});
+
+describe('stripParkedTaggedLines', () => {
+  const notes = 'Treated the perimeter.\n[Found] Ant trail at the slider\n[Found] German roach activity\n[Next] Reservice in two weeks\n[Protocol] Perimeter spray';
+  test('removes the free-typed lines a park owns; chip markers and other tags stay', () => {
+    expect(stripParkedTaggedLines({ notes, parked: { found: 'Ant trail at the slider' }, labels: { found: ['German roach activity'] } }))
+      .toBe('Treated the perimeter.\n[Found] German roach activity\n[Next] Reservice in two weeks\n[Protocol] Perimeter spray');
+    expect(stripParkedTaggedLines({ notes, parked: { found: 'x', next: 'y' } }))
+      .toBe('Treated the perimeter.\n[Protocol] Perimeter spray');
+  });
+  test('no park for a tag leaves its lines untouched', () => {
+    expect(stripParkedTaggedLines({ notes, parked: {} })).toBe(notes);
+    expect(stripParkedTaggedLines({ notes, parked: { found: '   ' } })).toBe(notes);
   });
 });
 

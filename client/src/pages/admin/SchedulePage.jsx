@@ -12116,12 +12116,16 @@ export function CompletionPanel({
       generatedReportTextRef.current = null;
       setAiReportUsed(false);
       if (String(savedDraft.notes || "").trim() === installed.trim()) {
-        setNotes(preGenerationNotesRef.current || "");
-      // The restored notes carry their [Found]/[Next] lines again, so the
-      // parked copies would double up — and would survive the tech deleting
-      // or correcting a restored line. Restoring resets the park.
-      setParkedFound("");
-      setParkedNext("");
+        // The parked fields own the free-typed [Found]/[Next] lines once a
+      // draft parked them (they are visible and editable there), so the
+      // restored notes come back WITHOUT those lines — no double-up, and a
+      // correction made in the parked field survives. Chip marker lines
+      // stay in the notes: they are the chips' own deselect handles.
+      setNotes(stripParkedTaggedLines({
+        notes: preGenerationNotesRef.current || "",
+        parked: { found: typeof savedDraft.parkedFound === "string" ? savedDraft.parkedFound : "", next: typeof savedDraft.parkedNext === "string" ? savedDraft.parkedNext : "" },
+        labels: { found: selectedObservationLabels, next: selectedRecommendationLabels },
+      }));
         // Detachment restores with the notes (codex r77) — same contract
         // as the invalidation path.
         setChipLinesDetached(preGenerationChipDetachedRef.current === true);
@@ -13634,6 +13638,10 @@ export function CompletionPanel({
       // customer report. [Next] note lines (typed or parked) are technician-
       // internal — the route folds the ones still in the notes into its
       // internal merged list itself; they never travel in this field.
+      // Parked [Next] lines are technician-internal: they go in their own
+      // field, which the route merges into structured_notes.recommendations
+      // (internal / recap) and never into formRecommendations.
+      const internalRecommendations = freeTextLines(parkedNext);
       const reportRecommendations = [
         ...activeSelectedLabels(selectedRecommendationLabels),
         ...freeTextLines(recommendationsText),
@@ -13652,6 +13660,7 @@ export function CompletionPanel({
         techTips: techTips?.available === true
           ? { ids: selectedTipIds, custom: customTip.trim() || null }
           : null,
+        internalRecommendations,
         // Set only on the resubmit after the tech OK'd the reconciliation
         // prompt — the server then skips the 409 and completes.
         ...(reconcileConfirmed ? { reportReconcileConfirmed: true } : {}),
@@ -14159,12 +14168,16 @@ export function CompletionPanel({
       // draft clears — clearing to empty would drop them from a
       // no-regenerate completion and from the next generation's grounding
       // (codex r44).
-      setNotes(preGenerationNotesRef.current || "");
-      // The restored notes carry their [Found]/[Next] lines again, so the
-      // parked copies would double up — and would survive the tech deleting
-      // or correcting a restored line. Restoring resets the park.
-      setParkedFound("");
-      setParkedNext("");
+      // The parked fields own the free-typed [Found]/[Next] lines once a
+      // draft parked them (they are visible and editable there), so the
+      // restored notes come back WITHOUT those lines — no double-up, and a
+      // correction made in the parked field survives. Chip marker lines
+      // stay in the notes: they are the chips' own deselect handles.
+      setNotes(stripParkedTaggedLines({
+        notes: preGenerationNotesRef.current || "",
+        parked: { found: parkedFound, next: parkedNext },
+        labels: { found: selectedObservationLabels, next: selectedRecommendationLabels },
+      }));
       // The restored notes' [Protocol]/[Found]/[Next] marker lines own
       // selection again — the detachment state travels with the notes it
       // described (codex r77).
@@ -15266,7 +15279,7 @@ export function CompletionPanel({
                 <textarea
                   aria-label="Findings carried from your notes"
                   value={parkedFound}
-                  onChange={(e) => { setParkedFound(e.target.value); invalidateGeneratedReportOnTypedEdit(); }}
+                  onChange={(e) => { invalidateGeneratedReportOnTypedEdit(); setParkedFound(e.target.value); }}
                   rows={2}
                   disabled={generating || photoAnalyzing}
                   style={{ ...mTextarea, opacity: generating || photoAnalyzing ? 0.55 : 1 }}
@@ -15279,7 +15292,7 @@ export function CompletionPanel({
                 <textarea
                   aria-label="Next steps carried from your notes"
                   value={parkedNext}
-                  onChange={(e) => { setParkedNext(e.target.value); invalidateGeneratedReportOnTypedEdit(); }}
+                  onChange={(e) => { invalidateGeneratedReportOnTypedEdit(); setParkedNext(e.target.value); }}
                   rows={2}
                   disabled={generating}
                   style={{ ...mTextarea, opacity: generating ? 0.55 : 1 }}
@@ -17605,7 +17618,7 @@ export function CompletionPanel({
                 <textarea
                   aria-label="Findings carried from your notes"
                   value={parkedFound}
-                  onChange={(e) => { setParkedFound(e.target.value); invalidateGeneratedReportOnTypedEdit(); }}
+                  onChange={(e) => { invalidateGeneratedReportOnTypedEdit(); setParkedFound(e.target.value); }}
                   rows={2}
                   disabled={generating || photoAnalyzing}
                   style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating || photoAnalyzing ? 0.55 : 1 }}
@@ -17620,7 +17633,7 @@ export function CompletionPanel({
                 <textarea
                   aria-label="Next steps carried from your notes"
                   value={parkedNext}
-                  onChange={(e) => { setParkedNext(e.target.value); invalidateGeneratedReportOnTypedEdit(); }}
+                  onChange={(e) => { invalidateGeneratedReportOnTypedEdit(); setParkedNext(e.target.value); }}
                   rows={2}
                   disabled={generating}
                   style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating ? 0.55 : 1 }}
@@ -19585,6 +19598,28 @@ export function parkTaggedNoteLines({ notes, tag, labels = [], current = "" }) {
   const merged = [...String(current || "").split("\n").map((l) => l.trim()), ...typed]
     .filter((line) => line && !seen.has(line.toLowerCase()) && seen.add(line.toLowerCase()));
   return merged.join("\n");
+}
+
+// The inverse of parkTaggedNoteLines for the restore paths: once a park
+// exists for a tag, the free-typed lines of that tag are removed from the
+// restored notes (the park owns them now); chip marker lines stay. With no
+// park for a tag the notes are returned as they were.
+export function stripParkedTaggedLines({ notes, parked = {}, labels = {} }) {
+  let out = String(notes || "");
+  for (const tag of ["found", "next"]) {
+    if (!String(parked[tag] || "").trim()) continue;
+    const rx = new RegExp(`^\\[${tag}\\]\\s*(.+)$`, "i");
+    const norm = (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+    const chipLabels = new Set((labels[tag] || []).map(norm).filter(Boolean));
+    out = out
+      .split("\n")
+      .filter((line) => {
+        const m = line.trim().match(rx);
+        return !m || chipLabels.has(norm(m[1]));
+      })
+      .join("\n");
+  }
+  return out;
 }
 
 export function rankTechTips(tips, q) {

@@ -4474,6 +4474,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       protocolActionScopesCompleted,
       observations,
       recommendations,
+      // technician-internal next steps (parked [Next] lines) — merged below,
+      // never into the form-provenance list
+      internalRecommendations,
       formResponses,
       formStartedAt,
       invoiceAlreadySent = false,
@@ -5375,6 +5378,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const reportRecommendations = normalizeCompletionTextArray([
       ...(Array.isArray(recommendations) ? recommendations : []),
       ...taggedCompletionNoteLines(technicianNotes, ['next']),
+      // parked [Next] lines from the completion screen: internal, same
+      // standing as tagged note lines; never in formRecommendations
+      ...(Array.isArray(internalRecommendations) ? internalRecommendations.filter((v) => typeof v === 'string') : []),
     ]);
     // Provenance-kept copy of ONLY the form's recommendation field — the
     // merged list above folds in [Next] technician-note lines, and the
