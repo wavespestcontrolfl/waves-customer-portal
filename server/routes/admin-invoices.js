@@ -725,10 +725,19 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
           via: 'both',
         });
       } catch (err) {
-        // Nothing settled — hand the notice back to the queue with the reason.
-        await trx('inbound_payment_notices').where({ id })
-          .update({ status: 'parked', park_reason: 'apply_failed', apply_error: err.message, updated_at: trx.fn.now() });
-        return { failed: err };
+        // A statusCode-shaped refusal settled nothing. Anything else may have
+        // thrown AFTER the ledger committed — ask the invoice, and never hand a
+        // settled notice back to the queue as failed.
+        const refusal = [400, 404, 409].includes(err.statusCode);
+        const paid = refusal ? null : await db('invoices').where({ id: invoiceId }).first();
+        if (paid && paid.status === 'paid' && paid.payment_recorded_by === recordedBy) {
+          logger.error(`[admin-invoices:payment-notices] ${invoiceId} settled but a later step threw (${err.message}) — closing notice ${id} as applied, receipt unknown`);
+          settled = { invoice: paid, receipt: null };
+        } else {
+          await trx('inbound_payment_notices').where({ id })
+            .update({ status: 'parked', park_reason: 'apply_failed', apply_error: refusal ? err.message : `Settlement outcome uncertain (${err.message}) — check the invoice before applying`, updated_at: trx.fn.now() });
+          return { failed: err };
+        }
       }
       const { invoice, receipt } = settled;
       await trx('inbound_payment_notices').where({ id }).update({

@@ -198,6 +198,29 @@ describe('settlement under the row lock', () => {
   });
 });
 
+describe('post-commit failures', () => {
+  test('a non-refusal error after the ledger committed records the notice as applied (receipt unknown), never as failed', async () => {
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+    recordManualPayment.mockRejectedValueOnce(new Error('activity_log insert exploded'));
+    tables.invoices = { firsts: [{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid', payment_recorded_by: RECORDED_BY }], returning: [], calls: [] };
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', matched_invoice_id: 'inv-1' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('receipt: unknown'), expect.anything());
+  });
+
+  test('a non-refusal error with the invoice still open parks apply_failed with an "uncertain" note', async () => {
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+    recordManualPayment.mockRejectedValueOnce(new Error('db down'));
+    tables.invoices = { firsts: [openRow()], returning: [], calls: [] };
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    const patch = updatesOf('inbound_payment_notices')[0];
+    expect(patch).toMatchObject({ status: 'parked', park_reason: 'apply_failed' });
+    expect(patch.apply_error).toMatch(/uncertain.*db down/);
+  });
+});
+
 describe('park reasons', () => {
   test('no exact-cent invoice ⇒ no_match, with the near-amount candidates for the operator', async () => {
     claimed();

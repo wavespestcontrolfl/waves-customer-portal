@@ -156,7 +156,7 @@ async function finishApplied(notice, email, invoice, matchMethod, receipt, trx =
     });
   }
   await stampEmail(email.id, `zelle_notice_applied:${invoice.invoice_number}`);
-  const legs = [receipt?.email?.ok && 'email', receipt?.sms?.ok && 'sms'].filter(Boolean).join(' + ') || 'no receipt delivered';
+  const legs = receipt === null ? 'unknown — check the invoice' : ([receipt?.email?.ok && 'email', receipt?.sms?.ok && 'sms'].filter(Boolean).join(' + ') || 'no receipt delivered');
   await notifyOwner(
     'Zelle payment applied',
     `${notice.payer_name} · $${(notice.amount_cents / 100).toFixed(2)} → ${invoice.invoice_number} (${matchMethod.replace(/_/g, ' ')}; receipt: ${legs})`,
@@ -234,6 +234,16 @@ async function recentlyApplied(parsed) {
     .where('received_at', '>', since)
     .first('id');
   return !!dup;
+}
+
+function isRefusal(err) {
+  return [400, 404, 409].includes(err?.statusCode);
+}
+// Did OUR settlement commit? True (with the row) when the invoice is paid and
+// the ledger names this reconciler as the recorder.
+async function settledByUs(invoiceId) {
+  const row = await db('invoices').where({ id: invoiceId }).first();
+  return row && row.status === 'paid' && row.payment_recorded_by === RECORDED_BY ? row : null;
 }
 
 async function exactOpenInvoices(parsed) {
@@ -324,8 +334,22 @@ async function maybeHandleZelleNotice(email) {
         via: 'both',
       });
     } catch (err) {
+      // A statusCode-shaped refusal settled nothing. Anything else may have
+      // thrown AFTER the ledger committed (a post-commit side effect, the
+      // final re-read) — ask the invoice, never label committed money as
+      // failed.
+      const paid = isRefusal(err) ? null : await settledByUs(match.id);
+      if (paid) {
+        logger.error(`[zelle-notice] ${match.invoice_number} settled but a later step threw (${err.message}) — recording as applied, receipt unknown`);
+        await finishApplied(notice, email, paid, matchMethod, null, trx);
+        return;
+      }
       logger.error(`[zelle-notice] apply failed for ${match.invoice_number} (email ${email.id}): ${err.message}`);
-      await finishParked(notice, email, 'apply_failed', { candidates, applyError: err.message, matchedInvoice: match }, trx);
+      await finishParked(notice, email, 'apply_failed', {
+        candidates,
+        applyError: isRefusal(err) ? err.message : `Settlement outcome uncertain (${err.message}) — check the invoice before applying`,
+        matchedInvoice: match,
+      }, trx);
       return;
     }
     await finishApplied(notice, email, settled.invoice || match, matchMethod, settled.receipt, trx);

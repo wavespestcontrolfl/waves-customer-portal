@@ -80,7 +80,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   tables = {};
   db.mockImplementation((table) => {
-    if (['inbound_payment_notices', 'emails'].includes(table)) return builder(table);
+    if (['inbound_payment_notices', 'emails', 'invoices'].includes(table)) return builder(table);
     throw new Error(`unexpected table ${table}`);
   });
 });
@@ -186,6 +186,22 @@ describe('POST /payment-notices/:id/apply', () => {
     const updates = tables.inbound_payment_notices.calls.filter(([m]) => m === 'update').map(([, p]) => p);
     expect(updates[0]).toMatchObject({ status: 'processing' });
     expect(updates[1]).toMatchObject({ status: 'parked', park_reason: 'apply_failed', apply_error: 'Invoice status changed before payment could be recorded' });
+  });
+});
+
+describe('POST /payment-notices/:id/apply — post-commit failure', () => {
+  test('a non-refusal error after the ledger committed closes the notice as applied (receipt unknown) and returns 200', async () => {
+    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [] };
+    tables.invoices = { firsts: [{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid', payment_recorded_by: 'Adam' }], selects: [], updates: [], calls: [] };
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockResolvedValueOnce([{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', total: '117.00', credit_applied: 0 }]);
+    recordManualPayment.mockRejectedValueOnce(new Error('receipt stamp exploded'));
+    await withServer(async (call) => {
+      const r = await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' });
+      expect(r.status).toBe(200);
+      expect(r.body).toEqual({ ok: true, invoice: expect.objectContaining({ id: 'inv-1', status: 'paid' }), receipt: null });
+    });
+    const updates = tables.inbound_payment_notices.calls.filter(([m]) => m === 'update').map(([, p]) => p);
+    expect(updates[1]).toMatchObject({ status: 'applied', matched_invoice_id: 'inv-1' });
   });
 });
 
