@@ -2409,6 +2409,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               updated_at: db.fn.now(),
             });
           published = true;
+          // A sibling is a delivered row of its own after the confirmed
+          // handoff — same telemetry as the anchor (a fallback sibling
+          // behind a SERVER anchor was invisible before; GH codex P2 on
+          // #3750) — on BOTH paths below: a sibling accepted mid-publication
+          // (guarded update zero-rowed by price_locked_at) was exposed just
+          // the same (GH codex P2 r3).
+          shadowLogFallbackDelivery(sibling, { handoff: stampChannels.length > 0 });
           if (!updated) {
             logger.warn(`[admin-estimates] sibling ${sibling.id} left 'sending' before publication (likely accepted) — state preserved.`);
             // The customer still SAW this sibling's quote — the public flow
@@ -2434,10 +2441,6 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (state stands): ${auditErr.message}`);
             }
           } else {
-            // A published sibling is a delivered row of its own — same
-            // telemetry as the anchor (a fallback sibling behind a SERVER
-            // anchor was invisible before; GH codex P2 on #3750).
-            shadowLogFallbackDelivery(sibling, { handoff: stampChannels.length > 0 });
             // Send-time pricing snapshot for the SIBLING too (estimator
             // audit M4): only the anchor wrote one, so grouped properties
             // had no frozen quote provenance. Fail-soft like the anchor's —
