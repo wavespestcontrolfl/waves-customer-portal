@@ -372,21 +372,23 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     const parked = Array.isArray(meta.additional_recordings) ? meta.additional_recordings : [];
     const chosen = parked.find((r) => r && r.recording_sid === wanted);
     if (!chosen) return res.status(404).json({ error: 'That recording is not parked on this call' });
-    // Every parked recording on a quarantined call goes, not only the one
-    // being adopted: the invariant is that the call keeps no audio. Each
-    // delete tombstones its entry in the parked list (URL gone now;
-    // delete_pending while a failed Twilio delete is owed to the recovery
-    // sweep), so a swallowed failure can never leave card audio reachable.
+    // A quarantined call keeps no audio: the call's CURRENT recording (the
+    // one the card may have been heard on) is the helper's primary, and
+    // the helper sweeps every parked recording — the chosen one included.
+    // Each delete tombstones its entry (URL gone now; delete_pending while
+    // a failed Twilio delete is owed to the recovery sweep), so a swallowed
+    // failure can never leave card audio reachable.
     const quarantineParked = async () => {
       const q = await CallRecordingProcessor.quarantineCardRecording(
-        { ...call, recording_sid: chosen.recording_sid, recording_url: chosen.recording_url || null },
+        call,
         { source: 'adopt_recording_post_quarantine' },
       ).catch((e) => {
-        logger.error(`[call-recordings] parked recording quarantine delete failed for ${maskSid(chosen.recording_sid)}: ${e.message}`);
+        logger.error(`[call-recordings] quarantine delete failed for call ${call.id}: ${e.message}`);
         return null;
       });
-      // The helper sweeps every parked recording, not only the chosen one.
-      return q ? { deleted: q.parked?.deleted ?? 0, delete_pending: q.parked?.pending ?? 0 } : { deleted: 0, delete_pending: parked.length };
+      if (!q) return { deleted: 0, delete_pending: parked.length + (call.recording_sid ? 1 : 0) };
+      const current = call.recording_sid ? (q.twilioDeleted ? { deleted: 1, delete_pending: 0 } : { deleted: 0, delete_pending: 1 }) : { deleted: 0, delete_pending: 0 };
+      return { deleted: current.deleted + (q.parked?.deleted ?? 0), delete_pending: current.delete_pending + (q.parked?.pending ?? 0) };
     };
     const quarantinedResponse = (res, outcome, prefix) => res.status(409).json({
       error: outcome.delete_pending

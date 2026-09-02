@@ -357,23 +357,26 @@ describe('POST /calls/:id/adopt-recording', () => {
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
       expect(res.status).toBe(409);
-      expect(await res.json()).toMatchObject({ reason: 'pan_quarantined', deleted: 2, delete_pending: 0 });
+      // Current recording + two parked ones.
+      expect(await res.json()).toMatchObject({ reason: 'pan_quarantined', deleted: 3, delete_pending: 0 });
     });
     expect(updates.find((u) => u.table === 'call_log')).toBeUndefined();
-    // One helper call: it sweeps every parked recording (OTHER included) itself.
+    // One helper call with the call's CURRENT recording as the primary; the
+    // helper sweeps every parked recording (PARKED and OTHER) itself.
     expect(processor.quarantineCardRecording).toHaveBeenCalledTimes(1);
-    expect(processor.quarantineCardRecording).toHaveBeenCalledWith(expect.objectContaining({ recording_sid: PARKED }), { source: 'adopt_recording_post_quarantine' });
+    expect(processor.quarantineCardRecording).toHaveBeenCalledWith(expect.objectContaining({ id: CALL_ID, recording_sid: CURRENT }), { source: 'adopt_recording_post_quarantine' });
     expect(processor.processRecording).not.toHaveBeenCalled();
   });
 
   test('a parked delete that fails at Twilio is reported as still pending, never as deleted', async () => {
     mockDb([{ ...call(), transcription_metadata: JSON.stringify({ pan_detected: true }) }]);
-    processor.quarantineCardRecording.mockResolvedValue({ quarantined: true, twilioDeleted: false, parked: { deleted: 0, pending: 1 } });
+    processor.quarantineCardRecording.mockResolvedValue({ quarantined: true, twilioDeleted: true, parked: { deleted: 0, pending: 1 } });
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
       expect(res.status).toBe(409);
       const body = await res.json();
-      expect(body).toMatchObject({ reason: 'pan_quarantined', deleted: 0, delete_pending: 1 });
+      // Current recording deleted, the parked one still owed.
+      expect(body).toMatchObject({ reason: 'pan_quarantined', deleted: 1, delete_pending: 1 });
       expect(body.error).toMatch(/retried by the recovery sweep/);
     });
   });
