@@ -213,8 +213,8 @@ function givenNameRuns(tokens) {
 }
 // [{ given: [tokens], surname: [tokens] }] per person on the line.
 function personsOf(payerName) {
-  // Joint-line separators: "&", "and", "/", "+", ";" (case-insensitive).
-  const people = String(payerName || '').split(/\s*[&/+;]\s*|\s+and\s+/i).map((p) => p.trim()).filter(Boolean);
+  // Joint-line separators: "&", "and", "or", "/", "+", ";" (case-insensitive).
+  const people = String(payerName || '').split(/\s*[&/+;]\s*|\s+(?:and|or)\s+/i).map((p) => p.trim()).filter(Boolean);
   const parsed = people.map((person) => {
     const comma = person.indexOf(',');
     if (comma > -1) {
@@ -231,8 +231,11 @@ function personsOf(payerName) {
   // without a dictionary — so it is read as written and, when that reading
   // corroborates nobody, the notice parks for a human. Borrowing the final
   // surname there would let "Alice Jones" settle Alice Doe's invoice.
+  // Only a TWO-token final name ("ROBERT DOE") lends its surname; with a
+  // middle name ("ROBERT JAMES DOE") the surname is ambiguous — nothing is
+  // borrowed and a single-token person parks for a human.
   const last = parsed[parsed.length - 1];
-  const borrowed = last && !last.fixedSurname && last.all && last.all.length > 1 ? last.all.slice(1) : null;
+  const borrowed = last && !last.fixedSurname && last.all && last.all.length === 2 ? last.all.slice(1) : null;
   return parsed.map((p) => (p.all && p.all.length === 1 && borrowed ? { all: [...p.all, ...borrowed] } : p));
 }
 function personCorroborates(person, customerFirst, customerLast) {
