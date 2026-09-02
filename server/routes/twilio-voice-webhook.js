@@ -206,6 +206,10 @@ function isPanQuarantinedRow(row) {
 // recording is parked for a deliberate decision, never swapped in and
 // auto-reprocessed.
 const RECORDING_LOAD_BEARING_STATUSES = new Set(['processing', 'processed', 'customer_creation_failed', 'lead_creation_failed']);
+// The attach/replace write re-checks the same set IN the statement (a pass
+// can land any of them between the read and the write). Built from the set
+// so the decision and the fence can never name different statuses.
+const NOT_LOAD_BEARING_SQL = `(processing_status IS NULL OR processing_status NOT IN (${[...RECORDING_LOAD_BEARING_STATUSES].map((s) => `'${s}'`).join(', ')}))`;
 
 function listedRecordingReason(metadata, sid) {
   try {
@@ -1709,7 +1713,7 @@ router.post('/recording-status', async (req, res) => {
           // when it was READ; a pass can claim it between that read and this
           // write (and start transcribing the old audio, or finalize without
           // the new audio). Re-checked in the write; zero rows re-decides.
-          .whereRaw("processing_status IS DISTINCT FROM 'processing' AND processing_status IS DISTINCT FROM 'processed'")
+          .whereRaw(NOT_LOAD_BEARING_SQL)
           .update(write);
         if (updated > 0) {
           matchedSid = baseline.twilio_call_sid;

@@ -66,8 +66,9 @@ function makeDb(tables) {
           const wanted = JSON.parse(clause.bindings[0])[0].recording_sid;
           return !(metaOf(row).additional_recordings || []).some((r) => r.recording_sid === wanted);
         }
-        if (sql.includes("processing_status IS DISTINCT FROM 'processing' AND processing_status IS DISTINCT FROM 'processed'")) {
-          return !['processing', 'processed'].includes(String(row.processing_status));
+        if (sql.startsWith("(processing_status IS NULL OR processing_status NOT IN (")) {
+          const names = [...sql.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+          return row.processing_status == null || !names.includes(String(row.processing_status));
         }
         throw new Error(`fake db: unsupported raw clause ${sql}`);
       }
@@ -364,6 +365,16 @@ describe('POST /recording-status', () => {
     expect(tables.triage_items).toHaveLength(1);
     jest.advanceTimersByTime(15 * 60 * 1000);
     expect(processor.processRecording).not.toHaveBeenCalled();
+  });
+
+  test('a replace decided on a stale read is parked when a downstream failure lands before the write', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: null, metadata: null });
+    let landed = false;
+    tables.__afterFirst = (row) => { if (!landed && row.twilio_call_sid === PARENT) { landed = true; row.processing_status = 'customer_creation_failed'; } };
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2 }));
+    const row = tables.call_log[0];
+    expect(row.recording_sid).toBe(REC_1);
+    expect(row.metadata.additional_recordings).toEqual([expect.objectContaining({ recording_sid: REC_2, parked_because: 'processing_status_customer_creation_failed' })]);
   });
 
   test('a first attach that loses to a competing callback is re-decided, never dropped', async () => {
