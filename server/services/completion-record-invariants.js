@@ -244,7 +244,7 @@ const PREDICATES = Object.freeze({
                  SELECT 1 FROM service_records sr
                   WHERE sr.scheduled_service_id = ss.id
                     AND ${OWES_CUSTOMER_ARTIFACT}
-                    AND sr.created_at >= '${REPORT_TOKEN_SINCE}'::date
+                    AND ${COMPLETED_MARKER_AT} >= '${REPORT_TOKEN_SINCE}'::date
                     AND ${COMPLETED_MARKER_AT} < now() - interval '2 hours')
            AND NOT EXISTS (${CANONICAL_SIBLING_FROZE_FALSE('requiresServiceReport')})
            AND NOT EXISTS (

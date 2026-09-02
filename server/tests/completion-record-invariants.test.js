@@ -123,6 +123,9 @@ describe('legacy cutovers and project-backed visits', () => {
     expect(_private.RECORD_FK_SINCE).toBe('2026-04-27');
     expect(_private.TRACKING_STAMP_SINCE).toBe('2026-04-22');
     expect(_private.REPORT_TOKEN_SINCE).toBe('2026-04-01');
+    // The token era is keyed on when the COMPLETION happened (recap re-completion of an old record included), not on the row's creation.
+    expect(PREDICATES.completed_record_without_report_token.sql).toContain(`${_private.COMPLETED_MARKER_AT} >= '${_private.REPORT_TOKEN_SINCE}'::date`);
+    expect(PREDICATES.completed_record_without_report_token.sql).not.toContain("sr.created_at >= '");
     const rec = PREDICATES.completed_visit_without_record.sql;
     expect(rec).toContain(_private.COMPLETED_TRANSITION_SINCE('2026-04-27'));
     expect(rec).toMatch(/h\.job_id = ss\.id[\s\S]*h\.to_status = 'completed'[\s\S]*h\.transitioned_at >= '2026-04-27'::date/);
@@ -134,7 +137,6 @@ describe('legacy cutovers and project-backed visits', () => {
     // An incomplete record is completion evidence for the stamp check too.
     expect(stamp).toContain("sr.status IN ('completed', 'incomplete')");
     // Report-token eligibility is bounded to records written after the token column shipped.
-    expect(PREDICATES.completed_record_without_report_token.sql).toContain("sr.created_at >= '2026-04-01'::date");
   });
 
   test('service-report predicates exclude project-backed visits as a whole (project row or project_completion sibling)', () => {
