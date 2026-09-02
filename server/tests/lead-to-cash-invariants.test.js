@@ -40,6 +40,15 @@ jest.mock('../services/stale-visit-sweep', () => ({ _private: { findStaleVisits:
 jest.mock('../services/estimate-conversion-guard', () => ({ convertedOpenEstimatesQuery: jest.fn() }));
 jest.mock('../config/completion-lane-registry', () => ({ ALL_LISTS: { A: ['known_key', 'gone_key'] }, classifyCatalogRow: jest.fn() }));
 jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }));
+jest.mock('../services/completion-record-invariants', () => {
+  const keys = ['completed_visit_without_record', 'duplicate_completed_records_per_visit',
+    'completed_record_without_report_token', 'completed_visit_without_completed_at',
+    'completed_record_without_comms_marker'];
+  return {
+    PREDICATES: Object.fromEntries(keys.map((k) => [k, { label: `P ${k}`, href: '/admin/dispatch', sql: 'SELECT 1' }])),
+    runPredicate: jest.fn(),
+  };
+});
 
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
@@ -51,6 +60,7 @@ const staleSweep = require('../services/stale-visit-sweep');
 const { convertedOpenEstimatesQuery } = require('../services/estimate-conversion-guard');
 const { classifyCatalogRow } = require('../config/completion-lane-registry');
 const { getCloseoutStatus } = require('../services/closeout-status');
+const { runPredicate } = require('../services/completion-record-invariants');
 const {
   runLeadToCashInvariantSweep, DETECTORS, _private: { runDetectors, composeReport, SEND_MARKER_KEY, SAMPLE_IDS, CLOSEOUT_VISIT_CAP },
 } = require('../services/lead-to-cash-invariants');
@@ -328,5 +338,20 @@ describe('detector adapters', () => {
     expect(out.count).toBe(1);
     expect(out.ids).toEqual([`[truncated: 7 completed visit(s) beyond the ${CLOSEOUT_VISIT_CAP}-visit cap were not evaluated]`]);
     expect(out.detail).toMatchObject({ checked: CLOSEOUT_VISIT_CAP, truncated: true });
+  });
+
+  test('completion-record predicates are registered one adapter each and delegate by key', async () => {
+    const keys = ['completed_visit_without_record', 'duplicate_completed_records_per_visit',
+      'completed_record_without_report_token', 'completed_visit_without_completed_at',
+      'completed_record_without_comms_marker'];
+    for (const key of keys) {
+      runPredicate.mockResolvedValueOnce({ count: 2, ids: ['a', 'b'], detail: { sampleCap: 25 } });
+      const d = byKey(key);
+      expect(d.label).toBe(`P ${key}`);
+      expect(d.href).toBe('/admin/dispatch');
+      const out = await d.run({ now: NOW });
+      expect(runPredicate).toHaveBeenLastCalledWith(key);
+      expect(out).toEqual({ count: 2, ids: ['a', 'b'], detail: { sampleCap: 25 } });
+    }
   });
 });
