@@ -288,13 +288,17 @@ describe('lead identity corpus — shape and PII hygiene', () => {
   test('names come from the synthetic vocabulary; every address declares itself fictional', () => {
     for (const c of CASES) {
       for (const rec of [c.a, c.b]) {
+        // Hygiene normalization REJECTS letters outside the Latin script
+        // instead of erasing them (namePart, the resolver's normalizer,
+        // strips them — `Marisol 王小明` would otherwise pass as `marisol`).
+        const latinOnly = (v) => /^[\p{Script=Latin}\p{M}\s'’.-]+$/u.test(String(v));
         if (rec.first_name) {
-          const ok = SYNTHETIC_FIRST_NAMES.has(namePart(rec.first_name));
+          const ok = latinOnly(rec.first_name) && SYNTHETIC_FIRST_NAMES.has(namePart(rec.first_name));
           expect({ id: c.id, first_name: rec.first_name, ok })
             .toEqual({ id: c.id, first_name: rec.first_name, ok: true });
         }
         if (rec.last_name) {
-          const ok = SYNTHETIC_LAST_NAMES.has(namePart(rec.last_name));
+          const ok = latinOnly(rec.last_name) && SYNTHETIC_LAST_NAMES.has(namePart(rec.last_name));
           expect({ id: c.id, last_name: rec.last_name, ok })
             .toEqual({ id: c.id, last_name: rec.last_name, ok: true });
         }
@@ -325,28 +329,20 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     // email-shaped token too, and must pass the same synthetic rules.
     // …and so is an RFC domain literal (person@[192.0.2.10]).
     // …and a QUOTED local part ("customer.name"@example.net).
-    // The token must be the WHOLE whitespace-delimited word (wrapping
-    // punctuation stripped): `real'office@example.com` is one word whose
-    // email-shaped tail happens to be allowlisted — the cut prefix is real.
+    // CONSERVATIVE email rule: any whitespace-delimited word containing an
+    // `@` — whatever grammar its local part or domain uses (Unicode,
+    // quoted, dot-atom punctuation, domain literals) — must, once wrapping
+    // punctuation is stripped, be EXACTLY a synthetic address: ASCII local
+    // part from the allowlist at a reserved example.com domain. Anything
+    // else is treated as a real address and fails.
     const str = String(text);
-    // (a quoted local may contain spaces: "customer name"@example.net)
-    // (…with quoted-pair escapes inside: "customer\\""@example.net)
-    for (const m of str.matchAll(/(?:"(?:[^"\\\n]|\\.)+"|[\p{L}\p{N}_.+%-]+)@(?:[\p{L}\p{N}_.-]+|\[[^\]\s]+\])/gu)) {
-      const email = m[0];
-      let ws = m.index;
-      while (ws > 0 && !/\s/.test(str[ws - 1])) ws -= 1;
-      let we = m.index + email.length;
-      while (we < str.length && !/\s/.test(str[we])) we += 1;
-      const word = str.slice(ws, we).replace(/^[^\p{L}\p{N}"[]+|[^\p{L}\p{N}\]]+$/gu, '');
-      const ok = word === email
-        && /@(?:[a-z0-9-]+\.)*example\.com$/i.test(email)
-        && SYNTHETIC_EMAIL_LOCALS.has(email.toLowerCase().split('@')[0]);
-      expect({ where, email, word, ok }).toEqual({ where, email, word, ok: true });
+    for (const raw of str.split(/\s+/)) {
+      if (!raw.includes('@')) continue;
+      const word = raw.replace(/^[^\p{L}\p{N}"[]+|[^\p{L}\p{N}\]]+$/gu, '');
+      const shaped = /^([a-z0-9._%+-]+)@(?:[a-z0-9-]+\.)*example\.com$/i.exec(word);
+      const ok = Boolean(shaped) && SYNTHETIC_EMAIL_LOCALS.has(shaped[1].toLowerCase());
+      expect({ where, word, ok }).toEqual({ where, word, ok: true });
     }
-    // Unicode dashes (en/em/figure/nonbreaking hyphen, minus) and
-    // nonbreaking/figure/narrow spaces normalize to ASCII first, and the
-    // separator class includes `/` — `941–555–2091` and `941/555/2091`
-    // are phone spellings too.
     // Unicode DECIMAL digits (Arabic-Indic, fullwidth, …) map to ASCII too:
     // Nd digits come in runs of ten, so the value is the offset from the
     // run's zero.

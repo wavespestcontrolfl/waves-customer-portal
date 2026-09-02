@@ -131,6 +131,20 @@ function chainReceiver(bare, selIdx) {
   }
 }
 const chainHead = (re) => Object.assign(re, { chain: true });
+// A head wrapped in parentheses — `(db('leads')).insert(row)` — has its
+// chain after the closing paren: step over each `)` that closes a `(`
+// immediately before the head.
+function unwrapParens(bare, headStart, from) {
+  let k = headStart - 1;
+  let f = from;
+  for (;;) {
+    while (k >= 0 && /\s/.test(bare[k])) k -= 1;
+    let j = f;
+    while (j < bare.length && /\s/.test(bare[j])) j += 1;
+    if (k < 0 || bare[k] !== '(' || bare[j] !== ')') return f;
+    k -= 1; f = j + 1;
+  }
+}
 
 // Split `text` on top-level commas (not inside (), [] or {}).
 function splitTopLevel(text) {
@@ -254,8 +268,8 @@ function insertFirstMatches(code, argRe) {
 // still one statement. (A mid-word split is deliberate obfuscation beyond
 // textual scanning.)
 // …and every JavaScript ESCAPE that is whitespace at runtime (\n \t \r \f
-// \v and their \x / \u spellings).
-const RAW_SEP = String.raw`(?:\s*${Q}\s*\+\s*${Q}\s*|\s*\/\*[\s\S]*?\*\/\s*|\s*--[^\n]*(?:\n|\\n)\s*|(?:\s|\\[ntrfv]|\\x0[9A-Da-d]|\\u000[9A-Da-d])+)`;
+// \v, the escaped space, and their \x / \u spellings).
+const RAW_SEP = String.raw`(?:\s*${Q}\s*\+\s*${Q}\s*|\s*\/\*[\s\S]*?\*\/\s*|\s*--[^\n]*(?:\n|\\n)\s*|(?:\s|\\[ntrfv]|\\x(?:0[9A-Da-d]|20)|\\u(?:000[9A-Da-d]|0020))+)`;
 // Optional schema qualifier: a bare or quoted identifier — a DOUBLE-quoted
 // one may hold any punctuation PostgreSQL allows ("tenant-one"."leads").
 const SQL_SCHEMA = String.raw`(?:(?:"[^"\n]+"|${Q}?[\w$]+${Q}?)\s*\.\s*)?`;
@@ -1487,7 +1501,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
   // `record` for a chain head: walk from `from` (the head's end) to the
   // insert call.
   const recordChain = (m, expr, from) => {
-    const hit = walkChain(code, from, HEAD_STOPS);
+    const hit = walkChain(code, unwrapParens(code, m.index, from), HEAD_STOPS);
     if (hit && hit.name === 'insert') record(m.index, hit.open + 1 - m.index, expr);
   };
   // A regex that ENDS AT the table call's `(`: parse its arguments.
@@ -1625,7 +1639,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     let use;
     while ((use = useRe.exec(view))) {
       const n = use[1];
-      const hit = walkChain(code, use.index + use[0].length, HEAD_STOPS);
+      const hit = walkChain(code, unwrapParens(code, use.index, use.index + use[0].length), HEAD_STOPS);
       if (!hit || hit.name !== 'insert') continue;
       // Same lexical rule as the literal pass: the nearest VISIBLE
       // declaration of the name must be one of the dynamic-builder ones.
@@ -1792,6 +1806,7 @@ function scanSourceForLeadInserts(src, filePath, imports = 'all') {
       if (pattern.chain) {
         let from = m.index + m[0].length;
         if (pattern.callArgs) { from = afterBalanced(bare, from); if (from === -1) continue; }
+        from = unwrapParens(bare, m.index, from);
         const hit = walkChain(bare, from, HEAD_STOPS);
         if (!hit || hit.name !== 'insert') continue;
         len = hit.open + 1 - m.index;
@@ -1912,6 +1927,9 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['triple-nested chain arguments', "await db('leads').modify(qb => qb.whereIn('id', ids.map(id => normalize(id)))).insert(row);"],
     ['deeply nested insert payload before .into', "await db.insert(rows.map(row => normalize(row, opts.get('k')))).into('leads');"],
     ['insert payload before .table', "await db.insert(rows.map(row => normalize(row))).table('leads');"],
+    ['parenthesized builder receiver', "await (db('leads')).insert(row);"],
+    ['parenthesized factory receiver', "const leadQuery = () => db('leads');\nawait (leadQuery()).insert(row);"],
+    ['escaped ASCII space inside raw SQL', "await db.raw('INSERT\\x20INTO\\u0020leads(name) VALUES (?)', [name]);"],
     ['callable factory with nested call arguments', "await getDb(loadConfig(kind))('leads').insert(row);"],
     ['optional invocation of an insertion helper', "function writeRow(builder, row) { return builder.insert(row); }\nawait writeRow?.(db('leads'), row);"],
     ['SQL producer as the text of an inline pg query config', "function buildInsert() {\n  return 'INSERT INTO leads (a) VALUES ($1)';\n}\nawait client.query({ text: buildInsert(), values: [a] });"],
@@ -2168,6 +2186,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(deepPayload[0].expr).toBe('table');
     const defaultParam = scanSourceForDynamicTableInserts("const TABLE = 'audit';\nfunction write(TABLE = resolveTable(kind), row) {\n  return db(TABLE).insert(row);\n}");
     expect(defaultParam).toHaveLength(1);
+    const parenReceiver = scanSourceForDynamicTableInserts('await (db(table)).insert(row);');
+    expect(parenReceiver).toHaveLength(1);
     const nestedFactory = scanSourceForDynamicTableInserts('await getDb(loadConfig(kind))(table).insert(row);');
     expect(nestedFactory).toHaveLength(1);
     expect(nestedFactory[0].expr).toBe('table');
@@ -2459,6 +2479,14 @@ describe('lead-writer registry (#3137 groundwork)', () => {
                 const id = bound.trim().split(/[=\s]/)[0];
                 if (/^[A-Za-z_$][\w$]*$/.test(id) && !governed.has(id)) { governed.add(id); grew = true; }
               }
+            }
+            // PLACED IN A CONTAINER — `const holder = { entry: config }` /
+            // `[config]` — governs the container's binding (its property
+            // writes, `holder['entry'].table = …`, are then checked).
+            const containerRe = new RegExp(String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[\[{][^;]*?(?<![.\w$])${escapeRe(name)}\b(?![.\w$(])`, 'g');
+            let ct;
+            while ((ct = containerRe.exec(bare))) {
+              if (!governed.has(ct[1])) { governed.add(ct[1]); grew = true; }
             }
             // PASSED AS A WHOLE ARGUMENT — `loadRow(config, id)` binds the
             // callee's parameter at that position, which is then governed
