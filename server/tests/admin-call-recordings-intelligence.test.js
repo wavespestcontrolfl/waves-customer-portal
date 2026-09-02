@@ -53,6 +53,7 @@ function mockDb(firstResults) {
       whereNull() { return b; },
       whereIn() { return b; },
       whereNotExists() { return b; },
+      whereNot(...a) { b.nots = [...(b.nots || []), a]; return b; },
       forUpdate() { b.locked = true; return b; },
       whereRaw(sql, bindings) { b.wheres.push(['raw', sql, bindings]); return b; },
       first: () => Promise.resolve(queue.shift() ?? null),
@@ -267,7 +268,15 @@ describe('POST /calls/:id/adopt-recording', () => {
     const fenceClauses = swap.wheres.map((w) => JSON.stringify(w));
     expect(fenceClauses.some((w) => w.includes('"recording_sid"') && w.includes(CURRENT))).toBe(true);
     expect(fenceClauses.some((w) => w.includes('additional_recordings') && w.includes(PARKED))).toBe(true);
-    expect(updates.find((u) => u.table === 'triage_items').patch.status).toBe('resolved');
+    const cardWrites = updates.filter((u) => u.table === 'triage_items');
+    const reviewCard = cardWrites.find((u) => JSON.stringify(u.wheres).includes('additional_recording'));
+    expect(reviewCard.patch.status).toBe('resolved');
+    // The OLD audio's other review cards are retired in the swap's own
+    // transaction, with a note naming both recordings (r10 P1).
+    const retired = cardWrites.find((u) => !JSON.stringify(u.wheres).includes('additional_recording'));
+    expect(retired.patch).toMatchObject({ status: 'resolved', resolution_note: expect.stringContaining(PARKED) });
+    expect(retired.patch.resolution_note).toContain(CURRENT);
+    expect(db.transaction).toHaveBeenCalled();
     // The pass is fenced to the chosen recording: a callback that replaces
     // it before the claim makes the pass refuse instead of processing audio
     // the operator never chose.
@@ -285,7 +294,7 @@ describe('POST /calls/:id/adopt-recording', () => {
     });
     // The chosen recording can no longer be acted on (it left the parked
     // list with the swap): the card is settled, not left pointing at it.
-    const card = updates.find((u) => u.table === 'triage_items');
+    const card = updates.find((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('additional_recording'));
     expect(card.patch.status).toBe('resolved');
     expect(card.patch.resolution_note).toContain(NEWER);
   });
@@ -317,9 +326,26 @@ describe('POST /calls/:id/adopt-recording', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ adopted: PARKED, remaining_for_review: 1 });
     });
-    const card = updates.find((u) => u.table === 'triage_items');
+    const card = updates.find((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('additional_recording'));
     expect(card.patch.status).toBeUndefined();
     expect(JSON.parse(card.patch.payload.bindings[0])).toMatchObject({ recording_sid: OTHER, parked_because: 'write_contended', kept_recording_sid: PARKED, remaining_for_review: 1 });
+  });
+
+  test('the review card is settled under the call row lock — list read and card write in one transaction (codex #3736 gh-r10 P2)', async () => {
+    const seen = [];
+    const updates = mockDb([call()]);
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = base(table); seen.push(b); return b; });
+    processor.processRecording.mockResolvedValue({ success: true, callSid: SID });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
+      expect(res.status).toBe(200);
+    });
+    // Two transactions: the swap (+ card retirement) and the settle.
+    expect(db.transaction).toHaveBeenCalledTimes(2);
+    const lockedReads = seen.filter((b) => b.table === 'call_log' && b.locked);
+    expect(lockedReads).toHaveLength(1);
+    expect(updates.some((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('additional_recording'))).toBe(true);
   });
 
   test('a review-card update that fails is reported as a warning on the successful adoption, never swallowed', async () => {
@@ -328,7 +354,12 @@ describe('POST /calls/:id/adopt-recording', () => {
     const realImpl = db.getMockImplementation();
     db.mockImplementation((table) => {
       const b = realImpl(table);
-      if (table === 'triage_items') b.update = () => Promise.reject(new Error('deadlock detected'));
+      // Only the review-card settle fails; the swap's own card retirement
+      // (scoped by whereNot) is untouched.
+      if (table === 'triage_items') {
+        const realUpdate = b.update;
+        b.update = (patch) => (JSON.stringify(b.wheres).includes('additional_recording') ? Promise.reject(new Error('deadlock detected')) : realUpdate(patch));
+      }
       return b;
     });
     await withServer(async (base) => {
@@ -354,7 +385,9 @@ describe('POST /calls/:id/adopt-recording', () => {
         expect(body).toMatchObject({ success: false, queued: true, adopted: PARKED });
       });
       expect(updates.find((u) => u.table === 'call_log').patch.processing_status).toBeNull();
-      expect(updates.find((u) => u.table === 'triage_items')).toBeUndefined();
+      // The old audio's other cards are retired with the swap; the
+      // additional_recording review card itself is left open.
+      expect(updates.find((u) => u.table === 'triage_items' && JSON.stringify(u.wheres).includes('additional_recording'))).toBeUndefined();
     }
   });
 

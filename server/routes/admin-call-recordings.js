@@ -370,7 +370,16 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
       received_at: null,
       parked_because: 'replaced_by_operator',
     }] : [];
-    const swapped = await db('call_log')
+    // The swap and the retirement of the replaced recording's review cards
+    // are ONE transaction (Codex #3736 r10 P1): recording A's open address /
+    // scheduling / email / routing cards describe audio this call no longer
+    // has, and most reprocess inserts are ON CONFLICT DO NOTHING — a repeated
+    // reason would keep A's payload and a reason absent from B would stay
+    // actionable indefinitely. The additional_recording card is the one
+    // card ABOUT the swap and is settled after the pass (settleReviewCard).
+    const supersededNote = `Superseded: recording ${call.recording_sid || 'none'} replaced by ${chosen.recording_sid} (operator adoption)`;
+    const swapped = await db.transaction(async (trx) => {
+      const n = await trx('call_log')
       .where({ id: call.id })
       .whereRaw("processing_status IS DISTINCT FROM 'processing'")
       // Re-checked IN the write: a quarantine stamp landing between the
@@ -439,6 +448,15 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         ),
         updated_at: new Date(),
       });
+      if (n > 0) {
+        await trx('triage_items')
+          .where({ call_log_id: call.id })
+          .whereNot('reason_code', 'additional_recording')
+          .whereIn('status', ['open', 'in_progress'])
+          .update({ status: 'resolved', resolved_at: new Date(), resolution_note: supersededNote });
+      }
+      return n;
+    });
     if (!swapped) {
       // Distinguish the quarantine race from an ordinary contention: the
       // former must also delete the parked audio at Twilio.
@@ -472,22 +490,29 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     // or failed pass leaves the card alone with the row queued for the sweep.
     // Read the list as it is NOW (the swap rewrote it against the current
     // row, and a callback may have parked more since).
+    // The list read and the card write are one transaction under the call
+    // row's lock (Codex r10 P2): the webhook's park writes call_log first
+    // and then merges the card, so a callback parking C serializes against
+    // this — it either lands before the read (C is seen) or waits for the
+    // resolve to commit and then finds no open card and opens a new one.
     const settleReviewCard = async (resolutionNote) => {
-      const after = await db('call_log').where({ id: call.id }).first('metadata').catch(() => null);
-      let nowParked = [];
-      try {
-        const m = typeof after?.metadata === 'string' ? JSON.parse(after.metadata) : (after?.metadata || {});
-        nowParked = Array.isArray(m.additional_recordings) ? m.additional_recordings : [];
-      } catch { nowParked = []; }
-      const stillForReview = nowParked.filter((r) => r && r.parked_because !== 'replaced_by_operator' && r.recording_sid !== chosen.recording_sid);
-      const openCard = db('triage_items')
-        .where({ call_log_id: call.id, reason_code: 'additional_recording' })
-        .whereIn('status', ['open', 'in_progress']);
+      let stillForReview = [];
       // The adoption is done either way; a card update that fails is
       // reported, not swallowed, so a stale card never hides behind a
       // plain success.
       let warning = null;
       try {
+        await db.transaction(async (trx) => {
+        const after = await trx('call_log').where({ id: call.id }).forUpdate().first('metadata');
+        let nowParked = [];
+        try {
+          const m = typeof after?.metadata === 'string' ? JSON.parse(after.metadata) : (after?.metadata || {});
+          nowParked = Array.isArray(m.additional_recordings) ? m.additional_recordings : [];
+        } catch { nowParked = []; }
+        stillForReview = nowParked.filter((r) => r && r.parked_because !== 'replaced_by_operator' && r.recording_sid !== chosen.recording_sid);
+        const openCard = trx('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'additional_recording' })
+          .whereIn('status', ['open', 'in_progress']);
         if (stillForReview.length === 0) {
           await openCard.update({ status: 'resolved', resolved_at: new Date(), resolution_note: resolutionNote });
         } else {
@@ -502,6 +527,7 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
             })]),
           });
         }
+        });
       } catch (cardErr) {
         logger.warn(`[call-recordings] additional-recording review card not updated for call ${call.id}: ${cardErr.message}`);
         warning = 'The recording was adopted, but its review card could not be updated; resolve it from the Triage inbox.';

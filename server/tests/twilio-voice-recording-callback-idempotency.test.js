@@ -55,6 +55,7 @@ function makeDb(tables) {
   function evalClause(row, clause) {
     switch (clause.type) {
       case 'eq': return row[clause.col] === clause.val;
+      case 'ne': return row[clause.col] !== clause.val;
       case 'null': return row[clause.col] == null;
       case 'in': return clause.vals.includes(row[clause.col]);
       case 'group': return evalGroup(row, clause.clauses);
@@ -94,6 +95,7 @@ function makeDb(tables) {
       },
       orWhere(col, val) { clauses.push({ type: 'eq', col, val, or: true }); return sb; },
       whereNull(col) { clauses.push({ type: 'null', col }); return sb; },
+      whereNot(col, val) { clauses.push({ type: 'ne', col, val }); return sb; },
       orWhereNull(col) { clauses.push({ type: 'null', col, or: true }); return sb; },
       whereRaw(sql, bindings) { clauses.push({ type: 'raw', sql, bindings }); return sb; },
       orWhereRaw(sql, bindings) { clauses.push({ type: 'raw', sql, bindings, or: true }); return sb; },
@@ -148,6 +150,7 @@ function makeDb(tables) {
       whereRaw(...a) { sb.whereRaw(...a); return builder; },
       orWhereRaw(...a) { sb.orWhereRaw(...a); return builder; },
       whereIn(...a) { sb.whereIn(...a); return builder; },
+      whereNot(...a) { sb.whereNot(...a); return builder; },
       select() { return builder; },
       first() {
         const hit = rows.find((r) => evalGroup(r, sb.clauses));
@@ -549,6 +552,23 @@ describe('POST /recording-status', () => {
     expect(row.processing_status).toBeNull();
     expect(row.transcription_status).toBe('pending');
     expect(row.metadata.superseded_recordings[0]).toMatchObject({ recording_sid: REC_1 });
+  });
+
+  test('a replace retires the review cards the OLD audio raised and keeps the additional_recording card (codex #3736 gh-r10)', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 12, processing_status: 'extraction_failed', transcription: null, metadata: null });
+    tables.triage_items.push(
+      { id: 't1', call_log_id: 'c1', reason_code: 'address_recovered', status: 'open', payload: '{}' },
+      { id: 't2', call_log_id: 'c1', reason_code: 'additional_recording', status: 'open', payload: '{}' },
+      { id: 't3', call_log_id: 'c1', reason_code: 'customer_creation_failed', status: 'resolved', payload: '{}' },
+      { id: 't4', call_log_id: 'other', reason_code: 'address_recovered', status: 'open', payload: '{}' },
+    );
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    expect(tables.call_log[0].recording_sid).toBe(REC_2);
+    const byId = Object.fromEntries(tables.triage_items.map((t) => [t.id, t]));
+    expect(byId.t1).toMatchObject({ status: 'resolved', resolution_note: expect.stringContaining(REC_2) });
+    expect(byId.t2.status).toBe('open');
+    expect(byId.t3.resolution_note).toBeUndefined();
+    expect(byId.t4.status).toBe('open');
   });
 
   test('a replace clears the voicemail stamps a REJECTED transcript produced, and keeps the ones Twilio stamped (codex #3736 gh-r6)', async () => {

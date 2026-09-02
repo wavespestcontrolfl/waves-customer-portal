@@ -1716,7 +1716,8 @@ router.post('/recording-status', async (req, res) => {
           );
         }
         const baseline = targetRow;
-        updated = await db('call_log')
+        updated = await db.transaction(async (trx) => {
+        const n = await trx('call_log')
           .where({ id: baseline.id })
           .where(notQuarantined)
           // Fence on the recording this decision was made against.
@@ -1730,6 +1731,21 @@ router.post('/recording-status', async (req, res) => {
           // the new audio). Re-checked in the write; zero rows re-decides.
           .whereRaw(NOT_LOAD_BEARING_SQL)
           .update(write);
+        // A replace retires the review cards the OLD audio raised (address,
+        // scheduling, email, routing): they describe a recording this call
+        // no longer has, and the re-run's ON CONFLICT DO NOTHING inserts
+        // would otherwise leave them actionable on stale evidence. The
+        // additional_recording card is about the recordings themselves and
+        // stays. Same transaction as the swap (Codex #3736 r10 P1).
+        if (n > 0 && attach.action === 'replace') {
+          await trx('triage_items')
+            .where({ call_log_id: baseline.id })
+            .whereNot('reason_code', 'additional_recording')
+            .whereIn('status', ['open', 'in_progress'])
+            .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Superseded: recording ${baseline.recording_sid || 'none'} replaced by ${RecordingSid}` });
+        }
+        return n;
+        });
         if (updated > 0) {
           matchedSid = baseline.twilio_call_sid;
           break;
