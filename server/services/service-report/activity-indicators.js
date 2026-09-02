@@ -1113,7 +1113,12 @@ const TYPED_TREATMENT_OPTIONS = Object.freeze({
       'Soil amendment / acidifier'],
     noWork: ['Inspection only'],
   } },
-  termite_treatment: { treatment_method: { applied: TERMITE_LIQUID_DILUTION_METHODS } },
+  termite_treatment: { treatment_method: {
+    applied: TERMITE_LIQUID_DILUTION_METHODS,
+    // Device-only work: declared, no treatment, no dry-down — the generic
+    // termite 30/120 advisory must clear (local audit P1 on #3701).
+    noWork: ['Bait station setup', 'Cartridge replacement'],
+  } },
   bed_bug: {
     treatment_method: {
       applied: ['Hybrid heat + chemical treatment', 'Chemical / IPM treatment', 'Targeted follow-up treatment',
@@ -1129,8 +1134,8 @@ const TYPED_TREATMENT_OPTIONS = Object.freeze({
   },
 });
 
-// `noWork` = the closeout explicitly recorded inspection-only / deferred work
-// and nothing else that treats — the typed counterpart of an exclusive
+// `noWork` = the closeout explicitly recorded inspection-only / deferred /
+// device-only work and nothing else that treats — the typed counterpart of an exclusive
 // no-treatment protocol action, so read-time normalization can clear the
 // re-entry targets (codex P1 r13 #3701). `dryDown` = an application that is
 // NOT in the field's `nonSpray` list (bait, gel, trunk injection carry no

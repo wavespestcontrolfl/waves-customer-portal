@@ -2505,9 +2505,11 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
           applicationMade={data.applicationMade === true
-            // null = product load failed: keep the application presentation
+            // null = product load failed: keep the application presentation.
             || data.applicationMade === null
-            || (data.applications || []).some(isProductApplication)}
+            // The server verdict is authoritative; row inference only backs
+            // up payloads that carry no verdict at all (local audit P1).
+            || (data.applicationMade === undefined && (data.applications || []).some(isProductApplication))}
           live={mode === 'live'}
           weeklyRainIn={data.serviceLine === 'lawn'
             // Legacy lawn payloads (no reportV2) still carry the weekly

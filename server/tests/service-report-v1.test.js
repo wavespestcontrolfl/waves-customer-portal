@@ -615,6 +615,15 @@ describe('service report v1', () => {
         },
         treatmentEvidence: false,
       })).toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
+      // Termite bait-station work is device work: the generic termite timer clears.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          service_type: 'Termite Treatment',
+          areas_serviced: JSON.stringify(['Bait stations']),
+          service_data: { typedReportSnapshot: { type: 'termite_treatment', values: { treatment_method: 'Bait station setup' } } },
+        },
+        treatmentEvidence: false,
+      })).toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
       const areaLessLawn = {
         service_type: 'One-Time Lawn Treatment',
         service_data: { typedReportSnapshot: { type: 'one_time_lawn_treatment', values: { work_completed: 'Weed control applied' } } },

@@ -53,7 +53,8 @@ describe('typed treatment evidence', () => {
     expect(typedTreatmentEvidence('bed_bug', { treatment_method: 'Chemical + heat' }))
       .toMatchObject({ applied: true, performed: true, noWork: false, dryDown: true, declared: true });
     expect(typedTreatmentEvidence('termite_treatment', { treatment_method: 'Bait station setup' }))
-      .toEqual({ applied: false, performed: false, noWork: false, dryDown: false, declared: false });
+      .toEqual({ applied: false, performed: false, noWork: true, dryDown: false, declared: true });
+    expect(typedTreatmentEvidence('termite_treatment', { treatment_method: 'Cartridge replacement' }).noWork).toBe(true);
     expect(typedTreatmentEvidence('termite_treatment', { treatment_method: 'Trenching' }))
       .toMatchObject({ applied: true, performed: true, noWork: false, dryDown: true, declared: true });
     expect(typedTreatmentEvidence('pest_inspection', { findings_observed: 'anything' }))
