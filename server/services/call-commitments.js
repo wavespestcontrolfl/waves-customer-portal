@@ -14,9 +14,11 @@
  *      the model returns is re-grounded against the transcript text; a
  *      commitment with no verbatim evidence is DROPPED, never stored.
  *
- * Identity: `commitment_key` is party:kind for the enumerated kinds and
- * party:other:<slug> for free-form ones, so a reprocess upserts instead of
- * duplicating. Human-touched rows (human_state set, or source='human') are
+ * Identity: `commitment_key` is party:kind for the singular kinds and
+ * party:kind:<description slug> for the kinds a call can carry more than
+ * once (send_report, send_paperwork, provide_info, other), so a reprocess
+ * upserts instead of duplicating and two distinct promises of a repeatable
+ * kind keep their own rows. Human-touched rows (human_state set, or source='human') are
  * never rewritten by the AI upsert; they are re-marked as still detected.
  *
  * Fulfillment: a promise is not fulfilled because the summary says so. Only
@@ -83,12 +85,20 @@ function slug(text) {
     .join('-');
 }
 
+// Kinds a single call can legitimately carry MORE THAN ONCE (send the WDO
+// report AND the treatment paperwork; provide the gate code AND the HOA
+// contact). These key on a description slug as well, like `other`; the
+// singular kinds (one estimate, one confirmation, one callback…) key on
+// party:kind alone so a reworded description on reprocess upserts the same
+// row instead of duplicating it.
+const REPEATABLE_KINDS = new Set(['send_report', 'send_paperwork', 'provide_info', 'other']);
+
 function commitmentKey(item) {
   const party = item.party === 'customer' ? 'customer' : 'waves';
   const kind = COMMITMENT_KINDS.includes(item.kind) ? item.kind : 'other';
-  if (kind !== 'other') return `${party}:${kind}`;
+  if (!REPEATABLE_KINDS.has(kind)) return `${party}:${kind}`;
   const s = slug(item.description) || crypto.createHash('sha1').update(String(item.description || '')).digest('hex').slice(0, 10);
-  return `${party}:other:${s}`.slice(0, 160);
+  return `${party}:${kind}:${s}`.slice(0, 160);
 }
 
 // ── Evidence ───────────────────────────────────────────────────────────────
@@ -572,7 +582,9 @@ async function resolveFulfillment(conn, commitment, call) {
         .first("estimate_id")
         .catch(() => null);
       if (leadEstimate?.estimate_id) {
-        const est = await conn("estimates").where({ id: leadEstimate.estimate_id }).whereNotNull("sent_at").first("id", "sent_at", "status");
+        // The lead can be a REUSED one (an earlier call's), so its estimate
+        // must have been sent after THIS call to count as this call's proof.
+        const est = await conn("estimates").where({ id: leadEstimate.estimate_id }).whereNotNull("sent_at").where("sent_at", ">", after).first("id", "sent_at", "status");
         if (est) return { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.sent_at, strength: "direct", basis: "estimate_sent_on_the_lead_this_call_created" };
       }
       if (!customerId) return null;
@@ -830,6 +842,7 @@ async function buildCallOutcomes(conn, call) {
 
 module.exports = {
   COMMITMENT_KINDS,
+  REPEATABLE_KINDS,
   WAVES_KINDS,
   CUSTOMER_KINDS,
   CHANNELS,

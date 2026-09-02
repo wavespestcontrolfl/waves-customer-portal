@@ -136,10 +136,15 @@ Per file, with the proving test.
   it read and to the parked entry itself; commitments are recorded after
   finalization, fenced on the pass generation, so the deterministic callback
   seed sees the settled disposition.
+- Pre-push Codex round 5 (1 P1, fixed): the direct estimate proof requires
+  `sent_at` after the call (a reused lead can carry an older estimate).
+- Pre-push Codex round 6 (1 P1, fixed): the kinds a call can carry more than
+  once (send_report, send_paperwork, provide_info, other) key on a
+  description slug as well, so two distinct promises keep their own rows.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 
-**Data.** `call_commitments` — one row per (call, commitment identity):
+**Data.** `call_commitments` — one row per (call, commitment identity — party:kind, plus a description slug for the repeatable kinds):
 `party` (waves|customer), `kind` (13 CHECK-constrained kinds), `description`,
 `channel`, `due_at` + `due_basis` (stated|suggested), `confidence`,
 `evidence` (verbatim quotes with speaker, pinned to a diarized segment index

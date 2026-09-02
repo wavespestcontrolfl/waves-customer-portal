@@ -43,6 +43,18 @@ describe('commitmentKey', () => {
     expect(a).toBe(b);
     expect(a).toMatch(/^waves:other:/);
   });
+  test('repeatable kinds keep one row per distinct promise; singular kinds do not', () => {
+    const report = commitmentKey({ party: 'waves', kind: 'send_paperwork', description: 'Send the WDO report' });
+    const forms = commitmentKey({ party: 'waves', kind: 'send_paperwork', description: 'Send the termite treatment paperwork' });
+    expect(report).not.toBe(forms);
+    expect(report).toMatch(/^waves:send_paperwork:/);
+    const info1 = commitmentKey({ party: 'customer', kind: 'provide_info', description: 'Text the gate code' });
+    const info2 = commitmentKey({ party: 'customer', kind: 'provide_info', description: 'Send the HOA contact' });
+    expect(info1).not.toBe(info2);
+    // Two estimate promises are the same obligation.
+    expect(commitmentKey({ party: 'waves', kind: 'send_estimate', description: 'Email the quote' }))
+      .toBe(commitmentKey({ party: 'waves', kind: 'send_estimate', description: 'Send an estimate tonight' }));
+  });
   test('unknown kinds and parties are coerced, never thrown', () => {
     expect(commitmentKey({ party: 'martian', kind: 'teleport', description: 'beam up' })).toMatch(/^waves:other:/);
   });

@@ -127,7 +127,7 @@ maybeDescribe('call_commitments (live Postgres)', () => {
   test('a human-added commitment is its own row, confirmed, with no AI provenance', async () => {
     const row = await cc.addHumanCommitment(db, callId, { party: 'waves', kind: 'send_paperwork', description: 'Mail the WDO paperwork', reviewedBy: 'tech-fixture' });
     expect(row).toMatchObject({ source: 'human', human_state: 'confirmed', status: 'open', kind: 'send_paperwork', confidence: null });
-    expect(row.commitment_key).toMatch(/^waves:send_paperwork:h[0-9a-f]{6}$/);
+    expect(row.commitment_key).toMatch(/^waves:send_paperwork:[a-z0-9-]+:h[0-9a-f]{6}$/);
   });
 
   test('the CHECK constraints reject a writer with a bad enum value', async () => {
@@ -196,6 +196,21 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     cleanup.smsIds.push(late.id);
     const proof = await cc.resolveFulfillment(db, { kind: 'send_appointment_confirmation' }, { ...call, from_phone: '+15555550178' });
     expect(proof).toBeNull();
+  });
+
+  test('an estimate on a REUSED lead that was sent before the call is not this call\'s proof; one sent after it is direct proof', async () => {
+    const call = await db('call_log').where({ id: callId }).first();
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000) }).returning('id');
+    const [lead] = await db('leads').insert({ phone: PHONE, twilio_call_sid: SID, estimate_id: est.id, status: 'estimate_sent' }).returning('id');
+    try {
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      await db('estimates').where({ id: est.id }).update({ sent_at: new Date(Date.now() - 60 * 1000) });
+      const proof = await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call);
+      expect(proof).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+    } finally {
+      await db('leads').where({ id: lead.id }).del();
+      await db('estimates').where({ id: est.id }).del();
+    }
   });
 
   test('deleting the call cascades its commitments', async () => {
