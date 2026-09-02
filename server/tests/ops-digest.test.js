@@ -8,8 +8,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 // The helper reads the env at call time, so the tests flip the variable
 // after load — exactly what a Railway flip does without a restart.
-function withGate(on) {
+function withGate(on, { activity = on } = {}) {
   process.env.GATE_OPS_DIGESTS_IN_APP = on ? 'true' : '';
+  process.env.GATE_AGENT_ACTIVITY = activity ? 'true' : '';
 }
 
 const { deliverOpsDigest, htmlToText, CATEGORY } = require('../services/ops-digest');
@@ -60,6 +61,15 @@ describe('deliverOpsDigest', () => {
     const out = await deliverOpsDigest({ key: 'k', subject: 's', text: 't', sendEmail });
     expect(sendEmail).toHaveBeenCalledTimes(1);
     expect(out).toMatchObject({ ok: true, channel: 'email', fallback: true });
+  });
+
+  it('digest gate without the Activity gate fails closed to email', async () => {
+    withGate(true, { activity: false });
+    const sendEmail = jest.fn().mockResolvedValue({ ok: true });
+    const out = await deliverOpsDigest({ key: 'k', subject: 's', text: 't', sendEmail });
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(out.channel).toBe('email');
   });
 
   it('gate on: stores the whole body — never truncated', async () => {

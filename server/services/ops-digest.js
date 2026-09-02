@@ -67,9 +67,12 @@ function emailOutcome(result) {
 // Guarded like admin-dispatch's techTips read: several sender suites mock
 // feature-gates with a partial object, and a missing gateEnvValue must read
 // as "off" (email path), never throw inside a digest send.
+// Requires BOTH gates: the digest only has a surface when the Activity feed
+// is on, so with GATE_AGENT_ACTIVITY off this fails closed to email.
 function inAppEnabled() {
   const gates = featureGates();
-  return typeof gates.gateEnvValue === 'function' && gates.gateEnvValue('GATE_OPS_DIGESTS_IN_APP') === true;
+  if (typeof gates.gateEnvValue !== 'function') return false;
+  return gates.gateEnvValue('GATE_OPS_DIGESTS_IN_APP') === true && gates.gateEnvValue('GATE_AGENT_ACTIVITY') === true;
 }
 
 /**

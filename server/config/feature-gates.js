@@ -2122,10 +2122,11 @@ const gates = {
   // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become
   // ops_digest bell rows the Activity feed lists, and the email is skipped
   // (bell-write failure still emails). OFF (default, dev AND prod): every
-  // sender emails exactly as before. The reply-to-approve flows and the
-  // stripe-webhook-health / llm-dispatch FIX alerts are not routed here.
-  // Kill switch: unset. This entry is for logGateStatus; the helper reads
-  // gateEnvValue('GATE_OPS_DIGESTS_IN_APP') at CALL time.
+  // sender emails exactly as before. Requires GATE_AGENT_ACTIVITY too (the
+  // rows need a surface) — with it off the helper fails closed to email.
+  // The reply-to-approve flows and the stripe-webhook-health / llm-dispatch
+  // FIX alerts are not routed here. Kill switch: unset. This entry is for
+  // logGateStatus; the helper reads both env vars at CALL time.
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 };
 
