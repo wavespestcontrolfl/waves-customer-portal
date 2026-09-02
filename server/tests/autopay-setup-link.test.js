@@ -177,11 +177,13 @@ describe('requestAutopaySetupLink — ordered checks', () => {
     expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).action).toBe('link_created');
   });
 
-  it('auto-secures from a consented saved card (enrolls, mints no row, sends nothing)', async () => {
+  it('auto-secures from a consented saved card (enrolls with the ORIGINAL consent moment, mints no row, sends nothing)', async () => {
     mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7', stripe_payment_method_id: 'pm_7' });
+    const consentAt = new Date('2026-08-15T10:00:00Z');
+    mockTableHandlers.payment_method_consents = { first: () => ({ created_at: consentAt }) };
     const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
     expect(r).toEqual({ requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' });
-    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-row-7', source: 'save_card_consent' }));
+    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-row-7', source: 'save_card_consent', authorizedAt: consentAt }));
     expect(touches('appointment_card_requests')).toHaveLength(0);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
@@ -196,10 +198,22 @@ describe('requestAutopaySetupLink — ordered checks', () => {
   });
 
   it('a refused saved-method enrollment is a retryable skip, not a link', async () => {
-    mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7' });
+    mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7', stripe_payment_method_id: 'pm_7' });
+    mockTableHandlers.payment_method_consents = { first: () => ({ created_at: new Date('2026-08-15T10:00:00Z') }) };
     mockEnrollConsentedMethod.mockResolvedValue({ enrolled: false, reason: 'ach_blocked' });
     expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).reason).toBe('enrollment_refused:ach_blocked');
     expect(touches('appointment_card_requests')).toHaveLength(0);
+  });
+
+  it('an opt-out that wins the race under the enrollment lock, or no readable consent moment, falls through to a fresh link', async () => {
+    mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7', stripe_payment_method_id: 'pm_7' });
+    mockTableHandlers.payment_method_consents = { first: () => ({ created_at: new Date('2026-08-15T10:00:00Z') }) };
+    mockEnrollConsentedMethod.mockResolvedValue({ enrolled: false, reason: 'opted_out_after_authorization' });
+    expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).action).toBe('link_created');
+    mockEnrollConsentedMethod.mockClear();
+    mockTableHandlers.payment_method_consents = { first: () => null };
+    expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).action).toBe('link_created');
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
   });
 });
 
@@ -354,6 +368,10 @@ describe('loadAutopaySetupPageData — state machine', () => {
     expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completed', expires_at: PAST })).state).toBe('closed');
     mockTableHandlers.customers = { first: () => null };
     expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completed' })).state).toBe('closed');
+    // A payer-billed customer closes the link — even after completion.
+    mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+    expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completed' })).state).toBe('closed');
+    mockResolveForInvoice.mockResolvedValue(null);
     // Soft-deleted (archived) customer counts as gone — pending and completed alike.
     mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, deleted_at: new Date() }) };
     expect((await loadAutopaySetupPageData({ ...PENDING })).state).toBe('closed');
@@ -591,13 +609,32 @@ describe('completion tail (page POST + webhook)', () => {
     expect(pmUpdate[1]).toEqual(expect.objectContaining({ method_type: 'ach' }));
   });
 
-  it('closes (no_longer_needed) when the customer was archived under the enrollment lock', async () => {
+  it('an archived customer answers like an unknown token (not_found): before any save, and again under the enrollment lock', async () => {
     mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
     mockTableHandlers.payment_methods = { first: () => null };
+    // Archived before the pre-side-effect check → nothing saved.
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'per_visit', deleted_at: new Date() }) };
+    expect((await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).code).toBe('not_found');
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    // Archived between the pre-check and the lock → retired, still not_found.
     let calls = 0;
     mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'per_visit', deleted_at: (calls++ === 0 ? null : new Date()) }) };
-    expect((await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).code).toBe('no_longer_needed');
+    expect((await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).code).toBe('not_found');
     expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+  });
+
+  it('a claim lost to a completion acks only when the row completed with THIS intent', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
+    mockTableHandlers.appointment_card_requests = {
+      first: () => ({ ...PENDING, status: 'completed', stripe_setup_intent_id: 'seti_winner' }),
+      update: (chain, patch) => (patch.status === 'completing' ? 0 : 1),
+    };
+    expect(await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).toEqual({ ok: false, code: 'intent_mismatch' });
+    mockTableHandlers.appointment_card_requests = {
+      first: () => ({ ...PENDING, status: 'completed', stripe_setup_intent_id: 'seti_new' }),
+      update: (chain, patch) => (patch.status === 'completing' ? 0 : 1),
+    };
+    expect(await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).toEqual({ ok: true, alreadyCompleted: true });
   });
 
   it('the AUTHORIZATION moment is the SetupAttempt (the confirm) — never SetupIntent.created, PaymentMethod.created, or a replay POST time', async () => {

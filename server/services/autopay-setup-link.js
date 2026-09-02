@@ -172,17 +172,43 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
     const optedOut = lastToggle?.event_type === 'autopay_disabled';
     const saved = optedOut ? null : await ConsentService.findConsentedChargeableCard(customerId);
     if (saved) {
+      // The ORIGINAL consent's moment rides into enrollment (pre-push Codex
+      // P0): the unlocked opt-out read above can race a disable that commits
+      // right after it — enrollConsentedMethod's in-lock guard then refuses
+      // opted_out_after_authorization instead of overwriting the opt-out.
+      let authorizedAt = null;
+      try {
+        const consentRow = await db('payment_method_consents')
+          .where({ customer_id: customerId, stripe_payment_method_id: saved.stripe_payment_method_id })
+          .orderBy('created_at', 'desc')
+          .first('created_at');
+        authorizedAt = consentRow?.created_at ? new Date(consentRow.created_at) : null;
+      } catch (err) {
+        logger.warn(`[autopay-setup-link] consent moment lookup failed for customer ${customerId}: ${err.message}`);
+      }
+      // No readable authorization moment → do not auto-enroll blind; mint a
+      // link for a fresh checkbox instead.
+      if (!(authorizedAt instanceof Date) || Number.isNaN(authorizedAt.getTime())) {
+        logger.info(`[autopay-setup-link] no consent moment for saved pm ${saved.id} — minting a fresh link instead of auto-enrolling`);
+      }
       const { enrollConsentedMethod } = require('./autopay-enrollment');
-      const enrollment = await enrollConsentedMethod({
-        customerId,
-        paymentMethodId: saved.id,
-        source: 'save_card_consent',
-        details: { via: PURPOSE, trigger },
-      });
+      const enrollment = authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime())
+        ? await enrollConsentedMethod({
+          customerId,
+          paymentMethodId: saved.id,
+          source: 'save_card_consent',
+          details: { via: PURPOSE, trigger },
+          authorizedAt,
+        })
+        : { enrolled: false, reason: 'no_consent_moment' };
       if (enrollment?.enrolled || enrollment?.reason === 'already_enrolled') {
         return { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' };
       }
-      return skip(`enrollment_refused:${enrollment?.reason || 'unknown'}`);
+      // An opt-out that won the race, or no readable consent moment: fall
+      // through to a fresh link (fresh checkbox) rather than refusing.
+      if (enrollment?.reason !== 'opted_out_after_authorization' && enrollment?.reason !== 'no_consent_moment') {
+        return skip(`enrollment_refused:${enrollment?.reason || 'unknown'}`);
+      }
     }
 
     // Dedup on the LIVE row — pending OR mid-completion (partial unique
@@ -413,6 +439,10 @@ async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
   // deletion is SOFT (deleted_at), so an archived customer counts as gone —
   // even when the capture completed; the contract says the GET becomes closed.
   if (isExpired(request) || !customer || customer.deleted_at) return { state: 'closed', ...base };
+  // Payer-billed accounts close too — before terminal success (GH Codex P0):
+  // a customer moved to third-party billing after completing must not keep
+  // seeing "Auto Pay is set up" for invoices that now route to the payer.
+  if (await payerExemption(request.customer_id)) return { state: 'closed', ...base };
   if (request.status === 'completed' || request.status === 'satisfied') return { state: 'secured', ...base };
   // Mid-completion (page POST or webhook holds the claim): the intent
   // succeeded, but the tail can still revert the row — say "finishing up",
@@ -420,7 +450,6 @@ async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
   // either (a second entry mid-save is the worse failure).
   if (request.status === 'completing') return { state: 'saving', ...base };
   if (request.status !== 'pending') return { state: 'closed', ...base };
-  if (await payerExemption(request.customer_id)) return { state: 'closed', ...base };
   // Lane can change after the link went out (office moved the customer to
   // monthly dues) — the promised cadence would then be false.
   if (!billingLaneSupported(customer)) return { state: 'closed', ...base };
@@ -511,8 +540,11 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
   // page no longer describes. Permanent refusal; a lookup failure is
   // retryable.
   try {
-    const laneRow = await db('customers').where({ id: request.customer_id }).first('billing_mode', 'waveguard_tier', 'monthly_rate');
-    if (!laneRow || !billingLaneSupported(laneRow)) return { ok: false, code: 'no_longer_needed' };
+    const laneRow = await db('customers').where({ id: request.customer_id }).first('deleted_at', 'billing_mode', 'waveguard_tier', 'monthly_rate');
+    // Archived (soft-deleted) BEFORE any save/consent work (GH Codex P0):
+    // an ineligible token answers like an unknown one (generic 404).
+    if (!laneRow || laneRow.deleted_at) return { ok: false, code: 'not_found' };
+    if (!billingLaneSupported(laneRow)) return { ok: false, code: 'no_longer_needed' };
   } catch (err) {
     logger.warn(`[autopay-setup-link] billing-lane re-check failed at completion for request ${request.id}: ${err.message}`);
     return { ok: false, code: 'verification_failed' };
@@ -578,8 +610,11 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
     .where({ id: request.id, status: 'pending' })
     .update({ status: 'completing', updated_at: claimStamp });
   if (claimed !== 1) {
-    const fresh = await db('appointment_card_requests').where({ id: request.id }).first('id', 'status', 'updated_at');
-    if (fresh?.status === 'completed' || fresh?.status === 'satisfied') return { ok: true, alreadyCompleted: true };
+    const fresh = await db('appointment_card_requests').where({ id: request.id }).first('id', 'status', 'updated_at', 'stripe_setup_intent_id');
+    // The claim was lost to a completion — ack ONLY if it completed with
+    // THIS intent (a losing tab's generation is intent_mismatch; GH Codex P1).
+    const terminal = fresh ? terminalOutcome(fresh, setupIntentId) : null;
+    if (terminal) return terminal;
     if (fresh?.status === 'completing' && fresh.updated_at
       && (Date.now() - new Date(fresh.updated_at).getTime()) > STALE_CLAIM_MS) {
       claimed = await db('appointment_card_requests')
@@ -696,7 +731,8 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
         .forUpdate()
         .first('id', 'deleted_at', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'autopay_enabled', 'autopay_paused_until');
       // Archived (soft-deleted) under the lock → never enable Auto Pay on it.
-      if (!locked || locked.deleted_at || !billingLaneSupported(locked)) return { enrolled: false, reason: 'lane_changed' };
+      if (!locked || locked.deleted_at) return { enrolled: false, reason: 'customer_deleted' };
+      if (!billingLaneSupported(locked)) return { enrolled: false, reason: 'lane_changed' };
       // A PAUSE taken since the link went out stands (pre-push Codex P1):
       // enrollment would report already_enrolled and this completion would
       // say "set up" while nothing collects. Resuming is the customer's or
@@ -728,6 +764,7 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
     // retried into success — retire the link and report the matching
     // permanent code instead of a retry loop with repeated alerts.
     const permanentUnderLock = {
+      customer_deleted: 'not_found',
       lane_changed: 'no_longer_needed',
       autopay_paused: 'no_longer_needed',
       payer_billed: 'no_longer_needed',

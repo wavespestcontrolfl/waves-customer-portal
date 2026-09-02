@@ -360,6 +360,9 @@ export default function SecureAppointmentPage() {
       // loaded): re-pull so the server mints the card-only generation — a
       // retry on the same succeeded bank intent can only refuse again.
       if (err?.code === 'bank_not_allowed') {
+        // The replacement intent remounts the capture (key above); reset
+        // the gate state so the CTA cannot fire under the old consent.
+        setCaptureState({ ready: false, agreed: false, loadFailed: false });
         await refresh();
         setError('Bank accounts aren’t available right now — please use a card.');
         return;
@@ -638,6 +641,11 @@ export default function SecureAppointmentPage() {
         {showCapture ? (
           <>
             <InlineAutoPayCapture
+              // Keyed on the intent: a replacement intent (bank refused →
+              // card-only re-mint) gets a FRESH capture — new Elements, reset
+              // ready/agreed/tender — never a stale instance with the old
+              // consent still ticked (GH Codex P1).
+              key={data.clientSecret}
               ref={captureRef}
               intent={{ clientSecret: data.clientSecret, publishableKey: data.publishableKey, paymentMethodTypes: data.paymentMethodTypes, capturedMethodType: data.capturedMethodType || null }}
               loadStripeSdk={loadStripeSdk}
