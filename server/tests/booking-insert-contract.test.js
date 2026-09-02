@@ -500,8 +500,12 @@ function escapesThroughCall(text, id) {
 // Property/index assignment (any depth, compound operators included),
 // Object.assign onto it, or delete of a property — on `id`.
 function mutatesIdentifier(text, id) {
+  const prop = `\\b${id}\\s*(?:\\.\\s*[A-Za-z_$][\\w$]*|\\[[^\\]]*\\])+`;
   return new RegExp(
-    `\\b${id}\\s*(?:\\.\\s*[A-Za-z_$][\\w$]*|\\[[^\\]]*\\])+\\s*(?:[-+*/%|&^]|\\*\\*|\\?\\?|\\|\\||&&)?=(?![=>])`
+    `${prop}\\s*(?:[-+*/%|&^]|\\*\\*|\\?\\?|\\|\\||&&)?=(?![=>])`
+    // postfix / prefix increment and decrement (GH Codex r19 P2)
+    + `|${prop}\\s*(?:\\+\\+|--)`
+    + `|(?:\\+\\+|--)\\s*${prop}`
     + `|\\bdelete\\s+${id}\\b`
     + `|\\bObject\\s*\\.\\s*assign\\s*\\(\\s*${id}\\b`,
   ).test(text);
@@ -1003,7 +1007,7 @@ describe('booking insert-site contract', () => {
     // (a property read, a spread, or a known non-mutating callee is not an escape)
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nconst id = data.customer_id;\nconst copy = { ...data };\nlogger.info('booking', data);\nconst json = JSON.stringify(data);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
     // …a payload MUTATED after completion stays bare (pre-push r6 P1)…
-    for (const mutation of ['data.customer_id = null;', "data['status'] = 'x';", 'data.count += 1;', 'Object.assign(data, raw);', 'delete data.source_action;', 'data.meta.note = null;', "data[0]['source_action'] = null;"]) {
+    for (const mutation of ['data.customer_id = null;', "data['status'] = 'x';", 'data.count += 1;', 'Object.assign(data, raw);', 'delete data.source_action;', 'data.meta.note = null;', "data[0]['source_action'] = null;", 'data.count++;', '++data.meta.count;', 'data.count--;']) {
       expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\n${mutation}\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
     }
     // (a READ of a property, or a comparison, is not a mutation)
