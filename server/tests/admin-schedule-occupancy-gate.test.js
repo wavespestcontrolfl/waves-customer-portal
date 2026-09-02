@@ -57,6 +57,8 @@ jest.mock('../services/scheduling/occupancy', () => {
 });
 jest.mock('../utils/customer-comms-lock', () => ({
   lockCustomerComms: jest.fn().mockResolvedValue(undefined),
+  // The bare-connection plan sync re-enters under this wrapper (rung 6).
+  withCustomerCommsLock: jest.fn(async (db, customerId, fn) => db.transaction(async (trx) => fn(trx))),
 }));
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: jest.fn() })) })),

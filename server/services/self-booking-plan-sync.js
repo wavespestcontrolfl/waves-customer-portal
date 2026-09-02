@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const {
   addETDays,
   addETMonthsByWeekday,
@@ -920,17 +921,34 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
     log = logger,
     customerId,
     today = etDateString(),
+    // Set by the bare-connection re-entry below — never by callers.
+    underCommsLock = false,
   } = options;
 
   if (!customerId) return { synced: false, reason: 'missing_customer_id' };
+  // A bare connection runs the WHOLE sync inside one transaction under
+  // rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the tier/rate
+  // alignment is derived from the customer row and its schedule, and
+  // deriving it unlocked while a cancellation wind-down reprices the same
+  // customer would write a stale alignment over the demotion. Callers
+  // already inside a transaction take the lock below, before the row lock.
+  if (!database.isTransaction && !underCommsLock) {
+    return withCustomerCommsLock(database, customerId, (trx) => syncCustomerWaveGuardPlanFromScheduledServices({ ...options, database: trx, underCommsLock: true }));
+  }
 
   const customerColumns = await columnInfo(database, 'customers');
   // Inside a transaction (seeder hook savepoint, reconcile per-candidate
   // trx), take the customer row lock so concurrent syncs on the same
   // customer serialize: whichever runs second re-reads AFTER the first
   // commits and derives its decision from the settled tier + schedule
-  // (Codex #3011 r2 — evidence-vs-write races). On a plain pool connection
-  // forUpdate is a single-statement no-op, so this changes nothing there.
+  // (Codex #3011 r2 — evidence-vs-write races). Always inside a
+  // transaction now (the bare-connection re-entry above opens one).
+  // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) BEFORE the row lock:
+  // the alignment below rewrites the tier and re-seeds the ledger — the
+  // writes the scoped cancellation wind-down serializes on. Reentrant for
+  // the seeder / converter / admin-schedule callers that already hold it
+  // (and for the bare-connection re-entry above).
+  await lockCustomerComms(database, customerId);
   let customerQuery = database('customers').where({ id: customerId }).first();
   if (database.isTransaction) customerQuery = customerQuery.forUpdate();
   const customer = await customerQuery;
