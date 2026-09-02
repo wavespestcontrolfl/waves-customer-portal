@@ -53,7 +53,7 @@ const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
-const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
+const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
@@ -212,9 +212,9 @@ function approvedReportProductFacts(catalog = {}) {
 async function attachApprovedReportProductFacts(knex, products = [], { frozenFacts = null } = {}) {
   const frozen = frozenFacts && typeof frozenFacts === 'object' ? frozenFacts : null;
   const isFrozen = (productId) => !!frozen
-    && Object.prototype.hasOwnProperty.call(frozen, String(productId || ''));
+    && Object.prototype.hasOwnProperty.call(frozen, canonicalProductId(productId));
   const withFrozen = (product) => {
-    const facts = frozen[String(product.product_id)];
+    const facts = frozen[canonicalProductId(product.product_id)];
     if (!facts || typeof facts !== 'object') return product;
     return {
       ...product,
@@ -265,7 +265,11 @@ async function attachApprovedReportProductFacts(knex, products = [], { frozenFac
     // r41): a legacy row with product_id but null product_category loses
     // its class identity when this lookup fails, and downstream honesty
     // passes would treat the visit as "no corrective products applied".
-    const marked = products.slice();
+    // Frozen products keep their completion-time facts on this path too —
+    // the failure concerns only the ids that still needed the live catalog.
+    const marked = frozen
+      ? products.map((product) => (isFrozen(product.product_id) ? withFrozen(product) : product))
+      : products.slice();
     marked.catalogEnrichmentFailed = true;
     return marked;
   }

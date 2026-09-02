@@ -37,7 +37,7 @@ const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApp
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory, approvedReportProductFacts } = require('../services/service-report/report-data');
-const { buildReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
+const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { tipsForVisit, freezeTechTips } = require('../services/service-report/tip-library');
 const { gateEnvValue } = require('../config/feature-gates');
 const {
@@ -7079,25 +7079,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const snapshotVisitRow = lockedSvcRow || svc;
           const snapshotCustomerRow = await trx('customers')
             .where({ id: svc.customer_id })
-            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
           const snapshotTechnicianRow = svc.technician_id
             ? await trx('technicians').where({ id: svc.technician_id }).first('name')
             : null;
           // ONE catalog read set inside the trx serves both the frozen report
           // facts and the product loop's validation below, so the facts the
           // report freezes are the rows the completion actually validated
-          // against (pre-push codex P1).
-          const snapshotProductIds = [...new Set((products || []).map((p) => p?.productId).filter(Boolean))];
+          // against (pre-push codex P1). Keys are canonical lower-case uuids:
+          // Postgres returns ids lower-case however the request spelled them.
+          const snapshotProductIds = [...new Set((products || []).map((p) => canonicalProductId(p?.productId)).filter(Boolean))];
           const completionCatalogRowsById = new Map(
             (snapshotProductIds.length
               ? await trx('products_catalog').whereIn('id', snapshotProductIds).select('*')
               : []
-            ).map((row) => [String(row.id), row]),
+            ).map((row) => [canonicalProductId(row.id), row]),
           );
           const reportProductFactsSnapshot = {};
           for (const productId of snapshotProductIds) {
-            reportProductFactsSnapshot[String(productId)] = approvedReportProductFacts(
-              completionCatalogRowsById.get(String(productId)) || null,
+            reportProductFactsSnapshot[productId] = approvedReportProductFacts(
+              completionCatalogRowsById.get(productId) || null,
             );
           }
           const reportIdentitySnapshot = buildReportIdentitySnapshot({
@@ -7982,7 +7983,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               throw err;
             }
             // Same read set the report identity snapshot froze from.
-            const product = completionCatalogRowsById.get(String(p.productId));
+            const product = completionCatalogRowsById.get(canonicalProductId(p.productId));
             if (!product) {
               const err = new Error(`Product not found: ${p.productId}`);
               err.isOperational = true; err.statusCode = 400;

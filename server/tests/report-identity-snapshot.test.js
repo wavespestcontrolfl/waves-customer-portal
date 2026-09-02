@@ -7,7 +7,9 @@
 const {
   buildReportIdentitySnapshot,
   applyReportIdentitySnapshot,
+  applyReportIdentitySnapshotToLegacyPdf,
   resolveVisitAddress,
+  resolveVisitCoordinates,
 } = require('../services/service-report/report-identity-snapshot');
 const {
   attachApprovedReportProductFacts,
@@ -140,6 +142,22 @@ describe('resolveVisitAddress (JS twin of the /:token address COALESCE)', () => 
   });
 });
 
+describe('resolveVisitCoordinates (JS twin of the /:token coordinate COALESCE)', () => {
+  const customer = { address_line1: '100 Main St', city: 'Parrish', zip: '34219', latitude: '27.58', longitude: '-82.42' };
+
+  test('stamped visit coords win', () => {
+    expect(resolveVisitCoordinates({ visit: { lat: 27.1, lng: -82.1, service_address_line1: '55 Rental Rd' }, customer })).toEqual({ lat: 27.1, lng: -82.1 });
+  });
+
+  test('non-divergent stamp without coords falls back to the primary home', () => {
+    expect(resolveVisitCoordinates({ visit: { service_address_line1: '100 Main Street' }, customer })).toEqual({ lat: 27.58, lng: -82.42 });
+  });
+
+  test('divergent stamp without coords freezes NO centre (no pin beats a wrong pin)', () => {
+    expect(resolveVisitCoordinates({ visit: { service_address_line1: '55 Rental Rd', service_address_city: 'Venice', service_address_zip: '34285' }, customer })).toBeNull();
+  });
+});
+
 describe('applyReportIdentitySnapshot', () => {
   test('returns the same row when no snapshot is present (legacy records unchanged)', () => {
     const row = liveJoinedRow({ protocol: {} });
@@ -164,6 +182,45 @@ describe('applyReportIdentitySnapshot', () => {
       technician_last_name: null,
     });
     expect(out.report_identity_snapshot).toEqual(snapshot);
+  });
+
+  test('freezes the map centre with the address, and nulls a live centre when none was resolved', () => {
+    const withCoords = snapshotFixture({
+      visit: { service_type: 'X', service_address_line1: '200 Palm Ave', lat: 27.5, lng: -82.5 },
+    });
+    expect(withCoords.mapCenter).toEqual({ lat: 27.5, lng: -82.5 });
+    const live = { ...liveJoinedRow({ reportIdentitySnapshot: withCoords }), customer_latitude: '27.9', customer_longitude: '-82.9' };
+    expect(applyReportIdentitySnapshot(live)).toMatchObject({ customer_latitude: 27.5, customer_longitude: -82.5 });
+
+    const noCoords = snapshotFixture({
+      visit: { service_type: 'X', service_address_line1: '55 Rental Rd', service_address_city: 'Venice', service_address_zip: '34285' },
+    });
+    expect(noCoords.mapCenter).toBeNull();
+    const liveMoved = { ...liveJoinedRow({ reportIdentitySnapshot: noCoords }), customer_latitude: '27.9', customer_longitude: '-82.9' };
+    expect(applyReportIdentitySnapshot(liveMoved)).toMatchObject({ customer_latitude: null, customer_longitude: null });
+  });
+
+  test('is idempotent', () => {
+    const once = applyReportIdentitySnapshot(liveJoinedRow({ reportIdentitySnapshot: snapshotFixture() }));
+    expect(applyReportIdentitySnapshot(once)).toEqual(once);
+  });
+});
+
+describe('applyReportIdentitySnapshotToLegacyPdf (documents.js generator inputs)', () => {
+  test('maps name, serviced address, technician, and product facts; passes through without a snapshot', () => {
+    const service = liveJoinedRow({ reportIdentitySnapshot: snapshotFixture() });
+    const out = applyReportIdentitySnapshotToLegacyPdf({
+      customer: { id: 'c1', first_name: 'Renamed', last_name: 'Person', address_line1: '999 New Home Dr', city: 'Bradenton', zip: '34203' },
+      service,
+      products: [{ product_id: PRODUCT_ID.toUpperCase(), product_name: null, epa_reg_number: null }, { product_id: 'other', product_name: 'Bare' }],
+    });
+    expect(out.customer).toMatchObject({ id: 'c1', first_name: 'Original', last_name: 'Customer', address_line1: '200 Palm Ave', address_line2: 'Unit 2', city: 'Parrish', zip: '34219' });
+    expect(out.service.technician_name).toBe('Alex Benson');
+    expect(out.products[0]).toMatchObject({ product_name: 'Celsius WG', epa_reg_number: '432-1507' });
+    expect(out.products[1]).toEqual({ product_id: 'other', product_name: 'Bare' });
+
+    const legacy = { customer: { first_name: 'Live' }, service: liveJoinedRow(null), products: [] };
+    expect(applyReportIdentitySnapshotToLegacyPdf(legacy)).toEqual(legacy);
   });
 });
 
@@ -205,6 +262,26 @@ describe('attachApprovedReportProductFacts with frozen facts', () => {
       epa_reg_number: '432-1507',
       approved_report_product_facts: FROZEN_FACTS,
     });
+    expect(products[1].approved_report_product_facts).toBeUndefined();
+  });
+
+  test('frozen keys are canonical: an upper-case request id still resolves its frozen facts', async () => {
+    const snapshot = buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID.toUpperCase()]: FROZEN_FACTS } });
+    expect(Object.keys(snapshot.productFacts)).toEqual([PRODUCT_ID]);
+    const knex = jest.fn(() => { throw new Error('catalog must not be queried'); });
+    const [product] = await attachApprovedReportProductFacts(knex, [{ product_id: PRODUCT_ID.toUpperCase() }], { frozenFacts: snapshot.productFacts });
+    expect(product.approved_report_product_facts).toEqual(FROZEN_FACTS);
+  });
+
+  test('a failed live enrichment keeps the frozen facts and still flags the failure', async () => {
+    const chain = { whereIn: jest.fn(() => chain), select: jest.fn(() => Promise.reject(new Error('db down'))) };
+    const knex = jest.fn(() => chain);
+    const products = await attachApprovedReportProductFacts(knex, [
+      { product_id: PRODUCT_ID },
+      { product_id: 'live-id' },
+    ], { frozenFacts: { [PRODUCT_ID]: FROZEN_FACTS } });
+    expect(products.catalogEnrichmentFailed).toBe(true);
+    expect(products[0].approved_report_product_facts).toEqual(FROZEN_FACTS);
     expect(products[1].approved_report_product_facts).toBeUndefined();
   });
 
@@ -253,6 +330,8 @@ describe('buildReportV1Data renders identity from the snapshot', () => {
     expect(data.technicianName).toBe('Alex B.');
     expect(data.serviceAddress).toContain('200 Palm Ave');
     expect(data.serviceAddress).not.toContain('999 New Home');
+    // Map centre follows the frozen address, not the live customer row.
+    expect(data.mapCenter).toBeNull();
     const application = (data.applications || []).find((a) => a.productId === PRODUCT_ID || a.product_id === PRODUCT_ID)
       || (data.applications || [])[0];
     expect(JSON.stringify(application)).toContain('432-1507');
