@@ -15,6 +15,8 @@
  *                                         (normal classification / spam handling still runs)
  *   4. template not parseable           → parked `parse_failed`
  *   5. same payer + amount applied <14d → parked `possible_duplicate`
+ *      (re-checked under a payer+amount advisory lock at settlement, so two
+ *      copies of one transfer can never both settle)
  *   6. exact-cent open self-pay invoices (services/open-balance.js):
  *        memo carries exactly one of them → apply (memo_invoice_number)
  *        exactly one whose customer name corroborates the payer → apply (amount_name)
@@ -226,14 +228,18 @@ async function sweepStaleClaims() {
   return recoverStaleClaims();
 }
 
-async function recentlyApplied(parsed) {
+async function recentlyApplied(parsed, database = db) {
   const since = new Date(Date.now() - DUPLICATE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
-  const dup = await db('inbound_payment_notices')
+  const dup = await database('inbound_payment_notices')
     .where({ payer_name_norm: normalizeNamePart(parsed.payerName), amount_cents: parsed.amountCents })
     .whereIn('status', ['auto_applied', 'applied'])
     .where('received_at', '>', since)
     .first('id');
   return !!dup;
+}
+
+function settlementLockKey(parsed) {
+  return `zelle-settle:${normalizeNamePart(parsed.payerName)}:${parsed.amountCents}`;
 }
 
 function isRefusal(err) {
@@ -325,10 +331,24 @@ async function maybeHandleZelleNotice(email) {
   // parked — a claim can never be "recovered" or re-applied mid-settlement.
   // recordManualPayment runs its own transaction on another connection and
   // never touches this table, so holding the lock across it cannot deadlock.
+  //
+  // Then a transaction-scoped ADVISORY lock keyed by normalized payer +
+  // amount: the duplicate check above ran before any lock, so two distinct
+  // copies of one bank notice (a re-forward, a second filter) could both see
+  // no prior application and settle two invoices for one transfer. Same-key
+  // settlements serialize here and re-run the check while holding the key
+  // through commit — the second copy sees the first one's applied row and
+  // parks. Lock order is always own-notice row → advisory key, so no cycle.
   await db.transaction(async (trx) => {
     const locked = await trx('inbound_payment_notices').where({ id: notice.id }).forUpdate().first('id', 'status');
     if (!locked || locked.status !== 'processing') {
       logger.warn(`[zelle-notice] notice ${notice.id} is ${locked?.status || 'gone'} at settlement time — not settling`);
+      return;
+    }
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [settlementLockKey(parsed)]);
+    if (await recentlyApplied(parsed, trx)) {
+      logger.warn(`[zelle-notice] notice ${notice.id}: same payer + amount applied while this copy was being matched — parking as possible_duplicate`);
+      await finishParked(notice, email, 'possible_duplicate', { candidates }, trx);
       return;
     }
     let settled;
@@ -344,6 +364,9 @@ async function maybeHandleZelleNotice(email) {
         // Fenced under the invoice lock: the ledger records exactly the
         // notice's amount or nothing.
         expectedAmountCents: parsed.amountCents,
+        // Re-checks payer / statement / live payer resolution on the locked
+        // invoice — a reassignment after exactOpenInvoices() refuses.
+        requireSelfPay: true,
       });
     } catch (err) {
       // A statusCode-shaped refusal settled nothing. Anything else may have

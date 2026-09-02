@@ -727,6 +727,9 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
           // (dropdown truth); the fence under the invoice lock is what
           // guarantees the ledger records the notice's amount or nothing.
           expectedAmountCents: notice.amount_cents,
+          // The self-pay check above is likewise pre-lock: re-run on the
+          // locked invoice so a payer assigned meanwhile refuses.
+          requireSelfPay: true,
         });
       } catch (err) {
         // A statusCode-shaped refusal settled nothing. Anything else may have

@@ -25,6 +25,7 @@ jest.mock('../models/db', () => {
   fn.transaction = jest.fn(async (work) => {
     const trx = (table) => fn(table);
     trx.fn = fn.fn;
+    trx.raw = fn.raw;
     return work(trx);
   });
   return fn;
@@ -147,7 +148,7 @@ describe('auto-apply', () => {
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     expect(OpenBalance.openSelfPayInvoicesByAmountDue).toHaveBeenCalledWith(11700, { limit: 25 });
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', {
-      method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: RECORDED_BY, sendReceipt: true, via: 'both', expectedAmountCents: 11700,
+      method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: RECORDED_BY, sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true,
     });
     expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', match_method: 'amount_name', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: RECORDED_BY });
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500', classification: 'other' });
@@ -187,6 +188,21 @@ describe('settlement under the row lock', () => {
     expect(tables.inbound_payment_notices.calls).toContainEqual(['forUpdate']);
     expect(recordManualPayment).not.toHaveBeenCalled();
     expect(updatesOf('inbound_payment_notices')).toHaveLength(0);
+  });
+
+  test('settlement serializes on a payer+amount advisory lock and re-runs the duplicate check under it', async () => {
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+    // Pre-lock check: clean. Under the lock: a second copy of the same transfer
+    // settled meanwhile (committed status applied/auto_applied).
+    tables.inbound_payment_notices.firsts.push(null, { id: 'notice-0' });
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    const raw = db.raw.mock.calls.find(([sql]) => /pg_advisory_xact_lock/.test(sql));
+    expect(raw).toBeTruthy();
+    expect(raw[1]).toEqual(['zelle-settle:patdoe:11700']);
+    expect(tables.inbound_payment_notices.calls).toContainEqual(['forUpdate']);
+    expect(recordManualPayment).not.toHaveBeenCalled();
+    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'possible_duplicate' });
   });
 
   test('a settlement that commits closes the row inside the same transaction', async () => {

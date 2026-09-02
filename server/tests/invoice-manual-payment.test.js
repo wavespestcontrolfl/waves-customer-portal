@@ -37,11 +37,13 @@ jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(a
 jest.mock('../services/project-report-hold', () => ({ scheduleHoldReleaseSweep: jest.fn() }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
 jest.mock('../services/payment-plans', () => ({ completeActivePlansForInvoice: jest.fn(async () => undefined) }));
+jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn(async () => true) }));
 
 const db = require('../models/db');
 const StripeService = require('../services/stripe');
 const InvoiceService = require('../services/invoice');
 const { sendReceiptEmail } = require('../services/invoice-email');
+const { rowIsSelfPayDue } = require('../services/open-balance');
 const { recordManualPayment, VALID_PAYMENT_METHODS } = require('../services/invoice-manual-payment');
 
 function recorder({ first = null, returning = [] } = {}) {
@@ -154,6 +156,30 @@ describe('recordManualPayment — refusal contract', () => {
     expect(err.statusCode).toBe(409);
     expect(err.message).toMatch(/\$120\.00, not the \$117\.00/);
     expect(err.amountMismatch).toEqual({ expectedCents: 11700, actualCents: 12000 });
+    expect(paymentsInsert).toBeNull();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a payer assigned on the locked row', { payer_id: 'payer-1' }, true],
+    ['a statement assigned on the locked row', { payer_statement_id: 'stmt-1' }, true],
+    ['the live payer resolution now naming a payer', {}, false],
+  ])('requireSelfPay is fenced under the invoice lock: %s → 409 and nothing written', async (_label, lockedOver, resolvesSelfPay) => {
+    db.mockImplementation(() => recorder({ first: openInvoice() }));
+    rowIsSelfPayDue.mockImplementation(async () => resolvesSelfPay);
+    let paymentsInsert = null;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') return recorder({ first: openInvoice(lockedOver), returning: [] });
+        if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 11700, requireSelfPay: true }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/no longer an open self-pay invoice/);
     expect(paymentsInsert).toBeNull();
     expect(sendReceiptEmail).not.toHaveBeenCalled();
   });

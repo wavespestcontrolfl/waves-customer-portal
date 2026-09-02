@@ -9,7 +9,7 @@
  * Contract (unchanged from the route):
  *   recordManualPayment(invoiceId, { method, reference, note, recordedBy,
  *                                    sendReceipt = true, via = 'both',
- *                                    expectedAmountCents })
+ *                                    expectedAmountCents, requireSelfPay })
  *     → { invoice, receipt }   receipt = { email, sms } | null
  *
  * expectedAmountCents (optional, the Zelle notice reconciler): the amount the
@@ -17,6 +17,14 @@
  * paid flip — if the amount due moved since the caller looked (an edit, a
  * credit), nothing is written and a 409 says so, so the ledger can never
  * record a different sum than the money that arrived.
+ *
+ * requireSelfPay (optional, both Zelle notice paths): the caller matched the
+ * invoice as an OPEN SELF-PAY invoice (no payer, no statement, live payer
+ * resolution empty) before calling. Re-run those predicates on the LOCKED row
+ * inside the transaction — a concurrent payer reassignment between the
+ * caller's check and the paid flip would otherwise settle another billing
+ * party's invoice with the homeowner's transfer. Refuses with a 409 and
+ * writes nothing.
  *
  * Refusals throw an Error carrying `statusCode` (400 / 404 / 409) and
  * `isOperational`; the lost-race 409 also carries `currentStatus`. Anything
@@ -78,6 +86,7 @@ async function recordManualPayment(id, {
   sendReceipt = true,
   via = 'both',
   expectedAmountCents = null,
+  requireSelfPay = false,
 } = {}) {
   if (expectedAmountCents != null && !(Number.isSafeInteger(expectedAmountCents) && expectedAmountCents > 0)) {
     throw refusal(400, 'expectedAmountCents must be a positive integer number of cents');
@@ -178,6 +187,14 @@ async function recordManualPayment(id, {
       const actualCents = Math.round(invoiceAmountDue(locked) * 100);
       if (actualCents !== expectedAmountCents) return { amountMismatch: { expectedCents: expectedAmountCents, actualCents } };
     }
+    // Self-pay fence under the same lock: the row's own payer columns plus
+    // the live payer re-resolution (rowIsSelfPayDue, fail-closed). A payer
+    // assigned after the caller's eligibility check makes this refuse.
+    if (requireSelfPay) {
+      const { rowIsSelfPayDue } = require('./open-balance');
+      const selfPay = !locked.payer_id && !locked.payer_statement_id && await rowIsSelfPayDue(locked.customer_id, locked);
+      if (!selfPay) return { notSelfPay: true };
+    }
     const [row] = await trx('invoices')
       .where({ id })
       .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
@@ -250,6 +267,9 @@ async function recordManualPayment(id, {
   if (updatedInvoice?.amountMismatch) {
     const { expectedCents, actualCents } = updatedInvoice.amountMismatch;
     throw refusal(409, `Invoice amount due is $${(actualCents / 100).toFixed(2)}, not the $${(expectedCents / 100).toFixed(2)} being recorded — nothing was recorded`, { amountMismatch: updatedInvoice.amountMismatch });
+  }
+  if (updatedInvoice?.notSelfPay) {
+    throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');
   }
   if (!updatedInvoice) {
     // Lost the race to a concurrent caller (or another path marked it
