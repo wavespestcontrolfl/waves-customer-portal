@@ -526,8 +526,8 @@ const GLASS_SERVICE_INCLUSIONS = {
     'Seasonal treatments matched to YOUR turf and program — never a one-size-fits-all spray',
     'Weed, fungus, and chinch-bug pressure checked every visit — caught early, not after the brown patch',
     'Every treatment documented and carried forward — your lawn’s history drives the next visit',
-    '90-day money-back guarantee — if you don’t love it, you don’t pay',
-    'No long-term contract — stay because the lawn proves it',
+    // Guarantee + no-contract bullets trimmed (owner 2026-09-02): the approve
+    // CTA's micro line under the lawn card states both, so they read twice.
   ],
   mosquito: [
     'Barrier treatment where mosquitoes actually rest — shaded foliage and harborage, not a fog-and-go',
