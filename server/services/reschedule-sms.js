@@ -86,6 +86,35 @@ class RescheduleSMS {
       }
       if (!pending) return null;
     }
+
+    // A bare "1"/"2" cannot identify which appointment the customer means
+    // when more than one still-answerable offer is pending. Do not guess based
+    // on recency: let the normal inbound path surface the reply to the office.
+    // Optionless modern rain-out rows do not count because they never offered
+    // a numbered choice.
+    if (isOptionReply) {
+      const selectedOptionKey = reply === '1' || reply === 'one' || reply.startsWith('1 ') || reply.startsWith('1.')
+        ? 'option1'
+        : 'option2';
+      const { isBlackoutDate } = require('./scheduling/blackout-dates');
+      const answerableOffers = [];
+      for (const row of pendingRows) {
+        const parsed = parseOptions(row);
+        const offeredOption = parsed[selectedOptionKey];
+        if (!offeredOption?.date || String(offeredOption.date) < etDateString()) continue;
+        if (await isBlackoutDate(offeredOption.date)) continue;
+        answerableOffers.push({ row, options: parsed });
+      }
+      if (answerableOffers.length > 1) {
+        return {
+          handled: false,
+          action: 'needs_disambiguation',
+          pending_count: answerableOffers.length,
+        };
+      }
+      if (answerableOffers.length === 0) return null;
+      ({ row: pending, options } = answerableOffers[0]);
+    }
     const responseTime = pending.sms_sent_at ? Math.round((Date.now() - new Date(pending.sms_sent_at).getTime()) / 60000) : null;
 
     let selectedOption = null;

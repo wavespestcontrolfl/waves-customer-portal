@@ -353,4 +353,51 @@ describe('handleRescheduleReply — confirm-in-place', () => {
     // Confirm-in-place on the older offer's live slot — no re-booking.
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
+
+  test('a numbered reply with multiple answerable offers falls through for office disambiguation', async () => {
+    const secondOffer = {
+      ...pendingRow(),
+      id: 'log-2',
+      scheduled_service_id: 'svc-2',
+      notes: JSON.stringify({
+        option1: { ...OPTION1, date: '2026-07-07' },
+        option2: { ...OPTION2, date: '2026-07-08' },
+      }),
+    };
+    wireDb({
+      reschedule_log: [chain({ rows: [secondOffer, pendingRow()] })],
+    });
+
+    const result = await RescheduleSMS.handleRescheduleReply('cust-1', '1');
+
+    expect(result).toEqual({
+      handled: false,
+      action: 'needs_disambiguation',
+      pending_count: 2,
+    });
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['does not contain option 1', { option2: OPTION2 }],
+    ['contains an expired option 1', { option1: { ...OPTION1, date: '2026-07-03' }, option2: OPTION2 }],
+  ])('a newer offer that %s does not block a valid reply 1 against the older offer', async (_label, newerOptions) => {
+    const newerOffer = {
+      ...pendingRow(),
+      id: 'log-newer',
+      scheduled_service_id: 'svc-newer',
+      notes: JSON.stringify(newerOptions),
+    };
+    wire(
+      { scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' },
+      undefined,
+      [newerOffer, pendingRow()],
+    );
+
+    const result = await RescheduleSMS.handleRescheduleReply('cust-1', '1');
+
+    expect(result).toMatchObject({ handled: true, action: 'rescheduled' });
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
 });
