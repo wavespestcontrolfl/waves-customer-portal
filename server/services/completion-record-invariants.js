@@ -76,7 +76,6 @@ const PREDICATES = Object.freeze({
        WHERE sr.status = 'completed'
          AND ss.status = 'completed'
          AND sr.report_view_token IS NULL
-         AND sr.report_generated_at IS NULL
          AND COALESCE(sr.structured_notes->>'backfill', 'false') <> 'true'
          AND COALESCE(sr.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
          AND sr.completion_source IS DISTINCT FROM 'project_completion'
@@ -94,8 +93,15 @@ const PREDICATES = Object.freeze({
          AND ${BEFORE_TODAY_ET}
          AND EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND sr.status = 'completed')`,
   },
+  // Confirmed notice = a settled completionSmsStatus (closeout-status.js
+  // comms fact vocabulary: 'sent', 'skipped_recap_sms_already_sent',
+  // 'deferred', 'blocked', …) or a sent report email. A NULL marker or
+  // 'failed' is the finding. recap_sms_sent_at is deliberately NOT
+  // evidence: it is an at-most-once CLAIM stamped before the provider
+  // call (closeout-status.js treats an aged claim alone as unverified), so
+  // a crash can leave it set with no text sent.
   completed_record_without_comms_marker: {
-    label: 'Completed non-backfill records (>24h old) with no completion text, recap text, or sent report email',
+    label: 'Completed non-backfill records (>24h old) with no confirmed completion notice (no/failed SMS marker, no sent report email)',
     href: '/admin/dispatch',
     sql: `
       SELECT count(*)::int AS n,
@@ -107,8 +113,7 @@ const PREDICATES = Object.freeze({
          AND COALESCE(sr.structured_notes->>'backfill', 'false') <> 'true'
          AND COALESCE(sr.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
          AND sr.completion_source IS DISTINCT FROM 'project_completion'
-         AND sr.structured_notes->>'completionSmsStatus' IS NULL
-         AND sr.recap_sms_sent_at IS NULL
+         AND COALESCE(sr.structured_notes->>'completionSmsStatus', '') IN ('', 'failed')
          AND NOT EXISTS (
                SELECT 1 FROM service_report_deliveries d
                 WHERE d.service_record_id = sr.id AND d.status = 'sent')

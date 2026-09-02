@@ -42,6 +42,14 @@ describe('PREDICATES registry', () => {
     }
     expect(PREDICATES.completed_record_without_comms_marker.sql).toContain(_private.COMMS_MARKER_SINCE);
   });
+
+  test('a stamped report_generated_at never hides a missing token; an unconfirmed recap claim is not delivery evidence', () => {
+    expect(PREDICATES.completed_record_without_report_token.sql).toContain('report_view_token IS NULL');
+    expect(PREDICATES.completed_record_without_report_token.sql).not.toContain('report_generated_at');
+    const comms = PREDICATES.completed_record_without_comms_marker.sql;
+    expect(comms).not.toContain('recap_sms_sent_at');
+    expect(comms).toContain("COALESCE(sr.structured_notes->>'completionSmsStatus', '') IN ('', 'failed')");
+  });
 });
 
 describe('runPredicate', () => {
