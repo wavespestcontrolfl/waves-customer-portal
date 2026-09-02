@@ -94,6 +94,9 @@ const PREDICATES = Object.freeze({
           HAVING count(*) > 1
         ) t`,
   },
+  // A frozen catalog rule saying the service owes no report
+  // (closeoutRequirements.requiresServiceReport=false) exempts the record,
+  // as it does in closeout-status; absent = owed (conservative).
   completed_record_without_report_token: {
     label: 'Completed visits (>2h) that owe a customer report and have no sibling record with a report token',
     href: '/admin/dispatch',
@@ -106,6 +109,7 @@ const PREDICATES = Object.freeze({
                SELECT 1 FROM service_records sr
                 WHERE sr.scheduled_service_id = ss.id
                   AND ${OWES_CUSTOMER_ARTIFACT}
+                  AND COALESCE(sr.structured_notes->'closeoutRequirements'->>'requiresServiceReport', 'true') <> 'false'
                   AND sr.created_at < now() - interval '2 hours')
          AND NOT EXISTS (
                SELECT 1 FROM service_records tok

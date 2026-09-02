@@ -49,6 +49,8 @@ describe('PREDICATES registry', () => {
     expect(token).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM service_records tok[\s\S]*report_view_token IS NOT NULL/);
     // A stamped report_generated_at never hides a missing token.
     expect(token).not.toContain('report_generated_at');
+    // A frozen "no report owed" catalog rule exempts the record; absent = owed.
+    expect(token).toContain("closeoutRequirements'->>'requiresServiceReport', 'true') <> 'false'");
     const comms = PREDICATES.completed_record_without_comms_marker.sql;
     expect(comms).toMatch(/FROM scheduled_services ss/);
     expect(comms).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM service_records sib[\s\S]*service_report_deliveries d/);
