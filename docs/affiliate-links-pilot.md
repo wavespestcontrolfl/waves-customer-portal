@@ -164,5 +164,18 @@ ships badly. Stihl is dealer-only — no program.
    `SAFE_MDX_COMPONENTS`, runner `affiliate_review` forced park, approval
    path extended, poller affiliate belt.
 4. **Ops** — owner signs up for programs; product-row PRs (yellow rows
-   arrive with all four review fields filled); `GATE_AFFILIATE_LINKS=true`
+   arrive with all four review fields filled — first six green Amazon rows
+   landed via astro #509 + portal #3724); `GATE_AFFILIATE_LINKS=true`
    after a shadow run confirms parking; then the 6 pilot briefs.
+5. **Pilot briefs** — `server/data/affiliate-pilot-briefs-v1.json`, seeded
+   with `node server/scripts/seed-category-topics.js --file=<path>` (the
+   category-seed lane: informational hub posts, operator-pinned). A brief's
+   `affiliate_products` (≤3; `product_id`, `placement`, `anchor`,
+   optional `section`) is validated at seed time against the vendored
+   registry and reaches the writer verbatim as binding instructions; the
+   writer's system prompt carries the general AffiliateLink rules
+   (disclosure, placement after the first H2, service CTA first, no prices).
+   Shadow check before the flip: seed one brief, then run
+   `GATE_AFFILIATE_LINKS=true SHADOW_MODE_NEW_SUPPORTING_BLOG=true railway run node server/scripts/run-autonomous-next.js --live`
+   — expect `skipped_shadow_mode` / `shadow_would_gate` with the draft
+   carrying the link and clean guardrails, no PR.
