@@ -863,3 +863,34 @@ describe('resolveConvertedPerApplicationFee — customer-level stamp at conversi
     })).toBeNull();
   });
 });
+
+describe('acceptVisitEstimatedPrice — the reserved visit row never carries a monthly display rate (DATA-001)', () => {
+  const { acceptVisitEstimatedPrice } = require('../routes/estimate-public');
+
+  test('one-time and annual prepay keep their rules', () => {
+    expect(acceptVisitEstimatedPrice({ treatAsOneTime: true, oneTimeTotal: 246 })).toBe(246);
+    expect(acceptVisitEstimatedPrice({ billingTerm: 'prepay_annual', cadenceAmount: 112 })).toBeNull();
+  });
+
+  test('the first-application invoice amount wins, then the tier per-application price', () => {
+    expect(acceptVisitEstimatedPrice({ firstApplicationInvoiceAmount: 103.5, tierBillsMonthly: true, tierPerApplicationPrice: 103.5, cadenceAmount: 51.75 })).toBe(103.5);
+    expect(acceptVisitEstimatedPrice({ tierBillsMonthly: true, tierPerApplicationPrice: 103.5, cadenceAmount: 51.75 })).toBe(103.5);
+  });
+
+  test('a monthly-billed tier plan with no derivable per-application price stays UNPRICED — never the cadence amount', () => {
+    expect(acceptVisitEstimatedPrice({ tierBillsMonthly: true, tierPerApplicationPrice: null, cadenceAmount: 51.75 })).toBeNull();
+    expect(acceptVisitEstimatedPrice({ tierBillsMonthly: true, tierPerApplicationPrice: 0, cadenceAmount: 51.75 })).toBeNull();
+  });
+
+  test('a per-visit cadence plan still bills its cadence amount', () => {
+    expect(acceptVisitEstimatedPrice({ tierBillsMonthly: false, cadenceAmount: 112 })).toBe(112);
+  });
+});
+
+describe('resolveFirstApplicationAmount — an unresolved per-application charge blocks the cadence fallback', () => {
+  const { resolveFirstApplicationAmount } = EstimateConverter;
+  test('the converter passes allowFallback:false for an unresolved monthly tier — explicit amount or nothing', () => {
+    expect(resolveFirstApplicationAmount({ billingCadence: { amount: 51.75 }, perApplicationAmount: null, monthlyRate: 51.75, allowFallback: false })).toBe(0);
+    expect(resolveFirstApplicationAmount({ firstApplicationAmount: 103.5, billingCadence: { amount: 51.75 }, perApplicationAmount: null, allowFallback: false })).toBe(103.5);
+  });
+});

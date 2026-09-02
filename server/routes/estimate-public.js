@@ -10248,9 +10248,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           visitsPerYear: Number(selectedFrequency?.visitsPerYear) || null,
         })
       : null;
-    const visitEstimatedPrice = treatAsOneTime
-      ? effectiveOneTimeTotal
-      : (billingTerm === 'prepay_annual' ? null : (firstApplicationInvoiceAmount || selectedTierPerApplicationPrice || effectiveBillingCadence?.amount));
+    const visitEstimatedPrice = acceptVisitEstimatedPrice({
+      treatAsOneTime,
+      billingTerm,
+      oneTimeTotal: effectiveOneTimeTotal,
+      firstApplicationInvoiceAmount,
+      tierBillsMonthly: selectedServiceTierBillsMonthly,
+      tierPerApplicationPrice: selectedTierPerApplicationPrice,
+      cadenceAmount: effectiveBillingCadence?.amount,
+    });
     const acceptedOneTimeServiceLabel = treatAsOneTime
       ? buildOneTimeInvoiceServiceLabel({
           estimate,
@@ -13758,6 +13764,31 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     next(err);
   }
 });
+
+// Price stamped on the reserved visit row at accept — completion bills it
+// ahead of the customer-level fee. One-time: the one-time total. Annual
+// prepay: none (the term covers the visit). Otherwise the first-application
+// invoice amount, else the tier plan's true per-application price, else the
+// billing-cadence amount — EXCEPT for a monthly-billed tier plan whose
+// per-application price could not be derived: its cadence amount is the
+// monthly display rate, and stamping it would bill a third of a quarterly
+// plan's visit price on every completion (validation audit DATA-001 /
+// pre-push codex P0). Such a row stays unpriced and completion parks it.
+function acceptVisitEstimatedPrice({
+  treatAsOneTime = false,
+  billingTerm = 'standard',
+  oneTimeTotal = null,
+  firstApplicationInvoiceAmount = null,
+  tierBillsMonthly = false,
+  tierPerApplicationPrice = null,
+  cadenceAmount = null,
+} = {}) {
+  if (treatAsOneTime) return oneTimeTotal;
+  if (billingTerm === 'prepay_annual') return null;
+  if (firstApplicationInvoiceAmount) return firstApplicationInvoiceAmount;
+  if (tierBillsMonthly) return Number(tierPerApplicationPrice) > 0 ? tierPerApplicationPrice : null;
+  return cadenceAmount;
+}
 
 // PUT /api/estimates/:token/select-tier — customer selects a WaveGuard tier
 router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) => {
@@ -25749,6 +25780,7 @@ async function handleEstimateAsk(req, res, next) {
 
 module.exports = router;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
+module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
 module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
 // Legacy/textual setup-row recognizer — shared with setup-fee-obligation's
 // snapshot evidence so a frozen legacy row ("WaveGuard Membership Setup")

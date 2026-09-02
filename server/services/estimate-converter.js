@@ -4112,6 +4112,16 @@ const EstimateConverter = {
           visitsPerYear: singleRecurringUnitVisits,
         })
       : null;
+    // A monthly-billed single unit whose per-visit charge could not be derived
+    // (visit count unknown — perApplicationChargeAmount returned null): the
+    // monthly figure is a display rate, so NO downstream fallback may stand
+    // in for the visit price (validation audit DATA-001 / pre-push codex P0).
+    // Consumers: the first-application invoice amount (allowFallback off) and
+    // the customer-level fee stamp (null → park).
+    const perApplicationUnresolved = !!singleRecurringUnit
+      && !!billingCadence
+      && String(billingCadence.frequencyKey || '') === 'monthly'
+      && !(Number(perApplicationAmount) > 0);
 
     // A CURRENT monthly member accepting an add-on/upgrade estimate keeps
     // their membership model — an unconditional per_application stamp would
@@ -5934,7 +5944,10 @@ const EstimateConverter = {
           billingCadence,
           perApplicationAmount,
           monthlyRate,
-          allowFallback: opts.allowFirstApplicationFallback !== false,
+          // An unresolved per-visit charge must not fall back to the cadence
+          // / monthly amount either — the first invoice would otherwise bill
+          // the display rate the fee stamp just refused (DATA-001).
+          allowFallback: opts.allowFirstApplicationFallback !== false && !perApplicationUnresolved,
         })
         : 0;
       const setupFeeApplies = billingTerm === 'standard'
