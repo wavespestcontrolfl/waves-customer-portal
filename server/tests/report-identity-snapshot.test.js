@@ -167,6 +167,31 @@ describe('applyReportIdentitySnapshot', () => {
   });
 });
 
+describe('buildReportIdentitySnapshot degrades per leg', () => {
+  test('a failed customer read omits customer AND address; a missing tech omits technicianName', () => {
+    const snapshot = buildReportIdentitySnapshot({
+      visit: { service_type: 'Original Lawn Service', service_address_line1: '200 Palm Ave' },
+      customer: null,
+      technicianName: null,
+      productFacts: undefined,
+    });
+    expect(snapshot).toEqual({
+      version: 1,
+      frozenAt: expect.any(String),
+      serviceTitle: 'Original Lawn Service',
+    });
+    // The overlay then leaves every live identity value in place.
+    const live = liveJoinedRow({ reportIdentitySnapshot: snapshot });
+    const out = applyReportIdentitySnapshot(live);
+    expect(out).toMatchObject({
+      first_name: 'Renamed',
+      address_line1: '999 New Home Dr',
+      technician_name: 'Someone Else',
+    });
+    expect(out.report_identity_snapshot).toEqual(snapshot);
+  });
+});
+
 describe('attachApprovedReportProductFacts with frozen facts', () => {
   test('frozen ids never hit the catalog; a null freeze stays bare', async () => {
     const knex = jest.fn(() => { throw new Error('catalog must not be queried'); });

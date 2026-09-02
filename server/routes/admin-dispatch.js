@@ -7065,33 +7065,48 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // from the catalog rows the product loop below re-validates; a
           // failed read leaves productFacts undefined so the renderer keeps
           // its live fallback for this record only.
+          // Every leg is fail-soft the SAME way: a read that fails freezes
+          // NOTHING for that leg (the key is omitted and the renderer keeps
+          // its live fallback for this record) — never a partial freeze
+          // built from the stale preflight join (pre-push codex P1).
           const snapshotVisitRow = lockedSvcRow || svc;
           const snapshotCustomerRow = await trx('customers')
             .where({ id: snapshotVisitRow.customer_id })
             .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip')
-            .catch(() => null);
+            .catch((readErr) => {
+              logger.warn(`[completion] report identity snapshot: customer read skipped: ${readErr.message}`);
+              return null;
+            });
           const snapshotTechnicianRow = snapshotVisitRow.technician_id
             ? await trx('technicians').where({ id: snapshotVisitRow.technician_id }).first('name').catch(() => null)
             : null;
+          // ONE catalog read set inside the trx serves both the frozen report
+          // facts and the product loop's validation below, so the facts the
+          // report freezes are the rows the completion actually validated
+          // against (pre-push codex P1).
+          const completionCatalogRowsById = new Map();
           let reportProductFactsSnapshot;
           try {
             const snapshotProductIds = [...new Set((products || []).map((p) => p?.productId).filter(Boolean))];
             const snapshotCatalogRows = snapshotProductIds.length
               ? await trx('products_catalog').whereIn('id', snapshotProductIds).select('*')
               : [];
-            const byId = new Map(snapshotCatalogRows.map((row) => [String(row.id), row]));
+            for (const row of snapshotCatalogRows) completionCatalogRowsById.set(String(row.id), row);
             reportProductFactsSnapshot = {};
             for (const productId of snapshotProductIds) {
-              reportProductFactsSnapshot[String(productId)] = approvedReportProductFacts(byId.get(String(productId)) || null);
+              reportProductFactsSnapshot[String(productId)] = approvedReportProductFacts(
+                completionCatalogRowsById.get(String(productId)) || null,
+              );
             }
           } catch (snapshotErr) {
+            completionCatalogRowsById.clear();
             reportProductFactsSnapshot = undefined;
             logger.warn(`[completion] report product facts snapshot skipped: ${snapshotErr.message}`);
           }
           const reportIdentitySnapshot = buildReportIdentitySnapshot({
             visit: snapshotVisitRow,
-            customer: snapshotCustomerRow || { first_name: svc.first_name, last_name: svc.last_name, city: svc.city },
-            technicianName: snapshotTechnicianRow ? snapshotTechnicianRow.name : svc.tech_name,
+            customer: snapshotCustomerRow,
+            technicianName: snapshotTechnicianRow ? snapshotTechnicianRow.name : null,
             productFacts: reportProductFactsSnapshot,
           });
           const serviceData = {
@@ -7969,7 +7984,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               err.isOperational = true; err.statusCode = 400;
               throw err;
             }
-            const product = await trx('products_catalog').where({ id: p.productId }).first();
+            // Same read set the report identity snapshot froze from; the
+            // per-id read only runs when that batch read failed.
+            const product = completionCatalogRowsById.get(String(p.productId))
+              || await trx('products_catalog').where({ id: p.productId }).first();
             if (!product) {
               const err = new Error(`Product not found: ${p.productId}`);
               err.isOperational = true; err.statusCode = 400;
