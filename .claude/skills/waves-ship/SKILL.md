@@ -42,15 +42,19 @@ Ship code changes through the Waves review/deploy pipeline without triggering th
 - Tag bare `@codex` on a fresh PR. After each subsequent push, post `@codex review` (a bare re-tag is a no-op; a quote-reply "> @codex" spawns a cloud code-editing task, not a review).
 - Stacked PRs: open children as DRAFT and retarget them to `main` BEFORE the parent squash-merges — squash merges strand children (recurred 4×; GitHub only auto-retargets on head-branch deletion, which squash-merge flows don't guarantee).
 - Run the full merge gate in CHECKLIST.md. Core rules:
-  - Clean = an ISSUE comment containing the Reviewed-commit SHA that matches your final HEAD. A clean top-level with unresolved inline threads on the current head is NOT clean — check `original_commit_id`.
+  - Codex-complete on a HEAD = either the clean ISSUE comment whose Reviewed-commit SHA matches your final HEAD, or a review whose inline threads anchor to it (Codex never emits both — REFERENCE.md). A clean top-level with unresolved inline threads on the current head is NOT complete — check `original_commit_id`.
   - Inline findings lag the top-level wrapper — usually 1–2 minutes, but up to ~12 minutes on a heavy round (bit #3669 r4: three findings landed 12 min after the wrapper, after the fix for the first had already been pushed). Poll until comment count is stable for 15 minutes after the wrapper before treating a round as fully delivered.
-  - "Clean" includes P2s: fix every finding or rebut inline with file:line evidence. Never self-downgrade a P2 to a follow-up.
+  - **The gate is severity-based, not count-based.** Priorities are the schema's (`.github/codex-review-schema.json`): P0 = security/money/data loss, P1 = correctness/footgun, P2 = nit/suggestion. Merge-ready = zero UNRESOLVED P0/P1 on the final HEAD, where unresolved = neither fixed nor rebutted inline with file:line evidence.
+  - P2s: fix when the fix is local and adds no surface (a few lines in files already in the diff). Otherwise rebut inline, or defer it — list it under a `Deferred P2s` heading in the PR body with file:line and one line of why. A listed deferral is addressed; an unlisted P2 is silently unaddressed and blocks.
+  - A rebutted round IS a clean round. Rebuttals cite file:line evidence. If Codex re-disputes the same rebuttal on the next round, stop re-arguing — record it as an open point for Adam in the PR body, not another push.
+  - Round cap: from round 4 on, a round that yields only P2s makes the PR merge-ready under the P2 rule. If round 5 or later still surfaces a NEW P0/P1, the PR is too large to converge — stop, report the round history, and propose a split. Never push to fish for a zero-comment round: Codex's counts are nondeterministic run-to-run (REFERENCE.md), so a zero is a lucky draw, not evidence.
   - NEVER merge until Codex has completed on the final commit. Green CI + COMMENTED is not enough.
   - During Codex usage limits, a bounced re-tag is not queued — post a fresh one after reset. >15–20 min of silence on a heavy day usually means limits, not clean.
 
 ### 5. Merge and verify
 - **Merging is Adam's step.** A self-authored PR stops at MERGE-READY unless Adam explicitly authorized merging in this session — "ok go" on a build plan authorizes building and opening the PR, not merging it.
-- Under a standing "merge when clean" authorization, clean = a review round with ZERO findings on the final HEAD. Fixing-or-rebutting findings completes the REVIEW round (§4), but a round that needed rebuttals does NOT satisfy "merge when clean" — push the fix, get a zero-comment round, or hand the non-converging loop back to Adam. Never self-merge on a rebutted round.
+- Under a standing "merge when clean" authorization, clean = the §4 gate on the final HEAD: zero unresolved P0/P1, every P2 fixed, rebutted, or listed as deferred in the PR body. A rebutted round qualifies. A round-cap stop (new P0/P1 at round 5+) does NOT — that PR goes back to Adam with a split proposal.
+- Standing authorization never covers a blast-radius diff: anything touching AGENTS.md P0 domains or a CLAUDE.md rule-18 contract (money movement, customer comms, DB schema/CHECK values, public `/:token` routes, webhook payloads, admin auth, native-app endpoints). Those stop at MERGE-READY with the severity summary and wait for Adam's in-session authorization.
 - After merge: confirm your final commit actually landed — "PR merged" doesn't prove it. Squash merges rewrite SHAs, so ancestry checks fail even on success: check `gh pr view <n> --json state,headRefOid,mergeCommit` and confirm `headRefOid` equals your final push SHA. Only for true merge commits does `git merge-base --is-ancestor <final-sha> <merge-sha>` apply. If your last push isn't in the merged head, recover via cherry-pick.
 - Confirm the Railway deploy went green before reporting done. A merged PR with a red deploy is not shipped.
 - Clean up the worktree when the lane closes: `git worktree remove ~/wt-<slug>`.
@@ -70,11 +74,12 @@ Ship code changes through the Waves review/deploy pipeline without triggering th
 - Brand-isolation CI fails the PR on hardcoded "Waves Pest Control"/hub URLs in spoke-shared content — use `{{brandName}}`-style tokens.
 
 ## Verification
-Before reporting a shipped change as done, all of: final-commit-in-merge check passed; Codex clean on final HEAD (or findings rebutted inline); Railway deploy green (or Pages build green for astro); gate/kill-switch documented for user-visible features; remote tip verified after last push. If any step was skipped or impossible, say so explicitly — never imply it happened.
+Before reporting a shipped change as done, all of: final-commit-in-merge check passed; Codex gate passed on final HEAD (zero unresolved P0/P1; every P2 fixed, rebutted inline, or listed under Deferred P2s in the PR body); Railway deploy green (or Pages build green for astro); gate/kill-switch documented for user-visible features; remote tip verified after last push. If any step was skipped or impossible, say so explicitly — never imply it happened.
 
 ## Failure Modes
 - Merging on a stale clean signal (Codex reviewed an earlier commit).
-- Self-merging without in-session authorization, or treating a rebutted round as "merge when clean".
+- Self-merging without in-session authorization, or self-merging a blast-radius diff under a standing authorization.
+- Blocking a merge on P2 nits, or re-pushing to fish for a zero-comment round — the gate is severity-based and the round cap exists for this reason.
 - Piping jest through `grep`/`tail` for pass/fail — it masks the exit code (a failing test shipped this way once). Run bare and check the exit code.
 - Trusting "PR merged" as proof your last push landed.
 - Pushing client/ changes without the brand check.
