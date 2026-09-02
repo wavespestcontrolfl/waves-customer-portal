@@ -301,11 +301,13 @@ async function parkAdditionalRecording(row, extra) {
       ),
     });
   if (appended === 0) {
-    // Either a retry of an already-parked RecordingSid (nothing to add; the
-    // review card below is idempotent) or a PAN stamp landed after the
-    // handler read the row. A quarantined call never keeps audio, parked or
-    // attached: delete the incoming recording at Twilio instead of parking
-    // it, and file no card for audio that no longer exists.
+    // Either a retry of an already-parked RecordingSid or a PAN stamp that
+    // landed after the handler read the row. A quarantined call never keeps
+    // audio, parked or attached: delete the incoming recording at Twilio
+    // instead of parking it, and file no card for audio that no longer
+    // exists. A plain retry files nothing either — the card was filed with
+    // the first delivery, and re-filing would reopen one the office already
+    // resolved by adopting or dismissing the recording.
     const now = await db('call_log').where({ id: row.id }).first('transcription_metadata');
     if (isPanQuarantinedRow(now)) {
       logger.warn(`[recording-status] recording ${maskSid(entry.recording_sid)} for ${maskSid(row.twilio_call_sid)} arrived as the call was PAN-quarantined — deleting instead of parking`);
@@ -321,6 +323,7 @@ async function parkAdditionalRecording(row, extra) {
         .catch((e) => logger.error(`[recording-status] post-quarantine current recording delete failed: ${e.message}`));
       return { parked: false, quarantined: true };
     }
+    return { parked: false, quarantined: false, duplicate: true };
   }
   try {
     const { buildTriageItem } = require('../services/call-routing-gates');

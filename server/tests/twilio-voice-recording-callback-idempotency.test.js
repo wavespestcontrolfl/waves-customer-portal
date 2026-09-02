@@ -401,11 +401,16 @@ describe('POST /recording-status', () => {
     );
   });
 
-  test('parking is idempotent per RecordingSid — a retried callback appends once', async () => {
+  test('parking is idempotent per RecordingSid — a retried callback appends once and files no second card (a resolved card stays resolved)', async () => {
     tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: 'processing' });
     await post('/recording-status', recordingCallback());
+    expect(tables.triage_items).toHaveLength(1);
+    // The office resolved the card; the carrier retries the same callback.
+    tables.triage_items[0].status = 'resolved';
     await post('/recording-status', recordingCallback());
     expect(tables.call_log[0].metadata.additional_recordings).toHaveLength(1);
+    expect(tables.triage_items).toHaveLength(1);
+    expect(tables.triage_items[0].status).toBe('resolved');
   });
 
   test('a replace on a voicemail row (rejected dial-leg audio) resets processing_status so the sweep re-runs it on the new audio', async () => {
