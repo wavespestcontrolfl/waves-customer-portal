@@ -150,18 +150,6 @@ const ALLOWLIST = [
     // candidate set); membership itself is decided per row in JS.
     reason: 'OR arm keeping converted label rows repair-eligible; not a lane selection',
   },
-  {
-    file: 'services/intelligence-bar/authorization-contract.js',
-    match: 'Number(params?.updates?.monthly_rate) > 0',
-    context: 'params?.updates?.waveguard_tier !== undefined',
-    count: 1,
-    // Confirm-card DISCLOSURE trigger (W0B, #3648): fires when the pending
-    // UPDATE PAYLOAD touches waveguard_tier or sets a positive rate, and
-    // pushes the executor's documented lane-stamp disclosure. It classifies
-    // which FIELDS the update touches — no customer's lane; the stamp
-    // itself runs in the executors on the canonical lane rules.
-    reason: 'disclosure trigger on the update payload (fields touched), not a lane classification of any row',
-  },
 ];
 
 const SKIP_DIRS = new Set(['node_modules', 'tests', 'migrations', '__tests__', 'coverage', 'dist']);
