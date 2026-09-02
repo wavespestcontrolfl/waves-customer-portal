@@ -902,6 +902,8 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
     log = logger,
     customerId,
     today = etDateString(),
+    // Set by the bare-connection re-entry below — never by callers.
+    underCommsLock = false,
   } = options;
 
   if (!customerId) return { synced: false, reason: 'missing_customer_id' };
@@ -911,8 +913,8 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   // deriving it unlocked while a cancellation wind-down reprices the same
   // customer would write a stale alignment over the demotion. Callers
   // already inside a transaction take the lock below, before the row lock.
-  if (!database.isTransaction) {
-    return withCustomerCommsLock(database, customerId, (trx) => syncCustomerWaveGuardPlanFromScheduledServices({ ...options, database: trx }));
+  if (!database.isTransaction && !underCommsLock) {
+    return withCustomerCommsLock(database, customerId, (trx) => syncCustomerWaveGuardPlanFromScheduledServices({ ...options, database: trx, underCommsLock: true }));
   }
 
   const customerColumns = await columnInfo(database, 'customers');
@@ -928,7 +930,8 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   // the seeder / converter / admin-schedule callers that already hold it
   // (and for the bare-connection re-entry above).
   await lockCustomerComms(database, customerId);
-  const customerQuery = database('customers').where({ id: customerId }).first().forUpdate();
+  let customerQuery = database('customers').where({ id: customerId }).first();
+  if (database.isTransaction) customerQuery = customerQuery.forUpdate();
   const customer = await customerQuery;
   if (!customer) return { synced: false, reason: 'customer_not_found' };
 
