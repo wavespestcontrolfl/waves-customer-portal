@@ -754,10 +754,9 @@ describe('POST /:id/cancel-plan', () => {
     // the end-of-term confirmation: both dedupe on the term, so a repeat
     // commit on a still-decided term (not a re-won-back account) raises no
     // second instruction and sends no second copy.
-    const episode = { termId: 'term-1', episodeKey: `${churnDate}:2027-02-28`, priorRequestIds: ['req-old'] };
-    expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', body.requestId, { retrieveAfter: '2027-02-28', ...episode });
+    expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', body.requestId, { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: churnDate, priorRequestIds: ['req-old'] });
     expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({
-      keptThrough: true, prepayTermId: 'term-1', termEpisodeKey: episode.episodeKey, priorRequestIds: ['req-old'],
+      keptThrough: true, prepayTermId: 'term-1', termEpisodeKey: `${churnDate}:2027-02-28`, priorRequestIds: ['req-old'],
     }));
   }));
 

@@ -176,8 +176,11 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
       // the per-EVENT key: retries of the same request stay idempotent,
       // while a restored customer who later cancels another rental program
       // gets a fresh task.
+      // The dated class carries its boundary: a corrected coverage end is a
+      // new instruction (the old dated row was retired above); an immediate
+      // task is (term, episode) alone.
       dedupeKey: termKeyed
-        ? `termite_station_retrieval:term:${termId}:${episodeKey}:${taskClass}`
+        ? `termite_station_retrieval:term:${termId}:${episodeKey}:${taskClass}${retrieveAfter ? `:${retrieveAfter}` : ''}`
         : `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`,
       metadata: {
         kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental,

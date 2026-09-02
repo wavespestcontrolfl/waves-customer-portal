@@ -82,7 +82,7 @@ describe('dedupe key: per (TERM, churn episode, class) when a prepaid term gover
 
   test('a dated task keys on term + episode, class "dated"; term, episode and request ride in metadata', async () => {
     await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: EP });
-    expect(keyOf()).toBe(`termite_station_retrieval:term:term-1:${EP}:dated`);
+    expect(keyOf()).toBe(`termite_station_retrieval:term:term-1:${EP}:dated:2027-02-28`);
     expect(mockNotifyAdmin.mock.calls[0][3].metadata).toEqual(expect.objectContaining({ termId: 'term-1', churnEpisode: EP, requestId: 'req-1', retrieveAfter: '2027-02-28' }));
   });
 
@@ -90,6 +90,14 @@ describe('dedupe key: per (TERM, churn episode, class) when a prepaid term gover
     await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: EP });
     await raiseTermiteRetrievalTask('c1', 'req-2', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: EP });
     expect(keyOf(0)).toBe(keyOf(1));
+  });
+
+  test('a corrected boundary changes the DATED key only — the immediate key is (term, episode) alone', async () => {
+    await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: EP });
+    await raiseTermiteRetrievalTask('c1', 'req-2', { retrieveAfter: '2027-03-31', termId: 'term-1', episodeKey: EP });
+    expect(keyOf(0)).not.toBe(keyOf(1));
+    await raiseTermiteRetrievalTask('c1', 'req-3', { retrieveAfter: null, termId: 'term-1', episodeKey: EP });
+    expect(keyOf(2)).toBe(`termite_station_retrieval:term:term-1:${EP}:immediate`);
   });
 
   test('a won-back customer churning again on the same term is a NEW episode — a fresh key, never silenced by the first episode', async () => {

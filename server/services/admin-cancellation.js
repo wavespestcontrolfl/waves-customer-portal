@@ -706,10 +706,15 @@ async function adminCoverageBoundaryInForce(customerId) {
 //              repeating the cancel must re-raise the dated instruction and
 //              re-tell the customer the new date, not dedupe against the
 //              old one.
+// The boundary belongs to the DATED side only (end-of-term confirmation,
+// dated retrieval task): an IMMEDIATE "pull now" task for an end-now
+// disposition is identified by (term, episode) alone — a corrected term
+// end must not raise a second pull-now instruction.
 // priorRequestIds = earlier admin end-of-coverage requests of THIS episode
-// for THIS term at THIS boundary (cases created on/after the churn date's
-// ET midnight, snapshot term/effectiveDate/effectiveOn), so rows written
-// before the term key shipped (request-keyed) still count as delivered.
+// for THIS term at THIS boundary; priorEndNowRequestIds = earlier end-now
+// requests of this episode for this term (cases created on/after the churn
+// date's ET midnight, matched on the snapshot), so rows written before the
+// term key shipped (request-keyed) still count as delivered.
 // Day granularity is sufficient: churned_at is a DATE, so two episodes on
 // the same ET day (win-back and re-churn within hours) would share a key —
 // but a second commit inside 24h of the first acceptance never reaches
@@ -719,7 +724,7 @@ async function adminCoverageBoundaryInForce(customerId) {
 // falls back to its request key (at-most-twice beats never telling anyone).
 async function resolveTermEpisode(customerId, term, currentRequestId = null) {
   if (!term) return null;
-  const none = { termId: term.id, episodeKey: null, priorRequestIds: [] };
+  const none = { termId: term.id, episodeKey: null, boundary: null, priorRequestIds: [], priorEndNowRequestIds: [] };
   try {
     const row = await db('customers').where({ id: customerId }).first('pipeline_stage', 'churned_at');
     if (!row || row.pipeline_stage !== 'churned' || !row.churned_at) return none;
@@ -734,27 +739,40 @@ async function resolveTermEpisode(customerId, term, currentRequestId = null) {
       .where('created_at', '>=', episodeStart)
       .select('service_request_id', 'snapshot');
     const priorRequestIds = [];
+    const priorEndNowRequestIds = [];
     for (const c of cases || []) {
       let snap = c.snapshot;
       if (typeof snap === 'string') { try { snap = JSON.parse(snap); } catch { snap = {}; } }
       snap = snap || {};
-      if (String(snap.prepayTermId || '') !== String(term.id) || snap.effectiveDate !== 'end_of_coverage') continue;
-      if (dateOnly(snap.effectiveOn) !== boundary) continue;
+      if (String(snap.prepayTermId || '') !== String(term.id)) continue;
       const rid = c.service_request_id ? String(c.service_request_id) : null;
-      if (!rid || rid === String(currentRequestId || '') || priorRequestIds.includes(rid)) continue;
-      priorRequestIds.push(rid);
+      if (!rid || rid === String(currentRequestId || '')) continue;
+      if (snap.effectiveDate === 'end_of_coverage') {
+        if (dateOnly(snap.effectiveOn) === boundary && !priorRequestIds.includes(rid)) priorRequestIds.push(rid);
+      } else if (String(snap.prepayDisposition || '') === 'end_now_refund' && !priorEndNowRequestIds.includes(rid)) {
+        priorEndNowRequestIds.push(rid);
+      }
     }
-    return { termId: term.id, episodeKey: `${churnDate}:${boundary}`, priorRequestIds };
+    return { termId: term.id, episodeKey: churnDate, boundary, priorRequestIds, priorEndNowRequestIds };
   } catch (err) {
     logger.warn(`[admin-cancellation] term episode lookup failed for ${customerId}: ${err.message}`);
     return none;
   }
 }
+// Confirmation legs are end-of-coverage by construction (keptThrough), so
+// their episode identity carries the boundary.
 const termEpisodeSendArgs = (episode) => ({
   prepayTermId: episode ? episode.termId : null,
-  termEpisodeKey: episode ? episode.episodeKey : null,
+  termEpisodeKey: episode && episode.episodeKey ? `${episode.episodeKey}:${episode.boundary}` : null,
   priorRequestIds: episode ? episode.priorRequestIds : [],
 });
+// Retrieval task: the class picks the compat set — dated ↔ end-of-coverage
+// requests at this boundary, immediate ↔ end-now requests.
+const termEpisodeRaiseArgs = (episode, retrieveAfter) => (episode ? {
+  termId: episode.termId,
+  episodeKey: episode.episodeKey,
+  priorRequestIds: retrieveAfter ? episode.priorRequestIds : episode.priorEndNowRequestIds,
+} : {});
 
 // The request-scoped history note the processor stamps on every visit this
 // request cancels — the immutable retry marker (never the editable reason).
@@ -1432,7 +1450,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             if (hasTermiteErr && (!datedTermite || priorSnap.effectiveOn)) {
               try {
                 const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
-                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: datedTermite ? priorSnap.effectiveOn : null, ...repairEpisode });
+                const repairAfter = datedTermite ? priorSnap.effectiveOn : null;
+                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: repairAfter, ...termEpisodeRaiseArgs(repairEpisode, repairAfter) });
                 promotedErrors = promotedErrors.filter((e) => e !== 'termite_retrieval_task');
               } catch (termiteErr) {
                 logger.warn(`[admin-cancellation] deferred termite retrieval repair failed for request ${reqRow.id}: ${termiteErr.message}`);
@@ -1981,8 +2000,10 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     if (processed && ['ends_at_term', 'ended_now', 'decision_already_recorded'].includes(termOutcome)) {
       try {
         const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
-        await raiseTermiteRetrievalTask(customerId, request.id,
-          { retrieveAfter: result.termiteRetrievalPending.retrieveAfter, ...termEpisode });
+        await raiseTermiteRetrievalTask(customerId, request.id, {
+          retrieveAfter: result.termiteRetrievalPending.retrieveAfter,
+          ...termEpisodeRaiseArgs(termEpisode, result.termiteRetrievalPending.retrieveAfter),
+        });
       } catch (termiteErr) {
         errors.push('termite_retrieval_task');
         logger.error(`[admin-cancellation] deferred termite retrieval task failed for request ${request.id}: ${termiteErr.message}`);
