@@ -32,6 +32,18 @@
 const crypto = require('crypto');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { parseETDateTime } = require('../utils/datetime-et');
+
+// A due time typed by the office arrives either as an ISO instant (the
+// panel converts its datetime-local value with the ET helper) or, from any
+// other client, as a naive 'YYYY-MM-DDTHH:mm'. Railway runs in UTC, so a
+// naive string handed to new Date() lands 4–5 hours off the Eastern
+// deadline that was meant — parseETDateTime pins naive strings to ET.
+function parseDueAt(value) {
+  if (value == null || value === '') return null;
+  const d = parseETDateTime(value);
+  return d instanceof Date && !Number.isNaN(d.getTime()) ? d : NaN;
+}
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -643,9 +655,10 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
         patch.description = text.slice(0, 2000);
       }
       if (due_at !== undefined) {
-        patch.due_at = due_at ? new Date(due_at) : null;
-        if (due_at && Number.isNaN(patch.due_at.getTime())) throw Object.assign(new Error('due_at is not a valid date'), { status: 400 });
-        patch.due_basis = due_at ? 'stated' : null;
+        const parsed = parseDueAt(due_at);
+        if (Number.isNaN(parsed)) throw Object.assign(new Error('due_at is not a valid date'), { status: 400 });
+        patch.due_at = parsed;
+        patch.due_basis = parsed ? 'stated' : null;
       }
       break;
     default:
@@ -661,8 +674,8 @@ async function addHumanCommitment(conn, callLogId, { party, kind, description, d
   const k = COMMITMENT_KINDS.includes(kind) ? kind : 'other';
   const text = String(description || '').trim();
   if (!text) throw Object.assign(new Error('description is required'), { status: 400 });
-  const due = due_at ? new Date(due_at) : null;
-  if (due && Number.isNaN(due.getTime())) throw Object.assign(new Error('due_at is not a valid date'), { status: 400 });
+  const due = parseDueAt(due_at);
+  if (Number.isNaN(due)) throw Object.assign(new Error('due_at is not a valid date'), { status: 400 });
   const key = `${commitmentKey({ party: p, kind: k, description: text })}:h${crypto.createHash('sha1').update(text).digest('hex').slice(0, 6)}`.slice(0, 160);
   const [row] = await conn('call_commitments').insert({
     call_log_id: callLogId,
@@ -754,6 +767,7 @@ module.exports = {
   MIN_MODEL_CONFIDENCE,
   MODEL_OUTPUT_SCHEMA,
   commitmentKey,
+  parseDueAt,
   anchorEvidence,
   deriveCommitmentsFromExtraction,
   buildCommitmentsPrompt,

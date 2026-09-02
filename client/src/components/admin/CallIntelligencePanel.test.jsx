@@ -103,6 +103,28 @@ describe("CallIntelligencePanel", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
+  it("edits show the due time as Eastern wall clock and send an instant, never a naive string", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      calls.push({ url: String(url), method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+      if (String(url).includes("/intelligence")) {
+        const view = intelligence();
+        view.commitments[0].due_at = "2026-09-05T17:00:00.000Z"; // 1 pm EDT
+        return { ok: true, status: 200, json: async () => ({ intelligence: view }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ commitment: {} }) };
+    }));
+    render(<CallIntelligencePanel callId={CALL_ID} />);
+    fireEvent.click(screen.getByRole("button", { name: /call intelligence/i }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Edit" })[0]).toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    const due = screen.getByLabelText("Edit due date");
+    expect(due.value).toBe("2026-09-05T13:00");
+    fireEvent.change(due, { target: { value: "2026-09-05T15:30" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
+    expect(calls.find((c) => c.method === "PATCH").body).toEqual({ action: "edit", description: "Send the caller an estimate", due_at: "2026-09-05T19:30:00.000Z" });
+  });
+
   it("colours an overdue open commitment as an alert and a kept one as strong", () => {
     expect(commitmentStatusTone({ status: "open", due_at: "2000-01-01T00:00:00Z" })).toBe("alert");
     expect(commitmentStatusTone({ status: "open", due_at: null })).toBe("neutral");

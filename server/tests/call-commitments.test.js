@@ -153,6 +153,23 @@ describe('anchorEvidence', () => {
   });
 });
 
+describe('parseDueAt — office-entered times are Eastern', () => {
+  const { parseDueAt } = require('../services/call-commitments');
+  test('a naive datetime-local string is pinned to ET, not to the server\'s UTC clock', () => {
+    // 1 pm Eastern on 2026-09-05 (EDT, UTC-4) is 17:00Z.
+    expect(parseDueAt('2026-09-05T13:00').toISOString()).toBe('2026-09-05T17:00:00.000Z');
+    // Winter: EST, UTC-5.
+    expect(parseDueAt('2026-12-05T13:00').toISOString()).toBe('2026-12-05T18:00:00.000Z');
+  });
+  test('an ISO instant with an offset is taken as-is; empty is null; garbage is NaN', () => {
+    expect(parseDueAt('2026-09-05T17:00:00.000Z').toISOString()).toBe('2026-09-05T17:00:00.000Z');
+    expect(parseDueAt('2026-09-05T13:00:00-04:00').toISOString()).toBe('2026-09-05T17:00:00.000Z');
+    expect(parseDueAt('')).toBeNull();
+    expect(parseDueAt(null)).toBeNull();
+    expect(Number.isNaN(parseDueAt('next tuesday'))).toBe(true);
+  });
+});
+
 describe('model contract', () => {
   test('the prompt forbids inference and demands verbatim quotes; it never carries a phone number', () => {
     const prompt = buildCommitmentsPrompt({ transcript: TRANSCRIPT, callStartedAt: '2026-09-01T14:00:00Z' });

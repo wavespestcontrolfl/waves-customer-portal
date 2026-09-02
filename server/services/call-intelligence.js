@@ -35,11 +35,15 @@ function describeProcessing(call) {
   let phase;
   let detail = null;
   let retryable = false;
+  const adopted = parseJson(call.metadata, {})?.adopted_recording || null;
   switch (status) {
     case null:
     case 'pending':
       phase = call.recording_url ? 'queued' : 'waiting_for_recording';
       detail = call.recording_url ? 'Recording received; the next sweep will process it.' : 'No recording has arrived for this call yet.';
+      if (adopted && call.recording_url) {
+        detail = 'An adopted recording is waiting to be processed; the transcript and extraction shown are from the previous recording until it runs.';
+      }
       break;
     case 'processing':
       phase = 'processing';

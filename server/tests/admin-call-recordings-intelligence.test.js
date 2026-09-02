@@ -178,11 +178,31 @@ describe('POST /calls/:id/adopt-recording', () => {
       expect((await res.json()).adopted).toBe(PARKED);
     });
     const swap = updates.find((u) => u.table === 'call_log');
-    expect(swap.patch).toMatchObject({ recording_sid: PARKED, recording_url: 'https://api.twilio.com/x/RE2.mp3', recording_duration_seconds: 80, transcription_status: 'pending' });
+    // The row leaves "processed": its transcript/extraction describe the old
+    // audio, and NULL puts it back in the sweep if the immediate pass defers.
+    expect(swap.patch).toMatchObject({ recording_sid: PARKED, recording_url: 'https://api.twilio.com/x/RE2.mp3', recording_duration_seconds: 80, transcription_status: 'pending', processing_status: null });
     const remaining = JSON.parse(swap.patch.metadata.bindings[0]);
     expect(remaining).toEqual([expect.objectContaining({ recording_sid: CURRENT, parked_because: 'replaced_by_operator' })]);
     expect(updates.find((u) => u.table === 'triage_items').patch.status).toBe('resolved');
     expect(processor.processRecording).toHaveBeenCalledWith(SID, { force: true, operator: true });
+  });
+
+  test('a deferred or failed reprocess keeps the review card open and reports the call as queued, never as done', async () => {
+    for (const outcome of [
+      { success: false, skipped: true, reason: 'recording_not_ready' },
+      { success: false, skipped: true, reason: 'terminal_write_ownership_lost' },
+    ]) {
+      const updates = mockDb([call()]);
+      processor.processRecording.mockResolvedValue(outcome);
+      await withServer(async (base) => {
+        const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body).toMatchObject({ success: false, queued: true, adopted: PARKED });
+      });
+      expect(updates.find((u) => u.table === 'call_log').patch.processing_status).toBeNull();
+      expect(updates.find((u) => u.table === 'triage_items')).toBeUndefined();
+    }
   });
 
   test('refuses while a pass holds the claim, and refuses a recording that is not parked', async () => {

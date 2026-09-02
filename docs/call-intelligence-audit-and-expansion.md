@@ -113,6 +113,14 @@ Per file, with the proving test.
   evidence highlight in `CallLogTabV2.jsx`. Test:
   `CallIntelligencePanel.test.jsx` (vitest).
 - `CLAUDE.md` — `GATE_CALL_COMMITMENTS` documented.
+- Pre-push Codex round (3 P1s, all fixed in the same PR): the recording
+  `replace` write re-checks that no pass claimed the row since the read and
+  parks the recording if one did (race test in the webhook suite); office-
+  entered due times are parsed as Eastern (`parseDueAt`, and the panel sends
+  instants via the client ET helper); adopting a parked recording sets the
+  row back to NULL status and resolves its review card only when the
+  reprocess actually completes (a deferred pass leaves the card open and the
+  row queued for the sweep).
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 

@@ -1546,8 +1546,32 @@ router.post('/recording-status', async (req, res) => {
               if (targetRow.recording_sid) this.where('recording_sid', targetRow.recording_sid);
               else this.whereNull('recording_sid');
             })
+            // A replace is decided on the status the row had when it was
+            // READ. A pass can claim the row between that read and this
+            // write and start transcribing the old audio, so the write
+            // re-checks that nothing is load-bearing — zero rows means the
+            // decision is stale and the recording is parked below instead.
+            .modify((q) => {
+              if (attach.action === 'replace') {
+                q.whereRaw("processing_status IS DISTINCT FROM 'processing' AND processing_status IS DISTINCT FROM 'processed'");
+              }
+            })
             .update(write);
-          if (updated > 0) matchedSid = targetRow.twilio_call_sid;
+          if (updated > 0) {
+            matchedSid = targetRow.twilio_call_sid;
+          } else if (attach.action === 'replace') {
+            const nowRow = await db('call_log').where({ id: targetRow.id }).first(...ATTACH_COLUMNS);
+            if (nowRow && !isPanQuarantinedRow(nowRow) && RECORDING_LOAD_BEARING_STATUSES.has(String(nowRow.processing_status))) {
+              attach = { action: 'park', reason: `processing_status_${nowRow.processing_status}_raced` };
+              await parkAdditionalRecording(nowRow, {
+                recording_sid: RecordingSid,
+                recording_url: recordingData.recording_url,
+                recording_duration_seconds: recordingData.recording_duration_seconds,
+                reason: attach.reason,
+              });
+              logger.warn(`[recording-status] second recording ${maskSid(RecordingSid)} for ${maskSid(nowRow.twilio_call_sid)} raced a claim — parked for review, recording_url kept`);
+            }
+          }
         } else if (attach.action === 'duplicate') {
           // Exactly-once for the row: nothing to write. The processing
           // attempt below is still scheduled — it is claim-fenced and skips

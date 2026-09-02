@@ -20,6 +20,7 @@
 import { useEffect, useState } from "react";
 import { Badge, Button, Input, Select, cn } from "../ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import { etDatetimeLocalToISO, etDatetimeLocalValue } from "../../lib/timezone";
 
 const PHASE_LABEL = {
   queued: "Queued",
@@ -289,7 +290,8 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
                   act("add", async () => {
                     await adminFetch(`/admin/call-recordings/calls/${encodeURIComponent(callId)}/commitments`, {
                       method: "POST",
-                      body: JSON.stringify({ party: adding.party, kind: adding.kind, description: adding.description, due_at: adding.due_at || null }),
+                      // datetime-local is a naive ET wall clock; send the instant, never the naive string.
+                      body: JSON.stringify({ party: adding.party, kind: adding.kind, description: adding.description, due_at: etDatetimeLocalToISO(adding.due_at) }),
                     });
                     setAdding(null);
                   });
@@ -338,7 +340,7 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
                         onSubmit={(e) => {
                           e.preventDefault();
                           act("edit", async () => {
-                            await patchCommitment(c.id, { action: "edit", description: editing.description, due_at: editing.due_at || null });
+                            await patchCommitment(c.id, { action: "edit", description: editing.description, due_at: etDatetimeLocalToISO(editing.due_at) });
                             setEditing(null);
                           });
                         }}
@@ -399,7 +401,7 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
                           size="sm"
                           variant="ghost"
                           disabled={!!busy}
-                          onClick={() => setEditing({ id: c.id, description: c.description, due_at: c.due_at ? new Date(c.due_at).toISOString().slice(0, 16) : "" })}
+                          onClick={() => setEditing({ id: c.id, description: c.description, due_at: etDatetimeLocalValue(c.due_at) })}
                         >
                           Edit
                         </Button>

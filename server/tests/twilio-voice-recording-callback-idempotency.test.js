@@ -66,6 +66,9 @@ function makeDb(tables) {
           const wanted = JSON.parse(clause.bindings[0])[0].recording_sid;
           return !(metaOf(row).additional_recordings || []).some((r) => r.recording_sid === wanted);
         }
+        if (sql.includes("processing_status IS DISTINCT FROM 'processing' AND processing_status IS DISTINCT FROM 'processed'")) {
+          return !['processing', 'processed'].includes(String(row.processing_status));
+        }
         throw new Error(`fake db: unsupported raw clause ${sql}`);
       }
       default: throw new Error(`fake db: unsupported clause ${clause.type}`);
@@ -133,8 +136,13 @@ function makeDb(tables) {
       select() { return builder; },
       first() {
         const hit = rows.find((r) => evalGroup(r, sb.clauses));
-        return Promise.resolve(hit ? { ...hit } : undefined);
+        const snapshot = hit ? { ...hit } : undefined;
+        // Race hook: mutate the live row AFTER the handler has read it, the
+        // way a processing claim lands between a read and a write.
+        if (hit && typeof tables.__afterFirst === 'function') tables.__afterFirst(hit, table);
+        return Promise.resolve(snapshot);
       },
+      modify(fn) { fn(builder); return builder; },
       update(patch) {
         const hits = rows.filter((r) => evalGroup(r, sb.clauses));
         hits.forEach((r) => applyUpdate(r, patch));
@@ -272,6 +280,31 @@ describe('POST /recording-status', () => {
     // buildTriageItem serializes the payload for the jsonb column.
     expect(JSON.parse(tables.triage_items[0].payload)).toMatchObject({ recording_sid: REC_2, kept_recording_sid: REC_1 });
     // Nothing is auto-processed against a recording the row does not carry.
+    jest.advanceTimersByTime(15 * 60 * 1000);
+    expect(processor.processRecording).not.toHaveBeenCalled();
+  });
+
+  test('a replace decided on a stale read is parked when a pass claims the row before the write', async () => {
+    // The handler reads processing_status NULL and decides "replace"; a pass
+    // claims the row before the UPDATE runs and starts transcribing the OLD
+    // audio. The write must refuse and the new recording must be parked —
+    // never swapped under a live claim.
+    tables.call_log.push({
+      id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 12,
+      processing_status: null, transcription: null, metadata: null,
+    });
+    let claimed = false;
+    tables.__afterFirst = (row) => {
+      if (!claimed && row.twilio_call_sid === PARENT) { claimed = true; row.processing_status = 'processing'; row.processing_token = 'tok'; }
+    };
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    const row = tables.call_log[0];
+    expect(row.recording_sid).toBe(REC_1);
+    expect(row.recording_url).toBe(`${URL_1}.mp3`);
+    expect(row.processing_status).toBe('processing');
+    expect(row.metadata.superseded_recordings).toBeUndefined();
+    expect(row.metadata.additional_recordings).toEqual([expect.objectContaining({ recording_sid: REC_2, parked_because: 'processing_status_processing_raced' })]);
+    expect(tables.triage_items).toHaveLength(1);
     jest.advanceTimersByTime(15 * 60 * 1000);
     expect(processor.processRecording).not.toHaveBeenCalled();
   });

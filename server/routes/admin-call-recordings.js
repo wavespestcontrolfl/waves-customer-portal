@@ -321,24 +321,42 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         recording_url: chosen.recording_url,
         recording_duration_seconds: chosen.recording_duration_seconds ?? null,
         transcription_status: 'pending',
+        // The row is no longer "processed": its transcript and extraction
+        // describe the previous recording. NULL puts it back in the sweep,
+        // so even if the immediate pass below defers (CDN not ready) or
+        // fails, the adopted audio is processed and the stale derived
+        // fields are replaced — never a processed row whose audio does not
+        // match its intelligence.
+        processing_status: null,
         metadata: db.raw(
           "jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}', ?::jsonb, true), '{adopted_recording}', ?::jsonb, true)",
-          [JSON.stringify(remaining), JSON.stringify({ recording_sid: chosen.recording_sid, by: req.technicianId || null, at: new Date().toISOString() })],
+          [JSON.stringify(remaining), JSON.stringify({ recording_sid: chosen.recording_sid, by: req.technicianId || null, at: new Date().toISOString(), previous_recording_sid: call.recording_sid || null })],
         ),
         updated_at: new Date(),
       });
     if (!swapped) return res.status(409).json({ error: 'A pass claimed this call while the swap was being made. Try again.', reason: 'already_processing' });
-    await db('triage_items')
-      .where({ call_log_id: call.id, reason_code: 'additional_recording' })
-      .whereIn('status', ['open', 'in_progress'])
-      .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Adopted ${chosen.recording_sid}` })
-      .catch(() => {});
     logger.info(`[call-recordings] operator adopted recording ${maskSid(chosen.recording_sid)} on call ${call.id}; reprocessing`);
     const result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true });
-    if (result?.skipped && result?.reason === 'already_processing') {
-      return res.status(409).json({ ...result, error: 'The recording was adopted but another pass is still working this call; Reprocess once it goes quiet.' });
+    if (result?.success === true) {
+      // Only a completed pass closes the review card; a deferred or failed
+      // one leaves it open with the row queued for the sweep.
+      await db('triage_items')
+        .where({ call_log_id: call.id, reason_code: 'additional_recording' })
+        .whereIn('status', ['open', 'in_progress'])
+        .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Adopted ${chosen.recording_sid}` })
+        .catch(() => {});
+      return res.json({ success: true, adopted: chosen.recording_sid, result });
     }
-    res.json({ success: true, adopted: chosen.recording_sid, result });
+    if (result?.skipped && result?.reason === 'already_processing') {
+      return res.status(409).json({ ...result, adopted: chosen.recording_sid, error: 'The recording was adopted but another pass is still working this call; the sweep will process the adopted audio once it goes quiet.' });
+    }
+    res.json({
+      success: false,
+      adopted: chosen.recording_sid,
+      queued: true,
+      result,
+      error: 'The recording was adopted and queued; the immediate pass did not complete, so the next sweep will process it. The review card stays open until it does.',
+    });
   } catch (err) { next(err); }
 });
 
