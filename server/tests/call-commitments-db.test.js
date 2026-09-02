@@ -207,6 +207,23 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(proof).toBeNull();
   });
 
+  test('an invoice on the visit booked from this call counts only when paid AFTER the call', async () => {
+    const call = await db('call_log').where({ id: callId }).first();
+    const [visit] = await db('scheduled_services').insert({ scheduled_date: '2026-09-11', service_type: 'General Pest Control', status: 'completed', source_call_log_id: callId }).returning('id');
+    cleanup.visitIds.push(visit.id);
+    const [payer] = await db('customers').insert({ first_name: 'Payer', phone: '+15555550199' }).returning('id');
+    cleanup.customerIds.push(payer.id);
+    const [inv] = await db('invoices').insert({ customer_id: payer.id, scheduled_service_id: visit.id, token: 'pay-' + callId.slice(0, 8), invoice_number: 'PAY-' + callId.slice(0, 6), total: 99, status: 'paid', paid_at: new Date(call.created_at.getTime() - 24 * 60 * 60 * 1000) }).returning('id');
+    try {
+      // Paid before the call: neither the direct path nor the same-customer hint.
+      expect(await cc.resolveFulfillment(db, { kind: 'make_payment' }, { ...call, customer_id: payer.id })).toBeNull();
+      await db('invoices').where({ id: inv.id }).update({ paid_at: new Date(Date.now() - 60 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'make_payment' }, { ...call, customer_id: payer.id })).toMatchObject({ kind: 'invoice_paid', record_id: inv.id, strength: 'direct' });
+    } finally {
+      await db('invoices').where({ id: inv.id }).del();
+    }
+  });
+
   test('an estimate on a REUSED lead that was sent before the call is not this call\'s proof; one sent after it is direct proof', async () => {
     const call = await db('call_log').where({ id: callId }).first();
     const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000) }).returning('id');

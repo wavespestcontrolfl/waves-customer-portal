@@ -699,10 +699,13 @@ async function resolveFulfillment(conn, commitment, call) {
       return msg ? { kind: "inbound_media", record_type: "message", record_id: msg.id, matched_at: msg.created_at, strength: "association", basis: `inbound_message_with_media_from_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "make_payment": {
+      // Paid AFTER the call, like every other match: a visit re-linked to
+      // this call during a reprocess can carry an invoice paid before it.
       const direct = await conn("invoices as i")
         .join("scheduled_services as ss", "ss.id", "i.scheduled_service_id")
         .where("ss.source_call_log_id", call.id)
         .whereNotNull("i.paid_at")
+        .where("i.paid_at", ">", after)
         .orderBy("i.paid_at", "asc")
         .first("i.id", "i.paid_at")
         .catch(() => null);
