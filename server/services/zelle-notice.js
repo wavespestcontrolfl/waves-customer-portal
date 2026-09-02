@@ -110,9 +110,8 @@ function memoInvoiceNumbers(memo) {
 // is not. The header is parsed structurally (RFC 8601): clauses are split on
 // ';' OUTSIDE quoted strings and parenthesised comments, quoted strings and
 // comments are then dropped, and only a clause that itself STARTS with
-// `dkim=pass` is read — so `dkim=pass header.i=@capitalone.com` smuggled
-// inside a quoted envelope local part or a comment (even one that tries to
-// close the comment from inside a quoted run) can never count. The
+// `dkim=pass` is read; a comment containing a quote or backslash (the
+// ingredients of every break-out payload) makes the whole header untrusted. The
 // signing identity is read after its LAST '@' and its org-domain must be
 // capitalone.com (public-suffix aware, so capitalone.com.evil.example fails).
 // Skip a quoted run starting at text[i] === '"', honouring backslash
@@ -124,6 +123,11 @@ function skipQuoted(text, i) {
   }
   return text.length;
 }
+// Top-level method clauses of an Authentication-Results header. Quoted
+// strings are skipped (escape-aware) and comments are dropped. FAIL CLOSED
+// on anything a genuine Google header never carries inside a comment — a
+// quote or a backslash — because those are exactly the characters every
+// break-out payload needs; such a header yields NO clauses at all.
 function authResultClauses(authResults) {
   const text = String(authResults || '');
   const clauses = [];
@@ -131,17 +135,19 @@ function authResultClauses(authResults) {
   let depth = 0;
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i];
-    if (ch === '\\') { if (depth === 0) cur += text.slice(i, i + 2); i += 1; continue; }
-    if (ch === '"') { i = skipQuoted(text, i); continue; }
     if (depth > 0) {
+      if (ch === '"' || ch === '\\') return [];
       if (ch === '(') depth += 1;
       else if (ch === ')') depth -= 1;
       continue;
     }
+    if (ch === '"') { i = skipQuoted(text, i); continue; }
+    if (ch === '\\') { i += 1; continue; }
     if (ch === '(') { depth = 1; continue; }
     if (ch === ';') { clauses.push(cur); cur = ''; continue; }
     cur += ch;
   }
+  if (depth > 0) return [];
   clauses.push(cur);
   return clauses.map((c) => c.replace(/\s+/g, ' ').trim().toLowerCase()).filter(Boolean);
 }
