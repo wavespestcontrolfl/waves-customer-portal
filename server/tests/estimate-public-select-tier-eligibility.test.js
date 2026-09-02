@@ -153,9 +153,16 @@ describe('selectTierCeiling', () => {
     })).toBe('Silver');
   });
 
-  test('stored result tier, then the raw engineResult tier (engine casing normalized)', () => {
+  test('stored result tier, then the raw engine shapes (engine casing normalized)', () => {
     expect(selectTierCeiling({ result: { recurring: { waveGuardTier: 'Gold' } } })).toBe('Gold');
     expect(selectTierCeiling({ engineResult: { waveGuard: { tier: 'platinum' } } })).toBe('Platinum');
+    // Raw engine output stored under result / at the root — an existing
+    // member's prior services are folded into that tier, so the row-count
+    // fallback must never run for these shapes.
+    expect(selectTierCeiling({ result: { waveGuard: { tier: 'gold' }, lineItems: [{ service: 'pest_control' }] } })).toBe('Gold');
+    expect(selectTierCeiling({ waveGuard: { tier: 'silver' }, lineItems: [{ service: 'pest_control' }] })).toBe('Silver');
+    expect(serviceOptOutEngineTierReference({ result: { waveGuard: { tier: 'gold' } } })).toBe('gold');
+    expect(serviceOptOutEngineTierReference({ waveGuard: { tier: 'silver' } })).toBe('silver');
   });
 
   test('legacy blob with no engine tier resolves from its qualifying recurring rows (palm never counts)', () => {

@@ -96,17 +96,21 @@ function serviceOptOutBlockedByProposal(estData = {}) {
 
 // The engine's own tier for the CURRENT mix, read from the stored carriers:
 // the last opt-out commit's stamp, else the mapped result, else the raw
-// engineResult (engine-only estimates store the tier there — without it a
-// select-tier override on one is not recognized, /data advertises the
-// controls, and the PUT overwrites the selection; codex #3684 r2 P1). Null
-// when no carrier holds one. Shared by the opt-out self-serve gate and the
-// select-tier eligibility ceiling so the two never disagree about what the
-// engine wrote.
+// engine shapes — the top-level engineResult (engine-only estimates store the
+// tier there — without it a select-tier override on one is not recognized,
+// /data advertises the controls, and the PUT overwrites the selection; codex
+// #3684 r2 P1), a raw result stored under `result` (the shape the win/loss
+// and pricing-audit readers already accept), and a raw result at the root.
+// Null when no carrier holds one. Shared by the opt-out self-serve gate and
+// the select-tier eligibility ceiling so the two never disagree about what
+// the engine wrote.
 function serviceOptOutEngineTierReference(estData = {}) {
   return estData?.serviceOptOut?.engineTier
     || estData?.result?.recurring?.waveGuardTier
     || estData?.result?.recurring?.tier
     || estData?.engineResult?.waveGuard?.tier
+    || estData?.result?.waveGuard?.tier
+    || estData?.waveGuard?.tier
     || null;
 }
 
