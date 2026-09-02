@@ -74,6 +74,7 @@ describe('parseField (the Policy panel contract)', () => {
     ['min_score', 101, /≤ 100/], ['min_score', -1, /≥ 0/], ['min_score', 1.5, /integer/], ['min_score', 'x', /number/],
     ['min_score', null, /cannot be empty/], ['nope', 1, /unknown policy field/], ['preferred_provider', 'human2', /one of/],
     ['auto_free_acquisition', 'yes', /boolean/], ['min_path_confidence', 1.2, /≤ 1/],
+    ['min_path_confidence', 0.655, /at most 2 decimal places/], ['auto_paid_min_d30_confidence', '0.123', /at most 2 decimal places/],
   ])('%s = %p rejects', (name, value, re) => {
     expect(P.parseField(name, value, null).error).toMatch(re);
   });
@@ -84,6 +85,8 @@ describe('parseField (the Policy panel contract)', () => {
     expect(P.parseField('presentment_window_days', 12, 10)).toEqual({ value: 12 });
     expect(P.parseField('auto_free_acquisition', 'true', false)).toEqual({ value: true });
     expect(P.parseField('preferred_provider', 'stagehand', 'deterministic_runner')).toEqual({ value: 'stagehand' });
+    expect(P.parseField('min_path_confidence', '0.70', 0.6)).toEqual({ value: 0.7 });
+    expect(P.parseField('auto_paid_min_d30_confidence', 0.65, null)).toEqual({ value: 0.65 });
   });
 });
 

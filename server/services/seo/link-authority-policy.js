@@ -55,11 +55,11 @@ const POLICY_FIELDS = Object.freeze({
   owner_monthly_budget_cents: { type: 'int', nullable: true, min: 0, default: null },
   max_auto_purchase_cents: { type: 'int', min: 0, default: 0 },
   auto_paid_min_score: { type: 'int', nullable: true, min: 0, max: 100, default: null },
-  auto_paid_min_d30_confidence: { type: 'number', nullable: true, min: 0, max: 1, default: null },
+  auto_paid_min_d30_confidence: { type: 'number', nullable: true, min: 0, max: 1, scale: 2, default: null }, // DECIMAL(3,2)
   min_score: { type: 'int', min: 0, max: 100, default: 60 },
   membership_requires_owner: { type: 'boolean', default: true },
   legal_attestation_requires_owner: { type: 'boolean', default: true },
-  min_path_confidence: { type: 'number', min: 0, max: 1, default: 0.6 },
+  min_path_confidence: { type: 'number', min: 0, max: 1, scale: 2, default: 0.6 },      // DECIMAL(3,2)
   max_spam_score: { type: 'int', min: 0, default: 10 },
   preferred_provider: { type: 'enum', values: ATTEMPT_PROVIDERS, default: 'deterministic_runner' },
 });
@@ -127,6 +127,10 @@ function parseField(name, value, current) {
   const n = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(n)) return { error: `${name} must be a number` };
   if (spec.type === 'int' && !Number.isInteger(n)) return { error: `${name} must be an integer` };
+  // DECIMAL(3,2) columns store two places: a finer value would be rounded by
+  // Postgres, so the stored threshold and the audit row would disagree with
+  // what the owner typed — refuse it instead.
+  if (spec.scale !== undefined && Math.round(n * 10 ** spec.scale) / 10 ** spec.scale !== n) return { error: `${name} allows at most ${spec.scale} decimal places` };
   if (spec.min !== undefined && n < spec.min) return { error: `${name} must be ≥ ${spec.min}` };
   if (spec.max !== undefined && n > spec.max) return { error: `${name} must be ≤ ${spec.max}` };
   if (spec.raiseOnly && current !== null && current !== undefined && n < current) {
