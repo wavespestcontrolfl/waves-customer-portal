@@ -19,7 +19,9 @@ jest.mock('../models/db', () => {
   return mockDb;
 });
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: jest.fn(() => true),
+  // Every gate on — except the pricing-authority send gate (#3750), whose
+  // verdict these unstamped fixtures don't model.
+  isEnabled: jest.fn((key) => key !== 'sendRequiresServerPricing'),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -194,7 +196,7 @@ beforeEach(() => {
     }
     return sql;
   });
-  isEnabled.mockReturnValue(true);
+  isEnabled.mockImplementation((key) => key !== 'sendRequiresServerPricing');
   inferEstimateServiceLines.mockReturnValue([{ key: 'pest' }]);
   customerConvertedSince.mockResolvedValue({ converted: false });
   leadIdForEstimate.mockResolvedValue(null);

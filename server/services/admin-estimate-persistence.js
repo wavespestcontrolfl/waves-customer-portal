@@ -2061,19 +2061,32 @@ async function createOrReuseAdminEstimate({
     // the new sibling joins (or starts) its group. Resolved inside the
     // transaction so the anchor's minted group id and the sibling's insert
     // commit together.
+    // A NEW property joining a group is judged like a revision moving into
+    // it (uncapped codex P1 r13), in the ONE lock order every send/schedule
+    // path uses — the group's advisory lock BEFORE any estimate row lock
+    // (pre-push codex P1 r15: ensureEstimateGroupId FOR UPDATEs the anchor,
+    // so the anchor's current group is read and locked first; a group minted
+    // for a still-ungrouped anchor has no sends to race and is locked once
+    // its id exists). Then the scheduled / mid-send verdict for an
+    // unverified write: a fallback-priced property added after the anchor
+    // was scheduled would otherwise be refused by the cron's group preflight
+    // and fail the anchor. Re-acquiring a held advisory xact lock is a no-op.
+    const joining = { id: null, estimate_group_id: null };
     if (body.groupWithEstimateId) {
+      const anchorRow = await trx('estimates').where({ id: body.groupWithEstimateId }).first('estimate_group_id');
+      const anchorGroupId = anchorRow?.estimate_group_id || null;
+      if (anchorGroupId) {
+        await lockScheduledGroupGuardGroups(trx, joining, { ...writeFields, estimate_group_id: anchorGroupId });
+      }
       writeFields.estimate_group_id = await ensureEstimateGroupId(trx, body.groupWithEstimateId, writeFields);
+      if (anchorGroupId && String(writeFields.estimate_group_id) !== String(anchorGroupId)) {
+        throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
+      }
     } else if (writeFields.estimate_group_id) {
+      await lockScheduledGroupGuardGroups(trx, joining, writeFields);
       await assertGroupAssignmentAllowed(trx, writeFields.estimate_group_id, writeFields);
     }
-    // A NEW property joining a group is judged like a revision moving into
-    // it (uncapped codex P1 r13): the group's advisory lock first — the same
-    // order every other path uses, and before the lead/draft row locks below
-    // — then the scheduled / mid-send verdict for an unverified write. A
-    // fallback-priced property added after the anchor was scheduled would
-    // otherwise be refused by the cron's group preflight and fail the anchor.
     if (writeFields.estimate_group_id) {
-      const joining = { id: null, estimate_group_id: null };
       await lockScheduledGroupGuardGroups(trx, joining, writeFields);
       await assertNoFallbackRevisionInScheduledGroup(trx, joining, writeFields);
     }
