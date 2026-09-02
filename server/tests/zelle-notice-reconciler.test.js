@@ -119,6 +119,11 @@ describe('gate', () => {
 });
 
 describe('not ours', () => {
+  test('initial-sync history (backfill) ⇒ false before any read — old notices never settle today\'s invoices', async () => {
+    expect(await maybeHandleZelleNotice(notice(), { backfill: true })).toBe(false);
+    expect(db).not.toHaveBeenCalled();
+  });
+
   test('ordinary mail ⇒ false, no reads', async () => {
     expect(await maybeHandleZelleNotice(notice({ subject: 'Hello', body_text: 'Can you come Tuesday?', snippet: 'Can you' }))).toBe(false);
     expect(db).not.toHaveBeenCalled();
@@ -338,6 +343,23 @@ describe('park reasons', () => {
   });
 });
 
+describe('owner surfacing under the bell policy', () => {
+  test('a parked notice defaults the bell ON (bellDefault — owner override still wins); an applied FYI does not', async () => {
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async () => []);
+    expect(await maybeHandleZelleNotice(notice())).toBe(true); // no_match → parked
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment needs review', expect.any(String), expect.objectContaining({ bellDefault: true }));
+    jest.clearAllMocks();
+    tables.inbound_payment_notices.returning = []; tables.inbound_payment_notices.calls = [];
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    const applied = NotificationService.notifyAdmin.mock.calls.find(([, title]) => title === 'Zelle payment applied');
+    expect(applied).toBeTruthy();
+    expect(applied[3].bellDefault).toBeUndefined();
+  });
+});
+
 describe('stale claim recovery', () => {
   test('a processing row older than the window is parked apply_failed for the operator, stamped and surfaced; the sweep runs on every notice', async () => {
     tables.inbound_payment_notices.selects = [[{ id: 'notice-old', email_id: 'email-old', payer_name: 'Old Payer', amount_cents: 5000 }]];
@@ -396,8 +418,13 @@ describe('sync wiring', () => {
     const classify = src.indexOf("require('./email-classifier')");
     expect(hook).toBeGreaterThan(-1);
     expect(hook).toBeLessThan(classify);
-    expect(src).toMatch(/zelleHandled = await maybeHandleZelleNotice\(email\)/);
+    expect(src).toMatch(/zelleHandled = await offerZelleNotice\(email, \{ backfill \}\)/);
+    expect(src).toMatch(/return await maybeHandleZelleNotice\(email, \{ backfill \}\)/);
     expect(src).toMatch(/if \(!proofHandled && !approvalControl && !zelleHandled && /);
+    // A hook throw marks the row for a targeted re-offer; the existing-email
+    // branch re-offers ONLY marked rows (never a gate-flip replay of history).
+    expect(src).toMatch(/whereNull\('auto_action'\)\.update\(\{ auto_action: ZELLE_RETRY_MARK/);
+    expect(src).toMatch(/if \(existing\.auto_action === ZELLE_RETRY_MARK\) \{\s*await offerZelleNotice\(/);
     expect(src).toMatch(/\(proofHandled \|\| approvalControl \|\| zelleHandled\) && await bellClaimColumnExists\(\)/);
     // The stale-claim sweep runs on every sync beside the bell sweep.
     expect(src).toMatch(/sweepUnclaimedCustomerEmailBells\(\)[\s\S]{0,600}require\('\.\.\/zelle-notice-reconciler'\)\.sweepStaleClaims\(\)/);

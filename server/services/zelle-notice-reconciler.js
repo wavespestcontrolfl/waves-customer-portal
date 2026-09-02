@@ -11,6 +11,8 @@
  *
  *   1. gate off                         → false (nothing read, email flows as today)
  *   2. not a notice (marker text)       → false
+ *      initial-sync history (backfill)  → false (old notices are never a live
+ *                                         money signal against today's invoices)
  *   3. untrusted sender                 → parked `sender_unverified`, return FALSE
  *                                         (normal classification / spam handling still runs)
  *   4. template not parseable           → parked `parse_failed`
@@ -101,13 +103,18 @@ async function stampEmail(emailId, autoAction) {
   }).catch((err) => logger.warn(`[zelle-notice] auto_action stamp failed for ${emailId}: ${err.message}`));
 }
 
-async function notifyOwner(title, body, noticeId) {
+// `needsReview`: a PARKED notice is an exception the owner must act on, so
+// its feed row defaults ON under the admin bell policy (bellDefault — the
+// owner's saved 'payment' override still silences it); the applied FYI keeps
+// the policy default (silent).
+async function notifyOwner(title, body, noticeId, { needsReview = false } = {}) {
   try {
     const NotificationService = require('./notification-service');
     await NotificationService.notifyAdmin('payment', title, body, {
       link: '/admin/invoices',
       dedupeKey: `zelle-notice:${noticeId}`,
       metadata: { noticeId },
+      ...(needsReview ? { bellDefault: true } : {}),
     });
   } catch (err) {
     logger.warn(`[zelle-notice] owner notification failed for ${noticeId}: ${err.message}`);
@@ -131,6 +138,7 @@ async function finishParked(notice, email, reason, { candidates = null, applyErr
     'Zelle payment needs review',
     `${notice.payer_name || 'Unknown payer'} sent${amount} — ${reason.replace(/_/g, ' ')}${applyError ? `: ${applyError}` : ''}`,
     notice.id,
+    { needsReview: true },
   );
   return { status: 'parked', reason };
 }
@@ -220,7 +228,7 @@ async function recoverStaleClaims() {
     if (!took) continue;
     logger.warn(`[zelle-notice] recovered a stale processing claim ${row.id} (email ${row.email_id}) → parked`);
     await stampEmail(row.email_id, 'zelle_notice_parked:apply_failed');
-    await notifyOwner('Zelle payment needs review', `${row.payer_name || 'Unknown payer'} sent${row.amount_cents != null ? ` $${(row.amount_cents / 100).toFixed(2)}` : ''} — sync interrupted before settlement`, row.id);
+    await notifyOwner('Zelle payment needs review', `${row.payer_name || 'Unknown payer'} sent${row.amount_cents != null ? ` $${(row.amount_cents / 100).toFixed(2)}` : ''} — sync interrupted before settlement`, row.id, { needsReview: true });
   }
   return stale.length;
 }
@@ -320,9 +328,13 @@ async function exactOpenInvoices(parsed) {
 
 // Returns true when the email was a Zelle notice this reconciler owns (the
 // sync skips classification); false when the email should flow as today.
-async function maybeHandleZelleNotice(email) {
+async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
   if (!isZelleReconcileEnabled()) return false;
   if (!email || !isZelleNoticeCandidate(email)) return false;
+  if (backfill) {
+    logger.info(`[zelle-notice] ${email.id} is initial-sync history — not a live money signal, flowing as ordinary mail`);
+    return false;
+  }
   await recoverStaleClaims().catch((err) => logger.warn(`[zelle-notice] stale-claim recovery failed: ${err.message}`));
 
   const trusted = isTrustedZelleSender(email);

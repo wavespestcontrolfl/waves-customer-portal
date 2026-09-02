@@ -224,6 +224,28 @@ async function incrementalSync(state) {
   }
 }
 
+// Capital One Zelle payment notices are deterministic money signals —
+// matched and settled (or parked) BEFORE any AI classification, awaited so
+// the sync cursor never advances past a notice whose ledger write / receipt
+// has not finished. Gated + fail-closed inside the handler
+// (GATE_ZELLE_NOTICE_RECONCILE); a throw must never break the sync loop —
+// the email row is marked for a targeted re-offer on the next sync instead
+// (the reconciler's own stamp overwrites the mark once it decides).
+// `true` = the reconciler owns the email (skip classification); `false` =
+// not a trusted notice, flow exactly as today.
+const ZELLE_RETRY_MARK = 'zelle_notice_retry';
+async function offerZelleNotice(email, { backfill }) {
+  try {
+    const { maybeHandleZelleNotice } = require('../zelle-notice-reconciler');
+    return await maybeHandleZelleNotice(email, { backfill });
+  } catch (err) {
+    logger.error(`[email-sync] Zelle notice check failed for ${email.id}: ${err?.message || err}`);
+    await db('emails').where({ id: email.id }).whereNull('auto_action').update({ auto_action: ZELLE_RETRY_MARK, updated_at: new Date() })
+      .catch((e) => logger.warn(`[email-sync] could not mark ${email.id} for Zelle retry: ${e.message}`));
+    return false;
+  }
+}
+
 async function upsertEmail(parsed, { backfill = false } = {}) {
   const existing = await db('emails').where('gmail_id', parsed.gmail_id).first();
 
@@ -289,6 +311,14 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
     // Crash-recovery: a row inserted by a sync that died before its bell
     // fired is re-seen here. Ring at most once (idempotent on emailId).
     await recoverLostCustomerEmailBell(existing, { customerId, parsed, backfill }).catch(() => {});
+    // A Zelle notice whose first pass threw BEFORE its claim row existed is
+    // re-offered here (GH codex r1 P1) — only rows the hook marked
+    // zelle_notice_retry, so the gate flipping on later never re-plays old
+    // notices against today's invoices. The claim is at-most-once
+    // (email_id UNIQUE): an already-claimed notice decides nothing.
+    if (existing.auto_action === ZELLE_RETRY_MARK) {
+      await offerZelleNotice({ ...existing, authentication_results: parsed.authentication_results || existing.authentication_results }, { backfill });
+    }
     const labelIds = parsed.label_ids || [];
     // Update read/starred/archive label status
     await db('emails').where('id', existing.id).update({
@@ -417,21 +447,10 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   // to false (Codex r10).
   const approvalControl = approvalControlEarly;
 
-  // Capital One Zelle payment notices are deterministic money signals —
-  // matched and settled (or parked) BEFORE any AI classification, awaited
-  // so the sync cursor never advances past a notice whose ledger write /
-  // receipt has not finished. Gated + fail-closed inside the handler
-  // (GATE_ZELLE_NOTICE_RECONCILE); a throw here must never break the sync
-  // loop. `true` = the reconciler owns the email (skip classification);
-  // `false` = not a trusted notice, flow exactly as today.
+  // Zelle notice pre-classify step (see offerZelleNotice).
   let zelleHandled = false;
   if (!proofHandled && !approvalControl) {
-    try {
-      const { maybeHandleZelleNotice } = require('../zelle-notice-reconciler');
-      zelleHandled = await maybeHandleZelleNotice(email);
-    } catch (err) {
-      logger.error(`[email-sync] Zelle notice check failed for ${email.id}: ${err?.message || err}`);
-    }
+    zelleHandled = await offerZelleNotice(email, { backfill });
   }
 
   // Control messages never ring AND must never reach the recovery sweep,
