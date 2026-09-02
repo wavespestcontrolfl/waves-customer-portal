@@ -3255,7 +3255,18 @@ router.put('/:id/proposal', async (req, res, next) => {
     // the authoritative totals + proposal JSON, so block it once the estimate
     // has left the editable window — otherwise a late edit corrupts a locked
     // accepted price, or races a send into a stale-PDF / clobbered-proposal split.
-    if (estimate.price_locked_at || ['accepted', 'declined', 'expired', 'sending'].includes(estimate.status)) {
+    // An EXPIRED proposal the pricing-authority gate refuses (no editor
+    // provenance yet — saved before the marker existed) has no other way
+    // back (uncapped codex P1 r32 on #3750): the extension is refused until
+    // the row carries provenance, and only this editor can stamp it. Mirror
+    // the ordinary expired-row recovery: the re-save is allowed, leaves the
+    // row expired, and the operator extends it afterwards.
+    const { expiredRowRecoverableUnderGate } = require('../services/admin-estimate-persistence');
+    const expiredRecovery = estimate.status === 'expired' && expiredRowRecoverableUnderGate(estimate);
+    const closedStatuses = expiredRecovery
+      ? ['accepted', 'declined', 'sending']
+      : ['accepted', 'declined', 'expired', 'sending'];
+    if (estimate.price_locked_at || closedStatuses.includes(estimate.status)) {
       return res.status(409).json({
         error: estimate.price_locked_at
           ? 'This estimate is price-locked (accepted) and can no longer be re-priced.'
@@ -3543,25 +3554,41 @@ router.put('/:id/proposal', async (req, res, next) => {
     // verdict and the handoff and put authored pricing on the automated
     // link. Same lock order as every send/schedule path (group, then row);
     // a group with a member mid-send is refused for a retry.
+    // Membership is observed INSIDE the transaction and pinned on the write
+    // (uncapped codex P0 + GH codex P1 r32): the pre-transaction read can be
+    // stale — a row moved into another group after it would otherwise be
+    // rewritten under the wrong group's lock. Group lock first, then the row
+    // lock; a membership change between the two reads is refused for a
+    // retry. "In flight" is any member that is 'sending' OR still holds a
+    // fresh delivery claim (GH codex P1 r32): an anchor accepted mid-handoff
+    // leaves 'sending' while the automated link is still being delivered.
+    const retry = (message) => { const err = new Error(message); err.statusCode = 409; return err; };
     const updatedCount = await db.transaction(async (trx) => {
-    if (estimate.estimate_group_id) {
+    const observed = await trx('estimates').where({ id: estimate.id }).first('id', 'estimate_group_id');
+    if (!observed) throw retry('This estimate changed while you were editing — reload and retry.');
+    const groupId = observed.estimate_group_id || null;
+    if (groupId) {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['estimate-group-send', String(estimate.estimate_group_id)],
+        ['estimate-group-send', String(groupId)],
       );
-      const sendingMember = await trx('estimates')
-        .where({ estimate_group_id: estimate.estimate_group_id, status: 'sending' })
+    }
+    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'estimate_group_id', 'status');
+    if (!locked || (locked.estimate_group_id || null) !== groupId) {
+      throw retry('This estimate changed groups while you were editing — reload and retry.');
+    }
+    if (groupId) {
+      const inFlightMember = await trx('estimates')
+        .where({ estimate_group_id: groupId })
         .whereNot({ id: estimate.id })
         .whereNull('archived_at')
+        .where((q) => q.where({ status: 'sending' }).orWhereRaw(`NOT (${DELIVERY_CLAIM_NOT_LIVE_SQL})`))
         .first('id');
-      if (sendingMember) {
-        const err = new Error('This multi-property group is being sent right now — wait a moment and retry.');
-        err.statusCode = 409;
-        throw err;
-      }
+      if (inFlightMember) throw retry('This multi-property group is being sent right now — wait a moment and retry.');
     }
     const updateQuery = trx('estimates')
       .where({ id: estimate.id })
+      .modify((qb) => (groupId ? qb.where({ estimate_group_id: groupId }) : qb.whereNull('estimate_group_id')))
       .whereNull('price_locked_at')
       // An ARCHIVED row is not editable (codex P1, PR #3304): a linkage
       // invalidation archiving the draft between this route's pre-read
@@ -3579,7 +3606,7 @@ router.put('/:id/proposal', async (req, res, next) => {
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
-      .whereNotIn('status', ['accepted', 'declined', 'expired', 'sending']);
+      .whereNotIn('status', closedStatuses);
     // Payment terms are predicated on bill_by_invoice AT WRITE TIME too — a
     // concurrent PATCH turning invoice mode off between the pre-read guard
     // and this UPDATE must not persist a term no billing path enforces
