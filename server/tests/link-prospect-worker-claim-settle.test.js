@@ -247,7 +247,7 @@ test('the lease stamps the path revision; a same-path change that lands while le
   path.revision = 3;
   const rep = await worker.report({ prospect_id: 'r1', outcome: 'failed', lease_token: claimed.lease_token });
   expect(rep.ok).toBe(true);
-  expect(row).toMatchObject({ claimed_at: null, path_id: 'p-live', automation_policy: null, last_classified_at: null }); // reconciled at release: unclassified for the changed route
+  expect(row).toMatchObject({ claimed_at: null, path_id: 'p-live', automation_policy: null, last_classified_at: null, leased_path_revision: null }); // reconciled at release: unclassified for the changed route; the stamp is consumed
   // an unchanged path releases without a transition
   const row2 = { id: 'r2', status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, attempts: 0, automation_policy: 'submit_free', last_classified_at: new Date('2026-08-01'), priority: 'high', domain_rating: 40, target_domain: 'example.com', path_id: 'p-live', target_url: 'https://example.com/join', quality_signals: null };
   mockStore.seo_link_prospects.push(row2);

@@ -81,3 +81,18 @@ test('the move is optimistic on the outreach state it read — a send starting i
   expect(await settleRetiredPlacements(db, { pathIds: ['p-old'], successor: next, now: NOW })).toBe(0);
   expect(drafted).toMatchObject({ path_id: 'p-old', outreach_status: 'sending', outreach_send_token: 'tok-9' });
 });
+
+test('a same-path reconcile at release fires ONCE per lease, syncs the execution URL (even to null), and clears the stamp', async () => {
+  const live = { id: 'p-live', submission_url: null, superseded_by: null, link_type: 'editorial', revision: 3, confidence: 0.7 };
+  const row = { id: 'r1', path_id: 'p-live', claimed_at: null, link_type: 'editorial', target_url: 'https://example.com/old-form', automation_policy: null, leased_path_revision: 2, outreach_status: 'drafted', outreach_send_token: 'tok', outreach_to_email: 'ed@example.com', outreach_sent_at: null };
+  const db = makeDb({ seo_link_acquisition_paths: [live], seo_link_prospects: [row] });
+  expect(await settleRetiredPlacements(db, { prospectIds: ['r1'], now: NOW })).toBe(1);
+  expect(row).toMatchObject({ target_url: null, leased_path_revision: null, outreach_status: 'none', outreach_send_token: null }); // URL synced to the path's (none); draft for the old route cleared
+  expect(await settleRetiredPlacements(db, { prospectIds: ['r1'], now: NOW })).toBe(0); // stamp consumed — no second transition, no path_moved loop
+  // a row never leased on the path (no stamp) is not reconciled by a same-path change
+  const idle = { id: 'r2', path_id: 'p-live', claimed_at: null, link_type: 'editorial', target_url: 'https://example.com/pitch-page', automation_policy: null, leased_path_revision: null, outreach_status: 'none' };
+  db._tables.seo_link_prospects.push(idle);
+  expect(await settleRetiredPlacements(db, { prospectIds: ['r2'], now: NOW })).toBe(0);
+  expect(idle.target_url).toBe('https://example.com/pitch-page');
+});
+

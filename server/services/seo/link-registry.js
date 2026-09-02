@@ -406,18 +406,23 @@ function observedWhere(q, row) {
  * token on every move, so the approval queue never sends a message composed
  * for a route that no longer exists; the lane follows the successor.
  */
-function movePatch(row, target, now) {
+function movePatch(row, target, now, { syncUrl = false } = {}) {
   // locked outreach never moves AT ALL — same lane, other outreach lane, or
   // signup lane: a send may be executing against the path it was claimed
   // on, or the row awaits human reconciliation; the retired path stays
   // (nothing can claim it) and the attempt/send stays attributed to it
   if (OUTREACH_LOCKED.has(row.outreach_status) || row.outreach_sent_at) return null;
-  // the execution URL follows the successor; a URL-less successor (outreach)
+  // The transition CONSUMES the lease stamp: a same-path reconcile at release
+  // fires once per lease, never again on every later release or operator
+  // draft of the same (now settled) row.
+  const patch = { path_id: target.id, updated_at: now, automation_policy: null, last_classified_at: null, leased_path_revision: null };
+  // The execution URL follows the successor; a URL-less successor (outreach)
   // CLEARS it — the retired route must not survive as the page the outreach
-  // drafter fetches and cites, so the drafter falls back to the homepage
-  const patch = { path_id: target.id, updated_at: now, automation_policy: null, last_classified_at: null };
+  // drafter fetches and cites. A release-time reconcile of the SAME path
+  // (syncUrl) syncs it to the path's own URL even when that is now null; an
+  // investigator same-path refresh leaves an outreach row's pitch page alone.
   if (target.submission_url) patch.target_url = target.submission_url;
-  else if (target.id !== row.path_id) patch.target_url = null; // a real supersession onto a URL-less path; a same-path refresh leaves it
+  else if (target.id !== row.path_id || syncUrl) patch.target_url = null;
   // an UNSENT draft was written for the path it is leaving — on EVERY move
   // (same lane included) it is cleared with its token, so the approval
   // endpoint can never send a message composed for a retired route
@@ -430,10 +435,10 @@ function movePatch(row, target, now) {
 }
 
 async function settleRetiredPlacements(q, { pathIds = null, successor = null, prospectIds = null, now = new Date() } = {}) {
-  const moveRows = async (rows, target) => {
+  const moveRows = async (rows, target, opts) => {
     let moved = 0;
     for (const row of rows) {
-      const patch = movePatch(row, target, now);
+      const patch = movePatch(row, target, now, opts);
       if (!patch) continue;
       moved += await observedWhere(q, row).update(patch);
     }
@@ -471,9 +476,12 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
       // draft produced on a route just declared gone must not stay
       // sendable — the transition runs for that too.
       const leasedRev = r.leased_path_revision == null ? null : Number(r.leased_path_revision);
-      const revised = leasedRev != null && cur.revision != null && Number(cur.revision) > leasedRev;
+      if (leasedRev == null) continue; // not released from a lease on this path — nothing to reconcile
+      const revised = cur.revision != null && Number(cur.revision) > leasedRev;
       const disproven = cur.confidence != null && !(Number(cur.confidence) > 0);
       if (!revised && !disproven) continue;
+      moved += await moveRows([r], cur, { syncUrl: true }); // the path itself changed: its URL (even null) is the execution truth
+      continue;
     }
     moved += await moveRows([r], cur);
   }
