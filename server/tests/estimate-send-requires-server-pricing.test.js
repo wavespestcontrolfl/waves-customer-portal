@@ -199,7 +199,10 @@ describe('GATED_SEND_AUTHORITY_SQL — the gated manual claims re-assert the WHO
   it('is SERVER, or an authored proposal by provenance; a constant with no placeholders', () => {
     expect(GATED_SEND_AUTHORITY_SQL).toContain("UPPER(pricing_authority) = 'SERVER'");
     expect(GATED_SEND_AUTHORITY_SQL).toContain("UPPER(COALESCE(category, '')) = 'COMMERCIAL'");
-    expect(GATED_SEND_AUTHORITY_SQL).toContain("(estimate_data->'proposal'->>'enabled')::boolean");
+    // Strict JSONB equality to literal true — no ::boolean cast (a malformed
+    // legacy value must not throw, and textual booleans must not pass).
+    expect(GATED_SEND_AUTHORITY_SQL).toContain("estimate_data->'proposal'->'enabled' = 'true'::jsonb");
+    expect(GATED_SEND_AUTHORITY_SQL).not.toContain('::boolean');
     expect(GATED_SEND_AUTHORITY_SQL).not.toContain('?');
   });
 });

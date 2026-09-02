@@ -306,7 +306,12 @@ const SERVER_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
 // enabled flag). Evaluating the exemption in JS on the pre-read row let a
 // proposal disabled between the pre-read and the claim ride the stale
 // exemption straight to the customer (pre-push codex P0).
-const GATED_SEND_AUTHORITY_SQL = "(UPPER(pricing_authority) = 'SERVER' OR (UPPER(COALESCE(category, '')) = 'COMMERCIAL' AND COALESCE((estimate_data->'proposal'->>'enabled')::boolean, false)))";
+// The proposal flag is compared as JSONB to the literal true — never cast:
+// a legacy or malformed value would make ::boolean throw (send → 500), and
+// Postgres accepts textual booleans the JS `=== true` verdict does not.
+// This mirrors isAuthoredProposalRow exactly and fails closed (pre-push
+// codex P1).
+const GATED_SEND_AUTHORITY_SQL = "(UPPER(pricing_authority) = 'SERVER' OR (UPPER(COALESCE(category, '')) = 'COMMERCIAL' AND estimate_data->'proposal'->'enabled' = 'true'::jsonb))";
 function gatedSendAuthorityPredicateApplies() {
   return require('../config/feature-gates').isEnabled('sendRequiresServerPricing');
 }
