@@ -83,8 +83,10 @@ const mockNotifyAdmin = jest.fn(async () => {});
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 // The policy's linked-appointment fallback lazy-requires the route module —
 // stub it so tests never load the real (heavy) estimate-public.
+const mockMatchAcceptCustomerByPhone = jest.fn(async () => ({ match: null }));
 jest.mock('../routes/estimate-public', () => ({
   findLinkedUpcomingAppointment: jest.fn(async () => null),
+  matchAcceptCustomerByPhone: (...a) => mockMatchAcceptCustomerByPhone(...a),
 }));
 
 const {
@@ -118,6 +120,7 @@ beforeEach(() => {
   mockHasConsentFor.mockResolvedValue(false);
   mockHasEnrollmentScopedConsent.mockResolvedValue(false);
   mockFindConsentedChargeableCard.mockResolvedValue(null);
+  mockMatchAcceptCustomerByPhone.mockResolvedValue({ match: null });
 });
 afterAll(() => { delete process.env.RECURRING_CARD_ON_FILE; });
 
@@ -574,6 +577,41 @@ describe('createRecurringCardSetupIntentForEstimate', () => {
     it('fails toward card when the ach_status lookup throws', async () => {
       mockDbFixtures.customers = () => { throw new Error('db down'); };
       expect((await createRecurringCardSetupIntentForEstimate(EST)).paymentMethodTypes).toEqual(['card']);
+    });
+
+    // Unlinked estimates are judged on the customer the accept will LAND on
+    // (pre-push Codex P1): the phone match that the accept transaction runs.
+    describe('unlinked estimate (customer_phone only)', () => {
+      const UNLINKED = { id: 'est-1', customer_id: null, customer_phone: '9415551234' };
+
+      it('mints card-only when the phone matches an existing customer with an unhealthy bank', async () => {
+        mockMatchAcceptCustomerByPhone.mockResolvedValue({ match: { id: 'cust-existing' } });
+        mockDbFixtures.customers = { ach_status: 'suspended' };
+        expect((await createRecurringCardSetupIntentForEstimate(UNLINKED)).paymentMethodTypes).toEqual(['card']);
+      });
+
+      it('mints card_or_bank when the phone matches a healthy existing customer', async () => {
+        mockMatchAcceptCustomerByPhone.mockResolvedValue({ match: { id: 'cust-existing' } });
+        mockDbFixtures.customers = { ach_status: 'active' };
+        expect((await createRecurringCardSetupIntentForEstimate(UNLINKED)).paymentMethodTypes).toEqual(['card', 'us_bank_account']);
+      });
+
+      it('mints card_or_bank for a genuinely new customer (no match)', async () => {
+        mockMatchAcceptCustomerByPhone.mockResolvedValue({ match: null });
+        expect((await createRecurringCardSetupIntentForEstimate(UNLINKED)).paymentMethodTypes).toEqual(['card', 'us_bank_account']);
+      });
+
+      it('fails toward card when the phone match itself errors', async () => {
+        mockMatchAcceptCustomerByPhone.mockRejectedValue(new Error('lookup down'));
+        expect((await createRecurringCardSetupIntentForEstimate(UNLINKED)).paymentMethodTypes).toEqual(['card']);
+      });
+
+      it('re-judges the same match at accept-time verification', async () => {
+        mockMatchAcceptCustomerByPhone.mockResolvedValue({ match: { id: 'cust-existing' } });
+        mockDbFixtures.customers = { ach_status: 'needs_verification' };
+        mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_SI, payment_method_types: ['card', 'us_bank_account'], payment_method: { id: 'pm_b', type: 'us_bank_account' } });
+        expect((await verifyRecurringCardIntent({ estimate: UNLINKED, setupIntentId: 'seti_1' })).reason).toBe('bank_not_allowed');
+      });
     });
 
     it('stays card-only with the gate off regardless of customer state', async () => {

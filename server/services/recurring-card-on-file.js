@@ -117,6 +117,35 @@ async function resolveGroupedEstimateOwnerId(estimate, database = db) {
 //    inbox; auto-charging the HOMEOWNER's card would collect from the wrong
 //    party),
 //  - customers already on Auto Pay with a chargeable method (nothing to add).
+
+// The customer the accept transaction will actually land on. Sent estimates
+// often carry only customer_phone — the accept phone-matches an existing
+// profile — so every read-only policy decision runs the SAME unambiguous
+// match (Codex #2680 r3), grouped sibling BEFORE the phone match to mirror
+// the transaction's resolution order (see resolveGroupedEstimateOwnerId).
+// `lookupFailed` lets fail-closed callers refuse rather than assume "new
+// customer" when the match itself errored.
+async function resolveProspectiveAcceptCustomer(estimate) {
+  let customerId = estimate?.customer_id || null;
+  if (!customerId) {
+    customerId = await resolveGroupedEstimateOwnerId(estimate);
+  }
+  let lookupFailed = false;
+  if (!customerId && estimate?.customer_phone) {
+    try {
+      const gates = require('../routes/estimate-public');
+      if (typeof gates.matchAcceptCustomerByPhone === 'function') {
+        const { match } = await gates.matchAcceptCustomerByPhone(estimate);
+        customerId = match?.id || null;
+      }
+    } catch (err) {
+      lookupFailed = true;
+      logger.warn('[recurring-cof] phone-match customer lookup failed — card stays required', { error: err.message });
+    }
+  }
+  return { customerId, lookupFailed };
+}
+
 async function resolveRecurringCardPolicyForEstimate({
   estimate,
   membership = null,
@@ -150,23 +179,7 @@ async function resolveRecurringCardPolicyForEstimate({
   // enrollment-qualified saved card or active Auto Pay must not be forced
   // through a fresh SetupIntent (auto-satisfy contract, spec §3.2). A
   // failed lookup keeps the card required (fail toward protection).
-  let resolvedCustomerId = estimate?.customer_id || null;
-  // Grouped sibling BEFORE the phone match — mirrors the accept
-  // transaction's resolution order (see resolveGroupedEstimateOwnerId).
-  if (!resolvedCustomerId) {
-    resolvedCustomerId = await resolveGroupedEstimateOwnerId(estimate);
-  }
-  if (!resolvedCustomerId && estimate?.customer_phone) {
-    try {
-      const gates = require('../routes/estimate-public');
-      if (typeof gates.matchAcceptCustomerByPhone === 'function') {
-        const { match } = await gates.matchAcceptCustomerByPhone(estimate);
-        resolvedCustomerId = match?.id || null;
-      }
-    } catch (err) {
-      logger.warn('[recurring-cof] phone-match customer lookup failed — card stays required', { error: err.message });
-    }
-  }
+  const { customerId: resolvedCustomerId } = await resolveProspectiveAcceptCustomer(estimate);
 
   // Existing plan customer — snapshot first, then the LIVE fallback the
   // deposit resolver uses (legacy customer-linked estimates have no
@@ -297,16 +310,22 @@ const MAX_SETUP_INTENT_GENERATIONS = 5;
 // while customers.ach_status is needs_verification/suspended, so offering the
 // bank tab there would capture a method the enrollment then rejects. A
 // lookup failure fails toward card (the tender the accept gate always
-// accepts). No customer row yet (new signup) → card_or_bank.
+// accepts). The customer is the one the accept will LAND on — an unlinked
+// estimate is phone-matched exactly like the accept transaction (pre-push
+// Codex P1: judging only estimate.customer_id let an existing customer with
+// a suspended bank slip through as "new"). Genuinely new customer →
+// card_or_bank.
 async function resolveRecurringCaptureTender(estimate) {
   if (require('../config/feature-gates').gates.acceptAchCapture !== true) return 'card';
-  if (!estimate?.customer_id) return 'card_or_bank';
+  const { customerId, lookupFailed } = await resolveProspectiveAcceptCustomer(estimate);
+  if (lookupFailed) return 'card';
+  if (!customerId) return 'card_or_bank';
   try {
-    const row = await db('customers').where({ id: estimate.customer_id }).first('ach_status');
+    const row = await db('customers').where({ id: customerId }).first('ach_status');
     if (row?.ach_status && row.ach_status !== 'active') return 'card';
     return 'card_or_bank';
   } catch (err) {
-    logger.warn(`[recurring-cof] ach_status precheck failed for customer ${estimate.customer_id} — card-only capture: ${err.message}`);
+    logger.warn(`[recurring-cof] ach_status precheck failed for customer ${customerId} — card-only capture: ${err.message}`);
     return 'card';
   }
 }
