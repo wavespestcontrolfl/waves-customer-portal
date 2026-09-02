@@ -213,7 +213,13 @@ function collectJsonLdOffers(jsonLdStrings) {
           // Whether the markup DECLARED the currency (vs the USD default
           // above) — a consumer proving a currency claim must not accept the
           // default as evidence.
-          explicitCurrency: !o.__currencyConflict && !!(o.priceCurrency || (o.priceSpecification && o.priceSpecification.priceCurrency)),
+          // …and never when the offer contradicts ITSELF (priceCurrency USD
+          // beside priceSpecification.priceCurrency CAD) — the direct field
+          // is still reported above, but nothing may attest it.
+          explicitCurrency: !o.__currencyConflict
+            && !(o.priceCurrency && o.priceSpecification && o.priceSpecification.priceCurrency
+              && String(o.priceCurrency).toUpperCase() !== String(o.priceSpecification.priceCurrency).toUpperCase())
+            && !!(o.priceCurrency || (o.priceSpecification && o.priceSpecification.priceCurrency)),
         });
       }
     }

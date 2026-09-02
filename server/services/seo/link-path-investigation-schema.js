@@ -266,10 +266,11 @@ function validateInvestigation(data) {
     // replaces_path_id would let array order decide which one retires the
     // predecessor and inherits its placements (and their worker lane)
     if (p.replaces_path_id) {
-      if (replaces.has(p.replaces_path_id)) {
-        return { valid: false, errors: [`/paths/${i} names the same replaces_path_id as /paths/${replaces.get(p.replaces_path_id)} (${p.replaces_path_id}) — a predecessor has exactly one successor; name it on the path you observed replacing it`] };
+      const pred = String(p.replaces_path_id).toLowerCase(); // a UUID is case-insensitive — one predecessor, whatever the casing
+      if (replaces.has(pred)) {
+        return { valid: false, errors: [`/paths/${i} names the same replaces_path_id as /paths/${replaces.get(pred)} (${pred}) — a predecessor has exactly one successor; name it on the path you observed replacing it`] };
       }
-      replaces.set(p.replaces_path_id, i);
+      replaces.set(pred, i);
     }
   }
   return { valid: true, errors: [] };

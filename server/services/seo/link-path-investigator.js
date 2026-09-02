@@ -205,6 +205,9 @@ function evidencePagesOf(path) {
   return Array.isArray(inv.pages_fetched) ? inv.pages_fetched.filter((u) => typeof u === 'string') : [];
 }
 
+/** Every URL embedded in a provenance touch's detail (host-boundness is enforced by the caller). */
+const touchUrls = (t) => String((t && t.source_detail) || '').match(/https?:\/\/[^\s"'<>]+/g) || [];
+
 function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths = [], probeOffset = 0, probeMask = 0 } = {}) {
   const seen = new Set();
   const out = [];
@@ -232,9 +235,16 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
   for (const u of competitorUrls) push(u);
   // provenance details can be COMPOSITE ("paste:2026-09-01 https://…/apply",
   // CSV context + resolved URL) — extract every embedded URL rather than
-  // requiring the whole string to be one
-  for (const t of touches) {
-    for (const m of String(t.source_detail || '').match(/https?:\/\/[^\s"'<>]+/g) || []) push(m);
+  // requiring the whole string to be one. Touches NEVER covered by a pass
+  // (covered_at null — the persisted hint cursor) go first, rotated by the
+  // pass offset among themselves, so a hint-rich domain cannot keep the
+  // same prefix forever and starve the sixth hint that IS the route.
+  const uncoveredTouches = touches.filter((t) => !t.covered_at);
+  const coveredTouches = touches.filter((t) => !!t.covered_at);
+  const tm = uncoveredTouches.length || 1;
+  const tStart = ((probeOffset % tm) + tm) % tm;
+  for (const t of [...uncoveredTouches.slice(tStart), ...uncoveredTouches.slice(0, tStart), ...coveredTouches]) {
+    for (const m of touchUrls(t)) push(m);
   }
   // The probe list is longer than what the fetch cap leaves after the
   // homepage and hints, so probes the domain has NEVER been offered (per
@@ -576,14 +586,23 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
   // this investigation just proved unusable. (A www origin normalizes to
   // the same key, so only the scheme case needs the alias lookup.)
   let rekeyed = false;
-  if (!existing && workingUrlFor && workingUrlFor.size && row.submission_url) {
+  let aliasRow = null; // an active row still keyed on the DEAD apex identity of this same route
+  if (workingUrlFor && workingUrlFor.size && row.submission_url) {
     const mine = registry.normalizeSubmissionUrl(row.submission_url);
     for (const [originalKey, working] of workingUrlFor) {
       if (registry.normalizeSubmissionUrl(working) !== mine) continue;
-      existing = await trx('seo_link_acquisition_paths')
-        .where({ domain_id: domainId, path_key: registry.pathKey(row.acquisition_type, originalKey) }).whereNull('superseded_by').first('*');
-      if (existing) { rekeyed = true; break; }
+      const aliasKey = registry.pathKey(row.acquisition_type, originalKey);
+      if (aliasKey === row.path_key) continue;
+      aliasRow = await trx('seo_link_acquisition_paths')
+        .where({ domain_id: domainId, path_key: aliasKey }).whereNull('superseded_by').first('*');
+      if (aliasRow) break;
     }
+    // no row at the working key yet → the apex row IS this path: re-key it.
+    // A row already at the working key (https and http rows coexisted) →
+    // the apex row is MERGED: superseded into the working row below, so
+    // its placements settle onto the live route instead of stranding on a
+    // zero-confidence row with no successor chain.
+    if (aliasRow && !existing) { existing = aliasRow; aliasRow = null; rekeyed = true; }
   }
   let id;
   if (!existing) {
@@ -647,19 +666,26 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
     if (bump.revision_payment || bump.revision_communication || bump.revision_execution) patch.revision = Number(existing.revision) + 1;
     await trx('seo_link_acquisition_paths').where({ id: existing.id }).update(patch);
     id = existing.id;
-    // the execution URL moved to the working origin (www or http): un-leased
-    // placements follow now; a leased one is refreshed from the path at
-    // its next claim (claim() hands out the live path's submission_url)
+    // A changed path is a NEW MANDATE for its placements — the execution URL
+    // moved to the working origin (a fallback vhost may be paid, gated or
+    // off-target), or a §3.2 input changed in place (a route just learned
+    // to be paid / account-gated / attested / lane-shifted). The SAME
+    // transition a supersession applies runs on the path's own placements
+    // (registry.settleRetiredPlacements, same-path mode): target_url and
+    // lane refreshed, unclassified until the weekly classifier has read the
+    // route, unsent drafts cleared, locked outreach refused, leased rows
+    // refreshed at their next claim.
     const movedToWorkingOrigin = !!(row.submission_url && existing.submission_url && existing.submission_url !== row.submission_url
       && workingUrlFor && workingUrlFor.has(registry.normalizeSubmissionUrl(existing.submission_url)));
-    if (movedToWorkingOrigin) {
-      // a changed execution URL is a NEW page for the classifier (the
-      // fallback vhost may be paid, gated or off-target): the same
-      // fail-closed transition a path supersession applies — unclassified
-      // until the weekly classifier has read it, never leased before
-      await trx('seo_link_prospects').where({ path_id: existing.id }).whereNull('claimed_at')
-        .update({ target_url: row.submission_url, automation_policy: null, last_classified_at: null, updated_at: now });
+    if (movedToWorkingOrigin || bump.revision_payment || bump.revision_communication || bump.revision_execution) {
+      await registry.settleRetiredPlacements(trx, { pathIds: [existing.id], successor: { id: existing.id, submission_url: row.submission_url, link_type: row.link_type }, now });
     }
+  }
+  // MERGE: an active row still keyed on the dead apex identity of this very
+  // route (https and http rows coexisted; https died) is superseded into
+  // this row, so its placements settle onto the live route below.
+  if (id && aliasRow && aliasRow.id !== id) {
+    await trx('seo_link_acquisition_paths').where({ id: aliasRow.id }).whereNull('superseded_by').update({ superseded_by: id, superseded_at: now, updated_at: now });
   }
   // §3.2 supersession, step-3 minimal form (nothing executes yet — no
   // purchases, approvals or authority instances exist to pin or carry):
@@ -1037,7 +1063,7 @@ async function investigatePaths(db, {
         }
 
         const [touches, existingPaths, competitorRows] = await Promise.all([
-          db('seo_link_domain_sources').where({ domain_id: domain.id }).select('source', 'source_detail', 'source_ref'),
+          db('seo_link_domain_sources').where({ domain_id: domain.id }).select('id', 'source', 'source_detail', 'source_ref', 'covered_at'),
           db('seo_link_acquisition_paths').where({ domain_id: domain.id }).whereNull('superseded_by').select('*'),
           db('seo_competitor_backlinks').whereIn('source_domain', [host, `www.${host}`]).limit(2).select('source_url'),
         ]);
@@ -1233,7 +1259,8 @@ async function investigatePaths(db, {
         const writable = (verdict.verdict === 'not_reproducible' ? [] : (verdict.paths || []))
           .filter((p) => p.acquisition_type !== 'not_reproducible' && p.acquisition_type !== 'unknown')
           .map((p) => {
-            const clean = { ...p, offhost: {} };
+            // a UUID is case-insensitive; the DB ids are lowercase
+            const clean = { ...p, offhost: {}, replaces_path_id: p.replaces_path_id ? String(p.replaces_path_id).toLowerCase() : p.replaces_path_id };
             for (const key of ['submission_url', 'legal_terms_url']) {
               if (clean[key] && !hostBound(host, clean[key])) {
                 clean.offhost[key] = clean[key];
@@ -1571,6 +1598,23 @@ async function investigatePaths(db, {
           // escalating backoff, never on every hourly sweep.
           const activeLeftUnstamped = activeAll.some((ap) => !stampIds.has(ap.id) && !unstampedIds.has(ap.id));
 
+          // Provenance-hint coverage cursor: a touch is COVERED once every
+          // host-bound URL it carries was fully observed (or definitively
+          // gone) this pass — stamped so the candidate order rotates past
+          // it and the terminal valve knows what was never read.
+          const definitiveKeys = new Set([...coverageKeys, ...goneKeys]);
+          const touchCoveredNow = (t) => {
+            const keys = touchUrls(t).filter((u) => hostBound(host, u)).map(registry.normalizeSubmissionUrl);
+            return keys.length > 0 && keys.every((k) => definitiveKeys.has(k));
+          };
+          const hintTouches = touches.filter((t) => touchUrls(t).some((u) => hostBound(host, u)));
+          const newlyCovered = hintTouches.filter((t) => !t.covered_at && touchCoveredNow(t));
+          if (newlyCovered.length) {
+            await trx('seo_link_domain_sources').whereIn('id', newlyCovered.map((t) => t.id).filter(Boolean)).update({ covered_at: now });
+          }
+          const hintsRemain = hintTouches.some((t) => !t.covered_at && !touchCoveredNow(t));
+          const hintProgress = newlyCovered.length > 0;
+
           // A re-investigation DISPROVES only what it actually COVERED: a
           // previously active, non-baseline path absent from this verdict is
           // invalidated (confidence 0 + the reason in its evidence) ONLY when
@@ -1695,8 +1739,12 @@ async function investigatePaths(db, {
             // cumulative probe_coverage_mask is the bound — closure fires
             // once every probe has had its attempt, or when a pass adds no
             // new probes (hints consumed every slot: nothing more to learn).
-            const probesRemain = (newProbeMask & FULL_PROBE_MASK) !== FULL_PROBE_MASK;
-            const probeProgress = newProbeMask !== priorProbeMask;
+            // …and the same discipline for provenance hints: a close waits
+            // until every hint URL has been offered a fetch (the persisted
+            // covered_at cursor is the bound), and a pass that covers a new
+            // hint is progress like a new probe bit
+            const probesRemain = (newProbeMask & FULL_PROBE_MASK) !== FULL_PROBE_MASK || hintsRemain;
+            const probeProgress = newProbeMask !== priorProbeMask || hintProgress;
             if (verdict.verdict === 'not_reproducible' && !best && probesRemain) {
               if (probeProgress) {
                 // coverage is advancing — keep the near-term chain going

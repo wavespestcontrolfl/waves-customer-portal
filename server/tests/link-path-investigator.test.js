@@ -1662,7 +1662,7 @@ describe('full run', () => {
   test('hints can never take the reserved probe slots — even a hint-saturated domain probes and closes (Codex PR r11+r12 P1)', async () => {
     const d = domainRow();
     // 12 hints would exhaust every slot without the reservation
-    const touches = Array.from({ length: 12 }, (_, i) => ({ domain_id: d.id, source: 'list_import', source_detail: `https://example.com/hint-${i}`, source_ref: null }));
+    const touches = Array.from({ length: 12 }, (_, i) => ({ id: uid(), domain_id: d.id, source: 'list_import', source_detail: `https://example.com/hint-${i}`, source_ref: null, covered_at: null }));
     const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: touches });
     const fetched = new Set();
     const fetcher = async (url) => { fetched.add(url); return okFetch(url); };
@@ -2769,5 +2769,91 @@ describe('full run', () => {
     // a child with NO declaration still inherits the parent's (unchanged)
     const clean = collectJsonLdOffers(['{"@type":"Product","offers":[{"@type":"AggregateOffer","priceCurrency":"USD","offers":[{"@type":"Offer","price":"95"}]}]}']);
     expect(clean[0]).toMatchObject({ currency: 'USD', explicitCurrency: true });
+  });
+
+  // ---- Codex PR round 28 -------------------------------------------------
+
+  test('an offer contradicting itself (priceCurrency USD, priceSpecification CAD) is never attested (Codex PR r28 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const { collectJsonLdOffers } = require('../services/price-scan/extract');
+    const ld = '{"@type":"Offer","price":"95","priceCurrency":"USD","priceSpecification":{"@type":"UnitPriceSpecification","price":"95","priceCurrency":"CAD"}}';
+    expect(collectJsonLdOffers([ld])[0]).toMatchObject({ explicitCurrency: false });
+    const text = `Directory listing page with membership details. Join for $95 / year. ${'Copy. '.repeat(10)}`;
+    const html = `<html><script type="application/ld+json">${ld}</script><body>${text}</body></html>`;
+    expect(verifyPriceEvidence([{ url: 'https://example.com/join', excerpt: text, text, html }], modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null })).currency_evidence).toBeNull();
+  });
+
+  test('a working-origin move on a URL-bearing outreach path goes through the placement transition — drafts cleared, locked sends untouched (Codex PR r28 P1)', async () => {
+    const d = domainRow();
+    const path = {
+      id: uid(), domain_id: d.id, acquisition_type: 'content_submission', submission_url: 'https://example.com/submit-article', link_type: 'editorial',
+      path_key: 'content_submission:https://example.com/submit-article', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: null, investigation: JSON.stringify({}), revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const drafted = { id: uid(), domain_id: d.id, path_id: path.id, status: 'prospect', claimed_at: null, link_type: 'editorial', target_url: 'https://example.com/submit-article', outreach_status: 'drafted', outreach_to_email: 'ed@example.com', outreach_send_token: 'tok-3', automation_policy: null };
+    const sending = { id: uid(), domain_id: d.id, path_id: path.id, status: 'prospect', claimed_at: null, link_type: 'editorial', target_url: 'https://example.com/submit-article', outreach_status: 'sending', outreach_send_token: 'tok-4' };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [path], seo_link_prospects: [drafted, sending] });
+    const fetcher = async (url) => (url.startsWith('https://www.example.com') ? okFetch(url) : { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' });
+    const bare = { payment_required: false, fee_scope: null, price_text: null, price_page_url: null, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null, renewal_period: null };
+    const echoed = modelPath({ acquisition_type: 'content_submission', link_type: 'editorial', submission_url: 'https://www.example.com/submit-article', ...bare });
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([echoed]) }) }));
+    expect(path.submission_url).toBe('https://www.example.com/submit-article');
+    expect(drafted).toMatchObject({ target_url: 'https://www.example.com/submit-article', outreach_status: 'none', outreach_to_email: null, outreach_send_token: null }); // composed for the retired route — cleared
+    expect(sending).toMatchObject({ target_url: 'https://example.com/submit-article', outreach_status: 'sending', outreach_send_token: 'tok-4' }); // locked: refused
+  });
+
+  test('an in-place gate change on a path invalidates its placements\' classification (Codex PR r28 P1)', async () => {
+    const d = domainRow();
+    const path = {
+      id: uid(), domain_id: d.id, acquisition_type: 'self_service_free', submission_url: 'https://example.com/join', link_type: 'directory',
+      path_key: 'self_service_free:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7, payment_required: false, account_required: false,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}), revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const placement = { id: uid(), domain_id: d.id, path_id: path.id, status: 'prospect', claimed_at: null, link_type: 'directory', target_url: 'https://example.com/join', automation_policy: 'submit_free', last_classified_at: new Date('2026-08-01') };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [path], seo_link_prospects: [placement] });
+    // the route now requires an account (execution input changed; same key)
+    const bare = { payment_required: false, fee_scope: null, price_text: null, price_page_url: null, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null, renewal_period: null };
+    const gated = modelPath({ acquisition_type: 'self_service_free', submission_url: 'https://example.com/join', account_required: true, ...bare });
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([gated]) }) }));
+    expect(path.revision_execution).toBe(2);
+    expect(placement).toMatchObject({ path_id: path.id, automation_policy: null, last_classified_at: null }); // reclassified before any runner may lease it
+  });
+
+  test('when https and http rows coexist and https dies, the apex row is MERGED into the working row so its placements settle (Codex PR r28 P2)', async () => {
+    const d = domainRow();
+    const mk = (url) => ({
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: url, link_type: 'directory', path_key: `paid_listing:${url}`,
+      superseded_by: null, baseline: false, confidence: 0.7, last_investigated_at: null, investigation: JSON.stringify({}), revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    });
+    const https = mk('https://example.com/get-listed'); const http = mk('http://example.com/get-listed');
+    const placement = { id: uid(), domain_id: d.id, path_id: https.id, status: 'prospect', claimed_at: null, link_type: 'directory', target_url: 'https://example.com/get-listed', automation_policy: 'submit_free' };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [https, http], seo_link_prospects: [placement] });
+    const fetcher = async (url) => (url.startsWith('http://example.com') ? okFetch(url) : { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' });
+    const echoed = modelPath({ submission_url: 'http://example.com/get-listed', price_page_url: 'http://example.com/get-listed', renewal_price_page_url: 'http://example.com/get-listed' });
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([echoed]) }) }));
+    expect(db._tables.seo_link_acquisition_paths).toHaveLength(2);
+    expect(https.superseded_by).toBe(http.id); // merged, not left as a chainless zero-confidence row
+    expect(placement).toMatchObject({ path_id: http.id, target_url: 'http://example.com/get-listed', automation_policy: null });
+  });
+
+  test('provenance hints rotate on a persisted cursor and a terminal close waits until every hint was offered a fetch (Codex PR r28 P1)', async () => {
+    const d = domainRow({ probe_coverage_mask: (1 << investigator.PROBE_PATHS.length) - 1 });
+    const touches = [1, 2, 3, 4, 5, 6, 7, 8].map((i) => ({ id: uid(), domain_id: d.id, source: 'competitor_gap', source_detail: `https://example.com/hint-${i}`, source_ref: null, covered_at: null }));
+    const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: touches });
+    const fetched = [];
+    const fetcher = async (url) => { fetched.push(url); return okFetch(url); };
+    const llm = async () => ({ ok: true, json: verdictOf([], 'not_reproducible') });
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: llm }));
+    const dom = () => db._tables.seo_link_domains[0];
+    expect(fetched.filter((u) => /hint-/.test(u))).toHaveLength(7); // the cap leaves one hint unread
+    expect(touches.filter((t) => t.covered_at).length).toBe(7); // …and the seven read are stamped
+    expect(dom().agent_state).toBe('watching'); // no close while a hint URL was never offered a fetch
+    expect(dom().score_reasons).toContain('unfetched candidate URLs remain');
+    // pass 2: the uncovered hint leads the queue; all hints covered → the verdict may close
+    fetched.length = 0;
+    await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), now: dom().watch_recheck_at, domainIds: [d.id] });
+    const eighth = touches.find((t) => !fetched.length || true) && touches.every((t) => t.covered_at);
+    expect(eighth).toBe(true);
+    expect(dom().agent_state).toBe('not_reproducible');
   });
 });

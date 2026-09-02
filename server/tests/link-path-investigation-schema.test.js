@@ -172,4 +172,11 @@ describe('investigator output schema', () => {
     expect(dup.errors[0]).toMatch(/\/paths\/1 names the same replaces_path_id as \/paths\/0/);
     expect(validateInvestigation(good({ paths: [goodPath({ replaces_path_id: pred }), goodPath({ submission_url: 'https://example.com/join-2', replaces_path_id: null })] })).valid).toBe(true);
   });
+
+  test('predecessor UUIDs are compared case-insensitively (Codex PR r28 P1)', () => {
+    const lower = '5f0b6c1e-1111-4222-8333-444455556666';
+    const dup = validateInvestigation(good({ paths: [goodPath({ replaces_path_id: lower }), goodPath({ submission_url: 'https://example.com/join-2', replaces_path_id: lower.toUpperCase() })] }));
+    expect(dup.valid).toBe(false);
+    expect(dup.errors[0]).toMatch(/names the same replaces_path_id/);
+  });
 });
