@@ -18,7 +18,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools');
-const { computeStalledCalls } = require('./call-processing-stall-watchdog');
+const { computeStalledCalls, MIN_DURATION_SECONDS } = require('./call-processing-stall-watchdog');
 
 const ITEM_LIMIT = 25;
 const SCAN_LIMIT = 200;
@@ -82,13 +82,33 @@ async function laneCallProcessing() {
   // Open rows (null / pending / processing) carry NO date window — an
   // indefinitely stalled call is exactly what this lane must surface.
   // Only terminal failures are windowed to the recent week.
+  // Live rows carry the watchdog's time-independent eligibility prefilter
+  // (a SID, something to process, long enough to process) BEFORE the scan
+  // cap, exactly as its candidates() query does — otherwise rows that can
+  // never become stalls (dead-air blips, SID-less rows) fill the oldest-first
+  // page and hide the real ones behind them.
   const rows = await db('call_log')
-    .whereNotNull('recording_url')
     .where(function whereOpen() {
       this.where(function whereLive() {
-        this.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing']);
+        this.where(function liveStatus() {
+          this.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing']);
+        })
+          .whereNotNull('twilio_call_sid')
+          .where(function longEnoughToProcess() {
+            this.whereRaw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [MIN_DURATION_SECONDS - 1])
+              .orWhere(function panQuarantined() {
+                this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'").whereNotNull('transcription');
+              });
+          })
+          .where(function somethingToProcess() {
+            this.whereRaw("NULLIF(btrim(recording_url), '') IS NOT NULL")
+              .orWhere(function panQuarantined() {
+                this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'").whereNotNull('transcription');
+              });
+          });
       }).orWhere(function whereFailedRecent() {
         this.whereIn('processing_status', ['extraction_failed', 'no_transcription'])
+          .whereNotNull('recording_url')
           .where('created_at', '>', since(RECENT_DAYS));
       });
     })
