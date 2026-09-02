@@ -33,7 +33,11 @@ Codex on a UI-touching PR:
 4. Interact with what you changed (click the button, open the modal, submit
    the form) — a screenshot of initial render misses broken states.
 5. Put the screenshots/findings in the PR description so the reviewer sees
-   the rendered result.
+   the rendered result. Attach the image files natively with
+   `gh pr create --attach <file>` / `gh pr comment --attach <file>`
+   (`gh` ≥ 2.99.0; alt text via `--attach './shot.png#Mobile 390'`) —
+   never a local path, a base64 blob, or an external image host. Details
+   and limits are in waves-ship §4.
 
 ## Additional checks
 
