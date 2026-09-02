@@ -4293,6 +4293,11 @@ const EstimateConverter = {
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['property-preferences', String(customerId)],
       );
+      // Rung 6 (customer-comms) BEFORE the customer row lock and the ledger
+      // writes below — the order the scoped cancellation wind-down uses
+      // (comms → row); taking it later in this transaction would deadlock
+      // against a wind-down holding comms and waiting on this row.
+      await lockCustomerComms(database, customerId);
       const lockedCustomerRow = await database('customers')
         .where({ id: customerId })
         .forUpdate()
@@ -4617,9 +4622,10 @@ const EstimateConverter = {
         };
     // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE this
     // customers-row write, preserving the #3011 customer-row →
-    // series-advisory order relative to admin-schedule. Only meaningful
-    // inside a caller transaction (public accept); the standalone path's
-    // seeding steps take it per-step in runSeedingStep below.
+    // series-advisory order relative to admin-schedule. Reentrant: the
+    // recurring path already took it ahead of its row lock above. Only
+    // meaningful inside a caller transaction (public accept); the standalone
+    // path's seeding steps take it per-step in runSeedingStep below.
     if (database.isTransaction) await lockCustomerComms(database, customerId);
     // RETURNING carries the atomic increment's actual result for the audit
     // outputs below (activity log, converter log, membership email, return
@@ -4652,8 +4658,12 @@ const EstimateConverter = {
       && Math.round(ledgerAdvisoryScalar * 100) !== Math.round(convertedMonthlyRate * 100)) {
       try {
         const PlanRateLedger = require('./plan-rate-ledger');
-        await database.transaction((sp) => PlanRateLedger
-          .resetLedgerToScalar(sp, customerId, convertedMonthlyRate, { source: 'gate_off_divergence' }));
+        await database.transaction(async (sp) => {
+          // Rung 6 when this opens the outermost transaction (standalone
+          // path); a caller transaction already holds it (taken above).
+          if (!database.isTransaction) await lockCustomerComms(sp, customerId);
+          return PlanRateLedger.resetLedgerToScalar(sp, customerId, convertedMonthlyRate, { source: 'gate_off_divergence' });
+        });
       } catch (divergenceErr) {
         logger.warn(`[estimate-converter] gate-off ledger divergence reset failed for customer ${customerId}: ${divergenceErr.message}`);
       }

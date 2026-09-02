@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
 // Deposit-stage cancellation orchestration (owner-scoped 2026-07-15):
 // a customer who accepted an estimate, paid a deposit, and cancelled before
@@ -514,6 +515,10 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
   // policy lives in the helper: advisory failures warn (transaction
   // commits); authoritative failures throw (everything rolls back).
   const tierCleared = await db.transaction(async (trx) => {
+    // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) BEFORE the
+    // customers row lock: this clears the tier and rewrites the ledger,
+    // the writes the scoped cancellation wind-down serializes on.
+    await lockCustomerComms(trx, customerId);
     const cleared = await trx('customers')
       .where({ id: customerId })
       .where((qb) => {

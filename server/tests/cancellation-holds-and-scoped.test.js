@@ -49,6 +49,7 @@ function mockMakeBuilder(table) {
     whereNot(arg) { const e = Object.entries(arg); filters.push((r) => !e.every(([k, v]) => String(r[k]) === String(v))); return builder; },
     whereNull(k) { filters.push((r) => r[k] == null); return builder; },
     whereRaw() { return builder; },
+    forUpdate() { mockState.forUpdate = (mockState.forUpdate || 0) + 1; return builder; },
     leftJoin() { return builder; },
     orderBy() { return builder; },
     select(...cols) { return Promise.resolve(applied().map((r) => ({ ...r }))); },
@@ -72,7 +73,8 @@ jest.mock('../models/db', () => {
 });
 
 const { startHold, runPlanHoldLifecycle } = require('../services/cancellation-resolution/holds');
-const { planScopedWindDown } = require('../services/cancellation-processor');
+const { planScopedWindDown, applyScopedWindDown, scopedPricingFingerprint } = require('../services/cancellation-processor');
+const lockCalls = () => require('../models/db').raw.mock.calls.filter(([sql]) => /pg_advisory_xact_lock/.test(sql)).map(([, b]) => b);
 const { etDateString } = require('../utils/datetime-et');
 
 function seed({ holds = [], customers = [], components = [], visits = [], invoices = [] } = {}) {
@@ -311,5 +313,209 @@ describe('planScopedWindDown (ruling C-3)', () => {
     mockState.tables.invoices = [{ id: 'inv-1', scheduled_service_id: invoicedId, status: 'void' }];
     const voided = await planScopedWindDown('c1', ['lawn_care']);
     expect(voided.perAppRows).toHaveLength(1);
+  });
+});
+
+describe('scoped wind-down under the rung-6 writer lock (#3666 r34 — the pricing race)', () => {
+  const visitRow = (family, extra = {}) => ({
+    id: `v-${family}`, customer_id: 'c1', status: 'confirmed', scheduled_date: daysOut(10),
+    recurring_ongoing: true, is_recurring: true, service_type: family === 'lawn_care' ? 'Lawn Care Service' : 'Quarterly Pest Control Service',
+    ...extra,
+  });
+  const perAppCustomer = () => ({ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true });
+
+  test('pinnedScope: after the sweep the swept family owns no live rows, yet the boundary re-plan keeps it in scope and re-derives ONLY the surviving side', async () => {
+    seed({ customers: [perAppCustomer()], visits: [visitRow('lawn_care'), { ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 }] });
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    expect(entry.ok).toBe(true);
+    // The sweep cancelled the lawn rows.
+    mockState.tables.scheduled_services = [{ ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 }];
+    expect((await planScopedWindDown('c1', ['lawn_care'])).error).toBe('scope_not_owned');
+    const fresh = await planScopedWindDown('c1', ['lawn_care'], require('../models/db'), { pinnedScope: entry.inScope });
+    expect(fresh.ok).toBe(true);
+    expect(fresh.inScope).toEqual(['lawn_care']);
+    expect(fresh.remaining).toEqual(['pest_control']);
+    expect(scopedPricingFingerprint(fresh)).toBe(scopedPricingFingerprint(entry));
+    // A surviving-family visit that appeared during the sweep IS in the fresh plan.
+    mockState.tables.scheduled_services.push({ ...visitRow('pest_control'), id: 'v-new', estimated_price: 90, primary_line_price: 90 });
+    const drifted = await planScopedWindDown('c1', ['lawn_care'], require('../models/db'), { pinnedScope: entry.inScope });
+    expect(drifted.perAppRows.map((r) => r.id).sort()).toEqual(['v-new', 'v-pest_control']);
+    expect(scopedPricingFingerprint(drifted)).not.toBe(scopedPricingFingerprint(entry));
+  });
+
+  test('a surviving-family visit landing between approval and the boundary refuses the wind-down (scoped_pricing_changed) — no demote, no reprice', async () => {
+    seed({ customers: [perAppCustomer()], visits: [visitRow('lawn_care'), { ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 }] });
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    const approved = scopedPricingFingerprint(entry);
+    mockState.tables.scheduled_services = [
+      { ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 },
+      { ...visitRow('pest_control'), id: 'v-new', estimated_price: 90, primary_line_price: 90 },
+    ];
+    mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
+    await expect(applyScopedWindDown('c1', entry, { requestId: 'req-1', scopedFamilies: ['lawn_care'], approvedScopedPricing: approved }))
+      .rejects.toMatchObject({ code: 'scoped_pricing_changed' });
+    expect(mockState.tables.customers[0].waveguard_tier).toBe('Silver');
+    expect(mockState.tables.scheduled_services.every((r) => r.estimated_price === 90)).toBe(true);
+  });
+
+  test('unchanged live state applies the FRESH plan under the lock — the lock is the first statement, the demote and reprice land, the request is stamped', async () => {
+    seed({ customers: [perAppCustomer()], visits: [visitRow('lawn_care'), { ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 }] });
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    const approved = scopedPricingFingerprint(entry);
+    mockState.tables.scheduled_services = [{ ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 }];
+    mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
+    require('../models/db').raw.mockClear();
+    const out = await applyScopedWindDown('c1', entry, { requestId: 'req-1', scopedFamilies: ['lawn_care'], approvedScopedPricing: approved });
+    expect(lockCalls()[0]).toEqual(['customer-comms:c1']);
+    expect(out.plan.remaining).toEqual(['pest_control']);
+    expect(mockState.tables.customers[0].waveguard_tier).toBe('Bronze');
+    expect(mockState.tables.scheduled_services[0].estimated_price).toBeGreaterThan(90);
+    expect(JSON.parse(mockState.tables.service_requests[0].metadata).cancel_plan.scopedWindDownCommitted).toBe(true);
+  });
+
+  test('a plan hold takes the same writer lock before touching the ledger', async () => {
+    seed({
+      customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: 150, billing_mode: 'monthly_membership', active: true, tier_protected_until: null }],
+      components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 }, { customer_id: 'c1', family_key: 'pest_control', monthly_rate: 60 }],
+      visits: [visitRow('lawn_care'), visitRow('pest_control')],
+    });
+    const db = require('../models/db');
+    db.raw.mockClear();
+    // A ledger writer commits just before the hold's transaction opens: the
+    // rate the hold records must be the one read UNDER the lock, not the
+    // eligibility read from before the visit moves.
+    const openTrx = db.transaction;
+    db.transaction = async (cb) => {
+      mockState.tables.customer_plan_rates.find((c) => c.family_key === 'lawn_care').monthly_rate = 75;
+      return openTrx(cb);
+    };
+    try {
+      const res = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) });
+      expect(res.holdId).toBeTruthy();
+    } finally { db.transaction = openTrx; }
+    expect(lockCalls()).toContainEqual(['customer-comms:c1']);
+    expect(Number(mockState.tables.plan_holds[0].held_monthly_rate)).toBe(75);
+    expect(Number(mockState.tables.customers[0].monthly_rate)).toBe(60);
+  });
+});
+
+test('a hold is refused under the lock when the family was cancelled in the gap (moved visits gone) or a concurrent hold landed', async () => {
+  const db = require('../models/db');
+  const visit = (id, date) => ({ id, customer_id: 'c1', status: 'confirmed', scheduled_date: date, service_type: 'Lawn Care Service' });
+  seed({
+    customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true, tier_protected_until: null }],
+    visits: [visit('l1', daysOut(5))],
+  });
+  const openTrx = db.transaction;
+  // A scoped wind-down cancelled the lawn visits between the move and the hold write.
+  db.transaction = async (cb) => { mockState.tables.scheduled_services[0].status = 'cancelled'; return openTrx(cb); };
+  try {
+    await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) })).rejects.toMatchObject({ code: 'hold_setup_failed' });
+  } finally { db.transaction = openTrx; }
+  expect(mockState.tables.plan_holds || []).toHaveLength(0);
+  expect(mockState.tables.customers[0].tier_protected_until).toBeNull();
+  // A concurrent hold for the same family committed first.
+  seed({ customers: [{ id: 'c1', monthly_rate: null, billing_mode: 'per_application', active: true, tier_protected_until: null }] });
+  db.transaction = async (cb) => { mockState.tables.plan_holds = [{ id: 'h-race', customer_id: 'c1', family_key: 'lawn_care', created_at: new Date() }]; return openTrx(cb); };
+  try {
+    await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) })).rejects.toMatchObject({ code: 'hold_setup_failed' });
+  } finally { db.transaction = openTrx; }
+  expect(mockState.tables.plan_holds).toHaveLength(1);
+});
+
+test('a hold with NO upcoming visits still compares the live set under the lock — a first visit booked in the gap refuses it', async () => {
+  const db = require('../models/db');
+  seed({ customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true, tier_protected_until: null }] });
+  const openTrx = db.transaction;
+  db.transaction = async (cb) => {
+    mockState.tables.scheduled_services = [{ id: 'l-new', customer_id: 'c1', status: 'confirmed', scheduled_date: daysOut(20), service_type: 'Lawn Care Service' }];
+    return openTrx(cb);
+  };
+  try {
+    await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) })).rejects.toMatchObject({ code: 'hold_setup_failed' });
+  } finally { db.transaction = openTrx; }
+  expect(mockState.tables.plan_holds || []).toHaveLength(0);
+});
+
+describe('boundary re-plan refusals', () => {
+  const visitRow = (family, extra = {}) => ({
+    id: `v-${family}`, customer_id: 'c1', status: 'confirmed', scheduled_date: daysOut(10),
+    recurring_ongoing: true, is_recurring: true, service_type: family === 'lawn_care' ? 'Lawn Care Service' : 'Quarterly Pest Control Service',
+    ...extra,
+  });
+  const perAppCustomer = () => ({ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true });
+
+  test('a live row still in the swept (pinned) family — booked after the sweep — refuses the wind-down instead of demoting around it', async () => {
+    seed({ customers: [perAppCustomer()], visits: [visitRow('lawn_care'), { ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 }] });
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    const approved = scopedPricingFingerprint(entry);
+    // The sweep cancelled v-lawn_care; a new lawn visit was booked afterwards.
+    mockState.tables.scheduled_services = [
+      { ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 },
+      { ...visitRow('lawn_care'), id: 'lawn-new' },
+    ];
+    const fresh = await planScopedWindDown('c1', ['lawn_care'], require('../models/db'), { pinnedScope: entry.inScope });
+    expect(fresh).toEqual(expect.objectContaining({ ok: false, error: 'scope_still_live', families: ['lawn_care'] }));
+    mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
+    await expect(applyScopedWindDown('c1', entry, { requestId: 'req-1', scopedFamilies: ['lawn_care'], approvedScopedPricing: approved }))
+      .rejects.toMatchObject({ code: 'scoped_pricing_changed' });
+    expect(mockState.tables.customers[0].waveguard_tier).toBe('Silver');
+  });
+
+  test('a read failure during the boundary re-plan is NOT pricing drift — it propagates as a plain wind-down failure', async () => {
+    seed({ customers: [perAppCustomer()], visits: [visitRow('lawn_care'), { ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 }] });
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    const db = require('../models/db');
+    const real = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      if (String(table).startsWith('customers')) return { where() { return this; }, forUpdate() { return this; }, first: async () => { throw new Error('connection reset'); } };
+      return real(table);
+    });
+    try {
+      const err = await applyScopedWindDown('c1', entry, { requestId: 'req-1', scopedFamilies: ['lawn_care'], approvedScopedPricing: scopedPricingFingerprint(entry) }).catch((e) => e);
+      expect(err.message).toMatch(/connection reset/);
+      expect(err.code).toBeUndefined();
+    } finally { db.mockImplementation(real); }
+  });
+});
+
+describe('boundary inputs and holds under the lock (Codex r3)', () => {
+  const visitRow = (family, extra = {}) => ({
+    id: `v-${family}`, customer_id: 'c1', status: 'confirmed', scheduled_date: daysOut(10),
+    recurring_ongoing: true, is_recurring: true, service_type: family === 'lawn_care' ? 'Lawn Care Service' : 'Quarterly Pest Control Service',
+    ...extra,
+  });
+  const perAppCustomer = () => ({ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true });
+
+  test('the fingerprint carries the pre-cancel tier and billing mode — a tier or mode edit during the sweep is refused even with unchanged priced outputs', async () => {
+    seed({ customers: [perAppCustomer()], visits: [visitRow('lawn_care'), visitRow('pest_control')] });
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    const approved = scopedPricingFingerprint(entry);
+    expect(approved).toMatch(/\|tierbefore=Silver\|mode=per_application$/);
+    // No priced rows (no per-app prices) → tier/monthly/rates/perapp identical…
+    mockState.tables.scheduled_services = [visitRow('pest_control')];
+    mockState.tables.customers[0].billing_mode = 'monthly_membership';
+    mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
+    // …but the lane changed: refused, nothing applied.
+    await expect(applyScopedWindDown('c1', entry, { requestId: 'req-1', scopedFamilies: ['lawn_care'], approvedScopedPricing: approved }))
+      .rejects.toMatchObject({ code: 'scoped_pricing_changed' });
+    expect(mockState.tables.customers[0].waveguard_tier).toBe('Silver');
+  });
+
+  test('the wind-down transaction locks the customers row and retires an in-scope hold that slipped in after the unlocked invalidation pass', async () => {
+    seed({
+      customers: [perAppCustomer()],
+      visits: [visitRow('lawn_care'), visitRow('pest_control')],
+      holds: [{ id: 'h-late', customer_id: 'c1', family_key: 'lawn_care', status: 'active', resume_on: daysOut(30) },
+        { id: 'h-keep', customer_id: 'c1', family_key: 'pest_control', status: 'active', resume_on: daysOut(30) }],
+    });
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    mockState.tables.scheduled_services = [visitRow('pest_control')];
+    mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
+    mockState.forUpdate = 0;
+    await applyScopedWindDown('c1', entry, { requestId: 'req-1', scopedFamilies: ['lawn_care'], approvedScopedPricing: scopedPricingFingerprint(entry) });
+    expect(mockState.forUpdate).toBeGreaterThan(0);
+    expect(mockState.tables.plan_holds.find((h) => h.id === 'h-late').status).toBe('cancelled');
+    expect(mockState.tables.plan_holds.find((h) => h.id === 'h-keep').status).toBe('active');
   });
 });

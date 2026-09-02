@@ -29,6 +29,7 @@
 const crypto = require('crypto');
 const { isEnabled } = require('../config/feature-gates');
 const logger = require('./logger');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
 const UNATTRIBUTED = 'unattributed';
 
@@ -472,6 +473,15 @@ async function applyAcceptToLedger(database, {
 // Blind scalar writes (admin rate edit, plan-sync backfills) invalidate any
 // finer attribution — reset to a single unattributed component matching the
 // scalar, or clear entirely when the rate is cleared/zeroed.
+// LOCKING (rung 6, scheduling/occupancy.js ORDERING CONTRACT): ledger
+// rewrites serialize against the cancellation wind-down, which re-plans and
+// reprices the surviving families under the per-customer customer-comms key.
+// The key must be taken BEFORE any customers row lock, so a caller that is
+// already inside a transaction takes it at ITS start (admin edit, IB tools,
+// offboarding, plan-sync, the churn wind-down) — taking it here, after that
+// caller has locked the row, would invert the order against the wind-down
+// (rung 6 held, waiting on the row) and deadlock. The helpers below lock
+// only when they open the OUTERMOST transaction themselves.
 async function resetLedgerToScalar(database, customerId, rate, { source = 'scalar_write' } = {}) {
   if (!(await ledgerTableExists(database))) return;
   await database('customer_plan_rates').where({ customer_id: customerId }).del();
@@ -497,6 +507,7 @@ async function resetLedgerToScalar(database, customerId, rate, { source = 'scala
 async function seedLedgerComponents(database, customerId, components = {}, { source = 'plan_sync' } = {}) {
   try {
     await database.transaction(async (sp) => {
+      if (!database.isTransaction) await lockCustomerComms(sp, customerId); // rung 6 — see LOCKING above
       if (!(await ledgerTableExists(sp))) return;
       await sp('customer_plan_rates').where({ customer_id: customerId }).del();
       for (const [family, rate] of Object.entries(components)) {
@@ -544,7 +555,10 @@ const MANUAL_RATE_AUDIT_ACTION = 'customer.rate_manual_override';
 
 async function syncScalarWriteToLedger(database, customerId, rate, { source = 'scalar_write' } = {}) {
   try {
-    await database.transaction((sp) => resetLedgerToScalar(sp, customerId, rate, { source }));
+    await database.transaction(async (sp) => {
+      if (!database.isTransaction) await lockCustomerComms(sp, customerId); // rung 6 — see LOCKING above
+      return resetLedgerToScalar(sp, customerId, rate, { source });
+    });
   } catch (syncErr) {
     if (planRateLedgerEnabled()) {
       logger.error(`[plan-rate-ledger] authoritative sync failed for customer ${customerId} (${source}) — failing the write: ${syncErr.message}`);
