@@ -710,6 +710,11 @@ async function adminCoverageBoundaryInForce(customerId) {
 // for THIS term at THIS boundary (cases created on/after the churn date's
 // ET midnight, snapshot term/effectiveDate/effectiveOn), so rows written
 // before the term key shipped (request-keyed) still count as delivered.
+// Day granularity is sufficient: churned_at is a DATE, so two episodes on
+// the same ET day (win-back and re-churn within hours) would share a key —
+// but a second commit inside 24h of the first acceptance never reaches
+// these side effects at all: the duplicate latch above echoes the recorded
+// outcome as a retry. Beyond 24h the churn dates differ.
 // Not churned / no stamp / unreadable → null episode, and every consumer
 // falls back to its request key (at-most-twice beats never telling anyone).
 async function resolveTermEpisode(customerId, term, currentRequestId = null) {
