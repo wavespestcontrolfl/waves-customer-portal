@@ -74,7 +74,7 @@ function resolveCatalogRow(visit, catalog) {
   if (distinct.length === 0) return { row: null, reason: 'no_match' };
   if (distinct.length > 1) return { row: null, reason: 'ambiguous' };
   if (!isLive(distinct[0])) return { row: null, reason: 'inactive_only' };
-  return { row: distinct[0], reason: null };
+  return { row: distinct[0], reason: null, candidates };
 }
 
 exports.up = async function up(knex) {
@@ -100,7 +100,7 @@ exports.up = async function up(knex) {
   const visits = await openVisitStatus(knex('scheduled_services').whereNull('service_id')).select(...cols);
 
   for (const v of visits) {
-    const { row: svc, reason } = resolveCatalogRow(v, catalog);
+    const { row: svc, reason, candidates } = resolveCatalogRow(v, catalog);
     if (!svc) {
       if (reason === 'ambiguous') state.ambiguous.push({ id: v.id, service_type: v.service_type });
       continue;
@@ -111,13 +111,20 @@ exports.up = async function up(knex) {
       continue;
     }
     const stampSnapshot = hasSnapshotCol && !snapshot;
+    const placeholders = candidates.map(() => '?').join(', ');
     let q = openVisitStatus(
       knex('scheduled_services')
         .where({ id: v.id, service_type: v.service_type })
         .whereNull('service_id'),
     ).whereRaw(
-      'EXISTS (SELECT 1 FROM services WHERE id = ? AND service_key = ? AND is_active = true AND is_archived IS NOT TRUE)',
-      [svc.id, svc.service_key],
+      // Re-check the RESOLUTION at write time, not just liveness (pre-push
+      // codex P1): the target must still carry a candidate name and no
+      // other catalog row may have acquired one — a rename or a new row
+      // between scan and write makes resolution absent/ambiguous, so the
+      // write must miss. Same shape as 000060's name guard.
+      `EXISTS (SELECT 1 FROM services WHERE id = ? AND service_key = ? AND is_active = true AND is_archived IS NOT TRUE AND LOWER(name) IN (${placeholders}))`
+      + ` AND NOT EXISTS (SELECT 1 FROM services WHERE id <> ? AND LOWER(name) IN (${placeholders}))`,
+      [svc.id, svc.service_key, ...candidates, svc.id, ...candidates],
     );
     if (hasSnapshotCol) q = stampSnapshot ? q.whereNull('service_key_snapshot') : q.where({ service_key_snapshot: v.service_key_snapshot });
     const patch = { service_id: svc.id };
@@ -129,6 +136,9 @@ exports.up = async function up(knex) {
         service_type: v.service_type,
         service_id: svc.id,
         service_key_snapshot: stampSnapshot ? svc.service_key : null,
+        // The snapshot the row ALREADY carried (agreeing case): down()
+        // requires it unchanged but never clears it (pre-push codex P1).
+        prior_service_key_snapshot: stampSnapshot ? null : (snapshot || null),
       });
     }
   }
@@ -155,6 +165,10 @@ exports.down = async function down(knex) {
     if (hasSnapshotCol && rec.service_key_snapshot) {
       q = q.where({ service_key_snapshot: rec.service_key_snapshot });
       patch.service_key_snapshot = null;
+    } else if (hasSnapshotCol && rec.prior_service_key_snapshot) {
+      // Agreeing snapshot was theirs: unlink only while it is still what we
+      // relied on, and leave it in place.
+      q = q.where({ service_key_snapshot: rec.prior_service_key_snapshot });
     }
     await q.update(patch);
   }

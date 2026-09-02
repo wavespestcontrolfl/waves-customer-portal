@@ -66,13 +66,21 @@ function fakeKnex(db, { missingTables = [], missingColumns = [], catalogEditDuri
       },
       whereNull(col) { preds.push((r) => r[col] == null); return q; },
       whereRaw(sql, bindings) {
-        if (!/^EXISTS \(SELECT 1 FROM services WHERE id = \? AND service_key = \? AND is_active = true AND is_archived IS NOT TRUE\)$/.test(sql)) {
-          throw new Error(`fake whereRaw: ${sql}`);
-        }
-        const [id, key] = bindings;
+        const m = /^EXISTS \(SELECT 1 FROM services WHERE id = \? AND service_key = \? AND is_active = true AND is_archived IS NOT TRUE AND LOWER\(name\) IN \(((?:\?, )*\?)\)\) AND NOT EXISTS \(SELECT 1 FROM services WHERE id <> \? AND LOWER\(name\) IN \(((?:\?, )*\?)\)\)$/.exec(sql);
+        if (!m) throw new Error(`fake whereRaw: ${sql}`);
+        const n = m[1].split(', ').length;
+        const [id, key, ...rest] = bindings;
+        const names = rest.slice(0, n);
+        const otherId = rest[n];
+        const names2 = rest.slice(n + 1);
+        if (otherId !== id || names2.join('|') !== names.join('|')) throw new Error('fake whereRaw: binding mismatch');
+        const lower = (s) => String(s || '').trim().toLowerCase();
         preds.push(() => {
           if (catalogEditDuringWrite) catalogEditDuringWrite(db);
-          return (db.services || []).some((s) => s.id === id && s.service_key === key && s.is_active === true && s.is_archived !== true);
+          const svcs = db.services || [];
+          const target = svcs.some((s) => s.id === id && s.service_key === key && s.is_active === true && s.is_archived !== true && names.includes(lower(s.name)));
+          const other = svcs.some((s) => s.id !== id && names.includes(lower(s.name)));
+          return target && !other;
         });
         return q;
       },
@@ -149,6 +157,32 @@ describe('20260902000010 link open legacy-label visits through the shared bridge
     }));
     expect(db.scheduled_services.filter((r) => r.service_id && r.id !== 'v-linked')).toHaveLength(0);
     expect(state(db).linked).toEqual([]);
+  });
+
+  test('write-time guard: a rename of the target, or another row acquiring a candidate name, makes the link miss', async () => {
+    let db = seedDb();
+    let edited = false;
+    await migration.up(fakeKnex(db, {
+      catalogEditDuringWrite: (d) => { if (!edited) { edited = true; d.services.find((s) => s.id === 'svc-pq').name = 'Quarterly WaveGuard Service'; } },
+    }));
+    expect(row(db, 'v-cad').service_id).toBeNull(); // first write hit the rename
+    expect(row(db, 'v-cad-m').service_id).toBe('svc-pm'); // untouched target still links
+    db = seedDb();
+    edited = false;
+    await migration.up(fakeKnex(db, {
+      catalogEditDuringWrite: (d) => { if (!edited) { edited = true; d.services.push({ id: 'svc-dup', service_key: 'pest_dup', name: 'Quarterly Pest Control', is_active: false, is_archived: true }); } },
+    }));
+    expect(row(db, 'v-cad').service_id).toBeNull(); // a second row now carries a candidate name → ambiguous at write
+  });
+
+  test('down() on an agreeing-snapshot row requires that snapshot unchanged and never clears it', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    expect(state(db).linked.find((l) => l.id === 'v-agree').prior_service_key_snapshot).toBe('pest_general_quarterly');
+    row(db, 'v-agree').service_key_snapshot = 'pest_general_monthly'; // another writer moved it
+    await migration.down(fakeKnex(db));
+    expect(row(db, 'v-agree').service_id).toBe('svc-pq'); // not ours any more
+    expect(row(db, 'v-agree').service_key_snapshot).toBe('pest_general_monthly');
   });
 
   test('idempotent: a re-run keeps the ledger and links nothing twice', async () => {
