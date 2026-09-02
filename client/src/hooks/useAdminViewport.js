@@ -14,6 +14,8 @@ import { useEffect } from "react";
  * bare-height extent would leave the bottom offsetTop px of the visible
  * range outside the shell and clip the focused form content.
  */
+export const KEYBOARD_OPEN_MIN_PX = 150;
+
 export function syncAdminViewportVars() {
   if (typeof window === "undefined" || typeof document === "undefined") return;
   const root = document.documentElement;
@@ -31,6 +33,10 @@ export function syncAdminViewportVars() {
   root.style.setProperty("--admin-vh", `${Math.round(height + offsetTop)}px`);
   root.style.setProperty("--vv-offset-top", `${Math.round(offsetTop)}px`);
   root.style.setProperty("--keyboard-inset", `${Math.round(keyboardInset)}px`);
+  // A soft keyboard is at least ~200px; URL-bar / toolbar changes are far
+  // smaller. The fixed mobile tab bar hides while it is open (index.css),
+  // otherwise it lifts onto the keyboard and covers the focused field.
+  root.toggleAttribute("data-keyboard-open", keyboardInset >= KEYBOARD_OPEN_MIN_PX);
 }
 
 export function clearAdminViewportVars() {
@@ -39,6 +45,7 @@ export function clearAdminViewportVars() {
   root.style.removeProperty("--admin-vh");
   root.style.removeProperty("--vv-offset-top");
   root.style.removeProperty("--keyboard-inset");
+  root.removeAttribute("data-keyboard-open");
 }
 
 export default function useAdminViewport(active) {
