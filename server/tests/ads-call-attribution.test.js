@@ -1103,6 +1103,10 @@ describe('phone successor arm requires durable lead evidence (codex P1 r18)', ()
     expect(arm).toMatch(/lo\.twilio_call_sid = call_log\.twilio_call_sid/);
     expect(arm).toMatch(/whereNot\('lo\.id', leadId\)/);
     expect(arm).toMatch(/whereNull\('lo\.deleted_at'\)/);
+    // An operator's explicit unlink (customer_link_override with a null
+    // customer_id) is a durable dissent: the shared predicate rides the arm.
+    expect(arm).toContain('.whereRaw(NOT_EXPLICITLY_UNLINKED_SQL)');
+    expect(src).toContain("require('../../utils/call-link-override')");
   });
 });
 

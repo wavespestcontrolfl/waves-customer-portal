@@ -313,13 +313,18 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
       // detach (the sync moves the message to the caller's unowned thread)
       // has no sweep behind it — the sweep only walks linked rows — so the
       // office retries the unlink.
-      await require('../services/conversations').syncVoiceMessageForCall(call.twilio_call_sid)
+      // The helper catches its own errors and returns null (Codex #3764 r2
+      // P1), so the null result is the failure signal — not a rejection.
+      const synced = await require('../services/conversations').syncVoiceMessageForCall(call.twilio_call_sid)
         .catch((e) => {
           logger.warn(`[call-recordings] voice message re-home after relink failed for ${maskSid(call.twilio_call_sid)}: ${e.message}`);
-          warnings.push(customerId
-            ? 'voice_message_rehome_failed: the hourly relink sweep will retry it'
-            : 'voice_message_rehome_failed: the recording is still in the previous customer\'s thread; retry the unlink');
+          return null;
         });
+      if (synced === null) {
+        warnings.push(customerId
+          ? 'voice_message_rehome_failed: the hourly relink sweep will retry it'
+          : 'voice_message_rehome_failed: the recording is still in the previous customer\'s thread; retry the unlink');
+      }
     }
     logger.info(`[call-recordings] call ${call.id} customer link set by operator (${customerId ? 'linked' : 'unlinked'}; timeline rows moved: ${timelineMoved})`);
     res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, timeline_rows_created: moved.timelineCreated, leads_unlinked: moved.leadsUnlinked, warnings });
@@ -513,7 +518,17 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     // while the pass processed a newer one (Codex #3736 r6 P1).
     let result;
     try {
-      result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true, expectedRecordingSid: chosen.recording_sid });
+      // The swap put processing_status back to NULL so the sweep owns the
+      // row; the pass must still know this call had COMPLETED before (Codex
+      // #3764 r2 P2) — its lead first-contact clamp keys on that, and an
+      // adoption on an old call would otherwise backdate first_contact_at
+      // to the original call time.
+      result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, {
+        force: true,
+        operator: true,
+        expectedRecordingSid: chosen.recording_sid,
+        reprocessOfProcessed: ['processed', 'voicemail', 'spam'].includes(call.processing_status),
+      });
     } catch (passErr) {
       // The swap is committed and the row is back in the sweep
       // (processing_status NULL). A pass that throws — a provider or DB

@@ -16,8 +16,8 @@ const {
   phoneLookupKey,
   isLinkableKey,
   TRANSCRIPTION_REJECTED_SENTINEL,
-  NOT_EXPLICITLY_UNLINKED_SQL,
 } = require('../services/call-log-relink');
+const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../utils/call-link-override');
 
 describe('pickContactPhone — the customer side of the call', () => {
   test('inbound → from_phone', () => {

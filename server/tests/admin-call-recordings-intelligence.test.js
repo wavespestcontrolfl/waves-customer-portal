@@ -150,6 +150,16 @@ describe('PUT /calls/:id/customer', () => {
     expect(timeline.patch).toEqual({ __deleted: true });
   });
 
+  test('a re-home that the helper reports as null (it catches its own errors) is a warning, not a silent success (codex #3764 gh-r2 P1)', async () => {
+    mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }]);
+    require('../services/conversations').syncVoiceMessageForCall.mockResolvedValueOnce(null);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: null }) });
+      expect(res.status).toBe(200);
+      expect((await res.json()).warnings).toEqual([expect.stringMatching(/voice_message_rehome_failed: .*retry the unlink/)]);
+    });
+  });
+
   test('an unlink severs the durable lead links too — the lead stamp keys leave metadata and the lead no longer claims the call SID (codex #3736 gh-r9)', async () => {
     const updates = mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }]);
     await withServer(async (base) => {
@@ -311,7 +321,9 @@ describe('POST /calls/:id/adopt-recording', () => {
     // The pass is fenced to the chosen recording: a callback that replaces
     // it before the claim makes the pass refuse instead of processing audio
     // the operator never chose.
-    expect(processor.processRecording).toHaveBeenCalledWith(SID, { force: true, operator: true, expectedRecordingSid: PARKED });
+    // …and carries the completed-state signal the swap erased from the row
+    // (processing_status NULL), so the lead first-contact clamp still applies.
+    expect(processor.processRecording).toHaveBeenCalledWith(SID, { force: true, operator: true, expectedRecordingSid: PARKED, reprocessOfProcessed: true });
     // The call's review flag follows its cards: the last card settled with
     // nothing else open clears review_status (codex #3764 gh-r1 P2).
     const flag = updates.find((u) => u.table === 'call_log' && u.patch.review_status === null);

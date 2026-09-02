@@ -1065,12 +1065,13 @@ describe('executeMerge', () => {
     // The rewrite is a one-key jsonb_set of the embedded id, never a blob written back.
     const rewrite = trx.raw.mock.calls.find(([sql]) => String(sql).includes("'{customer_link_override,customer_id}'"));
     // …plus this merge's stamp, so the undo can tell the rewrite from a later relink to the same winner (codex #3764 gh-r1 P2).
-    expect(rewrite).toEqual([expect.stringContaining("'{customer_link_override,merged_at}'"), [JSON.stringify(WINNER), expect.any(String)]]);
+    // The stamp is PUSHED onto merge_stamps (a stack), never a scalar overwrite: a chained merge's undo pops only its own.
+    expect(rewrite).toEqual([expect.stringContaining("'{customer_link_override,merge_stamps}', COALESCE(metadata -> 'customer_link_override' -> 'merge_stamps', '[]'::jsonb) || ?::jsonb"), [JSON.stringify(WINNER), expect.any(String)]]);
     expect(rewrite[0]).toContain('jsonb_set(jsonb_set(metadata');
     expect(result.repointed['call_log.customer_link_override']).toBe(1);
     const ids = JSON.parse(state.journal.repointed_ids);
     expect(ids.customer_link_override_call_ids).toEqual(['cl1']);
-    expect(ids.customer_link_override_merged_at).toBe(JSON.parse(rewrite[1][1]));
+    expect(JSON.parse(rewrite[1][1])).toEqual([ids.customer_link_override_merged_at]);
   });
 
   it('merging DIFFERENT homes marks the surviving sprinkler settings moved (stamp + confirmation reset); the same home does not (codex #3565 gh-r22)', async () => {

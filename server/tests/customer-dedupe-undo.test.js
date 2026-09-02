@@ -1076,8 +1076,8 @@ describe('revertMerge', () => {
     expect(back).toMatchObject({ pk: 'id', ids: ['cl1', 'cl2'] });
     expect(back.payload.updated_at).toBe('NOW()');
     const rewrite = state.rawCalls.find(([sql]) => String(sql).includes("'{customer_link_override,customer_id}'"));
-    // The rewrite back also drops the merge stamp it matched on.
-    expect(rewrite).toEqual([expect.stringContaining("jsonb_set(metadata #- '{customer_link_override,merged_at}'"), [JSON.stringify(LOSER)]]);
+    // The rewrite back pops ONLY the newest stamp (this merge's) — an earlier merge's stays underneath for its own undo.
+    expect(rewrite).toEqual([expect.stringContaining("'{customer_link_override,merge_stamps}', (metadata -> 'customer_link_override' -> 'merge_stamps') - -1"), [JSON.stringify(LOSER)]]);
     expect(result.repointedBack['call_log.customer_link_override']).toBe(1);
     expect(result.skipped).toContainEqual({ key: 'call_log.customer_link_override', reason: 'rows_changed_during_revert', count: 1 });
   });

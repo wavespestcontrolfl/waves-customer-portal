@@ -1230,7 +1230,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // tell THIS merge's rewrite from an operator relink to the same winner
     // made afterwards (Codex #3764 r1 P2): the relink endpoint writes a
     // fresh override object without the stamp, and the undo rewrites only
-    // overrides that still carry it.
+    // overrides whose NEWEST stamp is this one. Stamps are a stack
+    // (merge_stamps), not a scalar (Codex #3764 r2 P2): for A→B then B→C,
+    // undoing B→C pops its stamp and leaves A→B's in place for its own undo.
     const overrideMergeStamp = new Date().toISOString();
     try {
       await trx.transaction(async (sp) => {
@@ -1242,8 +1244,8 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
           .whereRaw("metadata -> 'customer_link_override' ->> 'customer_id' = ?", [String(loserId)])
           .update({
             metadata: sp.raw(
-              "jsonb_set(jsonb_set(metadata, '{customer_link_override,customer_id}', ?::jsonb, false), '{customer_link_override,merged_at}', ?::jsonb, true)",
-              [JSON.stringify(String(winnerId)), JSON.stringify(overrideMergeStamp)],
+              "jsonb_set(jsonb_set(metadata, '{customer_link_override,customer_id}', ?::jsonb, false), '{customer_link_override,merge_stamps}', COALESCE(metadata -> 'customer_link_override' -> 'merge_stamps', '[]'::jsonb) || ?::jsonb, true)",
+              [JSON.stringify(String(winnerId)), JSON.stringify([overrideMergeStamp])],
             ),
             updated_at: sp.fn.now(),
           });
@@ -3464,12 +3466,13 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     }
 
     // Operator call links the merge rewrote to the winner go back to the
-    // loser — only where the override still carries THIS merge's stamp
+    // loser — only where the override's NEWEST merge stamp is THIS merge's
     // (a relink made since the merge, even one to the same winner, wrote a
-    // fresh override without it: an operator decision, and it stays). A
-    // count-only record cannot be replayed and is reported, like any FK
-    // table; a record without the stamp cannot be told apart from later
-    // relinks and refuses the same way.
+    // fresh override without it: an operator decision, and it stays; an
+    // earlier merge's stamp stays underneath for its own undo). A count-
+    // only record cannot be replayed and is reported, like any FK table; a
+    // record without the stamp cannot be told apart from later relinks and
+    // refuses the same way.
     const overrideCallIds = recorded.customer_link_override_call_ids;
     const overrideMergeStamp = recorded.customer_link_override_merged_at || null;
     if (Array.isArray(overrideCallIds) && overrideCallIds.length) {
@@ -3477,10 +3480,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       const count = await trx('call_log')
         .whereIn('id', overrideCallIds)
         .whereRaw("metadata -> 'customer_link_override' ->> 'customer_id' = ?", [String(winnerId)])
-        .whereRaw("metadata -> 'customer_link_override' ->> 'merged_at' = ?", [String(overrideMergeStamp)])
+        .whereRaw("metadata -> 'customer_link_override' -> 'merge_stamps' ->> -1 = ?", [String(overrideMergeStamp)])
         .update({
           metadata: trx.raw(
-            "jsonb_set(metadata #- '{customer_link_override,merged_at}', '{customer_link_override,customer_id}', ?::jsonb, false)",
+            "jsonb_set(jsonb_set(metadata, '{customer_link_override,customer_id}', ?::jsonb, false), '{customer_link_override,merge_stamps}', (metadata -> 'customer_link_override' -> 'merge_stamps') - -1, true)",
             [JSON.stringify(String(loserId))],
           ),
           updated_at: trx.fn.now(),

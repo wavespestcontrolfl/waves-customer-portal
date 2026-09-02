@@ -56,12 +56,11 @@ const REHOME_SWEEP_LIMIT = 200;
 // Verbatim sentinel from call-recording-processor.js — marks a rejected
 // empty-voicemail row whose customer link was deliberately cleared.
 const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an implausible transcription was rejected.]';
-// An operator's explicit UNLINK (admin PUT /calls/:id/customer with a null
-// customer_id) stamps metadata.customer_link_override with customer_id null
-// and leaves call_log.customer_id NULL on purpose. The sweep must never
-// write the phone match back over that decision (Codex #3764 r1 P1) — the
-// predicate is carried by the scan AND the write, like the sentinel.
-const NOT_EXPLICITLY_UNLINKED_SQL = "((metadata -> 'customer_link_override') IS NULL OR (metadata -> 'customer_link_override' ->> 'customer_id') IS NOT NULL)";
+// An operator's explicit UNLINK leaves call_log.customer_id NULL on purpose;
+// the sweep must never write the phone match back over that decision (Codex
+// #3764 r1 P1) — the predicate is carried by the scan AND the write, like
+// the sentinel.
+const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../utils/call-link-override');
 
 function maskPhone(value) {
   const digits = String(value || '').replace(/\D/g, '');
@@ -255,7 +254,6 @@ module.exports = {
   phoneLookupKey,
   isLinkableKey,
   TRANSCRIPTION_REJECTED_SENTINEL,
-  NOT_EXPLICITLY_UNLINKED_SQL,
   WINDOW_DAYS,
   PAGE_SIZE,
   MAX_PAGES,

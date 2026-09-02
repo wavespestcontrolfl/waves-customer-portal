@@ -6298,7 +6298,10 @@ const CallRecordingProcessor = {
     // time into the SLA analytics. The retry states (extraction_failed,
     // no_transcription) are unfinished work and keep the real wait.
     const COMPLETED_STATUSES = new Set(['processed', 'voicemail', 'spam']);
-    const wasAlreadyProcessed = COMPLETED_STATUSES.has(call.processing_status);
+    // …or the caller says so: an operator adoption swaps the recording and
+    // puts processing_status back to NULL (so the sweep owns the row) before
+    // this pass, and passes the row's pre-swap completed state along.
+    const wasAlreadyProcessed = COMPLETED_STATUSES.has(call.processing_status) || opts.reprocessOfProcessed === true;
 
     // Dedup guard — skip if already fully processed (prevents duplicate
     // SMS on webhook retries). opts.force=true bypasses the guard so the
@@ -7071,7 +7074,16 @@ const CallRecordingProcessor = {
     // coordinating a visit, complaining, or asking about billing.
     let knownCaller = null;
     try {
-      const knownCustomer = await findCustomerForCallContact(contactPhone, {});
+      // The operator's link outranks the phone lookup here too (Codex #3764
+      // r2 P1): a relink exists because the phone identity was wrong or
+      // ambiguous, so the extraction prompt and the fail-open routing checks
+      // must see the CHOSEN customer — and no known-customer hint at all
+      // after an explicit unlink.
+      const knownCustomer = customerLinkOverride
+        ? (customerLinkOverride.customer_id
+          ? await db('customers').where({ id: customerLinkOverride.customer_id }).whereNull('deleted_at').first()
+          : null)
+        : await findCustomerForCallContact(contactPhone, {});
       knownCaller = summarizeKnownCaller(knownCustomer);
     } catch (e) {
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
