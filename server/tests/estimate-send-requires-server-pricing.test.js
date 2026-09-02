@@ -159,6 +159,18 @@ describe('assertEstimateSendable — engine-authoritative pricing gate', () => {
     expect(() => assertEstimateSendable(forged)).toThrow();
   });
 
+  it('a proposal authored BEFORE the provenance marker stays sendable with the gate off, and fails closed at the authority gate (not as quote-required) with it on (GH codex P0 r9)', () => {
+    const legacyProposal = fallbackDraft({
+      category: 'COMMERCIAL',
+      estimate_data: { proposal: { enabled: true, buildings: [{ name: 'Tower A', lineItems: [] }] }, result: { recurring: { services: [{ quoteRequired: true }] } } },
+    });
+    mockGateState.sendRequiresServerPricing = false;
+    expect(() => assertEstimateSendable(legacyProposal)).not.toThrow();
+    mockGateState.sendRequiresServerPricing = true;
+    expect(() => assertEstimateSendable(legacyProposal)).toThrow(/pricing engine|engine-verified|verify/i);
+    expect(() => assertEstimateSendable(legacyProposal)).not.toThrow(/manual review/i);
+  });
+
   it('exempts an authored proposal — its line items ARE the quote', () => {
     expect(caughtBy(fallbackDraft({
       estimate_data: { proposal: { enabled: true, provenance: { source: 'proposal-editor' }, buildings: [{ name: 'Tower A', lineItems: [] }] } },

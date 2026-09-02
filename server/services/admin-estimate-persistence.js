@@ -1004,11 +1004,12 @@ function sanitizeClientIdentityFields(obj) {
   return obj;
 }
 
-// A linked draft that must never be reused by the generic create: the
-// COMMERCIAL category (stamped only by the proposal editor) or ANY stored
-// proposal object — enabled, disabled or scaffold alike.
+// A linked draft that must never be reused by the generic create: one that
+// carries ANY stored proposal object — enabled, disabled or scaffold alike.
+// The COMMERCIAL category alone is NOT the signal (GH codex P2 r9): the
+// estimator engine and Agent Estimate stamp it on ordinary engine-priced
+// commercial drafts that carry no proposal and must keep being reusable.
 function linkedDraftCarriesProposal(row = {}) {
-  if (String(row.category || '').toUpperCase() === 'COMMERCIAL') return true;
   let data = row.estimate_data;
   if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
   const proposal = data && typeof data === 'object' ? data.proposal : null;

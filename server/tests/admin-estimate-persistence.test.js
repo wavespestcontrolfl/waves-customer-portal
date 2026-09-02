@@ -1231,8 +1231,10 @@ describe('createOrReuseAdminEstimate — a linked COMMERCIAL PROPOSAL draft is n
 describe('createOrReuseAdminEstimate — a DISABLED authored proposal draft is protected too (pre-push codex P0)', () => {
   const { linkedDraftCarriesProposal } = require('../services/admin-estimate-persistence');
 
-  test('the guard keys on the COMMERCIAL category or any stored proposal object, not only enabled/scaffold', () => {
-    expect(linkedDraftCarriesProposal({ category: 'COMMERCIAL', estimate_data: '{}' })).toBe(true);
+  test('the guard keys on any stored proposal object (not only enabled/scaffold) — never on the COMMERCIAL category alone', () => {
+    // An engine / Agent Estimate commercial draft carries the category but
+    // no proposal and must stay reusable (GH codex P2 r9).
+    expect(linkedDraftCarriesProposal({ category: 'COMMERCIAL', estimate_data: '{}' })).toBe(false);
     expect(linkedDraftCarriesProposal({ category: 'RESIDENTIAL', estimate_data: JSON.stringify({ proposal: { enabled: false, buildings: [] } }) })).toBe(true);
     expect(linkedDraftCarriesProposal({ category: 'RESIDENTIAL', estimate_data: { proposal: { scaffold: true } } })).toBe(true);
     expect(linkedDraftCarriesProposal({ category: 'RESIDENTIAL', estimate_data: '{}' })).toBe(false);

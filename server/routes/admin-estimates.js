@@ -286,7 +286,9 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
 // codex P0), and since #3750 the generic create/revise never persists a
 // browser proposal at all. A proposal without the marker — legacy rows
 // included, until re-saved in the editor — gets NO exemption from the
-// pricing-authority gate, its telemetry, or the manual-review gate.
+// pricing-authority gate or its telemetry (the manual-review exemption in
+// assertEstimateSendable deliberately keeps the older enabled-only
+// predicate so existing proposals stay sendable with the gate off).
 const PROPOSAL_PROVENANCE_SOURCE = 'proposal-editor';
 function isAuthoredProposalRow(estimate = {}) {
   const proposal = parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal;
@@ -462,7 +464,13 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   // at the gate rather than only scrubbing stored flags: the send snapshot
   // re-derives quoteRequired:true from proposal.enabled (via buildPricingBundle
   // → attachQuoteRequirement), which would otherwise re-block every resend.
-  const isAuthoredProposal = isAuthoredProposalRow(estimate);
+  // The manual-review exemption keeps the pre-#3750 predicate — an enabled
+  // proposal, marker or not — so proposals authored before the provenance
+  // marker existed stay sendable with the gate off (GH codex P0 r9:
+  // in-flight rows must keep working). The provenance requirement is scoped
+  // to the pricing-authority gate (isAuthoredProposalRow), where an
+  // un-marked legacy proposal fails closed until re-saved in the editor.
+  const isAuthoredProposal = parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true;
   if (!isAuthoredProposal && estimateDataHasQuoteRequirement(estimate.estimate_data || estimate.estimateData)) {
     const err = new Error('Quote-required estimates need manual review before they can be sent to the customer.');
     err.statusCode = 400;
