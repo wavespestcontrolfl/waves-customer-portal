@@ -1171,11 +1171,11 @@ export default function ProtocolReferenceTabV2() {
       </div>
       {trackData && (
         <div className="flex flex-col gap-3">
-          {" "}
+          {/* Month / equipment / area controls — lawn tracks only; service
+              programs have no mix inputs, so no (empty) card for them. */}
+          {isLawnTrack && (
           <Card className="overflow-hidden">
-            {" "}
             <div className="px-4 py-3 flex flex-col gap-3">
-              {isLawnTrack && (
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                   {" "}
                   <div>
@@ -1239,9 +1239,9 @@ export default function ProtocolReferenceTabV2() {
                     </div>{" "}
                   </div>{" "}
                 </div>
-              )}
             </div>{" "}
           </Card>
+          )}
           {safetyRules.length > 0 && (
             <div className="flex flex-wrap gap-2 px-3.5 py-2.5 bg-alert-bg border border-hairline border-alert-fg/30 rounded-md items-center">
               {" "}
