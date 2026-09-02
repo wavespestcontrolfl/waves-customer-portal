@@ -29,8 +29,11 @@ conversation: what was done wrong, what the correction was.)
    than dropping a rule.
 3. **`docs/public-route-contracts.md`** — if the lesson is the security
    contract of a route served without staff auth (its gate, token format,
-   rate limit, payload, headers, or an owner ruling about it). AGENTS.md
-   keeps only the invariant that every public route must be listed there.
+   rate limit, payload, headers, or an owner ruling about it). A lesson
+   about ONE route goes in its entry there; a lesson that applies to EVERY
+   public route (baseline guards, the report-family write rules, contract
+   burn, ask/find-slots gates) goes in the AGENTS.md P0 "Public route
+   surface" rule — never both.
 4. **The matching skill in `.claude/skills/*/SKILL.md`** — if the lesson is
    *procedural* and belongs to a domain a skill already covers (billing,
    DB/SQL, LLM call sites, shipping/PRs, content, pricing, UI verification,

@@ -107,10 +107,13 @@ duplicate them here; point at them.
   any DB read, a generic 404 (unknown, malformed, dark-gated, and
   ineligible rows indistinguishable), a rate limit, and privacy headers;
   a dark `GATE_*` route skips its limiter so a probe never sees a
-  revealing 429. Where a route's entry in that document specifies a
-  different dark or error response (e.g. the bond switcher's uniform 403
-  while dark), the entry is authoritative — flag drift from the entry,
-  not the entry itself. Writes on the `/api/reports/:token/*` family gate on
+  revealing 429. That baseline applies where a route's entry says nothing
+  else; where the entry records a different or narrower guard set (the
+  bond switcher's uniform 403 while dark, the automation-preview page's
+  token-plus-noindex-only contract), the entry is authoritative — flag
+  drift from the entry, never the entry itself, and flag a NEW route or a
+  widened payload that adopts less than the baseline without its entry
+  saying why. Writes on the `/api/reports/:token/*` family gate on
   `service_report_v1` + the token format check, use atomic conditional
   updates for one-shot guards (409 on 0 rows), mirror the read-side
   eligibility check, validate bodies before `Number()` coercion, and ride
@@ -314,7 +317,12 @@ duplicate them here; point at them.
 - **Lawn-diagnostic lockstep.** `CONDITION_LABELS` / `SUMMARY_CAUSE_RE` /
   `CONFIRMABLE_CONDITION` / the `GOVERNED_CAUSE` test stay mirrored and
   plural-aware; customer egress is confidence-gated and allowlisted —
-  never publish client- or LLM-supplied `customer_wording`.
+  never publish client- or LLM-supplied `customer_wording`. Persistence
+  stamps provenance server-side: `tech-lawn-diagnostic.js` accepts
+  `body.aiAnalysis` but overwrites `provenance` (`challenge_reverified`,
+  writer, run id) from the verified `lawn_diagnostic_runs` row — a client
+  must never be able to forge either and make an unreviewed summary look
+  eligible for confident customer voice.
 - **Lawn protocol data fan-out.** A product/protocol change reaches BOTH
   sources of truth (field-exec `protocols.json` AND `lawn_protocol_products`
   rates/gates + windows) plus `products_catalog` (rates match

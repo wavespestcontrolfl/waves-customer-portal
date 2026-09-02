@@ -479,16 +479,32 @@ gate, 24h expiry with 410, access-count audit, 30/15min limiter,
 `no-store`).
 `POST /api/stripe/terminal/validate-handoff` (machine-to-machine burn of
 the 60s single-use handoff JWT — the token IS the auth; see the atomic
-burn rule above).
+terminal-handoff burn rule in AGENTS.md).
 `/api/admin/push/vapid-key` (GET; deliberate — the VAPID public key is
 public by protocol).
 `/api/health` (GET; liveness probe, no data).
 `/api/integrations/*-worker` mounts (hermes workers; each authenticates
 via its own HMAC-signed header check inside the router — an
 unauthenticated internal route here is P0).
-The auth/OAuth login family (`/api/auth/login`, refresh, OAuth
-callbacks) is public by definition and rate-limited via
-`unauthenticatedAuthLimitKey`.
+Customer authentication (`server/routes/auth.js`, mounted at `/api/auth`):
+`POST /send-code`, `/verify-code`, `/refresh`, `/logout` are unauthenticated
+by definition. send-code and verify-code sit behind the `server/index.js`
+`authLimiter` (10 per 15 min keyed by `unauthenticatedAuthLimitKey` — JWT-
+blind, IPv6 /64-collapsed) plus per-route `ip:phone` limiters (5 and 8 per
+15 min); send-code returns ONE uniform response whether or not the number
+matches a customer, verify-code returns one uniform error for a bad code OR
+an unknown customer, logout is non-enumerating and idempotent, refresh and
+logout share a 30 per 15 min limiter. Nothing on this surface reveals
+whether a phone is on file. `/me`, `/properties`, `/select-property`
+require the customer JWT.
+Staff authentication (`server/routes/admin-auth.js`, mounted at
+`/api/admin/auth`): `POST /login` sits behind the same `authLimiter` (10 per
+15 min) and answers every failure with a generic 401 `Invalid credentials`;
+`/forgot-password` (5 per 15 min) and `/reset-password` (10 per 15 min) key
+on `unauthenticatedAuthLimitKey` with production-only limiters;
+`/change-password`, `/register` (requireAdmin), and `/me` require the staff
+bearer. OAuth callbacks validate a one-time `state` nonce, never bearer (see
+the AGENTS.md admin OAuth rule).
 `/.well-known/apple-app-site-association` + `/.well-known/assetlinks.json`
 (static universal-link association JSON for the native app shell — no auth,
 no PII, no request-derived content. **Both 404 behind GATE_UNIVERSAL_LINKS**;
@@ -1059,26 +1075,8 @@ written ATOMICALLY with the estimate update, is the whole audit surface.
 Treat the gate, the generic-404
 indistinguishability, the fail-closed reprice, the explicit membership
 identity, and the no-comms contract as security-critical.)
-New public routes outside this list are P0.
-The public estimate ask route must keep the estimate token format gate,
-a short-lived signed `askToken` bound to estimate id + estimate-token hash,
-terminal/expired-estimate rejection, public-route rate limits, no raw
-customer question/answer logging, and estimate-context-only answers.
-The estimate find-slots route is model-backed (parses a free-text "when"
-into a date window via Claude) and carries the same gate as ask: estimate
-token format gate, the short-lived signed `askToken`, terminal/expired
-rejection, public-route rate limit (15/min), and no raw query logging. It
-returns availability only (the same slot shape as available-slots) and never
-books.
-Contract links are short-lived bearer tokens for customer e-signature and
-must burn the token when signed.
-The `/api/reports/:token/*` family uses long-lived report tokens
-(`report_view_token` on `service_records`, 32-hex format enforced by
-`FULL_TOKEN_RE`). Writes on this family must: (a) gate state mutations on
-service_report_v1 + the report-token format check; (b) use atomic
-conditional updates for one-shot guards (e.g. one-rating-per-report uses
-`whereNull('client_pest_rating')` + 409 when 0 rows affected); (c) mirror
-the corresponding read-side eligibility check so a crafted POST can't
-store state for a report the customer can't see; (d) validate request
-bodies strictly before `Number()` coercion (raw `null`/`''`/`false`/`[]`
-must not coerce silently to 0); (e) ride the `reportEventLimiter`.
+The route-WIDE invariants — every public route must be listed here, the
+baseline token-route guards, the `/api/reports/:token/*` write rules,
+contract-token burn, and the estimate ask / find-slots gates — live in the
+AGENTS.md P0 rule "Public route surface", not in this document. This
+document holds the per-route entries only.
