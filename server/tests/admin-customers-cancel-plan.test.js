@@ -751,12 +751,23 @@ describe('POST /:id/cancel-plan', () => {
     const already = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
     expect(already).toEqual(expect.objectContaining({ duplicate: true, caseId: 'case-old' }));
     expect(mockProcess).not.toHaveBeenCalled();
+    // Staff scheduled a NEW, non-covered visit since (admin-schedule inserts
+    // without touching the churn stamp): new cancellable work — the
+    // operator's cancel runs fresh instead of echoing (#3727 r4).
+    mockState.scheduled_services.push({ id: 'extra', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-11-15', non_coverage: true });
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', cancelledCount: 1 });
+    const fresh = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+    expect(fresh.duplicate).toBeUndefined();
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    mockState.scheduled_services = mockState.scheduled_services.filter((r) => r.id !== 'extra');
+    mockState.service_requests = [mockState.service_requests[0]];
+    mockState.service_requests[0].status = 'resolved';
     // A win-back followed by a NEW churn restamps the customer — a different
     // event from the recorded one, however soon: that cancel processes fresh.
     mockState.customers[0].pipeline_stage_changed_at = new Date(older.getTime() + 5 * 60 * 1000);
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
     await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
-    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect(mockProcess).toHaveBeenCalledTimes(2);
     // A case recorded before the stamp existed proves nothing — processes.
     mockState.service_requests = [mockState.service_requests[0]];
     mockState.service_requests[0].status = 'resolved';
@@ -764,7 +775,7 @@ describe('POST /:id/cancel-plan', () => {
     mockState.customers[0].pipeline_stage_changed_at = older;
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
     await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
-    expect(mockProcess).toHaveBeenCalledTimes(2);
+    expect(mockProcess).toHaveBeenCalledTimes(3);
   }));
 
   test('the durable latch is for END-OF-COVERAGE cases only — an end-now term with a pending refund task still runs a fresh cancel for a new visit', () => withServer(async (baseUrl) => {

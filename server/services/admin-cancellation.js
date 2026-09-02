@@ -1258,6 +1258,31 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             const churnedAt = cust && cust.pipeline_stage_changed_at ? new Date(cust.pipeline_stage_changed_at).getTime() : NaN;
             tied = !!cust && cust.pipeline_stage === 'churned'
               && Number.isFinite(recorded) && Number.isFinite(churnedAt) && churnedAt === recorded;
+            // …and only while the cancellable work is still exactly the
+            // visits that run RETAINED (the term's covered set): a visit
+            // staff scheduled since (admin-schedule inserts without touching
+            // the churn stamp) is new work the operator just asked to
+            // cancel — fall through and run the processor (#3727 r4).
+            if (tied) {
+              try {
+                const { CANCELLABLE_STATUSES } = require('./cancellation-eligibility');
+                const covered = new Set((await liveCoveredKeepIds(term, customerId)).map(String));
+                const today = etDateString();
+                const [recurring, upcoming, rescheduled] = await Promise.all([
+                  db('scheduled_services').where({ customer_id: customerId, recurring_ongoing: true }).select('id'),
+                  db('scheduled_services').where({ customer_id: customerId }).whereIn('status', CANCELLABLE_STATUSES).where('scheduled_date', '>=', today).select('id'),
+                  db('scheduled_services').where({ customer_id: customerId, status: 'rescheduled' }).select('id'),
+                ]);
+                const extra = [...new Set([...recurring, ...upcoming, ...rescheduled].map((r) => String(r.id)))].filter((id) => !covered.has(id));
+                if (extra.length) {
+                  tied = false;
+                  logger.info(`[admin-cancellation] case ${prior.id} stays churned but new cancellable work exists (${extra.join(', ')}) — processing fresh`);
+                }
+              } catch (workErr) {
+                tied = false;
+                logger.warn(`[admin-cancellation] retained-work check failed for case ${prior.id}: ${workErr.message} — processing fresh`);
+              }
+            }
           }
         } catch (tieErr) {
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
