@@ -51,6 +51,7 @@ import {
   exclusiveProtocolSelectionConflict,
   reconcileDependentFindingSelections,
   reconcileExclusiveProtocolSelections,
+  noApplicationOutcomeConflict,
   specialtyCompletedWorkWithoutAction,
   specialtyCompletionFor,
   specialtyFindingActionConflict,
@@ -13342,6 +13343,16 @@ export function CompletionPanel({
     );
     if (completedWorkWithoutAction) {
       alert(completedWorkWithoutAction);
+      return;
+    }
+    const outcomeConflict = noApplicationOutcomeConflict(
+      specialtyCompletion,
+      activeSelectedLabels(selectedProtocolActionLabels),
+      selectedProducts.length,
+      visitOutcome,
+    );
+    if (outcomeConflict) {
+      alert(outcomeConflict);
       return;
     }
     // Don't complete while an AI draft is in flight — the response is about to

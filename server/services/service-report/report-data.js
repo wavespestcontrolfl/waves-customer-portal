@@ -499,6 +499,23 @@ function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
 // would falsely match \binterior\b). Only entries with treatmentApplied ===
 // true assert scope; an inspection / declined / no-access action contributes
 // nothing and must not fire the interior re-entry countdown.
+// Entries persisted before `reentryWait` existed carry treatmentPerformed
+// without it. Re-derive the wait from the server-owned preset metadata by
+// label; a label the presets no longer know fails closed and keeps the
+// stored guidance — an issued report must never lose its wait on a
+// re-read (local audit P1 on the #3701 follow-up).
+let specialtyActionByLabel = null;
+function performedActionKeepsWait(entry) {
+  if (entry.reentryWait !== undefined) return entry.reentryWait === true;
+  if (!specialtyActionByLabel) {
+    const { SPECIALTY_SERVICE_CLOSEOUTS } = require('../../../shared/specialty-service-closeouts');
+    specialtyActionByLabel = new Map(Object.values(SPECIALTY_SERVICE_CLOSEOUTS)
+      .flatMap((spec) => spec.protocols.map((action) => [action.label, action])));
+  }
+  const action = specialtyActionByLabel.get(String(entry.label || '').trim());
+  return action ? action.reentryWait === true : true;
+}
+
 function structuredActionScope(service = {}) {
   const structured = parseJsonObject(service.structured_notes);
   const entries = []
@@ -516,11 +533,16 @@ function structuredActionScope(service = {}) {
   // treatmentApplied): treatment occurred, so aftercare and the stored
   // re-entry guidance stand, but it is never pesticide-application evidence.
   let hasNonChemicalTreatment = false;
+  // Non-chemical work that still needs a waiting period (heat, steam):
+  // the only performed-but-unapplied work that keeps a stored re-entry
+  // timer (codex r16 P1 on #3701). Mechanical work does not.
+  let hasReentryWait = false;
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') continue;
     hasActions = true;
     if (entry.treatmentApplied !== true) {
       if (entry.treatmentPerformed === true) hasNonChemicalTreatment = true;
+      if (entry.treatmentPerformed === true && performedActionKeepsWait(entry)) hasReentryWait = true;
       continue;
     }
     if (entry.dryDown !== false) hasDryDownTreatment = true;
@@ -528,7 +550,7 @@ function structuredActionScope(service = {}) {
     if (scope === 'interior') { hasInterior = true; hasTreatment = true; }
     else if (scope === 'exterior') { hasExterior = true; hasTreatment = true; }
   }
-  return { hasInterior, hasExterior, hasTreatment, hasDryDownTreatment, hasActions, hasNonChemicalTreatment };
+  return { hasInterior, hasExterior, hasTreatment, hasDryDownTreatment, hasActions, hasNonChemicalTreatment, hasReentryWait };
 }
 
 // Controlled treatment-area labels carry an explicit scope
@@ -639,12 +661,14 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   // rule is gated on an explicit `false`.
   const declared = structuredActionScope(service);
   const typed = require('./activity-indicators').typedTreatmentEvidenceForRecord(service);
-  // Declared work with nothing dry-down-capable in it: inspection-only /
-  // deferred, bait-only, station-only. Non-chemical treatment (heat, steam)
-  // keeps the stored guidance on both the protocol and typed paths.
+  // Declared work with nothing that needs a waiting period: inspection-only /
+  // deferred, bait-only, station-only, or purely mechanical work (plugging,
+  // dethatching, nest removal, vacuuming). Only a dry-down application or a
+  // non-chemical treatment with its own wait (heat, steam) keeps the stored
+  // guidance, on both the protocol and typed paths (codex r16 P1 on #3701).
   const declaredWork = declared.hasActions || typed.declared;
-  const keepsGuidance = declared.hasDryDownTreatment || declared.hasNonChemicalTreatment
-    || typed.dryDown || (typed.performed && !typed.applied);
+  const keepsGuidance = declared.hasDryDownTreatment || declared.hasReentryWait
+    || typed.dryDown || typed.reentryWait;
   if (treatmentEvidence === false && declaredWork && !keepsGuidance) {
     if (!sideAdjusted('interior') && normalized.interior_reentry_min != null) normalized.interior_reentry_min = 0;
     if (!sideAdjusted('exterior') && normalized.exterior_reentry_min != null) normalized.exterior_reentry_min = 0;

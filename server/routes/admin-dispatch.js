@@ -5477,6 +5477,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ? products.filter((prod) => prod && typeof prod === 'object').length
           : 0,
         enforcePresetActions: explicitSpecialtyLane,
+        // inspection_only / customer_declined bill as not performed (see
+        // visitPerformed below) — the report must not publish performed
+        // work or applied products beside them (codex r16 P1 on #3701).
+        visitOutcome,
       },
     );
     if (structuredObservationConflict) {

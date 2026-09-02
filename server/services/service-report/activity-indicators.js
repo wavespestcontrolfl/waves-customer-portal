@@ -1124,12 +1124,14 @@ const TYPED_TREATMENT_OPTIONS = Object.freeze({
       applied: ['Hybrid heat + chemical treatment', 'Chemical / IPM treatment', 'Targeted follow-up treatment',
         'Chemical only', 'Chemical + heat', 'Steam + chemical'],
       performed: ['Heat treatment', 'Heat only'],
+      wait: ['Heat treatment', 'Heat only'],
       noWork: ['Inspection / monitoring only'],
     },
     work_completed: {
       applied: ['Crack & crevice treatment', 'Mattress / box spring treatment', 'Bed frame treatment',
         'Baseboard treatment', 'Furniture treatment', 'Dust application'],
       performed: ['Steam treatment'],
+      wait: ['Steam treatment'],
     },
   },
 });
@@ -1144,7 +1146,7 @@ const TYPED_TREATMENT_OPTIONS = Object.freeze({
 // = any classified option was selected at all.
 function typedTreatmentEvidence(type, values) {
   const fields = TYPED_TREATMENT_OPTIONS[type];
-  const result = { applied: false, performed: false, noWork: false, dryDown: false, declared: false };
+  const result = { applied: false, performed: false, noWork: false, dryDown: false, declared: false, reentryWait: false };
   if (!fields || !values || typeof values !== 'object') return result;
   let noWorkSelected = false;
   for (const [key, lists] of Object.entries(fields)) {
@@ -1153,6 +1155,9 @@ function typedTreatmentEvidence(type, values) {
     if (applied.length) result.applied = true;
     if (applied.some((part) => !(lists.nonSpray || []).includes(part))) result.dryDown = true;
     if (selected.some((part) => (lists.performed || []).includes(part))) result.performed = true;
+    // `wait` = performed non-chemical work with its own waiting period (heat,
+    // steam) — the only performed-only work that keeps a re-entry timer.
+    if (selected.some((part) => (lists.wait || []).includes(part))) result.reentryWait = true;
     if (selected.some((part) => (lists.noWork || []).includes(part))) noWorkSelected = true;
   }
   result.performed = result.performed || result.applied;
@@ -1178,6 +1183,7 @@ function typedTreatmentEvidenceForRecord(record) {
     applied: verdicts.some((v) => v.applied),
     performed: verdicts.some((v) => v.performed),
     dryDown: verdicts.some((v) => v.dryDown),
+    reentryWait: verdicts.some((v) => v.reentryWait),
     declared: verdicts.some((v) => v.declared),
     noWork: verdicts.length > 0 && verdicts.every((v) => v.noWork),
   };
