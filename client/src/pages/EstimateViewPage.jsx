@@ -80,7 +80,8 @@ import { loadStripeSdk } from '../lib/stripeLoader';
 import useModalFocus from '../hooks/useModalFocus';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
-import { formatETDate, formatETDateTime } from '../lib/timezone';
+import { etParts, formatETDate, formatETDateTime } from '../lib/timezone';
+import ReferralShareCard from '../components/referral/ReferralShareCard';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
 import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
 
@@ -4183,6 +4184,104 @@ export function ExistingPlanUpgradeCard({ membership, waveGuardTier, readOnly = 
   );
 }
 
+// Referral share card on the accepted / just-accepted screens
+// (GATE_ESTIMATE_SUCCESS_REFERRAL). The render payload carries only the
+// headline + CTA; the tap POSTs /:token/referral-link, which enrolls the
+// promoter — so a render never does. Same shared card as the service report.
+// `staffView` — a staff preview of a PUBLISHED accepted estimate
+// (?adminPreview=1) must never enroll the customer as a promoter: the card
+// renders its staff state and never fetches, and the fetch it would make
+// carries the same marker so the route refuses it too (GH codex P1 on #3710).
+export function EstimateReferralCard({ referral, token, staffView = false }) {
+  const fetchLink = async () => {
+    const url = `${API_BASE}/estimates/${token}/referral-link${staffView ? '?adminPreview=1' : ''}`;
+    const response = await fetch(url, { method: 'POST' });
+    if (!response.ok) throw new Error(`referral link ${response.status}`);
+    return response.json();
+  };
+  return (
+    <ReferralShareCard
+      referral={referral}
+      fetchLink={fetchLink}
+      staffView={staffView}
+      className="estimate-referral-card"
+      style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), marginTop: 16 }}
+      // The estimate page has no report stylesheet — the card's class hooks
+      // are inert here, so the estimate's own card typography rides inline.
+      styles={{
+        heading: { fontSize: 20, lineHeight: 1.35, fontWeight: 600, color: COLORS.navy, margin: '0 0 14px' },
+        button: { ...estimateCtaStyle, display: 'inline-block', fontSize: 15 },
+        link: { ...estimateCtaStyle, display: 'inline-block', fontSize: 15, textDecoration: 'none', margin: '10px 6px 0' },
+        code: { fontSize: 20, fontWeight: 700, color: COLORS.navy, letterSpacing: '0.04em', marginRight: 10 },
+        copy: { ...estimateSecondaryCtaStyle, padding: '6px 12px', fontSize: 14 },
+      }}
+    />
+  );
+}
+
+// Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): a 12-month strip
+// starting at the current ET month, with N evenly spaced application months
+// where N is the selected frequency's visitsPerYear. Pure arithmetic on data
+// already on the card — no product, step, or fertilizer names (owner-owned
+// business logic). The owner's 2026-07-23 ruling removed the "N applications
+// per year" HEADLINE from the price card; this is a separate visual block
+// behind its own gate.
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Returns 12 entries starting at startMonthIndex (0 = January): { label, marked }.
+// Applications are spread evenly across the year (12 / N months apart) from
+// the first month, rounded so 9 apps land ~every 1.33 months, 12 every
+// month, 4 every quarter. N > 12 saturates to every month.
+export function lawnCalendarMonths(visitsPerYear, startMonthIndex) {
+  const n = Math.min(12, Math.max(0, Math.round(Number(visitsPerYear) || 0)));
+  const start = ((Number(startMonthIndex) || 0) % 12 + 12) % 12;
+  const marked = new Set();
+  for (let i = 0; i < n; i += 1) marked.add(Math.round((i * 12) / n) % 12);
+  return Array.from({ length: 12 }, (_, offset) => ({
+    label: MONTH_ABBR[(start + offset) % 12],
+    marked: marked.has(offset),
+  }));
+}
+
+export function LawnProgramCalendar({ visitsPerYear, now = null }) {
+  const n = Math.round(Number(visitsPerYear) || 0);
+  if (!(n > 0)) return null;
+  const startMonthIndex = etParts(now || new Date()).month - 1;
+  const months = lawnCalendarMonths(n, startMonthIndex);
+  const weeks = Math.max(1, Math.round(52 / Math.min(n, 12)));
+  return (
+    <div aria-label="Your lawn program calendar" style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+        Your program
+      </div>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.5 }}>
+        {n} applications a year — about every {weeks} weeks
+      </div>
+      <div role="list" style={{ display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))', gap: 6, marginTop: 10 }}>
+        {months.map((m, i) => (
+          <div
+            key={`${m.label}-${i}`}
+            role="listitem"
+            aria-label={`${m.label}${m.marked ? ': application' : ''}`}
+            data-marked={m.marked ? 'true' : 'false'}
+            style={{
+              textAlign: 'center', padding: '6px 0', borderRadius: 999, fontSize: 14, fontWeight: 600,
+              border: `1.5px solid ${m.marked ? COLORS.glassNavy : ESTIMATE_BORDER}`,
+              background: m.marked ? COLORS.glassNavy : 'transparent',
+              color: m.marked ? COLORS.white : ESTIMATE_MUTED,
+            }}
+          >
+            {m.label}
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5 }}>
+        Timing shifts a little with weather and turf condition.
+      </div>
+    </div>
+  );
+}
+
 export function ServiceSection({
   section,
   servicesLength = 1,
@@ -4224,6 +4323,9 @@ export function ServiceSection({
   // Opens the "Does the lawn size look off?" sheet. Wired only when the
   // server payload flags measurementReviewEnabled (gate-on, non-preview).
   onMeasurementChallenge = null,
+  // Lawn program calendar under the lawn price card — wired only when the
+  // payload flags lawnCalendar (gate on) and the plan is recurring.
+  showLawnCalendar = false,
 }) {
   // On phones the corner-pinned WaveGuard badge's 170px heading clearance
   // eats most of the card width and crunches the headline — stack the badge
@@ -4417,6 +4519,10 @@ export function ServiceSection({
             // removing it there would drop the page's only guarantee claim
             // (codex P2 r3).
           />
+        ) : null}
+
+        {showLawnCalendar && section.key === 'lawn_care' && current ? (
+          <LawnProgramCalendar visitsPerYear={current.visitsPerYear} />
         ) : null}
 
         {/* Termite station rental rider (owner 2026-07-26): stations are
@@ -6693,6 +6799,7 @@ function EstimateViewPageInner() {
                 bondBusy={bondBusy}
                 onToggleInteriorService={onToggleInteriorService}
                 interiorBusy={interiorBusy}
+                showLawnCalendar={data?.lawnCalendar === true && serviceMode === 'recurring'}
                 onMeasurementChallenge={data?.measurementReviewEnabled && !adminDraftPreview
                   ? (basis) => setMeasurementReviewBasis(basis || {})
                   : null}
@@ -7059,6 +7166,7 @@ function EstimateViewPageInner() {
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
           <AcceptanceRecordCard acceptance={data.acceptance} />
+          {data.referral ? <EstimateReferralCard referral={data.referral} token={token} staffView={adminPreviewRequested} /> : null}
           <AppShowcaseCard />
           <EstimateAddServiceRequestCard
             offer={addServiceOffer}
@@ -7156,6 +7264,9 @@ function EstimateViewPageInner() {
               : null)}
           recurring={serviceMode !== 'one_time'}
         />
+        {/* The success screen renders from the accept response without a
+            /data refetch, so the referral card rides acceptResult.referral. */}
+        {acceptResult?.referral ? <EstimateReferralCard referral={acceptResult.referral} token={token} staffView={adminPreviewRequested} /> : null}
       </Page>
     );
   }
