@@ -175,6 +175,38 @@ async function claimNotice(email, parsed) {
   return row || null;
 }
 
+// A claim the sync never finished (process exit, DB blip after the insert)
+// would otherwise sit in `processing` forever: the email row is stored, so
+// no later sync re-enters the hook. Park anything older than the window as
+// apply_failed for the operator — never re-run the money path blind (if
+// recordManualPayment had committed, the invoice is paid and no longer a
+// candidate, so a manual Apply is refused; if it had not, the operator can
+// apply it).
+const STALE_CLAIM_MS = 10 * 60 * 1000;
+async function recoverStaleClaims() {
+  const cutoff = new Date(Date.now() - STALE_CLAIM_MS);
+  const stale = await db('inbound_payment_notices')
+    .where({ status: 'processing' })
+    .where('updated_at', '<', cutoff)
+    .select('id', 'email_id', 'payer_name', 'amount_cents');
+  for (const row of stale) {
+    const took = await db('inbound_payment_notices')
+      .where({ id: row.id, status: 'processing' })
+      .where('updated_at', '<', cutoff)
+      .update({
+        status: 'parked',
+        park_reason: 'apply_failed',
+        apply_error: 'The sync was interrupted before this notice was settled — check the invoice, then apply or ignore.',
+        updated_at: new Date(),
+      });
+    if (!took) continue;
+    logger.warn(`[zelle-notice] recovered a stale processing claim ${row.id} (email ${row.email_id}) → parked`);
+    await stampEmail(row.email_id, 'zelle_notice_parked:apply_failed');
+    await notifyOwner('Zelle payment needs review', `${row.payer_name || 'Unknown payer'} sent${row.amount_cents != null ? ` $${(row.amount_cents / 100).toFixed(2)}` : ''} — sync interrupted before settlement`, row.id);
+  }
+  return stale.length;
+}
+
 async function recentlyApplied(parsed) {
   const since = new Date(Date.now() - DUPLICATE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const dup = await db('inbound_payment_notices')
@@ -199,6 +231,7 @@ async function exactOpenInvoices(parsed) {
 async function maybeHandleZelleNotice(email) {
   if (!isZelleReconcileEnabled()) return false;
   if (!email || !isZelleNoticeCandidate(email)) return false;
+  await recoverStaleClaims().catch((err) => logger.warn(`[zelle-notice] stale-claim recovery failed: ${err.message}`));
 
   const trusted = isTrustedZelleSender(email);
   const parsed = parseZelleNotice(noticeText(email));
@@ -268,6 +301,8 @@ async function maybeHandleZelleNotice(email) {
 
 module.exports = {
   RECORDED_BY,
+  STALE_CLAIM_MS,
+  recoverStaleClaims,
   DUPLICATE_WINDOW_DAYS,
   NEAR_AMOUNT_TOLERANCE_CENTS,
   isZelleReconcileEnabled,

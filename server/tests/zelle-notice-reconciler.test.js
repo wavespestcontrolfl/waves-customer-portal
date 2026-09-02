@@ -41,7 +41,7 @@ const db = require('../models/db');
 const OpenBalance = require('../services/open-balance');
 const { recordManualPayment } = require('../services/invoice-manual-payment');
 const NotificationService = require('../services/notification-service');
-const { maybeHandleZelleNotice, isZelleReconcileEnabled, RECORDED_BY } = require('../services/zelle-notice-reconciler');
+const { maybeHandleZelleNotice, isZelleReconcileEnabled, recoverStaleClaims, RECORDED_BY } = require('../services/zelle-notice-reconciler');
 
 const TEXT = fs.readFileSync(path.join(__dirname, 'fixtures', 'zelle-notice-capitalone.txt'), 'utf8');
 const FORWARDED_AUTH = 'mx.google.com; dkim=pass header.i=@notification.capitalone.com header.s=k1; '
@@ -218,6 +218,28 @@ describe('park reasons', () => {
     expect(insertsOf('inbound_payment_notices')[0]).toMatchObject({ amount_cents: null, payer_name: null, status: 'processing' });
     expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'parse_failed' });
     expect(OpenBalance.openSelfPayInvoicesByAmountDue).not.toHaveBeenCalled();
+  });
+});
+
+describe('stale claim recovery', () => {
+  test('a processing row older than the window is parked apply_failed for the operator, stamped and surfaced; the sweep runs on every notice', async () => {
+    tables.inbound_payment_notices.selects = [[{ id: 'notice-old', email_id: 'email-old', payer_name: 'Old Payer', amount_cents: 5000 }]];
+    // builder.select is a plain mock — feed the stale row through it
+    const orig = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = orig(table); if (table === 'inbound_payment_notices') { const q = tables[table].selects; b.select = jest.fn(async () => (q.length ? q.shift() : [])); } return b; });
+    expect(await recoverStaleClaims()).toBe(1);
+    const patch = updatesOf('inbound_payment_notices')[0];
+    expect(patch).toMatchObject({ status: 'parked', park_reason: 'apply_failed' });
+    expect(patch.apply_error).toMatch(/interrupted/);
+    expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_parked:apply_failed' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment needs review', expect.stringContaining('interrupted'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-old' }));
+    // The CAS re-checks status + age so a row another pod just finished is left alone.
+    expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-old', status: 'processing' }]);
+  });
+
+  test('nothing stale ⇒ no writes', async () => {
+    expect(await recoverStaleClaims()).toBe(0);
+    expect(updatesOf('inbound_payment_notices')).toHaveLength(0);
   });
 });
 
