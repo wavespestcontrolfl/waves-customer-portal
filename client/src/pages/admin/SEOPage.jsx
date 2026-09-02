@@ -3097,8 +3097,9 @@ function BacklinkRegistryCard() {
       </div>
       <div style={{ fontSize: 12, color: D.muted, marginBottom: 10 }}>
         One row per candidate domain: how a link can be acquired, what it
-        costs, and where it stands. Investigation fetches pages and spends one
-        model call per domain; it never contacts or pays anyone.
+        costs, and where it stands. Investigation fetches pages and spends up
+        to two model calls per domain (one, plus a repair retry when the first
+        answer fails validation); it never contacts or pays anyone.
       </div>
       {runResult && (
         <div
@@ -3116,6 +3117,8 @@ function BacklinkRegistryCard() {
                 ? `Preview: ${runResult.selected} selected, up to ${runResult.wouldFetch ?? 0} fetches and ${runResult.wouldCall ?? 0} model calls`
                 : runResult.skipped === "lease_held"
                   ? "Another investigator run already holds the lease — nothing new was started."
+                : runResult.skipped === "probe_failed"
+                  ? "Could not check the investigator lease (database busy) — nothing was started; try again."
                 : runResult.started
                   ? "Investigator started in the background — runs are serialized; refresh the table to see results."
                   : `Investigated ${runResult.investigated}/${runResult.selected}: ${runResult.qualified} qualified, ${runResult.watching} watching, ${runResult.notReproducible} not reproducible, ${runResult.pathsWritten} paths written${runResult.failed?.length ? `, ${runResult.failed.length} failed` : ""}${runResult.skipped ? " (skipped: run already in progress)" : ""}`}

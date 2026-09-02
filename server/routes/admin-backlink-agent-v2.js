@@ -296,8 +296,13 @@ const REGISTRY_JOBS = Object.freeze({
     // Probe the lease BEFORE reporting startup: a held lease means no work
     // will run, and the operator must not read "started" off a no-op. (The
     // probe races the background acquire by design — a lease taken in the
-    // gap still lands as a logged skip, never a false failure.)
-    if (await require('../utils/cron-lock').isLocked(svc.LOCK_KEY)) return { started: false, skipped: 'lease_held' };
+    // gap still lands as a logged skip, never a false failure.) A probe that
+    // could not run (null: pool exhausted, DB blip) is NOT a free lease — the
+    // detached run would fail the same way with only a log to show for it,
+    // so report it as not started and let the operator retry.
+    const held = await require('../utils/cron-lock').isLocked(svc.LOCK_KEY);
+    if (held === null) return { started: false, skipped: 'probe_failed' };
+    if (held) return { started: false, skipped: 'lease_held' };
     void svc.investigatePaths(db, args)
       .then((r) => logger.info(`[link-investigator] admin run: ${r.skipped ? `SKIPPED (${r.skipped}) ` : ''}selected ${r.selected} investigated ${r.investigated} (qualified ${r.qualified} watching ${r.watching} not_reproducible ${r.notReproducible} refreshes ${r.pathRefreshes}) paths ${r.pathsWritten} failed ${r.failed.length} fetches ${r.fetches} llm ${r.llmCalls}`))
       .catch((err) => logger.error(`[link-investigator] admin run failed: ${err.message}`));
@@ -410,14 +415,19 @@ router.patch('/registry/:id', async (req, res, next) => {
     // delete) was lost — never overwrite it: a domain-only flip would
     // contradict the placements and authority behind it.
     // A new generation (Watch park, Reopen) is ONE atomic write: the domain
-    // state/mask and the provenance-hint cursor (covered_at) reset together,
-    // so a failure can never leave a reset mask beside stale hint coverage.
+    // state/mask and the provenance-hint coverage — BOTH halves, the stamp
+    // (covered_at) and the per-URL accrual (covered_urls), on every touch —
+    // reset together, exactly like the investigator's own generation resets.
+    // A partially covered touch carries no stamp but does carry covered_urls,
+    // and the resumed pass would credit those URLs as observed without
+    // re-fetching them; so a failure can never leave a reset mask beside
+    // stale hint coverage, and a fresh generation never inherits any.
     const n = await db.transaction(async (trx) => {
       const updated = await trx('seo_link_domains')
         .where({ id: domain.id }).whereNotIn('agent_state', ['ready_to_acquire', 'acquiring', 'acquired'])
         .update(patch);
       if (updated && patch.probe_coverage_mask === 0) {
-        await trx('seo_link_domain_sources').where({ domain_id: domain.id }).whereNotNull('covered_at').update({ covered_at: null });
+        await trx('seo_link_domain_sources').where({ domain_id: domain.id }).update({ covered_at: null, covered_urls: null });
       }
       return updated;
     });

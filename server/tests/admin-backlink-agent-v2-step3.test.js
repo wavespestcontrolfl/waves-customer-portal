@@ -16,13 +16,15 @@ const mockState = {
   placements: [],
   updates: [],
   touchUpdates: [],
+  touchWhereNotNull: 0,
 };
 
 jest.mock('../models/db', () => {
   const mk = (table) => {
     const q = {
       _table: table,
-      where: jest.fn(() => q), whereIn: jest.fn(() => q), whereILike: jest.fn(() => q), whereNotNull: jest.fn(() => q),
+      where: jest.fn(() => q), whereIn: jest.fn(() => q), whereILike: jest.fn(() => q),
+      whereNotNull: jest.fn(() => { if (table === 'seo_link_domain_sources') mockState.touchWhereNotNull += 1; return q; }),
       whereNotIn: jest.fn((col, arr) => { q._notIn = { col, arr }; return q; }),
       clone: () => q, orderBy: () => q, orderByRaw: () => q, limit: () => q, select: () => q,
       offset: () => Promise.resolve(mockState.domains),
@@ -77,7 +79,7 @@ function call(fn, { body = {}, query = {}, params = {} } = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  Object.assign(mockState, { domains: [], firstDomain: undefined, paths: [], touches: [], placements: [], updates: [], touchUpdates: [] });
+  Object.assign(mockState, { domains: [], firstDomain: undefined, paths: [], touches: [], placements: [], updates: [], touchUpdates: [], touchWhereNotNull: 0 });
 });
 
 describe('POST /registry/jobs/investigate', () => {
@@ -95,6 +97,14 @@ describe('POST /registry/jobs/investigate', () => {
     isLocked.mockResolvedValueOnce(true);
     const r = await call(handler('post', '/registry/jobs/:job'), { params: { job: 'investigate' }, body: {} });
     expect(r.body).toEqual({ job: 'investigate', started: false, skipped: 'lease_held' });
+    expect(investigatePaths).not.toHaveBeenCalled();
+    isEnabled.mockReturnValue(false);
+  });
+  test('a probe that could not run is not a free lease — reported as not started (Codex #3760 r1 P2)', async () => {
+    isEnabled.mockReturnValue(true);
+    isLocked.mockResolvedValueOnce(null);
+    const r = await call(handler('post', '/registry/jobs/:job'), { params: { job: 'investigate' }, body: {} });
+    expect(r.body).toEqual({ job: 'investigate', started: false, skipped: 'probe_failed' });
     expect(investigatePaths).not.toHaveBeenCalled();
     isEnabled.mockReturnValue(false);
   });
@@ -174,8 +184,11 @@ describe('PATCH /registry/:id', () => {
     expect(mockState.updates[0].patch.agent_state).toBe('watching');
     expect(mockState.updates[0].patch.watch_recheck_at).toBeInstanceOf(Date);
     expect(mockState.updates[0].patch.probe_coverage_mask).toBe(0); // a manual Watch starts a long-term generation — coverage re-earned after the park (Codex PR r26 P1)
-    expect(mockState.touchUpdates).toHaveLength(1); // …and the provenance-hint cursor is released with it (r29)
-    expect(mockState.touchUpdates[0].patch).toEqual({ covered_at: null });
+    expect(mockState.touchUpdates).toHaveLength(1); // …and the provenance-hint coverage is released with it (r29)
+    // BOTH halves, on every touch — the stamp and the per-URL accrual — so a
+    // partially covered touch cannot lend its old URLs to the fresh generation (#3760 r1 P1)
+    expect(mockState.touchUpdates[0].patch).toEqual({ covered_at: null, covered_urls: null });
+    expect(mockState.touchWhereNotNull).toBe(0);
     const rj = await call(patch(), { params: { id: 'd1' }, body: { action: 'reject' } });
     expect(rj.body.agent_state).toBe('rejected');
     expect(mockState.updates[1].patch.watch_recheck_at).toBeNull();
