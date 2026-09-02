@@ -173,14 +173,16 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // the LIMIT is applied before settlement, so a batch whose top rows are
     // all retired (settled, unclassified, not leased) must not make a
     // one-shot worker conclude there is no work while claimable rows sit
-    // below them. Every batch excludes the candidates already consumed;
-    // bounded rounds keep a pathological board from looping.
+    // below them. Every batch excludes the candidates already consumed, so
+    // the loop terminates by EXHAUSTION (a finite board, each round consuming
+    // fresh rows) — never by a round cap that could return an empty batch
+    // with claimable rows still unread.
     const out = [];
     const consumed = [];
     const now = new Date();
-    for (let round = 0; round < 8 && out.length < limit; round++) {
+    while (out.length < limit) {
     let rows = await ranked(limit - out.length, consumed).forUpdate().skipLocked();
-    if (rows.length === 0) break;
+    if (rows.length === 0) break; // exhausted
     for (const r of rows) consumed.push(r.id);
     const ids = rows.map((r) => r.id);
     // Settle BEFORE leasing, under the row locks just taken: a placement

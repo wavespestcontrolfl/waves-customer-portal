@@ -365,3 +365,16 @@ test('a board row the catch-up has not linked to a path yet is never leased or p
   expect((await worker.claim({ n: 5, type: 'signup' })).map((r) => r.id)).toEqual(['r-ok']);
 });
 
+test('claim keeps batching past any number of retired-path rows until a live one is leased (local Codex P1)', async () => {
+  const live = { id: 'p-live', domain_id: 'dL', submission_url: 'https://live.example/add', superseded_by: null, link_type: 'directory', confidence: 0.7, revision: 1 };
+  mockStore.seo_link_acquisition_paths.push(live);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high' };
+  for (let i = 0; i < 12; i++) { // twelve higher-ranked rows, each on its own retired path
+    mockStore.seo_link_acquisition_paths.push({ id: `p-old-${i}`, domain_id: `d${i}`, submission_url: `https://d${i}.example/old`, superseded_by: `p-new-${i}`, link_type: 'directory', confidence: 0.7 }, { id: `p-new-${i}`, domain_id: `d${i}`, submission_url: `https://d${i}.example/new`, superseded_by: null, link_type: 'directory', confidence: 0.7, revision: 1 });
+    mockStore.seo_link_prospects.push({ ...base, id: `r-old-${i}`, target_domain: `d${i}.example`, path_id: `p-old-${i}`, target_url: `https://d${i}.example/old`, domain_rating: 100 - i });
+  }
+  mockStore.seo_link_prospects.push({ ...base, id: 'r-live', target_domain: 'live.example', path_id: 'p-live', target_url: 'https://live.example/add', domain_rating: 1 });
+  expect((await worker.claim({ n: 1, type: 'signup' })).map((r) => r.id)).toEqual(['r-live']);
+  expect(mockStore.seo_link_prospects.filter((r) => r.id.startsWith('r-old-')).every((r) => r.path_id.startsWith('p-new-') && r.claimed_at == null)).toBe(true); // all twelve settled, none leased
+});
+
