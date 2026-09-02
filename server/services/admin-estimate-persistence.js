@@ -2215,14 +2215,18 @@ function fallbackRevisionGroupIds(row, writeFields) {
   return [...new Set([row?.estimate_group_id, writeFields?.estimate_group_id].filter(Boolean).map(String))].sort();
 }
 
-// A LIVE row (sent/viewed — customer-viewable) moving into another group
-// exposes that group's viewable siblings through its link the moment the
-// revision commits, with no send preflight in between (GH codex P1 r10):
-// even a SERVER-priced revision must therefore have the DESTINATION group
-// judged and locked. Gate-scoped like the delivery verdict it mirrors.
+// A LIVE row moving into another group exposes that group's viewable
+// siblings through its link the moment the revision commits, with no send
+// preflight in between (GH codex P1 r10): even a SERVER-priced revision
+// must therefore have the DESTINATION group judged and locked. "Live" is
+// the same set assertNoFallbackRevisionOfLiveLink uses — sent, viewed, OR
+// scheduled (GH codex P2 r11: a scheduled first-send row keeps its schedule
+// while joining the group, and the cron's group preflight would fail the
+// anchor later instead of this save refusing now). Gate-scoped like the
+// delivery verdict it mirrors.
 function liveGroupMoveDestinationIds(row, writeFields) {
   if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return [];
-  const live = !!(row?.sent_at || row?.viewed_at);
+  const live = !!(row?.sent_at || row?.viewed_at || String(row?.status || '') === 'scheduled');
   const destination = writeFields?.estimate_group_id ? String(writeFields.estimate_group_id) : null;
   if (!live || !destination || destination === String(row?.estimate_group_id || '')) return [];
   return [destination];

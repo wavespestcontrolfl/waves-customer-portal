@@ -1174,6 +1174,9 @@ describe('a LIVE row moving into a group has the destination judged and locked, 
 
   test('only a live row changing groups, gate on, names a destination; the lock set includes it even for a SERVER write', () => {
     expect(liveGroupMoveDestinationIds(liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual(['grp-dest']);
+    // A SCHEDULED first-send row is live too (GH codex P2 r11): it keeps its
+    // schedule while joining the group, so the destination is judged now.
+    expect(liveGroupMoveDestinationIds({ id: 'est-sched', estimate_group_id: null, status: 'scheduled' }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual(['grp-dest']);
     expect(liveGroupMoveDestinationIds({ ...liveRow, estimate_group_id: 'grp-dest' }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual([]);
     expect(liveGroupMoveDestinationIds({ id: 'est-draft', estimate_group_id: null }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual([]);
     expect(revisionGroupLockIds(liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual(['grp-dest']);
