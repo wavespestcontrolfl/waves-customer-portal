@@ -1011,6 +1011,19 @@ window.fetch = async (input, init) => {
     // built with a priced line — otherwise ?mode=pdf falls through to the
     // normal page exactly like production.
     const pdfPass = new URLSearchParams(window.location.search).get('mode') === 'pdf';
+    // returnVisit mirrors the GATE_ESTIMATE_RETURN_VISIT projection on a
+    // second visit so the welcome-back strip is exercised in preview
+    // (?visit=first suppresses it).
+    const firstVisit = new URLSearchParams(window.location.search).get('visit') === 'first';
+    const returnVisit = firstVisit ? {} : {
+      returnVisit: {
+        visitNumber: 3,
+        lastVisitAt: '2026-07-10T15:30:00.000Z',
+        changes: scenario === 'lawn'
+          ? [{ kind: 'extension_granted', label: 'Your expiration date was extended.', at: '2026-07-11T12:00:00.000Z' }]
+          : [],
+      },
+    };
     const payload = PAYLOADS[scenario]();
     const proposal = payload.proposal || (pdfPass ? synthesizeDocumentProposal(payload) : null);
     // lawnCalendar / referral mirror the GATE_ESTIMATE_LAWN_CALENDAR and
@@ -1020,6 +1033,7 @@ window.fetch = async (input, init) => {
       ...payload,
       ...(pdfPass && proposal ? { proposal } : {}),
       glassDefault: true,
+      ...returnVisit,
       lawnCalendar: true,
       ...referral,
       // softExit mirrors the GATE_ESTIMATE_SOFT_EXIT /data flag on a live row so
