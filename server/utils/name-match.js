@@ -213,7 +213,8 @@ function givenNameRuns(tokens) {
 }
 // [{ given: [tokens], surname: [tokens] }] per person on the line.
 function personsOf(payerName) {
-  const people = String(payerName || '').split(/\s*&\s*|\s+and\s+/i).map((p) => p.trim()).filter(Boolean);
+  // Joint-line separators: "&", "and", "/", "+", ";" (case-insensitive).
+  const people = String(payerName || '').split(/\s*[&/+;]\s*|\s+and\s+/i).map((p) => p.trim()).filter(Boolean);
   const parsed = people.map((person) => {
     const comma = person.indexOf(',');
     if (comma > -1) {
