@@ -1136,15 +1136,23 @@ export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, show
   // swallowed rejection would make the tap do nothing), then Web Share, else
   // the sms: href proceeds untouched (GH codex r3 P1). Mirrors
   // DocumentActionBar.
+  const smsHref = `sms:?&body=${encodeURIComponent(pageUrl)}`;
   const share = async (e) => {
+    // Native shell WITHOUT the Share plugin (an older installed binary
+    // running this bundle): Web Share is the unreliable path there, so the
+    // sms: link proceeds untouched (GH codex r4 P1).
+    if (isNativeApp() && !canShareNative()) return;
     if (canShareNative()) {
       e.preventDefault();
-      await shareUrlNative(pageUrl, 'My Waves estimate').catch(() => {});
+      try { await shareUrlNative(pageUrl, 'My Waves estimate'); } catch { window.location.href = smsHref; }
       return;
     }
     if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
       e.preventDefault();
-      try { await navigator.share({ title: 'My Waves estimate', url: pageUrl }); } catch { /* user dismissed */ }
+      try { await navigator.share({ title: 'My Waves estimate', url: pageUrl }); } catch (err) {
+        // A dismissed sheet is an AbortError; anything else falls back to sms.
+        if (!err || err.name !== 'AbortError') window.location.href = smsHref;
+      }
     }
   };
   const actionStyle = {
@@ -1160,7 +1168,7 @@ export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, show
       {changes.length ? (
         <>
           <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
-            This estimate has been opened {returnVisit.visitNumber} times &mdash; here&rsquo;s what&rsquo;s changed on it{since}:
+            This is visit {returnVisit.visitNumber} to this estimate &mdash; here&rsquo;s what&rsquo;s changed on it{since}:
           </div>
           <ul style={{ margin: 0, paddingLeft: 20, fontSize: 16, color: COLORS.glassNavy, lineHeight: 1.5 }}>
             {changes.map((c, i) => <li key={`${c.kind}-${c.at || i}`}>{c.label}</li>)}
@@ -1168,11 +1176,11 @@ export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, show
         </>
       ) : (
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
-          This estimate has been opened {returnVisit.visitNumber} times{lastDisplay ? `, last on ${lastDisplay}` : ''} &mdash; the estimate below is current as of today.
+          This is visit {returnVisit.visitNumber} to this estimate{lastDisplay ? ` (the last one was ${lastDisplay})` : ''} &mdash; the estimate below is current as of today.
         </div>
       )}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
-        <a href={`sms:?&body=${encodeURIComponent(pageUrl)}`} onClick={share} style={actionStyle}>Text this to someone</a>
+        <a href={smsHref} onClick={share} style={actionStyle}>Text this to someone</a>
         {showAsk ? <button type="button" onClick={onAsk} style={actionStyle}>Ask a question</button> : null}
       </div>
     </section>

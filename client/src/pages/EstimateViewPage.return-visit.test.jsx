@@ -6,10 +6,15 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-const nativeShare = { can: false, share: vi.fn(async () => true) };
+const nativeShare = { can: false, native: false, share: vi.fn(async () => true) };
 vi.mock('../native/nativeFile', async (importOriginal) => {
   const actual = await importOriginal();
   return { ...actual, canShareNative: () => nativeShare.can, shareUrlNative: (...a) => nativeShare.share(...a) };
+});
+// The page reads the shell flag from native/platform, not nativeFile.
+vi.mock('../native/platform', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, isNativeApp: () => nativeShare.native };
 });
 import { ReturnVisitStrip } from './EstimateViewPage';
 
@@ -32,7 +37,7 @@ describe('ReturnVisitStrip', () => {
         { kind: 'extension_granted', label: 'The expiration date was extended.', at: '2026-08-31T11:00:00.000Z' },
       ],
     }} />);
-    expect(screen.getByText(/opened 3 times — here’s what’s changed on it since August 30/)).toBeInTheDocument();
+    expect(screen.getByText(/This is visit 3 to this estimate — here’s what’s changed on it since August 30/)).toBeInTheDocument();
     expect(screen.getByText('Mosquito was removed from this estimate; the price below reflects that.')).toBeInTheDocument();
     expect(screen.getByText('The expiration date was extended.')).toBeInTheDocument();
     // Estimate-level wording only — never claims the current reader did it.
@@ -41,7 +46,7 @@ describe('ReturnVisitStrip', () => {
 
   it('never claims "nothing changed" when the server named no change (only two stamps are recognized)', () => {
     render(<ReturnVisitStrip returnVisit={{ visitNumber: 2, lastVisitAt: '2026-08-30T14:00:00.000Z', changes: [] }} />);
-    expect(screen.getByText(/opened 2 times, last on August 30 — the estimate below is current as of today\./)).toBeInTheDocument();
+    expect(screen.getByText(/This is visit 2 to this estimate \(the last one was August 30\) — the estimate below is current as of today\./)).toBeInTheDocument();
     expect(screen.queryByText(/same price|nothing has changed/i)).not.toBeInTheDocument();
   });
 
@@ -82,6 +87,20 @@ describe('ReturnVisitStrip', () => {
     expect(nativeShare.share).toHaveBeenCalledWith(window.location.href, 'My Waves estimate');
     expect(webShare).not.toHaveBeenCalled();
     nativeShare.can = false;
+    vi.unstubAllGlobals();
+  });
+
+  it('an installed native binary WITHOUT the Share plugin leaves the sms: link untouched (GH codex r4 P1)', () => {
+    nativeShare.native = true;
+    nativeShare.can = false;
+    const webShare = vi.fn();
+    vi.stubGlobal('navigator', { ...navigator, share: webShare });
+    render(<ReturnVisitStrip returnVisit={{ visitNumber: 2, lastVisitAt: '2026-08-30T14:00:00.000Z', changes: [] }} />);
+    const link = screen.getByRole('link', { name: 'Text this to someone' });
+    const evt = fireEvent.click(link);
+    expect(webShare).not.toHaveBeenCalled();
+    expect(evt).toBe(true); // default sms: navigation not prevented
+    nativeShare.native = false;
     vi.unstubAllGlobals();
   });
 });
