@@ -1030,14 +1030,18 @@ window.fetch = async (input, init) => {
     const payload = PAYLOADS[scenario]();
     const proposal = payload.proposal || (pdfPass ? synthesizeDocumentProposal(payload) : null);
     // lawnCalendar / referral mirror the GATE_ESTIMATE_LAWN_CALENDAR and
-    // GATE_ESTIMATE_SUCCESS_REFERRAL /data flags so both blocks render in preview.
+    // GATE_ESTIMATE_SUCCESS_REFERRAL /data blocks so both render in preview.
+    // The lawn fixture is the 9x program; the server projects its months
+    // through the scheduling catalog (42-day step) — mirrored here from the
+    // current month.
+    const lawnProgramMonths = Array.from({ length: 9 }, (_, i) => new Date(Date.now() + i * 42 * 86400000).getMonth());
     const referral = scenario === 'accepted' ? { referral: { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' } } : {};
     return respond({
       ...payload,
       ...(pdfPass && proposal ? { proposal } : {}),
       glassDefault: true,
       ...returnVisit,
-      lawnCalendar: true,
+      lawnCalendar: { programs: { standard: { visitsPerYear: 9, cadence: 'about every 42 days', months: lawnProgramMonths } } },
       ...referral,
       // softExit mirrors the GATE_ESTIMATE_SOFT_EXIT /data flag on a live row so
       // the "Not what you expected?" sheet is exercised in preview.

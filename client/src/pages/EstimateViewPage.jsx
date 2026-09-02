@@ -81,7 +81,7 @@ import useModalFocus from '../hooks/useModalFocus';
 import { canonicalShareUrl, shareDocumentLink } from '../components/DocumentActionBar';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
-import { addETDays, etParts, formatETDate, formatETDateTime } from '../lib/timezone';
+import { etParts, formatETDate, formatETDateTime } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
 import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
@@ -4350,10 +4350,14 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
 }
 
 // Lawn program seasons (GATE_ESTIMATE_LAWN_CALENDAR): the four SWFL turf
-// seasons in order from the current ET month, each with a one-line focus and
-// the share of the year's applications that lands in it. Replaces the
-// 12-month pill strip (owner 2026-09-02: twelve pills with N filled read as
-// noise, not a program). The season bands and their focus copy are the same
+// seasons in order from the current month, each with a one-line focus and
+// how many of the program's applications the scheduler puts in it.
+// Replaces the 12-month pill strip (owner 2026-09-02: twelve pills with N
+// filled read as noise, not a program). The cadence line and the projected
+// months arrive on the /data payload (`lawnCalendar.programs[frequencyKey]`)
+// from the scheduling catalog — this block only buckets months into
+// seasons, so it can never promise an interval the scheduler does not keep
+// (GH Codex P1). The season bands and their focus copy are the same
 // customer-facing seasonal context the lawn health widget already uses
 // (server/services/fawn-weather.js getSeasonalContext): spring green-up
 // Mar–Apr, summer peak May–Sep, fall transition Oct–Nov, winter dormancy
@@ -4370,43 +4374,13 @@ const LAWN_SEASONS = [
   { key: 'winter', label: 'Winter', range: 'Dec – Feb', months: [11, 0, 1], focus: 'Root strength while the lawn rests.' },
 ];
 
-// The program cadence is the interval the plan catalog schedules
-// (server/services/self-booking-plan-sync.js: 12 = monthly, 9 = the 42-day
-// "every 6 weeks" program, 6 = bimonthly, 4 = quarterly); any other count
-// falls back to the even split of the year. The headline and the per-season
-// counts both read from this one table so they can never disagree.
-const LAWN_CADENCE = {
-  12: { months: 1, label: 'about once a month' },
-  9: { days: 42, label: 'about every 42 days' },
-  6: { months: 2, label: 'about every 2 months' },
-  4: { months: 3, label: 'about every 3 months' },
-};
-function lawnCadence(n) {
-  if (LAWN_CADENCE[n]) return LAWN_CADENCE[n];
-  const days = n > 0 ? Math.max(1, Math.round(365 / n)) : 365;
-  return { days, label: `about every ${days} days` };
-}
-export function lawnCadenceLabel(visitsPerYear) {
-  return lawnCadence(Math.round(Number(visitsPerYear) || 0)).label;
-}
-
-// Returns the four seasons starting with the one containing `now`'s ET
-// month, each stamped { ...season, current, applications }. The count is a
-// projection: the first application in the current month, then N-1 more at
-// the program's cadence (whole months for the monthly / bimonthly /
-// quarterly plans, the 42-day step for the 6-week program), each counted
-// against the season its ET month falls in. Cadence arithmetic only — the
-// scheduler still sets the real dates.
-export function lawnProgramSeasons(visitsPerYear, now) {
-  const n = Math.max(0, Math.round(Number(visitsPerYear) || 0));
-  const at = now instanceof Date && !Number.isNaN(now.getTime()) ? now : new Date();
-  const start = etParts(at).month - 1;
-  const cadence = lawnCadence(n);
-  const hits = Array.from({ length: n }, (_, i) => (
-    cadence.months
-      ? (start + i * cadence.months) % 12
-      : etParts(addETDays(at, i * cadence.days)).month - 1
-  ));
+// `months` are the server-projected 0-based month indices of the program's
+// applications, first one first. Returns the four seasons starting with the
+// one containing the first month, each stamped { ...season, current,
+// applications }; the counts sum to months.length by construction.
+export function lawnProgramSeasons(months) {
+  const hits = (Array.isArray(months) ? months : []).map((m) => Number(m)).filter((m) => Number.isInteger(m) && m >= 0 && m < 12);
+  const start = hits.length ? hits[0] : etParts(new Date()).month - 1;
   const first = Math.max(0, LAWN_SEASONS.findIndex((s) => s.months.includes(start)));
   return LAWN_SEASONS.map((_, i) => LAWN_SEASONS[(first + i) % LAWN_SEASONS.length]).map((s, i) => ({
     ...s,
@@ -4415,18 +4389,27 @@ export function lawnProgramSeasons(visitsPerYear, now) {
   }));
 }
 
-export function LawnProgramCalendar({ visitsPerYear, now = null }) {
+// `program` = { visitsPerYear, cadence, months } from the /data payload.
+export function LawnProgramCalendar({ program }) {
   const [open, setOpen] = useState(false);
-  const n = Math.round(Number(visitsPerYear) || 0);
-  if (!(n > 0)) return null;
-  const seasons = lawnProgramSeasons(n, now || new Date());
+  // The browser print path keeps whatever is on screen: open the seasons
+  // before the print dialog so a collapsed block does not drop the program
+  // from the printed estimate (GH Codex P2).
+  useEffect(() => {
+    const onBeforePrint = () => setOpen(true);
+    window.addEventListener('beforeprint', onBeforePrint);
+    return () => window.removeEventListener('beforeprint', onBeforePrint);
+  }, []);
+  const n = Math.round(Number(program?.visitsPerYear) || 0);
+  if (!(n > 0) || !program?.cadence) return null;
+  const seasons = lawnProgramSeasons(program.months);
   return (
     <div aria-label="Your lawn program calendar" style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
         Your program
       </div>
       <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.5 }}>
-        {n} applications a year — {lawnCadenceLabel(n)}
+        {n} applications a year — {program.cadence}
       </div>
       <button
         type="button"
@@ -4449,7 +4432,6 @@ export function LawnProgramCalendar({ visitsPerYear, now = null }) {
             <div
               key={s.key}
               role="listitem"
-              aria-label={`${s.label} (${s.range}): ${s.applications} ${s.applications === 1 ? 'application' : 'applications'}${s.current ? ', current season' : ''}`}
               data-season={s.key}
               data-current={s.current ? 'true' : 'false'}
               style={{
@@ -4524,9 +4506,10 @@ export function ServiceSection({
   // Opens the "Does the lawn size look off?" sheet. Wired only when the
   // server payload flags measurementReviewEnabled (gate-on, non-preview).
   onMeasurementChallenge = null,
-  // Lawn program calendar under the lawn price card — wired only when the
-  // payload flags lawnCalendar (gate on) and the plan is recurring.
-  showLawnCalendar = false,
+  // Lawn program calendar under the lawn price card — the payload's
+  // lawnCalendar block ({ programs: { [frequencyKey]: { visitsPerYear,
+  // cadence, months } } }, gate on) when the plan is recurring, else null.
+  lawnCalendar = null,
 }) {
   // On phones the corner-pinned WaveGuard badge's 170px heading clearance
   // eats most of the card width and crunches the headline — stack the badge
@@ -4722,8 +4705,8 @@ export function ServiceSection({
           />
         ) : null}
 
-        {showLawnCalendar && section.key === 'lawn_care' && current ? (
-          <LawnProgramCalendar visitsPerYear={current.visitsPerYear} />
+        {section.key === 'lawn_care' && current && lawnCalendar?.programs?.[current.key] ? (
+          <LawnProgramCalendar program={lawnCalendar.programs[current.key]} />
         ) : null}
 
         {/* Termite station rental rider (owner 2026-07-26): stations are
@@ -7015,7 +6998,7 @@ function EstimateViewPageInner() {
                 bondBusy={bondBusy}
                 onToggleInteriorService={onToggleInteriorService}
                 interiorBusy={interiorBusy}
-                showLawnCalendar={data?.lawnCalendar === true && serviceMode === 'recurring'}
+                lawnCalendar={serviceMode === 'recurring' ? data?.lawnCalendar || null : null}
                 onMeasurementChallenge={data?.measurementReviewEnabled && !adminDraftPreview
                   ? (basis) => setMeasurementReviewBasis(basis || {})
                   : null}
