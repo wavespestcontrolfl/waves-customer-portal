@@ -12186,12 +12186,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           (appt) => !(appt?.estimated_price != null && Number(appt.estimated_price) > 0),
         );
         if (unpriced.length) {
-          const custRow = await db('customers').where({ id: customerId }).first('per_application_fee', 'billing_mode');
-          // A monthly-membership customer's dues cover the visit (a preserved
-          // legacy lane, or a monthly add-on kept on it): no per-application
-          // fee is expected there, and the alert would invite a manual
-          // invoice on top of the monthly charge (GH codex P1 r5).
-          const duesCovered = String(custRow?.billing_mode || '').toLowerCase() === 'monthly_membership';
+          const custRow = await db('customers').where({ id: customerId })
+            .first('per_application_fee', 'billing_mode', 'waveguard_tier', 'monthly_rate');
+          // The lane comes from the ONE resolver every billing reader uses
+          // (billing-lane resolveBillingLane): explicit mode, else the legacy
+          // split — a NULL-mode row with a real WaveGuard tier and a monthly
+          // rate IS a monthly member (GH codex P1 r6). Monthly dues or a
+          // prepaid term cover the visit: no per-application fee is expected
+          // there and the alert would invite a manual invoice on top.
+          const { resolveBillingLane } = require('../services/billing-lane');
+          const lane = resolveBillingLane(custRow || {}).mode;
+          const duesCovered = lane === 'monthly_membership' || lane === 'annual_prepay';
           if (!duesCovered && !(custRow?.per_application_fee != null && Number(custRow.per_application_fee) > 0)) {
             // The flag suppresses the converter's own unpriced-per-application
             // bell below, so it must reflect a PERSISTED alert: notifyAdmin
