@@ -116,7 +116,9 @@ async function laneCallProcessing() {
     // newest-first cap would hide exactly the rows this lane exists for.
     .orderByRaw('COALESCE(processing_heartbeat_at, processing_started_at, updated_at, created_at) ASC')
     .limit(SCAN_LIMIT)
-    .select('id', 'from_phone', 'to_phone', 'direction', 'processing_status', 'processing_heartbeat_at', 'processing_started_at', 'updated_at', 'created_at', 'extraction_attempts', 'recording_url', 'recording_duration_seconds', 'duration_seconds', 'transcription', 'transcription_metadata');
+    // Column set = the watchdog's candidates() select: computeStalledCalls
+    // reads metadata (recording-ready time), the SID and the customer id.
+    .select('id', 'twilio_call_sid', 'customer_id', 'from_phone', 'to_phone', 'direction', 'processing_status', 'processing_heartbeat_at', 'processing_started_at', 'updated_at', 'created_at', 'extraction_attempts', 'metadata', 'recording_url', 'recording_duration_seconds', 'duration_seconds', 'transcription', 'transcription_metadata');
   // One stall definition, the watchdog's (grace window, live-claim heartbeat,
   // alert ceiling, eligibility) — the tab must never disagree with the bell.
   const stalledIds = new Set(computeStalledCalls(rows).map((r) => r.id));
