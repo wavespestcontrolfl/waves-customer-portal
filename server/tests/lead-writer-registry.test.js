@@ -131,6 +131,43 @@ function chainReceiver(bare, selIdx) {
   }
 }
 const chainHead = (re) => Object.assign(re, { chain: true });
+
+// Split `text` on top-level commas (not inside (), [] or {}).
+function splitTopLevel(text) {
+  const parts = [];
+  let depth = 0;
+  let start = 0;
+  for (let k = 0; k < text.length; k += 1) {
+    const ch = text[k];
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
+    else if (ch === ',' && depth === 0) { parts.push(text.slice(start, k)); start = k + 1; }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+// Binding names in a parameter list — bare, defaulted, rest, and the
+// bindings inside DESTRUCTURED patterns (`{ qb, x: y = 1 }`, `[a, b]`).
+function paramNames(list) {
+  const names = [];
+  const walk = (text) => {
+    for (const part of splitTopLevel(text)) {
+      const q = part.trim().replace(/^\.\.\./, '');
+      if (!q) continue;
+      if (q[0] === '{' || q[0] === '[') {
+        const close = q.lastIndexOf(q[0] === '{' ? '}' : ']');
+        walk(q.slice(1, close === -1 ? undefined : close));
+        continue;
+      }
+      const keyed = q.match(/^[A-Za-z_$][\w$]*\s*:\s*([\s\S]*)$/);
+      if (keyed) { walk(keyed[1]); continue; }
+      const id = q.split(/[=\s]/)[0];
+      if (/^[A-Za-z_$][\w$]*$/.test(id)) names.push(id);
+    }
+  };
+  walk(list);
+  return names;
+}
 // `.insert(` in either spelling — dot access or literal bracket access
 // (`db('leads')['insert'](row)`).
 const INSERT_CALL = String.raw`(?:\??\.\s*insert|(?:\?\.)?\[\s*['"\x60]insert['"\x60]\s*\])\s*(?:\?\.\s*)?\(`;
@@ -141,8 +178,11 @@ const FROM_SEL = String.raw`(?:\??\.\s*from|\bfrom|(?:\?\.)?\[\s*['"\x60]from['"
 // `db('public.leads')` as a schema-qualified table name.
 // Optional schema prefix (`public.leads`) and Knex table alias suffix
 // (`leads as l`) around the exact table name.
-const LITERAL_LEADS = String.raw`${Q}(?:[\w$]+\.)?leads(?:\s+[aA][sS]\s+[\w$]+)?${Q}`;
-const isLeadsTable = (value) => /^(?:[\w$]+\.)?leads(?:\s+as\s+[\w$]+)?$/i.test(value.trim());
+// The schema and alias around the exact `leads` component may carry any
+// punctuation PostgreSQL identifiers allow (`tenant-one.leads`, `leads as
+// lead-row`).
+const LITERAL_LEADS = String.raw`${Q}(?:[^'"\x60.\s]+\.)?leads(?:\s+[aA][sS]\s+[^'"\x60\s]+)?${Q}`;
+const isLeadsTable = (value) => /^(?:[^.\s]+\.)?leads(?:\s+as\s+\S+)?$/i.test(value.trim());
 // Knex's optional second TABLE-OPTIONS argument — `db('leads', { only:
 // true })`, or a stored `opts` / `config.tableOpts` — after a table token.
 // (The dynamic pass parses the argument list structurally: tableArg.)
@@ -157,7 +197,7 @@ function knexInsertPatterns(token) {
   return [
     // Optional factory call between the identifier and the table argument —
     // the `getDb()('leads')` callable-factory style (routes/knowledge.js).
-    chainHead(new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`, 'g')),
+    chainHead(new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`, 'g')),
     // `.table(X)` with ANY prefix — `db.table(...)`, `db.withSchema('public').table(...)`.
     chainHead(new RegExp(String.raw`${TABLE_SEL}\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`, 'g')),
     // `.into` only AS PART OF an insert chain — `db.select('*').into(x)`
@@ -213,7 +253,9 @@ function insertFirstMatches(code, argRe) {
 // (`'INSERT ' + 'INTO leads'`) — constant SQL split at token boundaries is
 // still one statement. (A mid-word split is deliberate obfuscation beyond
 // textual scanning.)
-const RAW_SEP = String.raw`(?:\s*${Q}\s*\+\s*${Q}\s*|\s*\/\*[\s\S]*?\*\/\s*|\s*--[^\n]*\n\s*|\s+)`;
+// …and the JavaScript ESCAPES for whitespace (`'INSERT\\nINTO leads'` is
+// whitespace at runtime).
+const RAW_SEP = String.raw`(?:\s*${Q}\s*\+\s*${Q}\s*|\s*\/\*[\s\S]*?\*\/\s*|\s*--[^\n]*(?:\n|\\n)\s*|(?:\s|\\[ntr])+)`;
 // Optional schema qualifier: a bare or quoted identifier — a DOUBLE-quoted
 // one may hold any punctuation PostgreSQL allows ("tenant-one"."leads").
 const SQL_SCHEMA = String.raw`(?:(?:"[^"\n]+"|${Q}?[\w$]+${Q}?)\s*\.\s*)?`;
@@ -441,10 +483,7 @@ function balancedFunctionBodies(src) {
   while ((h = headRe.exec(src))) {
     const name = h[1] || h[3] || h[6] || h[8];
     if (!name) continue;
-    const params = (h[2] ?? h[4] ?? h[5] ?? h[7] ?? h[9] ?? '')
-      .split(',')
-      .map((x) => x.trim().replace(/^\.\.\./, '').split(/[=\s]/)[0])
-      .filter((x) => /^[A-Za-z_$][\w$]*$/.test(x));
+    const params = paramNames(h[2] ?? h[4] ?? h[5] ?? h[7] ?? h[9] ?? '');
     let depth = 1;
     let j = headRe.lastIndex;
     for (; j < bare.length && depth > 0; j += 1) {
@@ -564,7 +603,7 @@ function computeModuleFacts(raw) {
   const hasInsert = /insert/i.test(modSrc);
   const hasLeads = /leads/i.test(modSrc);
   const lead = hasLeads ? leadBuilderExports(modSrc) : { factories: new Set(), builders: new Set(), defaultFactory: false };
-  return {
+  const facts = {
     helpers: hasInsert ? insertingHelperNames(modSrc) : new Set(),
     callableDefault: hasInsert && defaultExportInserts(modSrc),
     sqlConstants: hasLeads ? leadSqlConstantNames(modSrc) : new Set(),
@@ -572,6 +611,34 @@ function computeModuleFacts(raw) {
     builders: lead.builders,
     defaultFactory: lead.defaultFactory,
   };
+  // EXPORT ALIASES — `module.exports = { save: writeRow }`, `exports.save =
+  // writeRow`, `export { writeRow as save }` — expose a local fact under
+  // the exported name too.
+  for (const [exported, local] of exportAliases(modSrc)) {
+    for (const k of ['helpers', 'sqlConstants', 'factories', 'builders']) if (facts[k].has(local)) facts[k].add(exported);
+  }
+  return facts;
+}
+function exportAliases(src) {
+  const out = [];
+  let m;
+  const propRe = /(?:module\s*\.\s*)?exports\s*\.\s*([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*;/g;
+  while ((m = propRe.exec(src))) out.push([m[1], m[2]]);
+  const objRe = /module\s*\.\s*exports\s*=\s*\{([^{}]*)\}/g;
+  while ((m = objRe.exec(src))) {
+    for (const part of splitTopLevel(m[1])) {
+      const kv = part.trim().match(/^([A-Za-z_$][\w$]*)\s*(?::\s*([A-Za-z_$][\w$]*))?\s*$/);
+      if (kv) out.push([kv[1], kv[2] || kv[1]]);
+    }
+  }
+  const esmRe = /\bexport\s*\{([^{}]*)\}\s*(?!from\b)/g;
+  while ((m = esmRe.exec(src))) {
+    for (const part of m[1].split(',')) {
+      const [local, exported] = part.split(/\s+as\s+/).map((x) => x && x.trim());
+      if (local && exported && /^[A-Za-z_$][\w$]*$/.test(local)) out.push([exported, local]);
+    }
+  }
+  return out;
 }
 // Lead BUILDERS a module can hand to importers: functions returning a lead
 // builder (`const leadQuery = () => db('leads')`, `function leadQuery() {…
@@ -590,7 +657,7 @@ function leadBuilderExports(modSrc) {
     while ((m = condDeclRe.exec(modSrc))) builders.add(m[1]);
     while ((m = factoryRe.exec(modSrc))) factories.add(m[1]);
     for (const f of balancedBodyFactories(modSrc, returnRe, [declRe, condDeclRe])) factories.add(f.name);
-    const defRe = new RegExp(String.raw`(?:module\s*\.\s*exports|exports\s*\.\s*default|\bexport\s+default)\s*=?\s*(?:async\s*)?(?:function\b[^(]*\([^()]*\)\s*\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+|(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`);
+    const defRe = new RegExp(String.raw`(?:module\s*\.\s*exports|exports\s*\.\s*default|\bexport\s+default)\s*=?\s*(?:async\s*)?(?:function\b[^(]*\([^()]*\)\s*\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+|(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?)[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`);
     if (defRe.test(modSrc)) defaultFactory = true;
     const defNamed = modSrc.match(/(?:module\s*\.\s*exports\s*=|\bexport\s+default)\s*([A-Za-z_$][\w$]*)\s*;/);
     if (defNamed && factories.has(defNamed[1])) defaultFactory = true;
@@ -740,7 +807,7 @@ function defaultExportInserts(src) {
     } else {
       bodyEnd = fnRe.lastIndex + src.slice(fnRe.lastIndex).match(/^[^;\n]*/)[0].length;
     }
-    const params = (f[1] ?? f[2] ?? f[3] ?? '').split(',').map((x) => x.trim().replace(/^\.\.\./, '').split(/[=\s]/)[0]).filter((x) => /^[A-Za-z_$][\w$]*$/.test(x));
+    const params = paramNames(f[1] ?? f[2] ?? f[3] ?? '');
     if (paramInserts(params, bare.slice(fnRe.lastIndex, bodyEnd))) return true;
   }
   const named = src.match(/(?:module\.exports\s*=|\bexport\s+default)\s*([A-Za-z_$][\w$]*)\s*;/);
@@ -777,7 +844,7 @@ function insertingHelperNames(src) {
   const exprArrowRe = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\(([^()]*)\)|([A-Za-z_$][\w$]*))\s*=>\s*(?!\{)([^;\n]*)/g;
   let a;
   while ((a = exprArrowRe.exec(src))) {
-    const params = (a[2] ?? a[3] ?? '').split(',').map((x) => x.trim().replace(/^\.\.\./, '').split(/[=\s]/)[0]).filter((x) => /^[A-Za-z_$][\w$]*$/.test(x));
+    const params = paramNames(a[2] ?? a[3] ?? '');
     const bodyStart = exprArrowRe.lastIndex - a[4].length;
     if (paramInserts(params, bare.slice(bodyStart, exprArrowRe.lastIndex))) names.add(a[1]);
   }
@@ -787,7 +854,7 @@ function insertingHelperNames(src) {
   const propFnRe = /(?:(?:module\s*\.\s*)?exports\s*\.\s*([A-Za-z_$][\w$]*)\s*=|([A-Za-z_$][\w$]*)\s*:)\s*(?:async\s*)?(?:function\b[^(]*\(([^()]*)\)\s*\{|(?:\(([^()]*)\)|([A-Za-z_$][\w$]*))\s*=>\s*(\{)?)/g;
   let pf;
   while ((pf = propFnRe.exec(src))) {
-    const params = (pf[3] ?? pf[4] ?? pf[5] ?? '').split(',').map((x) => x.trim().replace(/^\.\.\./, '').split(/[=\s]/)[0]).filter((x) => /^[A-Za-z_$][\w$]*$/.test(x));
+    const params = paramNames(pf[3] ?? pf[4] ?? pf[5] ?? '');
     let bodyEnd;
     if (pf[3] !== undefined || pf[6]) {
       let depth = 1;
@@ -913,18 +980,18 @@ function nearestDeclBindsLeads(code, name, idx) {
 // the module-facts pass.
 function builderRegexes(token) {
   const declRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${SEL_CHAIN}\s*(?:\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?(?:${SEL_CHAIN}\s*(?:\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
     'g'
   );
   const condDeclRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;]{0,200}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;]{0,200}?[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
     'g'
   );
   const factoryRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
     'g'
   );
-  const returnRe = new RegExp(String.raw`\breturn\b[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*(?:\?\.)?\(\s*(${token})${TABLE_OPTS}\)`);
+  const returnRe = new RegExp(String.raw`\breturn\b[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*(?:\?\.)?\(\s*(${token})${TABLE_OPTS}\)`);
   return { declRe, condDeclRe, factoryRe, returnRe };
 }
 
@@ -958,7 +1025,7 @@ function aliasInsertPatterns(src, token, filePath, imports = 'all') {
   // db('leads') }; queries.lead.insert(row)`. The use pattern keys on the
   // property name reached through any object.
   const propDeclRe = new RegExp(
-    String.raw`([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
+    String.raw`([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
     'g'
   );
   // Each property remembers its OWNING object (`const queries = { lead:
@@ -983,7 +1050,7 @@ function aliasInsertPatterns(src, token, filePath, imports = 'all') {
   ]);
   for (const helper of helperNames) {
     patternsExtra.push(new RegExp(
-      String.raw`${helperCallee(helper)}\s*\((?:[^()]|\([^()]*\))*?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
+      String.raw`${helperCallee(helper)}\s*\((?:[^()]|\([^()]*\))*?[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
       'g'
     ));
   }
@@ -1269,7 +1336,7 @@ function tableArg(code, open, { multi = false } = {}) {
 // Dynamic heads END AT THE OPENING PAREN of the table call; tableArg parses
 // the arguments and the chain walk continues from its end.
 const DYNAMIC_INSERT_PATTERNS = [
-  chainHead(new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(`, 'g')),
+  chainHead(new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(`, 'g')),
   chainHead(new RegExp(String.raw`(?:${TABLE_SEL}|${FROM_SEL})\s*(?:\?\.)?\(`, 'g')),
   Object.assign(new RegExp(String.raw`\bbatchInsert\s*\(`, 'g'), { multi: true }),
   chainHead(new RegExp(String.raw`\.into(?:\?\.)?\(`, 'g')),
@@ -1350,7 +1417,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     ...(imports === 'skip' ? [] : importedInsertingHelpers(src, filePath)),
   ]);
   for (const helper of dynHelpers) {
-    const useRe = new RegExp(String.raw`${helperCallee(helper)}\s*\((?:[^()]|\([^()]*\))*?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(`, 'g');
+    const useRe = new RegExp(String.raw`${helperCallee(helper)}\s*\((?:[^()]|\([^()]*\))*?[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(`, 'g');
     let use;
     while ((use = useRe.exec(code))) {
       const arg = argOf(use);
@@ -1360,7 +1427,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
   // Stored builders over a dynamic table — `const target = db(table);
   // await target.insert(row);` — the dynamic mirror of the alias pass.
   const dynDeclRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${SEL_CHAIN}\s*(?:\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*(?:\?\.)?\(`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?(?:${SEL_CHAIN}\s*(?:\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*(?:\?\.)?\(`,
     'g'
   );
   const dynBuilders = new Map(); // name -> table expr
@@ -1380,7 +1447,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
   // Conditional OR logical initializers holding a dynamic builder anywhere
   // — `cond ? db(a) : db(b)`, `enabled && db(table)`, `cached || db(table)`.
   const dynCondDeclRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;?&|]{0,120}(?:\?|&&|\|\|)[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;?&|]{0,120}(?:\?|&&|\|\|)[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(`,
     'g'
   );
   let cnd;
@@ -1393,7 +1460,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
   // Builders stored in OBJECT PROPERTIES over a dynamic table —
   // `const queries = { lead: db(table) }; queries.lead.insert(row)`.
   const dynPropDeclRe = new RegExp(
-    String.raw`([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(`,
+    String.raw`([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(`,
     'g'
   );
   const dynProps = new Map(); // prop -> { expr, owners: Set | null }
@@ -1455,7 +1522,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
   // Arrow FACTORY over a dynamic table — `const q = (t) => db(t); …
   // q(x).insert(row)` — the dynamic mirror of the literal factory pass.
   const dynFactoryRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*(?:\?\.)?\(`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(`,
     'g'
   );
   let fac;
@@ -1470,7 +1537,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     }
   }
   // Function/block-arrow factories over a dynamic table, balanced bodies.
-  const dynReturnRe = new RegExp(String.raw`\breturn\b[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*(?:\?\.)?\(`);
+  const dynReturnRe = new RegExp(String.raw`\breturn\b[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*(?:\?\.)?\(`);
   const exprOf = (m) => { const a = argOf(m); return a && a.expr.trim() ? a.expr : null; };
   for (const f of hasInsert ? balancedBodyFactories(code, dynReturnRe, [dynDeclRe, dynCondDeclRe], exprOf) : []) {
     if (!f.capture || isResolved(f.capture)) continue;
@@ -1722,6 +1789,11 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['triple-nested chain arguments', "await db('leads').modify(qb => qb.whereIn('id', ids.map(id => normalize(id)))).insert(row);"],
     ['deeply nested insert payload before .into', "await db.insert(rows.map(row => normalize(row, opts.get('k')))).into('leads');"],
     ['insert payload before .table', "await db.insert(rows.map(row => normalize(row))).table('leads');"],
+    ['escaped newline inside raw SQL', "await db.raw('INSERT\\nINTO leads(name) VALUES (?)', [name]);"],
+    ['optional factory invocation before the table', "await getDb?.()('leads').insert(row);"],
+    ['punctuated schema in a knex literal', "await db('tenant-one.leads').insert(row);"],
+    ['punctuated alias in a knex literal', "await db('leads as lead-row').insert(row);"],
+    ['destructured helper parameter', "function writeRow({ qb }, row) { return qb.insert(row); }\nawait writeRow({ qb: db('leads') }, row);"],
     ['SQL returned by a function passed to raw', "function buildInsert() {\n  return 'INSERT INTO leads (a) VALUES (?)';\n}\nawait db.raw(buildInsert(), [a]);"],
     ['SQL built by an arrow passed to query', "const buildInsert = (cols) => 'INSERT INTO leads (' + cols + ') VALUES ($1)';\nawait client.query(buildInsert('a'), [a]);"],
     ['quoted schema with punctuation', "await db.raw('INSERT INTO \"tenant-one\".\"leads\" (a) VALUES (?)', [a]);"],
@@ -1868,6 +1940,11 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(found("const { writeRow } = require('./barrel');\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
     expect(found("const { writeRow } = require('./barrel-spread');\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
     expect(found("import { writeRow } from './barrel.mjs';\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
+    // Local export ALIASES — the fact travels under the exported name.
+    fs.writeFileSync(path.join(dir, 'alias-exports.js'), "function writeRow(qb, row) {\n  return qb.insert(row);\n}\nconst leadQuery = () => db('leads');\nexports.persist = writeRow;\nmodule.exports = { save: writeRow, leadQ: leadQuery, leadQuery };\n");
+    expect(found("const { save } = require('./alias-exports');\nawait save(db('leads'), row);", route)).toEqual(["await save(db('leads'), row);"]);
+    expect(found("const { persist } = require('./alias-exports');\nawait persist(db('leads'), row);", route)).toEqual(["await persist(db('leads'), row);"]);
+    expect(found("const { leadQ } = require('./alias-exports');\nawait leadQ().insert(row);", route)).toEqual(['await leadQ().insert(row);']);
     fs.writeFileSync(path.join(dir, 'queries.mjs'), "export const CREATE_LEAD = 'INSERT INTO leads (a) VALUES ($1)';\nexport default { CREATE_LEAD };\n");
     expect(found("import defaults, { CREATE_LEAD } from './queries.mjs';\nawait client.query(CREATE_LEAD, [a]);", route)).toEqual(['await client.query(CREATE_LEAD, [a]);']);
     fs.writeFileSync(path.join(dir, 'barrel-renamed.mjs'), "export { writeRow as save, scoped } from './writers';\n");
@@ -1957,6 +2034,10 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(deepPayload[0].expr).toBe('table');
     const defaultParam = scanSourceForDynamicTableInserts("const TABLE = 'audit';\nfunction write(TABLE = resolveTable(kind), row) {\n  return db(TABLE).insert(row);\n}");
     expect(defaultParam).toHaveLength(1);
+    const optionalFactory = scanSourceForDynamicTableInserts('await getDb?.()(table).insert(row);');
+    expect(optionalFactory).toHaveLength(1);
+    const destructuredHelper = scanSourceForDynamicTableInserts('function writeRow({ qb }, row) { return qb.insert(row); }\nawait writeRow({ qb: db(table) }, row);');
+    expect(destructuredHelper).toHaveLength(1);
     const chainedSelector = scanSourceForDynamicTableInserts('await db.withSchema(schema).table(table).insert(row);');
     expect(chainedSelector).toHaveLength(1);
     expect(chainedSelector[0].expr).toBe('table');
@@ -2151,7 +2232,7 @@ describe('lead-writer registry (#3137 groundwork)', () => {
 
   test("dynamic-table helpers: every allowlist entry declares a caller contract, and every CALLER satisfies it (the never-leads reason isn't just prose)", () => {
     const { files } = repoScan();
-    const leadsShaped = (t) => /^(?:[\w$]+\.)?leads$/i.test(t);
+    const leadsShaped = (t) => /^(?:[^.\s]+\.)?leads$/i.test(t);
     const assertNotLeads = (where, t) => {
       expect({ where, table: t, leads: leadsShaped(t) }).toEqual({ where, table: t, leads: false });
     };
@@ -2200,8 +2281,9 @@ describe('lead-writer registry (#3137 groundwork)', () => {
         // defineProperty over it would feed the insert a runtime table.
         const mutationReFor = (name) => new RegExp(
           // Plain `=` and every COMPOUND assignment (`&&=`, `||=`, `??=`,
-          // `+=`, …) — `config.table &&= 'leads'` retargets the writer too.
-          String.raw`\b${escapeRe(name)}\b\s*(?:\.[\w$]+|\[[^\]]*\])+\s*(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*\/%&|^])?=(?!=)|Object\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)\s*\([^)]*\b${escapeRe(name)}\b`
+          // `+=`, …) — `config.table &&= 'leads'` retargets the writer too —
+          // and Object.* / Reflect.* reflective writes.
+          String.raw`\b${escapeRe(name)}\b\s*(?:\.[\w$]+|\[[^\]]*\])+\s*(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*\/%&|^])?=(?!=)|(?:Object\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)|Reflect\s*\.\s*(?:set|defineProperty|deleteProperty|setPrototypeOf))\s*\([^)]*\b${escapeRe(name)}\b`
         );
         const mutation = bare.match(mutationReFor(cc.object));
         expect({ file: w.file, mutation: mutation && mutation[0].trim() })
