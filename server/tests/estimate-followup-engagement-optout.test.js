@@ -81,3 +81,30 @@ describe('opt-out key lockstep (contract)', () => {
     expect(read('../services/service-report/click-estimate-mint.js')).toMatch(/noEngagementAutomation: true/);
   });
 });
+
+describe('safetyGate — engine-authoritative pricing gate (#3750, GH codex P1 r12)', () => {
+  const featureGates = require('../config/feature-gates');
+  const row = {
+    id: 'est-pa-1',
+    status: 'sent',
+    sent_at: '2026-07-10T11:59:00Z',
+    customer_phone: '(941) 555-0100',
+    estimate_data: '{}',
+    pricing_authority: 'CLIENT_FALLBACK',
+  };
+  afterEach(() => { featureGates.isEnabled.mockImplementation(() => false); });
+
+  test('gate on: a delivered row the engine never verified is skipped before any lane can nudge the customer', async () => {
+    featureGates.isEnabled.mockImplementation((key) => key === 'sendRequiresServerPricing');
+    expect(await safetyGate(row)).toEqual({ skip: true, reason: 'pricing-authority-not-server' });
+    expect(await safetyGate({ ...row, pricing_authority: null })).toEqual({ skip: true, reason: 'pricing-authority-not-server' });
+  });
+
+  test('gate on: an engine-verified row and an editor-authored proposal are not skipped by that rule; gate off never applies it', async () => {
+    featureGates.isEnabled.mockImplementation((key) => key === 'sendRequiresServerPricing');
+    expect((await safetyGate({ ...row, pricing_authority: 'SERVER' })).reason).not.toBe('pricing-authority-not-server');
+    expect((await safetyGate({ ...row, estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' } } }) })).reason).not.toBe('pricing-authority-not-server');
+    featureGates.isEnabled.mockImplementation(() => false);
+    expect((await safetyGate(row)).reason).not.toBe('pricing-authority-not-server');
+  });
+});

@@ -302,23 +302,20 @@ function sendRequiresServerPricingFor(estimate = {}) {
 // sends and every automated send alike: the explicit SERVER stamp, fail
 // closed on NULL, unknown or fallback values (pre-push codex P0s — a
 // negative CLIENT_FALLBACK check let unstamped legacy rows through).
-const SERVER_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
+const {
+  SERVER_PRICING_AUTHORITY_SQL,
+  GATED_SEND_AUTHORITY_SQL,
+  gatedSendAuthorityPredicateApplies,
+} = require('../services/pricing-authority-gate');
 // The gated MANUAL claims (immediate, scheduled, grouped anchor + siblings)
 // re-assert the whole verdict IN SQL on the row as it is at claim time —
 // engine-verified, OR an authored proposal by provenance (category stamp +
 // enabled flag). Evaluating the exemption in JS on the pre-read row let a
 // proposal disabled between the pre-read and the claim ride the stale
 // exemption straight to the customer (pre-push codex P0).
-// The proposal flag is compared as JSONB to the literal true — never cast:
-// a legacy or malformed value would make ::boolean throw (send → 500), and
-// Postgres accepts textual booleans the JS `=== true` verdict does not.
-// The provenance marker is the editor's server-owned stamp (see
-// PROPOSAL_PROVENANCE_SOURCE). Mirrors isAuthoredProposalRow exactly and
-// fails closed (pre-push codex P1 + P0).
-const GATED_SEND_AUTHORITY_SQL = "(UPPER(pricing_authority) = 'SERVER' OR (estimate_data->'proposal'->'enabled' = 'true'::jsonb AND estimate_data->'proposal'->'provenance'->>'source' = 'proposal-editor'))";
-function gatedSendAuthorityPredicateApplies() {
-  return require('../config/feature-gates').isEnabled('sendRequiresServerPricing');
-}
+// GATED_SEND_AUTHORITY_SQL / gatedSendAuthorityPredicateApplies live in
+// services/pricing-authority-gate.js — one verdict shared with the follow-up
+// lanes and the persistence guards (GH codex P1 r12).
 
 // Gate-off telemetry for the rollout count: one warn per delivery attempt
 // that actually reached the funnel WITHOUT the SERVER stamp (CLIENT_FALLBACK,

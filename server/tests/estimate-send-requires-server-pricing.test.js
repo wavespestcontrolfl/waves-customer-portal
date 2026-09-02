@@ -420,3 +420,16 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
       .toMatchObject({ statusCode: 422, code: 'PRICING_AUTHORITY_NOT_SERVER' });
   });
 });
+
+describe('pricing-authority-gate — the one verdict shared by sends, follow-ups and persistence (GH codex P1 r12)', () => {
+  const gate = require('../services/pricing-authority-gate');
+  test('SQL and JS forms agree: SERVER passes; an editor-authored proposal passes; NULL / CLIENT_FALLBACK / un-marked proposals fail closed', () => {
+    expect(gate.SERVER_PRICING_AUTHORITY_SQL).toBe("UPPER(pricing_authority) = 'SERVER'");
+    expect(gate.GATED_SEND_AUTHORITY_SQL).toBe(GATED_SEND_AUTHORITY_SQL);
+    expect(gate.rowPassesGatedSendAuthority({ pricing_authority: 'SERVER' })).toBe(true);
+    expect(gate.rowPassesGatedSendAuthority({ pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' } } }) })).toBe(true);
+    expect(gate.rowPassesGatedSendAuthority({ pricing_authority: 'CLIENT_FALLBACK', estimate_data: { proposal: { enabled: true } } })).toBe(false);
+    expect(gate.rowPassesGatedSendAuthority({ pricing_authority: null, estimate_data: 'not json' })).toBe(false);
+    expect(gate.rowPassesGatedSendAuthority({})).toBe(false);
+  });
+});
