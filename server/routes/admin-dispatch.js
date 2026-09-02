@@ -10425,6 +10425,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (reportToken) reportUrl = `${portalUrl}/report/${reportToken}`;
       } catch (err) {
         logger.error(`[dispatch] service report token mint failed: ${err.message}`);
+        // Post-commit and best-effort (never throws): the visit still
+        // completes, but the report-lane completion text is WITHHELD below
+        // (completionSmsWithheldForMissingReportToken) so the customer is not
+        // told "your report is ready" with a link to the portal home. This
+        // bell is therefore the only signal that anyone still owes them the
+        // report — same dedupe/transport as the email and PDF lane alerts.
+        const { alertServiceReportTokenMintFailed } = require('../services/service-report/failure-alerts');
+        await alertServiceReportTokenMintFailed({
+          serviceRecordId: record.id,
+          customerId: svc.customer_id,
+          error: err,
+        });
       }
     }
     const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
@@ -12316,7 +12328,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
-    if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit) {
+    if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
+      && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
+      // Report-v1 visit with no public report token (mint failed above): the
+      // report-lane template would render "your report is ready" around
+      // reportUrl, which is the portal HOME on this path (delivery.js only
+      // null-guards an empty url). Withhold the text instead. Marked 'failed'
+      // — the existing one-shot vocabulary (closeout-status reads it as
+      // completion_sms_failed, and it is NOT completionSmsAlreadyHandled, so a
+      // re-completion after the mint recovers sends normally). The bell for
+      // this state fired at the mint site; no separate SMS-failure bell.
+      const withheldDelta = {
+        completionSmsStatus: 'failed',
+        completionSmsError: 'report token unavailable — completion text withheld',
+        completionSmsFailedAt: new Date().toISOString(),
+      };
+      const withheldNotes = { ...recordStructuredNotes, ...withheldDelta };
+      await mergeRecordNotesKeys(record.id, withheldDelta)
+        .catch((updateErr) => logger.error(`[dispatch] completion SMS withheld status update failed: ${updateErr.message}`));
+      record.structured_notes = withheldNotes;
+      await markBundledReviewFailed();
+      logger.error(`[dispatch] Completion SMS withheld for service_record ${record.id}: report token unavailable`);
+    } else if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
         // Use the recap STORED on the record (the server-generated effectiveCustomerRecap,
@@ -12784,6 +12817,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             record.structured_notes = failedNotes;
             await markBundledReviewFailed(smsResult);
             logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+            // 'blocked' is a policy outcome (consent / opt-out) and intentional;
+            // only a provider FAILURE bells — this is a one-shot sender and
+            // nothing retries it, so the bell is the only signal.
+            if (!smsResult.blocked) {
+              const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
+              await alertCompletionSmsFailed({
+                serviceRecordId: record.id,
+                customerId: svc.customer_id,
+                smsType: sentSmsType,
+                errorClass: smsResult.code || 'provider_failure',
+                error: smsResult.reason || smsResult.code || 'SMS send failed',
+              });
+            }
           } else {
             Object.assign(smsNotesDelta, {
               completionSmsStatus: 'sent',
@@ -12858,6 +12904,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         record.structured_notes = failedNotes;
         await markBundledReviewFailed();
         logger.error(`Completion SMS failed: ${e.message}`);
+        const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
+        await alertCompletionSmsFailed({
+          serviceRecordId: record.id,
+          customerId: svc.customer_id,
+          smsType: null,
+          errorClass: e.code || e.name || 'exception',
+          error: e,
+        });
       }
     } else if (effectiveSendCompletionSms && svc.cust_phone && recapSmsAlreadySentForVisit) {
       // Record the skip in structured_notes so the audit trail (and the
@@ -16245,6 +16299,23 @@ function completionUsesReportLane({
   return Boolean(reportV1InvoiceArmed);
 }
 
+// A report-v1 completion text is a gateway to the report: without a public
+// token there is no report link to send, and the rendered body would say
+// "your report is ready" around the portal HOME. The route withholds the text
+// on this path (stamped 'failed' so a later re-completion retries it once the
+// mint recovers). Legacy (non-report-v1) visits keep their portal-home link —
+// that is where their visit detail lives. delivery_mode 'disabled' never
+// mints and never texts, so it is not a withhold. Pure for testability (_test).
+function completionSmsWithheldForMissingReportToken({
+  serviceReportV1Delivery,
+  typedDeliveryMode,
+  reportToken,
+}) {
+  if (!serviceReportV1Delivery) return false;
+  if (typedDeliveryMode === 'disabled') return false;
+  return !reportToken;
+}
+
 // completionInvoiceAmount and membershipDuesCoverVisit moved to
 // services/billing-lane.js (imported at top) — the schedule payloads'
 // completion-billing prediction must share the exact same authority.
@@ -16742,6 +16813,7 @@ module.exports._test = {
   completionSavedCardFallbackPolicy,
   completionUsesReportLane,
   reportV1InvoiceBodyCarriesPayLink,
+  completionSmsWithheldForMissingReportToken,
   backfillCompletionPlan,
   applyBackfillDurationPolicy,
   applyBackfillRecordTimingPolicy,

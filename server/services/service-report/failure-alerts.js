@@ -117,9 +117,64 @@ async function alertServiceReportPdfFailed({ job, error } = {}, { knex = db, tri
   }
 }
 
+// The completion route could not mint the public report token for a
+// report-v1 visit. The route withholds the completion text on this path
+// (it would otherwise read "your report is ready" and link the portal home),
+// so the customer has heard nothing — this bell is the only signal.
+async function alertServiceReportTokenMintFailed({ serviceRecordId, customerId, error } = {}, { knex = db, trigger = triggerNotification } = {}) {
+  try {
+    const dedupeKey = `service_report_token_mint_failed:${serviceRecordId || 'unknown'}`;
+    if (await alreadyAlerted(dedupeKey, knex)) return { skipped: true, reason: 'duplicate' };
+
+    const context = await loadServiceContext(serviceRecordId, customerId, knex);
+    const errorMessage = sanitizeErrorText(error?.message || error?.error || error);
+    logger.warn(`[service-report-alerts] report token mint failed for record=${serviceRecordId || 'unknown'}`);
+
+    return await trigger('service_report_token_mint_failed', {
+      customerName: context.customerName,
+      serviceLabel: context.serviceLabel,
+      errorMessage,
+      link: adminLink(context.customerId),
+      dedupeKey,
+    });
+  } catch (err) {
+    logger.error(`[service-report-alerts] token mint alert failed: ${err.message}`);
+    return { skipped: true, error: err.message };
+  }
+}
+
+// The completion SMS itself failed (provider failure or a thrown error in the
+// send path — NOT a quiet-hours deferral or a consent block, which are
+// intentional). The route is a one-shot sender, so nothing retries this.
+async function alertCompletionSmsFailed({ serviceRecordId, customerId, smsType, errorClass, error } = {}, { knex = db, trigger = triggerNotification } = {}) {
+  try {
+    const dedupeKey = `completion_sms_failed:${serviceRecordId || 'unknown'}`;
+    if (await alreadyAlerted(dedupeKey, knex)) return { skipped: true, reason: 'duplicate' };
+
+    const context = await loadServiceContext(serviceRecordId, customerId, knex);
+    const errorMessage = sanitizeErrorText(error?.message || error?.error || error);
+    logger.warn(`[service-report-alerts] completion SMS failed for record=${serviceRecordId || 'unknown'} class=${errorClass || 'unknown'}`);
+
+    return await trigger('completion_sms_failed', {
+      customerName: context.customerName,
+      serviceLabel: context.serviceLabel,
+      smsType: smsType || null,
+      errorClass: sanitizeErrorText(errorClass) || null,
+      errorMessage,
+      link: adminLink(context.customerId),
+      dedupeKey,
+    });
+  } catch (err) {
+    logger.error(`[service-report-alerts] completion SMS alert failed: ${err.message}`);
+    return { skipped: true, error: err.message };
+  }
+}
+
 module.exports = {
   alertServiceReportDeliveryFailed,
   alertServiceReportPdfFailed,
+  alertServiceReportTokenMintFailed,
+  alertCompletionSmsFailed,
   sanitizeErrorText,
   __private: { alreadyAlerted, loadServiceContext, adminLink },
 };
