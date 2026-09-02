@@ -61,9 +61,12 @@ const INCOMPLETE_FOLLOWUP_GRACE_DAYS = 7;
 
 // The instant a record last became "complete" for grace-period purposes:
 // a recap-rail re-completion of an office-handoff record keeps its original
-// created_at and bumps updated_at, so created_at alone would age a freshly
-// completed record straight past the grace window (codex P2).
-const COMPLETED_MARKER_AT = 'GREATEST(sr.created_at, COALESCE(sr.updated_at, sr.created_at))';
+// created_at, so created_at alone would age a freshly completed record
+// straight past the grace window (codex P2) — but the row's general
+// updated_at moves on every report/delivery/correction write and would
+// restart the window forever (codex P1). The visit's tracker stamp
+// (scheduled_services.completed_at) is the completion-specific marker.
+const COMPLETED_MARKER_AT = 'GREATEST(sr.created_at, COALESCE(ss.completed_at, sr.created_at))';
 
 // A completed record that OWES the customer a report / a completion notice:
 // not a backfill, delivery not suppressed, not a project close (the project
@@ -156,7 +159,11 @@ const PREDICATES = Object.freeze({
   // treats an aged claim alone as unverified), so a crash can leave it set
   // with no text sent. A frozen catalog rule saying the service owes no
   // notice (closeoutRequirements.requiresCustomerNotice=false) exempts the
-  // record, as it does in closeout-status.
+  // record, as it does in closeout-status. Email evidence must sit on the
+  // sibling that OWNS the report artifact (its report_view_token), as
+  // closeout-status pairs delivery with the artifact record — a sent
+  // delivery on an older or suppressed sibling does not clear a newer
+  // owed notice (codex P1).
   completed_record_without_comms_marker: {
     label: 'Completed visits (>24h) that owe a completion notice and have no sibling with a terminal one (sent / recap sent / consent-blocked SMS, or sent report email)',
     href: '/admin/dispatch',
@@ -176,9 +183,9 @@ const PREDICATES = Object.freeze({
                   WHERE sib.scheduled_service_id = ss.id
                     AND (
                       sib.structured_notes->>'completionSmsStatus' IN (${TERMINAL_SMS_STATUSES.map((s) => `'${s}'`).join(', ')})
-                      OR EXISTS (
+                      OR (sib.report_view_token IS NOT NULL AND EXISTS (
                            SELECT 1 FROM service_report_deliveries d
-                            WHERE d.service_record_id = sib.id AND d.status = 'sent')))`),
+                            WHERE d.service_record_id = sib.id AND d.status = 'sent'))))`),
   },
   // visitOutcome 'incomplete' leaves scheduled_services.status='completed'
   // with a service_records row of status 'incomplete' (admin-dispatch.js);

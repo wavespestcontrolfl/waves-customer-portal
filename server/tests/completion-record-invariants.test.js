@@ -47,8 +47,9 @@ describe('PREDICATES registry', () => {
     expect(PREDICATES.completed_record_without_comms_marker.sql).toContain(_private.COMMS_MARKER_SINCE);
   });
 
-  test('grace periods age from the record\'s latest completion marker, not its original created_at', () => {
-    expect(_private.COMPLETED_MARKER_AT).toBe('GREATEST(sr.created_at, COALESCE(sr.updated_at, sr.created_at))');
+  test('grace periods age from the completion-specific marker (visit completed_at), never the row\'s general updated_at', () => {
+    expect(_private.COMPLETED_MARKER_AT).toBe('GREATEST(sr.created_at, COALESCE(ss.completed_at, sr.created_at))');
+    expect(_private.COMPLETED_MARKER_AT).not.toContain('updated_at');
     expect(PREDICATES.completed_record_without_report_token.sql).toContain(`${_private.COMPLETED_MARKER_AT} < now() - interval '2 hours'`);
     expect(PREDICATES.completed_record_without_comms_marker.sql).toContain(`${_private.COMPLETED_MARKER_AT} < now() - interval '24 hours'`);
   });
@@ -64,6 +65,8 @@ describe('PREDICATES registry', () => {
     const comms = PREDICATES.completed_record_without_comms_marker.sql;
     expect(comms).toMatch(/FROM scheduled_services ss/);
     expect(comms).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM service_records sib[\s\S]*service_report_deliveries d/);
+    // Email evidence counts only on the sibling that owns the report artifact.
+    expect(comms).toContain("(sib.report_view_token IS NOT NULL AND EXISTS (");
     // Only TERMINAL SMS outcomes clear the visit (closeout-status done /
     // not_required); pending 'sending' / 'deferred' and 'failed' do not.
     expect(_private.TERMINAL_SMS_STATUSES).toEqual(['sent', 'skipped_recap_sms_already_sent', 'blocked']);
