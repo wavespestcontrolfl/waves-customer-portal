@@ -78,12 +78,16 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       // reads (locked outreach state — the registry refuses to move it and
       // no worker may re-serve it)
       .whereNull('outreach_sent_at')
-      // …and the linked path must be STANDING before ordering and LIMIT: a
-      // retired (superseded) or DISPROVEN (confidence 0) path is filtered
-      // here, not after the cut, so a prefix of higher-ranked rows on dead
-      // routes can never consume the batch and starve valid prospects below
+      // …and a DISPROVEN path (confidence 0 — gone, omitted under coverage,
+      // or an unobserved claim) is filtered here, before ordering and LIMIT,
+      // so a prefix of higher-ranked rows on dead routes can never consume
+      // the batch and starve valid prospects below. RETIRED (superseded)
+      // paths deliberately stay IN the candidate set: settlement below is
+      // the only thing that moves such a placement onto its successor, and
+      // each one is consumed by it exactly once (moved, unclassified, then
+      // ineligible until the classifier has read the successor).
       .where((b) => b.whereNull('path_id').orWhereNotIn('path_id',
-        trx('seo_link_acquisition_paths').select('id').where((s) => s.whereNotNull('superseded_by').orWhere('confidence', '<=', 0))));
+        trx('seo_link_acquisition_paths').select('id').where('confidence', '<=', 0)));
     // The in-process auto-drafter emails a stored contact and can't fill a web form,
     // so it claims only prospects that already have a contact_email — leaving
     // form-only prospects untouched (status='prospect') for manual handling rather
