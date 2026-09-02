@@ -199,9 +199,14 @@ function contentRunItem(run, awaitingReplyByRun, decidedByRun = new Map()) {
       : awaiting && status !== 'failed'
         ? 'awaiting_review'
         : decidedStatus || status,
-    // An open approval is the current event: date the row by when it was
-    // raised, not by the (possibly much older) run it belongs to.
-    startedAt: iso(awaiting?.created_at || run.claimed_at || run.created_at),
+    // The approval is the current event: date the row by when it was raised
+    // (open) or decided (terminal), not by the possibly much older run.
+    startedAt: iso(
+      awaiting?.created_at ||
+      (decidedStatus && decided ? decided.decided_at || decided.created_at : null) ||
+      run.claimed_at ||
+      run.created_at,
+    ),
     finishedAt: iso(run.completed_at),
     durationMs: run.total_ms == null ? null : Number(run.total_ms),
     steps,
@@ -395,18 +400,20 @@ async function loadRows(windowHours) {
   const runIds = runs.map((r) => r.id);
   const approvals = await safe('content_email_approvals', () =>
     db('content_email_approvals')
-      .select('run_id', 'token', 'status', 'kind', 'created_at', 'email_sent_at', 'last_error')
+      .select('run_id', 'token', 'status', 'kind', 'created_at', 'decided_at', 'email_sent_at', 'last_error')
+      // Any approval RAISED or DECIDED inside the window counts as activity
+      // (an old parked run approved today is today's event), plus every row
+      // on a loaded run.
       .where((q) => {
-        q.where({ status: 'awaiting_reply' }).andWhere('created_at', '>=', since);
+        q.where('created_at', '>=', since).orWhere('decided_at', '>=', since);
         if (runIds.length) q.orWhereIn('run_id', runIds);
       })
       .orderBy('created_at', 'desc')
       .limit(MAX_ITEMS * 2));
   const loaded = new Set(runIds.map(String));
-  const missingRunIds = approvals
-    .filter((a) => a.status === 'awaiting_reply')
-    .map((a) => a.run_id)
-    .filter((id) => id && !loaded.has(String(id)));
+  const missingRunIds = Array.from(new Set(
+    approvals.map((a) => a.run_id).filter((id) => id && !loaded.has(String(id))).map(String),
+  ));
   const stragglers = missingRunIds.length
     ? await safe('autonomous_runs', () => runQuery().whereIn('id', missingRunIds))
     : [];

@@ -116,14 +116,14 @@ describe('buildActivity', () => {
       approvals: [
         { run_id: 'old', status: 'awaiting_reply', token: 'EA-old00001', created_at: '2026-09-02T11:30:00Z', email_sent_at: '2026-09-02T11:30:05Z' },
         { run_id: 'unsent', status: 'awaiting_reply', token: 'EA-unsent01', created_at: '2026-09-02T11:40:00Z', email_sent_at: null, last_error: 'SMTP 421' },
-        { run_id: 'ok', status: 'approved', token: 'EA-ok000001', created_at: '2026-09-02T09:00:00Z' },
+        { run_id: 'ok', status: 'approved', token: 'EA-ok000001', created_at: '2026-08-30T09:00:00Z', decided_at: '2026-09-02T09:15:00Z' },
         { run_id: 'no', status: 'rejected', token: 'EA-no000001', created_at: '2026-09-02T09:00:00Z' },
       ],
     });
     const by = Object.fromEntries(items.map((i) => [i.id, i]));
     expect(by['run:old'].status).toBe('awaiting_review');
     expect(by['run:old'].startedAt).toBe('2026-09-02T11:30:00.000Z');
-    expect(by['run:ok']).toMatchObject({ status: 'completed', detail: 'approved by email reply' });
+    expect(by['run:ok']).toMatchObject({ status: 'completed', detail: 'approved by email reply', startedAt: '2026-09-02T09:15:00.000Z' });
     expect(by['run:no']).toMatchObject({ status: 'skipped', detail: 'rejected by email reply' });
     expect(by['run:ui']).toMatchObject({ status: 'completed', detail: 'Approved in review' });
     // reviewer_notes alone is not a decision — the runner seeds it at park time
