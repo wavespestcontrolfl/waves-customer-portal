@@ -741,8 +741,13 @@ async function markEstimateManuallyAccepted({
         // message (convert monthly or bill the prepay manually) rather than a
         // generic 500. The trx rolls back either way, so no partial
         // customer/visit/term/invoice is left behind.
-        if (err && err.isOperational && err.statusCode === 422) {
-          throw httpError(err.message, 422);
+        // Every operational 4xx keeps its status and code (GH codex P1 on
+        // #3751): the unpriced per-application add-on refusal is a 409 the
+        // operator must see as re-quote guidance, not a generic 500.
+        if (err && err.isOperational && Number(err.statusCode) >= 400 && Number(err.statusCode) < 500) {
+          const operational = httpError(err.message, Number(err.statusCode));
+          if (err.code) operational.code = err.code;
+          throw operational;
         }
         // Surface the atomic overlap guard as a 409 that keeps its tag, so the
         // booking route can detect it and degrade to a standard booking with a

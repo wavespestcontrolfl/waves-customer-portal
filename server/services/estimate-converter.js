@@ -4169,7 +4169,11 @@ const EstimateConverter = {
     // Shared predicate (billing-cadence.js) — the estimate display surfaces
     // read the same function so the "Billed $X/mo" disclosure can never
     // drift from the billing behavior decided here.
-    const preservesExistingMembership = customerPreservesMonthlyMembership(customer);
+    // Re-derived from the LOCKED customer snapshot once it is taken below
+    // (pre-push codex P1): a billing-mode change committing before the lock
+    // must not bypass the unpriced-add-on refusal or reject a now-monthly
+    // member on a stale pre-lock read.
+    let preservesExistingMembership = customerPreservesMonthlyMembership(customer);
     // An ADD-ON accept (existing recurring customer buying a NEW service
     // family) must not clobber monthly_rate with just the add-on's monthly:
     // for a monthly member the cron charges monthly_rate directly, so the
@@ -4203,7 +4207,10 @@ const EstimateConverter = {
         .where({ id: customerId })
         .forUpdate()
         .first();
-      if (lockedCustomerRow) effectiveCustomer = lockedCustomerRow;
+      if (lockedCustomerRow) {
+        effectiveCustomer = lockedCustomerRow;
+        preservesExistingMembership = customerPreservesMonthlyMembership(effectiveCustomer);
+      }
     }
     const addOnContext = suppressRecurringConversion
       ? { addOnBase: 0, hadOtherLiveFamilies: false, sameFamilyAtOtherProperty: null }
@@ -4367,9 +4374,11 @@ const EstimateConverter = {
     // lane (billing_mode monthly_membership below — codex #3591 r21 P0):
     // no per-application fee exists for it. The customers-row stamp stays
     // the ONE fallback authority, so the legacy branch lives here.
+    // Both read the LOCKED customer snapshot (effectiveCustomer), never the
+    // pre-lock row — the file's customer-lock contract.
     assertPerApplicationAddOnPriced({
       perApplicationUnresolved,
-      customer,
+      customer: effectiveCustomer,
       preservesExistingMembership,
       suppressRecurringConversion,
       billingTerm,
@@ -4377,7 +4386,7 @@ const EstimateConverter = {
     const stampedPerApplicationFee = resolveConvertedPerApplicationFee({
       pinnedLegacyRodentOnlyPlan,
       preservesExistingMembership,
-      customer,
+      customer: effectiveCustomer,
       recurringUnitCount,
       perApplicationAmount,
     });
