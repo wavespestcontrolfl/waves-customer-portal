@@ -230,7 +230,7 @@ describe('post-commit pricing-fallback bell (SEC-002 / pre-push codex P1)', () =
       'estimate',
       expect.stringContaining('Estimate saved without engine pricing'),
       expect.stringContaining('client fallback'),
-      expect.objectContaining({ bell: true, dedupeKey: 'estimate-pricing-fallback:est-cf-9', metadata: expect.objectContaining({ estimateId: 'est-cf-9', customerId: 'cust-cf-9', reason: 'ENGINE_ERROR' }) }),
+      expect.objectContaining({ bell: true, dedupeKey: 'estimate-pricing-fallback:est-cf-9', dedupeWindowMs: 6 * 60 * 60 * 1000, metadata: expect.objectContaining({ estimateId: 'est-cf-9', customerId: 'cust-cf-9', reason: 'ENGINE_ERROR' }) }),
     );
   });
 

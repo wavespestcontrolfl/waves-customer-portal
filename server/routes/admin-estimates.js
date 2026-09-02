@@ -609,6 +609,7 @@ router.use((req, res, next) => (
 // reason, the route rings only after the create/revise transaction committed
 // — never from a dryRun preflight — keyed per estimate so a preflight-plus-
 // save or a retry never rings twice. Best-effort; never fails the request.
+const PRICING_FALLBACK_BELL_DEDUPE_WINDOW_MS = 6 * 60 * 60 * 1000;
 function notifyPricingFallbackAfterCommit(estimate, reason) {
   if (reason !== 'ENGINE_ERROR' || !estimate?.id) return;
   try {
@@ -625,7 +626,11 @@ function notifyPricingFallbackAfterCommit(estimate, reason) {
         // category (pre-push codex P1; same override the commercial-schedule
         // bell carries).
         bell: true,
+        // Bounded, not forever (GH codex P2 on #3750): a later engine
+        // failure on the same estimate — after a successful SERVER re-save
+        // — must ring again once the window has passed.
         dedupeKey: `estimate-pricing-fallback:${estimate.id}`,
+        dedupeWindowMs: PRICING_FALLBACK_BELL_DEDUPE_WINDOW_MS,
         // customerId lets NotificationService apply its internal-test
         // suppression (GH codex P2 on #3750), like the neighbouring alerts.
         metadata: { estimateId: estimate.id, customerId: estimate.customer_id || null, pricingAuthority: 'CLIENT_FALLBACK', reason },
@@ -1687,7 +1692,6 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   assertEstimateSendable(estimate, {
     engineReviewAcknowledged: engineReviewAcknowledgedResolved,
   });
-  shadowLogFallbackDelivery(estimate);
 
   // Send-time lead-with-one-service (GATE_ESTIMATE_LEAD_SERVICE_SEND): parks
   // the non-lead recurring lines as staff opt-out events BEFORE any delivery
@@ -2067,6 +2071,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       failedChannels,
     };
   }
+  // Rollout telemetry from the FINAL delivered row — after the provider
+  // handoff, after the send-time park recompute and every pre-delivery
+  // check (GH codex P2 on #3750: counting earlier labelled aborted or
+  // repriced attempts as fallback deliveries). Published siblings log
+  // themselves below.
+  shadowLogFallbackDelivery(estimate);
 
   const updatePayload = {
     // Finalize the claim. The row is held as `sending` for the whole send (a
@@ -2373,6 +2383,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (state stands): ${auditErr.message}`);
             }
           } else {
+            // A published sibling is a delivered row of its own — same
+            // telemetry as the anchor (a fallback sibling behind a SERVER
+            // anchor was invisible before; GH codex P2 on #3750).
+            shadowLogFallbackDelivery(sibling);
             // Send-time pricing snapshot for the SIBLING too (estimator
             // audit M4): only the anchor wrote one, so grouped properties
             // had no frozen quote provenance. Fail-soft like the anchor's —
