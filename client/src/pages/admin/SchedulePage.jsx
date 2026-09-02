@@ -9630,10 +9630,16 @@ export function CompletionPanel({
   // .stop() can still deliver a final result asynchronously, which would mutate
   // notes after the payload was snapshotted and then be lost when the response
   // replaces the notes.
-  const dictation = useSpeechDictation((text) => {
-    if (generating) return;
-    setNotes((b) => (b ? `${b} ${text}` : text));
-  });
+  const dictation = useSpeechDictation(
+    (text) => {
+      if (generating) return;
+      setNotes((b) => (b ? `${b} ${text}` : text));
+    },
+    // GATE_TECH_DICTATION_UPLOAD: where the browser has no SpeechRecognition
+    // (iOS home-screen PWA) the mic records a clip and the server transcribes
+    // it into this same notes box. Typing always works — the mic is optional.
+    { uploadServiceId: service?.id },
+  );
   // Customer email isn't on the schedule payload (only name/phone are), so fetch
   // it for the header contact card's tap-to-email link. The same fetch surfaces
   // the account's default payer for the third-party-billing banner below.
@@ -15330,12 +15336,17 @@ export function CompletionPanel({
                   <button
                     type="button"
                     onClick={dictation.toggle}
-                    disabled={generating}
+                    disabled={generating || dictation.uploading}
+                    aria-busy={dictation.uploading || undefined}
                     aria-label={
-                      dictation.listening ? "Stop dictation" : "Dictate notes"
+                      dictation.uploading
+                        ? "Transcribing dictation"
+                        : dictation.listening ? "Stop dictation" : "Dictate notes"
                     }
                     title={
-                      dictation.listening ? "Stop dictation" : "Dictate notes"
+                      dictation.uploading
+                        ? "Transcribing…"
+                        : dictation.listening ? "Stop dictation" : "Dictate notes"
                     }
                     style={{
                       position: "absolute",
@@ -17702,11 +17713,18 @@ export function CompletionPanel({
               <button
                 type="button"
                 onClick={dictation.toggle}
-                disabled={generating}
+                disabled={generating || dictation.uploading}
+                aria-busy={dictation.uploading || undefined}
                 aria-label={
-                  dictation.listening ? "Stop dictation" : "Dictate notes"
+                  dictation.uploading
+                    ? "Transcribing dictation"
+                    : dictation.listening ? "Stop dictation" : "Dictate notes"
                 }
-                title={dictation.listening ? "Stop dictation" : "Dictate notes"}
+                title={
+                  dictation.uploading
+                    ? "Transcribing…"
+                    : dictation.listening ? "Stop dictation" : "Dictate notes"
+                }
                 style={{
                   position: "absolute",
                   bottom: 12,

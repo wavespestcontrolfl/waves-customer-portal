@@ -1354,4 +1354,75 @@ router.get('/:id/treatment-zone', async (req, res, next) => {
   }
 });
 
+// ── Field dictation upload (GATE_TECH_DICTATION_UPLOAD) ─────────────────────
+// The completion-notes mic uses the browser's SpeechRecognition where it
+// exists. Where it does not (iOS home-screen PWA, Firefox) the client records
+// with MediaRecorder and POSTs the clip here; the same OpenAI transcriber and
+// PAN scrub the call-recording path uses return plain text for the notes box.
+// Nothing is persisted — no row, no S3 object, no comms. Raw technician notes
+// never reach a customer-facing model (AGENTS.md egress rule): this is
+// transcription only, no extraction.
+const DICTATION_AUDIO_TYPES = new Map([
+  ['audio/webm', 'clip.webm'],
+  ['audio/mp4', 'clip.mp4'],
+  ['audio/x-m4a', 'clip.m4a'],
+  ['audio/m4a', 'clip.m4a'],
+  ['audio/mpeg', 'clip.mp3'],
+  ['audio/ogg', 'clip.ogg'],
+  ['audio/wav', 'clip.wav'],
+]);
+const DICTATION_MAX_BYTES = 15 * 1024 * 1024;
+const DICTATION_TRANSCRIPTION_PROMPT = `Transcribe a pest control technician's dictated field notes for Waves Pest Control (Southwest Florida): areas treated, pests found, products and application rates, follow-up recommendations. Keep product names, numbers, and units exactly as spoken. Do not summarize or add commentary.`;
+const dictationUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: DICTATION_MAX_BYTES } });
+
+function dictationUploadGateOn() {
+  return typeof featureGates.gateEnvValue === 'function' && featureGates.gateEnvValue('GATE_TECH_DICTATION_UPLOAD') === true;
+}
+
+// Mime type as the browser reports it, stripped of codec parameters
+// ("audio/webm;codecs=opus" → "audio/webm").
+function dictationBaseType(mimetype) {
+  return String(mimetype || '').split(';')[0].trim().toLowerCase();
+}
+
+router.get('/:id/dictation/availability', async (req, res, next) => {
+  try {
+    if (!dictationUploadGateOn()) return res.json({ available: false });
+    if (!(await loadOwnedServiceOr403(req, res))) return undefined;
+    return res.json({ available: Boolean(process.env.OPENAI_API_KEY) });
+  } catch (err) { return next(err); }
+});
+
+router.post('/:id/dictation', (req, res, next) => {
+  dictationUpload.single('audio')(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Recording too large (15 MB max)' });
+    return next(err);
+  });
+}, async (req, res, next) => {
+  try {
+    if (!dictationUploadGateOn()) return res.status(404).json({ error: 'Dictation upload is not available' });
+    if (!(await loadOwnedServiceOr403(req, res))) return undefined;
+    if (!req.file || !req.file.buffer?.length) return res.status(400).json({ error: 'No audio provided' });
+    const baseType = dictationBaseType(req.file.mimetype);
+    const filename = DICTATION_AUDIO_TYPES.get(baseType);
+    if (!filename) {
+      return res.status(415).json({ error: `Unsupported audio type: ${baseType || 'unknown'}` });
+    }
+
+    const { transcribeWithOpenAI } = require('../services/call-recording-processor');
+    const result = await transcribeWithOpenAI(req.file.buffer, {
+      model: process.env.OPENAI_DICTATION_MODEL || 'gpt-4o-transcribe',
+      prompt: DICTATION_TRANSCRIPTION_PROMPT,
+      mimeType: baseType,
+      filename,
+    });
+    const text = String(result?.text || '').trim();
+    // Audit line carries who/what/size only — never the transcript.
+    logger.info(`[tech-dictation] service=${req.params.id} tech=${req.technicianId} bytes=${req.file.buffer.length} type=${baseType} ok=${Boolean(result)} chars=${text.length}`);
+    if (!result) return res.status(502).json({ error: 'Transcription unavailable — type your notes instead' });
+    return res.json({ text });
+  } catch (err) { return next(err); }
+});
+
 module.exports = router;
