@@ -2130,11 +2130,19 @@ router.post('/call-status', async (req, res) => {
       const existing = await trx('call_log').where('twilio_call_sid', CallSid).first();
 
       if (existing) {
+        // Never roll a finished call back to an in-flight status on a late
+        // or retried non-terminal event (see nextCallStatus) — and when the
+        // status is retained, keep its duration too: a delayed busy/failed/
+        // ringing leg callback carries CallDuration "0" and would otherwise
+        // zero a completed call's real length (which drops it from the
+        // duration-gated recording sweeps).
+        const status = nextCallStatus(existing.status, CallStatus);
+        const retained = status === existing.status && status !== CallStatus;
         await trx('call_log').where('twilio_call_sid', CallSid).update({
-          // Never roll a finished call back to an in-flight status on a
-          // late or retried non-terminal event (see nextCallStatus).
-          status: nextCallStatus(existing.status, CallStatus),
-          duration_seconds: parseInt(CallDuration || existing.duration_seconds || 0),
+          status,
+          duration_seconds: retained
+            ? (existing.duration_seconds || 0)
+            : parseInt(CallDuration || existing.duration_seconds || 0),
           updated_at: new Date(),
         });
         return;

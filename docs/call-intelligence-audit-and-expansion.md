@@ -151,6 +151,9 @@ Per file, with the proving test.
 - Pre-push Codex round 9 (1 P1, fixed): the first attach carries the same
   processing/processed fence as a replace; a load-bearing row with no
   recording yet parks the arrival rather than installing it under the pass.
+- Pre-push Codex round 10 (2 P1s, fixed): a retained terminal status keeps
+  its duration (a late leg callback carries CallDuration "0"); adding a
+  human commitment is idempotent on its deterministic key.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 

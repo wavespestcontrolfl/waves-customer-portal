@@ -128,6 +128,11 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     const row = await cc.addHumanCommitment(db, callId, { party: 'waves', kind: 'send_paperwork', description: 'Mail the WDO paperwork', reviewedBy: 'tech-fixture' });
     expect(row).toMatchObject({ source: 'human', human_state: 'confirmed', status: 'open', kind: 'send_paperwork', confidence: null });
     expect(row.commitment_key).toMatch(/^waves:send_paperwork:[a-z0-9-]+:h[0-9a-f]{6}$/);
+    // A retried or double-submitted request returns the same row, never a
+    // uniqueness error.
+    const again = await cc.addHumanCommitment(db, callId, { party: 'waves', kind: 'send_paperwork', description: 'Mail the WDO paperwork', reviewedBy: 'tech-fixture' });
+    expect(again.id).toBe(row.id);
+    expect(await db('call_commitments').where({ call_log_id: callId, kind: 'send_paperwork' })).toHaveLength(1);
   });
 
   test('the CHECK constraints reject a writer with a bad enum value', async () => {
