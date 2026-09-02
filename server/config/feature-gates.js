@@ -91,9 +91,23 @@ const gates = {
   // Payment Element minted card_or_bank unconditionally, letting a bank
   // account be saved while the customer saw the CARD consent copy; with the
   // gate off the portal setup-intent route now mints card-only. Kill
-  // switch: unset or any non-'true' value. Booking/estimate flows stay
-  // card-only regardless (owner ruling 2026-07-13).
+  // switch: unset or any non-'true' value. Booking flows stay card-only
+  // regardless (owner ruling 2026-07-13); the estimate accept capture has
+  // its own gate below (acceptAchCapture, owner ruling 2026-09-01).
   portalAchAutopay: process.env.GATE_PORTAL_ACH_AUTOPAY === 'true',
+
+  // Bank account on the estimate-accept Auto Pay capture (owner ruling
+  // 2026-09-01): the recurring per-application and in-lane prepay
+  // SetupIntent mints card_or_bank with INSTANT verification only
+  // (Financial Connections) — the accept trust boundary stays a live
+  // succeeded intent, so a bank that cannot instant-verify falls back to a
+  // card in the same session; no micro-deposit pending state at accept.
+  // An existing customer whose ach_status is set and not 'active' mints
+  // card-only (same precheck as the pay page's capture-setup). The one-time
+  // card hold and the /secure appointment-card link stay card-only. Gate
+  // off = byte-identical card-only mint and card copy. Customer-facing
+  // money surface — fail-closed ==='true' in every environment.
+  acceptAchCapture: process.env.GATE_ACCEPT_ACH_CAPTURE === 'true',
 
   // Portal payment-method removal guard (owner ruling 2026-08-27): the
   // method Auto Pay is using (getAutopaySelectedMethodIds — the charge

@@ -1119,19 +1119,37 @@ const StripeService = {
    * SAME intent (a succeeded replay short-circuits in the capture modal),
    * while the caller walks `generation` forward past a canceled replay to
    * mint a usable replacement (same reason the card-hold flow salts).
+   * paymentMethodType 'card_or_bank' (GATE_ACCEPT_ACH_CAPTURE) adds
+   * us_bank_account with INSTANT verification only — the accept gate needs a
+   * live succeeded intent, and a micro-deposit bank would sit in
+   * requires_action for days. The tender set salts the idempotency key so a
+   * gate flip mid-window mints a fresh intent instead of replaying the other
+   * tender family's parameters (Stripe rejects a key reuse with different
+   * params).
    */
-  async createRecurringCardSetupIntent({ estimateId, generation = 0 }) {
+  async createRecurringCardSetupIntent({ estimateId, generation = 0, paymentMethodType = 'card' }) {
     const stripe = getStripe();
     if (!stripe) return null;
+    const withBank = paymentMethodType === 'card_or_bank';
     return stripe.setupIntents.create({
-      payment_method_types: ['card'],
+      payment_method_types: withBank ? ['card', 'us_bank_account'] : ['card'],
       usage: 'off_session',
-      description: 'Waves recurring plan — card on file for Auto Pay',
+      description: withBank
+        ? 'Waves recurring plan — card or bank account on file for Auto Pay'
+        : 'Waves recurring plan — card on file for Auto Pay',
+      ...(withBank ? {
+        payment_method_options: {
+          us_bank_account: {
+            financial_connections: { permissions: ['payment_method'] },
+            verification_method: 'instant',
+          },
+        },
+      } : {}),
       metadata: {
         purpose: 'estimate_recurring_card',
         estimate_id: String(estimateId),
       },
-    }, { idempotencyKey: `estimate_recurring_card_${estimateId}${Number(generation) > 0 ? `_g${Number(generation)}` : ''}` });
+    }, { idempotencyKey: `estimate_recurring_card_${estimateId}${withBank ? '_cb' : ''}${Number(generation) > 0 ? `_g${Number(generation)}` : ''}` });
   },
 
   // "Secure your appointment" card capture (appointment-card-request funnel)

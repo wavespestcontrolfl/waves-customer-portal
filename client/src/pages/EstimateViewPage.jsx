@@ -35,7 +35,7 @@ import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
-import { CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
@@ -2759,10 +2759,26 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
+  const paymentElementRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [agreed, setAgreed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  // Tender picked inside the Payment Element — a bank tab only exists when
+  // the intent was minted card_or_bank (GATE_ACCEPT_ACH_CAPTURE). Copy and
+  // the consent text follow it; the checkbox re-arms on a switch so the
+  // recorded ACH authorization is the one that was on screen.
+  // A succeeded replay initializes to the tender already on the intent
+  // (Codex #3723 r1 P1) — the customer never re-enters it.
+  const [methodType, setMethodType] = useState(intent?.capturedMethodType || 'card');
+  const bank = methodType === 'us_bank_account';
+  const bankOffered = Array.isArray(intent?.paymentMethodTypes) && intent.paymentMethodTypes.includes('us_bank_account');
+  // Synchronous mirrors for the save gesture (pre-push Codex P1): a tender
+  // switch clears consent inside the change handler itself, and the
+  // handler reads the live tick through the ref.
+  const methodTypeRef = useRef(methodType);
+  const agreedRef = useRef(false);
+  const setAgreedSync = (v) => { agreedRef.current = v; setAgreed(v); };
 
   useEffect(() => {
     let cancelled = false;
@@ -2778,8 +2794,18 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
       const paymentElement = elements.create('payment');
       paymentElement.mount(mountRef.current);
       paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
+      paymentElement.on('change', (event) => {
+        if (cancelled) return;
+        const next = event?.value?.type || 'card';
+        if (next !== methodTypeRef.current) {
+          methodTypeRef.current = next;
+          setAgreedSync(false);
+          setMethodType(next);
+        }
+      });
       stripeRef.current = stripe;
       elementsRef.current = elements;
+      paymentElementRef.current = paymentElement;
     }).catch(() => {
       if (!cancelled) setError('Could not load the secure card form. Check your connection and try again.');
     });
@@ -2787,14 +2813,27 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
   }, [intent]);
 
   const handleSave = useCallback(async () => {
-    if (!stripeRef.current || !elementsRef.current) return;
+    if (!stripeRef.current || !elementsRef.current || !agreedRef.current) return;
     setSubmitting(true);
     setError(null);
+    // Lock the Payment Element for the whole confirm (Codex #3723 r2 P1):
+    // the tender the consent was ticked for is the one confirmed.
+    const lock = (readOnly) => { try { paymentElementRef.current?.update?.({ readOnly }); } catch { /* element gone */ } };
+    lock(true);
     try {
       // Re-tap after a succeeded setup — honor the captured card instead of
       // re-confirming.
       const existing = await stripeRef.current.retrieveSetupIntent(intent.clientSecret);
       if (existing?.setupIntent?.status === 'succeeded') {
+        // Bank-capable replay with an unresolved captured tender: the
+        // consent on screen may not match what Stripe holds — fail closed.
+        const replayedTypes = existing.setupIntent.payment_method_types || [];
+        if (replayedTypes.includes('us_bank_account') && !intent?.capturedMethodType) {
+          lock(false);
+          setError('Your payment method was already saved. Please refresh this page to continue.');
+          setSubmitting(false);
+          return;
+        }
         onSuccess(existing.setupIntent.id);
         return;
       }
@@ -2804,7 +2843,8 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
         redirect: 'if_required',
       });
       if (result.error) {
-        setError(result.error.message || 'We could not save that card. Try another card.');
+        lock(false);
+        setError(result.error.message || (bank ? 'We could not save that bank account. Try a card instead.' : 'We could not save that card. Try another card.'));
         setSubmitting(false);
         return;
       }
@@ -2813,13 +2853,19 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
         onSuccess(si.id);
         return;
       }
-      setError('That card could not be saved. Try again in a moment.');
+      // Instant-verified banks land 'succeeded' like cards; there is no
+      // micro-deposit pending state at accept (GATE_ACCEPT_ACH_CAPTURE).
+      lock(false);
+      setError(bank
+        ? 'That bank account could not be verified instantly. Use a card to finish booking.'
+        : 'That card could not be saved. Try again in a moment.');
       setSubmitting(false);
     } catch {
-      setError('We could not save that card. Try again.');
+      lock(false);
+      setError(bank ? 'We could not save that bank account. Try again or use a card.' : 'We could not save that card. Try again.');
       setSubmitting(false);
     }
-  }, [intent, onSuccess]);
+  }, [intent, onSuccess, bank]);
 
   return (
     <div
@@ -2837,23 +2883,33 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
           are the non-glass fallback. */}
       <div data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>
-          {prepay ? 'Save your card — annual prepay' : 'Set up Auto Pay'}
+          {prepay
+            ? (bankOffered ? 'Save your card or bank account — annual prepay' : 'Save your card — annual prepay')
+            : 'Set up Auto Pay'}
         </div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
           {prepay
-            ? 'Save your card to confirm your plan. When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.'
-            : 'Save your card to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.'}
+            ? (bank
+              ? 'Save your bank account to confirm your plan. When you confirm, we show your exact 12-month total and debit this account. Bank transfers have no added card surcharge.'
+              : 'Save your card to confirm your plan. When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
+            : (bank
+              ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.'
+              : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.`)}
         </div>
         <div ref={mountRef} />
         <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
           <input
             type="checkbox"
             checked={agreed}
-            onChange={(e) => setAgreed(e.target.checked)}
+            onChange={(e) => setAgreedSync(e.target.checked)}
             disabled={submitting}
             style={{ marginTop: 3, width: 16, height: 16, flex: 'none' }}
           />
-          <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>{prepay ? PREPAY_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT}</span>
+          <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+            {prepay
+              ? (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)
+              : (bank ? ACH_CONSENT_TEXT : CARD_CONSENT_TEXT)}
+          </span>
         </label>
         {error ? (
           <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
@@ -2864,7 +2920,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
             onClick={handleSave}
             disabled={!ready || !agreed || submitting}
             style={{ ...estimateCtaStyle, opacity: !ready || !agreed || submitting ? 0.6 : 1 }}
-          >{submitting ? 'Saving…' : 'Agree & save card'}</button>
+          >{submitting ? 'Saving…' : (bank ? 'Agree & save bank account' : 'Agree & save card')}</button>
           <button
             type="button"
             onClick={onCancel}
@@ -3401,7 +3457,7 @@ function AcceptanceRecordCard({ acceptance }) {
   );
 }
 
-export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false }) {
+export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card' }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -3445,7 +3501,12 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
             // charges the SAVED method — which may be a bank account — so
             // only a capture accept may say "card".
             ? (prepayCardCapture
-              ? 'Your existing appointment stays scheduled. Your saved card is charged the 12-month total when you confirm.'
+              // A capture accept says "card" only while the capture holds a
+              // card — a bank pick (GATE_ACCEPT_ACH_CAPTURE) reads "bank
+              // account" (Codex #3723 r4 P2).
+              ? (captureMethodType === 'us_bank_account'
+                ? 'Your existing appointment stays scheduled. Your bank account is debited the 12-month total when you confirm.'
+                : 'Your existing appointment stays scheduled. Your saved card is charged the 12-month total when you confirm.')
               : 'Your existing appointment stays scheduled. Your saved payment method on file is charged the 12-month total when you confirm.')
             : 'Your existing appointment stays scheduled. Annual prepay invoice is available for optional payment after confirmation.')
           : 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.'
@@ -5064,7 +5125,7 @@ function EstimateViewPageInner() {
   // SetupIntent; the ref drives confirmSetup from the combined CTA. The modal
   // stays as the fallback (inline mint failure, stale-402 force path).
   const [inlineCardIntent, setInlineCardIntent] = useState(null);
-  const [inlineCardState, setInlineCardState] = useState({ ready: false, agreed: false });
+  const [inlineCardState, setInlineCardState] = useState({ ready: false, agreed: false, methodType: 'card' });
   const inlineCaptureRef = useRef(null);
   const inlineIntentMintRef = useRef(false);
   // Inline confirmSetup in flight: drives the CTA's submitting state WITHOUT
@@ -6303,6 +6364,7 @@ function EstimateViewPageInner() {
   const handleInlineCardState = useCallback((st) => {
     setInlineCardState((prev) => (
       prev.ready === st.ready && prev.agreed === st.agreed && !!prev.loadFailed === !!st.loadFailed
+        && (prev.methodType || 'card') === (st.methodType || 'card')
         ? prev
         : st
     ));
@@ -7597,6 +7659,7 @@ function EstimateViewPageInner() {
             serviceMode={serviceMode}
             prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
             prepayCardCapture={!!data?.recurringCardPolicy?.required}
+            captureMethodType={inlineAutoPayActive && inlineCardIntent ? inlineCardState.methodType : 'card'}
             depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
               ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. Rescheduling is free but doesn't reset the cancellation window. ${CARD_SURCHARGE_DISCLOSURE}`
               : ((data?.depositPolicy?.required || (serviceMode === 'one_time' && data?.depositPolicy?.requiredForOneTime))
@@ -7615,10 +7678,17 @@ function EstimateViewPageInner() {
                     // In-lane prepay (GATE_PREPAY_CARD_AND_CHARGE): the card
                     // IS charged at confirm — never show the "$0 today" story.
                     ? (inlineAutoPayActive && inlineCardIntent
-                      ? `Your card is charged the 12-month prepay total when you confirm. ${CARD_SURCHARGE_DISCLOSURE}`
+                      // Tender-aware (GATE_ACCEPT_ACH_CAPTURE): the inline
+                      // capture reports the selected method — a bank pick
+                      // must not sit under a "your card is charged" line.
+                      ? (inlineCardState.methodType === 'us_bank_account'
+                        ? 'Your bank account is debited the 12-month prepay total when you confirm. Bank transfers have no added card surcharge.'
+                        : `Your card is charged the 12-month prepay total when you confirm. ${CARD_SURCHARGE_DISCLOSURE}`)
                       : `A card on file is required to book. It is charged the 12-month prepay total when you confirm. ${CARD_SURCHARGE_DISCLOSURE}`)
                     : (inlineAutoPayActive && inlineCardIntent
-                      ? CARD_SURCHARGE_DISCLOSURE
+                      ? (inlineCardState.methodType === 'us_bank_account'
+                        ? 'Bank transfers have no added card surcharge.'
+                        : CARD_SURCHARGE_DISCLOSURE)
                       : `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`))
                   : null))}
             autoPaySlot={inlineAutoPayActive && inlineCardIntent ? (
@@ -7636,7 +7706,9 @@ function EstimateViewPageInner() {
               <AcceptanceTermsLine terms={data.acceptanceTerms} />
             ) : null}
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent
-              ? (paymentPreference === 'prepay_annual' ? 'Confirm & pay the 12-month plan' : 'Confirm booking & save card')
+              ? (paymentPreference === 'prepay_annual'
+                ? 'Confirm & pay the 12-month plan'
+                : (inlineCardState.methodType === 'us_bank_account' ? 'Confirm booking & save bank account' : 'Confirm booking & save card'))
               : null}
             confirmDisabled={!!prepayChargeQuote
               // While the exact-total quote card is up, ITS button is the
