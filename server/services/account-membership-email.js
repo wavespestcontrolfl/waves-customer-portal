@@ -424,10 +424,13 @@ async function sendCancellationReceived({
     } catch (probeErr) {
       logger.warn(`[account-membership-email] legacy cancellation-key probe failed for ${request.id}: ${probeErr.message}`);
     }
-    // Term-keyed compat: an earlier request of the same episode sent this
-    // class under its request key (class-suffixed or legacy) before the
-    // term key shipped — that email already told the customer.
-    const priorIds = termKeyed && Array.isArray(priorRequestIds) ? priorRequestIds.map(String).filter(Boolean) : [];
+    // Term-keyed compat: THIS request (a repair of an acceptance opened
+    // before the term key shipped) or an earlier request of the same
+    // episode sent this class under its request key (class-suffixed or
+    // legacy) — that email already told the customer.
+    const priorIds = termKeyed
+      ? [...new Set([String(request.id), ...(Array.isArray(priorRequestIds) ? priorRequestIds.map(String) : [])].filter(Boolean))]
+      : [];
     if (priorIds.length) {
       try {
         const keys = priorIds.flatMap((rid) => [`account.cancellation_received:${rid}:${outcomeClass}`, `account.cancellation_received:${rid}`]);

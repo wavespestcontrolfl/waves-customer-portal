@@ -231,6 +231,17 @@ describe('account and membership email sender', () => {
     });
     expect(prior).toEqual(expect.objectContaining({ ok: true, deduped: true, priorRequest: true }));
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    // ...and the CURRENT request's own class-suffixed pre-deploy send
+    // (repair retry of an acceptance opened before the term key shipped).
+    jest.clearAllMocks();
+    setDbQueues({ email_messages: [chain({ first: undefined }), chain({ first: { id: 'em-cur' } })] });
+    const cur = await AccountMembershipEmail.sendCancellationReceived({
+      customerId: 'cust-1',
+      request: { id: 'req-cur', category: 'cancellation', subject: 'Cancel plan', created_at: '2026-08-31' },
+      processed: true, keptThrough: true, prepayTermId: 'term-1', termEpisodeKey: EP,
+    });
+    expect(cur).toEqual(expect.objectContaining({ ok: true, deduped: true, priorRequest: true }));
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
     // keptThrough without a resolved term, a term without keptThrough
     // (immediate end-now cancel), and a term without an episode: request-keyed.
     for (const args of [{ keptThrough: true }, { prepayTermId: 'term-1', termEpisodeKey: EP }, { keptThrough: true, prepayTermId: 'term-1' }]) {

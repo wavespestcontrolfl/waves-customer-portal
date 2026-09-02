@@ -92,27 +92,29 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
   // end_now_refund) SUPERSEDES the earlier dated task — staff must never
   // hold a wait-until-term-end instruction and a pull-now instruction at
   // once. Stamp the dated task read and say so in the new body.
+  // A DATED raise for a CORRECTED boundary (admin fixed term_end, repeated
+  // the cancel) likewise retires the earlier dated row naming the old
+  // date — staff must never hold two retrieval dates at once.
   let supersededDated = false;
-  if (!retrieveAfter) {
-    try {
-      const stamped = await db('notifications')
-        .where({ recipient_type: 'admin' })
-        .whereNull('read_at')
-        .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
-        .whereRaw("metadata->>'customerId' = ?", [String(customerId)])
-        .whereRaw("metadata->>'retrieveAfter' IS NOT NULL")
-        .update({ read_at: new Date() });
-      supersededDated = Number(stamped) > 0;
-    } catch (supersedeErr) {
-      // NOT swallowed: raising the immediate task while the dated one may
-      // still stand would leave staff two contradictory instructions with
-      // no review error naming the stale one. Throwing lands as
-      // termite_retrieval_task on the run, and the latch's lost-task repair
-      // retries this whole raise (supersede + task) (deferred P2 from
-      // #3666 r32).
-      logger.error(`[cancellation-processor] dated-retrieval supersede failed for ${customerId}: ${supersedeErr.message}`);
-      throw new Error(`dated retrieval task could not be superseded: ${supersedeErr.message}`);
-    }
+  try {
+    const stale = db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereNull('read_at')
+      .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
+      .whereRaw("metadata->>'customerId' = ?", [String(customerId)])
+      .whereRaw("metadata->>'retrieveAfter' IS NOT NULL");
+    if (retrieveAfter) stale.whereRaw("metadata->>'retrieveAfter' <> ?", [String(retrieveAfter)]);
+    const stamped = await stale.update({ read_at: new Date() });
+    supersededDated = Number(stamped) > 0;
+  } catch (supersedeErr) {
+    // NOT swallowed: raising the new task while the stale dated one may
+    // still stand would leave staff two contradictory instructions with
+    // no review error naming the stale one. Throwing lands as
+    // termite_retrieval_task on the run, and the latch's lost-task repair
+    // retries this whole raise (supersede + task) (deferred P2 from
+    // #3666 r32).
+    logger.error(`[cancellation-processor] dated-retrieval supersede failed for ${customerId}: ${supersedeErr.message}`);
+    throw new Error(`dated retrieval task could not be superseded: ${supersedeErr.message}`);
   }
   const termKeyed = !!(termId && episodeKey);
   const taskClass = retrieveAfter ? 'dated' : 'immediate';
@@ -120,8 +122,9 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
   // of the SAME episode raised this class of task under its request key.
   // Matched in JS on the small per-customer row set (the key lives inside
   // metadata).
-  if (termKeyed && Array.isArray(priorRequestIds) && priorRequestIds.length) {
-    const wanted = new Set(priorRequestIds.map((r) => `termite_station_retrieval:${customerId}:${r}`));
+  const compatRequestIds = termKeyed ? [...(Array.isArray(priorRequestIds) ? priorRequestIds : []), ...(requestId ? [requestId] : [])] : [];
+  if (compatRequestIds.length) {
+    const wanted = new Set(compatRequestIds.map((r) => `termite_station_retrieval:${customerId}:${r}`));
     const rows = await db('notifications')
       .where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
@@ -139,7 +142,7 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
   // calendar through the coverage boundary — pulling the stations now would
   // make those visits undeliverable, so the task is DATED, never "pull now".
   const timing = retrieveAfter
-    ? ` Paid coverage runs through ${retrieveAfter} — schedule the retrieval AFTER that date, not before; covered termite visits still deliver until then.`
+    ? ` Paid coverage runs through ${retrieveAfter} — schedule the retrieval AFTER that date, not before; covered termite visits still deliver until then.${supersededDated ? ' This supersedes the earlier dated retrieval task — the coverage end date was corrected.' : ''}`
     : ` Schedule the retrieval visit.${supersededDated ? ' This supersedes the earlier dated retrieval task — the program now ends immediately.' : ''}`;
   const result = await NotificationService.notifyAdmin(
     'service',
@@ -650,6 +653,11 @@ async function processCancellationRequest({
   let churned = false;
   let termiteRetrievalPending = null;
   let wasChurnedStage = false;
+  // First churn of an EPISODE: no churned_at stamp on the row. customer-
+  // stages clears the stamp only on a real reactivation, so a dormant /
+  // past_customer / lost row that still carries one is the same episode —
+  // its churn facts (date, reason, MRR snapshot, classification) stay.
+  let firstChurn = false;
   // A scoped cancel never churns the account — the customer keeps the
   // families that stay; their billing wind-down happens per family below.
   if (!scoped) try {
@@ -670,18 +678,20 @@ async function processCancellationRequest({
         next_charge_date: null,
         updated_at: now,
       };
-      // Preserve the original churn timestamp/reason if already churned.
-      if (!wasChurnedStage) {
-        update.pipeline_stage_changed_at = now;
+      // The stage transition is stamped whenever the row was not already
+      // 'churned'; the churn FACTS only on the first churn of the episode.
+      if (!wasChurnedStage) update.pipeline_stage_changed_at = now;
+      firstChurn = !wasChurnedStage && !customer.churned_at;
+      // Preserve the original churn date/reason/MRR if already churned —
+      // including an archival relabel (dormant / past_customer / lost)
+      // whose churned_at customer-stages deliberately kept: that is the
+      // same episode, not a new churn, and the end-of-coverage side
+      // effects dedupe on it.
+      if (firstChurn) {
         // churned_at is a DATE column — stamp the ET calendar date (a JS Date
         // lands on the wrong day after ET midnight; same rule as the admin
-        // stage-change path). An EXISTING stamp is kept: customer-stages
-        // clears it only on a real reactivation (entry into a live customer
-        // stage), so a stamp on a dormant / past_customer / lost row means
-        // the original churn episode never ended — an archival relabel
-        // followed by a repeat cancel is the same episode, not a new churn
-        // (and the end-of-coverage side effects dedupe on it).
-        if (!customer.churned_at) update.churned_at = etDateString();
+        // stage-change path).
+        update.churned_at = etDateString();
         update.churn_reason = CHURN_REASON;
         // Taxonomy (Phase 7): snapshot the rate AT churn (monthly_rate gets
         // zeroed/repriced later — without this the Pareto's dollars rewrite
@@ -1357,7 +1367,7 @@ async function processCancellationRequest({
     }
   }
 
-  if (churned && !wasChurnedStage) {
+  if (churned && firstChurn) {
     try {
       await db('customer_interactions').insert({
         customer_id: customerId,
@@ -1382,7 +1392,7 @@ async function processCancellationRequest({
   // and deliberately OUTSIDE `errors` — a classification miss leaves the row
   // at 'unclassified' (fail-closed), it is not an operational failure that
   // should flag the request for manual review.
-  if (churned && !wasChurnedStage) {
+  if (churned && firstChurn) {
     try {
       const { classifyChurnReason } = require('./churn-classifier');
       const { code } = await classifyChurnReason(cancelReason);

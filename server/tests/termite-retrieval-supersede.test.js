@@ -17,7 +17,15 @@ jest.mock('../models/db', () => jest.fn((table) => {
   const b = {
     where(c) { if (typeof c === 'object') Object.entries(c).forEach(([k, v]) => conds.push((r) => r[k] === v)); return b; },
     whereNull(k) { conds.push((r) => r[k] == null); return b; },
-    whereRaw() { return b; },
+    // The retire predicates the raise uses on metadata: equality, inequality
+    // and IS NOT NULL — honoured so a boundary-scoped retire is testable.
+    whereRaw(sql, bindings = []) {
+      const cmp = /metadata->>'(\w+)' (=|<>) \?/.exec(sql);
+      if (cmp) conds.push((r) => ((cmp[2] === '=') === (String((r.metadata || {})[cmp[1]]) === String(bindings[0]))));
+      const nn = /metadata->>'(\w+)' IS NOT NULL/.exec(sql);
+      if (nn) conds.push((r) => (r.metadata || {})[nn[1]] != null);
+      return b;
+    },
     whereIn(k, vals) { conds.push((r) => vals.includes(r[k])); return b; },
     select: async () => (mockTables[table] || []).filter((r) => conds.every((c) => c(r))),
     first: async () => (mockTables[table] || []).find((r) => conds.every((c) => c(r))) || null,
@@ -57,10 +65,15 @@ test('a FAILED retire throws — no immediate task is raised beside a dated one 
   expect(mockNotifyAdmin).not.toHaveBeenCalled();
 });
 
-test('a DATED task never touches the retire step', async () => {
+test('a DATED task runs the retire step too (for an earlier dated row naming a DIFFERENT date) — a failing retire throws as well', async () => {
   mockFailUpdate = 'notifications';
+  await expect(raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' })).rejects.toThrow(/could not be superseded/);
+  expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  mockFailUpdate = null;
   const out = await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
   expect(out).toEqual(expect.objectContaining({ raised: true }));
+  // Same date as the existing dated row → it is left alone.
+  expect(mockTables.notifications[0].read_at).toBeNull();
 });
 
 describe('dedupe key: per (TERM, churn episode, class) when a prepaid term governs the cancel, per request otherwise', () => {
@@ -114,5 +127,32 @@ describe('dedupe key: per (TERM, churn episode, class) when a prepaid term gover
     expect(imm).toEqual(expect.objectContaining({ raised: true }));
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     expect(keyOf()).toBe(`termite_station_retrieval:term:term-1:${EP}:immediate`);
+  });
+});
+
+describe('boundary correction and current-request compat', () => {
+  const EP = '2026-09-01:2027-03-31';
+
+  test('a DATED raise for a corrected boundary retires the earlier dated row naming the old date', async () => {
+    const out = await raiseTermiteRetrievalTask('c1', 'req-2', { retrieveAfter: '2027-03-31', termId: 'term-1', episodeKey: EP });
+    expect(out).toEqual(expect.objectContaining({ raised: true }));
+    expect(mockTables.notifications[0].read_at).not.toBeNull();
+    expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/coverage end date was corrected/);
+  });
+
+  test('a DATED raise for the SAME boundary leaves the existing dated row alone', async () => {
+    await raiseTermiteRetrievalTask('c1', 'req-2', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: EP });
+    expect(mockTables.notifications[0].read_at).toBeNull();
+    expect(mockNotifyAdmin.mock.calls[0][2]).not.toMatch(/supersedes/);
+  });
+
+  test('compat: the CURRENT request already raised this class under its request key (repair of a pre-deploy acceptance) — nothing new', async () => {
+    mockTables.notifications.push({
+      id: 'n-cur', recipient_type: 'admin', read_at: null,
+      metadata: { kind: 'termite_station_retrieval', customerId: 'c1', dedupeKey: 'termite_station_retrieval:c1:req-cur', retrieveAfter: '2027-02-28' },
+    });
+    const out = await raiseTermiteRetrievalTask('c1', 'req-cur', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: EP });
+    expect(out).toEqual(expect.objectContaining({ raised: true, deduped: true, priorRequest: true }));
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 });

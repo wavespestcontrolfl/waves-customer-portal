@@ -252,10 +252,14 @@ test('an EXISTING churned_at stamp survives a repeat churn from an archival rela
   seedCustomer();
   db.__tables.customers[0].pipeline_stage = 'dormant';
   db.__tables.customers[0].churned_at = '2026-06-01';
+  db.__tables.customers[0].churn_reason = 'price';
+  db.__tables.customers[0].churn_reason_detail = 'too expensive';
+  db.__tables.customers[0].churn_mrr = 99;
   db.__tables.scheduled_services = [];
   await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', actor: { type: 'portal' } });
   expect(db.__tables.customers[0].pipeline_stage).toBe('churned');
-  expect(db.__tables.customers[0].churned_at).toBe('2026-06-01');
+  // Every churn FACT of the preserved episode survives, not just the date.
+  expect(db.__tables.customers[0]).toEqual(expect.objectContaining({ churned_at: '2026-06-01', churn_reason: 'price', churn_reason_detail: 'too expensive', churn_mrr: 99 }));
   // A genuinely reactivated account (stamp cleared by customer-stages) gets a fresh one.
   seedCustomer();
   db.__tables.customers[0].churned_at = null;
