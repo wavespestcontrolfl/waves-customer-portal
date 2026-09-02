@@ -329,7 +329,8 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     // punctuation stripped): `real'office@example.com` is one word whose
     // email-shaped tail happens to be allowlisted — the cut prefix is real.
     const str = String(text);
-    for (const m of str.matchAll(/(?:"[^"\s@]+"|[\p{L}\p{N}_.+%-]+)@(?:[\p{L}\p{N}_.-]+|\[[^\]\s]+\])/gu)) {
+    // (a quoted local may contain spaces: "customer name"@example.net)
+    for (const m of str.matchAll(/(?:"[^"@\n]+"|[\p{L}\p{N}_.+%-]+)@(?:[\p{L}\p{N}_.-]+|\[[^\]\s]+\])/gu)) {
       const email = m[0];
       let ws = m.index;
       while (ws > 0 && !/\s/.test(str[ws - 1])) ws -= 1;

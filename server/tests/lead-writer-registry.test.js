@@ -49,6 +49,10 @@ const Q = '[\'"`]'; // quote class incl. backtick
 // null when the chain ends first.
 const INSERT_STOP = new Set(['insert']);
 const TABLE_STOPS = new Set(['into', 'table', 'from']);
+// A head walk stops at EITHER: reaching a table selector first means a later
+// call re-targets the builder (`db.withSchema(schema).table(table).insert`)
+// and that selector's own head is the site, not this one.
+const HEAD_STOPS = new Set([...INSERT_STOP, ...TABLE_STOPS]);
 function walkChain(bare, pos, stops) {
   let k = pos;
   const ws = () => { while (k < bare.length && /\s/.test(bare[k])) k += 1; };
@@ -252,6 +256,30 @@ function simpleAssignPairs(src) {
 // / a bare destructured `raw(`, or a native pg `.query(` (`client.query`,
 // `pool.query`) — never a substring (`draw(`, `withdraw(`).
 const RAW_CALLEE = String.raw`(?:\??\.\s*(?:raw|query)|(?:\?\.)?\[\s*['"\x60](?:raw|query)['"\x60]\s*\]|(?<![.\w$])raw)\s*(?:\?\.\s*)?\(`;
+// The FUNCTION that produces the SQL literal at `idx`: the innermost
+// function whose body RETURNS it, or the expression-bodied arrow it is the
+// value of (`const buildInsert = (t) => \`INSERT INTO …\``). Null when the
+// literal is not a function's product.
+function sqlProducer(code, bare, idx) {
+  let j = idx;
+  while (j > 0 && (bare[j - 1] === ' ' || bare[j - 1] === '\n' || code[j - 1] === '+')) j -= 1;
+  const lead = code.slice(Math.max(0, j - 200), j);
+  const arrow = lead.match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*)?$/);
+  if (arrow) return arrow[1];
+  let depth = 0;
+  let b = j - 1;
+  for (; b >= 0; b -= 1) {
+    const ch = bare[b];
+    if (ch === ')' || ch === ']') depth += 1;
+    else if (ch === '(' || ch === '[') depth -= 1;
+    else if ((ch === ';' || ch === '{' || ch === '}') && depth <= 0) break;
+  }
+  if (!/^\s*return\b/.test(code.slice(b + 1, j))) return null;
+  let best = null;
+  for (const f of balancedFunctionBodies(code)) if (f.start <= idx && idx < f.end && (!best || f.end - f.start < best.end - best.start)) best = f;
+  return best ? best.name : null;
+}
+
 // The declaration that holds the SQL literal at `idx`: `{ name, member }`,
 // where `member` is the regex tail required after the name at the callee
 // (empty for a plain constant; the property access for SQL held in an
@@ -321,6 +349,12 @@ function inRawContext(code, idx) {
   // string literal(s) — every string char is blank in the fully blanked
   // view, and `+` glue joins concatenated pieces — to the `=` of the
   // declaration, then require that identifier to reach a raw callee.
+  // SQL RETURNED by a function (or produced by an expression-bodied arrow)
+  // that is later handed to raw/query — `db.raw(buildInsert('leads'))`: the
+  // literal's own statement is the evidence, the callee invocation the
+  // execution.
+  const producer = sqlProducer(code, bare, idx);
+  if (producer && new RegExp(String.raw`${RAW_CALLEE}\s*${escapeRe(producer)}\s*(?:\?\.)?\(`).test(bare)) return true;
   const decl = sqlDeclaration(code, idx);
   if (!decl) return false;
   const { member } = decl;
@@ -352,12 +386,18 @@ function inRawContext(code, idx) {
 // the blanked view backward from each occurrence to the call's `(` at
 // depth 0, counting top-level commas; a `;`, `{`, `}` or `=` first means it
 // is not an argument. Control-keyword heads (`if (x)`) are not calls.
-function wholeArgumentPasses(bare, name) {
+function wholeArgumentPasses(bare, name, scalarProps = new Set()) {
   const out = [];
-  const occRe = new RegExp(String.raw`(?<![.\w$])${escapeRe(name)}\b(?!\s*[.\[(])`, 'g');
+  // The name itself or a MEMBER path off it (`retarget(TYPES.lawn)`) — a
+  // governed entry escapes through the parameter just the same. A path
+  // ending in a governed SCALAR property (`db(config.table)`) passes a
+  // string, which no callee can mutate back into the config.
+  const occRe = new RegExp(String.raw`(?<![.\w$])${escapeRe(name)}\b(?:\s*(?:\.\s*[A-Za-z_$][\w$]*|\[[^\]]*\]))*(?!\s*[.\[(])`, 'g');
   let o;
   while ((o = occRe.exec(bare))) {
-    const after = bare.slice(o.index + name.length).match(/^\s*([,)])/);
+    const leaf = o[0].match(/\.\s*([A-Za-z_$][\w$]*)\s*$/);
+    if (leaf && scalarProps.has(leaf[1])) continue;
+    const after = bare.slice(o.index + o[0].length).match(/^\s*([,)])/);
     if (!after) continue;
     let depth = 0;
     let position = 0;
@@ -492,16 +532,19 @@ function balancedBodyFactories(src, bodyRe, localDeclRes = [], captureAt = null)
 function relativeImports(src, filePath) {
   const out = [];
   if (!filePath) return out;
-  const importRe = /\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\bimport\s*\{([^{}]*)\}\s*from\s*['"](\.{1,2}\/[^'"]+)['"]|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\bimport\s+(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)\s+from\s*['"](\.{1,2}\/[^'"]+)['"]/g;
+  const importRe = /\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\bimport\s*\{([^{}]*)\}\s*from\s*['"](\.{1,2}\/[^'"]+)['"]|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\bimport\s+(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)\s+from\s*['"](\.{1,2}\/[^'"]+)['"]|\bimport\s+([A-Za-z_$][\w$]*)\s*,\s*\{([^{}]*)\}\s*from\s*['"](\.{1,2}\/[^'"]+)['"]/g;
   let m;
   while ((m = importRe.exec(src))) {
-    const target = path.resolve(path.dirname(filePath), m[2] || m[4] || m[6] || m[8]);
+    const target = path.resolve(path.dirname(filePath), m[2] || m[4] || m[6] || m[8] || m[11]);
     const resolved = [target, `${target}.js`, path.join(target, 'index.js')]
       .find((c) => fs.existsSync(c) && fs.statSync(c).isFile());
     if (!resolved) continue;
+    // Combined `import defaults, { a } from './x'`: a default binding AND
+    // named bindings.
+    if (m[9]) out.push({ resolved, ns: m[9] });
     const ns = m[5] || m[7];
     if (ns) { out.push({ resolved, ns }); continue; }
-    const bindings = (m[1] || m[3]).split(',')
+    const bindings = (m[1] || m[3] || m[10] || '').split(',')
       .map((part) => part.split(/\s*(?::|\bas\b)\s*/).map((x) => x && x.trim()))
       .filter(([orig]) => orig);
     out.push({ resolved, bindings });
@@ -1284,8 +1327,8 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
   // `record` for a chain head: walk from `from` (the head's end) to the
   // insert call.
   const recordChain = (m, expr, from) => {
-    const hit = walkChain(code, from, INSERT_STOP);
-    if (hit) record(m.index, hit.open + 1 - m.index, expr);
+    const hit = walkChain(code, from, HEAD_STOPS);
+    if (hit && hit.name === 'insert') record(m.index, hit.open + 1 - m.index, expr);
   };
   // A regex that ENDS AT the table call's `(`: parse its arguments.
   const argOf = (m, opts) => tableArg(code, m.index + m[0].length - 1, opts);
@@ -1398,8 +1441,8 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     let use;
     while ((use = useRe.exec(code))) {
       const n = use[1];
-      const hit = walkChain(code, use.index + use[0].length, INSERT_STOP);
-      if (!hit) continue;
+      const hit = walkChain(code, use.index + use[0].length, HEAD_STOPS);
+      if (!hit || hit.name !== 'insert') continue;
       // Same lexical rule as the literal pass: the nearest VISIBLE
       // declaration of the name must be one of the dynamic-builder ones.
       if (dynDecls.has(n)) {
@@ -1559,8 +1602,8 @@ function scanSourceForLeadInserts(src, filePath, imports = 'all') {
       if (pattern.chain) {
         let from = m.index + m[0].length;
         if (pattern.callArgs) { from = afterBalanced(bare, from); if (from === -1) continue; }
-        const hit = walkChain(bare, from, INSERT_STOP);
-        if (!hit) continue;
+        const hit = walkChain(bare, from, HEAD_STOPS);
+        if (!hit || hit.name !== 'insert') continue;
         len = hit.open + 1 - m.index;
       }
       if (pattern === RAW_SQL_INSERT_RE && !inRawContext(code, m.index)) continue;
@@ -1679,6 +1722,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['triple-nested chain arguments', "await db('leads').modify(qb => qb.whereIn('id', ids.map(id => normalize(id)))).insert(row);"],
     ['deeply nested insert payload before .into', "await db.insert(rows.map(row => normalize(row, opts.get('k')))).into('leads');"],
     ['insert payload before .table', "await db.insert(rows.map(row => normalize(row))).table('leads');"],
+    ['SQL returned by a function passed to raw', "function buildInsert() {\n  return 'INSERT INTO leads (a) VALUES (?)';\n}\nawait db.raw(buildInsert(), [a]);"],
+    ['SQL built by an arrow passed to query', "const buildInsert = (cols) => 'INSERT INTO leads (' + cols + ') VALUES ($1)';\nawait client.query(buildInsert('a'), [a]);"],
     ['quoted schema with punctuation', "await db.raw('INSERT INTO \"tenant-one\".\"leads\" (a) VALUES (?)', [a]);"],
     ['multi-statement raw SQL', "await db.raw(\"SET search_path = 'public'; INSERT INTO leads(name) VALUES ('x')\");"],
     ['stored table-options object', "const opts = { only: true };\nawait db('leads', opts).insert(row);"],
@@ -1734,6 +1779,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['select-into read is not a writer', "await db.select('*').into('leads');"],
     ['other property of an SQL object executed, not the leads one', "const SQL = { create: 'INSERT INTO leads (a) VALUES (?)', other: 'SELECT 1' };\nawait db.raw(SQL.other);"],
     ['SQL object property never executed is not a writer', "const SQL = { create: 'INSERT INTO leads (a) VALUES (?)' };\nmodule.exports = { SQL };"],
+    ['SQL returned by a function never executed is not a writer', "function buildInsert() {\n  return 'INSERT INTO leads (a) VALUES (?)';\n}\nmodule.exports = { buildInsert };"],
     ['computed SQL constant never executed is not a writer', "const SQL = ['INSERT INTO leads (a)', 'VALUES ($1)'].join(' ');\nmodule.exports = { SQL };"],
     ['same property name on an unrelated object', "const queries = { target: db('leads') };\nconst audits = { target: db('audit') };\nawait audits.target.insert(row);\nawait queries.target.select();"],
     ['alias of another table is not leads', "await db('leads_archive as l').insert(row);"],
@@ -1822,6 +1868,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(found("const { writeRow } = require('./barrel');\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
     expect(found("const { writeRow } = require('./barrel-spread');\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
     expect(found("import { writeRow } from './barrel.mjs';\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
+    fs.writeFileSync(path.join(dir, 'queries.mjs'), "export const CREATE_LEAD = 'INSERT INTO leads (a) VALUES ($1)';\nexport default { CREATE_LEAD };\n");
+    expect(found("import defaults, { CREATE_LEAD } from './queries.mjs';\nawait client.query(CREATE_LEAD, [a]);", route)).toEqual(['await client.query(CREATE_LEAD, [a]);']);
     fs.writeFileSync(path.join(dir, 'barrel-renamed.mjs'), "export { writeRow as save, scoped } from './writers';\n");
     expect(found("import { save } from './barrel-renamed.mjs';\nawait save(db('leads'), row);", route)).toEqual(["await save(db('leads'), row);"]);
     expect(found("import { writeRow } from './barrel-renamed.mjs';\nawait writeRow(db('leads'), row);", route)).toEqual([]);
@@ -1909,6 +1957,11 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(deepPayload[0].expr).toBe('table');
     const defaultParam = scanSourceForDynamicTableInserts("const TABLE = 'audit';\nfunction write(TABLE = resolveTable(kind), row) {\n  return db(TABLE).insert(row);\n}");
     expect(defaultParam).toHaveLength(1);
+    const chainedSelector = scanSourceForDynamicTableInserts('await db.withSchema(schema).table(table).insert(row);');
+    expect(chainedSelector).toHaveLength(1);
+    expect(chainedSelector[0].expr).toBe('table');
+    const sqlFn = scanSourceForDynamicTableInserts('function buildInsert(table) {\n  return `INSERT INTO ${table} (a) VALUES (?)`;\n}\nawait db.raw(buildInsert(kind), [a]);');
+    expect(sqlFn).toHaveLength(1);
     const deepArg = scanSourceForDynamicTableInserts("await db(resolveTable(normalize(config.get('kind')))).insert(row);");
     expect(deepArg).toHaveLength(1);
     const storedOpts = scanSourceForDynamicTableInserts('const opts = { only: true };\nawait db(table, opts).insert(row);');
@@ -2184,7 +2237,7 @@ describe('lead-writer registry (#3137 groundwork)', () => {
             // (its own property writes are checked). A callee this file
             // cannot inspect (imported, or a member call) is an unverified
             // escape and fails outright.
-            for (const { callee, position } of wholeArgumentPasses(bare, name)) {
+            for (const { callee, position } of wholeArgumentPasses(bare, name, new Set(cc.props))) {
               const fn = inFileFunctions.get(callee);
               expect({ file: w.file, governed: name, passedTo: callee, inspectable: Boolean(fn) })
                 .toEqual({ file: w.file, governed: name, passedTo: callee, inspectable: true });
