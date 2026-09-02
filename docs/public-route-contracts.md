@@ -430,6 +430,14 @@ AND server feature-cache warm — the client SDK fetches feature definitions
 only after it says enabled, which is what makes unsetting GATE_GROWTHBOOK a
 real rollback for client experiments too (and keeps clients dark while the
 server can't validate exposure keys)).
+`/api/public/services/menu` (read-only catalog-derived product menu the
+website quote form renders from — no auth, no token, no params, no PII.
+Mounted at `server/index.js` → `routes/public-services-menu.js`; payload is
+`{ generated_at, items }` from `services/public-services-menu.js`, served
+with `Cache-Control: public, max-age=300` on success and `no-store` on
+error; inherits the global `/api/` IP rate limit. Consumed by the Astro
+quote form, so its item shape is a spoke-fleet contract per CLAUDE.md
+rule 18 — additive changes only).
 `/api/public/service-areas` (read-only canonical SWFL city list — no auth, no
 token, public `Cache-Control`. Consumed by the Astro build and the admin blog
 UI; no PII).

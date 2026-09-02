@@ -89,9 +89,13 @@ duplicate them here; point at them.
   `server/routes/admin-*.js` starts with
   `router.use(adminAuthenticate, requireAdmin | requireTechOrAdmin)` from
   `server/middleware/admin-auth.js`. A new file that omits it, or a diff
-  that removes it, exposes admin endpoints. Both halves are required:
-  `adminAuthenticate` alone admits technicians to admin-intended pages.
-  Per-handler middleware is acceptable; missing entirely is P0.
+  that removes it, exposes admin endpoints. Both halves are required on
+  new routers: `adminAuthenticate` alone admits technicians to
+  admin-intended pages. An existing router that already mounts only
+  `adminAuthenticate` is a known consistency defect (P2 — technician
+  reach, not an unauthenticated hole); flag it when the diff adds a router
+  or removes a guard, not on unrelated edits. Per-handler middleware is
+  acceptable; missing entirely is P0.
 - **Internal and worker routes authenticate.** Any `/api/internal/*` mount
   needs `adminAuthenticate` + `requireAdmin` or an HMAC-signed header
   check; each `/api/integrations/*-worker` mount authenticates via its own
@@ -103,7 +107,10 @@ duplicate them here; point at them.
   any DB read, a generic 404 (unknown, malformed, dark-gated, and
   ineligible rows indistinguishable), a rate limit, and privacy headers;
   a dark `GATE_*` route skips its limiter so a probe never sees a
-  revealing 429. Writes on the `/api/reports/:token/*` family gate on
+  revealing 429. Where a route's entry in that document specifies a
+  different dark or error response (e.g. the bond switcher's uniform 403
+  while dark), the entry is authoritative — flag drift from the entry,
+  not the entry itself. Writes on the `/api/reports/:token/*` family gate on
   `service_report_v1` + the token format check, use atomic conditional
   updates for one-shot guards (409 on 0 rows), mirror the read-side
   eligibility check, validate bodies before `Number()` coercion, and ride
@@ -125,12 +132,15 @@ duplicate them here; point at them.
 - **Card PAN, CVV, full SSN, or full Stripe `payment_method` objects in
   logs.** Railway logs and `errors.log` are plain text. last4 is fine; the
   full PM object (BIN, fingerprint) is not.
-- **Hardcoded model IDs.** Model IDs live only in `server/config/models.js`
-  (tiers `DEEP` / `FLAGSHIP` / `WORKHORSE` / `FAST` / `VOICE` / `VISION` /
-  `EXTREME`; `check:domain-rules` enforces the Anthropic half). A new
-  `'claude-…'` literal outside that file and `services/llm/deep.js` pins a
-  tier and defeats the env-var swap. Every DEEP call site goes through
-  `createDeepMessage` (thinking-block stripping + refusal fallback).
+- **Hardcoded Anthropic model IDs.** Anthropic IDs live only in
+  `server/config/models.js` (tiers `DEEP` / `FLAGSHIP` / `WORKHORSE` /
+  `FAST` / `VOICE` / `VISION` / `EXTREME`) and `services/llm/deep.js`;
+  `check:domain-rules` enforces it. A new `'claude-…'` literal elsewhere
+  pins a tier and defeats the env-var swap. Per-service OpenAI/Gemini
+  defaults (transcription and extraction in
+  `call-recording-processor.js`) are a documented exception, not a
+  finding. Every DEEP call site goes through `createDeepMessage`
+  (thinking-block stripping + refusal fallback).
 
 ## Treat as P1
 
@@ -203,7 +213,11 @@ duplicate them here; point at them.
   `git ls-remote:*` allows `--upload-pack=<exec>`, `gh pr create` pushes,
   `gh pr comment:*` has `--delete-last`, `npm ci` runs install scripts,
   `npm run test:contracts` calls live Stripe/Twilio/GitHub/Cloudflare when
-  secrets are loaded). Prefer exact forms; note a trailing `:*` enforces a
+  secrets are loaded); (d) an exact command with a remote side effect —
+  `npm run dev:server` boots `initScheduledJobs()` with `cronJobs`
+  defaulting ON outside prod, and `npm run models:check` sends
+  `ANTHROPIC_API_KEY` to api.anthropic.com — none of these may be
+  pre-approved. Prefer exact forms; note a trailing `:*` enforces a
   word boundary, so colon-named scripts need exact entries. Accepted
   residual risk (owner ruling, #2768): local read/stage prefix rules
   (`git status/diff/log/show/add/commit:*`) stay — damage is local and
