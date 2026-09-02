@@ -288,6 +288,9 @@ const postCancel = async (baseUrl, body = {}) => {
 };
 
 const PROCESSED = { ok: true, cancelledCount: 3, recurrenceStopped: 2, churned: true, errors: [], keptThrough: null, lateFeeWaived: false };
+// Upcoming fixture dates relative to the suite's pinned clock (AGENTS.md:
+// no near-today literals) — jest fake timers freeze Date.now() below.
+const daysOut = (n) => new Date(Date.now() + n * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 // Frozen calendar (codex r22 P1): the annual-prepay fixtures carry literal
 // term windows (term_start 2026-03-01 → term_end 2027-02-28) that
@@ -766,7 +769,7 @@ describe('POST /:id/cancel-plan', () => {
     // Staff scheduled a NEW, non-covered visit since (admin-schedule inserts
     // without touching the churn stamp): new cancellable work — the
     // operator's cancel runs fresh instead of echoing (#3727 r4).
-    mockState.scheduled_services.push({ id: 'extra', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-11-15', non_coverage: true });
+    mockState.scheduled_services.push({ id: 'extra', customer_id: 'cust-1', status: 'confirmed', scheduled_date: daysOut(75), non_coverage: true });
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', cancelledCount: 1 });
     const fresh = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
     expect(fresh.duplicate).toBeUndefined();
@@ -776,7 +779,7 @@ describe('POST /:id/cancel-plan', () => {
     // sweep never auto-cancels it) — the latch holds (pre-push P1).
     mockState.service_requests = [mockState.service_requests[0]];
     mockState.service_requests[0].status = 'resolved';
-    mockState.scheduled_services.push({ id: 'live', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-11-15', track_state: 'en_route', non_coverage: true });
+    mockState.scheduled_services.push({ id: 'live', customer_id: 'cust-1', status: 'confirmed', scheduled_date: daysOut(75), track_state: 'en_route', non_coverage: true });
     const held = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
     expect(held).toEqual(expect.objectContaining({ duplicate: true, caseId: 'case-old' }));
     expect(mockProcess).toHaveBeenCalledTimes(1);
@@ -815,7 +818,7 @@ describe('POST /:id/cancel-plan', () => {
       status: 'cancelled', renewal_decision: 'cancel',
     }];
     // A visit created while the refund task is pending — cancellable work.
-    mockState.scheduled_services = [{ id: 'late', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-10-01' }];
+    mockState.scheduled_services = [{ id: 'late', customer_id: 'cust-1', status: 'confirmed', scheduled_date: daysOut(30) }];
     const acceptedAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
     mockState.service_requests = [{
       id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
