@@ -1153,3 +1153,52 @@ describe('null / unknown pricing authority counts as unverified in the live-link
     expect(fallbackRevisionGroupIds({ estimate_group_id: 'grp-a' }, { address: 'no pricing write' })).toEqual([]);
   });
 });
+
+describe('a LIVE row moving into a group has the destination judged and locked, whatever its own authority (GH codex P1 r10 on #3750)', () => {
+  const { assertLiveRowMayJoinGroup, liveGroupMoveDestinationIds, revisionGroupLockIds } = require('../services/admin-estimate-persistence');
+  beforeEach(() => { mockGateState.sendRequiresServerPricing = true; });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+  const liveRow = { id: 'est-live', estimate_group_id: null, sent_at: '2026-07-10T11:59:00Z' };
+
+  function fakeTrx(siblings) {
+    const calls = { whereIns: [] };
+    const chain = {
+      where: () => chain, whereNot: () => chain, whereNull: () => chain,
+      whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return chain; },
+      select: async () => siblings,
+    };
+    const trx = jest.fn(() => chain);
+    trx.raw = jest.fn(async () => ({}));
+    return { trx, calls };
+  }
+
+  test('only a live row changing groups, gate on, names a destination; the lock set includes it even for a SERVER write', () => {
+    expect(liveGroupMoveDestinationIds(liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual(['grp-dest']);
+    expect(liveGroupMoveDestinationIds({ ...liveRow, estimate_group_id: 'grp-dest' }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual([]);
+    expect(liveGroupMoveDestinationIds({ id: 'est-draft', estimate_group_id: null }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual([]);
+    expect(revisionGroupLockIds(liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual(['grp-dest']);
+    expect(revisionGroupLockIds({ ...liveRow, estimate_group_id: 'grp-z' }, { pricing_authority: 'CLIENT_FALLBACK', estimate_group_id: 'grp-a' })).toEqual(['grp-a', 'grp-z']);
+    mockGateState.sendRequiresServerPricing = false;
+    expect(liveGroupMoveDestinationIds(liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).toEqual([]);
+  });
+
+  test('refused when the destination holds a published sibling without an engine-verified price; allowed for SERVER siblings and editor-authored proposals', async () => {
+    const fallbackSibling = { id: 'est-sib', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' };
+    const { trx, calls } = fakeTrx([fallbackSibling]);
+    await expect(assertLiveRowMayJoinGroup(trx, liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/without an engine-verified price/i) });
+    expect(calls.whereIns).toEqual([['status', ['draft', 'scheduled', 'send_failed', 'sent', 'viewed']]]);
+    const ok = fakeTrx([
+      { id: 'est-a', pricing_authority: 'SERVER', estimate_data: '{}' },
+      { id: 'est-b', pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' } } }) },
+    ]);
+    await expect(assertLiveRowMayJoinGroup(ok.trx, liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).resolves.toBeUndefined();
+    const legacyProposal = fakeTrx([{ id: 'est-c', pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true } }) }]);
+    await expect(assertLiveRowMayJoinGroup(legacyProposal.trx, liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).rejects.toMatchObject({ statusCode: 409 });
+    // Not a group change, or not live: no query at all.
+    const quiet = fakeTrx([fallbackSibling]);
+    await assertLiveRowMayJoinGroup(quiet.trx, { ...liveRow, estimate_group_id: 'grp-dest' }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' });
+    await assertLiveRowMayJoinGroup(quiet.trx, { id: 'est-draft', estimate_group_id: null }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' });
+    expect(quiet.trx).not.toHaveBeenCalled();
+  });
+});

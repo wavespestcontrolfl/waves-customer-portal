@@ -289,10 +289,9 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
 // pricing-authority gate or its telemetry (the manual-review exemption in
 // assertEstimateSendable deliberately keeps the older enabled-only
 // predicate so existing proposals stay sendable with the gate off).
-const PROPOSAL_PROVENANCE_SOURCE = 'proposal-editor';
+const { PROPOSAL_PROVENANCE_SOURCE, isProposalAuthoredByEditor } = require('../services/estimate-proposal');
 function isAuthoredProposalRow(estimate = {}) {
-  const proposal = parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal;
-  return proposal?.enabled === true && proposal?.provenance?.source === PROPOSAL_PROVENANCE_SOURCE;
+  return isProposalAuthoredByEditor(parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal);
 }
 
 function sendRequiresServerPricingFor(estimate = {}) {

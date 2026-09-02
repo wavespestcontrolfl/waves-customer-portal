@@ -2215,6 +2215,52 @@ function fallbackRevisionGroupIds(row, writeFields) {
   return [...new Set([row?.estimate_group_id, writeFields?.estimate_group_id].filter(Boolean).map(String))].sort();
 }
 
+// A LIVE row (sent/viewed — customer-viewable) moving into another group
+// exposes that group's viewable siblings through its link the moment the
+// revision commits, with no send preflight in between (GH codex P1 r10):
+// even a SERVER-priced revision must therefore have the DESTINATION group
+// judged and locked. Gate-scoped like the delivery verdict it mirrors.
+function liveGroupMoveDestinationIds(row, writeFields) {
+  if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return [];
+  const live = !!(row?.sent_at || row?.viewed_at);
+  const destination = writeFields?.estimate_group_id ? String(writeFields.estimate_group_id) : null;
+  if (!live || !destination || destination === String(row?.estimate_group_id || '')) return [];
+  return [destination];
+}
+
+// Every group a revision must lock before its row lock: the fallback set
+// plus a live row's move destination. Sorted — one lock order everywhere.
+function revisionGroupLockIds(row, writeFields) {
+  return [...new Set([...fallbackRevisionGroupIds(row, writeFields), ...liveGroupMoveDestinationIds(row, writeFields)])].sort();
+}
+
+// The destination group's viewable siblings must each be engine-verified
+// (or an editor-authored proposal by provenance) before a live row joins
+// them — the same verdict the send claims apply, mirrored here because the
+// join itself publishes them (GH codex P1 r10).
+async function assertLiveRowMayJoinGroup(trx, row, writeFields) {
+  const { isProposalAuthoredByEditor } = require('./estimate-proposal');
+  for (const groupId of liveGroupMoveDestinationIds(row, writeFields)) {
+    const siblings = await trx('estimates')
+      .where({ estimate_group_id: groupId })
+      .whereNot({ id: row?.id })
+      .whereNull('archived_at')
+      .whereNull('price_locked_at')
+      .whereIn('status', ['draft', 'scheduled', 'send_failed', 'sent', 'viewed'])
+      .select('id', 'pricing_authority', 'estimate_data');
+    for (const sibling of siblings) {
+      if (String(sibling.pricing_authority || '').toUpperCase() === 'SERVER') continue;
+      let data = sibling.estimate_data;
+      if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+      if (isProposalAuthoredByEditor(data?.proposal)) continue;
+      throw errorWithStatus(
+        'That multi-property group has a property without an engine-verified price — re-save it from the estimate tool before moving this estimate into the group (the group link shows every property together). Nothing was saved.',
+        409,
+      );
+    }
+  }
+}
+
 // The scheduled-group verdict applies only while the rollout gate is on —
 // with it off, a scheduled group's members deliver fallback pricing by design
 // (shadow mode) and the cron's claim refuses nothing.
@@ -2231,7 +2277,7 @@ function scheduledGroupGuardGroupIds(row, writeFields) {
 // deadlocking (row held + waiting for the group lock vs group lock held +
 // waiting for the row).
 async function lockScheduledGroupGuardGroups(trx, row, writeFields) {
-  const groupIds = fallbackRevisionGroupIds(row, writeFields);
+  const groupIds = revisionGroupLockIds(row, writeFields);
   for (const groupId of groupIds) {
     await trx.raw(
       'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -2696,6 +2742,7 @@ async function reviseAdminEstimate({
     // reprice confirm the identical real save would refuse; the locked
     // recheck inside the write transaction stays authoritative.
     await assertNoFallbackRevisionInScheduledGroup(database, estimate, writeFields);
+    await assertLiveRowMayJoinGroup(database, estimate, writeFields);
     if (groupDuplicateRecheckNeeded) {
       const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
       const revisedKey = normalizedEstimatePropertyKey(writeFields.address);
@@ -2769,10 +2816,11 @@ async function reviseAdminEstimate({
     // The locked row's group must be one we already hold the lock for — a
     // concurrent group change between the pre-read and the row lock would
     // otherwise need an out-of-order lock; refuse and let the operator retry.
-    if (fallbackRevisionGroupIds(lockedPrior, writeFields).some((groupId) => !lockedGuardGroups.includes(groupId))) {
+    if (revisionGroupLockIds(lockedPrior, writeFields).some((groupId) => !lockedGuardGroups.includes(groupId))) {
       throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
     }
     await assertNoFallbackRevisionInScheduledGroup(trx, lockedPrior, writeFields);
+    await assertLiveRowMayJoinGroup(trx, lockedPrior, writeFields);
     // Protocol keys re-applied from the LOCKED row (codex P0, PR #3304 GH
     // r8c): writeFields.estimate_data was built from the pre-read
     // snapshot, so a delivery claim or an invalidation marker recorded
@@ -2899,3 +2947,6 @@ module.exports.fallbackRevisionGroupIds = fallbackRevisionGroupIds;
 module.exports.linkedDraftCarriesProposal = linkedDraftCarriesProposal;
 module.exports.writeStampsUnverifiedPricing = writeStampsUnverifiedPricing;
 module.exports.assertNoFallbackRevisionOfLiveLink = assertNoFallbackRevisionOfLiveLink;
+module.exports.assertLiveRowMayJoinGroup = assertLiveRowMayJoinGroup;
+module.exports.liveGroupMoveDestinationIds = liveGroupMoveDestinationIds;
+module.exports.revisionGroupLockIds = revisionGroupLockIds;
