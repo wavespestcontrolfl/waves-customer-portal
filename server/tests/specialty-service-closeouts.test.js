@@ -236,6 +236,10 @@ describe('specialty service closeout vocabulary', () => {
       observations: [], actions: ['Individual mound treatment'], productCount: 1, visitOutcome: 'completed',
     })).toBeNull();
     expect(noApplicationOutcomeConflict(SPECIALTY_SERVICE_CLOSEOUTS.fire_ant, ['Individual mound treatment'], 0, 'incomplete')).toBeNull();
+    // A keyless legacy row's dynamic action is performed work for this check too.
+    expect(validateSpecialtyClosureCombination('fire_ant', {
+      observations: [], actions: ['Legacy mound drench'], enforcePresetActions: false, visitOutcome: 'customer_declined',
+    })).toBe('Visit outcome “customer declined” cannot record the performed action “Legacy mound drench” — change the outcome or clear the action.');
   });
 
   test('accepts consistent work state and lanes without work-state rules', () => {

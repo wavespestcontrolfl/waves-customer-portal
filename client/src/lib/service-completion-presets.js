@@ -188,8 +188,11 @@ export function noApplicationOutcomeConflict(preset, actionLabels, productCount,
   const outcomeLabel = NO_APPLICATION_OUTCOMES[String(visitOutcome || "")];
   if (!outcomeLabel || !preset) return null;
   const byLabel = new Map((preset.protocols || []).map((action) => [action.label, action]));
+  // A label outside the preset is a legacy dynamic action a keyless row may
+  // still carry — it is performed work for this check too, so a stale
+  // client cannot pair it with a no-application outcome (local audit P1).
   const performed = (Array.isArray(actionLabels) ? actionLabels : [])
-    .find((label) => byLabel.has(label) && byLabel.get(label).exclusive !== true);
+    .find((label) => !byLabel.has(label) || byLabel.get(label).exclusive !== true);
   if (performed) return `Visit outcome “${outcomeLabel}” cannot record the performed action “${performed}” — change the outcome or clear the action.`;
   if (Number(productCount) > 0) return `Visit outcome “${outcomeLabel}” cannot record applied products — change the outcome or remove the products.`;
   return null;
