@@ -21,7 +21,7 @@
 //   silent truncation that hides recent calls.
 // - Disposition gap: missed calls that lack an operator-set
 //   disposition should surface in a clear "needs review" state.
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { CheckCircle2, MessageSquare, PhoneCall, Voicemail, XCircle } from "lucide-react";
 import {
@@ -34,6 +34,10 @@ import {
   cn,
 } from "../../components/ui";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
+import CallTranscriptSync, {
+  parseTranscriptSegments,
+  segmentsMatchTranscript,
+} from "../../components/admin/CallTranscriptSync";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import { describeProcessResult } from "../../lib/callProcessResult";
 
@@ -321,25 +325,85 @@ export default function CallLogTabV2() {
       else next.add(id);
       return next;
     });
+  // Audio-synced transcript (GATE_CALL_TRANSCRIPT_SYNC, reported by the
+  // calls endpoint). One player handle per call id for click-to-seek, and
+  // the playback position of whichever recording is currently playing.
+  const [transcriptSyncEnabled, setTranscriptSyncEnabled] = useState(false);
+  const playerRefs = useRef(new Map());
+  // Per-recording positions: two recordings can play at once and each
+  // open transcript must follow its own player.
+  const [playbackById, setPlaybackById] = useState({});
+  // Only the newest /ai/admin/calls request may update state — overlapping
+  // requests (mount, 300 ms search debounce, auto-process refresh) resolve
+  // in any order, and a stale success must never re-enable the gate after
+  // a newer failure reset it.
+  const loadSeqRef = useRef(0);
+  // One stable callback ref per call id: a fresh closure each render would
+  // make React detach (null) and re-attach the player on every update,
+  // wiping the playback position on each timeupdate.
+  const playerRefCallbacks = useRef(new Map());
+  const playerRefFor = (id) => {
+    const cached = playerRefCallbacks.current.get(id);
+    if (cached) return cached;
+    const cb = (handle) => {
+    if (handle) playerRefs.current.set(id, handle);
+    else {
+      // The player unmounted (row filtered out): a remount starts unloaded,
+      // so its old position must not light a transcript line.
+      playerRefs.current.delete(id);
+      setPlaybackById((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }
+    };
+    playerRefCallbacks.current.set(id, cb);
+    return cb;
+  };
+  // Parsed once per fetch, not per playback tick: every timeupdate rerenders
+  // the list, and parsing 200 structured transcripts on each tick would
+  // stutter the highlight.
+  const syncedSegmentsById = useMemo(() => {
+    const map = new Map();
+    if (!transcriptSyncEnabled) return map;
+    for (const c of calls) {
+      if (!c?.recording_available || !c.transcript_structured) continue;
+      const segs = parseTranscriptSegments(c.transcript_structured);
+      if (segs.length && segmentsMatchTranscript(segs, c.transcription)) map.set(c.id, segs);
+    }
+    return map;
+  }, [calls, transcriptSyncEnabled]);
 
   const loadCalls = (search = "") => {
     const q = search
       ? `?search=${encodeURIComponent(search)}&limit=1000`
       : "?days=365&limit=200";
+    loadSeqRef.current += 1;
+    const seq = loadSeqRef.current;
     return Promise.allSettled([
       adminFetch(`/ai/admin/calls${q}`),
       adminFetch("/ai/admin/calls/route-calibration?days=30"),
     ])
       .then(([callsResult, calibrationResult]) => {
+        if (seq !== loadSeqRef.current) return; // superseded
         if (callsResult.status !== "fulfilled") throw callsResult.reason;
         const d = callsResult.value;
         setCalls(d.calls || []);
+        setTranscriptSyncEnabled(d.transcript_sync_enabled === true);
         if (calibrationResult.status === "fulfilled") {
           setRouteCalibration(calibrationResult.value);
         }
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        if (seq !== loadSeqRef.current) return; // superseded
+        // Fail closed: a rejected reload must not leave the gated transcript
+        // UI enabled on stale data.
+        setTranscriptSyncEnabled(false);
+        setLoading(false);
+      });
   };
 
   useEffect(() => {
@@ -1390,8 +1454,17 @@ export default function CallLogTabV2() {
                             : ""}
                         </div>{" "}
                         <AuthenticatedCallAudio
+                          ref={playerRefFor(c.id)}
                           recordingId={c.recording_sid || c.id}
                           className="w-full h-8"
+                          // Only a row with a synced transcript pays for
+                          // timeupdate rerenders; gate off = no listener.
+                          onTimeUpdate={
+                            syncedSegmentsById.has(c.id)
+                              ? (seconds) =>
+                                  setPlaybackById((prev) => ({ ...prev, [c.id]: seconds * 1000 }))
+                              : undefined
+                          }
                         />{" "}
                       </div>
                     )}
@@ -1401,6 +1474,8 @@ export default function CallLogTabV2() {
                       (() => {
                         const open = expandedTranscripts.has(c.id);
                         const shown = displayTranscript(c);
+                        const syncedSegments = syncedSegmentsById.get(c.id) || [];
+                        const synced = syncedSegments.length > 0;
                         const preview =
                           shown.length > 120
                             ? shown.slice(0, 120).trim() + "…"
@@ -1428,9 +1503,23 @@ export default function CallLogTabV2() {
                                 {open ? "▾" : "▸"}
                               </span>{" "}
                             </button>{" "}
-                            <div className="px-2 pb-2 text-14 md:text-12 text-ink-secondary italic leading-relaxed">
-                              "{open ? shown : preview}"
-                            </div>{" "}
+                            {open && synced ? (
+                              <div className="px-1 pb-2">
+                                <CallTranscriptSync
+                                  segments={syncedSegments}
+                                  currentMs={playbackById[c.id] ?? -1}
+                                  onSeek={(ms) =>
+                                    playerRefs.current
+                                      .get(c.id)
+                                      ?.seekTo(ms / 1000)
+                                  }
+                                />
+                              </div>
+                            ) : (
+                              <div className="px-2 pb-2 text-14 md:text-12 text-ink-secondary italic leading-relaxed">
+                                "{open ? shown : preview}"
+                              </div>
+                            )}{" "}
                           </div>
                         );
                       })()}

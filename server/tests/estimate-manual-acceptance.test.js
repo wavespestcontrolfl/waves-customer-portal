@@ -132,7 +132,16 @@ function makeDb(estimate, claimedOverrides = null) {
           && (this.nullColumns || []).some((column) => estimate[column] != null);
         // claimedOverrides simulates the row mutating between the pre-claim SELECT
         // and this guarded UPDATE (e.g. a concurrent proposal-mode toggle).
-        const updated = { ...estimate, ...patch, ...(claimedOverrides || {}) };
+        // The at-lock authority stamp (#3750) rides as a raw jsonb_set on
+        // estimate_data — simulate it: prior blob + pricingAuthorityAtLock
+        // from the row's column, exactly what Postgres would write.
+        const applied = { ...patch };
+        if (applied.estimate_data && applied.estimate_data.__raw) {
+          let prior = {};
+          try { prior = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data || '{}') : (estimate.estimate_data || {}); } catch { prior = {}; }
+          applied.estimate_data = JSON.stringify({ ...prior, pricingAuthorityAtLock: String(estimate.pricing_authority || 'NULL').toUpperCase() });
+        }
+        const updated = { ...estimate, ...applied, ...(claimedOverrides || {}) };
         return {
           returning: async () => (guardBlocked ? [] : [updated]),
         };
@@ -147,7 +156,9 @@ function makeDb(estimate, claimedOverrides = null) {
   database.fn = { now: () => 'NOW' };
   // The claim transaction takes the customer-comms advisory lock before
   // the estimate row lock (Codex #3109 r32) — raw serves that acquire.
-  database.raw = jest.fn(async () => ({ rows: [] }));
+  // Synchronous like knex's Raw builder (a raw stamp inside an UPDATE
+  // payload must not be a Promise); awaiting it for the lock acquire works.
+  database.raw = jest.fn((sql) => ({ rows: [], __raw: String(sql) }));
   database.transaction = jest.fn(async (callback) => callback(database));
   return { database, updates, inserts };
 }

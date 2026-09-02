@@ -1,4 +1,5 @@
 const express = require('express');
+const { gateEnvValue } = require('../config/feature-gates');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
@@ -431,7 +432,13 @@ router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, re
       withTranscriptions: calls.filter(c => c.transcription).length,
     };
 
-    res.json({ calls: callsWithRouting, stats });
+    res.json({
+      calls: callsWithRouting,
+      stats,
+      // GATE_CALL_TRANSCRIPT_SYNC read at call time: the tab renders the
+      // clickable audio-synced transcript only when this is true.
+      transcript_sync_enabled: gateEnvValue('GATE_CALL_TRANSCRIPT_SYNC'),
+    });
   } catch (err) { next(err); }
 });
 

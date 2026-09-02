@@ -15,7 +15,9 @@ jest.mock('../models/db', () => {
   return mockDb;
 });
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: jest.fn(() => true),
+  // Every gate on for the deposit stage — except the pricing-authority send
+  // gate (#3750), whose verdict this suite's unstamped fixtures don't model.
+  isEnabled: jest.fn((key) => key !== 'sendRequiresServerPricing'),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true })),
@@ -129,7 +131,9 @@ beforeEach(() => {
   db.mockImplementation((table) =>
     makeBuilder(table, (queues[table] || []).shift() || {}),
   );
-  isEnabled.mockReturnValue(true);
+  // All gates on except the pricing-authority send gate (#3750) — see the
+  // module mock above.
+  isEnabled.mockImplementation((key) => key !== 'sendRequiresServerPricing');
   assessDepositFollowUpEligibility.mockResolvedValue({
     eligible: true,
     outstandingAmount: 49,

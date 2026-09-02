@@ -1,0 +1,40 @@
+/**
+ * Board safety layer (split of #3687, Codex r30): the acquisition-path
+ * revision a placement was LEASED on.
+ *
+ * `seo_link_prospects.leased_path_revision` — stamped by worker.claim() from
+ * the linked path's `revision`. A same-path change that lands while the row
+ * is leased (a gate change, a working-origin move, a lane shift) cannot be
+ * applied to a leased row; at lease release the registry compares the
+ * path's current revision with this stamp and applies the transition then.
+ *
+ * The send valve REQUIRES the stamp on a drafted row (a draft is bound to the
+ * revision it was composed on). A draft that pre-dates the column can only be
+ * bound FAIL-CLOSED: on a path still at revision 1 (never revised) the draft
+ * was necessarily composed on revision 1, so it is stamped 1; on a path that
+ * has been revised nothing can tell whether the copy predates the change, so
+ * the stamp stays null and the send valve refuses it until it is re-drafted
+ * (saveDraft / the worker stamp the revision they observe while composing).
+ * Idempotent: only null stamps are filled.
+ */
+exports.up = async function up(knex) {
+  const cols = await knex('seo_link_prospects').columnInfo();
+  if (!cols.leased_path_revision) {
+    await knex.schema.alterTable('seo_link_prospects', (t) => {
+      t.integer('leased_path_revision');
+    });
+  }
+  await knex.raw(`
+    UPDATE seo_link_prospects p
+       SET leased_path_revision = a.revision
+      FROM seo_link_acquisition_paths a
+     WHERE a.id = p.path_id
+       AND p.outreach_status = 'drafted'
+       AND p.leased_path_revision IS NULL
+       AND a.revision = 1
+  `);
+};
+
+exports.down = async function down(knex) {
+  await knex.raw('ALTER TABLE seo_link_prospects DROP COLUMN IF EXISTS leased_path_revision');
+};

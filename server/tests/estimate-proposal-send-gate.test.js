@@ -132,8 +132,11 @@ describe('assertEstimateSendable proposal exemption', () => {
     status: 'sent',
     token: 'tok-proposal-test',
     monthly_total: 583,
+    // PUT /:id/proposal stamps the server-owned provenance marker on every
+    // proposal it writes — the exemption's evidence (#3750).
+    category: 'COMMERCIAL',
     estimate_data: {
-      proposal: { enabled: true, buildings: [{ name: 'Tower A', lineItems: [] }] },
+      proposal: { enabled: true, provenance: { source: 'proposal-editor' }, buildings: [{ name: 'Tower A', lineItems: [] }] },
       // mimic what a send snapshot leaves behind
       sendSnapshot: { pricingBundle: { quoteRequired: true } },
       ...extraData,

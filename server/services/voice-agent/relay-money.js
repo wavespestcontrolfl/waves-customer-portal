@@ -220,7 +220,9 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
     // `archived_at` rides along for the viewability predicate below.
     .select('id', 'status', 'service_type', 'created_at', 'sent_at', 'expires_at', 'archived_at',
       'monthly_total', 'annual_total', 'onetime_total', 'estimate_data',
-      'customer_id', 'customer_phone', 'show_one_time_option', 'waveguard_tier');
+      'customer_id', 'customer_phone', 'show_one_time_option', 'waveguard_tier',
+      // The pricing-authority verdict reads these (uncapped codex P1 r28).
+      'pricing_authority', 'price_locked_at', 'estimate_group_id');
   // ⭐ STATUS IS NOT THE SAME QUESTION AS "CAN THE CUSTOMER SEE THIS?".
   // `sent`/`viewed` is a status the expiry sweep has to come along and change;
   // until it does — or if it fails — the row still reads as open while
@@ -230,8 +232,31 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
   // that page uses (estimate-public.isEstimateCustomerViewable): archived,
   // linkage-invalidated and past-expiry rows all drop out here too.
   const { isEstimateCustomerViewable } = require('../../routes/estimate-public');
-  const viewable = rows.filter((row) => isEstimateCustomerViewable(row)).slice(0, ESTIMATE_LIMIT);
+  // Judge EVERY viewable overfetched row before the ESTIMATE_LIMIT cut
+  // (uncapped codex P1 r29): if the newest rows are withheld, older
+  // engine-verified ones must still be quotable.
+  let viewable = rows.filter((row) => isEstimateCustomerViewable(row));
+  // Engine-authoritative pricing gate (#3750, GH codex P1 r27): the voice
+  // channel is a customer send like any other. While the gate is on, an open
+  // estimate the shared group-aware verdict refuses (a delivered
+  // CLIENT_FALLBACK / unstamped row, or a group link showing one) is never
+  // quoted — it is acknowledged as awaiting an office price check so the
+  // agent neither guesses nor reads it back.
+  const withheld = [];
+  {
+    const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../pricing-authority-gate');
+    const quotable = [];
+    for (const row of viewable) {
+      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, row))) withheld.push(row);
+      else quotable.push(row);
+    }
+    viewable = quotable.slice(0, ESTIMATE_LIMIT);
+  }
+  const withheldNote = withheld.length
+    ? `${withheld.length === 1 ? 'One open estimate on this account is' : `${withheld.length} open estimates on this account are`} awaiting an office price check — do NOT state a price for ${withheld.length === 1 ? 'it' : 'those'}, and do not guess; a team member will confirm. `
+    : '';
   if (!viewable.length) {
+    if (withheld.length) return withheldNote + 'Do not guess at a quote — get_pricing gives standard plan pricing.';
     return 'No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan '
       + 'pricing, and a team member can put a written estimate together.';
   }
@@ -285,7 +310,7 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
     return bits.join('; ');
   }));
 
-  return `Open estimates on this account: ${rendered.join(' || ')}. `
+  return withheldNote + `Open estimates on this account: ${rendered.join(' || ')}. `
     + 'These are the prices the estimate was SENT at — quote them exactly as written, never re-price, '
     + 'discount, or update them. Recurring prices are PER APPLICATION: say them in exactly that unit, and '
     + 'never add them up into a combined monthly or yearly plan total. Do not read out a link; the estimate '

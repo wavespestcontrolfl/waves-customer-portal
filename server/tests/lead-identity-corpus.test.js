@@ -59,7 +59,8 @@ const { EMAIL_RE } = require('../utils/workable-lead-signal');
 const { splitStreetLineUnit, normalizeStreetLine } = require('../utils/address-normalizer');
 const { _test } = require('../services/call-recording-processor');
 
-const { extractedNameMatchesCustomer, sameFirstName, isUsableContactPhone } = _test;
+const { extractedNameMatchesCustomer, isUsableContactPhone } = _test;
+const { sameFirstName } = require('../utils/name-match');
 
 // The corpus's phone key: toE164-normalized, then the call path's OWN
 // usability predicate (isUsableContactPhone) — prose comes back raw from

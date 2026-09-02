@@ -445,14 +445,22 @@ async function markLive(prospect, { isDofollow, anchorText, backlinkId, discover
   // withdrawn; a row whose send is in flight ('sending') or already sent is left
   // to the send finalizer / operator reconciliation — a 0-row update here means
   // exactly that, and the row is not touched.
-  let q = db('seo_link_prospects').where({ id: prospect.id });
-  if (prospect.status === 'prospect') {
-    q = q.where({ status: 'prospect' })
-      .whereRaw("COALESCE(outreach_status, 'none') IN ('none', 'drafted')")
-      .whereNull('outreach_sent_at');
-    Object.assign(patch, { claimed_at: null, claimed_by: null, outreach_status: 'none', outreach_send_token: null });
-  }
-  const n = await q.update(patch);
+  // Promotion releases a Hermes lease into a NON-claimable state (live), so
+  // the placement follows a superseded / changed acquisition path in the SAME
+  // transaction (registry.settleRetiredPlacements) — claim-time settlement
+  // never gets another chance on a live row.
+  const n = await db.transaction(async (trx) => {
+    let q = trx('seo_link_prospects').where({ id: prospect.id });
+    if (prospect.status === 'prospect') {
+      q = q.where({ status: 'prospect' })
+        .whereRaw("COALESCE(outreach_status, 'none') IN ('none', 'drafted')")
+        .whereNull('outreach_sent_at');
+      Object.assign(patch, { claimed_at: null, claimed_by: null, outreach_status: 'none', outreach_send_token: null });
+    }
+    const updated = await q.update(patch);
+    if (updated && prospect.status === 'prospect') await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: [prospect.id], now });
+    return updated;
+  });
   if (!n) {
     logger.info(`[link-verifier] ${prospect.id} (${prospect.target_domain}) link is live but the row is mid-send — left for reconciliation`);
     return 'pending';

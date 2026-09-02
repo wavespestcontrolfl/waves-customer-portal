@@ -7,6 +7,7 @@
  * and a real end-to-end recompute through the actual engine.
  */
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
 
 const {
   createOrReuseAdminEstimate,
@@ -242,7 +243,32 @@ describe('resolveServerAuthoritativePricing', () => {
     expect(out.audit.pricing_authority).toBe('CLIENT_FALLBACK');
     expect(out.totals).toEqual({ monthlyTotal: 114.67, annualTotal: 1376, onetimeTotal: 0 });
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('CLIENT_FALLBACK reason=ENGINE_ERROR'));
+    // The failure is REPORTED, not belled, here (SEC-002 / pre-push codex
+    // P1): the route rings after the save's transaction committed, never
+    // from a dryRun preflight.
+    expect(out.fallbackReason).toBe('ENGINE_ERROR');
+    const { notifyAdmin } = require('../services/notification-service');
+    expect(notifyAdmin).not.toHaveBeenCalled();
     errSpy.mockRestore();
+  });
+
+  it('reports NO_INPUTS as the fallback reason and null for a server reprice', async () => {
+    const noInputs = await resolveServerAuthoritativePricing({
+      estimateData: {},
+      clientPreview: { monthlyTotal: 10, annualTotal: 120, onetimeTotal: 0 },
+      quoteRequired: false,
+      now: NOW,
+      recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }),
+    });
+    expect(noInputs.fallbackReason).toBe('NO_INPUTS');
+    const server = await resolveServerAuthoritativePricing({
+      estimateData: {},
+      clientPreview: { monthlyTotal: 10, annualTotal: 120, onetimeTotal: 0 },
+      quoteRequired: false,
+      now: NOW,
+      recompute: async () => ({ recomputed: true, serverResult: { recurring: {} }, serverTotals: { monthlyTotal: 10, annualTotal: 120, onetimeTotal: 0 } }),
+    });
+    expect(server.fallbackReason).toBeNull();
   });
 });
 
@@ -278,6 +304,36 @@ describe('createOrReuseAdminEstimate — server authoritative on save', () => {
     // Blob/column agreement: the embedded result was overwritten to the server result.
     const persisted = JSON.parse(row.estimate_data);
     expect(persisted.result.recurring.grandTotal).toBe(69);
+  });
+
+  it('never persists a browser-supplied proposal — proposal.enabled would exempt the row from the send gate (pre-push P0 on #3750)', async () => {
+    const { database, getInsert } = makeDatabase();
+    const recompute = async () => ({
+      recomputed: true,
+      source: 'ENGINE_REQUEST',
+      serverResult: serverResultMonthly(69, 828),
+      serverTotals: { monthlyTotal: 69, annualTotal: 828, onetimeTotal: 0 },
+    });
+    await createOrReuseAdminEstimate({
+      database,
+      now: NOW,
+      recompute,
+      body: baseBody({
+        monthlyTotal: 69,
+        annualTotal: 828,
+        estimateData: {
+          inputs: {},
+          result: { recurring: { grandTotal: 69, monthlyTotal: 69, annualTotal: 828, services: [{ service: 'lawn_care', mo: 69 }] }, oneTime: { total: 0 } },
+          engineRequest: { profile: {}, selectedServices: ['LAWN'], options: {} },
+          // Forged: only PUT /:id/proposal may author this.
+          proposal: { enabled: true, buildings: [{ name: 'Forged', lineItems: [{ description: 'Browser-priced', amount: 1 }] }] },
+        },
+      }),
+    });
+    const row = getInsert().row;
+    expect(row.pricing_authority).toBe('SERVER');
+    const persisted = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data;
+    expect(persisted.proposal).toBeUndefined();
   });
 
   it('a SERVER reprice persists the RAW engine result beside the mapped one (audit enrichment source)', async () => {

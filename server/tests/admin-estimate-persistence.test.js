@@ -1,4 +1,14 @@
 jest.mock('../models/db', () => jest.fn());
+// Mutable pricing-authority send gate (#3750): off by default, flipped by
+// the scheduled-group-on-create tests below.
+const mockGateState = { sendRequiresServerPricing: false };
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return {
+    ...actual,
+    isEnabled: (key) => (key === 'sendRequiresServerPricing' ? mockGateState.sendRequiresServerPricing : actual.isEnabled(key)),
+  };
+});
 // Pass-through mock: every test keeps the real qualifying-services lookup;
 // the lookup-failure test below overrides it once.
 jest.mock('../services/waveguard-existing-services', () => {
@@ -21,7 +31,7 @@ const {
 const { generateEstimate } = require('../services/pricing-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 
-function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = false }) {
+function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = false, scheduledGroupMember = null }) {
   const updates = [];
   const inserts = [];
   let storedEstimate = estimate;
@@ -50,8 +60,14 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
         whereNotIn() {
           return this;
         },
+        whereNot() {
+          return this;
+        },
         select: async () => [],
         first: async () => {
+          // The scheduled-group guard's member lookups (#3750).
+          if (table === 'estimates' && clause.estimate_group_id && clause.status === 'scheduled') return scheduledGroupMember;
+          if (table === 'estimates' && clause.estimate_group_id && clause.status === 'sending') return null;
           if (table === 'leads' && clause.id === lead?.id) return lead;
           if (table === 'estimates' && clause.id === storedEstimate?.id) return storedEstimate;
           if (table === 'customers' && customer && clause.id === customer.id) return customer;
@@ -1200,5 +1216,143 @@ describe('admin estimate persistence', () => {
 
     expect(updates).toHaveLength(1);
     expect(updates[0].clause).toEqual({ id: 'estimate-draft', status: 'draft' });
+  });
+});
+
+describe('createOrReuseAdminEstimate — a linked COMMERCIAL PROPOSAL draft is never reused by the generic save (GH codex P2 r6 on #3750)', () => {
+  test('refuses (409) instead of stripping the server-owned proposal and clobbering its totals', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, updates, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101', estimate_id: 'estimate-proposal' },
+      estimate: {
+        id: 'estimate-proposal',
+        status: 'draft',
+        token: 'existing-token',
+        category: 'COMMERCIAL',
+        customer_phone: '(941) 555-0101',
+        estimate_data: JSON.stringify({ proposal: { enabled: true, buildings: [{ name: 'Tower A', lineItems: [{ description: 'Interior', amount: 240 }] }] } }),
+      },
+    });
+    await expect(createOrReuseAdminEstimate({
+      database,
+      body: { ...baseBody, address: '456 Revised St', monthlyTotal: 145 },
+      technicianId: 'tech-1',
+      now,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/Commercial proposal editor/i) });
+    expect(inserts).toEqual([]);
+    expect(updates.filter((u) => u.table === 'estimates')).toEqual([]);
+  });
+});
+
+describe('createOrReuseAdminEstimate — a DISABLED authored proposal draft is protected too (pre-push codex P0)', () => {
+  const { linkedDraftCarriesProposal } = require('../services/admin-estimate-persistence');
+
+  test('the guard keys on any stored proposal object (not only enabled/scaffold) — never on the COMMERCIAL category alone', () => {
+    // An engine / Agent Estimate commercial draft carries the category but
+    // no proposal and must stay reusable (GH codex P2 r9).
+    expect(linkedDraftCarriesProposal({ category: 'COMMERCIAL', estimate_data: '{}' })).toBe(false);
+    expect(linkedDraftCarriesProposal({ category: 'RESIDENTIAL', estimate_data: JSON.stringify({ proposal: { enabled: false, buildings: [] } }) })).toBe(true);
+    expect(linkedDraftCarriesProposal({ category: 'RESIDENTIAL', estimate_data: { proposal: { scaffold: true } } })).toBe(true);
+    expect(linkedDraftCarriesProposal({ category: 'RESIDENTIAL', estimate_data: '{}' })).toBe(false);
+    expect(linkedDraftCarriesProposal({ category: null, estimate_data: 'not json' })).toBe(false);
+  });
+
+  test('a linked draft whose authored proposal was saved disabled is refused (409) instead of overwritten', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, updates, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101', estimate_id: 'estimate-proposal' },
+      estimate: {
+        id: 'estimate-proposal',
+        status: 'draft',
+        token: 'existing-token',
+        category: 'COMMERCIAL',
+        customer_phone: '(941) 555-0101',
+        estimate_data: JSON.stringify({ proposal: { enabled: false, buildings: [{ name: 'Tower A', lineItems: [{ description: 'Interior', amount: 240 }] }] } }),
+      },
+    });
+    await expect(createOrReuseAdminEstimate({
+      database,
+      body: { ...baseBody, address: '456 Revised St', monthlyTotal: 145 },
+      technicianId: 'tech-1',
+      now,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(inserts).toEqual([]);
+    expect(updates.filter((u) => u.table === 'estimates')).toEqual([]);
+  });
+});
+
+describe('createOrReuseAdminEstimate — a NEW property joining a SCHEDULED group is judged like a revision moving into it (uncapped codex P1 r13 on #3750)', () => {
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  const GROUP = '2f5e7a10-6c3b-4d9e-9a11-3b7c5d2e8f01';
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('gate on: a fallback-priced property cannot be created into a group whose anchor is scheduled — nothing inserted', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    const { database, inserts } = makeDatabase({ lead: null, estimate: null, scheduledGroupMember: { id: 'est-anchor' } });
+    await expect(createOrReuseAdminEstimate({
+      database,
+      body: { ...baseBody, estimateGroupId: GROUP },
+      technicianId: 'tech-1',
+      recompute: engineError,
+      now: () => new Date('2026-05-15T12:00:00.000Z'),
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/group it would join is scheduled to send/i) });
+    expect(inserts).toEqual([]);
+  });
+
+  test('controls: no scheduled member, or gate off, keeps the fail-open create', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    const open = makeDatabase({ lead: { id: 'lead-1', status: 'new', phone: '9415550101' }, estimate: null, scheduledGroupMember: null });
+    await createOrReuseAdminEstimate({
+      database: open.database, body: { ...baseBody, estimateGroupId: GROUP }, technicianId: 'tech-1', recompute: engineError, now: () => new Date('2026-05-15T12:00:00.000Z'),
+    });
+    expect(open.inserts.filter((i) => i.table === 'estimates')).toHaveLength(1);
+    mockGateState.sendRequiresServerPricing = false;
+    const gateOff = makeDatabase({ lead: { id: 'lead-1', status: 'new', phone: '9415550101' }, estimate: null, scheduledGroupMember: { id: 'est-anchor' } });
+    await createOrReuseAdminEstimate({
+      database: gateOff.database, body: { ...baseBody, estimateGroupId: GROUP }, technicianId: 'tech-1', recompute: engineError, now: () => new Date('2026-05-15T12:00:00.000Z'),
+    });
+    expect(gateOff.inserts.filter((i) => i.table === 'estimates')).toHaveLength(1);
+  });
+});
+
+describe('createOrReuseAdminEstimate — reusing a lead\'s GROUPED draft is judged like a revision of it (pre-push codex P1 r18 on #3750)', () => {
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  const GROUP = '2f5e7a10-6c3b-4d9e-9a11-3b7c5d2e8f01';
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('gate on: a plain create (no grouping fields) that would reuse a grouped draft with a scheduled sibling is refused — nothing written', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    const { database, updates, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101', estimate_id: 'estimate-draft' },
+      estimate: { id: 'estimate-draft', status: 'draft', token: 'existing-token', customer_phone: '(941) 555-0101', estimate_group_id: GROUP },
+      scheduledGroupMember: { id: 'est-anchor' },
+    });
+    await expect(createOrReuseAdminEstimate({
+      database,
+      body: { ...baseBody, address: '456 Revised St', monthlyTotal: 145 },
+      technicianId: 'tech-1',
+      recompute: engineError,
+      now: () => new Date('2026-05-15T12:00:00.000Z'),
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/scheduled to send/i) });
+    expect(inserts).toEqual([]);
+    expect(updates.filter((u) => u.table === 'estimates')).toEqual([]);
+  });
+
+  test('control: the same reuse with no scheduled sibling keeps the fail-open save', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    const { database, updates } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101', estimate_id: 'estimate-draft' },
+      estimate: { id: 'estimate-draft', status: 'draft', token: 'existing-token', customer_phone: '(941) 555-0101', estimate_group_id: GROUP },
+      scheduledGroupMember: null,
+    });
+    const result = await createOrReuseAdminEstimate({
+      database,
+      body: { ...baseBody, address: '456 Revised St', monthlyTotal: 145 },
+      technicianId: 'tech-1',
+      recompute: engineError,
+      now: () => new Date('2026-05-15T12:00:00.000Z'),
+    });
+    expect(result.reused).toBe(true);
+    expect(updates.filter((u) => u.table === 'estimates')).toHaveLength(1);
   });
 });

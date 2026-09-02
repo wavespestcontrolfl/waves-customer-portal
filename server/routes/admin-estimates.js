@@ -271,6 +271,148 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
   };
 }
 
+// True when the engine-authoritative pricing gate applies to THIS send: gate
+// on and not an authored proposal (its line items ARE the quote). Delivered
+// rows are NOT exempt — a revision of a live link can fall back too, and its
+// resend would deliver the unverified price (pre-push codex P0). Shared by
+// the pre-read check in assertEstimateSendable and by the send CLAIMS, which
+// re-assert it as a WHERE predicate so a revision that stamps CLIENT_FALLBACK
+// between the check and the claim loses the race instead of being delivered.
+// The server-owned provenance marker PUT /:id/proposal stamps on every
+// proposal it writes. It is the ONLY evidence that the proposal editor
+// authored the price: `category` is not provenance (the estimator engine
+// and Agent Estimate also create COMMERCIAL rows, and an older generic
+// reuse could keep the category beside a browser-supplied blob — pre-push
+// codex P0), and since #3750 the generic create/revise never persists a
+// browser proposal at all. A proposal without the marker — legacy rows
+// included, until re-saved in the editor — gets NO exemption from the
+// pricing-authority gate or its telemetry (the manual-review exemption in
+// assertEstimateSendable deliberately keeps the older enabled-only
+// predicate so existing proposals stay sendable with the gate off).
+const { PROPOSAL_PROVENANCE_SOURCE, isProposalAuthoredByEditor } = require('../services/estimate-proposal');
+function isAuthoredProposalRow(estimate = {}) {
+  return isProposalAuthoredByEditor(parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal);
+}
+
+function sendRequiresServerPricingFor(estimate = {}) {
+  if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return false;
+  return !isAuthoredProposalRow(estimate);
+}
+// The ONE authority predicate every send claim re-asserts — gated manual
+// sends and every automated send alike: the explicit SERVER stamp, fail
+// closed on NULL, unknown or fallback values (pre-push codex P0s — a
+// negative CLIENT_FALLBACK check let unstamped legacy rows through).
+const {
+  SERVER_PRICING_AUTHORITY_SQL,
+  GATED_SEND_AUTHORITY_SQL,
+  gatedSendAuthorityPredicateApplies,
+  rowPassesGatedSendAuthority,
+  applyLinkVisibleSiblingScope,
+  estimateDeliverableUnderGate,
+  groupPassesGatedSendAuthority,
+} = require('../services/pricing-authority-gate');
+// The gated MANUAL claims (immediate, scheduled, grouped anchor + siblings)
+// re-assert the whole verdict IN SQL on the row as it is at claim time —
+// engine-verified, OR an authored proposal by provenance (category stamp +
+// enabled flag). Evaluating the exemption in JS on the pre-read row let a
+// proposal disabled between the pre-read and the claim ride the stale
+// exemption straight to the customer (pre-push codex P0).
+// GATED_SEND_AUTHORITY_SQL / gatedSendAuthorityPredicateApplies live in
+// services/pricing-authority-gate.js — one verdict shared with the follow-up
+// lanes and the persistence guards (GH codex P1 r12).
+
+// Gate-off telemetry for the rollout count: one warn per delivery attempt
+// that actually reached the funnel WITHOUT the SERVER stamp (CLIENT_FALLBACK,
+// unstamped legacy rows, unknown values — everything the gate will refuse),
+// emitted AFTER the funnel's own sendability check passed (so a later
+// rejection never counts) and only from that one site (the pre-read assert
+// used to log too and double-counted; GH codex P2 on #3750). Silent while
+// the gate is on — the assert refuses the send instead.
+// `handoff`: whether a REAL provider handoff happened for this delivery —
+// the funnel's stampChannels distinction (an SMS suppressed by the SMS gate,
+// template policy or owner kill reports ok with real:false and reaches no
+// customer). Rollout counts must reflect actual customer exposure (GH codex
+// P2 on #3750), so a suppressed-only attempt logs nothing.
+function shadowLogFallbackDelivery(estimate = {}, { handoff = true } = {}) {
+  if (!handoff) return false;
+  const authority = String(estimate.pricing_authority || '').toUpperCase();
+  if (authority === 'SERVER') return false;
+  if (isAuthoredProposalRow(estimate)) return false;
+  if (require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return false;
+  logger.warn(`[pricing-authority] shadow: estimate ${estimate.id} is being delivered with pricing authority ${authority || 'NULL'} (GATE_SEND_REQUIRES_SERVER_PRICING off)`);
+  return true;
+}
+
+// Automation never publishes a price the engine did not verify — gate or no
+// gate (AGENTS.md estimator-engine authority; pre-push codex P0s). Only the
+// explicit SERVER stamp passes: null, unknown and CLIENT_FALLBACK all fail
+// closed. The lead auto-send lane claims its anchor with
+// AUTO_SEND_PRICING_AUTHORITY_SQL; this is the same verdict for every
+// grouped SIBLING that lane would publish, applied in the group preflight
+// when the caller declares options.autoSend.
+function assertAutoSendPricingAuthority(row = {}) {
+  // An authored proposal (any stored proposal object) is never automation's
+  // to publish, whatever stamp the underlying draft still carries.
+  const proposalData = parseEstimateData(row.estimate_data || row.estimateData)?.proposal;
+  const isProposal = !!(proposalData && typeof proposalData === 'object');
+  if (!isProposal && String(row.pricing_authority || '').toUpperCase() === 'SERVER') return;
+  const err = new Error('This estimate\'s price has no engine verification stamp (or was saved from the browser preview because the pricing engine could not verify it) — it is never auto-sent. Re-save it from the estimate tool and send it by hand.');
+  err.statusCode = 422;
+  err.code = 'PRICING_AUTHORITY_NOT_SERVER';
+  throw err;
+}
+
+// Schedule-time preflight for grouped sends (GH codex P2 on #3750). The
+// scheduled cron publishes every active sibling under one claim, and
+// claimGroupSiblingsForPublish refuses a sibling whose pricing authority
+// fails the gate — by then the operator is gone, the anchor lands in
+// send_failed (a gate refusal is never retried) and the customer never gets
+// the group link. The same per-sibling verdict is applied HERE, at request
+// time, so the schedule is refused while someone can still fix the sibling.
+// Sibling enumeration mirrors the claim exactly (active, unlocked,
+// unarchived). Returns the first blocking sibling with the code the claim
+// would have raised, or null.
+// `forUpdate`: lock the sibling rows for the caller's transaction (the
+// schedule route), so a concurrent revision of a sibling serializes against
+// the scheduling write instead of slipping between this read and it.
+async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false, forUpdate = false } = {}) {
+  if (!estimate?.estimate_group_id) return null;
+  // Two sets are judged (never re-claimed): the PUBLISHABLE siblings this
+  // send would publish (draft / scheduled / send_failed, unlocked) and every
+  // sibling the customer's one link already renders — the shared
+  // link-visible scope (sending / sent / viewed while unexpired, accepted /
+  // declined always; GH codex P1 r6 + uncapped P1 r19), so a SERVER anchor
+  // is never delivered beside an unverified price the link would show.
+  let query = database('estimates')
+    .where({ estimate_group_id: estimate.estimate_group_id })
+    .whereNot({ id: estimate.id })
+    .whereNull('archived_at')
+    .where((q) => q
+      .where((publishable) => publishable.whereIn('status', ['draft', 'scheduled', 'send_failed']).whereNull('price_locked_at'))
+      .orWhere((visible) => applyLinkVisibleSiblingScope(visible)));
+  if (forUpdate) query = query.forUpdate();
+  const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
+  for (const sibling of siblings) {
+    const authority = String(sibling.pricing_authority || '').toUpperCase();
+    // Automation: the explicit SERVER stamp only. Manual sends: the ONE
+    // shared row verdict — SERVER, a genuinely locked accepted price, or an
+    // editor-authored proposal (uncapped codex P1 r21: a re-implemented
+    // SERVER-or-proposal check blocked every group holding a legitimately
+    // accepted property).
+    if (autoSend) {
+      if (authority === 'SERVER') continue;
+      return { sibling, statusCode: 422, code: 'PRICING_AUTHORITY_NOT_SERVER' };
+    }
+    if (!gatedSendAuthorityPredicateApplies() || rowPassesGatedSendAuthority(sibling)) continue;
+    return {
+      sibling,
+      statusCode: 409,
+      code: authority === 'CLIENT_FALLBACK' ? 'CLIENT_FALLBACK_PRICING' : 'PRICING_AUTHORITY_NOT_SERVER',
+    };
+  }
+  return null;
+}
+
 function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } = {}) {
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
@@ -333,6 +475,12 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   // at the gate rather than only scrubbing stored flags: the send snapshot
   // re-derives quoteRequired:true from proposal.enabled (via buildPricingBundle
   // → attachQuoteRequirement), which would otherwise re-block every resend.
+  // The manual-review exemption keeps the pre-#3750 predicate — an enabled
+  // proposal, marker or not — so proposals authored before the provenance
+  // marker existed stay sendable with the gate off (GH codex P0 r9:
+  // in-flight rows must keep working). The provenance requirement is scoped
+  // to the pricing-authority gate (isAuthoredProposalRow), where an
+  // un-marked legacy proposal fails closed until re-saved in the editor.
   const isAuthoredProposal = parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true;
   if (!isAuthoredProposal && estimateDataHasQuoteRequirement(estimate.estimate_data || estimate.estimateData)) {
     const err = new Error('Quote-required estimates need manual review before they can be sent to the customer.');
@@ -343,6 +491,39 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     const err = new Error('Automated lead estimates need manual review before they can be sent to the customer.');
     err.statusCode = 400;
     throw err;
+  }
+  // Engine-authoritative pricing (validation audit SEC-002, 2026-09-02). A
+  // save whose server recompute failed or had no replayable inputs persists
+  // the BROWSER preview as a NON-authoritative price (pricing_authority
+  // CLIENT_FALLBACK — fail-open so a broken engine never blocks the save),
+  // and nothing re-verified that price before delivery. Every send of such
+  // a row — first send or resend — is refused while
+  // GATE_SEND_REQUIRES_SERVER_PRICING is on and logged as a would-block
+  // while it is off (shadow count before the flip). Re-saving from the
+  // estimate tool reprices through the engine and clears the stamp. An
+  // authored proposal IS the manual quote (exempt like the gates above).
+  // Historical delivered rows are the data audit's job; a revision of a
+  // delivered row that falls back is refused at save time while the gate
+  // is on (reviseAdminEstimate).
+  // The gate-off would-block telemetry lives in the delivery funnel
+  // (shadowLogFallbackDelivery), not here: this assert runs on the pre-read
+  // in the route AND again inside sendEstimateNowInner, and may run before
+  // a later gate rejects the request — logging here double-counted exposure
+  // (GH codex P2 on #3750). Fail closed: only the explicit SERVER stamp
+  // sends while the gate is on — a NULL / unknown stamp is no proof the
+  // engine priced the row (pre-push codex P0), and the fallback stamp is
+  // proof it did not. Each gets the message that tells the operator why.
+  if (sendRequiresServerPricingFor(estimate)) {
+    const authority = String(estimate.pricing_authority || '').toUpperCase();
+    if (authority !== 'SERVER') {
+      const fallback = authority === 'CLIENT_FALLBACK';
+      const err = new Error(fallback
+        ? 'This estimate\'s price was saved from the browser preview because the pricing engine could not verify it. Open it in the estimate tool and save again so the engine prices it, then send.'
+        : 'This estimate\'s price carries no engine verification stamp (it was saved before server-authoritative pricing, or by a path that does not stamp it). Open it in the estimate tool and save again so the engine prices it, then send.');
+      err.statusCode = 409;
+      err.code = fallback ? 'CLIENT_FALLBACK_PRICING' : 'PRICING_AUTHORITY_NOT_SERVER';
+      throw err;
+    }
   }
   assertEstimateManagerApprovalResolved(estimate);
   if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
@@ -523,14 +704,52 @@ router.use((req, res, next) => (
     : requireAdmin(req, res, next)
 ));
 
+// Post-commit bell for a save whose engine recompute FAILED (validation audit
+// SEC-002; pre-push codex P1): the resolver fails open and reports the
+// reason, the route rings only after the create/revise transaction committed
+// — never from a dryRun preflight — keyed per estimate so a preflight-plus-
+// save or a retry never rings twice. Best-effort; never fails the request.
+const PRICING_FALLBACK_BELL_DEDUPE_WINDOW_MS = 6 * 60 * 60 * 1000;
+function notifyPricingFallbackAfterCommit(estimate, reason) {
+  if (reason !== 'ENGINE_ERROR' || !estimate?.id) return;
+  try {
+    const NotificationService = require('../services/notification-service');
+    void NotificationService.notifyAdmin(
+      'estimate',
+      `Estimate saved without engine pricing: ${estimate.customer_name || estimate.id}`,
+      'The pricing engine failed while this estimate was saved, so the browser preview was stored as a NON-authoritative price (pricing authority: client fallback). Open it in the estimate tool and save again so the engine prices it before it is sent.',
+      {
+        icon: '\u26A0\uFE0F',
+        link: '/admin/estimates',
+        // bell: true — an unverified price on a saved estimate must ring even
+        // under GATE_ADMIN_BELL_POLICY, whose default denies the 'estimate'
+        // category (pre-push codex P1; same override the commercial-schedule
+        // bell carries).
+        bell: true,
+        // Bounded, not forever (GH codex P2 on #3750): a later engine
+        // failure on the same estimate — after a successful SERVER re-save
+        // — must ring again once the window has passed.
+        dedupeKey: `estimate-pricing-fallback:${estimate.id}`,
+        dedupeWindowMs: PRICING_FALLBACK_BELL_DEDUPE_WINDOW_MS,
+        // customerId lets NotificationService apply its internal-test
+        // suppression (GH codex P2 on #3750), like the neighbouring alerts.
+        metadata: { estimateId: estimate.id, customerId: estimate.customer_id || null, pricingAuthority: 'CLIENT_FALLBACK', reason },
+      },
+    ).catch((err) => logger.warn(`[pricing-authority] fallback admin notify failed for estimate ${estimate.id}: ${err.message}`));
+  } catch (err) {
+    logger.warn(`[pricing-authority] fallback admin notify setup failed for estimate ${estimate.id}: ${err.message}`);
+  }
+}
+
 // POST /api/admin/estimates — create estimate
 router.post('/', async (req, res, next) => {
   try {
-    const { estimate, reused, memberLinkageWarning } = await createOrReuseAdminEstimate({
+    const { estimate, reused, memberLinkageWarning, pricingFallbackReason } = await createOrReuseAdminEstimate({
       body: req.body,
       technicianId: req.technicianId,
       technician: req.technician,
     });
+    notifyPricingFallbackAfterCommit(estimate, pricingFallbackReason);
     res.status(reused ? 200 : 201).json({
       id: estimate.id,
       token: estimate.token,
@@ -570,7 +789,7 @@ router.put('/:id', async (req, res, next) => {
     // the builder can confirm a server reprice with the operator BEFORE the
     // edit publishes to the customer's live link.
     const dryRun = req.body?.dryRun === true;
-    const { estimate, memberLinkageWarning } = await reviseAdminEstimate({
+    const { estimate, memberLinkageWarning, pricingFallbackReason } = await reviseAdminEstimate({
       estimateId: req.params.id,
       body: req.body,
       technicianId: req.technicianId,
@@ -583,6 +802,7 @@ router.put('/:id', async (req, res, next) => {
       // bedroom re-price waits for — lift the stale-price send guard.
       await require('../services/estimate-clarify-asks').clearEstimateRepricePending(estimate.id)
         .catch((err) => logger.warn(`[estimates] reprice guard clear failed for ${estimate.id}: ${err.message}`));
+      notifyPricingFallbackAfterCommit(estimate, pricingFallbackReason);
     }
     res.json({
       dryRun: dryRun || undefined,
@@ -764,30 +984,71 @@ router.post('/:id/send', async (req, res, next) => {
       if (scheduledTime <= new Date()) {
         return res.status(400).json({ error: 'scheduledAt must be in the future' });
       }
-      // Atomic claim, mirroring the immediate-send path below. The
-      // assertEstimateSendable check above ran on a stale read: writing
+      // Grouped schedule: every active sibling must clear the pricing-
+      // authority gate NOW, not when the cron's group claim refuses it
+      // hours later with nobody watching (GH codex P2 on #3750) — and the
+      // check is ATOMIC with the schedule write (GH codex P2 r5): the
+      // sibling rows are locked FOR UPDATE under the group's advisory lock
+      // inside the same transaction as the anchor's scheduling UPDATE, so a
+      // concurrent revision that would stamp a sibling CLIENT_FALLBACK
+      // either committed first (this schedule refuses it) or waits for this
+      // commit (and is then refused by the scheduled-group guard in
+      // admin-estimate-persistence assertNoFallbackRevisionInScheduledGroup).
+      // The claim itself mirrors the immediate-send path below: the
+      // assertEstimateSendable check above ran on a stale read, and writing
       // status='scheduled' unconditionally could clobber an in-flight
       // 'sending' row (its guarded sent-write then misses and the cron
       // re-sends — duplicate customer texts) or overwrite a concurrent
       // accept (money-bearing state lost, and the row re-enters the send
       // pipeline on a committed conversion).
-      const scheduledClaim = await db('estimates')
-        .where({ id: estimate.id })
-        .whereNull('price_locked_at')
-        // Archived rows can never re-enter the send pipeline (codex P0,
-        // PR #3304): a stale scheduling request racing an invalidation
-        // must not restore status='scheduled' on the archived draft.
-        .whereNull('archived_at')
-        .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
-        .update({
-          status: 'scheduled',
-          scheduled_at: scheduledTime,
-          send_method: sendMethod,
-          expires_at: estimateExpiresAt(() => scheduledTime),
-          scheduled_send_attempts: 0,
-          last_send_error: null,
-          updated_at: db.fn.now(),
+      const scheduleOutcome = await db.transaction(async (trx) => {
+        if (estimate.estimate_group_id) {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['estimate-group-send', String(estimate.estimate_group_id)],
+          );
+        }
+        const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, forUpdate: true });
+        if (blockingSibling) return { blockingSibling };
+        const claimed = await trx('estimates')
+          .where({ id: estimate.id })
+          // Same observed-membership pin as the immediate claim (GH codex
+          // P1 r8): the sibling preflight above judged THIS group's rows —
+          // a move to another group since the read must lose the race.
+          .where({ estimate_group_id: estimate.estimate_group_id || null })
+          .whereNull('price_locked_at')
+          // Archived rows can never re-enter the send pipeline (codex P0,
+          // PR #3304): a stale scheduling request racing an invalidation
+          // must not restore status='scheduled' on the archived draft.
+          .whereNull('archived_at')
+          .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
+          // Same pricing-authority re-assertion as the immediate-send claim
+          // (pre-push codex P1): a revision stamping CLIENT_FALLBACK between
+          // the pre-read check and this UPDATE must lose the race with a 409
+          // here, not report "scheduled" and have the cron burn retries.
+          .modify((q) => {
+            if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL);
+          })
+          .update({
+            status: 'scheduled',
+            scheduled_at: scheduledTime,
+            send_method: sendMethod,
+            expires_at: estimateExpiresAt(() => scheduledTime),
+            scheduled_send_attempts: 0,
+            last_send_error: null,
+            updated_at: trx.fn.now(),
+          });
+        return { claimed };
+      });
+      if (scheduleOutcome.blockingSibling) {
+        const { blockingSibling } = scheduleOutcome;
+        return res.status(blockingSibling.statusCode).json({
+          error: `Grouped estimate ${blockingSibling.sibling.id} has no engine-verified price — re-save it from the estimate tool before scheduling this group (the scheduled send publishes every property together).`,
+          code: blockingSibling.code,
+          siblingEstimateId: blockingSibling.sibling.id,
         });
+      }
+      const scheduledClaim = scheduleOutcome.claimed;
       if (!scheduledClaim) {
         return res.status(409).json({
           error: 'This estimate is mid-send, already accepted, or locked — refresh and retry.',
@@ -811,6 +1072,13 @@ router.post('/:id/send', async (req, res, next) => {
     if (!estimate.estimate_group_id) {
       const claimed = await db('estimates')
         .where({ id: estimate.id })
+        // Claim ONLY the membership this send observed (GH codex P1 r8): a
+        // SERVER revision grouping this row between the read above and this
+        // claim would otherwise hand sendEstimateNow a stale ungrouped
+        // object that skips the group claim while the public link renders
+        // every viewable sibling — a fallback sibling included. Zero rows →
+        // 409, the refreshed retry runs the grouped path.
+        .whereNull('estimate_group_id')
         .whereNull('price_locked_at')
         // An ARCHIVED row is never claimable for send (codex P0, PR
         // #3304): linkage invalidation archives stale wrong-lead drafts
@@ -818,6 +1086,14 @@ router.post('/:id/send', async (req, res, next) => {
         // deliver the old recipient's content after that commit.
         .whereNull('archived_at')
         .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
+        // Re-assert the pricing-authority gate ON the claim (pre-push codex
+        // P0): assertEstimateSendable checked the pre-read row, and a revision
+        // committing CLIENT_FALLBACK between that check and this claim must
+        // lose the race — a zero-row claim 409s, and the refreshed retry
+        // meets the gate's own message.
+        .modify((q) => {
+          if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL);
+        })
         .update({ status: 'sending', updated_at: db.fn.now() });
       if (!claimed) {
         return res.status(409).json({
@@ -1221,7 +1497,7 @@ async function revertLeadServiceForSend(estimateId, serviceKey, parkId = null) {
 // row a concurrent send already claimed is never stolen or released by this
 // one) — two concurrent sends of different group members serialize, the loser
 // aborts pre-delivery. Returns the claimed rows for later publish/release.
-async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false } = {}) {
+async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false, autoSend = false } = {}) {
   // Mid-send check, sibling enumeration, and the claims run in ONE
   // transaction under a group-scoped advisory xact lock (codex #3244 r8):
   // without it, two overlapping immediate sends of different members could
@@ -1247,17 +1523,36 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       err.statusCode = 409;
       throw err;
     }
+    // Group-wide pricing-authority verdict at DELIVERY (GH codex P1 r6):
+    // every viewable sibling — published ones included — must clear the
+    // gate before this send hands the customer the group link. Same verdict
+    // the schedule route applied at request time; here it runs under the
+    // group lock on the rows the claims below will actually publish beside.
+    const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, autoSend });
+    if (blockingSibling) {
+      const err = new Error(`Grouped estimate ${blockingSibling.sibling.id} has no engine-verified price — re-save it from the estimate tool before sending this group (the group link shows every property together).`);
+      err.statusCode = blockingSibling.statusCode;
+      err.code = blockingSibling.code;
+      throw err;
+    }
     // Claim the ANCHOR here too, under the same lock (codex #3248 r4) —
     // unless a pre-claiming caller (scheduled cron, lead auto-send) already
     // moved it to 'sending' before calling.
     let anchorClaimedInLock = false;
     if (String(estimate.status || '') !== 'sending') {
       const anchorClaimed = await trx('estimates')
-        .where({ id: estimate.id, status: estimate.status })
+        // Observed-membership pin (GH codex P1 r8): the siblings enumerated
+        // below are THIS group's; an anchor moved elsewhere since the read
+        // must not be published beside them.
+        .where({ id: estimate.id, status: estimate.status, estimate_group_id: estimate.estimate_group_id })
         .whereNull('price_locked_at')
         // Same archive guard as the standalone claim (codex P0, PR #3304).
         .whereNull('archived_at')
         .whereNotIn('status', ['accepted', 'declined', 'expired'])
+        // Same pricing-authority re-assertion as the standalone claim.
+        .modify((q) => {
+          if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL);
+        })
         .update({ status: 'sending', updated_at: trx.fn.now() });
       if (!anchorClaimed) {
         const err = new Error('This estimate is being sent or is locked right now. Wait a moment and retry.');
@@ -1297,6 +1592,10 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       assertEstimateSendable(sibling, {
         engineReviewAcknowledged: ['scheduled', 'sending'].includes(String(sibling.status || '')),
       });
+      // Automation policy (pre-push codex P0): the gate-dependent check
+      // above lets a CLIENT_FALLBACK sibling through while the gate is off;
+      // an auto-send never publishes one.
+      if (autoSend) assertAutoSendPricingAuthority(sibling);
     } catch (e) {
       const err = new Error(`Grouped property "${sibling.address || sibling.id}" is not sendable: ${e.message}`);
       err.statusCode = e.statusCode || 422;
@@ -1317,6 +1616,13 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       const won = await trx('estimates')
         .where({ id: sibling.id, status: sibling.status, updated_at: sibling.updated_at })
         .whereNull('price_locked_at')
+        // Same atomic re-assertion as the anchor claims: the preflight above
+        // read the sibling before this lock; a fallback stamp landing in
+        // between loses the race here.
+        .modify((q) => {
+          if (autoSend) q.whereRaw(SERVER_PRICING_AUTHORITY_SQL);
+          else if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL);
+        })
         .update({ status: 'sending', updated_at: trx.fn.now() });
       if (won) claimed.push(sibling);
     }
@@ -1593,6 +1899,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   if (estimate.estimate_group_id) {
     const groupClaim = await claimGroupSiblingsForPublish(estimate, {
       callerPreClaimed: options.callerPreClaimed === true,
+      autoSend: options.autoSend === true,
     });
     claimedGroupSiblings = groupClaim.claimed;
     // Signal claim ownership to the caller AFTER the claim transaction
@@ -1921,6 +2228,22 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       failedChannels,
     };
   }
+  // Rollout telemetry from the FINAL delivered row — after the provider
+  // handoff, after the send-time park recompute and every pre-delivery
+  // check (GH codex P2 on #3750: counting earlier labelled aborted or
+  // repriced attempts as fallback deliveries). Published siblings log
+  // themselves below.
+  shadowLogFallbackDelivery(estimate, { handoff: stampChannels.length > 0 });
+  // Gate-off shadow count, GROUP-wide (GH codex P2 r30): a SERVER anchor
+  // delivered beside an already-published fallback sibling hands the
+  // customer that price too — the gate would refuse the send, so it counts
+  // as a would-block delivery. Published siblings are never claimed, so the
+  // per-sibling log below cannot see them.
+  if (stampChannels.length > 0 && estimate.estimate_group_id
+    && !require('../config/feature-gates').isEnabled('sendRequiresServerPricing')
+    && !(await groupPassesGatedSendAuthority(db, estimate))) {
+    logger.warn(`[pricing-authority] shadow: estimate ${estimate.id} delivered a group link whose visible siblings include a price without the SERVER stamp (GATE_SEND_REQUIRES_SERVER_PRICING off)`);
+  }
 
   const updatePayload = {
     // Finalize the claim. The row is held as `sending` for the whole send (a
@@ -2202,6 +2525,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               updated_at: db.fn.now(),
             });
           published = true;
+          // A sibling is a delivered row of its own after the confirmed
+          // handoff — same telemetry as the anchor (a fallback sibling
+          // behind a SERVER anchor was invisible before; GH codex P2 on
+          // #3750) — on BOTH paths below: a sibling accepted mid-publication
+          // (guarded update zero-rowed by price_locked_at) was exposed just
+          // the same (GH codex P2 r3).
+          shadowLogFallbackDelivery(sibling, { handoff: stampChannels.length > 0 });
           if (!updated) {
             logger.warn(`[admin-estimates] sibling ${sibling.id} left 'sending' before publication (likely accepted) — state preserved.`);
             // The customer still SAW this sibling's quote — the public flow
@@ -2925,7 +3255,18 @@ router.put('/:id/proposal', async (req, res, next) => {
     // the authoritative totals + proposal JSON, so block it once the estimate
     // has left the editable window — otherwise a late edit corrupts a locked
     // accepted price, or races a send into a stale-PDF / clobbered-proposal split.
-    if (estimate.price_locked_at || ['accepted', 'declined', 'expired', 'sending'].includes(estimate.status)) {
+    // An EXPIRED proposal the pricing-authority gate refuses (no editor
+    // provenance yet — saved before the marker existed) has no other way
+    // back (uncapped codex P1 r32 on #3750): the extension is refused until
+    // the row carries provenance, and only this editor can stamp it. Mirror
+    // the ordinary expired-row recovery: the re-save is allowed, leaves the
+    // row expired, and the operator extends it afterwards.
+    const { expiredRowRecoverableUnderGate } = require('../services/admin-estimate-persistence');
+    const expiredRecovery = estimate.status === 'expired' && expiredRowRecoverableUnderGate(estimate);
+    const closedStatuses = expiredRecovery
+      ? ['accepted', 'declined', 'sending']
+      : ['accepted', 'declined', 'expired', 'sending'];
+    if (estimate.price_locked_at || closedStatuses.includes(estimate.status)) {
       return res.status(409).json({
         error: estimate.price_locked_at
           ? 'This estimate is price-locked (accepted) and can no longer be re-priced.'
@@ -3179,7 +3520,14 @@ router.put('/:id/proposal', async (req, res, next) => {
     const existingData = parseEstimateData(estimate.estimate_data) || {};
     const nextData = {
       ...existingData,
-      proposal: { ...normalized, updatedAt: new Date().toISOString() },
+      proposal: {
+        ...normalized,
+        updatedAt: new Date().toISOString(),
+        // Server-owned provenance: the send gate's authored-proposal
+        // exemption keys on THIS marker (isAuthoredProposalRow /
+        // GATED_SEND_AUTHORITY_SQL), never on category or the blob alone.
+        provenance: { source: PROPOSAL_PROVENANCE_SOURCE, stampedAt: new Date().toISOString(), stampedBy: req.technicianId || null },
+      },
     };
     // The prior send's delivery state describes the PREVIOUS proposal PDF. Once
     // the operator re-authors the proposal, that emailed-PDF claim is stale, so
@@ -3199,8 +3547,48 @@ router.put('/:id/proposal', async (req, res, next) => {
     // pre-read; scope the UPDATE to the same editable conditions so a customer
     // accept or another admin's Mark accepted landing between SELECT and UPDATE
     // can't overwrite the locked accepted price/proposal. 409 when it loses.
-    const updateQuery = db('estimates')
+    // The write rides ONE transaction under the group's send advisory lock
+    // (uncapped codex P0 r31): a grouped auto-send validates its published
+    // siblings under that lock and releases it before the provider handoff,
+    // so an unlocked proposal rewrite of a sibling could slip between the
+    // verdict and the handoff and put authored pricing on the automated
+    // link. Same lock order as every send/schedule path (group, then row);
+    // a group with a member mid-send is refused for a retry.
+    // Membership is observed INSIDE the transaction and pinned on the write
+    // (uncapped codex P0 + GH codex P1 r32): the pre-transaction read can be
+    // stale — a row moved into another group after it would otherwise be
+    // rewritten under the wrong group's lock. Group lock first, then the row
+    // lock; a membership change between the two reads is refused for a
+    // retry. "In flight" is any member that is 'sending' OR still holds a
+    // fresh delivery claim (GH codex P1 r32): an anchor accepted mid-handoff
+    // leaves 'sending' while the automated link is still being delivered.
+    const retry = (message) => { const err = new Error(message); err.statusCode = 409; return err; };
+    const updatedCount = await db.transaction(async (trx) => {
+    const observed = await trx('estimates').where({ id: estimate.id }).first('id', 'estimate_group_id');
+    if (!observed) throw retry('This estimate changed while you were editing — reload and retry.');
+    const groupId = observed.estimate_group_id || null;
+    if (groupId) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-send', String(groupId)],
+      );
+    }
+    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'estimate_group_id', 'status');
+    if (!locked || (locked.estimate_group_id || null) !== groupId) {
+      throw retry('This estimate changed groups while you were editing — reload and retry.');
+    }
+    if (groupId) {
+      const inFlightMember = await trx('estimates')
+        .where({ estimate_group_id: groupId })
+        .whereNot({ id: estimate.id })
+        .whereNull('archived_at')
+        .where((q) => q.where({ status: 'sending' }).orWhereRaw(`NOT (${DELIVERY_CLAIM_NOT_LIVE_SQL})`))
+        .first('id');
+      if (inFlightMember) throw retry('This multi-property group is being sent right now — wait a moment and retry.');
+    }
+    const updateQuery = trx('estimates')
       .where({ id: estimate.id })
+      .modify((qb) => (groupId ? qb.where({ estimate_group_id: groupId }) : qb.whereNull('estimate_group_id')))
       .whereNull('price_locked_at')
       // An ARCHIVED row is not editable (codex P1, PR #3304): a linkage
       // invalidation archiving the draft between this route's pre-read
@@ -3218,19 +3606,26 @@ router.put('/:id/proposal', async (req, res, next) => {
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
-      .whereNotIn('status', ['accepted', 'declined', 'expired', 'sending']);
+      .whereNotIn('status', closedStatuses);
     // Payment terms are predicated on bill_by_invoice AT WRITE TIME too — a
     // concurrent PATCH turning invoice mode off between the pre-read guard
     // and this UPDATE must not persist a term no billing path enforces
     // (codex #3297 r4c).
     if (savingPaymentTerm) updateQuery.where({ bill_by_invoice: true });
-    const updatedCount = await updateQuery.update({
+    return updateQuery.update({
       estimate_data: JSON.stringify(nextData),
       category: 'COMMERCIAL',
+      // Authored totals are NOT engine output: the engine stamp a generated
+      // draft carried is cleared so the SERVER-only automation (lead
+      // auto-send) can never deliver operator-authored proposal prices; the
+      // manual send exemption rides the provenance marker instead (GH codex
+      // P1 r30 on #3750).
+      pricing_authority: null,
       monthly_total: totals.monthlyEquivalent,
       annual_total: totals.annualRecurring,
       onetime_total: totals.oneTime,
       updated_at: db.fn.now(),
+    });
     });
     if (!updatedCount) {
       return res.status(409).json({
@@ -3242,7 +3637,10 @@ router.put('/:id/proposal', async (req, res, next) => {
 
     logger.info(`[estimates] Saved commercial proposal for estimate ${estimate.id} (${normalized.buildings.length} buildings, first-year ${totals.firstYearTotal})`);
     res.json({ success: true, proposal: normalized, totals });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 // GET /api/admin/estimates/:id/proposal.pdf — branded commercial proposal
@@ -3614,6 +4012,16 @@ router.post('/:id/follow-up', async (req, res, next) => {
     if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
     if (estimate.status === 'accepted') return res.status(400).json({ error: 'Already accepted' });
     assertEstimateSendable(estimate);
+    // Group-aware pricing-authority verdict (#3750, uncapped codex P0 r24):
+    // this text carries the estimate link, and the link renders every
+    // viewable sibling — a SERVER anchor beside an unverified sibling is
+    // refused like any other send while the gate is on.
+    if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+      return res.status(409).json({
+        error: 'A property on this estimate\'s link has no engine-verified price — re-save it from the estimate tool before sending this follow-up.',
+        code: 'PRICING_AUTHORITY_NOT_SERVER',
+      });
+    }
 
     const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
     const viewUrl = await shortenOrPassthrough(longUrl, {
@@ -4127,6 +4535,15 @@ router._internals = {
   resolveBlockingAutomationForProposal,
   clearStaleProposalDelivery,
   assertEstimateSendable,
+  sendRequiresServerPricingFor,
+  isAuthoredProposalRow,
+  PROPOSAL_PROVENANCE_SOURCE,
+  shadowLogFallbackDelivery,
+  SERVER_PRICING_AUTHORITY_SQL,
+  GATED_SEND_AUTHORITY_SQL,
+  assertAutoSendPricingAuthority,
+  findGroupSiblingBlockingSend,
+  notifyPricingFallbackAfterCommit,
   assertEstimateManagerApprovalResolved,
   leadEstimateAutomationSummary,
   estimateDataHasBlockingLeadAutomation,
