@@ -82,6 +82,8 @@ describe('PREDICATES registry', () => {
     const sql = PREDICATES.duplicate_completed_records_per_visit.sql;
     expect(sql).toContain("completion_source IN ('detailed_form', 'project_completion')");
     expect(sql).toContain('GROUP BY sr.scheduled_service_id, sr.completion_source');
+    // One row per VISIT even when both rails duplicated.
+    expect(sql).toMatch(/\) g\s+GROUP BY g\.scheduled_service_id/);
   });
 
   test('incomplete visits stay visible after the grace window until a completed sibling or a live follow-up exists', () => {

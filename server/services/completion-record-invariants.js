@@ -109,13 +109,17 @@ const PREDICATES = Object.freeze({
     label: 'Visits with more than one completed service_records row from the same completion rail',
     href: '/admin/dispatch',
     sql: aggregate(`
-        SELECT sr.scheduled_service_id AS id, count(*) AS ord
-          FROM service_records sr
-         WHERE sr.scheduled_service_id IS NOT NULL
-           AND sr.status = 'completed'
-           AND sr.completion_source IN ('detailed_form', 'project_completion')
-         GROUP BY sr.scheduled_service_id, sr.completion_source
-        HAVING count(*) > 1`),
+        SELECT g.scheduled_service_id AS id, max(g.n) AS ord
+          FROM (
+            SELECT sr.scheduled_service_id, count(*) AS n
+              FROM service_records sr
+             WHERE sr.scheduled_service_id IS NOT NULL
+               AND sr.status = 'completed'
+               AND sr.completion_source IN ('detailed_form', 'project_completion')
+             GROUP BY sr.scheduled_service_id, sr.completion_source
+            HAVING count(*) > 1
+          ) g
+         GROUP BY g.scheduled_service_id`),
   },
   // A frozen catalog rule saying the service owes no report
   // (closeoutRequirements.requiresServiceReport=false) exempts the record,
