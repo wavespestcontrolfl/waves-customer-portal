@@ -1841,6 +1841,15 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       ...(firstDeliveredAt ? { firstDeliveredAt } : {}),
       ...(lastDeliveredAt ? { lastDeliveredAt } : {}),
     },
+    // The per-park handoff witness rides the finalization write too, so a
+    // transient failure of the in-branch stamp can never leave a delivered
+    // park looking undelivered once finalization lands (pre-push codex P1).
+    ...(options.leadShapeRef?.parkedKey && stampChannels.length
+      ? {
+        leadServiceHandoffAt: (lastDeliveredAt || firstDeliveredAt || now().toISOString()),
+        leadServiceHandoffParkId: String(options.leadShapeRef.parkId || ''),
+      }
+      : {}),
   };
   // Delivery outcomes must survive even if snapshot construction fails;
   // partial-send retry state is operational data, not part of pricing QA.
