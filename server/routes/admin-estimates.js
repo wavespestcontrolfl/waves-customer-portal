@@ -282,25 +282,27 @@ function sendRequiresServerPricingFor(estimate = {}) {
   if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return false;
   return parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled !== true;
 }
-const SEND_CLAIM_PRICING_AUTHORITY_SQL = "COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'";
+// The ONE authority predicate every send claim re-asserts — gated manual
+// sends and every automated send alike: the explicit SERVER stamp, fail
+// closed on NULL, unknown or fallback values (pre-push codex P0s — a
+// negative CLIENT_FALLBACK check let unstamped legacy rows through).
+const SERVER_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
 
 // Gate-off telemetry for the rollout count: one warn per delivery attempt
-// that actually reached the funnel with CLIENT_FALLBACK pricing, emitted
-// AFTER the funnel's own sendability check passed (so a later rejection
-// never counts) and only from that one site (the pre-read assert used to
-// log too and double-counted; GH codex P2 on #3750). Silent while the gate
-// is on — the assert refuses the send instead.
+// that actually reached the funnel WITHOUT the SERVER stamp (CLIENT_FALLBACK,
+// unstamped legacy rows, unknown values — everything the gate will refuse),
+// emitted AFTER the funnel's own sendability check passed (so a later
+// rejection never counts) and only from that one site (the pre-read assert
+// used to log too and double-counted; GH codex P2 on #3750). Silent while
+// the gate is on — the assert refuses the send instead.
 function shadowLogFallbackDelivery(estimate = {}) {
-  if (String(estimate.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return false;
+  const authority = String(estimate.pricing_authority || '').toUpperCase();
+  if (authority === 'SERVER') return false;
   if (parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true) return false;
   if (require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return false;
-  logger.warn(`[pricing-authority] shadow: estimate ${estimate.id} is being delivered with CLIENT_FALLBACK pricing (GATE_SEND_REQUIRES_SERVER_PRICING off)`);
+  logger.warn(`[pricing-authority] shadow: estimate ${estimate.id} is being delivered with pricing authority ${authority || 'NULL'} (GATE_SEND_REQUIRES_SERVER_PRICING off)`);
   return true;
 }
-// Automation claims require the explicit SERVER stamp (fail closed on null /
-// unknown values — pre-push codex P0); the manual gate above only refuses
-// the known fallback stamp.
-const AUTO_SEND_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
 
 // Automation never publishes a price the engine did not verify — gate or no
 // gate (AGENTS.md estimator-engine authority; pre-push codex P0s). Only the
@@ -407,14 +409,21 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   // (shadowLogFallbackDelivery), not here: this assert runs on the pre-read
   // in the route AND again inside sendEstimateNowInner, and may run before
   // a later gate rejects the request — logging here double-counted exposure
-  // (GH codex P2 on #3750).
-  if (!isAuthoredProposal
-    && String(estimate.pricing_authority || '').toUpperCase() === 'CLIENT_FALLBACK'
-    && sendRequiresServerPricingFor(estimate)) {
-    const err = new Error('This estimate\'s price was saved from the browser preview because the pricing engine could not verify it. Open it in the estimate tool and save again so the engine prices it, then send.');
-    err.statusCode = 409;
-    err.code = 'CLIENT_FALLBACK_PRICING';
-    throw err;
+  // (GH codex P2 on #3750). Fail closed: only the explicit SERVER stamp
+  // sends while the gate is on — a NULL / unknown stamp is no proof the
+  // engine priced the row (pre-push codex P0), and the fallback stamp is
+  // proof it did not. Each gets the message that tells the operator why.
+  if (sendRequiresServerPricingFor(estimate)) {
+    const authority = String(estimate.pricing_authority || '').toUpperCase();
+    if (authority !== 'SERVER') {
+      const fallback = authority === 'CLIENT_FALLBACK';
+      const err = new Error(fallback
+        ? 'This estimate\'s price was saved from the browser preview because the pricing engine could not verify it. Open it in the estimate tool and save again so the engine prices it, then send.'
+        : 'This estimate\'s price carries no engine verification stamp (it was saved before server-authoritative pricing, or by a path that does not stamp it). Open it in the estimate tool and save again so the engine prices it, then send.');
+      err.statusCode = 409;
+      err.code = fallback ? 'CLIENT_FALLBACK_PRICING' : 'PRICING_AUTHORITY_NOT_SERVER';
+      throw err;
+    }
   }
   assertEstimateManagerApprovalResolved(estimate);
   if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
@@ -890,7 +899,7 @@ router.post('/:id/send', async (req, res, next) => {
         // the pre-read check and this UPDATE must lose the race with a 409
         // here, not report "scheduled" and have the cron burn retries.
         .modify((q) => {
-          if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SEND_CLAIM_PRICING_AUTHORITY_SQL);
+          if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SERVER_PRICING_AUTHORITY_SQL);
         })
         .update({
           status: 'scheduled',
@@ -937,7 +946,7 @@ router.post('/:id/send', async (req, res, next) => {
         // lose the race — a zero-row claim 409s, and the refreshed retry
         // meets the gate's own message.
         .modify((q) => {
-          if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SEND_CLAIM_PRICING_AUTHORITY_SQL);
+          if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SERVER_PRICING_AUTHORITY_SQL);
         })
         .update({ status: 'sending', updated_at: db.fn.now() });
       if (!claimed) {
@@ -1381,7 +1390,7 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
         .whereNotIn('status', ['accepted', 'declined', 'expired'])
         // Same pricing-authority re-assertion as the standalone claim.
         .modify((q) => {
-          if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SEND_CLAIM_PRICING_AUTHORITY_SQL);
+          if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SERVER_PRICING_AUTHORITY_SQL);
         })
         .update({ status: 'sending', updated_at: trx.fn.now() });
       if (!anchorClaimed) {
@@ -1450,8 +1459,7 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
         // read the sibling before this lock; a fallback stamp landing in
         // between loses the race here.
         .modify((q) => {
-          if (autoSend) q.whereRaw(AUTO_SEND_PRICING_AUTHORITY_SQL);
-          else if (sendRequiresServerPricingFor(sibling)) q.whereRaw(SEND_CLAIM_PRICING_AUTHORITY_SQL);
+          if (autoSend || sendRequiresServerPricingFor(sibling)) q.whereRaw(SERVER_PRICING_AUTHORITY_SQL);
         })
         .update({ status: 'sending', updated_at: trx.fn.now() });
       if (won) claimed.push(sibling);
@@ -4263,8 +4271,7 @@ router._internals = {
   assertEstimateSendable,
   sendRequiresServerPricingFor,
   shadowLogFallbackDelivery,
-  SEND_CLAIM_PRICING_AUTHORITY_SQL,
-  AUTO_SEND_PRICING_AUTHORITY_SQL,
+  SERVER_PRICING_AUTHORITY_SQL,
   assertAutoSendPricingAuthority,
   notifyPricingFallbackAfterCommit,
   assertEstimateManagerApprovalResolved,

@@ -4015,7 +4015,12 @@ function initScheduledJobs() {
           }
         } catch (e) {
           logger.error(`Scheduled estimate ${est.id} failed: ${e.message}`);
-          await markScheduledEstimateSendFailure(est, e.message, { retry: true, now });
+          // A pricing-authority refusal is deterministic (the row needs a
+          // re-save through the engine): fail it once with the gate's own
+          // message instead of burning scheduled_send_attempts on retries
+          // (pre-push codex P1 on #3750).
+          const pricingAuthorityRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER'].includes(e.code));
+          await markScheduledEstimateSendFailure(est, e.message, { retry: !pricingAuthorityRefusal, now });
         }
       }
       logger.info(`Scheduled estimates processed: ${scheduled.length}`);

@@ -70,8 +70,7 @@ const adminEstimatesRouter = require('../routes/admin-estimates');
 const {
   assertEstimateSendable,
   sendRequiresServerPricingFor,
-  SEND_CLAIM_PRICING_AUTHORITY_SQL,
-  AUTO_SEND_PRICING_AUTHORITY_SQL,
+  SERVER_PRICING_AUTHORITY_SQL,
   assertAutoSendPricingAuthority,
   notifyPricingFallbackAfterCommit,
   shadowLogFallbackDelivery,
@@ -131,10 +130,15 @@ describe('assertEstimateSendable — engine-authoritative pricing gate', () => {
     expect(caughtBy(fallbackDraft({ pricing_authority: 'client_fallback' }))?.code).toBe('CLIENT_FALLBACK_PRICING');
   });
 
-  it('lets engine-priced and unstamped rows through', () => {
+  it('lets only the explicit SERVER stamp through; unstamped or unknown stamps are refused with their own code', () => {
     expect(caughtBy(fallbackDraft({ pricing_authority: 'SERVER' }))).toBeNull();
-    expect(caughtBy(fallbackDraft({ pricing_authority: null }))).toBeNull();
-    expect(caughtBy(fallbackDraft({ pricing_authority: undefined }))).toBeNull();
+    expect(caughtBy(fallbackDraft({ pricing_authority: 'server' }))).toBeNull();
+    for (const authority of [null, undefined, '', 'SOMETHING_NEW']) {
+      const err = caughtBy(fallbackDraft({ pricing_authority: authority }));
+      expect(err?.statusCode).toBe(409);
+      expect(err?.code).toBe('PRICING_AUTHORITY_NOT_SERVER');
+      expect(err?.message).toMatch(/no engine verification stamp/i);
+    }
   });
 
   it('blocks a delivered row too — a revision of a live link can fall back, and its resend must not deliver it', () => {
@@ -162,6 +166,12 @@ describe('shadowLogFallbackDelivery — one would-block per delivery attempt, ga
     expect(shadowLogFallbackDelivery(fallbackDraft())).toBe(true);
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/shadow.*est-client-fallback-1.*CLIENT_FALLBACK/));
+  });
+
+  it('counts unstamped legacy rows too — everything the gate will refuse', () => {
+    mockGateState.sendRequiresServerPricing = false;
+    expect(shadowLogFallbackDelivery(fallbackDraft({ pricing_authority: null }))).toBe(true);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/shadow.*est-client-fallback-1.*authority NULL/));
   });
 
   it('stays silent for engine-priced rows, authored proposals, and while the gate is on (the assert refuses instead)', () => {
@@ -198,8 +208,8 @@ describe('sendRequiresServerPricingFor — the predicate the send CLAIMS re-asse
     }))).toBe(false);
   });
 
-  it('the claim predicate excludes only CLIENT_FALLBACK rows, case-insensitively, and tolerates NULL', () => {
-    expect(SEND_CLAIM_PRICING_AUTHORITY_SQL).toBe("COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'");
+  it('the claim predicate every gated send re-asserts requires the explicit SERVER stamp', () => {
+    expect(SERVER_PRICING_AUTHORITY_SQL).toBe("UPPER(pricing_authority) = 'SERVER'");
   });
 });
 
@@ -269,6 +279,6 @@ describe('assertAutoSendPricingAuthority — automation publishes only an engine
     expect(() => assertAutoSendPricingAuthority({ pricing_authority: 'SOMETHING_NEW' })).toThrow();
     expect(() => assertAutoSendPricingAuthority({ pricing_authority: null })).toThrow();
     expect(() => assertAutoSendPricingAuthority({})).toThrow();
-    expect(AUTO_SEND_PRICING_AUTHORITY_SQL).toBe("UPPER(pricing_authority) = 'SERVER'");
+    expect(SERVER_PRICING_AUTHORITY_SQL).toBe("UPPER(pricing_authority) = 'SERVER'");
   });
 });
