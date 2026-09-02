@@ -2177,25 +2177,42 @@ function assertNoFallbackRevisionOfLiveLink(row, writeFields) {
 // link's. Runs on the LOCKED row inside the write transaction; the schedule
 // route locks the sibling rows FOR UPDATE inside its own scheduling
 // transaction, so the two serialize and this read is never stale.
-// Both the row's CURRENT group and the revision's DESTINATION group are
-// judged (GH codex P2 r7): a fallback revision that moves a draft into a
-// group whose anchor is scheduled would be refused by the cron's group
-// preflight later and fail that anchor. `lock` takes the group's advisory
-// xact lock first — the same lock the schedule route holds while it locks
-// the siblings and writes the schedule — so a move and a schedule of the
-// same group serialize instead of racing (the dryRun preflight reads
-// unlocked, best-effort; the locked recheck in the write is authoritative).
-async function assertNoFallbackRevisionInScheduledGroup(trx, row, writeFields, { lock = true } = {}) {
-  if (String(writeFields?.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return;
-  if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return;
-  const groupIds = [...new Set([row?.estimate_group_id, writeFields?.estimate_group_id].filter(Boolean).map(String))];
+// The groups a fallback revision under the gate must be judged against:
+// the row's CURRENT group and the revision's DESTINATION group (GH codex P2
+// r7 — a fallback move into a group whose anchor is scheduled would be
+// refused by the cron's group preflight later and fail that anchor).
+// Sorted, so every path takes the groups' advisory locks in one order.
+function scheduledGroupGuardGroupIds(row, writeFields) {
+  if (String(writeFields?.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return [];
+  if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return [];
+  return [...new Set([row?.estimate_group_id, writeFields?.estimate_group_id].filter(Boolean).map(String))].sort();
+}
+
+// LOCK ORDER (pre-push codex P1): group advisory xact lock(s) FIRST, then
+// the estimate row FOR UPDATE — the order the schedule route (group lock,
+// then the siblings FOR UPDATE) and the group send claim (group lock, then
+// the anchor claim) already use. The revise calls this BEFORE its row lock,
+// so a revision racing a schedule of the same group waits instead of
+// deadlocking (row held + waiting for the group lock vs group lock held +
+// waiting for the row).
+async function lockScheduledGroupGuardGroups(trx, row, writeFields) {
+  const groupIds = scheduledGroupGuardGroupIds(row, writeFields);
   for (const groupId of groupIds) {
-    if (lock) {
-      await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['estimate-group-send', groupId],
-      );
-    }
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['estimate-group-send', groupId],
+    );
+  }
+  return groupIds;
+}
+
+// The verdict itself never locks: the write path holds the group locks from
+// lockScheduledGroupGuardGroups (taken before the row lock), and the dryRun
+// preflight reads unlocked, best-effort — the locked recheck in the write is
+// authoritative.
+async function assertNoFallbackRevisionInScheduledGroup(trx, row, writeFields) {
+  const groupIds = scheduledGroupGuardGroupIds(row, writeFields);
+  for (const groupId of groupIds) {
     const scheduledMember = await trx('estimates')
       .where({ estimate_group_id: groupId, status: 'scheduled' })
       .whereNot({ id: row?.id })
@@ -2616,7 +2633,7 @@ async function reviseAdminEstimate({
     // best-effort read, so the builder never walks the operator through a
     // reprice confirm the identical real save would refuse; the locked
     // recheck inside the write transaction stays authoritative.
-    await assertNoFallbackRevisionInScheduledGroup(database, estimate, writeFields, { lock: false });
+    await assertNoFallbackRevisionInScheduledGroup(database, estimate, writeFields);
     if (groupDuplicateRecheckNeeded) {
       const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
       const revisedKey = normalizedEstimatePropertyKey(writeFields.address);
@@ -2674,6 +2691,9 @@ async function reviseAdminEstimate({
     // and resets its baseline. The baseline must snapshot the composition
     // this UPDATE actually replaces, so the locked row — not the pre-read —
     // feeds the capture below.
+    // Group advisory lock(s) BEFORE the row lock — see
+    // lockScheduledGroupGuardGroups for the deadlock this order prevents.
+    const lockedGuardGroups = await lockScheduledGroupGuardGroups(trx, estimate, writeFields);
     const lockedPrior = await trx('estimates')
       .where({ id: estimate.id })
       .forUpdate()
@@ -2684,6 +2704,12 @@ async function reviseAdminEstimate({
     // row live, and the fallback revision must lose to it — the throw rolls
     // this transaction back with nothing written.
     assertNoFallbackRevisionOfLiveLink(lockedPrior, writeFields);
+    // The locked row's group must be one we already hold the lock for — a
+    // concurrent group change between the pre-read and the row lock would
+    // otherwise need an out-of-order lock; refuse and let the operator retry.
+    if (scheduledGroupGuardGroupIds(lockedPrior, writeFields).some((groupId) => !lockedGuardGroups.includes(groupId))) {
+      throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
+    }
     await assertNoFallbackRevisionInScheduledGroup(trx, lockedPrior, writeFields);
     // Protocol keys re-applied from the LOCKED row (codex P0, PR #3304 GH
     // r8c): writeFields.estimate_data was built from the pre-read
@@ -2804,3 +2830,5 @@ module.exports = {
 };
 module.exports.stripClientProposal = stripClientProposal;
 module.exports.assertNoFallbackRevisionInScheduledGroup = assertNoFallbackRevisionInScheduledGroup;
+module.exports.lockScheduledGroupGuardGroups = lockScheduledGroupGuardGroups;
+module.exports.scheduledGroupGuardGroupIds = scheduledGroupGuardGroupIds;
