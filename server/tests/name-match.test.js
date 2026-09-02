@@ -47,6 +47,15 @@ describe('payerNameCorroborates', () => {
     expect(payerNameCorroborates('ROBERT DOE', customer)).toBe(true);
   });
 
+  test('an ambiguous nickname (Pat / Chris / Sam / Alex) only matches an identical customer first name', () => {
+    expect(payerNameCorroborates('PAT DOE', { first_name: 'Patrick', last_name: 'Doe' })).toBe(false);
+    expect(payerNameCorroborates('PAT DOE', { first_name: 'Patricia', last_name: 'Doe' })).toBe(false);
+    expect(payerNameCorroborates('PAT DOE', { first_name: 'Pat', last_name: 'Doe' })).toBe(true);
+    expect(payerNameCorroborates('SAM DOE', { first_name: 'Samuel', last_name: 'Doe' })).toBe(false);
+    // The bank's full name still resolves a customer recorded by nickname.
+    expect(payerNameCorroborates('SAMANTHA DOE', { first_name: 'Sam', last_name: 'Doe' })).toBe(true);
+  });
+
   test('nickname first name still corroborates', () => {
     expect(payerNameCorroborates('Bob Doe', customer)).toBe(true);
   });

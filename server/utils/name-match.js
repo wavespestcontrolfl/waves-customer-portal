@@ -180,6 +180,20 @@ function firstNameVariants(normalizedFirst) {
   const variants = NICKNAME_LOOKUP.get(normalizedFirst);
   return variants ? [...variants] : [normalizedFirst];
 }
+// How many nickname groups a token belongs to. "pat" (Patrick / Patricia),
+// "chris", "sam", "alex" span two — that merge is fine for the call processor
+// (a phone already narrows the household) but NOT for money: a bank name must
+// map to ONE canonical given name or match the customer exactly.
+const NICKNAME_GROUP_COUNT = new Map();
+for (const group of NICKNAME_GROUPS) {
+  for (const name of group) NICKNAME_GROUP_COUNT.set(name, (NICKNAME_GROUP_COUNT.get(name) || 0) + 1);
+}
+function payerFirstNameCompatible(payerRun, customerFirst) {
+  if (!payerRun || !customerFirst) return false;
+  if (payerRun === customerFirst) return true;
+  if ((NICKNAME_GROUP_COUNT.get(payerRun) || 0) !== 1) return false;
+  return sameFirstName(payerRun, customerFirst);
+}
 function sameFirstName(a, b) {
   if (!a || !b) return false;
   if (a === b) return true;
@@ -193,8 +207,9 @@ function sameFirstName(a, b) {
 // must belong to the SAME person: the customer's last name must be that
 // person's surname — the trailing token run, or everything before the comma
 // in "Last, First" form — and the LEADING run of the remaining tokens must be
-// first-name-compatible (nickname-aware; compound "Mary Ann" joins; a middle
-// name never counts). Generational suffixes (Jr, Sr, II…) are ignored. A single-token person shares the surname of the last person on
+// first-name-compatible — equal, or a nickname that belongs to exactly ONE
+// group ("Bob" → Robert; never "Pat", "Chris", "Sam", "Alex", which span two
+// names); compound "Mary Ann" joins; a middle name never counts. Generational suffixes (Jr, Sr, II…) are ignored. A single-token person shares the surname of the last person on
 // the line ("Pat & Robert Doe"). Initials never satisfy the first-name leg;
 // a missing customer name part never corroborates (amount alone is not
 // identity).
@@ -240,13 +255,13 @@ function personsOf(payerName) {
 }
 function personCorroborates(person, customerFirst, customerLast) {
   if (person.fixedSurname) {
-    return person.surname.join('') === customerLast && givenNameRuns(person.given).some((r) => sameFirstName(r, customerFirst));
+    return person.surname.join('') === customerLast && givenNameRuns(person.given).some((r) => payerFirstNameCompatible(r, customerFirst));
   }
   const tokens = person.all || [];
   // The surname is a trailing run; the given name lives in what precedes it.
   for (let k = tokens.length - 1; k >= 1; k -= 1) {
     if (tokens.slice(k).join('') === customerLast) {
-      if (givenNameRuns(tokens.slice(0, k)).some((r) => sameFirstName(r, customerFirst))) return true;
+      if (givenNameRuns(tokens.slice(0, k)).some((r) => payerFirstNameCompatible(r, customerFirst))) return true;
     }
   }
   return false;
@@ -261,6 +276,7 @@ function payerNameCorroborates(payerName, customer = {}) {
 module.exports = {
   normalizeNamePart,
   normalizeNameFolded,
+  payerFirstNameCompatible,
   NICKNAME_GROUPS,
   firstNameVariants,
   sameFirstName,
