@@ -46,7 +46,7 @@ beforeEach(() => {
   localStorage.setItem("waves_admin_token", "t");
   vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
     calls.push({ url: String(url), method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
-    if (String(url).includes("/intelligence")) return { ok: true, status: 200, json: async () => ({ intelligence: intelligence() }) };
+    if (String(url).includes("/intelligence")) return { ok: true, status: 200, json: async () => ({ intelligence: intelligence(), features: { commitments: true, admin: true } }) };
     if (String(url).includes("/commitments/")) return { ok: true, status: 200, json: async () => ({ commitment: {} }) };
     return { ok: true, status: 200, json: async () => ({}) };
   }));
@@ -140,6 +140,17 @@ describe("CallIntelligencePanel", () => {
     await waitFor(() => expect(screen.getByText(/Possibly kept: sms sent/)).toBeInTheDocument());
     expect(screen.queryByText(/^Kept:/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Mark done" })).toBeInTheDocument();
+  });
+
+  it("shows the customer relink and recording adoption only to admins", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ intelligence: intelligence({ recordings: { current: "RE1", additional: [{ recording_sid: "RE2", recording_duration_seconds: 80 }], superseded: [] } }), features: { commitments: true, admin: false } }) })));
+    render(<CallIntelligencePanel callId={CALL_ID} />);
+    fireEvent.click(screen.getByRole("button", { name: /call intelligence/i }));
+    await waitFor(() => expect(screen.getByText("Complete")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Change linked customer" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Use this recording/ })).not.toBeInTheDocument();
+    // Commitment controls stay staff-wide.
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
   });
 
   it("hides every write control when the gate is off and says why", async () => {

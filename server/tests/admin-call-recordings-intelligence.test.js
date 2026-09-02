@@ -17,7 +17,7 @@ jest.mock('../services/call-commitments', () => ({
 // per request, never at factory time).
 let mockRole = 'admin';
 jest.mock('../middleware/admin-auth', () => ({
-  adminAuthenticate: (req, _res, next) => { req.technicianId = 'tech-1'; next(); },
+  adminAuthenticate: (req, _res, next) => { req.technicianId = 'tech-1'; req.techRole = mockRole; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
   requireAdmin: (_req, res, next) => (mockRole === 'admin' ? next() : res.status(403).json({ error: 'Admin only' })),
 }));
@@ -94,13 +94,14 @@ describe('GET /calls/:id/intelligence', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.intelligence.call_id).toBe(CALL_ID);
-      // The panel hides its write controls on this flag.
-      expect(body.features).toEqual({ commitments: true });
+      // The panel hides its write controls on these flags: commitments while
+      // the gate is off, the admin-only corrections for non-admins.
+      expect(body.features).toEqual({ commitments: true, admin: false });
     });
     isEnabled.mockReturnValue(false);
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`);
-      expect((await res.json()).features).toEqual({ commitments: false });
+      expect((await res.json()).features).toEqual({ commitments: false, admin: false });
     });
   });
   test('404s when the call does not exist', async () => {

@@ -221,7 +221,9 @@ router.get('/calls/:id/intelligence', async (req, res, next) => {
     const { isEnabled } = require('../config/feature-gates');
     // The panel hides its write controls when the gate is off, instead of
     // offering buttons that can only 409.
-    res.json({ intelligence, features: { commitments: isEnabled('callCommitments') } });
+    // The panel renders the admin-only corrections (customer relink,
+    // recording adoption) only for admins; staff see them read-only.
+    res.json({ intelligence, features: { commitments: isEnabled('callCommitments'), admin: req.techRole === 'admin' } });
   } catch (err) { next(err); }
 });
 

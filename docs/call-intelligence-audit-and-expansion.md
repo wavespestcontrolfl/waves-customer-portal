@@ -197,6 +197,9 @@ Per file, with the proving test.
 - Pre-push Codex round 23 (1 P1, fixed): every timestamp reaching a
   commitment (model due_at, V2 scheduling fields) goes through the Eastern
   parser — a naive string is an ET wall clock, never UTC.
+- Pre-push Codex round 24 (1 P1, fixed): the intelligence response carries
+  an admin flag; the panel shows customer relink and recording adoption
+  only to admins (commitment controls stay staff-wide).
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 

@@ -91,7 +91,7 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
     setState((s) => ({ ...s, status: "loading", error: null }));
     try {
       const body = await adminFetch(`/admin/call-recordings/calls/${encodeURIComponent(callId)}/intelligence`);
-      setState({ status: "ready", data: body.intelligence, error: null, canEdit: body.features?.commitments !== false });
+      setState({ status: "ready", data: body.intelligence, error: null, canEdit: body.features?.commitments !== false, isAdmin: body.features?.admin === true });
     } catch (err) {
       setState({ status: "error", data: null, error: err.message || "Could not load call intelligence." });
     }
@@ -123,6 +123,8 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
   const view = state.data;
   // Off gate: reads still render what was recorded; writes are not offered.
   const canEdit = state.canEdit !== false;
+  // Customer relink and recording adoption are admin-only on the server.
+  const isAdmin = state.isAdmin === true;
 
   return (
     <div className="mt-1.5 ml-8 bg-zinc-50 border-hairline rounded-md">
@@ -221,9 +223,11 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
             <Badge tone={view.links.customer_link.source === "human" ? "strong" : "neutral"}>
               {view.links.customer_link.source === "human" ? "set by office" : view.links.customer_link.source === "generated" ? "generated" : "none"}
             </Badge>
-            <Button size="sm" variant="secondary" onClick={() => setRelink(relink ? null : { query: "", results: [] })} aria-label="Change linked customer">
-              {relink ? "Cancel" : "Change"}
-            </Button>
+            {isAdmin && (
+              <Button size="sm" variant="secondary" onClick={() => setRelink(relink ? null : { query: "", results: [] })} aria-label="Change linked customer">
+                {relink ? "Cancel" : "Change"}
+              </Button>
+            )}
           </div>
           {relink && (
             <div className="space-y-1.5">
@@ -437,14 +441,16 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
                     {r.received_at ? ` · received ${fmtWhen(r.received_at)}` : ""}
                     {r.parked_because ? ` · ${humanize(r.parked_because)}` : ""}
                   </span>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={!!busy}
-                    onClick={() => act("adopt", () => adminFetch(`/admin/call-recordings/calls/${encodeURIComponent(callId)}/adopt-recording`, { method: "POST", body: JSON.stringify({ recording_sid: r.recording_sid }) }))}
-                  >
-                    Use this recording & reprocess
-                  </Button>
+                  {isAdmin && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={!!busy}
+                      onClick={() => act("adopt", () => adminFetch(`/admin/call-recordings/calls/${encodeURIComponent(callId)}/adopt-recording`, { method: "POST", body: JSON.stringify({ recording_sid: r.recording_sid }) }))}
+                    >
+                      Use this recording & reprocess
+                    </Button>
+                  )}
                 </div>
               ))}
             </div>
