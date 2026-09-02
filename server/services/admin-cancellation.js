@@ -727,7 +727,12 @@ async function adminCoverageBoundaryInForce(customerId) {
 // identity (key + compat set) must be that boundary, not a term_end an
 // admin corrected since — or the repair would consume the corrected
 // date's key while texting the old one.
-async function resolveTermEpisode(customerId, term, currentRequestId = null, { boundary: boundaryOverride = null } = {}) {
+// `requestCreatedAt`: the request being keyed. A request opened BEFORE the
+// current episode began (an acceptance left open across a win-back and a
+// re-churn) belongs to an earlier episode — it gets no term key at all and
+// falls back to request-keyed dedupe, so its repair can neither retire the
+// current episode's dated task nor consume its confirmation key.
+async function resolveTermEpisode(customerId, term, currentRequestId = null, { boundary: boundaryOverride = null, requestCreatedAt = null } = {}) {
   if (!term) return null;
   const none = { termId: term.id, episodeKey: null, boundary: null, priorRequestIds: [], priorEndNowRequestIds: [] };
   try {
@@ -739,6 +744,10 @@ async function resolveTermEpisode(customerId, term, currentRequestId = null, { b
     const { parseETDateTime } = require('../utils/datetime-et');
     const episodeStart = parseETDateTime(`${churnDate}T00:00`);
     if (!Number.isFinite(episodeStart.getTime())) return none;
+    if (requestCreatedAt) {
+      const opened = new Date(requestCreatedAt);
+      if (Number.isFinite(opened.getTime()) && opened.getTime() < episodeStart.getTime()) return none;
+    }
     const cases = await db('cancellation_cases')
       .where({ customer_id: customerId })
       .where('created_at', '>=', episodeStart)
@@ -1452,7 +1461,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             // gets its pull instruction.
             const datedTermite = priorSnap.effectiveDate === 'end_of_coverage';
             const repairEpisode = await resolveTermEpisode(customerId, term, reqRow.id,
-              { boundary: datedTermite ? priorSnap.effectiveOn : null });
+              { boundary: datedTermite ? priorSnap.effectiveOn : null, requestCreatedAt: reqRow.created_at });
             if (hasTermiteErr && (!datedTermite || priorSnap.effectiveOn)) {
               try {
                 const { raiseTermiteRetrievalTask } = require('./cancellation-processor');

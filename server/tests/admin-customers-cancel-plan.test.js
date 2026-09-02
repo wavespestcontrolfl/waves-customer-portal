@@ -2180,6 +2180,38 @@ describe('POST /:id/cancel-plan', () => {
       expect(mockState.service_requests[0].status).toBe('resolved');
     }));
 
+    test('a repair for an acceptance opened BEFORE the current churn episode is keyed on the request alone — it never borrows the term key of the new episode', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      // The acceptance was left open across a win-back; the account then
+      // re-churned (churned_at = today), so the request predates the episode.
+      mockState.customers[0].pipeline_stage = 'churned';
+      mockState.customers[0].churned_at = new Date().toISOString().slice(0, 10);
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' } }),
+        created_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
+      }];
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        created_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term',
+          outcome: {
+            visitsPulled: 2, scope: [], confirmationRequested: false, confirmation: null, confirmationChannels: [],
+            errors: ['termite_retrieval_task'],
+          },
+        }),
+      }];
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      expect(body.duplicate).toBe(true);
+      // Raised, but request-keyed: no episode identity rides on it (the task
+      // is term-keyed only with BOTH termId and episodeKey), so it can neither
+      // retire the current episode's dated task nor consume its confirmation key.
+      expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', 'req-9', expect.objectContaining({ retrieveAfter: '2027-02-28', episodeKey: null, priorRequestIds: [] }));
+      expect(body.errors).toEqual([]);
+    }));
+
     test('a stale termite_retrieval_task on an END-NOW decided-term duplicate repairs the IMMEDIATE task — the office gets its pull instruction', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.annual_prepay_terms[0].status = 'cancelled';
