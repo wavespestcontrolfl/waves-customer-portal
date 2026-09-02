@@ -39,7 +39,7 @@ jest.mock('../services/notification-service', () => ({
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockPlan = { active: false, throws: false };
 jest.mock('../services/waveguard-existing-services', () => ({
-  isActivePlanCustomer: jest.fn(async () => { if (mockPlan.throws) throw new Error('lookup down'); return mockPlan.active; }),
+  isActivePlanCustomer: jest.fn(async (dbh, id, opts) => { mockPlan.lastOpts = opts; if (mockPlan.throws) throw new Error('lookup down'); return mockPlan.active; }),
 }));
 
 const { applyLeadServiceForSend, revertLeadServiceForSend, markLeadServiceRevertPending } = require('../routes/admin-estimates');
@@ -320,6 +320,26 @@ describe('fail-closed marker handling (GH codex r4 P1 x2)', () => {
     mockRows.queue = [claimed, claimed, claimed];
     expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
     expect(mockMixCalls).toHaveLength(0);
+  });
+
+  test('membership reads are STRICT so an outage reads as member, never as "no plan" (GH codex r9 P1)', async () => {
+    mockPlan.active = false;
+    const row = newCustomerRow({ customer_id: 'cust-1' });
+    mockRows.queue = [claimedRowFor(row), claimedRowFor(row), parkedRow];
+    await applyLeadServiceForSend(row);
+    expect(mockPlan.lastOpts).toEqual({ strict: true });
+  });
+
+  test('a bound revert marker wins over the attempt stamp: a transient restore failure is retried, not stranded (GH codex r9 P1)', async () => {
+    const row = newCustomerRow();
+    const claimed = claimedRowFor(row);
+    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), leadServiceHandoffAttempt: { parkId: 'p1', at: 't' }, leadServiceRevertPending: { serviceKey: 'lawn_care', parkId: 'p1', at: 't' }, serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', parkId: 'p1', at: 't1' }] } });
+    const restoredRow = { ...claimed, estimate_data: JSON.stringify({ serviceOptOut: { events: [] } }) };
+    mockRows.queue = [claimed, claimed, restoredRow];
+    const out = await applyLeadServiceForSend(row);
+    expect(out.parkedKey).toBeNull();
+    expect(mockMixCalls.map((c) => [c.body.serviceKey, c.body.included])).toEqual([['lawn_care', true], ['lawn_care', true]]);
+    expect(mockNotify.calls).toHaveLength(0);
   });
 
   test('an ATTEMPTED handoff with no witness is ambiguous: the send aborts and the office is paged, nothing restored (pre-push codex P1)', async () => {

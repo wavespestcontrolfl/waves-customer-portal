@@ -906,7 +906,14 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
       // already hold the reduced quote, so it is neither restored nor
       // resent; the send aborts and the office reviews (pre-push codex P1).
       const attempt = pendingData?.leadServiceHandoffAttempt || null;
-      if (unwitnessed && attempt && parkedEvent.parkId && attempt.parkId === parkedEvent.parkId) {
+      // A bound revert marker is CONFIRMED no-handoff (the wrapper writes it
+      // only after every channel failed and compensation failed): it wins
+      // over the attempt stamp, so a transient restore failure retries
+      // instead of stranding the estimate in review (GH codex r9 P1).
+      const boundMarker = pendingData?.leadServiceRevertPending || null;
+      const markerBound = boundMarker && parkedEvent && boundMarker.serviceKey === parkedEvent.serviceKey
+        && (!boundMarker.parkId || boundMarker.parkId === parkedEvent.parkId);
+      if (!markerBound && unwitnessed && attempt && parkedEvent.parkId && attempt.parkId === parkedEvent.parkId) {
         await pageOfficeAmbiguousPark(estimate, parkedEvent.serviceKey).catch(() => {});
         const abort = new Error('This estimate needs a review: an earlier send may have delivered a single-service quote whose delivery could not be confirmed. Nothing was sent.');
         abort.statusCode = 409;
@@ -996,7 +1003,9 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
     if (current.customer_id) {
       const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
       let activeMember = true;
-      try { activeMember = await isActivePlanCustomer(db, current.customer_id); } catch (_) { activeMember = true; }
+      // strict: a failed read THROWS (read as "member", i.e. never parked)
+      // instead of the helper's default "no plan" (GH codex r9 P1).
+      try { activeMember = await isActivePlanCustomer(db, current.customer_id, { strict: true }); } catch (_) { activeMember = true; }
       if (activeMember) return untouched;
     }
     const estimatePublic = require('./estimate-public');
@@ -1433,6 +1442,17 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // Reverts on ANY exit without a real handoff — sent:false, a throw, or a
   // sent:true built only from suppression sentinels (r2).
   if (leadShapeRef.parkedKey && !leadShapeRef.delivered) {
+    // Every channel conclusively failed (no throw): the attempt stamp is no
+    // longer ambiguous evidence — clear it so a later retry is a retry, not
+    // a review abort (GH codex r9 P1). Best-effort; the bound marker below
+    // wins over the stamp regardless.
+    if (!thrown && result && result.sent === false) {
+      try {
+        await db('estimates').where({ id: estimate?.id }).update({
+          estimate_data: db.raw("COALESCE(estimate_data, '{}'::jsonb) - 'leadServiceHandoffAttempt'"),
+        });
+      } catch (err) { logger.warn(`[admin-estimates] attempt-stamp clear failed for estimate ${estimate?.id}: ${err.message}`); }
+    }
     const restored = await revertLeadServiceForSend(estimate?.id, leadShapeRef.parkedKey);
     // A failed compensation is a DURABLE retry state, never a silent
     // reshape: the marker makes the next send retry the restore first (and
@@ -1513,8 +1533,41 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // design — a refusal or engine miss sends the full bundle exactly as today
   // (never a blocked send), and the row is re-read so the message text and
   // the delivery claim below see the parked totals.
+  // The post-operator, PRE-park row is what the draft-to-send learning
+  // event must see — an automated park is not an operator edit (GH codex
+  // r9 P1).
+  const preParkEstimate = estimate;
   const leadShape = await applyLeadServiceForSend(estimate, { leadShapeRef: options.leadShapeRef || null });
   estimate = leadShape.estimate;
+  if (leadShape.parkedKey) {
+    // The operator acknowledged the pre-park bundle; the parked single-line
+    // quote is a DIFFERENT recompute and must clear sendability on its own —
+    // review-only output falls back to the full bundle (GH codex r9 P1).
+    let shapedSendable = true;
+    try {
+      assertEstimateSendable(estimate, { engineReviewAcknowledged: engineReviewAcknowledgedResolved });
+      const { lineRequiresReview } = require('../services/estimator-engine/draft-builder');
+      let shapedData = {};
+      try { shapedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); } catch { shapedData = {}; }
+      const lines = Array.isArray(shapedData?.engineResult?.lineItems) ? shapedData.engineResult.lineItems : [];
+      if (lines.some((li) => li && typeof li === 'object' && lineRequiresReview(li))) shapedSendable = false;
+    } catch (_) { shapedSendable = false; }
+    if (!shapedSendable) {
+      logger.warn(`[admin-estimates] lead-service send: parked quote not sendable on estimate ${estimate.id}; restoring the full bundle`);
+      const restored = await revertLeadServiceForSend(estimate.id, leadShape.parkedKey);
+      if (!restored) {
+        const abort = new Error('The single-service quote needs a review and the full bundle could not be restored. Nothing was sent.');
+        abort.statusCode = 409;
+        abort.leadServiceAbort = true;
+        throw abort;
+      }
+      const restoredRow = await db('estimates').where({ id: estimate.id }).first();
+      if (!restoredRow) throw Object.assign(new Error('Estimate disappeared while restoring. Nothing was sent.'), { statusCode: 409, leadServiceAbort: true });
+      estimate = { ...restoredRow, status: estimate.status };
+      leadShape.parkedKey = null;
+      if (options.leadShapeRef) { options.leadShapeRef.parkedKey = null; options.leadShapeRef.parkId = null; }
+    }
+  }
 
   // Group pre-flight runs before ANY channel delivery (see helper above).
   let claimedGroupSiblings = [];
@@ -1975,7 +2028,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // constraint). Fail-soft: never turns a delivered send into an error.
     try {
       const { recordSentLearningEvent } = require('../services/estimate-learning');
-      await recordSentLearningEvent({ estimateId: estimate.id, sentRow: estimate });
+      await recordSentLearningEvent({ estimateId: estimate.id, sentRow: preParkEstimate });
     } catch (e) {
       logger.warn(`[admin-estimates] learning event failed for estimate ${estimate.id}: ${e.message}`);
     }

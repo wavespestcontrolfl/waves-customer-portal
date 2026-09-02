@@ -14796,7 +14796,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       // P0). A lookup error refuses too.
       if (estimate.customer_id) {
         let activeMember = true;
-        try { activeMember = await isActivePlanCustomer(db, estimate.customer_id); } catch (_) { activeMember = true; }
+        try { activeMember = await isActivePlanCustomer(db, estimate.customer_id, { strict: true }); } catch (_) { activeMember = true; }
         if (activeMember) return { status: 400, body: ({ error: 'service_not_addable' }) };
       }
       mode = 'add';
@@ -14811,7 +14811,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       // (pre-push codex P0). Staff compensation restores keep the bypass.
       if (estimate.customer_id) {
         let activeMember = true;
-        try { activeMember = await isActivePlanCustomer(db, estimate.customer_id); } catch (_) { activeMember = true; }
+        try { activeMember = await isActivePlanCustomer(db, estimate.customer_id, { strict: true }); } catch (_) { activeMember = true; }
         if (activeMember) return { status: 400, body: ({ error: 'service_not_addable' }) };
       }
       if (OptOut.serviceOptOutBlockedByProposal(parsedData)
@@ -25153,7 +25153,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // payload literal; a lookup error withholds the stamp.
     let addStampBlockedByMembership = false;
     if (serviceAddGateOn() && !adminDraftPreview && estimate.customer_id) {
-      try { addStampBlockedByMembership = !!(await isActivePlanCustomer(db, estimate.customer_id)); }
+      try { addStampBlockedByMembership = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
       catch (_) { addStampBlockedByMembership = true; }
     }
 
