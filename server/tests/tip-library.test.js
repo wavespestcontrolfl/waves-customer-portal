@@ -160,6 +160,10 @@ describe('freezeTechTips', () => {
     expect(sentenceCount('Water 1.25 inches a week, early morning.')).toBe(1);
     expect(sentenceCount('Flip the mats. Empty the saucers. Trim the hedge!')).toBe(3);
     expect(sentenceCount('Do you have bromeliads? Flush them weekly.')).toBe(2);
+    // capitalisation is not a sentence boundary signal
+    expect(sentenceCount('Flip the mats. then empty the saucers.')).toBe(2);
+    expect(sentenceCount('flip the mats! empty the saucers')).toBe(2);
+    expect(freezeTechTips({ ids: [], custom: 'Flip the mats. then empty the saucers.' }).dropped[0].violations).toEqual(['multi_sentence']);
     const { tips, dropped } = freezeTechTips({ ids: [], custom: 'Flip the mats. Empty the saucers. Trim the hedge. Fix the drip.' });
     expect(tips).toEqual([]);
     expect(dropped).toEqual([{ copy: 'Flip the mats. Empty the saucers. Trim the hedge. Fix the drip.', violations: ['multi_sentence'] }]);

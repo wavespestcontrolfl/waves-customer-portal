@@ -391,13 +391,17 @@ function resolveTipIds(ids) {
  * whole set is capped at MAX_TIPS_PER_VISIT, and anything malformed yields
  * an empty freeze rather than a throw.
  */
-// Sentence terminators followed by a new sentence (or the end). "A/C",
-// decimals ("1.25") and abbreviations without a following capital don't
-// split; "Do X. Then Y." does.
+// Sentence terminators followed by whitespace and more text, or the end —
+// independent of capitalisation ("Flip the mats. then empty the saucers."
+// is two). "A/C" has no terminator and decimals ("1.25") have no
+// whitespace after the dot, so neither splits; a mid-line abbreviation
+// ("approx. 1 inch") does, and the 400 tells the tech to make it one
+// sentence.
 function sentenceCount(text) {
   const t = String(text || '').trim();
   if (!t) return 0;
-  return (t.match(/[.!?]+(?:["')\]]+)?(?=\s+["'(]?[A-Z0-9]|\s*$)/g) || []).length || 1;
+  // interior boundaries + 1: a trailing terminator (or none) is still one sentence
+  return (t.match(/[.!?]+(?:["')\]]+)?(?=\s+\S)/g) || []).length + 1;
 }
 
 function freezeTechTips(input) {

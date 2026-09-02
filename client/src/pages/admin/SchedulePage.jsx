@@ -12114,6 +12114,11 @@ export function CompletionPanel({
       setAiReportUsed(false);
       if (String(savedDraft.notes || "").trim() === installed.trim()) {
         setNotes(preGenerationNotesRef.current || "");
+      // The restored notes carry their [Found]/[Next] lines again, so the
+      // parked copies would double up — and would survive the tech deleting
+      // or correcting a restored line. Restoring resets the park.
+      setParkedFound("");
+      setParkedNext("");
         // Detachment restores with the notes (codex r77) — same contract
         // as the invalidation path.
         setChipLinesDetached(preGenerationChipDetachedRef.current === true);
@@ -14152,6 +14157,11 @@ export function CompletionPanel({
       // no-regenerate completion and from the next generation's grounding
       // (codex r44).
       setNotes(preGenerationNotesRef.current || "");
+      // The restored notes carry their [Found]/[Next] lines again, so the
+      // parked copies would double up — and would survive the tech deleting
+      // or correcting a restored line. Restoring resets the park.
+      setParkedFound("");
+      setParkedNext("");
       // The restored notes' [Protocol]/[Found]/[Next] marker lines own
       // selection again — the detachment state travels with the notes it
       // described (codex r77).
