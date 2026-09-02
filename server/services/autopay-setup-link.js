@@ -769,8 +769,24 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
 
 // POST /secure/:token/complete for a kind='customer' row — live-verify
 // against Stripe (never the client's word), then the tail.
+// A terminal row acks ONLY the intent it completed with (GH Codex P1): two
+// tabs can hold different intent generations; the loser's method is
+// attached at Stripe but never saved/consented/enrolled, so reporting it as
+// completed would show a secured page for a method nothing will charge. A
+// satisfied row (auto-secured, no intent of its own) acks any POST — the
+// link is covered either way.
+function terminalOutcome(request, setupIntentId) {
+  if (request.status === 'satisfied') return { ok: true, alreadyCompleted: true };
+  if (request.status === 'completed') {
+    if (setupIntentId && request.stripe_setup_intent_id === setupIntentId) return { ok: true, alreadyCompleted: true };
+    return { ok: false, code: 'intent_mismatch' };
+  }
+  return null;
+}
+
 async function completeAutopaySetupCapture({ request, setupIntentId, ip = null, userAgent = null }) {
-  if (request.status === 'completed' || request.status === 'satisfied') return { ok: true, alreadyCompleted: true };
+  const terminal = terminalOutcome(request, setupIntentId);
+  if (terminal) return terminal;
   if (!setupIntentId) return { ok: false, code: 'no_setup_intent' };
   let setupIntent = null;
   try {
@@ -809,7 +825,9 @@ async function completeAutopaySetupCaptureFromWebhook(setupIntent, { eventCreate
     return { ok: false, code: 'completion_in_progress' };
   }
   if (request.status !== 'pending' && request.status !== 'completing') {
-    return { ok: true, alreadyCompleted: true };
+    // Terminal: ack only the intent the row completed with (a stale
+    // generation acks as intent_mismatch — permanent, never enrolled).
+    return terminalOutcome(request, setupIntent?.id) || { ok: false, code: 'intent_mismatch' };
   }
   if (!intentMatchesRequest(setupIntent, request.id)) return { ok: false, code: 'intent_mismatch' };
   return finishVerifiedCapture({

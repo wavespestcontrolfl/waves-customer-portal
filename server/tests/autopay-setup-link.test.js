@@ -724,12 +724,24 @@ describe('completion tail (page POST + webhook)', () => {
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 
-  it('webhook backstop completes a pending row from the signed event and acks non-pending rows', async () => {
+  it('webhook backstop completes a pending row from the signed event and acks a terminal row only for ITS intent', async () => {
     mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING }) };
     mockTableHandlers.payment_methods = { first: () => null };
     expect(await completeAutopaySetupCaptureFromWebhook(GOOD_SI)).toEqual({ ok: true });
-    mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completed' }) };
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completed', stripe_setup_intent_id: 'seti_new' }) };
     expect(await completeAutopaySetupCaptureFromWebhook(GOOD_SI)).toEqual({ ok: true, alreadyCompleted: true });
+    // A stale generation (another tab's intent) is a permanent mismatch, never enrolled.
+    expect(await completeAutopaySetupCaptureFromWebhook({ ...GOOD_SI, id: 'seti_stale' })).toEqual({ ok: false, code: 'intent_mismatch' });
+    // A satisfied row (auto-secured, no intent) acks any event.
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'satisfied' }) };
+    expect(await completeAutopaySetupCaptureFromWebhook({ ...GOOD_SI, id: 'seti_any' })).toEqual({ ok: true, alreadyCompleted: true });
+  });
+
+  it('page POST on a completed row acks only the completing intent; a stale generation is intent_mismatch', async () => {
+    const completed = { ...PENDING, status: 'completed', stripe_setup_intent_id: 'seti_new' };
+    expect(await completeAutopaySetupCapture({ request: completed, setupIntentId: 'seti_new' })).toEqual({ ok: true, alreadyCompleted: true });
+    expect(await completeAutopaySetupCapture({ request: completed, setupIntentId: 'seti_stale' })).toEqual({ ok: false, code: 'intent_mismatch' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 
   it('webhook backstop reports a FRESH completing claim as retryable and ignores visit-lane rows', async () => {
