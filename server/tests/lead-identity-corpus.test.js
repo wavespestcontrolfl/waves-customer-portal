@@ -325,16 +325,37 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     // email-shaped token too, and must pass the same synthetic rules.
     // …and so is an RFC domain literal (person@[192.0.2.10]).
     // …and a QUOTED local part ("customer.name"@example.net).
-    for (const email of String(text).match(/(?:"[^"\s@]+"|[\p{L}\p{N}_.+%-]+)@(?:[\p{L}\p{N}_.-]+|\[[^\]\s]+\])/gu) || []) {
-      const ok = /@(?:[a-z0-9-]+\.)*example\.com$/i.test(email)
+    // The token must be the WHOLE whitespace-delimited word (wrapping
+    // punctuation stripped): `real'office@example.com` is one word whose
+    // email-shaped tail happens to be allowlisted — the cut prefix is real.
+    const str = String(text);
+    for (const m of str.matchAll(/(?:"[^"\s@]+"|[\p{L}\p{N}_.+%-]+)@(?:[\p{L}\p{N}_.-]+|\[[^\]\s]+\])/gu)) {
+      const email = m[0];
+      let ws = m.index;
+      while (ws > 0 && !/\s/.test(str[ws - 1])) ws -= 1;
+      let we = m.index + email.length;
+      while (we < str.length && !/\s/.test(str[we])) we += 1;
+      const word = str.slice(ws, we).replace(/^[^\p{L}\p{N}"[]+|[^\p{L}\p{N}\]]+$/gu, '');
+      const ok = word === email
+        && /@(?:[a-z0-9-]+\.)*example\.com$/i.test(email)
         && SYNTHETIC_EMAIL_LOCALS.has(email.toLowerCase().split('@')[0]);
-      expect({ where, email, ok }).toEqual({ where, email, ok: true });
+      expect({ where, email, word, ok }).toEqual({ where, email, word, ok: true });
     }
     // Unicode dashes (en/em/figure/nonbreaking hyphen, minus) and
     // nonbreaking/figure/narrow spaces normalize to ASCII first, and the
     // separator class includes `/` — `941–555–2091` and `941/555/2091`
     // are phone spellings too.
-    const normalized = String(text).replace(/[\u2010-\u2015\u2212]/g, '-').replace(/[\u00A0\u2007\u202F]/g, ' ');
+    // Unicode DECIMAL digits (Arabic-Indic, fullwidth, …) map to ASCII too:
+    // Nd digits come in runs of ten, so the value is the offset from the
+    // run's zero.
+    const asciiDigit = (ch) => {
+      let z = ch.codePointAt(0);
+      while (/\p{Nd}/u.test(String.fromCodePoint(z - 1))) z -= 1;
+      return String((ch.codePointAt(0) - z) % 10);
+    };
+    const normalized = String(text)
+      .replace(/\p{Nd}/gu, (ch) => (/[0-9]/.test(ch) ? ch : asciiDigit(ch)))
+      .replace(/[\u2010-\u2015\u2212]/g, '-').replace(/[\u00A0\u2007\u202F]/g, ' ');
     for (const run of normalized.match(/\+?\d[\d\s().\/-]{5,}\d/g) || []) {
       const digits = run.replace(/\D/g, '');
       if (digits.length < 7) continue;

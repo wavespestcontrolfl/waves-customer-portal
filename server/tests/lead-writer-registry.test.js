@@ -210,8 +210,11 @@ function insertFirstMatches(code, argRe) {
 // still one statement. (A mid-word split is deliberate obfuscation beyond
 // textual scanning.)
 const RAW_SEP = String.raw`(?:\s*${Q}\s*\+\s*${Q}\s*|\s*\/\*[\s\S]*?\*\/\s*|\s*--[^\n]*\n\s*|\s+)`;
+// Optional schema qualifier: a bare or quoted identifier — a DOUBLE-quoted
+// one may hold any punctuation PostgreSQL allows ("tenant-one"."leads").
+const SQL_SCHEMA = String.raw`(?:(?:"[^"\n]+"|${Q}?[\w$]+${Q}?)\s*\.\s*)?`;
 const RAW_SQL_INSERT_RE = new RegExp(
-  String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`,
+  String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?${SQL_SCHEMA}${Q}?leads\b`,
   'gi'
 );
 
@@ -574,14 +577,15 @@ function importedLeadBuilders(src, filePath) {
 // (its views are already lexed then); the single-file API reads on demand.
 // A BARREL that re-exports another module (`module.exports = require(
 // './writers')`, `...require('./x')`, `Object.assign(module.exports,
-// require('./x'))`, `export * from './x'`, `export { a } from './x'`)
-// carries that module's facts too, transitively.
+// require('./x'))`, `export * from './x'`, `export { a as b } from './x'`)
+// carries that module's facts too, transitively — named re-exports under
+// their exported names.
 const mergedFactsCache = new Map();
 function ownModuleFacts(resolved) {
   if (!moduleFactsCache.has(resolved)) moduleFactsCache.set(resolved, computeModuleFacts(fs.readFileSync(resolved, 'utf8')));
   return moduleFactsCache.get(resolved);
 }
-const RE_EXPORT_RE = /module\s*\.\s*exports\s*=\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\.\.\.\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|Object\s*\.\s*assign\s*\(\s*(?:module\s*\.\s*)?exports\s*,\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\bexport\s+\*\s+from\s*['"](\.{1,2}\/[^'"]+)['"]|\bexport\s*\{[^{}]*\}\s*from\s*['"](\.{1,2}\/[^'"]+)['"]/g;
+const RE_EXPORT_RE = /module\s*\.\s*exports\s*=\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\.\.\.\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|Object\s*\.\s*assign\s*\(\s*(?:module\s*\.\s*)?exports\s*,\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\bexport\s+\*\s+from\s*['"](\.{1,2}\/[^'"]+)['"]|\bexport\s*\{([^{}]*)\}\s*from\s*['"](\.{1,2}\/[^'"]+)['"]/g;
 function moduleFacts(resolved, seen = new Set()) {
   if (mergedFactsCache.has(resolved)) return mergedFactsCache.get(resolved);
   const own = ownModuleFacts(resolved);
@@ -592,10 +596,20 @@ function moduleFacts(resolved, seen = new Set()) {
   let m;
   RE_EXPORT_RE.lastIndex = 0;
   while ((m = RE_EXPORT_RE.exec(src))) {
-    const target = path.resolve(path.dirname(resolved), m[1] || m[2] || m[3] || m[4] || m[5]);
+    const target = path.resolve(path.dirname(resolved), m[1] || m[2] || m[3] || m[4] || m[6]);
     const hit = [target, `${target}.js`, path.join(target, 'index.js')].find((c) => fs.existsSync(c) && fs.statSync(c).isFile());
     if (!hit) continue;
     const f = moduleFacts(hit, seen);
+    if (m[5] !== undefined) {
+      // NAMED re-export — `export { writeRow as save } from './x'` exposes
+      // the fact under its EXPORTED name only.
+      for (const part of m[5].split(',')) {
+        const [orig, local] = part.split(/\s+as\s+/).map((x) => x && x.trim());
+        if (!orig) continue;
+        for (const k of ['helpers', 'sqlConstants', 'factories', 'builders']) if (f[k].has(orig)) merged[k].add(local || orig);
+      }
+      continue;
+    }
     for (const k of ['helpers', 'sqlConstants', 'factories', 'builders']) for (const n of f[k]) merged[k].add(n);
     merged.callableDefault = merged.callableDefault || f.callableDefault;
     merged.defaultFactory = merged.defaultFactory || f.defaultFactory;
@@ -1433,16 +1447,16 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     // Optional literal schema qualifier and/or identifier quote around the
     // interpolated target — `INSERT INTO public.${table}` and
     // `INSERT INTO "${table}"` are both valid PostgreSQL.
-    new RegExp(String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:["'\x60]?[\w$]+["'\x60]?\s*\.\s*)?["'\x60]?\$\{([^}]+)\}`, 'gi'),
+    new RegExp(String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?${SQL_SCHEMA}["'\x60]?\$\{([^}]+)\}`, 'gi'),
     // Concatenated target — a bare identifier/member OR a parenthesized
     // expression (`'INSERT INTO ' + (kind ? 'leads' : 'audit')`).
-    new RegExp(String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:[\w$]+\.)?['"\x60]\s*\+\s*(\([^()]*\)|[\w$.[\]]+)`, 'gi'),
+    new RegExp(String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:(?:"[^"\n]+"|[\w$]+)\.)?['"\x60]\s*\+\s*(\([^()]*\)|[\w$.[\]]+)`, 'gi'),
     // Knex identifier bindings at the table position — positional (??) or
     // named (:table:), with an optional literal schema qualifier
     // (`public.??`) — the bound value is runtime data, so it is dynamic by
     // definition (never resolvable).
-    new RegExp(String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:["'\x60]?[\w$]+["'\x60]?\s*\.\s*)?(\?\?)`, 'gi'),
-    new RegExp(String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:["'\x60]?[\w$]+["'\x60]?\s*\.\s*)?(:[\w$]+:)`, 'gi'),
+    new RegExp(String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?${SQL_SCHEMA}(\?\?)`, 'gi'),
+    new RegExp(String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?${SQL_SCHEMA}(:[\w$]+:)`, 'gi'),
   ];
   // Comment-blanked but STRING-PRESERVING view (offsets identical): the SQL
   // text lives in strings, but a COMMENT mentioning `INSERT INTO ${table}`
@@ -1665,6 +1679,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['triple-nested chain arguments', "await db('leads').modify(qb => qb.whereIn('id', ids.map(id => normalize(id)))).insert(row);"],
     ['deeply nested insert payload before .into', "await db.insert(rows.map(row => normalize(row, opts.get('k')))).into('leads');"],
     ['insert payload before .table', "await db.insert(rows.map(row => normalize(row))).table('leads');"],
+    ['quoted schema with punctuation', "await db.raw('INSERT INTO \"tenant-one\".\"leads\" (a) VALUES (?)', [a]);"],
     ['multi-statement raw SQL', "await db.raw(\"SET search_path = 'public'; INSERT INTO leads(name) VALUES ('x')\");"],
     ['stored table-options object', "const opts = { only: true };\nawait db('leads', opts).insert(row);"],
     ['four-level nested chain arguments', "await db('leads').modify(q => q.whereIn('id', ids.map(x => fn(g(x))))).insert(row);"],
@@ -1807,6 +1822,9 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(found("const { writeRow } = require('./barrel');\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
     expect(found("const { writeRow } = require('./barrel-spread');\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
     expect(found("import { writeRow } from './barrel.mjs';\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
+    fs.writeFileSync(path.join(dir, 'barrel-renamed.mjs'), "export { writeRow as save, scoped } from './writers';\n");
+    expect(found("import { save } from './barrel-renamed.mjs';\nawait save(db('leads'), row);", route)).toEqual(["await save(db('leads'), row);"]);
+    expect(found("import { writeRow } from './barrel-renamed.mjs';\nawait writeRow(db('leads'), row);", route)).toEqual([]);
     // Lead-builder FACTORIES and stored lead builders exported by a sibling
     // module — neither file alone shows table + insert.
     fs.writeFileSync(path.join(dir, 'lead-query.js'), "const leadQuery = () => db('leads');\nfunction leadsIn(trx) {\n  return trx('leads');\n}\nconst leads = db('leads');\nconst auditQuery = () => db('audit');\nmodule.exports = { leadQuery, leadsIn, leads, auditQuery };\n");
@@ -2558,7 +2576,13 @@ describe('lead-writer registry (#3137 groundwork)', () => {
       // resolver proves nothing): the resolver must be CALLED, or take part
       // in a branch / lookup condition — an if/while/ternary/logical guard
       // or a where-family / first lookup — on a line before the insert.
-      const called = new RegExp(String.raw`\b${id}\s*(?:\?\.)?\(`).test(span);
+      // A DEFINITION of the identifier is not a call: `function createLead(`
+      // (the enclosing header) and method-shorthand headers are blanked
+      // before the call check.
+      const noDefs = span
+        .replace(new RegExp(String.raw`\bfunction\s+${id}\s*\(`, 'g'), 'function (')
+        .replace(new RegExp(String.raw`^(\s*)(?:async\s+)?${id}\s*\([^()]*\)\s*\{`, 'gm'), '$1{');
+      const called = new RegExp(String.raw`\b${id}\s*(?:\?\.)?\(`).test(noDefs);
       const guarding = span.split('\n').some((line) => new RegExp(String.raw`\b${id}\b`).test(line)
         && /\b(?:if|while)\s*\(|\?[^.?]|&&|\|\||\?\?|\.\s*(?:where\w*|orWhere\w*|andWhere\w*|first|findOne|whereIn|whereNotIn)\s*\(/.test(line));
       const referenced = called || guarding;

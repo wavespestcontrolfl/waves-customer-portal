@@ -151,7 +151,10 @@ const LEAD_WRITERS = [
     file: 'services/lead-attribution.js',
     anchor: "const [newLead] = await db('leads').insert({",
     context: 'attributeInboundContact — inbound call/SMS attribution (phone-keyed, concurrent-call sid guard)',
-    identityResolver: 'attributeInboundContact',
+    // The inline phone-keyed lookup that decides update-vs-mint inside
+    // attributeInboundContact (naming the enclosing function itself would be
+    // a header, not a resolution).
+    identityResolver: 'existingLead',
   },
   {
     file: 'services/lead-estimate-link.js',
