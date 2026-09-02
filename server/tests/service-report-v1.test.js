@@ -518,8 +518,21 @@ describe('service report v1', () => {
         .toHaveLength(1);
       expect(buildReentryContextFromRecord({ ...base, applications: [{ application_method: 'perimeter_spray' }] }, now)?.targets)
         .toHaveLength(1);
-      expect(buildReentryContextFromRecord({ ...base, applications: [{ application_method: 'bait_placement' }] }, now)?.targets)
+      // Bait-only rows are definitely not dry-down evidence: the declared no-treatment closeout clears.
+      expect(buildReentryContextFromRecord({ ...base, applications: [{ application_method: 'bait_placement' }] }, now)).toBeUndefined();
+      // A station check without product identity stays unknown: the stored timer stands.
+      expect(buildReentryContextFromRecord({ ...base, applications: [{ application_method: 'station_check' }] }, now)?.targets)
         .toHaveLength(1);
+      // Bait-only TYPED work (applied, no dry-down) with a bait-placement row clears too.
+      const baitOnlyTyped = {
+        id: 'svc-3', started_at: base.started_at, ended_at: base.ended_at,
+        service_type: 'One-Time Pest Treatment',
+        areas_serviced: JSON.stringify(['Kitchen']),
+        advisory: { exterior_reentry_min: 0, interior_reentry_min: 120 },
+        service_data: { typedReportSnapshot: { type: 'one_time_pest_treatment', values: { work_completed: 'Bait placement' } } },
+      };
+      expect(buildReentryContextFromRecord({ ...baitOnlyTyped, applications: [{ application_method: 'bait_placement' }] }, now)).toBeUndefined();
+      expect(buildReentryContextFromRecord({ ...baitOnlyTyped, applications: [] }, now)).toBeUndefined();
       // A productless typed lawn application is dry-down evidence for the dynamic context too.
       const typedLawn = {
         id: 'svc-2', started_at: base.started_at, ended_at: base.ended_at,

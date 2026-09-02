@@ -53,15 +53,24 @@ function buildReentrySummary(targets, now, timeZone = DEFAULT_TIME_ZONE) {
 // only non-spray methods (bait, station, injection — product identity is not
 // loaded here) leave it unknown, and no rows at all means none (codex P1 r11
 // #3701). Unknown never zeroes anything.
+// Methods with no dry-down concept whose identity needs no product lookup:
+// a bait placement or trunk injection is definitely not spray evidence. A
+// station_check row is left unknown here — a registered liquid recorded under
+// the client's defaulted station_check counts as an application, and this
+// path does not load product identity (local audit P1 on #3701).
+const DEFINITE_NON_DRY_DOWN_METHODS = new Set(['bait_placement', 'trunk_injection']);
+
 function reentryTreatmentEvidence(record, applications) {
   if (record?.treatmentEvidence !== undefined) return record.treatmentEvidence;
-  if (applications.some((app) => isSprayApplicationMethod(app.application_method || app.method || app.applicationMethod))) return true;
+  const methods = applications.map((app) => String(app.application_method || app.method || app.applicationMethod || '').toLowerCase());
+  if (methods.some((method) => isSprayApplicationMethod(method))) return true;
   // Typed closeouts record dry-down-capable work in the frozen snapshot with
   // no product row required — the same primary + companion evidence the
   // report payload uses (codex P1 r14 #3701).
   if (typedTreatmentEvidenceForRecord(record).dryDown) return true;
   if (record?.applicationsLoadFailed) return undefined;
-  return applications.length ? undefined : false;
+  if (!applications.length) return false;
+  return methods.every((method) => DEFINITE_NON_DRY_DOWN_METHODS.has(method)) ? false : undefined;
 }
 
 function buildReentryContextFromRecord(record, now = new Date()) {
