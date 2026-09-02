@@ -72,6 +72,12 @@ describe('noticeText + parseZelleNotice', () => {
     expect(parseZelleNotice(t)).toEqual({ payerName: 'Pat Doe', amountCents: 5000, memo: null });
   });
 
+  test('amounts are parsed as integer cents, never through a float', () => {
+    for (const [txt, cents] of [['$0.01', 1], ['$1.10', 110], ['$4.35', 435], ['$1,234,567.89', 123456789]]) {
+      expect(parseZelleNotice(`PAT DOE has just sent you money with Zelle in the amount of ${txt}.`).amountCents).toBe(cents);
+    }
+  });
+
   test('a $0.00 or malformed amount is not a notice', () => {
     expect(parseZelleNotice('PAT DOE has just sent you money with Zelle in the amount of $0.00.')).toBeNull();
     expect(parseZelleNotice('PAT DOE has just sent you money with Zelle in the amount of $12.')).toBeNull();

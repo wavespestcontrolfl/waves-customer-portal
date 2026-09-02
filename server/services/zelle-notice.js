@@ -62,11 +62,15 @@ function noticeText({ body_text: bodyText, body_html: bodyHtml } = {}) {
     .trim();
 }
 
+// Integer arithmetic only: the template always prints two decimals, so the
+// dollars and cents are parsed as separate integers (no float rounding).
 function parseAmountCents(text) {
-  const m = text.match(/in the amount of \$ ?([\d,]+\.\d{2})\b/i);
+  const m = text.match(/in the amount of \$ ?([\d,]+)\.(\d{2})\b/i);
   if (!m) return null;
-  const cents = Math.round(Number(m[1].replace(/,/g, '')) * 100);
-  return Number.isFinite(cents) && cents > 0 ? cents : null;
+  const dollars = Number(m[1].replace(/,/g, ''));
+  if (!Number.isSafeInteger(dollars)) return null;
+  const cents = dollars * 100 + Number(m[2]);
+  return cents > 0 ? cents : null;
 }
 
 function parsePayerName(text) {
