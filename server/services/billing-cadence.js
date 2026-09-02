@@ -86,26 +86,34 @@ function intervalPriceFromAnnual(annualAmount, frequencyKey) {
  * (tree & shrub audit 2026-07-18: six completions x annual/12 collects half
  * the accepted annual). With an unknown visit count a per-visit cadence
  * (quarterly / bimonthly / every-6-weeks — one charge per visit) still bills
- * the cadence amount; a MONTHLY cadence is a tier plan's display rate whose
+ * the cadence amount, and so does a MONTHLY cadence on residential pest
+ * control, whose monthly plan IS twelve visits (legacy rows encode
+ * { frequency: 'monthly' } with no visitsPerYear — pre-push codex P0). A
+ * monthly cadence on any other family is a tier plan's display rate whose
  * visit count could not be read, so the amount is unknown (null) and the
  * converter parks the fee instead of repeating that under-collection
- * (validation audit DATA-001, 2026-09-02).
+ * (validation audit DATA-001, 2026-09-02). Callers pass the unit's
+ * serviceKey as that family evidence.
  */
 function perApplicationChargeAmount({
   billingCadence = null,
   annualRate,
   monthlyRate,
   visitsPerYear,
+  serviceKey = null,
 } = {}) {
   const cadenceAmount = roundMoney(billingCadence?.amount);
   const visits = Number(visitsPerYear);
   if (!Number.isFinite(visits) || visits <= 0) {
     // Unknown visit count: a per-visit cadence still bills the cadence
-    // amount (one charge per visit by construction). A MONTHLY cadence is
-    // the display rate of a tier plan whose visit count we could not read —
-    // stamping it repeats the T&S 2026-07-18 under-collection, so the
-    // amount is unknown and the converter parks the fee (DATA-001).
-    return String(billingCadence?.frequencyKey || '') === 'monthly' ? null : cadenceAmount;
+    // amount (one charge per visit by construction), and so does monthly
+    // residential pest — its monthly plan IS twelve visits. A MONTHLY
+    // cadence on any other family is the display rate of a tier plan whose
+    // visit count we could not read — stamping it repeats the T&S
+    // 2026-07-18 under-collection, so the amount is unknown and the
+    // converter parks the fee (DATA-001).
+    if (String(billingCadence?.frequencyKey || '') !== 'monthly') return cadenceAmount;
+    return String(serviceKey || '') === 'pest_control' ? cadenceAmount : null;
   }
   const annual = Number(annualRate || 0);
   const monthly = Number(monthlyRate ?? billingCadence?.monthlyRate ?? 0);

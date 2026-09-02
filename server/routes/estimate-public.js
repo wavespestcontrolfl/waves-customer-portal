@@ -10246,6 +10246,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           annualRate: effectiveAnnualTotal,
           monthlyRate: effectiveMonthlyTotal,
           visitsPerYear: Number(selectedFrequency?.visitsPerYear) || null,
+          // Tier accepts are never residential pest — the family evidence
+          // keeps an unknown visit count unpriced (DATA-001).
+          serviceKey: acceptedServiceTierKey || null,
         })
       : null;
     const visitEstimatedPrice = acceptVisitEstimatedPrice({

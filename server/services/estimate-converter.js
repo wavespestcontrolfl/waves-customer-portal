@@ -4110,6 +4110,9 @@ const EstimateConverter = {
           annualRate: parseFloat(estimate.annual_total || 0),
           monthlyRate,
           visitsPerYear: singleRecurringUnitVisits,
+          // Family evidence for the unknown-visits case: monthly residential
+          // pest bills its cadence amount per visit; monthly tier plans do not.
+          serviceKey: singleRecurringUnit ? recurringServiceKey(singleRecurringUnit) : null,
         })
       : null;
     // A monthly-billed single unit whose per-visit charge could not be derived

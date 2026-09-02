@@ -58,7 +58,7 @@ describe('perApplicationChargeAmount', () => {
     expect(amount).toBe(98);
   });
 
-  test('unknown visit count on a MONTHLY cadence is unknown, never the display rate (DATA-001)', () => {
+  test('unknown visit count on a MONTHLY tier cadence is unknown, never the display rate (DATA-001)', () => {
     // The monthly figure is a tier plan's display rate; with no visit count
     // it is NOT a per-visit price — stamping it repeated the 2026-07-18 bug.
     expect(perApplicationChargeAmount({
@@ -66,13 +66,33 @@ describe('perApplicationChargeAmount', () => {
       annualRate: 621,
       monthlyRate: 51.75,
       visitsPerYear: null,
+      serviceKey: 'tree_shrub',
     })).toBeNull();
     expect(perApplicationChargeAmount({
       billingCadence: tsStandardCadence,
       annualRate: 621,
       monthlyRate: 51.75,
       visitsPerYear: 0,
+      serviceKey: 'lawn_care',
     })).toBeNull();
+    // No family evidence at all is treated as a tier plan (fail closed).
+    expect(perApplicationChargeAmount({
+      billingCadence: tsStandardCadence,
+      annualRate: 621,
+      monthlyRate: 51.75,
+      visitsPerYear: null,
+    })).toBeNull();
+  });
+
+  test('monthly residential pest with no visit count still bills the cadence amount — the plan IS twelve visits', () => {
+    const monthlyPest = resolveBillingCadence({ monthlyRate: 87.36, annualRate: 1048.32, frequencyKey: 'monthly' });
+    expect(perApplicationChargeAmount({
+      billingCadence: monthlyPest,
+      annualRate: 1048.32,
+      monthlyRate: 87.36,
+      visitsPerYear: null,
+      serviceKey: 'pest_control',
+    })).toBe(monthlyPest.amount);
   });
 
   test('unknown visit count on a per-visit cadence still bills the cadence amount', () => {
