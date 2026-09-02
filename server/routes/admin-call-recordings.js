@@ -315,15 +315,22 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     // a failed Twilio delete is owed to the recovery sweep), so a swallowed
     // failure can never leave card audio reachable.
     const quarantineParked = async () => {
+      // The row AS IT IS NOW, never this request's snapshot: another
+      // operator or a callback can have swapped the current recording
+      // between the read above and a failed swap, and the helper deletes
+      // the primary it is handed — the snapshot's stale SID would leave the
+      // newly current audio at Twilio with nothing owed.
+      const fresh = await db('call_log').where({ id: call.id }).first().catch(() => null);
+      const row = fresh || call;
       const q = await CallRecordingProcessor.quarantineCardRecording(
-        call,
+        row,
         { source: 'adopt_recording_post_quarantine' },
       ).catch((e) => {
         logger.error(`[call-recordings] quarantine delete failed for call ${call.id}: ${e.message}`);
         return null;
       });
-      if (!q) return { deleted: 0, delete_pending: parked.length + (call.recording_sid ? 1 : 0) };
-      const current = call.recording_sid ? (q.twilioDeleted ? { deleted: 1, delete_pending: 0 } : { deleted: 0, delete_pending: 1 }) : { deleted: 0, delete_pending: 0 };
+      if (!q) return { deleted: 0, delete_pending: parked.length + (row.recording_sid ? 1 : 0) };
+      const current = row.recording_sid ? (q.twilioDeleted ? { deleted: 1, delete_pending: 0 } : { deleted: 0, delete_pending: 1 }) : { deleted: 0, delete_pending: 0 };
       return { deleted: current.deleted + (q.parked?.deleted ?? 0), delete_pending: current.delete_pending + (q.parked?.pending ?? 0) };
     };
     const quarantinedResponse = (res, outcome, prefix) => res.status(409).json({

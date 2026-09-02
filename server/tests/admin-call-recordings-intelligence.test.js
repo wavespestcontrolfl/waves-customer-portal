@@ -305,6 +305,18 @@ describe('POST /calls/:id/adopt-recording', () => {
     expect(processor.processRecording).not.toHaveBeenCalled();
   });
 
+  test('the quarantine is run on the row as it is NOW, not on this request\'s snapshot', async () => {
+    const NEWER = 'RE' + '4'.repeat(32);
+    // Queue: the snapshot this request read, then the fresh row another operator changed under it.
+    mockDb([{ ...call(), transcription_metadata: JSON.stringify({ pan_detected: true }) }, { ...call(), recording_sid: NEWER, recording_url: 'https://api.twilio.com/x/RE4.mp3' }]);
+    processor.quarantineCardRecording.mockResolvedValue({ quarantined: true, twilioDeleted: true, parked: { deleted: 1, pending: 0 } });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
+      expect(res.status).toBe(409);
+    });
+    expect(processor.quarantineCardRecording).toHaveBeenCalledWith(expect.objectContaining({ recording_sid: NEWER }), { source: 'adopt_recording_post_quarantine' });
+  });
+
   test('a parked delete that fails at Twilio is reported as still pending, never as deleted', async () => {
     mockDb([{ ...call(), transcription_metadata: JSON.stringify({ pan_detected: true }) }]);
     processor.quarantineCardRecording.mockResolvedValue({ quarantined: true, twilioDeleted: true, parked: { deleted: 0, pending: 1 } });
