@@ -1,6 +1,12 @@
 // db is mocked so the write-path describe below can drive extendEstimate
 // end-to-end; every other describe here exercises pure/pre-write paths that
 // never touch it.
+// Mutable pricing-authority send gate (#3750): off by default.
+const mockGateState = { sendRequiresServerPricing: false };
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return { ...actual, isEnabled: (key) => (key === 'sendRequiresServerPricing' ? mockGateState.sendRequiresServerPricing : actual.isEnabled(key)) };
+});
 jest.mock('../models/db', () => {
   const mockDeletes = [];
   const dbFn = jest.fn((table) => {
@@ -38,6 +44,7 @@ const {
   computeExtensionExpiry,
   extensionStatusUpdate,
   EXTENDABLE_STATUSES,
+  extensionDeliverableUnderGate,
 } = require('../services/estimate-extension');
 
 const DAY = 86400000;
@@ -199,5 +206,46 @@ describe('EXTENDABLE_STATUSES', () => {
     // accept them or the public POST 500s on a row the UI offered the button
     // for (codex P1, 2026-07-10).
     expect(EXTENDABLE_STATUSES).toEqual(['sent', 'viewed', 'expired', 'send_failed', 'sending']);
+  });
+});
+
+describe('extendEstimate — engine-authoritative pricing gate (#3750, GH codex P1 r14 / uncapped P0 r17)', () => {
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('gate on: a delivered row the engine never verified is refused before any mutation, with a customer-safe message and a code', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    await expect(extendEstimate({
+      estimate: { id: 'est-cf', status: 'expired', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}', expires_at: '2026-06-01T00:00:00Z' },
+      days: 7,
+      entryPoint: 'test',
+    })).rejects.toMatchObject({ statusCode: 409, code: 'PRICING_AUTHORITY_NOT_SERVER', message: expect.stringMatching(/call the office/i) });
+  });
+});
+
+describe('extensionDeliverableUnderGate — the siblings an extension would REVIVE are judged too (uncapped codex P0 r20)', () => {
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+  function fakeDatabase(visible, revivable) {
+    let call = 0;
+    const database = jest.fn(() => {
+      const rows = call++ === 0 ? visible : revivable; // visible-sibling read, then revivable read
+      const chain = {
+        where: (c) => { if (typeof c === 'function') c(chain); return chain; },
+        orWhere: (c) => { if (typeof c === 'function') c(chain); return chain; },
+        whereNot: () => chain, whereNull: () => chain, whereRaw: () => chain, whereIn: () => chain, whereNotIn: () => chain, orWhereIn: () => chain, orWhereNotNull: () => chain,
+        select: async () => rows,
+      };
+      return chain;
+    });
+    return database;
+  }
+  const anchor = { id: 'est-a', estimate_group_id: 'grp-1', status: 'expired', pricing_authority: 'SERVER', estimate_data: '{}' };
+
+  test('an expired CLIENT_FALLBACK sibling (invisible today, revived by the extension) refuses; all-verified siblings pass; gate off always passes', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    expect(await extensionDeliverableUnderGate(fakeDatabase([], [{ id: 'est-b', status: 'expired', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' }]), anchor)).toBe(false);
+    expect(await extensionDeliverableUnderGate(fakeDatabase([], [{ id: 'est-b', status: 'expired', pricing_authority: 'SERVER', estimate_data: '{}' }]), anchor)).toBe(true);
+    expect(await extensionDeliverableUnderGate(fakeDatabase([], []), { ...anchor, estimate_group_id: null })).toBe(true);
+    mockGateState.sendRequiresServerPricing = false;
+    expect(await extensionDeliverableUnderGate(fakeDatabase([], [{ id: 'est-b', status: 'expired', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' }]), anchor)).toBe(true);
   });
 });

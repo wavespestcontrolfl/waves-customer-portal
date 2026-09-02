@@ -179,13 +179,20 @@ async function recordAttempt(p, result, evidenceKey) {
 async function leaseGuardedReclassify(p, patch) {
   const leaseDate = p.lease_token ? new Date(p.lease_token) : null;
   if (!leaseDate || Number.isNaN(leaseDate.getTime())) return 0;
-  const n = await db('seo_link_prospects')
-    .where({ id: p.id })
-    .where('claimed_at', leaseDate)
-    // Stamp last_classified_at so the weekly classifier treats this runtime decision as
-    // fresh and won't re-pick the row and revert a parked gate (e.g. a heuristic FREEFORM
-    // domain back to submit_free) before the 30-day reclassify window.
-    .update({ ...patch, claimed_at: null, claimed_by: null, last_classified_at: new Date(), updated_at: new Date() });
+  const n = await db.transaction(async (trx) => {
+    const updated = await trx('seo_link_prospects')
+      .where({ id: p.id })
+      .where('claimed_at', leaseDate)
+      // Stamp last_classified_at so the weekly classifier treats this runtime decision as
+      // fresh and won't re-pick the row and revert a parked gate (e.g. a heuristic FREEFORM
+      // domain back to submit_free) before the 30-day reclassify window.
+      .update({ ...patch, claimed_at: null, claimed_by: null, last_classified_at: new Date(), updated_at: new Date() });
+    // This IS a lease release (often into a parked policy nothing will claim
+    // again): the placement follows a superseded path in the SAME transaction,
+    // like every other release — released and settled, or neither.
+    if (updated) await worker.settleReleasedPlacements([p.id], trx);
+    return updated;
+  });
   if (n === 0) logger.warn(`[signup-runner] stale lease on ${p.target_domain} — reclassify skipped (row was reclaimed)`);
   return n;
 }

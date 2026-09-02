@@ -58,6 +58,7 @@
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
+ *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true (12-month application strip under the lawn price card, arithmetic on visitsPerYear only; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
@@ -1513,6 +1514,18 @@ const gates = {
   // STRICT opt-in: this changes what gets sent and billed.
   // Enable with GATE_ESTIMATE_LEAD_SERVICE_SEND=true (needs opt-out + add on).
   estimateLeadServiceSend: process.env.GATE_ESTIMATE_LEAD_SERVICE_SEND === 'true',
+  // Send requires engine-authoritative pricing (validation audit SEC-002,
+  // 2026-09-02). An admin save whose server recompute failed or had no
+  // replayable inputs persists the BROWSER preview as a NON-authoritative
+  // price (estimates.pricing_authority = CLIENT_FALLBACK — deliberately
+  // fail-open so a broken engine never blocks the save). With this gate on,
+  // every send of such a row is refused (409 CLIENT_FALLBACK_PRICING) until
+  // it is re-saved through the engine, and a revision of a DELIVERED row
+  // whose recompute falls back is refused at save time; off, the send goes
+  // out and the would-block is logged so the count can be read before the
+  // flip. The lead auto-send lane skips these rows regardless of the gate.
+  // Enable with GATE_SEND_REQUIRES_SERVER_PRICING=true; unset = revoke.
+  sendRequiresServerPricing: process.env.GATE_SEND_REQUIRES_SERVER_PRICING === 'true',
   // Lawn program calendar on the estimate page: a 12-month strip under the
   // lawn price card marking N evenly spaced application months, where N is
   // the selected frequency's visitsPerYear. Pure arithmetic on data already
@@ -2066,6 +2079,14 @@ const gates = {
   // = the response is byte-identical to today. Kill switch: unset. Read at
   // CALL time so a flip needs no redeploy.
   ibToolActivity: gateEnvValue('GATE_IB_TOOL_ACTIVITY'),
+  // Audio-synced call transcript (admin call log). When on, calls whose
+  // call_log.transcript_structured carries diarized segments render them as
+  // a clickable list that follows recording playback; click a line to seek.
+  // OFF unless set, dev AND prod — GET /api/ai/admin/calls reports
+  // transcript_sync_enabled:false and the tab keeps the plain-text
+  // transcript. Read-only, no comms, no writes. Kill switch: unset. Read at
+  // CALL time so a flip needs no redeploy.
+  callTranscriptSync: gateEnvValue('GATE_CALL_TRANSCRIPT_SYNC'),
   // Field dictation upload (2026-09-02): the completion-notes mic falls back
   // to MediaRecorder + server transcription (OpenAI, same transcriber and
   // PAN scrub as call recordings) when SpeechRecognition is unavailable.

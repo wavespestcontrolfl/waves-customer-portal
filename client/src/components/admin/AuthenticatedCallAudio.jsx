@@ -1,4 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -8,18 +15,34 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
  * converted to a same-page Blob URL. The staff JWT never appears in the DOM
  * or request URL, and recordings are not downloaded until someone asks for
  * one.
+ *
+ * Optional playback hooks for a synced transcript:
+ * - `onTimeUpdate(seconds)` fires on the audio element's timeupdate.
+ * - the forwarded ref exposes `seekTo(seconds)`. On a loaded recording it
+ *   seeks and plays (inside the click's user activation). Before the
+ *   recording is loaded it triggers the same user-initiated load (the
+ *   caller's click IS the intent) and POSITIONS the playhead once the audio
+ *   mounts — it does not try to play then: that would run after the fetch,
+ *   outside any user gesture, and browsers reject audible autoplay there.
+ *   The controls are visible at the seeked position; one press plays.
  */
-export default function AuthenticatedCallAudio({
-  recordingId,
-  controls = true,
-  preload = "none",
-  title,
-  className,
-  style,
-  ...audioProps
-}) {
+const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
+  {
+    recordingId,
+    controls = true,
+    preload = "none",
+    title,
+    className,
+    style,
+    onTimeUpdate,
+    ...audioProps
+  },
+  ref,
+) {
   const id = recordingId == null ? "" : String(recordingId);
   const requestNumberRef = useRef(0);
+  const audioRef = useRef(null);
+  const pendingSeekRef = useRef(null);
   const [request, setRequest] = useState(null);
   const [loaded, setLoaded] = useState({
     id: "",
@@ -37,6 +60,37 @@ export default function AuthenticatedCallAudio({
     requestNumberRef.current += 1;
     setRequest({ id, number: requestNumberRef.current });
   }, [current.status, id]);
+
+  const applySeek = useCallback((seconds, { play } = { play: true }) => {
+    const el = audioRef.current;
+    if (!el) return false;
+    el.currentTime = Math.max(0, seconds);
+    if (play) {
+      const played = el.play?.();
+      if (played && typeof played.catch === "function") played.catch(() => {});
+    }
+    return true;
+  }, []);
+
+  useImperativeHandle(ref, () => ({
+    seekTo(seconds) {
+      const target = Number(seconds);
+      if (!Number.isFinite(target)) return;
+      if (current.status === "ready" && applySeek(target)) return;
+      pendingSeekRef.current = target;
+      loadRecording();
+    },
+  }), [applySeek, current.status, loadRecording]);
+
+  // A seek requested before the audio existed positions the playhead once
+  // it mounts. No play() here — this runs after the fetch, outside the
+  // click's user activation, where autoplay is commonly rejected.
+  useEffect(() => {
+    if (current.status !== "ready" || pendingSeekRef.current == null) return;
+    const target = pendingSeekRef.current;
+    pendingSeekRef.current = null;
+    applySeek(target, { play: false });
+  }, [applySeek, current.status]);
 
   useEffect(() => {
     if (!request || request.id !== id) return undefined;
@@ -106,11 +160,17 @@ export default function AuthenticatedCallAudio({
       {current.status === "ready" ? (
         <audio
           {...audioProps}
+          ref={audioRef}
           controls={controls}
           preload={preload}
           src={current.sourceUrl}
           aria-label={label}
           title={title}
+          onTimeUpdate={
+            onTimeUpdate
+              ? (e) => onTimeUpdate(e.currentTarget.currentTime)
+              : undefined
+          }
           style={{ width: "100%", height: "100%" }}
         />
       ) : current.status === "loading" ? (
@@ -149,4 +209,6 @@ export default function AuthenticatedCallAudio({
       )}
     </div>
   );
-}
+});
+
+export default AuthenticatedCallAudio;

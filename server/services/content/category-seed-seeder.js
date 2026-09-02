@@ -107,6 +107,56 @@ const BLOCKED_TOPIC_SERVICE = [
 ];
 const FAQ_SECTION_RE = /\bfaq\b|frequently asked|common questions/i;
 
+// ── affiliate pilot briefs (owner monetization pilot 2026-08-31) ──────
+// A brief may carry `affiliate_products`: the ONLY products the writer may
+// link, each through <AffiliateLink product placement>. Validated at SEED
+// time against the vendored registry (an unknown / inactive id or an
+// unlisted placement is a manifest error, not a gate surprise a run later)
+// and carried VERBATIM into the operator brief. Cap mirrors the guardrails'
+// AFFILIATE_LINK_MAX_PER_POST.
+const MAX_AFFILIATE_PRODUCTS = 3;
+const KEBAB_RE = /^[a-z0-9][a-z0-9-]*$/;
+// Non-protected post types only — the registry validator already refuses
+// location/cost/decision/comparison/case-study on every row.
+function affiliateProductIndex() {
+  return require('../../../packages/affiliate-registry').productIndex();
+}
+function validateAffiliateProducts(brief) {
+  const list = brief.affiliate_products;
+  if (list === undefined) return null;
+  if (!Array.isArray(list) || list.length === 0 || list.length > MAX_AFFILIATE_PRODUCTS) {
+    throw new Error(`category seed ${brief.id}: affiliate_products must be a non-empty array of at most ${MAX_AFFILIATE_PRODUCTS} entries`);
+  }
+  const idx = affiliateProductIndex();
+  const seen = new Set();
+  let allowedPostTypes = null;
+  for (const p of list) {
+    if (!p || typeof p !== 'object' || !KEBAB_RE.test(String(p.product_id || '')) || !KEBAB_RE.test(String(p.placement || '')) || !String(p.anchor || '').trim()) {
+      throw new Error(`category seed ${brief.id}: each affiliate product needs a kebab-case product_id and placement plus a non-empty anchor (got ${JSON.stringify(p).slice(0, 120)})`);
+    }
+    if (seen.has(p.product_id)) throw new Error(`category seed ${brief.id}: affiliate product "${p.product_id}" is listed twice`);
+    seen.add(p.product_id);
+    const entry = idx.get(p.product_id);
+    if (!entry) throw new Error(`category seed ${brief.id}: unknown affiliate product "${p.product_id}" — add it to packages/affiliate-registry (astro, owner-merged) and sync first`);
+    if (entry.state !== 'active') throw new Error(`category seed ${brief.id}: affiliate product "${p.product_id}" is not active (${entry.state}) — the publish gate would reject it`);
+    if (!(entry.row.allowed_placements || []).includes(p.placement)) {
+      throw new Error(`category seed ${brief.id}: affiliate product "${p.product_id}" does not allow placement "${p.placement}" (allowed: ${(entry.row.allowed_placements || []).join(', ')})`);
+    }
+    const rowTypes = new Set(entry.row.allowed_post_types || []);
+    allowedPostTypes = allowedPostTypes === null ? [...rowTypes] : allowedPostTypes.filter((t) => rowTypes.has(t));
+  }
+  if (!allowedPostTypes || allowedPostTypes.length === 0) {
+    throw new Error(`category seed ${brief.id}: the listed affiliate products share no allowed post_type`);
+  }
+  return { products: list.map((p) => ({ product_id: p.product_id, placement: p.placement, anchor: String(p.anchor).trim(), section: p.section ? String(p.section) : null })), allowed_post_types: allowedPostTypes };
+}
+// Compose-time shape (no registry lookups — a row paused after seeding is
+// the publish gate's call, not a compose crash).
+function affiliateProductsFor(payload) {
+  const list = Array.isArray(payload.affiliate_products) ? payload.affiliate_products : [];
+  return list.filter((p) => p && p.product_id).map((p) => ({ product_id: p.product_id, placement: p.placement || 'primary-rec', anchor: String(p.anchor || p.product_id).trim(), section: p.section ? String(p.section) : null }));
+}
+
 function briefTopicText(brief) {
   return `${brief.slug || ''} ${brief.primary_kw || ''} ${brief.working_title || ''}`;
 }
@@ -220,6 +270,7 @@ function loadManifest(file = DEFAULT_MANIFEST_PATH) {
       }
     }
     availableAtFor(brief); // throws on a malformed window
+    validateAffiliateProducts(brief); // throws on an unknown/inactive product or unlisted placement
   }
   return manifest;
 }
@@ -412,6 +463,11 @@ function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], sc
       emphasis: byline.emphasis,
     },
     global_rules: meta.manifest_notes || null,
+    // The ONLY products the writer may link (affiliate pilot) — verbatim
+    // from the manifest; the guardrails re-check every id against the
+    // registry at gate time and the runner parks the draft as
+    // affiliate_review for the owner.
+    affiliate_products: affiliateProductsFor(payload),
     binding_instructions: buildBindingInstructions({ payload, byline, ctaDirectives, requiredSources, sourceNotes, globalRules: meta.manifest_notes, faqBlocked, payloadSchema }),
   };
 
@@ -449,9 +505,23 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, requiredSour
         ? 'SCHEMA: emit FAQPage structured data with a matching VISIBLE FAQ section (questions as ### headings).'
         : null),
     'Never hardcode Waves pricing or dollar amounts — if cost comes up, direct readers to /contact/ (lawn and tree & shrub have no calculator flow).',
+    ...affiliateBindingLines(payload),
     globalRules ? `GLOBAL RULES: ${globalRules}` : null,
   ];
   return lines.filter(Boolean);
+}
+
+// Binding lines for an affiliate pilot brief — the writer's system prompt
+// carries the general AFFILIATE PRODUCT LINKS rules; these bind the
+// specific products, anchors, and sections for THIS post.
+function affiliateBindingLines(payload) {
+  const products = affiliateProductsFor(payload);
+  if (!products.length) return [];
+  const items = products.map((p) => `<AffiliateLink product="${p.product_id}" placement="${p.placement}">${p.anchor}</AffiliateLink>${p.section ? ` — place it in: ${p.section}` : ''}`);
+  return [
+    `AFFILIATE PRODUCTS (binding — these are the ONLY products you may link, each exactly once, through the AffiliateLink component with EXACTLY this product id, placement and anchor text): ${items.join(' | ')}.`,
+    'AFFILIATE RULES (binding): set frontmatter.disclosure to { "type": "affiliate" }; no affiliate link before the first "## " section heading; the Waves service CTA link comes BEFORE the first affiliate link; never print or estimate a price for the product (say "view current price" in prose); never mention the product in the title or meta description; never link it through a raw URL; post_type must be protocol, diagnostic, or seasonal.',
+  ];
 }
 
 module.exports = {
@@ -462,6 +532,10 @@ module.exports = {
   isCategorySeed,
   buildCategoryOverlay,
   _internals: {
+    validateAffiliateProducts,
+    affiliateProductsFor,
+    affiliateBindingLines,
+    MAX_AFFILIATE_PRODUCTS,
     serviceForBrief,
     blockedTopicIdFor,
     briefRequestsFaq,

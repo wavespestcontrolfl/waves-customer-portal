@@ -1,5 +1,6 @@
 // Labeled anchor target for the jump-nav. The scroll-mt offsets clear the
-// sticky nav bar (taller on mobile where the bar stacks into two rows).
+// sticky nav bar: two stacked rows below xl (section tabs over the period
+// strip — ~80px at md–lg, taller still with the mobile select), one row at xl+.
 // `about` renders a native-details dropdown under the header explaining what
 // the section is for and how to read it — tap "What is this?" to expand.
 export default function DashboardSection({ id, title, caption, about, children }) {
@@ -7,7 +8,7 @@ export default function DashboardSection({ id, title, caption, about, children }
     <section
       id={id}
       aria-label={title}
-      className="scroll-mt-16 max-md:scroll-mt-32 mb-6"
+      className="scroll-mt-32 md:scroll-mt-24 xl:scroll-mt-16 mb-6"
     >
       <div className="flex items-baseline justify-between gap-3 pb-1.5 border-b border-hairline border-zinc-200">
         <h2 className="u-label text-zinc-900">{title}</h2>

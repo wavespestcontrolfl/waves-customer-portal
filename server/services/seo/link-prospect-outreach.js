@@ -126,6 +126,14 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
     return { ok: false, code: fresh ? 'send_in_flight' : 'needs_reconcile' };
   }
 
+  // The path the draft was composed against, as observed with the prospect
+  // above: the write below is conditioned on the LOCKED path still being at
+  // this revision, so a path change landing between this read and the lock
+  // can never label a stale draft with the new revision.
+  const observedPath = prospect.path_id
+    ? await db('seo_link_acquisition_paths').where({ id: prospect.path_id }).first('id', 'revision')
+    : null;
+
   const patch = {
     outreach_to_email: to.trim(),
     outreach_subject: subject,
@@ -148,13 +156,47 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
   // read above and this update: only write an OPEN prospect that is still unsent and in
   // a re-draftable state (none/drafted). 0 rows → a send raced us / status moved on, so
   // we must not resurrect the draft.
-  const rows = await db('seo_link_prospects')
-    .where({ id: prospectId, status: 'prospect' })
-    .whereNull('outreach_sent_at')
-    .where((b) => b.whereNull('outreach_status').orWhereIn('outreach_status', ['none', 'drafted']))
-    .update(patch)
-    .returning('*');
+  // The draft write releases any Hermes lease into `drafted` — a NON-claimable
+  // state — so the placement is settled onto its live acquisition path in the
+  // SAME transaction. If that settlement MOVED the row (its path was superseded
+  // or changed while the operator drafted against the stale prospect), the
+  // just-written draft was composed for a retired route and the transition
+  // has already cleared it: report path_moved so the operator re-drafts.
+  const { rows, moved } = await db.transaction(async (trx) => {
+    // Lock order is prospect → path in every outreach transaction (the send
+    // does the same), so a /send racing this save cannot deadlock it.
+    await trx('seo_link_prospects').where({ id: prospectId }).forUpdate().first('id');
+    // A manual draft is BOUND to the path revision it was written against:
+    // the stamp lets the release-time reconcile and the send-time check see
+    // an in-place path change (communication terms, lane) made while the
+    // draft awaits approval — exactly like a worker's leased draft.
+    if (prospect.path_id) {
+      const onPath = await trx('seo_link_acquisition_paths').where({ id: prospect.path_id }).forUpdate().first('id', 'revision');
+      const observedRev = observedPath && observedPath.revision != null ? Number(observedPath.revision) : null;
+      const lockedRev = onPath && onPath.revision != null ? Number(onPath.revision) : null;
+      if (!onPath || lockedRev !== observedRev) return { rows: [], moved: true }; // the path changed under the operator → path_moved, re-draft
+      patch.leased_path_revision = lockedRev;
+    }
+    // …and on the PATH and LANE the operator drafted against: a settlement
+    // that moved the row (to a signup lane, say) between the pre-read and
+    // this write must make it miss, or a signup placement would be left
+    // `drafted` — unclaimable by the runner, refused by the send valve.
+    let write = trx('seo_link_prospects')
+      .where({ id: prospectId, status: 'prospect', link_type: prospect.link_type })
+      .whereNull('outreach_sent_at')
+      .where((b) => b.whereNull('outreach_status').orWhereIn('outreach_status', ['none', 'drafted']));
+    write = prospect.path_id == null ? write.whereNull('path_id') : write.where('path_id', prospect.path_id);
+    const written = await write.update(patch).returning('*');
+    if (!written || written.length === 0) return { rows: written, moved: 0 };
+    const n = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: [prospectId] });
+    return { rows: written, moved: n };
+  });
+  if (moved && (!rows || rows.length === 0)) return { ok: false, code: 'path_moved' }; // refused before the write: the path changed under the operator
   if (!rows || rows.length === 0) return { ok: false, code: 'send_in_flight' };
+  if (moved) {
+    logger.info(`[link-outreach] draft for ${prospectId} discarded — its acquisition path moved while drafting`);
+    return { ok: false, code: 'path_moved', error: 'the placement\'s acquisition path changed while you drafted; reload and draft again' };
+  }
   logger.info(`[link-outreach] draft saved for ${prospectId}`); // no recipient (PII)
   return { ok: true, prospect: rows[0] };
 }
@@ -195,10 +237,44 @@ async function sendOutreach({ prospectId, approvedBy = 'admin' }) {
   const sendToken = randomUUID();
   const claim = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(?)', [OUTREACH_LOCK_KEY]);
+    // prospect → path lock order, same as saveDraft (settlement locks the path)
+    await trx('seo_link_prospects').where({ id: prospectId }).forUpdate().first('id');
     if ((await dailySendCount(trx)) >= cap) return { ok: false, code: 'rate_limited' };
+    // Settle the drafted row BEFORE taking it in flight: its acquisition path
+    // may have been superseded, revised or disproven since the draft was
+    // saved. A settlement that moves the row has cleared the draft (it was
+    // composed for a retired route) — abort here rather than email obsolete
+    // copy; once the row is `sending` settlement refuses to touch it.
+    const moved = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: [prospectId] });
+    if (moved) return { ok: false, code: 'path_moved' };
+    // zero moved is not proof of a live path: a chain settlement could not
+    // resolve (bounded hops) or refused leaves the row on a retired path —
+    // re-read and require the path it will send on to be non-superseded
+    // …and STANDING: settlement reconciles a disproof only against a lease
+    // stamp, so a later disproof (confidence 0 / NULL) or a human-step ruling
+    // (agent_completable=false) on the same path is re-checked here
+    const current = await trx('seo_link_prospects').where({ id: prospectId }).first('path_id', 'leased_path_revision');
+    // an UNLINKED prospect (the registry catch-up has not linked it yet) has
+    // passed no standing check at all — it is not sent until it has a path
+    if (!current || !current.path_id) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
+    // …read FOR UPDATE, held through the drafted→sending CAS below (as
+    // worker.claim() holds its path locks through the lease): an investigation
+    // superseding or revising the path waits for this commit instead of
+    // slipping in between the standing read and the CAS
+    const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'agent_completable', 'revision');
+    const standing = onPath && !onPath.superseded_by && require('./link-registry').isStandingConfidence(onPath.confidence) && onPath.agent_completable !== false; // NULL confidence = never assessed = not standing
+    if (!standing) return { ok: false, code: 'path_moved' };
+    // …and the draft must still be bound to the path's CURRENT revision: a
+    // stamp that no longer matches means the path changed in place after the
+    // draft was written (terms, lane, URL) — copy composed for a route that
+    // no longer exists as such is not sent. The stamp is REQUIRED: every
+    // draft carries one (the lease that produced it, saveDraft, or the
+    // migration's backfill of pre-existing drafts), so a missing stamp is a
+    // draft nothing bound to a revision — not sent either.
+    if (current.leased_path_revision == null || onPath.revision == null || Number(onPath.revision) !== Number(current.leased_path_revision)) return { ok: false, code: 'path_moved' };
     const attemptAt = new Date();
     const claimedRows = await trx('seo_link_prospects')
-      .where({ id: prospectId, outreach_status: 'drafted', status: 'prospect' })
+      .where({ id: prospectId, outreach_status: 'drafted', status: 'prospect', path_id: current.path_id }) // the CAS is bound to the path whose standing was just verified
       .whereNull('outreach_sent_at')
       // Stamp the attempt (counts toward the cap regardless of outcome) and release any
       // Hermes lease as we take the row in-flight, so a stale worker report (optimistic

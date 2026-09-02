@@ -151,6 +151,21 @@ function leadEstimateAutoSendEligibility(estimate = {}, options = {}) {
   }
   if (summary.status !== 'generated' || !summary.generated) return { eligible: false, reason: 'not_generated' };
   if (summary.quoteRequired) return { eligible: false, reason: 'quote_required' };
+  // Automation delivers ONLY a price the engine verified: the row must carry
+  // the explicit SERVER authority stamp (validation audit SEC-002,
+  // 2026-09-02; pre-push codex P0 — a negative CLIENT_FALLBACK check failed
+  // open for null / unknown stamps). Gate or no gate; the operator re-saves
+  // an unstamped or fallback row through the engine or sends it by hand.
+  // An authored commercial proposal is never automation's to send (GH codex
+  // P1 r30): its totals are the operator's, not generateEstimate's, even
+  // when the generated draft underneath still carries the SERVER stamp.
+  const proposalData = parseJsonObject(estimate.estimate_data || estimate.estimateData)?.proposal;
+  if (proposalData && typeof proposalData === 'object') {
+    return { eligible: false, reason: 'authored_proposal' };
+  }
+  if (String(estimate.pricing_authority || estimate.pricingAuthority || '').toUpperCase() !== 'SERVER') {
+    return { eligible: false, reason: 'pricing_authority_not_server' };
+  }
   if (disallowedReview.length > 0) {
     return { eligible: false, reason: 'disallowed_review_reasons', review: disallowedReview };
   }
@@ -436,6 +451,14 @@ async function claimLeadEstimateAutoSend(database, estimate, { now = new Date(),
         AND estimate_data->'automation'->'autoSend'->>'blocked_at' IS NULL
       )
     )`)
+    // Engine-authoritative pricing re-asserted ON the claim, gate or no gate
+    // (pre-push codex P0s): eligibility required the SERVER stamp on a
+    // pre-read, and a revision replacing it between that read and this
+    // UPDATE must lose the race — only an engine-verified price is ever
+    // auto-sent (fail closed on null / unknown stamps).
+    .whereRaw("UPPER(pricing_authority) = 'SERVER'")
+    // No authored proposal object on the row (GH codex P1 r30).
+    .whereRaw("estimate_data->'proposal' IS NULL")
     .update({
       status: 'sending',
       send_method: sendMethod,
@@ -446,7 +469,15 @@ async function claimLeadEstimateAutoSend(database, estimate, { now = new Date(),
   return updated || null;
 }
 
-async function updateAutoSendMetadata(database, estimate, patch, status = estimate.status, extraUpdate = {}) {
+// The pricing-authority block is written only while the row is still NOT
+// SERVER (GH codex P2 r6): an operator's engine re-save landing between the
+// eligibility read and the block write must not be stamped already_blocked
+// for good — the guarded UPDATE zero-rows and the next scan re-evaluates.
+const AUTO_SEND_BLOCK_STILL_NOT_SERVER_SQL = "COALESCE(UPPER(pricing_authority), '') <> 'SERVER'";
+
+// `guard`: optional (query) => query refinement applied to the UPDATE's
+// WHERE — a caller-supplied predicate the write must still satisfy.
+async function updateAutoSendMetadata(database, estimate, patch, status = estimate.status, extraUpdate = {}, guard = null) {
   // ATOMIC merge of automation.autoSend into the row's CURRENT JSONB — never
   // a wholesale serialization of the caller's pre-send object. A send can
   // rewrite estimate_data mid-flight (the lead-service park, its
@@ -455,10 +486,14 @@ async function updateAutoSendMetadata(database, estimate, patch, status = estima
   // in the columns (GH codex r5 P1 + pre-push P1 on #3711). Same key shape
   // mergeAutoSendMetadata produces, applied server-side.
   const patchJson = JSON.stringify(parseJsonObject(patch));
-  const [updated] = await database('estimates')
-    .where({ id: estimate.id })
+  let query = database('estimates').where({ id: estimate.id });
+  if (typeof guard === 'function') query = guard(query) || query;
+  const [updated] = await query
     .update({
-      status,
+      // A null status writes NO status: a block must never move a row that a
+      // concurrent send has already carried past the candidate's stale
+      // status (pre-push codex P1).
+      ...(status != null ? { status } : {}),
       estimate_data: database.raw(
         "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{automation}', COALESCE(estimate_data->'automation', '{}'::jsonb)), '{automation,autoSend}', COALESCE(estimate_data->'automation'->'autoSend', '{}'::jsonb) || ?::jsonb)",
         [patchJson],
@@ -508,11 +543,27 @@ async function processLeadEstimateAutoSendBatch({
         results.skipped += 1;
         continue;
       }
-      await updateAutoSendMetadata(database, estimate, {
+      // The block is metadata only — it never writes status — and it lands
+      // only on the row as the candidate read saw it: same status (a
+      // concurrent gate-off manual send may have moved a fallback row to
+      // 'sending'/'sent'; resetting it to draft would re-deliver — pre-push
+      // codex P1) and, for an authority block, still not SERVER (an engine
+      // re-save since the read must not be stamped already_blocked). A
+      // zero-row result is skipped; the next scan judges the row afresh.
+      const authorityBlock = eligibility.reason === 'pricing_authority_not_server';
+      const blockedRow = await updateAutoSendMetadata(database, estimate, {
         blockedAt: now.toISOString(),
         blockedReason: eligibility.reason,
         blockedReviewReasons: eligibility.review || [],
+      }, null, {}, (q) => {
+        q.where({ status: estimate.status });
+        if (authorityBlock) q.whereRaw(AUTO_SEND_BLOCK_STILL_NOT_SERVER_SQL);
+        return q;
       });
+      if (!blockedRow) {
+        results.skipped += 1;
+        continue;
+      }
       results.blocked += 1;
       continue;
     }
@@ -557,6 +608,10 @@ async function processLeadEstimateAutoSendBatch({
         now: () => now,
         // This path claims the row before calling (codex #3248 r6 contract).
         callerPreClaimed: true,
+        // Automation policy for the group preflight: every published
+        // sibling must carry engine-authoritative pricing regardless of
+        // GATE_SEND_REQUIRES_SERVER_PRICING (pre-push codex P0).
+        autoSend: true,
       });
       if (sendResult.sent) {
         const sentEstimate = await database('estimates').where({ id: claimed.id }).first();
@@ -611,4 +666,6 @@ module.exports = {
   mergeAutoSendMetadata,
   previewLeadEstimateAutoSendAudit,
   processLeadEstimateAutoSendBatch,
+  updateAutoSendMetadata,
+  AUTO_SEND_BLOCK_STILL_NOT_SERVER_SQL,
 };

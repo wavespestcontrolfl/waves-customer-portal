@@ -184,6 +184,16 @@ async function run({ limit = 100, dryRun = false, anthropic, fetchPageFn } = {})
         .modify((qb) => {
           if (p.claimed_at == null) qb.whereNull('claimed_at'); else qb.where('claimed_at', p.claimed_at);
           if (p.last_classified_at == null) qb.whereNull('last_classified_at'); else qb.where('last_classified_at', p.last_classified_at);
+          // …and the ROUTE this classification read: a path supersession
+          // (registry.settleRetiredPlacements) moves path_id/target_url and
+          // leaves last_classified_at null, so a snapshot of an unclassified
+          // row would otherwise write the OLD page's policy onto the new
+          // route and stamp it fresh
+          if (p.path_id == null) qb.whereNull('path_id'); else qb.where('path_id', p.path_id);
+          if (p.target_url == null) qb.whereNull('target_url'); else qb.where('target_url', p.target_url);
+          // …and the LANE it read: an in-place lane shift (same path_id and
+          // target_url) must not receive a classification made for the other lane
+          if (p.link_type == null) qb.whereNull('link_type'); else qb.where('link_type', p.link_type);
         })
         .update({
           directory_category: c.directory_category,

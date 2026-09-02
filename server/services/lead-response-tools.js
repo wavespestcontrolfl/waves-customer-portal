@@ -6,6 +6,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
+const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -111,43 +112,100 @@ async function executeLeadTool(toolName, input) {
       const customerId = input.customer_id;
       const phone = input.phone;
 
-      let estimates;
-      if (customerId) {
-        estimates = await db('estimates')
-          .where({ customer_id: customerId })
-          .orderBy('created_at', 'desc')
-          .limit(5);
-      } else if (phone) {
-        const clean = (phone || '').replace(/\D/g, '');
-        estimates = await db('estimates')
-          .where(function () {
+      const clean = (phone || '').replace(/\D/g, '');
+      const baseQuery = () => {
+        if (customerId) return db('estimates').where({ customer_id: customerId });
+        if (phone) {
+          return db('estimates').where(function () {
             this.where('customer_phone', clean)
               .orWhere('customer_phone', `+1${clean}`)
               .orWhere('customer_phone', `+${clean}`);
-          })
-          .orderBy('created_at', 'desc')
-          .limit(5);
+          });
+        }
+        return null;
+      };
+
+      // Only rows the customer can actually OPEN are listed (uncapped codex
+      // P1 r33 on #3750): an expired, send-failed, never-published, or
+      // linkage-invalidated row is refused by the public page, so its price,
+      // bearer token, and URL never reach the agent — it would quote a dead
+      // offer or send a dead link. Viewability is a predicate the query can't
+      // express, so the candidates are PAGED until five viewable rows are in
+      // hand or the candidates run out (a filter applied after a limit lets
+      // newer hidden rows mask an older estimate the customer still holds —
+      // the composer-customer-links.js pattern). Hidden rows are counted so
+      // the agent can offer a fresh quote without quoting the old one.
+      const { isEstimateCustomerViewable } = require('../routes/estimate-public');
+      const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+      // The public data route's verdict is viewability AND the durable
+      // call-side block (uncapped codex P1 r34): an engine draft whose call
+      // is missing, reprocessing, quarantined, or repointed is refused by the
+      // page even when the row itself looks open. Any failure to read that
+      // verdict hides the row (fail closed).
+      const customerCanOpen = async (row) => {
+        if (!isEstimateCustomerViewable(row)) return false;
+        try {
+          const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+          return !(await callSideBlockForEstimateData(db, data));
+        } catch (err) {
+          logger.warn('[lead-tools] check_existing_estimates: call-side verdict unavailable, row hidden', { estimateId: row.id, error: err.message });
+          return false;
+        }
+      };
+      const LIMIT = 5;
+      const PAGE = 15;
+      const viewable = [];
+      let hiddenCount = 0;
+      if (baseQuery()) {
+        for (let offset = 0; ; offset += PAGE) {
+          const rows = await baseQuery().orderBy('created_at', 'desc').offset(offset).limit(PAGE);
+          for (const row of rows) {
+            // Rows past the cap are neither evaluated nor counted (uncapped
+            // codex P1 r36): the hidden count reports only rows the
+            // customer cannot open, never valid estimates beyond the limit.
+            if (viewable.length >= LIMIT) break;
+            if (await customerCanOpen(row)) viewable.push(row);
+            else hiddenCount += 1;
+          }
+          if (viewable.length >= LIMIT || rows.length < PAGE) break;
+        }
       }
 
-      if (!estimates?.length) return { hasEstimates: false, estimates: [] };
+      if (!viewable.length) {
+        return { hasEstimates: false, estimates: [], ...(hiddenCount ? { unviewableEstimates: hiddenCount } : {}) };
+      }
 
+      // The agent may quote these URLs to the customer, so a link (and the
+      // bearer token behind it) is handed out ONLY for a viewable row that
+      // passes the group-aware pricing-authority verdict while the gate is on
+      // (#3750, uncapped codex P0 r24) — the same rule every guarded send
+      // funnel applies. Withheld rows still list, with the reason.
       return {
         hasEstimates: true,
-        estimates: await Promise.all(estimates.map(async e => ({
-          id: e.id,
-          status: e.status,
-          total: e.monthly_total || e.total_amount,
-          serviceInterest: e.service_interest,
-          sentAt: e.sent_at,
-          viewedAt: e.viewed_at,
-          token: e.token,
-          viewUrl: e.token
-            ? await shortenOrPassthrough(
-                `https://portal.wavespestcontrol.com/estimate/${e.token}`,
-                { kind: 'estimate', entityType: 'estimates', entityId: e.id, customerId: e.customer_id || null }
-              )
-            : null,
-        }))),
+        ...(hiddenCount ? { unviewableEstimates: hiddenCount } : {}),
+        estimates: await Promise.all(viewable.map(async (e) => {
+          const authorityOk = !gatedSendAuthorityPredicateApplies() || await estimateDeliverableUnderGate(db, e);
+          const linkable = authorityOk && !!e.token;
+          // A row the verdict refuses shows NO price either (uncapped codex P0
+          // r25): the agent quotes what it is given, and an unverified
+          // dollar figure must never reach a customer by any rail.
+          return {
+            id: e.id,
+            status: e.status,
+            ...(authorityOk ? { total: e.monthly_total || e.total_amount } : { totalWithheld: 'pricing-authority-not-server' }),
+            serviceInterest: e.service_interest,
+            sentAt: e.sent_at,
+            viewedAt: e.viewed_at,
+            token: linkable ? e.token : null,
+            viewUrl: linkable
+              ? await shortenOrPassthrough(
+                  `https://portal.wavespestcontrol.com/estimate/${e.token}`,
+                  { kind: 'estimate', entityType: 'estimates', entityId: e.id, customerId: e.customer_id || null }
+                )
+              : null,
+            ...(linkable ? {} : { viewUrlWithheld: !e.token ? 'no-token' : 'pricing-authority-not-server' }),
+          };
+        })),
       };
     }
 

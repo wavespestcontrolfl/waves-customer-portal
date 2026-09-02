@@ -31,6 +31,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { generateRecap, smsRecap } = require('./completion-recap');
 const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
 const { invalidateServiceReportPdfCache } = require('./service-report/pdf-storage');
+const { detectServiceLine } = require('./service-report/service-line-configs');
 const { isValidRateUnit } = require('./inventory-units');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -418,6 +419,7 @@ async function submitRecap({
         ...(serviceRecordCols.service_tier_source ? ['service_tier_source'] : []),
         ...(serviceRecordCols.service_id ? ['service_id'] : []),
         ...(serviceRecordCols.service_type ? ['service_type'] : []),
+        ...(serviceRecordCols.service_line ? ['service_line'] : []),
       );
 
     // Tier/provenance/callback snapshot — the SAME shared builder the heavy
@@ -607,6 +609,11 @@ async function submitRecap({
         technician_notes: note || null,
         status: 'completed',
         ...snapshotBackfill,
+        // Fill-if-absent: a record created before the line was stamped at
+        // insert gets the same frozen verdict (pre-push codex P1).
+        ...(serviceRecordCols.service_line && !existing.service_line
+          ? { service_line: detectServiceLine(existing.service_type || svc.service_type || 'Pest Control') }
+          : {}),
         ...(mergedServiceData ? { service_data: mergedServiceData } : {}),
         ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
         ...smsClaim,
@@ -637,6 +644,11 @@ async function submitRecap({
         scheduled_service_id: serviceId,
         service_date: serviceDate,
         service_type: svc.service_type || 'Pest Control',
+        // Report line, frozen at write like the /complete path (see
+        // project-completion buildServiceRecordInsert for the reader note).
+        ...(serviceRecordCols.service_line
+          ? { service_line: detectServiceLine(svc.service_type || 'Pest Control') }
+          : {}),
         status: 'completed',
         technician_notes: note || null,
         ...tierSnapshot,

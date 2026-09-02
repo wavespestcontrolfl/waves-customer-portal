@@ -17,6 +17,10 @@ jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
+  // The schedule claim runs inside a transaction (sibling preflight locked
+  // FOR UPDATE + the anchor UPDATE, GH codex P2 r5 on #3750) — same
+  // recording builder as the trx.
+  mockDb.transaction = jest.fn(async (callback) => callback(mockDb));
   return mockDb;
 });
 jest.mock('../middleware/admin-auth', () => ({
@@ -83,12 +87,15 @@ function estimateRow(overrides = {}) {
 // configured claim count; grouped callbacks replay against the recorder.
 function makeBuilder(row, { updateResult = 1 } = {}) {
   const b = {};
-  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotIn', 'whereNotNull', 'select', 'orderBy', 'limit']) {
+  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotIn', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'limit']) {
     b[m] = jest.fn((...args) => {
       if (typeof args[0] === 'function') args[0].call(b, b);
       return b;
     });
   }
+  // The scheduled claim re-asserts the pricing-authority gate through
+  // .modify() (SEC-002) — the fake runs the modifier like knex does.
+  b.modify = jest.fn((fn) => { fn(b); return b; });
   b.first = jest.fn(async () => row);
   b.update = jest.fn(async () => updateResult);
   return b;

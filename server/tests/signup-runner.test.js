@@ -2,6 +2,7 @@ jest.mock('../services/seo/link-prospect-worker', () => ({
   claim: jest.fn(),
   report: jest.fn(async () => ({ ok: true })),
   releaseClaims: jest.fn(async () => ({ released: 0 })),
+  settleReleasedPlacements: jest.fn(async () => 0),
   businessProfile: () => ({ brand: 'Waves Pest Control', website: 'https://wavespestcontrol.com', contact_email: 'contact@wavespestcontrol.com', default_location_id: 'bradenton', locations: [
     { id: 'bradenton', name: 'Bradenton, FL', address: '13649 Luxe Ave #110, Bradenton, FL 34211', phone: '(941) 318-7612' },
     { id: 'sarasota', name: 'Sarasota, FL', address: '100 Main St, Sarasota, FL 34236', phone: '(941) 555-2000' },
@@ -48,7 +49,9 @@ jest.mock('../models/db', () => {
   };
   mockWhere.mockImplementation(() => builder); // chainable: .where(...).where(...)
   builder.where = mockWhere;
-  return jest.fn(() => builder);
+  const fn = jest.fn(() => builder);
+  fn.transaction = async (cb) => cb(fn); // reclassify releases + settles in one transaction
+  return fn;
 });
 
 const worker = require('../services/seo/link-prospect-worker');
@@ -89,6 +92,8 @@ describe('leaseGuardedReclassify (optimistic lease guard)', () => {
     expect(mockWhere).toHaveBeenCalledWith('claimed_at', new Date('2026-06-22T00:00:00.000Z'));
     expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null, claimed_by: null }));
     expect(n).toBe(1);
+    // a reclassify IS a lease release: the placement settles onto its live path (Codex PR #3687 r29 P1)
+    expect(require('../services/seo/link-prospect-worker').settleReleasedPlacements).toHaveBeenCalledWith(['p1'], expect.anything()); // inside the release transaction
   });
   test('no-op (returns 0, no DB write) without a valid lease_token', async () => {
     const n = await leaseGuardedReclassify({ id: 'p1', lease_token: 'not-a-date' }, { automation_policy: 'skip' });

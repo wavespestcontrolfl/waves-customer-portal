@@ -1236,6 +1236,10 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     }
 
     const [estimate] = await trx('estimates').insert({
+      // Engine drafts are priced by generateEstimate only (AGENTS.md
+      // estimator-engine authority): the explicit SERVER stamp the send gate
+      // and the auto-send lane require.
+      pricing_authority: 'SERVER',
       estimate_data: JSON.stringify({
         engineInputs: storedEngineInputs,
         engineResult,

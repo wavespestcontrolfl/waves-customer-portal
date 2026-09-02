@@ -2084,6 +2084,7 @@ function ProductsTab({
               setPage(1);
             }}
             style={{
+              minHeight: 40,
               padding: "6px 14px",
               borderRadius: 20,
               border: "none",
@@ -3595,6 +3596,7 @@ function RegistryTab({ showToast }) {
             key={f.key}
             onClick={() => setFilter(f.key)}
             style={{
+              minHeight: 40,
               ...sBtn(filter === f.key ? D.teal : "transparent", filter === f.key ? "#fff" : D.muted),
               border: filter === f.key ? "none" : `1px solid ${D.border}`,
               fontSize: 11,
