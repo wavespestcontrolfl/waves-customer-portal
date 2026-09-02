@@ -330,6 +330,20 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(blob).toBeUndefined();
   });
 
+  test('quarantining an incoming recording that is not the row\'s current one leaves the current one OWED', async () => {
+    const processor = require('../services/call-recording-processor');
+    const INCOMING = 'REincoming0000000000000000000014';
+    const CURRENT = 'REcurrent00000000000000000000014';
+    db.__builder.update.mockClear();
+    db.__state.call = { id: 'c-owe-current', recording_url: 'https://api.twilio.com/cur.mp3', recording_sid: CURRENT, metadata: {}, transcription_metadata: { pan_detected: true, pan_notified: true } };
+    const out = await processor.quarantineCardRecording({ ...db.__state.call, recording_sid: INCOMING, recording_url: null }, { source: 'recording_status_post_quarantine' });
+    expect(out.twilioDeleted).toBe(true);
+    const stamp = db.__builder.update.mock.calls.map((c) => c[0]).find((patch) => typeof patch.transcription_metadata === 'string' && patch.transcription_metadata.trim().startsWith('{'));
+    const meta = JSON.parse(stamp.transcription_metadata);
+    expect(meta.quarantine_owed_sids).toEqual([CURRENT]);
+    expect(meta.recording_quarantined).toBe(false);
+  });
+
   test('an unstamped call still proceeds into the Twilio lookup', async () => {
     const processor = require('../services/call-recording-processor');
     db.__state.call = { id: 'c-clean', recording_url: null, transcription_metadata: null };

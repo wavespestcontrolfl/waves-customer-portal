@@ -519,7 +519,7 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
     // recording that sits in no metadata list, that SID is the only thing
     // recovery can retry.
     await db.transaction(async (trx) => {
-    const row = await trx('call_log').where({ id: call.id }).forUpdate().first('transcription_metadata');
+    const row = await trx('call_log').where({ id: call.id }).forUpdate().first('transcription_metadata', 'recording_sid', 'recording_url');
     // jsonb columns come back as OBJECTS from Postgres, strings from mocks/
     // sqlite — handle both or a quarantine would clobber the provider/source
     // metadata instead of merging (Codex #2676 round-4 P2).
@@ -555,6 +555,15 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
     ]);
     if (deleteIncomplete) owedSids.add(sid);
     else if (twilioDeleted && sid) owedSids.delete(sid);
+    // This call deletes the SID it was handed. When that is NOT the row's
+    // current recording (the webhook quarantines an incoming recording
+    // first, the row's own second), the current recording is owed from this
+    // moment: its URL is cleared below, and a crash before the second call
+    // must leave recovery a SID to delete, never a completed-looking row.
+    // A row whose recording_url is already null had its current recording
+    // quarantined (or never had one) — only a still-reachable one is owed.
+    const currentSid = row?.recording_sid || null;
+    if (currentSid && currentSid !== sid && String(row?.recording_url || '').trim()) owedSids.add(currentSid);
     if (owedSids.size) {
       nextMeta.quarantine_owed_sids = [...owedSids];
       nextMeta.quarantine_recording_sid = [...owedSids][0];
