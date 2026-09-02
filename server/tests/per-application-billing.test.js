@@ -931,3 +931,26 @@ describe('emailPerApplicationAmountForConversion — the welcome email never quo
     expect(emailPerApplicationAmountForConversion({ recurringUnitCount: 2, perApplicationAmount: 112 })).toBeNull();
   });
 });
+
+describe('assertPerApplicationAddOnPriced — an established per-application customer never bills an unpriced add-on at the old fee (GH codex P1)', () => {
+  const { assertPerApplicationAddOnPriced } = EstimateConverter;
+  const perAppCustomer = { billing_mode: 'per_application', per_application_fee: 98 };
+
+  test('refuses the conversion (409 + code) when the single monthly unit is unresolved', () => {
+    let caught = null;
+    try {
+      assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer });
+    } catch (e) { caught = e; }
+    expect(caught?.statusCode).toBe(409);
+    expect(caught?.code).toBe('PER_APPLICATION_ADD_ON_UNPRICED');
+    expect(caught?.message).toMatch(/nothing was booked/i);
+  });
+
+  test('never fires when the charge resolved, for new customers (they park instead), members, one-time or prepay accepts', () => {
+    expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: false, customer: perAppCustomer })).not.toThrow();
+    expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: {} })).not.toThrow();
+    expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, preservesExistingMembership: true })).not.toThrow();
+    expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, suppressRecurringConversion: true })).not.toThrow();
+    expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, billingTerm: 'prepay_annual' })).not.toThrow();
+  });
+});

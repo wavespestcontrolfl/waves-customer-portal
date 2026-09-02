@@ -12300,7 +12300,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       }
     }
     // Deferred per-application fee park (DATA-001) — same post-commit contract.
-    if (acceptConversion?.perApplicationFeeNotification) {
+    // The per-visit completeness check above (§3.7) already owns the case
+    // with a BOOKED visit (GH codex P1 on #3751: two bells for one accept);
+    // the converter's bell covers only an accept that booked nothing.
+    if (acceptConversion?.perApplicationFeeNotification && !acceptedAppointmentsToRegister.length) {
       const feeNotify = acceptConversion.perApplicationFeeNotification;
       try {
         const NotificationService = require('../services/notification-service');

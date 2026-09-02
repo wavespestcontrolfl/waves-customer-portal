@@ -2336,6 +2336,30 @@ function resolveConvertedPerApplicationFee({
   return null;
 }
 
+// FAIL-CLOSED money guard (GH codex P1 on #3751): an established
+// per-application customer accepting a single monthly-billed unit whose
+// per-visit charge could not be derived. The resolver rightly preserves the
+// account's existing fee, so the add-on's rows would carry no price and
+// completion would bill the ORIGINAL plan's fee for an unrelated add-on
+// (completion-charge-verdict's customer-fee fallback), while the park bell
+// stays silent because the stamped fee is non-null. Refuse the conversion
+// instead — the accept rolls back and the office prices the add-on.
+function assertPerApplicationAddOnPriced({
+  perApplicationUnresolved = false,
+  customer = {},
+  preservesExistingMembership = false,
+  suppressRecurringConversion = false,
+  billingTerm = 'standard',
+} = {}) {
+  if (!perApplicationUnresolved || preservesExistingMembership || suppressRecurringConversion) return;
+  if (billingTerm === 'prepay_annual') return;
+  if (!(customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)) return;
+  const err = new Error('This add-on\'s per-visit price could not be derived from the accepted plan, and it must not bill at the account\'s existing per-visit fee — nothing was booked. Please call the office to add it.');
+  err.statusCode = 409;
+  err.code = 'PER_APPLICATION_ADD_ON_UNPRICED';
+  throw err;
+}
+
 function estimateOperatorSetupFeeWaived(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
   return data?.operatorPriceAdjustment?.waiveSetupFee === true;
@@ -4338,6 +4362,13 @@ const EstimateConverter = {
     // lane (billing_mode monthly_membership below — codex #3591 r21 P0):
     // no per-application fee exists for it. The customers-row stamp stays
     // the ONE fallback authority, so the legacy branch lives here.
+    assertPerApplicationAddOnPriced({
+      perApplicationUnresolved,
+      customer,
+      preservesExistingMembership,
+      suppressRecurringConversion,
+      billingTerm,
+    });
     const stampedPerApplicationFee = resolveConvertedPerApplicationFee({
       pinnedLegacyRodentOnlyPlan,
       preservesExistingMembership,
@@ -4362,7 +4393,14 @@ const EstimateConverter = {
         type: 'billing',
         title: 'Per-visit fee not set on a new per-application customer',
         body: `Estimate #${estimateId} converted to per-application billing, but the per-visit charge could not be derived from the accepted plan (no billing cadence or visit count on the quote). Visits will complete with no billable amount until the fee is set — invoice the first visit by hand or re-quote.`,
-        options: { icon: '\u{1F4B3}', link: '/admin/customers', bell: true, metadata: { estimateId, customerId } },
+        options: {
+          icon: '\u{1F4B3}',
+          link: '/admin/customers',
+          bell: true,
+          // One bell per estimate across retries and dispatch paths.
+          dedupeKey: `per-application-fee-unresolved:${estimateId}`,
+          metadata: { estimateId, customerId },
+        },
       };
     }
     // 1. Update customer to active. Clear deleted_at: admin screens filter
@@ -7079,3 +7117,4 @@ module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversi
 module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmountForConversion;
 module.exports.applyFrozenExistingServiceExtension = applyFrozenExistingServiceExtension;
 module.exports.resolveConvertedPerApplicationFee = resolveConvertedPerApplicationFee;
+module.exports.assertPerApplicationAddOnPriced = assertPerApplicationAddOnPriced;
