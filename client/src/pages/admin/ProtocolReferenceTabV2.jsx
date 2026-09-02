@@ -927,6 +927,9 @@ export default function ProtocolReferenceTabV2() {
   // Monotonic id of the latest protocol request: a slow earlier selection
   // must not install its data (or its failure rollback) over a later one.
   const trackRequestRef = useRef(0);
+  // Last selection that actually loaded — what a failed request rolls back
+  // to (the in-flight selection at request time may itself never resolve).
+  const lastLoadedRef = useRef({ key: null, data: null });
   const [loading, setLoading] = useState(true);
   const [showFullCalendar, setShowFullCalendar] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
@@ -948,7 +951,6 @@ export default function ProtocolReferenceTabV2() {
   const isServiceProgram = selectedTrack && !isLawnTrack;
 
   const loadTrack = async (key) => {
-    const previous = { key: selectedTrack, data: trackData };
     const requestId = ++trackRequestRef.current;
     const isCurrent = () => requestId === trackRequestRef.current;
     setSelectedTrack(key);
@@ -961,15 +963,17 @@ export default function ProtocolReferenceTabV2() {
     try {
       const d = await adminFetch(`/admin/protocols/programs?${param}`);
       if (!isCurrent()) return;
-      setTrackData(d.track || d.program);
+      const data = d.track || d.program;
+      lastLoadedRef.current = { key, data };
+      setTrackData(data);
       setSelectedConditionalIds([]);
     } catch (e) {
       if (!isCurrent()) return;
       // Restore the previous selection so the controlled Select (phones)
       // can re-emit a change for the failed key — re-picking the already
       // selected option fires nothing — and offer a direct retry.
-      setSelectedTrack(previous.key);
-      setTrackData(previous.data);
+      setSelectedTrack(lastLoadedRef.current.key);
+      setTrackData(lastLoadedRef.current.data);
       setTrackError({ key, message: e?.message || "Request failed" });
     }
   };
@@ -992,6 +996,7 @@ export default function ProtocolReferenceTabV2() {
               `/admin/protocols/programs?${param}`,
             );
             if (!cancelled) {
+              lastLoadedRef.current = { key: defaultTrack, data: track.track || track.program };
               setSelectedTrack(defaultTrack);
               setTrackData(track.track || track.program);
             }
