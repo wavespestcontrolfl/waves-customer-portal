@@ -26,6 +26,15 @@ import { useNavigate } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import { etParts } from '../../lib/timezone';
 
+// Catalog categories are slugs like "Damage_id" / "Pest_id" ("identification
+// guide"); show them as "Damage ID" / "Pest ID" instead of the raw key.
+function humanizeCategory(category) {
+  if (!category) return '';
+  return String(category)
+    .replace(/_id$/i, ' ID')
+    .replace(/_/g, ' ');
+}
+
 const DARK = {
   bg: '#0f1923',
   card: '#1e293b',
@@ -234,7 +243,7 @@ function PhotoGrid({ photos }) {
                 {p.name}
               </div>
               <div style={{ fontSize: 10, color: DARK.muted, textTransform: 'capitalize' }}>
-                {p.category}
+                {humanizeCategory(p.category)}
               </div>
             </div>
           </a>
