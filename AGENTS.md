@@ -146,6 +146,21 @@ duplicate them here; point at them.
   `call-recording-processor.js`) are a documented exception, not a
   finding. Every DEEP call site goes through `createDeepMessage`
   (thinking-block stripping + refusal fallback).
+- **Estimate service-mix rail member exclusion**
+  (`server/routes/estimate-public.js` `applyServiceMixChange`,
+  `server/routes/admin-estimates.js` `applyLeadServiceForSend`). A priced
+  customer add (`GATE_ESTIMATE_SERVICE_ADD`) and the send-time lead-service
+  park (`GATE_ESTIMATE_LEAD_SERVICE_SEND`) price NEW-customer terms; a plan
+  member's ladder is a different program. Both read the ONE evidence reader
+  `memberEvidenceInEstimateData`, run a strict live `isActivePlanCustomer`
+  check that fails CLOSED, and re-check on a `FOR UPDATE` customer row
+  inside the write (estimate row locked first — the accept path's order).
+  Also security-critical: the add branch is customer-only (`actor !==
+  'customer'` → 400), an add whose recompute yields no new recurring row
+  fails closed (409 `add_unavailable`), and a staff-parked offer re-enters
+  only under the add gate. Dropping any of these plants fresh-quote
+  pricing on a member plan or lets staff parks masquerade as customer
+  removals.
 
 ## Treat as P1
 

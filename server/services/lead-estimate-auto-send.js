@@ -447,12 +447,22 @@ async function claimLeadEstimateAutoSend(database, estimate, { now = new Date(),
 }
 
 async function updateAutoSendMetadata(database, estimate, patch, status = estimate.status, extraUpdate = {}) {
-  const nextData = mergeAutoSendMetadata(estimate.estimate_data || estimate.estimateData, patch);
+  // ATOMIC merge of automation.autoSend into the row's CURRENT JSONB — never
+  // a wholesale serialization of the caller's pre-send object. A send can
+  // rewrite estimate_data mid-flight (the lead-service park, its
+  // revert-pending marker, the handoff witness, the delivery claim), and
+  // writing a stale snapshot would erase those while the parked totals stay
+  // in the columns (GH codex r5 P1 + pre-push P1 on #3711). Same key shape
+  // mergeAutoSendMetadata produces, applied server-side.
+  const patchJson = JSON.stringify(parseJsonObject(patch));
   const [updated] = await database('estimates')
     .where({ id: estimate.id })
     .update({
       status,
-      estimate_data: JSON.stringify(nextData),
+      estimate_data: database.raw(
+        "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{automation}', COALESCE(estimate_data->'automation', '{}'::jsonb)), '{automation,autoSend}', COALESCE(estimate_data->'automation'->'autoSend', '{}'::jsonb) || ?::jsonb)",
+        [patchJson],
+      ),
       updated_at: database.fn.now(),
       ...extraUpdate,
     })

@@ -1676,12 +1676,144 @@ export function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = fal
   );
 }
 
-function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
+// When the legacy offer ladder has no candidate for this mix (a mosquito-only
+// plan, say) but the server stamped keys addable, the priced card is built
+// from the server's stamp — the stamp is the eligibility truth (GH codex r3
+// P2). Exported for tests.
+export function offerFromAddable(addable = []) {
+  const first = (Array.isArray(addable) ? addable : []).find((a) => a && a.key && a.label);
+  if (!first) return null;
+  return {
+    serviceKey: first.key,
+    label: first.label,
+    title: `Add ${first.label} and save more`,
+    body: '',
+  };
+}
+
+// Confirm panel shared by every "a line joins the plan" moment — a priced add
+// (GATE_ESTIMATE_SERVICE_ADD), a customer restore, and a staff-parked offer.
+// The dryRun's disclosures show the resulting terms BEFORE the reprice is
+// written; the commit echoes previewBasis.
+function ServiceJoinConfirmPanel({ label, quote, phase, onConfirm, onCancel, mode = 'add' }) {
+  const submitting = phase === 'submitting';
+  const restoring = mode === 'restore';
+  return (
+    <div style={estimateInnerBox({ padding: '14px 16px' })}>
+      <div style={{ fontSize: 15, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
+        {restoring ? `Add ${label} back?` : `Add ${label}?`}
+      </div>
+      {Number(quote.next?.onetimeTotal || 0) !== Number(quote.previous?.onetimeTotal || 0) ? (
+        <div style={{ fontSize: 14, color: ESTIMATE_TEXT, lineHeight: 1.55 }}>
+          Your first visit becomes{' '}
+          <strong>${Number(quote.next?.onetimeTotal || 0).toFixed(2)}</strong>
+          {' '}(was ${Number(quote.previous?.onetimeTotal || 0).toFixed(2)}).
+        </div>
+      ) : null}
+      {(quote.disclosures || []).length ? (
+        <ul style={{ margin: '10px 0 0', paddingLeft: 18, fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+          {quote.disclosures.map((d, j) => (
+            <li key={d.code ? `${d.code}-${j}` : j} style={{ marginBottom: 4 }}>{d.message}</li>
+          ))}
+        </ul>
+      ) : (
+        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+          {restoring ? `${label} comes back at your original quoted terms.` : `${label} joins your plan with no change to your other services.`}
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
+        <button
+          type="button"
+          onClick={onConfirm}
+          disabled={submitting}
+          style={{
+            ...estimateCtaStyle,
+            padding: '10px 18px', fontSize: 14,
+            opacity: submitting ? 0.6 : 1,
+            cursor: submitting ? 'default' : 'pointer',
+          }}
+        >
+          {submitting ? 'Updating…' : restoring ? `Yes, add ${label} back` : `Yes, add ${label}`}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={submitting}
+          style={{
+            ...estimateSecondaryCtaStyle,
+            padding: '10px 18px', fontSize: 14,
+            cursor: submitting ? 'default' : 'pointer',
+          }}
+        >
+          Never mind
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// `priced` (GATE_ESTIMATE_SERVICE_ADD): the server stamped this offer's
+// service addable, so the card prices it in place through the opt-out rail
+// instead of filing a bundle inquiry for the office. Shape: { phase, quote,
+// onPreview, onConfirm, onCancel } — the same optOut state the removal rows
+// use.
+export function EstimateAddServiceRequestCard({ offer, requestState, onRequest, priced = null }) {
   if (!offer) return null;
   const status = requestState?.status || 'idle';
   const isSubmitting = status === 'submitting';
   const isReceived = status === 'received';
   const isError = status === 'error';
+  if (priced) {
+    const previewing = priced.phase === 'previewing';
+    const showPanel = (priced.phase === 'preview' || priced.phase === 'submitting') && priced.quote;
+    return (
+      <section style={estimateCard({ padding: 16 })}>
+        <div style={{ fontSize: 16, fontWeight: 800, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>
+          {offer.title}
+        </div>
+        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 4 }}>
+          See exactly what {offer.label} adds per application before you decide — nothing changes until you confirm.
+        </div>
+        {showPanel ? (
+          <div style={{ marginTop: 12 }}>
+            <ServiceJoinConfirmPanel
+              label={offer.label}
+              quote={priced.quote}
+              phase={priced.phase}
+              onConfirm={priced.onConfirm}
+              onCancel={priced.onCancel}
+            />
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={priced.onPreview}
+            disabled={previewing}
+            style={{
+              margin: '12px auto 0',
+              width: 'fit-content',
+              minWidth: 220,
+              padding: '0 24px',
+              minHeight: 44,
+              border: 'none',
+              borderRadius: 10,
+              background: ESTIMATE_BUTTON_BG,
+              color: COLORS.white,
+              fontSize: 15,
+              fontWeight: 800,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: previewing ? 'default' : 'pointer',
+              opacity: previewing ? 0.72 : 1,
+            }}
+          >
+            {previewing ? 'Checking your price…' : `See my price with ${offer.label}`}
+          </button>
+        )}
+      </section>
+    );
+  }
   return (
     <section style={estimateCard({ padding: 16 })}>
       {/* Icon chip removed (owner 2026-07-06) — copy carries the offer. */}
@@ -5091,6 +5223,28 @@ function EstimateViewPageInner() {
     ),
     [services, serviceMode, data?.cta?.terminalState, data?.estimate?.membership, data?.serviceOptOut?.removedKeys]
   );
+  // Priced add (GATE_ESTIMATE_SERVICE_ADD): the offer prices in place when the
+  // server stamped its key addable — same optOut state and rail as a restore.
+  // Never on a terminal/accepted page (the accept-time reprice is frozen);
+  // the server never stamps `addable` on a staff draft preview.
+  // serviceOptOut.addable is the eligibility truth: the legacy ladder's pick
+  // is used only when the stamp covers it; otherwise the priced offer is
+  // built from the stamp — a ladder pick the server did not stamp must
+  // never hide a priced add-on behind the office inquiry (pre-push codex P1).
+  const addableStamp = data?.serviceOptOut?.addable || [];
+  // Recurring mode only, like the legacy ladder: a priced add rewrites the
+  // estimate as a recurring bundle, never from the one-time flow (GH codex
+  // r4 P2).
+  // Frozen restart quotes refuse every self-serve mutation
+  // (refuseFrozenRestartMutation), so no priced offer there (GH codex r5 P2).
+  const pricedAddOffer = data?.cta?.terminalState == null && serviceMode === 'recurring' && !restartQuote && addableStamp.length
+    ? (addServiceOffer && addableStamp.some((a) => a?.key === addServiceOffer.serviceKey)
+      ? addServiceOffer
+      : offerFromAddable(addableStamp))
+    : null;
+  // The priced offer wins the card whenever one exists; the inquiry card is
+  // the fallback for mixes with no stamped add.
+  const offerCardOffer = pricedAddOffer || addServiceOffer;
   // Download PDF / Share / Print / Portal Login at the top of every estimate
   // render (owner ask 2026-07-09, live review screen) — the same shared bar
   // as the report/pay/receipt/contract pages. The PDF endpoint streams the
@@ -5472,6 +5626,8 @@ function EstimateViewPageInner() {
           ? 'Removing this would end an included item on your plan. Give us a call at (941) 234-8929 and we\'ll sort it out with you.'
           : body?.error === 'service_not_removable'
             ? 'This service can\'t be removed online. Give us a call and we\'ll take care of it.'
+            : body?.error === 'service_not_addable' || body?.error === 'add_unavailable'
+              ? 'We can\'t price this add-on online for your property just yet. Give us a call and we\'ll quote it for you.'
             : body?.error === 'estimate_changed_since_preview'
               ? 'Your estimate changed since this preview. Please take another look at the updated numbers and try again.'
               : 'We couldn\'t update your estimate just now. Please try again.',
@@ -6800,10 +6956,25 @@ function EstimateViewPageInner() {
               {data.serviceOptOut.removedKeys.map((key, i) => {
                 const label = data.serviceOptOut.removedLabels?.[i] || key;
                 const active = optOut.sectionKey === key;
+                // A line Waves parked at send time (GATE_ESTIMATE_LEAD_SERVICE_SEND)
+                // reads as an offer, not as something the customer took off.
+                const staffOffered = (data.serviceOptOut.staffOfferedKeys || []).includes(key);
                 // Restore confirm panel — same two-step as a removal: the
                 // dryRun's disclosures show the resulting terms BEFORE the
                 // reprice is written, and the commit echoes previewBasis.
                 if (active && (optOut.phase === 'preview' || optOut.phase === 'submitting') && optOut.quote) {
+                  if (staffOffered) {
+                    return (
+                      <ServiceJoinConfirmPanel
+                        key={key}
+                        label={label}
+                        quote={optOut.quote}
+                        phase={optOut.phase}
+                        onConfirm={() => commitOptOut(key, true, optOut.quote?.previewBasis || null)}
+                        onCancel={cancelRemoveService}
+                      />
+                    );
+                  }
                   return (
                     <div key={key} style={estimateInnerBox({ padding: '14px 16px' })}>
                       <div style={{ fontSize: 15, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
@@ -6867,7 +7038,7 @@ function EstimateViewPageInner() {
                       fontSize: 14, color: ESTIMATE_BODY,
                     }}
                   >
-                    <span>{label} removed</span>
+                    <span>{staffOffered ? `Also available: ${label}` : `${label} removed`}</span>
                     <button
                       type="button"
                       onClick={() => onPreviewRestoreService(key)}
@@ -6878,7 +7049,9 @@ function EstimateViewPageInner() {
                         textDecoration: 'underline', cursor: 'pointer',
                       }}
                     >
-                      {active && optOut.phase === 'previewing' ? 'Checking your new price…' : 'Add it back'}
+                      {active && optOut.phase === 'previewing'
+                        ? 'Checking your new price…'
+                        : staffOffered ? `See my price with ${label}` : 'Add it back'}
                     </button>
                   </div>
                 );
@@ -7192,6 +7365,16 @@ function EstimateViewPageInner() {
   // (configure branch) and also after the confirmation card (review branch) so
   // the price-before-AI ordering holds while the panel + ask stay available
   // during the held-slot review step too.
+  // One prop object for EVERY active offer-card site (glass tail and the
+  // non-glass / review aiPanelBlock alike), so a category outside the glass
+  // pack still gets the dry-run price preview (GH codex P2 r2).
+  const pricedAddProps = pricedAddOffer ? {
+    phase: optOut.sectionKey === pricedAddOffer.serviceKey ? optOut.phase : 'idle',
+    quote: optOut.sectionKey === pricedAddOffer.serviceKey ? optOut.quote : null,
+    onPreview: () => onPreviewRestoreService(pricedAddOffer.serviceKey),
+    onConfirm: () => commitOptOut(pricedAddOffer.serviceKey, true, optOut.quote?.previewBasis || null),
+    onCancel: cancelRemoveService,
+  } : null;
   const aiPanelBlock = (
     <>
       {!isRegulatedCertificateSurface ? (
@@ -7207,9 +7390,10 @@ function EstimateViewPageInner() {
         </>
       ) : null}
       <EstimateAddServiceRequestCard
-        offer={addServiceOffer}
+        offer={offerCardOffer}
         requestState={addServiceRequestState}
         onRequest={handleAddServiceRequest}
+        priced={pricedAddProps}
       />
     </>
   );
@@ -7696,9 +7880,10 @@ function EstimateViewPageInner() {
               {data?.softExit === true && !isRegulatedCertificateSurface && ctaPhase !== 'submitting'
                 ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
               <EstimateAddServiceRequestCard
-                offer={addServiceOffer}
+                offer={offerCardOffer}
                 requestState={addServiceRequestState}
                 onRequest={handleAddServiceRequest}
+                priced={pricedAddProps}
               />
             </>
           ) : null}

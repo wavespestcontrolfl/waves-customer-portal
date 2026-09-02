@@ -54,6 +54,8 @@
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
+ *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
+ *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true (12-month application strip under the lawn price card, arithmetic on visitsPerYear only; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
@@ -1474,6 +1476,27 @@ const gates = {
   // Enable with GATE_ESTIMATE_SERVICE_OPT_OUT=true.
   estimateServiceOptOut: process.env.GATE_ESTIMATE_SERVICE_OPT_OUT === 'true',
 
+  // Priced add-a-service on a sent estimate: the mirror of the opt-out. A
+  // never-quoted residential line (pest / lawn / mosquito) joins the plan
+  // through the SAME PUT /:token/service-opt-out dryRun-preview → confirm
+  // rail and the same canonical recompute (mode 'add'). Requires the opt-out
+  // gate too. No customer comms; one activity_log row, no bell. STRICT
+  // opt-in in every environment for the same reason as the opt-out: it
+  // rewrites monthly_total / annual_total / onetime_total.
+  // Enable with GATE_ESTIMATE_SERVICE_ADD=true (with the opt-out gate on).
+  estimateServiceAdd: process.env.GATE_ESTIMATE_SERVICE_ADD === 'true',
+
+  // Send-time "lead with one service": when a NEW residential customer's
+  // estimate carries EXACTLY two recurring lines (the non-lead one removable),
+  // sendEstimateNow parks the second as a staff-authored opt-out event
+  // (actor 'staff') before delivery, so the customer receives a single-
+  // service quote with the other offered as a one-tap priced add-on on the
+  // page. Three-line estimates go out as the full bundle (one atomic park,
+  // never a partial mix). Lead = the estimator's first selected recurring service. Existing
+  // members, commercial, grouped and proposal estimates are untouched.
+  // STRICT opt-in: this changes what gets sent and billed.
+  // Enable with GATE_ESTIMATE_LEAD_SERVICE_SEND=true (needs opt-out + add on).
+  estimateLeadServiceSend: process.env.GATE_ESTIMATE_LEAD_SERVICE_SEND === 'true',
   // Lawn program calendar on the estimate page: a 12-month strip under the
   // lawn price card marking N evenly spaced application months, where N is
   // the selected frequency's visitsPerYear. Pure arithmetic on data already

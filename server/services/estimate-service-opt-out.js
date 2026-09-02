@@ -339,6 +339,174 @@ function readRemovedInputs(event) {
   return isPlainObject(raw) ? raw : null;
 }
 
+// ── Priced add (GATE_ESTIMATE_SERVICE_ADD) ─────────────────────────────
+//
+// The mirror of a removal: a service that was NEVER on the quote joins it
+// through the same dryRun-preview → confirm rail, priced by the same canonical
+// recompute. Only the three residential lines the engine can price from the
+// stored property profile alone; termite/rodent need measurements the profile
+// may not carry and are left to the office (bundle inquiry).
+const SERVICE_ADD_KEYS = ['pest_control', 'lawn_care', 'mosquito'];
+
+function replayableCarrier(estData) {
+  const req = estData?.engineRequest;
+  if (isPlainObject(req) && isPlainObject(req.profile) && Array.isArray(req.selectedServices)) return 'engineRequest';
+  if (isPlainObject(estData?.engineInputs) && isPlainObject(estData.engineInputs.services)) return 'engineInputs';
+  return null;
+}
+
+// Whether the engine can price `serviceKey` from what the estimate already
+// stores WITHOUT review. Lawn needs a supplied turf basis (measured, lawn
+// sqft, or the wizard's estimated turf): a lot-only profile prices turf off
+// the lot-minus-footprint heuristic, which the engine grades LOW / field-
+// verify (property-calculator turfBasis lotFallback, draft-builder
+// HEURISTIC_TURF_BASES), so every preview would refuse as review-only and
+// the customer would hold a button that can only fail where the office
+// inquiry card used to be (GH codex r10 P2). That mix keeps the inquiry.
+function serviceAddBuildable(estData, serviceKey) {
+  const carrier = replayableCarrier(estData);
+  if (!carrier) return false;
+  if (serviceKey !== 'lawn_care') return true;
+  if (carrier === 'engineRequest') {
+    const p = estData.engineRequest.profile;
+    return Number(p.measuredTurfSf) > 0 || Number(p.lawnSqFt) > 0 || Number(p.estimatedTurfSf) > 0;
+  }
+  return Number(estData.engineInputs.lawnSqFt) > 0;
+}
+
+// ONE review predicate for a priced engine line: the draft builder's own
+// (customQuoteFlag, manualReviewReasons, heuristic turf, the custom-quote
+// trio) plus the separately recorded low pricing-confidence grade. Shared by
+// the add rail (addedLineReviewOnly) and the send-time shaped-quote check so
+// the two can never disagree about what is sendable (GH codex r10 P1).
+function lineReviewOnly(line) {
+  if (!line || typeof line !== 'object') return true;
+  const { lineRequiresReview } = require('./estimator-engine/draft-builder');
+  return lineRequiresReview(line)
+    || String(line.pricingConfidence || line.confidence || '').toLowerCase() === 'low';
+}
+
+// EVERY member-evidence carrier the rail and reconcileFrozenMembershipSnapshot
+// recognize: the frozen snapshot flag, priors in any replay carrier, and the
+// recurring-customer flag in any replay shape (same truthy coercion). One
+// reader for the add resolver and the send-time lead-service scope, so the
+// two can never disagree about who is a member (pre-push codex P0 x2).
+function memberEvidenceInEstimateData(estData = {}) {
+  if (!isPlainObject(estData)) return false;
+  if (estData.membershipSnapshot?.isExistingCustomer === true) return true;
+  // engineInput (singular) is the public-wizard replay shape the membership
+  // reconciler also recognizes (pre-push codex P0).
+  const carriers = [estData, estData.engineInputs, estData.engineInput, estData.inputs, estData.engineRequest?.options]
+    .filter(isPlainObject);
+  if (carriers.some((c) => Array.isArray(c.priorQualifyingServices) && c.priorQualifyingServices.length)) return true;
+  return carriers.some((c) => {
+    const v = c.recurringCustomer ?? c.isRecurringCustomer;
+    if (v == null || v === false) return false;
+    const normalized = String(v).trim().toLowerCase();
+    return normalized !== '' && normalized !== 'no' && normalized !== 'false' && normalized !== '0';
+  });
+}
+
+// `category` is the estimates.category column — the authoritative scope, not
+// the rendered section keys (a commercial or legacy row can carry generic
+// keys). Fails CLOSED unless RESIDENTIAL (pre-push codex P1).
+function serviceOptOutAddableKeys(estData = {}, sections = [], rowTier = null, { category } = {}) {
+  const empty = new Set();
+  if (!isPlainObject(estData)) return empty;
+  if (String(category || '').toUpperCase() !== 'RESIDENTIAL') return empty;
+  if (serviceOptOutBlockedByProposal(estData)) return empty;
+  if (serviceOptOutTierSelectionActive(estData, rowTier)) return empty;
+  // Existing members never self-serve a priced add: their offers are the
+  // seasonal / member ladder (a different program than the fresh-quote
+  // default this rail would plant — pre-push codex P0), and their combined
+  // tier is the office's to extend. The mirror inquiry stays for them.
+  if (memberEvidenceInEstimateData(estData)) return empty;
+  const list = Array.isArray(sections) ? sections : [];
+  // Residential, engine-priced recurring plans only: a commercial line or a
+  // quote-required section takes the whole page out of self-serve adds.
+  if (list.some((s) => s && (String(s.key || '').startsWith('commercial_') || s.quoteRequired === true))) return empty;
+  const recurring = list.filter((s) => s && s.isRecurring === true);
+  if (!recurring.length) return empty;
+  const present = new Set(recurring.map((s) => String(s.key || '')));
+  const removed = new Set(currentlyOptedOutKeys(estData));
+  const addable = new Set();
+  for (const key of SERVICE_ADD_KEYS) {
+    if (present.has(key)) continue;
+    // A removed line comes back through the restore path, never as an add.
+    if (removed.has(key)) continue;
+    if (serviceIsPresentInInputs(estData, key)) continue;
+    if (!serviceAddBuildable(estData, key)) continue;
+    addable.add(key);
+  }
+  return addable;
+}
+
+// The synthetic "removedInputs" for an add — the same shape a restore
+// re-plants, so applyServiceOptOutToEstimateData({ included: true }) is the one
+// surgery for both. engineRequest carriers get the selectedServices token
+// (translateV2CallToV1Input derives the service block from the profile +
+// options, exactly as a fresh admin quote would); engineInputs carriers get
+// the add-service flow's default block (estimate-add-service-request), so a
+// customer add and an office add price identically.
+function buildServiceAddInputs(estData = {}, serviceKey) {
+  const spec = SERVICE_OPT_OUT_KEYS[serviceKey];
+  if (!spec || !SERVICE_ADD_KEYS.includes(serviceKey)) return { ok: false, reason: 'service_not_addable' };
+  const carrier = replayableCarrier(estData);
+  if (!carrier) return { ok: false, reason: 'service_not_addable' };
+  const captured = { engineInputs: null, inputs: null, selected: [] };
+  if (carrier === 'engineRequest') {
+    captured.selected = [spec.selected[0]];
+  }
+  if (isPlainObject(estData.engineInputs) && isPlainObject(estData.engineInputs.services)) {
+    const { addRequestedServiceToInputs } = require('./estimate-add-service-request');
+    const { added, updatedInputs, reason } = addRequestedServiceToInputs(estData.engineInputs, estData, serviceKey);
+    if (!added) return { ok: false, reason: reason || 'service_not_addable' };
+    const engineKey = spec.engine.find((k) => updatedInputs.services[k] != null);
+    if (!engineKey) return { ok: false, reason: 'service_not_addable' };
+    captured.engineInputs = { [engineKey]: updatedInputs.services[engineKey] };
+    // Keep the display carrier in step with the replay carrier.
+    if (isPlainObject(estData.inputs)) captured.inputs = { [engineKey]: updatedInputs.services[engineKey] };
+  }
+  return { ok: true, removedInputs: captured };
+}
+
+// Keys whose CURRENT state is "removed by staff at send time" — the page words
+// these as an offer ("Also available"), not as something the customer took
+// off ("removed · Add it back").
+// Whether `serviceKey`'s CURRENT state is a staff-parked offer (its latest
+// event is an actor:'staff' removal). A staff offer only ever re-enters the
+// plan under the add gate — the lane that created it — so the rail and the
+// /data stamp both consult this with the gate.
+function latestOptOutEventIsStaff(parsedData = {}, serviceKey) {
+  return staffOfferedKeys(parsedData).includes(serviceKey);
+}
+
+// The latest event per service, for lines whose CURRENT state is a staff
+// park — the send path matches each park's own id against the durable
+// handoff witness, so a prior delivery of an earlier shape can never hide an
+// undelivered park (GH codex pre-push P0 on #3711).
+function staffOfferedEvents(parsedData = {}) {
+  const events = parsedData?.serviceOptOut?.events;
+  if (!Array.isArray(events)) return [];
+  const latest = new Map();
+  for (const e of events) {
+    if (e && e.serviceKey) latest.set(e.serviceKey, e);
+  }
+  return Array.from(latest.values()).filter((e) => e.included === false && e.actor === 'staff');
+}
+
+function staffOfferedKeys(parsedData = {}) {
+  const events = parsedData?.serviceOptOut?.events;
+  if (!Array.isArray(events)) return [];
+  const latest = new Map();
+  for (const e of events) {
+    if (e && e.serviceKey) latest.set(e.serviceKey, e);
+  }
+  return Array.from(latest.values())
+    .filter((e) => e.included === false && e.actor === 'staff')
+    .map((e) => e.serviceKey);
+}
+
 // Section keys currently opted out, for the /data payload and the add-offer
 // suppression (answering "remove lawn" with "add lawn and save more" in three
 // places is the failure this prevents).
@@ -369,4 +537,12 @@ module.exports = {
   readRemovedInputs,
   currentlyOptedOutKeys,
   serviceOptOutLabel,
+  SERVICE_ADD_KEYS,
+  serviceOptOutAddableKeys,
+  buildServiceAddInputs,
+  staffOfferedKeys,
+  staffOfferedEvents,
+  latestOptOutEventIsStaff,
+  lineReviewOnly,
+  memberEvidenceInEstimateData,
 };
