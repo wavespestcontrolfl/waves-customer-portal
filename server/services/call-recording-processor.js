@@ -5058,9 +5058,14 @@ async function transcribeWithOpenAI(audioBuffer, opts = {}) {
 
   const model = opts.model || OPENAI_TRANSCRIPTION_MODEL;
   const prompt = opts.prompt || OPENAI_TRANSCRIPTION_PROMPT;
+  // Twilio recordings are always mp3; uploaded field dictation (tech-track
+  // /dictation) arrives as webm/mp4/m4a and OpenAI sniffs the container from
+  // the filename, so the caller may name both.
+  const mimeType = opts.mimeType || 'audio/mpeg';
+  const filename = opts.filename || 'call-recording.mp3';
   try {
     const form = new FormData();
-    form.append('file', new Blob([audioBuffer], { type: 'audio/mpeg' }), 'call-recording.mp3');
+    form.append('file', new Blob([audioBuffer], { type: mimeType }), filename);
     form.append('model', model);
     form.append('language', 'en');
     const diarized = model.includes('diarize');
@@ -15920,6 +15925,10 @@ CallRecordingProcessor._test = {
 // same transcriber + same hallucination guard the live path uses, so a
 // backfilled transcript can never be lower-integrity than a live one.
 CallRecordingProcessor.transcribeRecording = transcribeRecording;
+// Buffer-in transcriber for uploaded field dictation (tech-track
+// /dictation, NOT test-only): same OpenAI call + PAN scrub the call path
+// uses, so a dictated note can never be lower-integrity than a call.
+CallRecordingProcessor.transcribeWithOpenAI = transcribeWithOpenAI;
 CallRecordingProcessor.isImplausibleTranscript = isImplausibleTranscript;
 CallRecordingProcessor.quarantineCardRecording = quarantineCardRecording;
 CallRecordingProcessor.scrubStructuredTranscript = scrubStructuredTranscript;

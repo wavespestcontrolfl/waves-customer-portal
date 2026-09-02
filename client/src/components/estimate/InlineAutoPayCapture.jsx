@@ -1,5 +1,5 @@
 import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
-import { CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 
 /**
  * Inline Auto Pay capture for the single-screen booking review (owner ask
@@ -35,12 +35,35 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
+  // The mounted Payment Element — locked read-only while a confirm is in
+  // flight so the tender cannot change under the consent that was ticked
+  // (Codex #3723 r2 P1).
+  const paymentElementRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [agreed, setAgreed] = useState(false);
+  // Tender the customer picked inside the Payment Element ('card' or
+  // 'us_bank_account'). A bank tab only exists when the intent was minted
+  // card_or_bank (GATE_ACCEPT_ACH_CAPTURE); the consent copy and the
+  // surcharge line follow the selection so the recorded ACH authorization
+  // matches what was on screen.
+  // A succeeded REPLAY (the mint returned an intent that already holds a
+  // method) initializes to that captured tender — the customer never
+  // re-enters it, so the rendered authorization must match what Stripe
+  // holds, not a card default (Codex #3723 r1 P1).
+  const [methodType, setMethodType] = useState(intent?.capturedMethodType || 'card');
+  const bank = methodType === 'us_bank_account';
+  const bankOffered = Array.isArray(intent?.paymentMethodTypes) && intent.paymentMethodTypes.includes('us_bank_account');
+  // Refs mirror the two values the confirm gesture must judge SYNCHRONOUSLY
+  // (pre-push Codex P1): a tender switch clears consent inside the change
+  // handler itself — never only in a post-render effect — so a click landing
+  // right after the switch cannot confirm under a stale tick.
+  const methodTypeRef = useRef(methodType);
+  const agreedRef = useRef(false);
+  const setAgreedSync = (v) => { agreedRef.current = v; setAgreed(v); };
   // The checkbox assents to the RENDERED authorization — if the variant
   // changes (per-application Auto Pay ↔ immediate annual prepay charge),
   // the prior check must not carry over (Codex r5 P1).
-  useEffect(() => { setAgreed(false); }, [prepay]);
+  useEffect(() => { agreedRef.current = false; setAgreed(false); }, [prepay]);
   const [termsOpen, setTermsOpen] = useState(false);
   const [error, setError] = useState(null);
   // Stripe.js failed to load/mount: reported upward so the parent can drop
@@ -57,10 +80,13 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   const lastEmitRef = useRef(null);
   useEffect(() => {
     const last = lastEmitRef.current;
-    if (last && last.ready === ready && last.agreed === agreed && last.loadFailed === loadFailed) return;
-    lastEmitRef.current = { ready, agreed, loadFailed };
-    onStateChange?.({ ready, agreed, loadFailed });
-  }, [ready, agreed, loadFailed, onStateChange]);
+    if (last && last.ready === ready && last.agreed === agreed && last.loadFailed === loadFailed && last.methodType === methodType) return;
+    lastEmitRef.current = { ready, agreed, loadFailed, methodType };
+    // methodType rides the emit so the parent's surrounding summary and
+    // confirm label can follow the tender (a "your card is charged" line
+    // next to a bank authorization is contradictory consent copy).
+    onStateChange?.({ ready, agreed, loadFailed, methodType });
+  }, [ready, agreed, loadFailed, methodType, onStateChange]);
 
   // Keyed on the intent's VALUES, never the object's identity: a parent that
   // passes an inline `{clientSecret, publishableKey}` literal re-creates the
@@ -88,8 +114,18 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       const paymentElement = elements.create('payment');
       paymentElement.mount(mountRef.current);
       paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
+      paymentElement.on('change', (event) => {
+        if (cancelled) return;
+        const next = event?.value?.type || 'card';
+        if (next !== methodTypeRef.current) {
+          methodTypeRef.current = next;
+          setAgreedSync(false);
+          setMethodType(next);
+        }
+      });
       stripeRef.current = stripe;
       elementsRef.current = elements;
+      paymentElementRef.current = paymentElement;
     }).catch(() => {
       if (!cancelled) {
         setError('Could not load the secure card form. Check your connection and try again.');
@@ -111,10 +147,29 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       if (!stripeRef.current || !elementsRef.current) {
         return { ok: false, error: 'The secure card form is still loading — try again in a moment.' };
       }
+      // The consent must still be ticked for the tender on screen at the
+      // moment of confirm — a tender switch re-arms it (see the effect
+      // above), and this closure reads the live value.
+      if (!agreedRef.current) {
+        return { ok: false, error: 'Please check the authorization box to continue.' };
+      }
       setError(null);
+      // Lock the element for the whole confirm: the tender picked when the
+      // box was ticked is the one that gets confirmed and consented.
+      const lock = (readOnly) => { try { paymentElementRef.current?.update?.({ readOnly }); } catch { /* element gone */ } };
+      lock(true);
+      const fail = (message) => { lock(false); setError(message); return { ok: false, error: message }; };
       try {
         const existing = await stripeRef.current.retrieveSetupIntent(intent.clientSecret);
         if (existing?.setupIntent?.status === 'succeeded') {
+          // Bank-capable intent whose captured tender the mint did not
+          // resolve: the consent on screen may not be the one Stripe
+          // holds — fail closed; a refresh re-mints and the replay then
+          // carries capturedMethodType.
+          const replayedTypes = existing.setupIntent.payment_method_types || [];
+          if (replayedTypes.includes('us_bank_account') && !intent?.capturedMethodType) {
+            return fail('Your payment method was already saved. Please refresh this page to continue.');
+          }
           return { ok: true, setupIntentId: existing.setupIntent.id };
         }
         const result = await stripeRef.current.confirmSetup({
@@ -123,45 +178,50 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
           redirect: 'if_required',
         });
         if (result.error) {
-          const message = result.error.message || 'We could not save that card. Try another card.';
-          setError(message);
-          return { ok: false, error: message };
+          return fail(result.error.message || (bank ? 'We could not save that bank account. Try a card instead.' : 'We could not save that card. Try another card.'));
         }
         const si = result.setupIntent;
         if (si && si.status === 'succeeded') {
           return { ok: true, setupIntentId: si.id };
         }
-        const message = 'That card could not be saved. Try again in a moment.';
-        setError(message);
-        return { ok: false, error: message };
+        // Instant-verified banks land 'succeeded' like cards; a bank that
+        // could not instant-verify never gets here (Stripe surfaces the
+        // error above) — no micro-deposit pending state exists at accept.
+        return fail(bank
+          ? 'That bank account could not be verified instantly. Use a card to finish booking.'
+          : 'That card could not be saved. Try again in a moment.');
       } catch {
-        const message = 'We could not save that card. Try again.';
-        setError(message);
-        return { ok: false, error: message };
+        return fail(bank ? 'We could not save that bank account. Try again or use a card.' : 'We could not save that card. Try again.');
       }
     },
-  }), [ready, agreed, intent]);
+  }), [ready, agreed, intent, bank]);
 
   return (
     <div style={{ marginTop: 20, paddingTop: 18, borderTop: `1px solid ${borderColor}`, textAlign: 'left' }}>
       <div style={{ fontSize: 15, fontWeight: 600, color: NAVY }}>
-        {prepay ? 'Annual prepay — your card pays for the year' : 'Auto Pay — nothing charged today'}
+        {prepay
+          ? (bank ? 'Annual prepay — your bank account pays for the year' : 'Annual prepay — your card pays for the year')
+          : 'Auto Pay — nothing charged today'}
       </div>
       <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 4 }}>
         {prepay
-          ? 'When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.'
-          : 'After each completed service, your card is charged that service’s amount automatically.'}
+          ? (bank
+            ? 'When you confirm, we show your exact 12-month total and debit this bank account. Bank transfers have no added card surcharge.'
+            : 'When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
+          : (bank
+            ? 'After each completed service, that service’s amount is debited from your bank account automatically. Bank transfers have no added card surcharge.'
+            : `After each completed service, your ${bankOffered ? 'card or bank account' : 'card'} is charged that service’s amount automatically.`)}
       </div>
       <div ref={mountRef} style={{ marginTop: 14 }} />
       <div style={{ fontSize: 14, color: bodyColor, marginTop: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
         <span aria-hidden="true">🔒</span>
-        <span>Secured by Stripe — remove your card anytime in the Waves app.</span>
+        <span>{`Secured by Stripe — remove your ${bankOffered ? 'payment method' : 'card'} anytime in the Waves app.`}</span>
       </div>
       <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 14, cursor: 'pointer' }}>
         <input
           type="checkbox"
           checked={agreed}
-          onChange={(e) => setAgreed(e.target.checked)}
+          onChange={(e) => setAgreedSync(e.target.checked)}
           // Locked while confirmSetup is awaiting (Codex #2681 r3 P1): the
           // in-flight handler proceeds to /accept on the EARLIER click, so an
           // uncheck landing mid-await would record consent the checkbox no
@@ -171,8 +231,12 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         />
         <span style={{ fontSize: 14, color: NAVY, lineHeight: 1.5, fontWeight: 600 }}>
           {prepay
-            ? 'I authorize Waves to save this card and charge my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.'
-            : 'I authorize Waves to charge this card after each completed service — cancel anytime.'}
+            ? (bank
+              ? 'I authorize Waves to save this bank account and debit my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.'
+              : 'I authorize Waves to save this card and charge my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.')
+            : (bank
+              ? 'I authorize Waves to debit this bank account after each completed service — cancel anytime.'
+              : 'I authorize Waves to charge this card after each completed service — cancel anytime.')}
         </span>
       </label>
       <button
@@ -182,7 +246,9 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       >{termsOpen ? 'Hide full terms' : 'View full terms'}</button>
       {termsOpen ? (
         <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 8, marginLeft: 26 }}>
-          {prepay ? PREPAY_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT}
+          {prepay
+            ? (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)
+            : (bank ? ACH_CONSENT_TEXT : CARD_CONSENT_TEXT)}
         </div>
       ) : null}
       {error ? (
