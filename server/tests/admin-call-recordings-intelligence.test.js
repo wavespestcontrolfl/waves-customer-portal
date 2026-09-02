@@ -257,9 +257,13 @@ describe('POST /calls/:id/adopt-recording', () => {
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
       expect(res.status).toBe(409);
-      expect(await res.json()).toMatchObject({ reason: 'recording_changed', adopted: PARKED, current_recording_sid: NEWER });
+      expect(await res.json()).toMatchObject({ reason: 'recording_changed', adopted: PARKED, current_recording_sid: NEWER, remaining_for_review: 0 });
     });
-    expect(updates.find((u) => u.table === 'triage_items')).toBeUndefined();
+    // The chosen recording can no longer be acted on (it left the parked
+    // list with the swap): the card is settled, not left pointing at it.
+    const card = updates.find((u) => u.table === 'triage_items');
+    expect(card.patch.status).toBe('resolved');
+    expect(card.patch.resolution_note).toContain(NEWER);
   });
 
   test('adopting over a rejected-transcript voicemail row clears the voicemail stamps the discarded audio produced', async () => {

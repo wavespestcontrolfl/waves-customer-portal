@@ -448,16 +448,17 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     // chosen recording as adopted and processed — and close its card —
     // while the pass processed a newer one (Codex #3736 r6 P1).
     const result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true, expectedRecordingSid: chosen.recording_sid });
-    if (result?.success === true) {
-      // Only a completed pass closes the review card; a deferred or failed
-      // one leaves it open with the row queued for the sweep. And it closes
-      // only when no other parked recording still awaits a decision — the
-      // recording this adoption replaced stays in the list as evidence, not
-      // as a review item; any other callback-parked entry keeps the card
-      // open, retargeted to it, so it does not vanish from the inbox with no
-      // operator decision recorded.
-      // Read the list as it is NOW (the swap rewrote it against the current
-      // row, and a callback may have parked more since).
+    // Settle the review card once the operator's decision on the chosen
+    // recording is final — processed, or overtaken by a newer recording
+    // before it could be. It closes only when no other parked recording
+    // still awaits a decision: the recording this adoption replaced stays
+    // in the list as evidence, not as a review item; any other callback-
+    // parked entry keeps the card open, retargeted to it, so it does not
+    // vanish from the inbox with no operator decision recorded. A deferred
+    // or failed pass leaves the card alone with the row queued for the sweep.
+    // Read the list as it is NOW (the swap rewrote it against the current
+    // row, and a callback may have parked more since).
+    const settleReviewCard = async (resolutionNote) => {
       const after = await db('call_log').where({ id: call.id }).first('metadata').catch(() => null);
       let nowParked = [];
       try {
@@ -468,13 +469,13 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
       const openCard = db('triage_items')
         .where({ call_log_id: call.id, reason_code: 'additional_recording' })
         .whereIn('status', ['open', 'in_progress']);
-      // The adoption and reprocess are done either way; a card update that
-      // fails is reported, not swallowed, so a stale card never hides
-      // behind a plain success.
+      // The adoption is done either way; a card update that fails is
+      // reported, not swallowed, so a stale card never hides behind a
+      // plain success.
       let warning = null;
       try {
         if (stillForReview.length === 0) {
-          await openCard.update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Adopted ${chosen.recording_sid}` });
+          await openCard.update({ status: 'resolved', resolved_at: new Date(), resolution_note: resolutionNote });
         } else {
           const next = stillForReview[0];
           await openCard.update({
@@ -489,17 +490,25 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         }
       } catch (cardErr) {
         logger.warn(`[call-recordings] additional-recording review card not updated for call ${call.id}: ${cardErr.message}`);
-        warning = 'The recording was adopted and processed, but its review card could not be updated; resolve it from the Triage inbox.';
+        warning = 'The recording was adopted, but its review card could not be updated; resolve it from the Triage inbox.';
       }
-      return res.json({ success: true, adopted: chosen.recording_sid, remaining_for_review: stillForReview.length, ...(warning ? { warning } : {}), result });
+      return { remaining: stillForReview.length, warning };
+    };
+    if (result?.success === true) {
+      const card = await settleReviewCard(`Adopted ${chosen.recording_sid}`);
+      return res.json({ success: true, adopted: chosen.recording_sid, remaining_for_review: card.remaining, ...(card.warning ? { warning: card.warning } : {}), result });
     }
     if (result?.skipped && result?.reason === 'already_processing') {
       return res.status(409).json({ ...result, adopted: chosen.recording_sid, error: 'The recording was adopted but another pass is still working this call; the sweep will process the adopted audio once it goes quiet.' });
     }
     if (result?.skipped && result?.reason === 'recording_changed') {
-      // The card stays open: the chosen recording was not processed, and the
-      // newer one that replaced it needs the operator's decision too.
-      return res.status(409).json({ ...result, adopted: chosen.recording_sid, error: 'The recording was adopted, but a newer recording replaced it before it could be processed; the sweep will process the current recording. Review the call again.' });
+      // The chosen recording is gone from the parked list (the swap removed
+      // it) and now sits in superseded_recordings: a card still pointing at
+      // it could never be acted on (adopt would 404). The operator's
+      // decision on it IS final — settle the card now: resolved, or
+      // retargeted to whatever else is still parked (Codex #3736 r8 P2).
+      const card = await settleReviewCard(`Adopted ${chosen.recording_sid}; replaced by ${result.current_recording_sid || 'a newer recording'} before it was processed`);
+      return res.status(409).json({ ...result, adopted: chosen.recording_sid, remaining_for_review: card.remaining, ...(card.warning ? { warning: card.warning } : {}), error: 'The recording was adopted, but a newer recording replaced it before it could be processed; the sweep will process the current recording. Review the call again.' });
     }
     res.json({
       success: false,

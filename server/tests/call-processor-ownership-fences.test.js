@@ -223,3 +223,15 @@ describe('route decisions are keyed on the recording they were derived from', ()
     expect(body.slice(upd - 400, upd)).toContain("recording_sid: call.recording_sid || ''");
   });
 });
+
+// An explicit operator unlink covers the lead as well as the customer: a
+// reprocess must not mint or reuse a customer-less lead from the call's
+// phone (codex #3736 gh-r8).
+describe('an explicit unlink gates lead creation', () => {
+  const { body } = processRecordingBody();
+  test('workableUnnamedLead consults explicitUnlink', () => {
+    const at = body.indexOf('const workableUnnamedLead = ');
+    expect(at).toBeGreaterThan(-1);
+    expect(body.slice(at, at + 200)).toContain('!explicitUnlink');
+  });
+});

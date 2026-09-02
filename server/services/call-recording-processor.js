@@ -9790,7 +9790,10 @@ const CallRecordingProcessor = {
     // lands in Needs Review (UNqualified: missing name) instead of being dropped
     // to a silent no_op. Still gated by the non-lead content veto, so existing-
     // customer / spam / wrong-number calls never take this path.
-    const workableUnnamedLead = !customerId && !nonLeadCall
+    // An operator's explicit UNLINK covers the lead too (Codex #3736 r8
+    // P2): the call belongs to no one, so a reprocess must not mint or
+    // reuse a customer-less lead from its phone and stamp the call with it.
+    const workableUnnamedLead = !customerId && !nonLeadCall && !explicitUnlink
       && hasWorkableLeadSignal({ extracted, phone, voicemail: extracted.is_voicemail === true });
     // Set when a same-call row is dropped because it is no longer ours (see
     // the ownership re-read in Step 4b). workableUnnamedLead is false
