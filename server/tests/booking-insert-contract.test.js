@@ -571,8 +571,16 @@ function stripCallArgs(text) {
 // list (`mutate(makeOptions(), data)`) can't hide it (r12 P2); the same
 // check runs on a callback's element parameter (`rows.forEach((row) =>
 // stripAttribution(row))` — r14 P2).
+// Any `return` STATEMENT carrying a bare reference to the tracked value
+// (`return data`, `return { payload: data }`, `return ok ? data : null`)
+// hands it to the wrapper (GH codex r3 P2). Statement-bounded by `;`/`}`.
 function returnsRef(body, id) {
-  return new RegExp(`\\breturn\\s+(?:await\\s+)?${id}\\b`).test(body);
+  const ret = /\breturn\b([^;}]*)/g;
+  let m;
+  while ((m = ret.exec(body)) !== null) {
+    if (bareRef(id).test(m[1])) return true;
+  }
+  return false;
 }
 
 function isBlockFunction(arg) {
@@ -634,6 +642,9 @@ function blankStringContents(source) {
       let k = 1;
       let piece = '`';
       while (k < literal.length - (literal.endsWith('`') && literal.length > 1 ? 1 : 0)) {
+        // An ESCAPED `\${` is inert template text, not an interpolation
+        // (GH codex r3 P2) — blank the escape pair and move on.
+        if (literal[k] === '\\') { piece += '  '; k += 2; continue; }
         if (literal.startsWith('${', k)) {
           const exprEnd = endOfExpression(i + k + 2) - i;
           // The expression is code: recurse so a quoted string INSIDE it
@@ -1297,6 +1308,9 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nwrap(() => { return data; });\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\n({ meta: { status: data.status } } = raw);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`x \${format("invalid data")}\`);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nwrap(() => { return { payload: data }; });\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nwrap(() => { return ok ? data : null; });\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`example: \\\${mutate(data)} is inert text\`);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
     // …the three #3702 deferred shapes: a NAMED callback is opaque and fails closed…
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach(stripAttribution);\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nconst n = rows.indexOf(first);\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
