@@ -970,5 +970,7 @@ describe('assertPerApplicationAddOnPriced — an established per-application cus
     expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, preservesExistingMembership: true })).not.toThrow();
     expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, suppressRecurringConversion: true })).not.toThrow();
     expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, billingTerm: 'prepay_annual' })).not.toThrow();
+    // Pinned legacy rodent-only plans live on the monthly dues lane — no fee to refuse.
+    expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, pinnedLegacyRodentOnlyPlan: true })).not.toThrow();
   });
 });

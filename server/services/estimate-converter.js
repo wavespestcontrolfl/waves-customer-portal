@@ -2349,9 +2349,13 @@ function assertPerApplicationAddOnPriced({
   customer = {},
   preservesExistingMembership = false,
   suppressRecurringConversion = false,
+  pinnedLegacyRodentOnlyPlan = false,
   billingTerm = 'standard',
 } = {}) {
   if (!perApplicationUnresolved || preservesExistingMembership || suppressRecurringConversion) return;
+  // A pinned pre-realignment rodent-only plan bills on the monthly dues lane
+  // and carries no per-application fee by design — nothing to refuse.
+  if (pinnedLegacyRodentOnlyPlan) return;
   if (billingTerm === 'prepay_annual') return;
   if (!(customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)) return;
   // Customer-facing (the public accept route returns it verbatim): pricing
@@ -4149,15 +4153,19 @@ const EstimateConverter = {
           serviceKey: singleRecurringUnit ? recurringServiceKey(singleRecurringUnit) : null,
         })
       : null;
-    // A single recurring unit whose per-visit charge could not be derived —
+    // A single SCHEDULING unit whose per-visit charge could not be derived —
     // no inferable billing cadence at all, or a monthly-billed tier plan
     // whose visit count is unknown (perApplicationChargeAmount returned
     // null): NO downstream fallback may stand in for the visit price
     // (validation audit DATA-001 / pre-push codex P0s — the cadence-less
-    // case bypassed a monthly-only definition). Consumers: the first-
-    // application invoice amount (allowFallback off), the customer-level fee
-    // stamp (null → park) and the established-customer add-on refusal.
-    const perApplicationUnresolved = !!singleRecurringUnit
+    // case bypassed a monthly-only definition, and a supplement-only plan
+    // (scalar rodent bait, whose unit comes from supplementStandaloneUnits so
+    // riderAwareSingleRecurringUnit is null) bypassed a line-based one).
+    // Keyed on recurringUnitCount — the count the fee stamp and the row
+    // price writer use. Consumers: the first-application invoice amount
+    // (allowFallback off), the customer-level fee stamp (null → park) and
+    // the established-customer add-on refusal.
+    const perApplicationUnresolved = recurringUnitCount === 1
       && !(Number(perApplicationAmount) > 0);
 
     // A CURRENT monthly member accepting an add-on/upgrade estimate keeps
@@ -4383,6 +4391,7 @@ const EstimateConverter = {
       customer: effectiveCustomer,
       preservesExistingMembership,
       suppressRecurringConversion,
+      pinnedLegacyRodentOnlyPlan,
       billingTerm,
     });
     const stampedPerApplicationFee = resolveConvertedPerApplicationFee({
