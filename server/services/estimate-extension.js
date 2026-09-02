@@ -106,7 +106,12 @@ function revivableSiblingsQuery(database, estimate) {
     // never-sent expiry (disposition expired_unsent) stays expired by the
     // revive's own CASE — so it is not judged here either (GH codex P2 r25).
     .where((b) => b.whereNotIn('status', ['send_failed', 'expired']).orWhereNotNull('sent_at').orWhereNotNull('viewed_at'))
-    .whereRaw("COALESCE(disposition, '') <> 'expired_unsent'");
+    .whereRaw("COALESCE(disposition, '') <> 'expired_unsent'")
+    // A linkage-invalidated sibling can never render even if revived (the
+    // public reader rejects it first) — it is neither judged here nor
+    // revived below (GH codex P2 r26).
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''");
 }
 
 // The ONE question the public extension-request (generic 404, before the
@@ -271,6 +276,10 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         // the customer.
         .where((b) => b.whereNot('status', 'send_failed').orWhereNotNull('sent_at').orWhereNotNull('viewed_at'))
         .where((b) => b.whereNull('expires_at').orWhere('expires_at', '<', newExpiry))
+        // Never revive a linkage-invalidated sibling (GH codex P2 r26): it
+        // cannot render, so a revived status would only mislead the sweep.
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
         // Atomic belt to the pre-mutation verdict (uncapped codex P0 r20):
         // while the gate is on a sibling that fails the authority predicate
         // is never revived, whatever raced between the verdict and here.
