@@ -19,7 +19,8 @@ const { domainFromAddress } = require('./email/spam-blocker');
 const { properCase } = require('../utils/name-case');
 
 const ZELLE_SENDER_ORG_DOMAIN = 'capitalone.com';
-const NOTICE_MARKER_RE = /sent you money with Zelle/i;
+// \s also matches NBSP, so an encoded space in the HTML rendering still hits.
+const NOTICE_MARKER_RE = /sent\s+you\s+money\s+with\s+Zelle/i;
 // Invoice numbers as minted by services/invoice.js (WPC-YYYY-NNNN…).
 const INVOICE_NUMBER_RE = /\bWPC-\d{4}-\d{3,6}\b/gi;
 
@@ -30,9 +31,10 @@ function isZelleNoticeCandidate({ subject, body_text: bodyText, body_html: bodyH
   return NOTICE_MARKER_RE.test(String(subject || ''))
     || NOTICE_MARKER_RE.test(String(bodyText || '').slice(0, 4000))
     || NOTICE_MARKER_RE.test(String(snippet || ''))
-    // HTML-only rendering: the marker may sit past the snippet, and a tag
-    // (Zelle<sup>®</sup>) may split it — strip tags before testing.
-    || NOTICE_MARKER_RE.test(String(bodyHtml || '').slice(0, 20000).replace(/<[^>]+>/g, ''));
+    // HTML-only rendering: decode it the same way the parser will (styles and
+    // tags dropped, entities such as &nbsp; decoded) BEFORE bounding, so a
+    // long <head> or an encoded space cannot hide the marker.
+    || NOTICE_MARKER_RE.test(htmlToText(bodyHtml).slice(0, 4000));
 }
 
 // Minimal HTML → text: drop head/style/script, turn block boundaries into

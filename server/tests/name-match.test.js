@@ -77,6 +77,11 @@ describe('payerNameCorroborates', () => {
     // Surname-first without a comma is not a bank form — the surname is the trailing run.
     expect(payerNameCorroborates('De La Cruz Maria', delacruz)).toBe(false);
     expect(payerNameCorroborates('Jose De La Cruz', delacruz)).toBe(false);
+    // The fragment after a particle is not a surname: Maria De La Cruz is not Maria Cruz.
+    expect(payerNameCorroborates('MARIA DE LA CRUZ', { first_name: 'Maria', last_name: 'Cruz' })).toBe(false);
+    expect(payerNameCorroborates('MARIA DE LA CRUZ', { first_name: 'Maria', last_name: 'La Cruz' })).toBe(false);
+    expect(payerNameCorroborates('DICK VAN DYKE', { first_name: 'Dick', last_name: 'Dyke' })).toBe(false);
+    expect(payerNameCorroborates('DICK VAN DYKE', { first_name: 'Dick', last_name: 'Van Dyke' })).toBe(true);
     const maryAnn = { first_name: 'Mary Ann', last_name: 'Smith' };
     expect(payerNameCorroborates('MARY ANN SMITH', maryAnn)).toBe(true);
     expect(payerNameCorroborates('MaryAnn Smith', maryAnn)).toBe(true);

@@ -31,6 +31,9 @@ describe('isZelleNoticeCandidate', () => {
     expect(isZelleNoticeCandidate({ snippet: 'PAT DOE has just SENT YOU MONEY WITH ZELLE' })).toBe(true);
     // HTML-only rendering where a tag splits the marker and the snippet is unrelated.
     expect(isZelleNoticeCandidate({ subject: 'Good news', snippet: 'Sign In', body_html: HTML })).toBe(true);
+    // Encoded whitespace and a huge <head> before the body do not hide the marker.
+    const bigHead = `<html><head><style>${'.a{color:red}'.repeat(3000)}</style></head><body><p>PAT DOE has just sent&nbsp;you money with Zelle<sup>&reg;</sup> in the amount of $9.00.</p></body></html>`;
+    expect(isZelleNoticeCandidate({ subject: 'Good news', body_html: bigHead })).toBe(true);
     expect(isZelleNoticeCandidate({ subject: 'Your statement is ready', body_text: 'nothing here' })).toBe(false);
     expect(isZelleNoticeCandidate({})).toBe(false);
   });
