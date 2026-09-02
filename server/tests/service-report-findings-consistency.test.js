@@ -28,6 +28,10 @@ describe('editable service-report findings consistency', () => {
       .toEqual(['Invalid value for areas_treated: Front lawn']);
     expect(validate('termite_treatment', { areas_treated: 'Rear addition slab' }).errors)
       .toEqual(['Invalid value for areas_treated: Rear addition slab']);
+    // Inspection areas: a migrated legacy pest chip passes, free text does not.
+    expect(validate('one_time_pest_treatment', { areas_inspected: pestLegacyOnly }).errors).toEqual([]);
+    expect(validate('one_time_pest_treatment', { areas_inspected: 'Behind the pool pump' }).errors)
+      .toEqual(['Invalid value for areas_inspected: Behind the pool pump']);
     expect(validate('one_time_lawn_treatment', {
       spot_treatment_areas: 'Front lawn, Custom strip beside seawall',
     }).errors).toEqual(['Invalid value for spot_treatment_areas: Custom strip beside seawall']);

@@ -75,6 +75,12 @@ describe("typed area ownership", () => {
     expect(pruneRestoredFindingsValues(
       { areas_treated: "Bait stations, Foundation perimeter, Primary bedroom, Rear addition slab" }, [field], "termite_treatment",
     )).toEqual({ areas_treated: "Bait stations, Foundation perimeter, Primary bedroom, Rear addition slab" });
+    // Inspection areas changed from free text to chips too: the legacy text stays visible.
+    const inspected = { key: "areas_inspected", type: "chips", options: ["Kitchen"] };
+    expect(pruneRestoredFindingsValues({ areas_inspected: "Kitchen, Behind the pool pump" }, [inspected], "one_time_pest_treatment"))
+      .toEqual({ areas_inspected: "Kitchen, Behind the pool pump" });
+    expect(typedFieldValueConflicts("one_time_pest_treatment", { areas_inspected: "Kitchen, Behind the pool pump" }, [inspected])[0])
+      .toContain('"Behind the pool pump"');
     // Other chip fields still prune to the current options.
     const other = { key: "work_completed", type: "chips", options: ["Trenching"] };
     expect(pruneRestoredFindingsValues({ work_completed: "Trenching, Retired option" }, [other])).toEqual({ work_completed: "Trenching" });

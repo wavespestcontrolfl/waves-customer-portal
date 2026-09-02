@@ -86,6 +86,11 @@ import {
 } from "../../components/schedule/cardLinkStatus";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
 const TREATMENT_AREA_FIELD_KEYS = ["areas_treated", "spot_treatment_areas", "treatment_zones"];
+// Area fields that changed from free text to chips in this PR: restored legacy
+// values stay visible (removable legacy chips) and block submit until replaced.
+// areas_inspected is inspection location, never treatment scope, so it is
+// deliberately NOT a typed treatment-area key (local audit P1 on #3701).
+const LEGACY_AREA_FIELD_KEYS = [...TREATMENT_AREA_FIELD_KEYS, "areas_inspected"];
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const D = {
@@ -6971,7 +6976,7 @@ export function typedFieldValueConflicts(schemaType, values, fields = null) {
   // chips migrated from another lane) render as removable legacy chips; the
   // server rejects them, so block here with the fix spelled out.
   for (const field of Array.isArray(fields) ? fields : []) {
-    if (!TREATMENT_AREA_FIELD_KEYS.includes(field?.key) || !Array.isArray(field.options)) continue;
+    if (!LEGACY_AREA_FIELD_KEYS.includes(field?.key) || !Array.isArray(field.options)) continue;
     const parts = String(values?.[field.key] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     const offList = offListTypedAreaValues(parts, field, schemaType);
     if (offList.length) {
@@ -7086,7 +7091,7 @@ export function pruneRestoredFindingsValues(restored, fields, findingsType = nul
       const parts = String(raw || "").split(",").map((s) => s.trim()).filter(Boolean);
       // Treatment-area fields keep every restored value (legacy chips stay
       // visible and removable); other chip fields prune to current options.
-      const kept = TREATMENT_AREA_FIELD_KEYS.includes(field.key)
+      const kept = LEGACY_AREA_FIELD_KEYS.includes(field.key)
         ? parts
         : parts.filter((s) => field.options.includes(s));
       if (kept.length) values[key] = kept.join(", ");

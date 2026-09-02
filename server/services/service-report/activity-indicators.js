@@ -1178,7 +1178,10 @@ function typedTreatmentEvidenceForRecord(record) {
   };
 }
 
-const TREATMENT_AREA_FIELD_KEYS = ['areas_treated', 'spot_treatment_areas', 'treatment_zones'];
+// Area fields that changed from free text to chips: they also accept the
+// lane's legacy generic chips (a migrated draft). areas_inspected is included
+// for validation only — report-data never reads it as treatment scope.
+const TREATMENT_AREA_FIELD_KEYS = ['areas_treated', 'spot_treatment_areas', 'treatment_zones', 'areas_inspected'];
 function legacyAreasForFindingsType(type) {
   return new Set(LEGACY_COMPLETION_AREAS.categories[LEGACY_COMPLETION_AREAS.byFindingsType[type]] || []);
 }
