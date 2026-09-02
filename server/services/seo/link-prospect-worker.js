@@ -16,6 +16,9 @@ const { WAVES_LOCATIONS } = require('../../config/locations');
 const WORKER = 'hermes';
 const SIGNUP_TYPES = ['directory', 'citation', 'social'];
 const OUTREACH_TYPES = ['editorial', 'resource', 'guest_post', 'haro'];
+// Registry domain states an owner set by hand (Watch / Reject): no placement
+// under such a domain is leased until the owner reopens it.
+const NON_CLAIMABLE_DOMAIN_STATES = ['watching', 'rejected'];
 const MAX_ATTEMPTS = 4;
 
 // Recipient sanity check, shared by the outreach send valve (link-prospect-outreach
@@ -87,7 +90,12 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       // each one is consumed by it exactly once (moved, unclassified, then
       // ineligible until the classifier has read the successor).
       .where((b) => b.whereNull('path_id').orWhereNotIn('path_id',
-        trx('seo_link_acquisition_paths').select('id').where('confidence', '<=', 0)));
+        trx('seo_link_acquisition_paths').select('id').where('confidence', '<=', 0).whereNull('superseded_by'))) // ACTIVE disproven only — a retired zero-confidence path still reaches settlement
+      // …and the owner's registry ruling holds at the chokepoint: a placement
+      // on a domain the owner parked (Watch) or refused (Reject) is never
+      // leased, whatever its own status/policy/confidence still read
+      .where((b) => b.whereNull('domain_id').orWhereNotIn('domain_id',
+        trx('seo_link_domains').select('id').whereIn('agent_state', NON_CLAIMABLE_DOMAIN_STATES)));
     // The in-process auto-drafter emails a stored contact and can't fill a web form,
     // so it claims only prospects that already have a contact_email — leaving
     // form-only prospects untouched (status='prospect') for manual handling rather
@@ -163,16 +171,22 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // The LIVE path's submission_url is the execution truth: when the
     // investigator moved a route to its working origin (www / http) while
     // this placement was leased, its target_url still names the dead apex —
-    // refresh it here, under the claim's lock, so the runner navigates the
-    // origin that answers.
+    // refresh it here, under the claim's lock. A changed execution URL is a
+    // NEW page for the classifier (a fallback vhost may be paid, gated or
+    // off-target), so the row is left unclassified and NOT leased now — the
+    // same fail-closed transition a path supersession applies.
     const urlOf = new Map(paths.map((p) => [p.id, p.submission_url]));
+    const deferred = new Set();
     for (const r of rows) {
       const liveUrl = r.path_id ? urlOf.get(r.path_id) : null;
       if (liveUrl && r.target_url !== liveUrl) {
-        await trx('seo_link_prospects').where({ id: r.id }).whereNull('claimed_at').update({ target_url: liveUrl, updated_at: new Date() });
-        r.target_url = liveUrl;
+        await trx('seo_link_prospects').where({ id: r.id }).whereNull('claimed_at')
+          .update({ target_url: liveUrl, automation_policy: null, last_classified_at: null, updated_at: new Date() });
+        deferred.add(r.id);
       }
     }
+    rows = rows.filter((r) => !deferred.has(r.id));
+    if (rows.length === 0) return [];
     const leaseIds = rows.map((r) => r.id);
     const now = new Date();
     await trx('seo_link_prospects')

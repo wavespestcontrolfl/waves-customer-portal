@@ -2744,7 +2744,7 @@ describe('full run', () => {
     await w.run();
     expect(w.db._tables.seo_link_acquisition_paths).toHaveLength(1);
     expect(w.path).toMatchObject({ submission_url: w.working, path_key: 'paid_listing:https://example.com/get-listed', revision_execution: 2, last_investigated_at: NOW });
-    expect(w.idle.target_url).toBe(w.working); // un-leased placement follows now
+    expect(w.idle).toMatchObject({ target_url: w.working, automation_policy: null, last_classified_at: null }); // un-leased placement follows now — unclassified for the new page (r27)
     expect(w.leased.target_url).toBe('https://example.com/get-listed'); // leased: refreshed from the path at its next claim
     // http: the scheme is part of the identity — the SAME row is re-keyed, never duplicated
     const h = mk('http://example.com');

@@ -8,7 +8,7 @@
  * raced by the next claim. In-memory knex-shaped store, real
  * link-registry.settleRetiredPlacements.
  */
-const mockStore = { seo_link_prospects: [], seo_link_acquisition_paths: [] };
+const mockStore = { seo_link_prospects: [], seo_link_acquisition_paths: [], seo_link_domains: [] };
 jest.mock('../models/db', () => {
   const builder = (table) => {
     const preds = [];
@@ -62,7 +62,7 @@ jest.mock('../models/db', () => {
 
 const worker = require('../services/seo/link-prospect-worker');
 
-beforeEach(() => { mockStore.seo_link_prospects.length = 0; mockStore.seo_link_acquisition_paths.length = 0; });
+beforeEach(() => { mockStore.seo_link_prospects.length = 0; mockStore.seo_link_acquisition_paths.length = 0; mockStore.seo_link_domains.length = 0; });
 
 test('claim hands out a placement on its LIVE successor path, moving the execution URL, atomically with the lease', async () => {
   const old = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old-join', superseded_by: 'p-mid' };
@@ -172,7 +172,33 @@ test('claim refreshes a placement\'s execution URL from the live path when the r
   const row = { id: 'r1', status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40, target_domain: 'example.com', path_id: 'p-www', target_url: 'https://example.com/get-listed' };
   mockStore.seo_link_prospects.push(row);
   const claimed = await worker.claim({ n: 5, type: 'signup' });
-  expect(claimed[0]).toMatchObject({ id: 'r1', target_url: 'https://www.example.com/get-listed' }); // the runner navigates the origin that answers
-  expect(row.target_url).toBe('https://www.example.com/get-listed');
+  expect(claimed).toEqual([]); // a changed execution URL is a new page: refreshed, unclassified, NOT leased until the classifier has read it (r27)
+  expect(row).toMatchObject({ target_url: 'https://www.example.com/get-listed', automation_policy: null, last_classified_at: null, claimed_at: null });
 });
+
+test('a placement under a domain the owner parked (Watch) or refused (Reject) is never leased (Codex PR r27 P1)', async () => {
+  mockStore.seo_link_domains.push({ id: 'dW', agent_state: 'watching' }, { id: 'dR', agent_state: 'rejected' }, { id: 'dQ', agent_state: 'qualified' });
+  const live = (id, host) => ({ id, domain_id: 'x', submission_url: `https://${host}/add`, superseded_by: null, link_type: 'directory', confidence: 0.7 });
+  mockStore.seo_link_acquisition_paths.push(live('p-w', 'w.example'), live('p-r', 'r.example'), live('p-q', 'q.example'));
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40 };
+  mockStore.seo_link_prospects.push(
+    { ...base, id: 'r-w', domain_id: 'dW', target_domain: 'w.example', path_id: 'p-w', target_url: 'https://w.example/add' },
+    { ...base, id: 'r-r', domain_id: 'dR', target_domain: 'r.example', path_id: 'p-r', target_url: 'https://r.example/add' },
+    { ...base, id: 'r-q', domain_id: 'dQ', target_domain: 'q.example', path_id: 'p-q', target_url: 'https://q.example/add' },
+    { ...base, id: 'r-legacy', domain_id: null, target_domain: 'legacy.example', path_id: null, target_url: 'https://legacy.example/add' },
+  );
+  const claimed = await worker.claim({ n: 5, type: 'signup' });
+  expect(claimed.map((r) => r.id).sort()).toEqual(['r-legacy', 'r-q']); // owner rulings hold at the chokepoint; un-backfilled legacy rows are unaffected
+});
+
+test('a retired path that was ALSO disproven still reaches settlement — the pre-filter is for active disproven paths only (Codex PR r27 P2)', async () => {
+  const retiredDead = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old', superseded_by: 'p-new', link_type: 'directory', confidence: 0 };
+  const live = { id: 'p-new', domain_id: 'd1', submission_url: 'https://example.com/new', superseded_by: null, link_type: 'directory', confidence: 0.7 };
+  mockStore.seo_link_acquisition_paths.push(retiredDead, live);
+  const row = { id: 'r1', status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40, target_domain: 'example.com', path_id: 'p-old', target_url: 'https://example.com/old' };
+  mockStore.seo_link_prospects.push(row);
+  expect(await worker.claim({ n: 5, type: 'signup' })).toEqual([]);
+  expect(row).toMatchObject({ path_id: 'p-new', target_url: 'https://example.com/new', automation_policy: null, claimed_at: null }); // settled, not stranded
+});
+
 

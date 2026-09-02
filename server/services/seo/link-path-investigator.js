@@ -653,7 +653,12 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
     const movedToWorkingOrigin = !!(row.submission_url && existing.submission_url && existing.submission_url !== row.submission_url
       && workingUrlFor && workingUrlFor.has(registry.normalizeSubmissionUrl(existing.submission_url)));
     if (movedToWorkingOrigin) {
-      await trx('seo_link_prospects').where({ path_id: existing.id }).whereNull('claimed_at').update({ target_url: row.submission_url, updated_at: now });
+      // a changed execution URL is a NEW page for the classifier (the
+      // fallback vhost may be paid, gated or off-target): the same
+      // fail-closed transition a path supersession applies — unclassified
+      // until the weekly classifier has read it, never leased before
+      await trx('seo_link_prospects').where({ path_id: existing.id }).whereNull('claimed_at')
+        .update({ target_url: row.submission_url, automation_policy: null, last_classified_at: null, updated_at: now });
     }
   }
   // §3.2 supersession, step-3 minimal form (nothing executes yet — no
