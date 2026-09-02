@@ -1264,6 +1264,27 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     expect(verified.lotSqFt).toBe(0);
   });
 
+  test('unit address: parcel-scale satellite areas are discarded with the building dims', () => {
+    const ai = {
+      estimatedTurfSf: 180000, estimatedBedAreaSf: 22000, imperviousSurfacePercent: 55,
+      shrubDensity: 'MODERATE', hasPool: 'YES',
+    };
+    const profile = buildEnrichedProfile(
+      rentalComplexRecord({ lotSize: 900000, _source: 'county' }), ai, null, null, null, null, unit,
+    );
+    expect(profile.isCommercial).toBe(false);
+    expect(profile.estimatedTurfSf).toBe(0);
+    expect(Number(profile.estimatedBedAreaSf) || 0).toBe(0);
+    expect(profile.imperviousSurfacePercent == null || profile.imperviousSurfacePercent === 0).toBe(true);
+    // Observations that are not areas survive.
+    expect(profile.shrubDensity).toBe('MODERATE');
+    // The bare building keeps the parcel-scale read.
+    const whole = buildEnrichedProfile(
+      rentalComplexRecord({ lotSize: 900000, _source: 'county' }), ai, null, null, null, null, building,
+    );
+    expect(whole.estimatedTurfSf).toBe(180000);
+  });
+
   test('unit address on a positive commercial-use record stays commercial ("Suite 200")', () => {
     const profile = buildEnrichedProfile(
       rentalComplexRecord({ propertyType: 'Office Building', unitCount: 1 }),

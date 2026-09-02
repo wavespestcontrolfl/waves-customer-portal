@@ -1821,6 +1821,13 @@ describe('residentialUnitLookupVerdict — the manual lookup honors a unit addre
           ...apartmentVerdict, address: '500 Example Pkwy Suite 200, Sarasota, FL 34232', commercialSubtype,
         })).toBe(false);
       }
+      // A SUITE is a business tenant even on a multifamily/HOA verdict.
+      expect(residentialUnitLookupVerdict({
+        ...apartmentVerdict, address: '1048 Example Lakes Cir Suite 200, Sarasota, FL 34232',
+      })).toBe(false);
+      expect(residentialUnitLookupVerdict({
+        ...apartmentVerdict, address: '1048 Example Lakes Cir Ste 4, Sarasota, FL 34232',
+      })).toBe(false);
       // A unit count with a commercial-use subtype is not neutral.
       expect(residentialUnitLookupVerdict({
         ...apartmentVerdict, commercialSubtype: 'office_retail', commercialDetectionSource: 'property_record_unit_count',

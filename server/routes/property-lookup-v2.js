@@ -1685,6 +1685,22 @@ function applySatelliteAttachmentType(rc, ai) {
   return candidate;
 }
 
+// Drop the satellite AREA reads (turf / bed / impervious) from an analysis
+// whose measurement does not describe the property being quoted — stale
+// imagery, or a parcel-scale read on a one-unit quote. Density and pool
+// reads stay: they are observations, not areas.
+function discardVisionAreaFields(ai) {
+  if (!ai) return ai;
+  const out = { ...ai };
+  delete out.estimatedTurfSf;
+  delete out.imperviousSurfacePercent;
+  delete out.imperviosSurfacePercent;
+  delete out.estimatedBedAreaSf;
+  delete out.estimatedBedAreaPercent;
+  delete out._bedAreaConfidence;
+  return out;
+}
+
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null, lookupAddress = null) {
   // Association aggregate dimensions survive in _parcel even when a
   // same-weight PAO record (a single condo unit) won the merge — prefer them
@@ -1731,13 +1747,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // sanitize rows poisoned before this shipped, no backfill needed.
   const staleImageryConflict = detectStaleImageryTurfConflict(rc, ai);
   if (staleImageryConflict) {
-    ai = { ...ai };
-    delete ai.estimatedTurfSf;
-    delete ai.imperviousSurfacePercent;
-    delete ai.imperviosSurfacePercent;
-    delete ai.estimatedBedAreaSf;
-    delete ai.estimatedBedAreaPercent;
-    delete ai._bedAreaConfidence;
+    ai = discardVisionAreaFields(ai);
     // Fires on every profile build for a conflicted address (fresh + cache
     // hit) — greppable in Railway to judge how often the guard runs and,
     // against later confirmed sq ft, whether the lot-based fallback is
@@ -1752,13 +1762,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       yearBuilt: staleImageryConflict.yearBuilt,
     });
   }
-  const footprintTurf = computeFootprintTurf(rc);
-  const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
-  const waterDistance = ai?.waterDistance || 'NONE';
-  const imperviousSurfacePercent = firstNonNegativeNumber(
-    ai?.imperviousSurfacePercent,
-    ai?.imperviosSurfacePercent
-  );
+  // Runs BEFORE the footprint / impervious / turf reads below: they are
+  // computed off rc and ai, and the unit verdict rewrites both.
   // detectCategory answers the WHOLE-property question (an apartment
   // complex is commercial to the association or owner). A lookup run with a
   // unit designator on such a building is one occupant's quote — a
@@ -1793,7 +1798,20 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       squareFootage: isVerifiedDim('squareFootage') ? rc.squareFootage : 0,
       lotSize: isVerifiedDim('lotSize') ? rc.lotSize : 0,
     };
+    // Vision measured the PARCEL too: its turf / bed / impervious areas
+    // are the complex's grounds, and left in place they price a tenant's
+    // lawn or exterior work off the whole property (pre-push codex P1).
+    // Same discard the stale-imagery guard uses; the unit's HIGH flag
+    // owns the confirm-before-pricing posture.
+    ai = discardVisionAreaFields(ai);
   }
+  const footprintTurf = computeFootprintTurf(rc);
+  const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
+  const waterDistance = ai?.waterDistance || 'NONE';
+  const imperviousSurfacePercent = firstNonNegativeNumber(
+    ai?.imperviousSurfacePercent,
+    ai?.imperviosSurfacePercent
+  );
 
   // New-construction / weak-record fallback: surface a satellite-detected
   // townhome/condo when no authoritative source pinned the type. For fresh
