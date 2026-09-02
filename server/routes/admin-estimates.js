@@ -888,6 +888,10 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
   if (!featureGates.isEnabled('estimateServiceOptOut') || !featureGates.isEnabled('estimateServiceAdd')) return untouched;
   try {
     if (!estimate || estimate.estimate_group_id || estimate.price_locked_at) return untouched;
+    // Frozen restart quotes (plan_restart) carry the cancellation-time
+    // families verbatim and accept validates that array — never reshape
+    // them (GH codex r5 P1).
+    if (String(estimate.source || '') === 'plan_restart') return untouched;
     // The category COLUMN is the scope — never default a missing one to
     // residential (same fail-closed rule as the add resolver).
     if (String(estimate.category || '').toUpperCase() !== 'RESIDENTIAL') return untouched;
@@ -907,6 +911,9 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
     let estData = {};
     try { estData = typeof current.estimate_data === 'string' ? JSON.parse(current.estimate_data) : (current.estimate_data || {}); }
     catch { return untouched; }
+    // Frozen restart quote, re-checked on the claimed row (source column or
+    // the planRestart blob flag the public page keys on).
+    if (String(claimedRow.source || '') === 'plan_restart' || estData?.planRestart === true) return untouched;
     // A pending revert from an earlier undelivered send is retried BEFORE
     // anything else; if it still fails the send aborts (the office was
     // paged when the marker was written). Success clears the marker and the
@@ -917,7 +924,7 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
     // send whose marker write failed (GH codex r4 P1). Either way the
     // restore runs first; if it still fails the send aborts.
     const OptOut = require('../services/estimate-service-opt-out');
-    const structuralPending = !estData?.deliveryState?.firstDeliveredAt
+    const structuralPending = !estData?.deliveryState?.firstDeliveredAt && !estData?.leadServiceHandoffAt
       ? (OptOut.staffOfferedKeys(estData || {})[0] || null)
       : null;
     const pendingKey = estData?.leadServiceRevertPending?.serviceKey
@@ -1730,7 +1737,30 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // if the snapshot read or the status finalize below throws. A suppressed
   // SMS (gate/template/owner kill) reports ok with real:false and is NOT a
   // handoff, so it never sets this (GH codex P1 r1 + r2).
-  if (options.leadShapeRef && stampChannels.length > 0) options.leadShapeRef.delivered = true;
+  if (options.leadShapeRef && stampChannels.length > 0) {
+    options.leadShapeRef.delivered = true;
+    // DURABLE handoff witness, written the moment a provider accepted the
+    // message and before any later step that can crash or be terminated by a
+    // deploy: the next send's structural pending check must never mistake a
+    // delivered single-service quote for an undelivered one and restore the
+    // full bundle under a link the customer already holds (GH codex r5 P1).
+    // Best-effort by contract with a loud log — a failure here leaves the
+    // firstDeliveredAt stamp below as the witness, exactly as today.
+    if (options.leadShapeRef.parkedKey) {
+      try {
+        await db('estimates')
+          .where({ id: estimate.id })
+          .update({
+            estimate_data: db.raw(
+              "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceHandoffAt}', to_jsonb(?::text))",
+              [new Date().toISOString()],
+            ),
+          });
+      } catch (err) {
+        logger.error(`[admin-estimates] lead-service handoff witness failed for estimate ${estimate.id}: ${err.message}`);
+      }
+    }
+  }
   const sent = sentChannels.length > 0;
 
   if (!sent) {

@@ -5060,7 +5060,9 @@ function EstimateViewPageInner() {
   // Recurring mode only, like the legacy ladder: a priced add rewrites the
   // estimate as a recurring bundle, never from the one-time flow (GH codex
   // r4 P2).
-  const pricedAddOffer = data?.cta?.terminalState == null && serviceMode === 'recurring' && addableStamp.length
+  // Frozen restart quotes refuse every self-serve mutation
+  // (refuseFrozenRestartMutation), so no priced offer there (GH codex r5 P2).
+  const pricedAddOffer = data?.cta?.terminalState == null && serviceMode === 'recurring' && !restartQuote && addableStamp.length
     ? (addServiceOffer && addableStamp.some((a) => a?.key === addServiceOffer.serviceKey)
       ? addServiceOffer
       : offerFromAddable(addableStamp))

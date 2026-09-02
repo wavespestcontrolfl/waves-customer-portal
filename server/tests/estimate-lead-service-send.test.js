@@ -330,3 +330,22 @@ describe('fail-closed marker handling (GH codex r4 P1 x2)', () => {
     mockRows.updateThrows = false;
   });
 });
+
+describe('round-five scope pins (GH codex r5)', () => {
+  test('a frozen plan_restart quote is never reshaped', async () => {
+    for (const row of [newCustomerRow({ source: 'plan_restart' }), newCustomerRow({ estimate_data: JSON.stringify({ planRestart: true, engineRequest: { profile: {}, selectedServices: ['PEST', 'LAWN'], options: {} } }) })]) {
+      mockRows.queue = [claimedRowFor(row), parkedRow];
+      expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
+    }
+    expect(mockMixCalls).toHaveLength(0);
+  });
+
+  test('a durable handoff witness (leadServiceHandoffAt) makes a staff-parked row NOT structurally pending', async () => {
+    const row = newCustomerRow();
+    const claimed = claimedRowFor(row);
+    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), leadServiceHandoffAt: '2026-09-01T00:00:00Z', serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }] } });
+    mockRows.queue = [claimed, claimed];
+    expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
+    expect(mockMixCalls).toHaveLength(0);
+  });
+});

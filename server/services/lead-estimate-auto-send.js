@@ -447,7 +447,19 @@ async function claimLeadEstimateAutoSend(database, estimate, { now = new Date(),
 }
 
 async function updateAutoSendMetadata(database, estimate, patch, status = estimate.status, extraUpdate = {}) {
-  const nextData = mergeAutoSendMetadata(estimate.estimate_data || estimate.estimateData, patch);
+  // Merge into the row as it is NOW, never the caller's pre-send object: a
+  // send can rewrite estimate_data mid-flight (the lead-service park, its
+  // revert-pending marker, the delivery claim), and serializing a stale
+  // snapshot would erase those while the parked totals stay in the columns
+  // (GH codex r5 P1 on #3711). Falls back to the caller's object only when
+  // no fresh row can be read.
+  let base = estimate.estimate_data || estimate.estimateData;
+  try {
+    const q = database('estimates').where({ id: estimate.id });
+    const fresh = typeof q.first === 'function' ? await q.first() : null;
+    if (fresh && fresh.estimate_data !== undefined && fresh.estimate_data !== null) base = fresh.estimate_data;
+  } catch (_) { /* keep the caller's snapshot */ }
+  const nextData = mergeAutoSendMetadata(base, patch);
   const [updated] = await database('estimates')
     .where({ id: estimate.id })
     .update({
