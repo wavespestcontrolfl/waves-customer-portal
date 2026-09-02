@@ -13316,6 +13316,12 @@ export function CompletionPanel({
     // #3187 r18: the guard silently swallowed the resume POST and left the
     // button disabled forever).
     if (submitting && !resumingPoll) return;
+    // Upload-mode dictation lands asynchronously after the mic stops; a
+    // completion posted now would ship notes without it (pre-push P1).
+    if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
+      alert("Stop dictation and wait for the transcript to appear in your notes before completing.");
+      return;
+    }
     const specialtyProductConflict = exclusiveProtocolProductConflict(
       activeSelectedLabels(selectedProtocolActionLabels),
       specialtyProtocolActions,
@@ -15611,6 +15617,13 @@ export function CompletionPanel({
                   // a final spoken chunk lands in serviceNotes rather than after
                   // the snapshot. Once generating flips true the dictation
                   // callback ignores any late chunk (and the mic is disabled).
+                  // Upload-mode dictation transcribes AFTER the mic stops (an
+                  // async server round-trip), so a snapshot taken now would miss
+                  // it. Hold the action until the transcript has landed.
+                  if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
+                    alert("Stop dictation and wait for the transcript to appear in your notes first.");
+                    return;
+                  }
                   if (dictation.listening) dictation.toggle();
                   const { payload, hasReportInput } = buildAiReportPayload();
                   if (!hasReportInput) {
@@ -17986,6 +17999,13 @@ export function CompletionPanel({
                 // a final spoken chunk lands in serviceNotes rather than after
                 // the snapshot. Once generating flips true the dictation
                 // callback ignores any late chunk (and the mic is disabled).
+                // Upload-mode dictation transcribes AFTER the mic stops (an
+                // async server round-trip), so a snapshot taken now would miss
+                // it. Hold the action until the transcript has landed.
+                if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
+                  alert("Stop dictation and wait for the transcript to appear in your notes first.");
+                  return;
+                }
                 if (dictation.listening) dictation.toggle();
                 const { payload, hasReportInput } = buildAiReportPayload();
                 if (!hasReportInput) {
