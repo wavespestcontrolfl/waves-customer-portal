@@ -1253,8 +1253,12 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             const cust = await db('customers').where({ id: customerId }).first('pipeline_stage', 'pipeline_stage_changed_at');
             const resolvedAt = new Date(priorReq.updated_at || priorReq.created_at).getTime();
             const churnedAt = cust && cust.pipeline_stage_changed_at ? new Date(cust.pipeline_stage_changed_at).getTime() : NaN;
-            const rechurnedLater = Number.isFinite(churnedAt) && churnedAt > resolvedAt;
-            tied = !!cust && cust.pipeline_stage === 'churned' && !rechurnedLater;
+            // A missing/unusable stamp proves nothing — never extend the
+            // latch on it (a won-back-then-churned account with a null
+            // stamp would otherwise echo the old case forever): fall
+            // through and process (pre-push P1 on #3727).
+            tied = !!cust && cust.pipeline_stage === 'churned'
+              && Number.isFinite(churnedAt) && churnedAt <= resolvedAt;
           }
         } catch (tieErr) {
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);

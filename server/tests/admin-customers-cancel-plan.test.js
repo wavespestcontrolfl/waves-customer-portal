@@ -757,6 +757,14 @@ describe('POST /:id/cancel-plan', () => {
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
     await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
     expect(mockProcess).toHaveBeenCalledTimes(1);
+    // No usable stamp at all proves nothing — the latch is not extended on
+    // it; the cancel processes rather than echoing the old case forever.
+    mockState.service_requests = [mockState.service_requests[0]];
+    mockState.service_requests[0].status = 'resolved';
+    mockState.customers[0].pipeline_stage_changed_at = null;
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
+    await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
+    expect(mockProcess).toHaveBeenCalledTimes(2);
   }));
 
   test('a HISTORICAL prepaid case never swallows a NEW cancellation — a re-won-back account processes fresh', () => withServer(async (baseUrl) => {
