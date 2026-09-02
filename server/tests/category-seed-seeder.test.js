@@ -371,3 +371,57 @@ describe('manifest framing (PR #3549 topic-targeting gate)', () => {
     expect(failures).toEqual([]);
   });
 });
+
+
+// ── affiliate pilot briefs (owner monetization pilot 2026-08-31) ──────
+
+describe('category-seed-seeder: affiliate_products (pilot briefs)', () => {
+  const affiliate = (over = {}) => ({ ...VALID_BRIEF, id: 'AF1', slug: '/lawn-care/affiliate-test-sarasota-fl/', affiliate_products: [{ product_id: 'acurite-glass-rain-gauge', placement: 'primary-rec', anchor: 'a glass rain gauge', section: 'the reading section' }], ...over });
+
+  test('a valid product list seeds and rides the overlay verbatim with binding lines', () => {
+    const manifest = seeder.loadManifest(writeManifest([affiliate()]));
+    const row = seeder._internals.rowForBrief(manifest.briefs[0], manifest);
+    const overlay = seeder.buildCategoryOverlay({ opportunity: { signal_metadata: row.signal_metadata }, pageType: 'supporting-blog', requiredSections: [], schemaTypes: [] });
+    expect(overlay.operator_brief.affiliate_products).toEqual([{ product_id: 'acurite-glass-rain-gauge', placement: 'primary-rec', anchor: 'a glass rain gauge', section: 'the reading section' }]);
+    const joined = overlay.operator_brief.binding_instructions.join('\n');
+    expect(joined).toMatch(/AFFILIATE PRODUCTS \(binding/);
+    expect(joined).toContain('<AffiliateLink product="acurite-glass-rain-gauge" placement="primary-rec">a glass rain gauge</AffiliateLink>');
+    expect(joined).toMatch(/disclosure to \{ "type": "affiliate" \}/);
+    expect(joined).toMatch(/BEFORE the first affiliate link/);
+  });
+
+  test('a brief without affiliate_products carries none and no affiliate binding line', () => {
+    const manifest = seeder.loadManifest(writeManifest([VALID_BRIEF]));
+    const row = seeder._internals.rowForBrief(manifest.briefs[0], manifest);
+    const overlay = seeder.buildCategoryOverlay({ opportunity: { signal_metadata: row.signal_metadata }, pageType: 'supporting-blog' });
+    expect(overlay.operator_brief.affiliate_products).toEqual([]);
+    expect(overlay.operator_brief.binding_instructions.join('\n')).not.toMatch(/AFFILIATE/);
+  });
+
+  test('rejects an unknown product, an unlisted placement, a missing anchor, a duplicate, and more than three', () => {
+    expect(() => seeder.loadManifest(writeManifest([affiliate({ affiliate_products: [{ product_id: 'no-such-product', placement: 'primary-rec', anchor: 'x' }] })]))).toThrow(/unknown affiliate product "no-such-product"/);
+    expect(() => seeder.loadManifest(writeManifest([affiliate({ affiliate_products: [{ product_id: 'acurite-glass-rain-gauge', placement: 'sidebar', anchor: 'x' }] })]))).toThrow(/does not allow placement "sidebar"/);
+    expect(() => seeder.loadManifest(writeManifest([affiliate({ affiliate_products: [{ product_id: 'acurite-glass-rain-gauge', placement: 'primary-rec' }] })]))).toThrow(/non-empty anchor/);
+    expect(() => seeder.loadManifest(writeManifest([affiliate({ affiliate_products: [{ product_id: 'acurite-glass-rain-gauge', placement: 'primary-rec', anchor: 'a' }, { product_id: 'acurite-glass-rain-gauge', placement: 'alt-rec', anchor: 'b' }] })]))).toThrow(/listed twice/);
+    const four = ['acurite-glass-rain-gauge', 'xlux-soil-moisture-meter', 'orbit-sprinkler-catch-cups', 'stuff-it-copper-mesh'].map((id) => ({ product_id: id, placement: 'primary-rec', anchor: id }));
+    expect(() => seeder.loadManifest(writeManifest([affiliate({ affiliate_products: four })]))).toThrow(/at most 3/);
+    expect(() => seeder.loadManifest(writeManifest([affiliate({ affiliate_products: [] })]))).toThrow(/at most 3/);
+  });
+
+  test('the shipped affiliate pilot manifest loads: six hub posts, every product an active registry row, ≤3 per post, unique slugs', () => {
+    const file = path.join(__dirname, '../data/affiliate-pilot-briefs-v1.json');
+    const manifest = seeder.loadManifest(file);
+    expect(manifest.briefs).toHaveLength(6);
+    const { productIndex } = require('../../packages/affiliate-registry');
+    const idx = productIndex();
+    for (const b of manifest.briefs) {
+      expect(b.action).toBe('new_supporting_blog');
+      expect(Array.isArray(b.affiliate_products) && b.affiliate_products.length >= 1 && b.affiliate_products.length <= 3).toBe(true);
+      for (const p of b.affiliate_products) expect(idx.get(p.product_id)?.state).toBe('active');
+      expect(b.window).toBe('immediate');
+    }
+    expect(new Set(manifest.briefs.map((b) => b.slug)).size).toBe(6);
+    // Playbook composition: 2 prevention (pest exclusion), 2 measurement, 2 field-tool — six distinct products across the set.
+    expect(new Set(manifest.briefs.flatMap((b) => b.affiliate_products.map((p) => p.product_id))).size).toBe(6);
+  });
+});

@@ -434,6 +434,33 @@ tel: markdown links per the rule above.)
   gate hard-blocks a raw markdown table in the body). For a
   decision / "which option is right for me" / "best [service] in [city]" brief
   you may anchor the whole post on this component — see BUYER'S-GUIDE COMPARISON.
+- <AffiliateLink product="…" placement="…">plain product name</AffiliateLink>
+  — an owner-approved product recommendation (affiliate pilot). ONLY when
+  the brief's voice_constraints.operator_brief.affiliate_products lists
+  products; see AFFILIATE PRODUCT LINKS. On every other brief NEVER emit it.
+
+AFFILIATE PRODUCT LINKS — binding whenever the brief lists affiliate_products
+(a deterministic gate P0-blocks violations, and every affiliate post is held
+for the owner's approval; a violation wastes the run):
+- Use ONLY the product ids, placements and anchor text the brief lists, each
+  at most once, at most 3 per post. A product the brief did not name is a P0.
+- Syntax: valid JSX, not in a code fence, e.g.
+  <AffiliateLink product="acurite-glass-rain-gauge" placement="primary-rec">a glass rain gauge</AffiliateLink>
+  The anchor is the plain product name as the brief gives it — never
+  "click here", "buy now", a price, or a retailer name.
+- Placement: never before the first "## " section heading. The Waves service
+  CTA link (the brief's CTA path) must appear BEFORE the first affiliate link.
+  Put the recommendation inside the how-to step it supports, where the
+  brief's outline says.
+- Never print or estimate the product's price — if cost matters say "view
+  current price" in prose near the link (the global no-hardcoded-price rule
+  applies to products too).
+- Frontmatter MUST carry disclosure: { "type": "affiliate" } — exactly that
+  string; the layout renders the FTC disclosure from it, and an affiliate
+  link without it is blocked. Never mention the product in the title or
+  meta description, and never link it through a raw URL.
+- Affiliate posts are informational: post_type protocol, diagnostic, or
+  seasonal — never decision, comparison, cost, case-study, or location.
 
 BUYER'S-GUIDE COMPARISON — when the brief's intent is comparison / "how to
 choose" / a "best [service] in [city]" demand, you may anchor the post on a
