@@ -64,6 +64,7 @@ function fakeDb(seed = {}) {
       },
       orderBy() { return q; },
       limit() { return q; },
+      forUpdate() { return q; },
       first(...cols) { st.first = true; st.columns = cols; return q.then((r) => r[0] || null); },
       update(patch) { st.update = patch; return q; },
       _eval(row) {

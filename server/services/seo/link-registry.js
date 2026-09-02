@@ -449,9 +449,15 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
   let moved = 0;
   for (const r of rows) {
     if (!r.path_id) continue; // an un-backfilled legacy row has no path to follow
-    let cur = await q('seo_link_acquisition_paths').where({ id: r.path_id }).first(...SUCCESSOR_COLUMNS);
+    // Every worker-mode caller runs inside a transaction: the traversed path
+    // rows are LOCKED (FOR UPDATE) until the move commits, so an investigation
+    // retiring the chosen successor in parallel waits for this commit and its
+    // own retired-chain settlement then sees the placement on that row —
+    // never a non-claimable placement left on a successor retired between
+    // this read and the write.
+    let cur = await q('seo_link_acquisition_paths').where({ id: r.path_id }).forUpdate().first(...SUCCESSOR_COLUMNS);
     for (let hop = 0; cur && cur.superseded_by && hop < SUPERSESSION_MAX_HOPS; hop++) {
-      cur = await q('seo_link_acquisition_paths').where({ id: cur.superseded_by }).first(...SUCCESSOR_COLUMNS);
+      cur = await q('seo_link_acquisition_paths').where({ id: cur.superseded_by }).forUpdate().first(...SUCCESSOR_COLUMNS);
     }
     if (!cur || cur.superseded_by) continue; // the chain did not resolve
     if (cur.id === r.path_id) {

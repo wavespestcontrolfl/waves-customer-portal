@@ -22,6 +22,7 @@ function makeDb(seed) {
       whereNull(col) { preds.push((row) => get(row, col) == null); return q; },
       whereNotNull(col) { preds.push((row) => get(row, col) != null); return q; },
       select() { return q; },
+      forUpdate() { return q; },
       async first() { return rows()[0] ? { ...rows()[0] } : undefined; },
       async update(patch) { const hit = rows(); for (const r of hit) Object.assign(r, patch); return hit.length; },
       then(res, rej) { return Promise.resolve(rows().map((r) => ({ ...r }))).then(res, rej); },
