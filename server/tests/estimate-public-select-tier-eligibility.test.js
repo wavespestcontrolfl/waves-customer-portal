@@ -172,6 +172,28 @@ describe('selectTierCeiling', () => {
     expect(selectTierCeiling(rows([{ name: 'Pest Control', service: 'pest_control', mo: 37.33 }]))).toBe('Bronze');
   });
 
+  test('legacy rows stamped qualifying keep their frozen posture; rows stamped false stay excluded', () => {
+    const rows = (services) => ({ result: { recurring: { services } } });
+    // A key the live qualifying list never carried, frozen as qualifying on the row
+    expect(selectTierCeiling(rows([
+      { name: 'Pest Control', service: 'pest_control', mo: 37.33 },
+      { name: 'Legacy Program', service: 'legacy_program', mo: 20, countsTowardWaveGuardTier: true },
+    ]))).toBe('Silver');
+    expect(selectTierCeiling(rows([
+      { name: 'Pest Control', service: 'pest_control', mo: 37.33 },
+      { name: 'Legacy Program', service: 'legacy_program', mo: 20, waveGuardTierEligible: true },
+    ]))).toBe('Silver');
+    // An explicit false outranks the live list AND an affirmative sibling flag
+    expect(selectTierCeiling(rows([
+      { name: 'Pest Control', service: 'pest_control', mo: 37.33 },
+      { name: 'Lawn Care', service: 'lawn_care', mo: 38, countsTowardWaveGuardTier: false },
+    ]))).toBe('Bronze');
+    expect(selectTierCeiling(rows([
+      { name: 'Pest Control', service: 'pest_control', mo: 37.33 },
+      { name: 'Lawn Care', service: 'lawn_care', mo: 38, waveGuardTierEligible: true, countsTowardWaveGuardTier: false },
+    ]))).toBe('Bronze');
+  });
+
   test('no recurring evidence at all fails closed to Bronze', () => {
     expect(selectTierCeiling({})).toBe('Bronze');
     expect(selectTierCeiling(null)).toBe('Bronze');

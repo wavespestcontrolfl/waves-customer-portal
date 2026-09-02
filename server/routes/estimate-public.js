@@ -13758,11 +13758,22 @@ function selectTierCeiling(estData = {}) {
   const stamped = OptOut.serviceOptOutEngineTierReference(data);
   if (stamped) return normalizeWaveGuardTierLabel(stamped);
   const estResult = data.result && typeof data.result === 'object' ? data.result : data;
-  const keys = recurringServicesWithSupplements(estResult)
+  const rows = recurringServicesWithSupplements(estResult);
+  const keys = rows
     .filter(recurringServiceCountsTowardTier)
     .map(recurringServiceKey)
     .filter(Boolean);
-  return normalizeWaveGuardTierLabel(determineWaveGuardTier([...new Set(keys)]).tier);
+  // Frozen affirmative posture (pre-push codex P1): a saved row stamped
+  // qualifying counts even when the live WAVEGUARD.qualifyingServices no
+  // longer lists its key — the ceiling reads what the engine wrote for the
+  // quote, never today's policy. Rows stamped false stay excluded either way.
+  const frozenQualifying = rows
+    .filter((svc) => svc.countsTowardWaveGuardTier !== false && svc.waveGuardTierEligible !== false
+      && (svc.countsTowardWaveGuardTier === true || svc.waveGuardTierEligible === true))
+    .map(recurringServiceKey)
+    .filter(Boolean);
+  const active = [...new Set([...keys, ...frozenQualifying])];
+  return normalizeWaveGuardTierLabel(determineWaveGuardTier(active, { assumeQualifying: frozenQualifying }).tier);
 }
 
 // PUT /api/estimates/:token/select-tier — customer selects a WaveGuard tier
