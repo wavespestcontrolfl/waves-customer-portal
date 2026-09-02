@@ -222,6 +222,25 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     }
   });
 
+  test('buildCallOutcomes: the paid total covers every later paid invoice, not just the capped list', async () => {
+    const [cust] = await db('customers').insert({ first_name: 'Revenue', phone: '+15555550166' }).returning('id');
+    cleanup.customerIds.push(cust.id);
+    const [c] = await db('call_log').insert({ twilio_call_sid: 'CA' + '8'.repeat(30) + 'r1', direction: 'inbound', from_phone: '+15555550166', to_phone: OUR_NUMBER, status: 'completed', customer_id: cust.id, created_at: new Date(Date.now() - 3600 * 1000) }).returning('*');
+    cleanup.callIds.push(c.id);
+    const invoiceIds = [];
+    try {
+      for (let i = 0; i < 7; i += 1) {
+        const [inv] = await db('invoices').insert({ customer_id: cust.id, token: 'fx-' + i + '-' + c.id.slice(0, 8), invoice_number: 'FX-' + c.id.slice(0, 6) + '-' + i, total: 10.5, status: 'paid', paid_at: new Date(), created_at: new Date(Date.now() - (60 - i) * 1000) }).returning('id');
+        invoiceIds.push(inv.id);
+      }
+      const outcomes = await cc.buildCallOutcomes(db, c);
+      expect(outcomes.invoices).toHaveLength(5);
+      expect(outcomes.revenue_cents).toBe(7 * 1050);
+    } finally {
+      await db('invoices').whereIn('id', invoiceIds).del();
+    }
+  });
+
   test('deleting the call cascades its commitments', async () => {
     const [scratch] = await db('call_log').insert({ twilio_call_sid: 'CA' + '8'.repeat(30) + 'd3', direction: 'inbound', from_phone: PHONE, to_phone: OUR_NUMBER, status: 'completed' }).returning('id');
     await cc.addHumanCommitment(db, scratch.id, { party: 'customer', kind: 'confirm_date', description: 'Confirm Friday' });

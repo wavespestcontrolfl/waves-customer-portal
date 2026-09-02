@@ -290,11 +290,20 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
       by: req.technicianId || null,
       at: new Date().toISOString(),
     };
-    await db('call_log').where({ id: call.id }).update({
-      customer_id: customerId,
-      metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_link_override}', ?::jsonb, true)", [JSON.stringify(override)]),
-      updated_at: new Date(),
-    });
+    // Not while a pass holds the claim: the running pass keeps its own
+    // resolved customer for the leads, contacts and texts it is about to
+    // write, so a mid-pass relink would leave those on the old customer.
+    // The office retries once the pass finishes (a few minutes at most).
+    const relinked = await db('call_log').where({ id: call.id })
+      .whereRaw("processing_status IS DISTINCT FROM 'processing'")
+      .update({
+        customer_id: customerId,
+        metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_link_override}', ?::jsonb, true)", [JSON.stringify(override)]),
+        updated_at: new Date(),
+      });
+    if (!relinked) {
+      return res.status(409).json({ error: 'A pass is still working this call. Change the customer once it finishes.', reason: 'already_processing' });
+    }
     if (call.twilio_call_sid) {
       await require('../services/conversations').syncVoiceMessageForCall(call.twilio_call_sid)
         .catch((e) => logger.warn(`[call-recordings] voice message re-home after relink failed for ${maskSid(call.twilio_call_sid)}: ${e.message}`));

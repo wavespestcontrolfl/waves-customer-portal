@@ -161,6 +161,11 @@ Per file, with the proving test.
   the timeline dedupe moved from check-then-insert to a partial unique
   index + ON CONFLICT (live-Postgres test); the direct estimate proof must
   be created after the call, not only sent after it.
+- Pre-push Codex round 14 (2 P1s, fixed): a customer relink is refused with
+  409 while a pass holds the claim (the pass keeps its own resolved customer
+  for the records it is about to write); the paid-revenue figure is a
+  separate aggregate over every later paid invoice in integer cents, not a
+  sum of the capped display list.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 

@@ -845,7 +845,15 @@ async function buildCallOutcomes(conn, call) {
       .select('id', 'status', 'total', 'paid_at', 'created_at')
       .catch(() => []);
     out.invoices = invoices.map((i) => ({ id: i.id, status: i.status, total: i.total == null ? null : Number(i.total), paid_at: i.paid_at, basis: 'customer_invoice_after_call' }));
-    out.revenue_cents = Math.round(invoices.filter((i) => i.paid_at).reduce((sum, i) => sum + Number(i.total || 0), 0) * 100);
+    // The list above is a capped display; the paid total is a separate
+    // aggregate over EVERY later paid invoice, in integer cents.
+    const paid = await conn('invoices')
+      .where('customer_id', customerId)
+      .where('created_at', '>', after)
+      .whereNotNull('paid_at')
+      .first(conn.raw('COALESCE(ROUND(SUM(total) * 100), 0)::bigint AS cents'))
+      .catch(() => null);
+    out.revenue_cents = Number(paid?.cents || 0);
   }
   return out;
 }

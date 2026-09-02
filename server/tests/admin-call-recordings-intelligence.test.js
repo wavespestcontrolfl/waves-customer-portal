@@ -186,6 +186,23 @@ describe('PUT /calls/:id/customer', () => {
     expect(JSON.parse(write.patch.metadata.bindings[0])).toMatchObject({ customer_id: CUSTOMER_ID, previous_customer_id: 'old-customer' });
     expect(require('../services/conversations').syncVoiceMessageForCall).toHaveBeenCalledWith(SID);
   });
+  test('refuses a relink while a pass holds the claim', async () => {
+    const updates = mockDb([{ id: CALL_ID, customer_id: null, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
+    // The conditional update matches no rows while processing_status = processing.
+    db.mockImplementation((table) => {
+      const b = { table, wheres: [], where() { return b; }, whereNull() { return b; }, whereIn() { return b; }, whereRaw() { return b; },
+        first: () => Promise.resolve(table === 'customers' ? { id: CUSTOMER_ID } : { id: CALL_ID, customer_id: null, twilio_call_sid: SID }),
+        update: (patch) => { updates.push({ table, patch }); return Promise.resolve(0); } };
+      return b;
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
+      expect(res.status).toBe(409);
+      expect((await res.json()).reason).toBe('already_processing');
+    });
+    expect(require('../services/conversations').syncVoiceMessageForCall).not.toHaveBeenCalled();
+  });
+
   test('refuses an unknown customer and a malformed id', async () => {
     mockDb([{ id: CALL_ID, customer_id: null, twilio_call_sid: SID }, null]);
     await withServer(async (base) => {
