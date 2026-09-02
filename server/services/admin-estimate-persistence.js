@@ -2171,11 +2171,22 @@ async function createOrReuseAdminEstimate({
 // refusal, preflight-visible) AND on the locked row inside the write
 // transaction (the send-versus-revise race), so the verdict can never
 // depend on a stale read.
+// "Unverified" = the write stamps ANY authority other than SERVER — the
+// engine-error CLIENT_FALLBACK, and the NULL a quote-required revision is
+// deliberately stamped with (pre-push codex P1): with the gate on neither
+// can be sent, and a grouped send must not deliver either beside a SERVER
+// anchor. A write that carries no pricing_authority at all is not a
+// pricing write and is never judged here.
+function writeStampsUnverifiedPricing(writeFields) {
+  if (!writeFields || !Object.prototype.hasOwnProperty.call(writeFields, 'pricing_authority')) return false;
+  return String(writeFields.pricing_authority || '').toUpperCase() !== 'SERVER';
+}
+
 function assertNoFallbackRevisionOfLiveLink(row, writeFields) {
   if (!row) return;
   const live = row.sent_at || row.viewed_at || String(row.status || '') === 'scheduled';
   if (!live) return;
-  if (String(writeFields?.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return;
+  if (!writeStampsUnverifiedPricing(writeFields)) return;
   if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return;
   throw errorWithStatus(
     String(row.status || '') === 'scheduled' && !(row.sent_at || row.viewed_at)
@@ -2199,7 +2210,7 @@ function assertNoFallbackRevisionOfLiveLink(row, writeFields) {
 // the mid-send verdict below applies with the rollout gate off too.
 // Sorted, so every path takes the groups' advisory locks in one order.
 function fallbackRevisionGroupIds(row, writeFields) {
-  if (String(writeFields?.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return [];
+  if (!writeStampsUnverifiedPricing(writeFields)) return [];
   return [...new Set([row?.estimate_group_id, writeFields?.estimate_group_id].filter(Boolean).map(String))].sort();
 }
 
@@ -2885,3 +2896,5 @@ module.exports.scheduledGroupGuardGroupIds = scheduledGroupGuardGroupIds;
 module.exports.assertNoFallbackRevisionDuringGroupSend = assertNoFallbackRevisionDuringGroupSend;
 module.exports.fallbackRevisionGroupIds = fallbackRevisionGroupIds;
 module.exports.linkedDraftCarriesProposal = linkedDraftCarriesProposal;
+module.exports.writeStampsUnverifiedPricing = writeStampsUnverifiedPricing;
+module.exports.assertNoFallbackRevisionOfLiveLink = assertNoFallbackRevisionOfLiveLink;
