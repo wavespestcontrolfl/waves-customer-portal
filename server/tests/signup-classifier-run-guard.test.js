@@ -38,7 +38,7 @@ test('the classification UPDATE is guarded on path_id + target_url as well as th
   expect(patch.automation_policy).toBe('submit_free'); // citysquares is a known free-form directory
   expect(wheres).toEqual(expect.arrayContaining([
     [{ id: 'p1' }], ['status', 'prospect'], ['claimed_at', 'IS NULL'], ['last_classified_at', 'IS NULL'],
-    ['path_id', 'path-1'], ['target_url', 'https://citysquares.com/add'],
+    ['path_id', 'path-1'], ['target_url', 'https://citysquares.com/add'], ['link_type', 'directory'], // …and the observed lane (r6 P2)
   ]));
 });
 

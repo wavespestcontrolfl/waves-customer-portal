@@ -250,7 +250,7 @@ async function sendOutreach({ prospectId, approvedBy = 'admin' }) {
     // superseding or revising the path waits for this commit instead of
     // slipping in between the standing read and the CAS
     const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'agent_completable', 'revision');
-    const standing = onPath && !onPath.superseded_by && !(onPath.confidence != null && !(Number(onPath.confidence) > 0)) && onPath.agent_completable !== false;
+    const standing = onPath && !onPath.superseded_by && Number.isFinite(Number(onPath.confidence)) && Number(onPath.confidence) > 0 && onPath.agent_completable !== false; // NULL confidence = never assessed = not standing
     if (!standing) return { ok: false, code: 'path_moved' };
     // …and the draft must still be bound to the path's CURRENT revision: a
     // stamp that no longer matches means the path changed in place after the

@@ -25,6 +25,30 @@ const { claimProspectDomain, lockProspectDomain, canonicalProspectDomain, byDoma
 // worker actually claims. Derived, never copied, so a reclassification there
 // flows through here.
 const NON_OUTREACH_TYPES = new Set(worker.SIGNUP_TYPES);
+
+/**
+ * The `path_id` patch for a reopened lost row: unchanged when its current path
+ * is live and agent-completable; otherwise the active outreach path for the
+ * reopened lane + pitch URL on the row's domain (find-or-create against the
+ * registry's partial unique key), or null — left for the periodic catch-up to
+ * link — when the registry has not yet given the row a domain.
+ */
+async function claimableOutreachPath(trx, row, linkType) {
+  const cur = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first('id', 'superseded_by', 'agent_completable') : null;
+  if (cur && !cur.superseded_by && cur.agent_completable !== false) return {};
+  if (!row.domain_id) return { path_id: null };
+  const registry = require('./link-registry');
+  const path = registry.acquisitionPathFromLegacyRow({ link_type: linkType, target_url: row.target_url || null });
+  const active = () => trx('seo_link_acquisition_paths').where({ domain_id: row.domain_id, path_key: path.path_key }).whereNull('superseded_by').first('id');
+  let existing = await active();
+  if (!existing) {
+    const ins = await trx('seo_link_acquisition_paths').insert({ ...path, domain_id: row.domain_id })
+      .onConflict(trx.raw('(domain_id, path_key) WHERE superseded_by IS NULL')).ignore().returning(['id']);
+    existing = (ins && ins[0]) || (await active());
+    if (!existing) throw new Error(`lost-link recovery: lost race creating path ${path.path_key}`);
+  }
+  return { path_id: existing.id };
+}
 const OUTREACH_TYPES = new Set(worker.OUTREACH_TYPES);
 // Board states that mean "someone is already on this" — never reopened here.
 // Recovery excludes EVERY board row for the domain (see prospect-domain-lock).
@@ -107,7 +131,7 @@ async function queueOne(loss, out, scoreMod) {
     // it to 'lost' when the inbound link disappears — that EXACT-page row is
     // REOPENED as a fresh prospect (the worker only claims status='prospect').
     // Rows rejected by the owner are left alone.
-    const exists = await byDomain(db('seo_link_prospects'), domain).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type');
+    const exists = await byDomain(db('seo_link_prospects'), domain).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type', 'domain_id', 'path_id', 'target_url');
     if (exists && exists.status === 'lost' && NON_OUTREACH_TYPES.has(exists.link_type)) {
       // A lost signup-lane placement (citation/directory/social) is not an
       // outreach target; reopening it would hand it to the citation runner.
@@ -135,10 +159,20 @@ async function queueOne(loss, out, scoreMod) {
       const reopened = await db.transaction(async (trx) => {
         const { inFlight: raced } = await claimProspectDomain(trx, domain, { statuses: IN_FLIGHT_STATUSES, lanes: 'all' });
         if (raced) return { raced };
+        // The reopened row must sit on a path a worker may CLAIM. A baseline-
+        // imported placement is linked to its baseline path, which is
+        // deliberately not agent-completable (the link was never acquired by
+        // an agent) — the worker refuses such paths, so the reopen would look
+        // queued and never be drafted. Re-pitching is a NEW outreach route:
+        // link the row to the claimable outreach path for its lane + pitch
+        // page (find-or-create, the catch-up's own identity), keeping the
+        // current path only when it already stands for a worker.
+        const pathPatch = await claimableOutreachPath(trx, exists, reopenType);
         return trx('seo_link_prospects').where({ id: exists.id, status: 'lost' }).update({
           status: 'prospect',
           priority: 'high',
           link_type: reopenType,
+          ...pathPatch,
           claimed_at: null, claimed_by: null,
           attempts: 0,
           // The prior attempt is APPENDED to quality_signals.prior_outreach_attempts

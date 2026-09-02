@@ -16,7 +16,7 @@ jest.mock('../models/db', () => {
     const get = (row, col) => row[String(col).includes('.') ? String(col).split('.')[1] : col];
     const rows = () => { const r = mockStore[table].filter((row) => preds.every((p) => p(row))); return limitN == null ? r : r.slice(0, limitN); };
     const eq = (l, r) => (l instanceof Date && r instanceof Date ? l.getTime() === r.getTime() : l === r);
-    const cmp = (op, l, r) => (op === '<' ? l < r : op === '<=' ? l <= r : eq(l, r));
+    const cmp = (op, l, r) => (op === '<' || op === '<=' ? (l == null || r == null ? false : op === '<' ? l < r : l <= r) : eq(l, r)); // SQL semantics: a NULL never satisfies a comparison
     const vals = (arr) => (arr && typeof arr._rows === 'function' ? arr._rows().map((r) => r[(arr._select || ['id'])[0]]) : arr); // a sub-builder resolves lazily as a sub-select
     // grouped where: OR-combined like knex's callback builder, nesting allowed
     const group = (fn) => {
@@ -69,7 +69,7 @@ beforeEach(() => { mockStore.seo_link_prospects.length = 0; mockStore.seo_link_a
 test('claim hands out a placement on its LIVE successor path, moving the execution URL, atomically with the lease', async () => {
   const old = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old-join', superseded_by: 'p-mid' };
   const mid = { id: 'p-mid', domain_id: 'd1', submission_url: 'https://example.com/mid-join', superseded_by: 'p-live' };
-  const live = { id: 'p-live', domain_id: 'd1', submission_url: 'https://example.com/join', superseded_by: null };
+  const live = { id: 'p-live', domain_id: 'd1', submission_url: 'https://example.com/join', superseded_by: null, confidence: 0.7 };
   mockStore.seo_link_acquisition_paths.push(old, mid, live);
   const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, automation_policy: 'submit_free', outreach_status: null, priority: 'high', domain_rating: 40, target_domain: 'example.com' };
   const stale = { ...base, id: 'r-stale', path_id: 'p-old', target_url: 'https://example.com/old-join' }; // released after the investigator retired its path twice
@@ -86,7 +86,7 @@ test('claim hands out a placement on its LIVE successor path, moving the executi
 });
 
 test('a placement on a live path claims unchanged; preview claims settle nothing and lease nothing', async () => {
-  const live = { id: 'p-live', domain_id: 'd1', submission_url: 'https://example.com/join', superseded_by: null };
+  const live = { id: 'p-live', domain_id: 'd1', submission_url: 'https://example.com/join', superseded_by: null, confidence: 0.7 };
   const old = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old-join', superseded_by: 'p-live' };
   mockStore.seo_link_acquisition_paths.push(old, live);
   const row = { id: 'r1', status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40, target_domain: 'example.com', path_id: 'p-old', target_url: 'https://example.com/old-join' };
@@ -101,9 +101,9 @@ test('a placement on a live path claims unchanged; preview claims settle nothing
 
 test('a moved placement never keeps a policy classified for the old path — and a lane change leaves the signup lane (local Codex P1 / PR r20 P1)', async () => {
   const oldA = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/free-listing', superseded_by: 'p-paid', link_type: 'directory' };
-  const paid = { id: 'p-paid', domain_id: 'd1', submission_url: 'https://example.com/sponsor', superseded_by: null, link_type: 'directory' };
+  const paid = { id: 'p-paid', domain_id: 'd1', submission_url: 'https://example.com/sponsor', superseded_by: null, link_type: 'directory', confidence: 0.7 };
   const oldB = { id: 'p-old2', domain_id: 'd2', submission_url: 'https://gated.example/free', superseded_by: 'p-outreach', link_type: 'directory' };
-  const outreach = { id: 'p-outreach', domain_id: 'd2', submission_url: null, superseded_by: null, link_type: 'editorial' };
+  const outreach = { id: 'p-outreach', domain_id: 'd2', submission_url: null, superseded_by: null, link_type: 'editorial', confidence: 0.7 };
   mockStore.seo_link_acquisition_paths.push(oldA, paid, oldB, outreach);
   const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, automation_policy: 'submit_free', last_classified_at: new Date('2026-08-01'), priority: 'high', domain_rating: 40 };
   const toPaid = { ...base, id: 'r-paid', target_domain: 'example.com', path_id: 'p-old', target_url: 'https://example.com/free-listing' };
@@ -118,7 +118,7 @@ test('a moved placement never keeps a policy classified for the old path — and
 
 test('a REFUSED settlement never leases the retired path, and a sent-stamped row is never served (local Codex P1)', async () => {
   const old = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old-join', superseded_by: 'p-live', link_type: 'directory' };
-  const live = { id: 'p-live', domain_id: 'd1', submission_url: 'https://example.com/join', superseded_by: null, link_type: 'directory' };
+  const live = { id: 'p-live', domain_id: 'd1', submission_url: 'https://example.com/join', superseded_by: null, link_type: 'directory', confidence: 0.7 };
   mockStore.seo_link_acquisition_paths.push(old, live);
   const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40, target_domain: 'example.com' };
   // locked by a sent stamp although its status reads none — the registry refuses to move it
@@ -278,6 +278,35 @@ test('a confidence drop to zero during the lease is reconciled at release even t
   const rep = await worker.report({ prospect_id: 'r1', outcome: 'failed', lease_token: claimed.lease_token });
   expect(rep.ok).toBe(true);
   expect(row).toMatchObject({ claimed_at: null, automation_policy: null, last_classified_at: null }); // the transition ran: nothing composed on a dead route stays actionable
+});
+
+test('a path whose confidence is NULL (never assessed) is never leased — standing means POSITIVE confidence (Codex #3720 r6 P1)', async () => {
+  const unassessed = { id: 'p-null', domain_id: 'd1', submission_url: 'https://null.example/add', superseded_by: null, link_type: 'directory', confidence: null, agent_completable: true };
+  const live = { id: 'p-live', domain_id: 'd2', submission_url: 'https://live.example/add', superseded_by: null, link_type: 'directory', confidence: 0.7, agent_completable: true };
+  mockStore.seo_link_acquisition_paths.push(unassessed, live);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40 };
+  mockStore.seo_link_prospects.push(
+    { ...base, id: 'r-null', target_domain: 'null.example', path_id: 'p-null', target_url: 'https://null.example/add', domain_rating: 90 },
+    { ...base, id: 'r-live', target_domain: 'live.example', path_id: 'p-live', target_url: 'https://live.example/add' },
+  );
+  const leased = await worker.claim({ n: 5, type: 'signup' });
+  expect(leased.map((r) => r.id)).toEqual(['r-live']);
+  expect(mockStore.seo_link_prospects.find((r) => r.id === 'r-null').claimed_at).toBeNull();
+  expect((await worker.claim({ n: 5, type: 'signup', preview: true })).map((r) => r.id)).toEqual([]); // r-live is leased now; r-null is never previewed either
+});
+
+test('a read-only preview excludes a placement whose target_url lags its live path URL — a live claim would refresh and defer it (Codex #3720 r6 P2)', async () => {
+  const moved = { id: 'p-www', domain_id: 'd1', submission_url: 'https://www.example.com/get-listed', superseded_by: null, link_type: 'directory', confidence: 0.7, agent_completable: true };
+  const ok = { id: 'p-ok', domain_id: 'd2', submission_url: 'https://ok.example/add', superseded_by: null, link_type: 'directory', confidence: 0.7, agent_completable: true };
+  mockStore.seo_link_acquisition_paths.push(moved, ok);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40 };
+  mockStore.seo_link_prospects.push(
+    { ...base, id: 'r-www', target_domain: 'example.com', path_id: 'p-www', target_url: 'https://example.com/get-listed', domain_rating: 90 },
+    { ...base, id: 'r-ok', target_domain: 'ok.example', path_id: 'p-ok', target_url: 'https://ok.example/add' },
+  );
+  const preview = await worker.claim({ n: 5, type: 'signup', preview: true });
+  expect(preview.map((r) => r.id)).toEqual(['r-ok']);
+  expect(mockStore.seo_link_prospects.find((r) => r.id === 'r-www')).toMatchObject({ target_url: 'https://example.com/get-listed', claimed_at: null }); // read-only: no refresh, no lease
 });
 
 test('a read-only preview never reports a placement on a superseded path as claimable (Codex #3720 r2 P2)', async () => {

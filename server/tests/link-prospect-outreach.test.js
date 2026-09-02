@@ -332,6 +332,17 @@ describe('sendOutreach', () => {
     expect(gmail.sendMessage).not.toHaveBeenCalled();
   });
 
+  test('NULL confidence (never assessed) is not standing → path_moved (Codex #3720 r6 P1)', async () => {
+    isEnabled.mockReturnValue(true);
+    setDbQueues({
+      seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ first: { c: '0' } }), chain({ result: [] }), chain({ first: { path_id: 'path-unassessed' } })],
+      seo_link_acquisition_paths: [chain({ first: { id: 'path-unassessed', superseded_by: null, confidence: null, agent_completable: true } })],
+    });
+    expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+  });
+
   test('a draft whose path was revised in place after it was written is not sent → path_moved (revision stamp)', async () => {
     isEnabled.mockReturnValue(true);
     setDbQueues({

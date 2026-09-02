@@ -865,6 +865,33 @@ describe('lost-link recovery', () => {
     expect(updates[0].link_type).toBe('resource');
   });
 
+  test('a reopened baseline placement (path not agent-completable) is relinked to a claimable outreach path for its lane + pitch page (Codex #3720 r6 P1)', async () => {
+    const updates = []; const pathOps = [];
+    makeDb({
+      seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', domain_id: 'd1', path_id: 'path-base', target_url: 'https://blog.example/post' }; if (op === 'update') { updates.push(st.payload); return 1; } },
+      seo_link_acquisition_paths: (op, st) => {
+        pathOps.push({ op, wheres: st.wheres, payload: st.payload });
+        if (op === 'first' && st.wheres[0][0].id === 'path-base') return { id: 'path-base', superseded_by: null, agent_completable: false }; // the baseline path
+        if (op === 'first') return null; // no active outreach path for this key yet
+        if (op === 'insert') return [{ id: 'path-rec' }];
+      },
+    });
+    const r = await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+    expect(r.queued).toBe(1);
+    expect(updates[0]).toEqual(expect.objectContaining({ status: 'prospect', link_type: 'resource', path_id: 'path-rec' }));
+    const ins = pathOps.find((o) => o.op === 'insert').payload;
+    expect(ins).toEqual(expect.objectContaining({ domain_id: 'd1', link_type: 'resource', agent_completable: true, submission_url: 'https://blog.example/post', baseline: false }));
+    expect(pathOps.find((o) => o.op === 'first' && o.wheres[0][0].path_key)).toBeTruthy(); // find-or-create against the registry key
+    // …while a row already on a live, agent-completable path keeps it
+    updates.length = 0;
+    makeDb({
+      seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', domain_id: 'd1', path_id: 'path-live', target_url: 'https://blog.example/post' }; if (op === 'update') { updates.push(st.payload); return 1; } },
+      seo_link_acquisition_paths: (op) => { if (op === 'first') return { id: 'path-live', superseded_by: null, agent_completable: true }; throw new Error('no path write expected'); },
+    });
+    await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+    expect(updates[0]).not.toHaveProperty('path_id');
+  });
+
   test('board lookup matches every spelling of the target page; canonical insert form', () => {
     const { targetPageOf, targetPageVariants } = recovery._test;
     expect(targetPageOf('https://www.wavespestcontrol.com/x?utm=1#f')).toBe('https://www.wavespestcontrol.com/x/');

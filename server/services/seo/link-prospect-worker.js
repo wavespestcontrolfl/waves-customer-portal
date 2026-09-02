@@ -114,7 +114,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       // ineligible until the classifier has read the successor).
       .whereNotIn('path_id',
         trx('seo_link_acquisition_paths').select('id').whereNull('superseded_by') // ACTIVE rows only — a retired zero-confidence path still reaches settlement
-          .where((s) => s.where('confidence', '<=', 0).orWhere('agent_completable', false))) // disproven, or a route whose contract needs a human step
+          .where((s) => s.whereNull('confidence').orWhere('confidence', '<=', 0).orWhere('agent_completable', false))) // never assessed (NULL), disproven, or a route whose contract needs a human step
       // …and the owner's registry ruling holds at the chokepoint: a placement
       // on a domain the owner parked (Watch) or refused (Reject) is never
       // leased, whatever its own status/policy/confidence still read
@@ -164,9 +164,16 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // contract and never strands rows until the stale sweep. A live claim would
     // SETTLE rows on superseded paths (moved, unclassified, not leased), so the
     // preview excludes them rather than report a retired URL as claimable.
+    // …and a placement whose target_url lags its LIVE path's submission_url
+    // is excluded too: a live claim would refresh the URL, unclassify the row
+    // and defer it (below) rather than lease it, so the preview must not show
+    // it as claimable — least of all under the obsolete URL.
     if (preview) {
       const previewRows = await ranked(limit, []).whereNotIn('path_id', trx('seo_link_acquisition_paths').select('id').whereNotNull('superseded_by'));
-      return previewRows.map((r) => ({ ...r }));
+      const previewPathIds = [...new Set(previewRows.map((r) => r.path_id).filter(Boolean))];
+      const previewPaths = previewPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', previewPathIds).select('id', 'submission_url') : [];
+      const liveUrlOf = new Map(previewPaths.map((p) => [p.id, p.submission_url]));
+      return previewRows.filter((r) => { const liveUrl = r.path_id ? liveUrlOf.get(r.path_id) : null; return !(liveUrl && r.target_url !== liveUrl); }).map((r) => ({ ...r }));
     }
 
     // Batches until `limit` live rows are leased or the candidates run out:
@@ -218,7 +225,10 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // …nor one the investigator marked NOT agent-completable: its contract
     // requires a human step (plan §6.3), and the outreach lane has no policy
     // filter that would otherwise stop Hermes from leasing it
-    const blocked = new Set(paths.filter((p) => p.superseded_by || (p.confidence != null && !(Number(p.confidence) > 0)) || p.agent_completable === false).map((p) => p.id));
+    // …STANDING means a POSITIVE confidence: a path whose confidence is NULL
+    // (schema-permitted — never assessed) or non-numeric has passed no check
+    // and is refused exactly like a disproven one (fail closed)
+    const blocked = new Set(paths.filter((p) => p.superseded_by || !(Number.isFinite(Number(p.confidence)) && Number(p.confidence) > 0) || p.agent_completable === false).map((p) => p.id));
     rows = rows.filter((r) => !blocked.has(r.path_id) && types.includes(r.link_type));
     if (effectivePolicy) rows = rows.filter((r) => r.automation_policy === effectivePolicy);
     if (rows.length === 0) continue;
