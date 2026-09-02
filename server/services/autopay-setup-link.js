@@ -81,6 +81,49 @@ function consentMethodTypeFor(stripeType) {
   return stripeType === 'us_bank_account' ? 'ach' : 'card';
 }
 
+// The ONE enrollment path for this lane (capture completion AND the office
+// auto-enroll from a saved consented card — GH Codex #3726 P2): FOR UPDATE
+// on the customer row, then the eligibility this lane promises (not
+// archived, per-visit/per-application lane, not paused) judged under that
+// lock, then enrollConsentedMethod in savepoint mode on the same handle
+// (its own FOR UPDATE re-locks the row we hold — same transaction, no
+// self-deadlock). Its confirmation email comes back as a closure and fires
+// only after COMMIT (visit-lane pattern). Returns enrollConsentedMethod's
+// result, or { enrolled:false, reason } with one of customer_deleted /
+// lane_changed / autopay_paused.
+async function enrollUnderCustomerLock({ customerId, paymentMethodId, details, authorizedAt = null }) {
+  const { enrollConsentedMethod } = require('./autopay-enrollment');
+  let deferredEnrollmentEmail = null;
+  const enrollment = await db.transaction(async (trx) => {
+    const locked = await trx('customers')
+      .where({ id: customerId })
+      .forUpdate()
+      .first('id', 'deleted_at', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'autopay_enabled', 'autopay_paused_until');
+    if (!locked || locked.deleted_at) return { enrolled: false, reason: 'customer_deleted' };
+    if (!billingLaneSupported(locked)) return { enrolled: false, reason: 'lane_changed' };
+    // A PAUSE stands: enrollment would report already_enrolled and the
+    // caller would say "set up" while nothing collects. Resuming is the
+    // customer's or the office's explicit action — never a side effect.
+    if (locked.autopay_enabled && require('./autopay-eligibility').isPaused(locked)) {
+      return { enrolled: false, reason: 'autopay_paused' };
+    }
+    const result = await enrollConsentedMethod({
+      customerId,
+      paymentMethodId,
+      source: 'save_card_consent',
+      details,
+      ...(authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime()) ? { authorizedAt } : {}),
+      dbh: trx,
+    });
+    deferredEnrollmentEmail = result?.sendEnrollmentConfirmation || null;
+    return result;
+  });
+  if (enrollment?.enrolled && deferredEnrollmentEmail) {
+    try { deferredEnrollmentEmail(); } catch { /* best-effort */ }
+  }
+  return enrollment;
+}
+
 // Tender for the capture — identical policy to the accept capture: bank is
 // offered only while the customer's ACH state is healthy, because
 // enrollConsentedMethod refuses a bank target under needs_verification /
@@ -191,12 +234,13 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
       if (!(authorizedAt instanceof Date) || Number.isNaN(authorizedAt.getTime())) {
         logger.info(`[autopay-setup-link] no consent moment for saved pm ${saved.id} — minting a fresh link instead of auto-enrolling`);
       }
-      const { enrollConsentedMethod } = require('./autopay-enrollment');
+      // Same locked eligibility as capture completion (GH Codex P2): an
+      // archive / lane move / pause that commits after the unlocked checks
+      // above is judged under the customer lock before anything enrolls.
       const enrollment = authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime())
-        ? await enrollConsentedMethod({
+        ? await enrollUnderCustomerLock({
           customerId,
           paymentMethodId: saved.id,
-          source: 'save_card_consent',
           details: { via: PURPOSE, trigger },
           authorizedAt,
         })
@@ -204,6 +248,11 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
       if (enrollment?.enrolled || enrollment?.reason === 'already_enrolled') {
         return { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' };
       }
+      // Locked eligibility refusals are the same skips the unlocked checks
+      // would have produced.
+      if (enrollment?.reason === 'customer_deleted') return skip('customer_not_found');
+      if (enrollment?.reason === 'lane_changed') return skip('unsupported_billing_lane');
+      if (enrollment?.reason === 'autopay_paused') return skip('autopay_paused');
       // An opt-out that won the race, or no readable consent moment: fall
       // through to a fresh link (fresh checkbox) rather than refusing.
       if (enrollment?.reason !== 'opted_out_after_authorization' && enrollment?.reason !== 'no_consent_moment') {
@@ -443,7 +492,10 @@ async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
   // a customer moved to third-party billing after completing must not keep
   // seeing "Auto Pay is set up" for invoices that now route to the payer.
   if (await payerExemption(request.customer_id)) return { state: 'closed', ...base };
-  if (request.status === 'completed' || request.status === 'satisfied') return { state: 'secured', ...base };
+  // Only a capture COMPLETED through this link earns the secured copy; a
+  // standalone row never becomes 'satisfied' (external activation retires
+  // it), so anything else terminal is closed.
+  if (request.status === 'completed') return { state: 'secured', ...base };
   // Mid-completion (page POST or webhook holds the claim): the intent
   // succeeded, but the tail can still revert the row — say "finishing up",
   // never "set up" (pre-push Codex P1). The card form is not re-shown
@@ -458,12 +510,13 @@ async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
   try {
     const { customerOnAutopay } = require('./autopay-eligibility');
     if (await customerOnAutopay(customer)) {
+      // Activated elsewhere → this link is no longer active: RETIRE it
+      // (expired) so every later GET stays closed (GH Codex P0: a
+      // 'satisfied' heal would revive to secured on refresh), never a
+      // setup-success confirmation the link did not earn.
       await db('appointment_card_requests')
         .where({ id: request.id, status: 'pending' })
-        .update({ status: 'satisfied', completed_at: new Date(), updated_at: new Date() });
-      // Activated elsewhere → this link is no longer active: CLOSED, never a
-      // setup-success confirmation the link did not earn (GH Codex P0; the
-      // route contract says an already-active account renders closed).
+        .update({ status: 'expired', completed_at: new Date(), updated_at: new Date() });
       return { state: 'closed', ...base };
     }
   } catch (err) {
@@ -724,40 +777,16 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
     // mode on the same handle (its own FOR UPDATE re-locks the row we hold —
     // same transaction, no self-deadlock). Its confirmation email comes back
     // as a closure and fires only after COMMIT (visit-lane pattern).
-    let deferredEnrollmentEmail = null;
-    const enrollment = await db.transaction(async (trx) => {
-      const locked = await trx('customers')
-        .where({ id: request.customer_id })
-        .forUpdate()
-        .first('id', 'deleted_at', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'autopay_enabled', 'autopay_paused_until');
-      // Archived (soft-deleted) under the lock → never enable Auto Pay on it.
-      if (!locked || locked.deleted_at) return { enrolled: false, reason: 'customer_deleted' };
-      if (!billingLaneSupported(locked)) return { enrolled: false, reason: 'lane_changed' };
-      // A PAUSE taken since the link went out stands (pre-push Codex P1):
-      // enrollment would report already_enrolled and this completion would
-      // say "set up" while nothing collects. Resuming is the customer's or
-      // the office's explicit action — never this link's side effect.
-      if (locked.autopay_enabled && require('./autopay-eligibility').isPaused(locked)) {
-        return { enrolled: false, reason: 'autopay_paused' };
-      }
-      const result = await enrollConsentedMethod({
-        customerId: request.customer_id,
-        paymentMethodId: saved?.id,
-        source: 'save_card_consent',
-        details: { via: PURPOSE, setup_intent_id: setupIntentId },
-        // The authorization moment (GH Codex #3726 r3 P1): a retry (stale
-        // lease / webhook) after the customer turned Auto Pay OFF must not
-        // re-enable it — enrollConsentedMethod refuses
-        // opted_out_after_authorization.
-        ...(authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime()) ? { authorizedAt } : {}),
-        dbh: trx,
-      });
-      deferredEnrollmentEmail = result?.sendEnrollmentConfirmation || null;
-      return result;
+    const enrollment = await enrollUnderCustomerLock({
+      customerId: request.customer_id,
+      paymentMethodId: saved?.id,
+      details: { via: PURPOSE, setup_intent_id: setupIntentId },
+      // The authorization moment (GH Codex #3726 r3 P1): a retry (stale
+      // lease / webhook) after the customer turned Auto Pay OFF must not
+      // re-enable it — enrollConsentedMethod refuses
+      // opted_out_after_authorization.
+      authorizedAt,
     });
-    if (enrollment?.enrolled && deferredEnrollmentEmail) {
-      try { deferredEnrollmentEmail(); } catch { /* best-effort */ }
-    }
     // Policy refusals under the enrollment lock are PERMANENT (GH Codex
     // P2): a payer assignment / lane move / pause / ACH suspension that
     // committed between the unlocked prechecks and the lock cannot be

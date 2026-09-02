@@ -183,7 +183,9 @@ describe('requestAutopaySetupLink — ordered checks', () => {
     mockTableHandlers.payment_method_consents = { first: () => ({ created_at: consentAt }) };
     const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
     expect(r).toEqual({ requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' });
-    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-row-7', source: 'save_card_consent', authorizedAt: consentAt }));
+    // Enrolled under the customer lock on the transaction handle, same as capture completion.
+    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-row-7', source: 'save_card_consent', authorizedAt: consentAt, dbh: expect.anything() }));
+    expect(touches('customers').some((c) => c.calls.some((x) => x[0] === 'forUpdate'))).toBe(true);
     expect(touches('appointment_card_requests')).toHaveLength(0);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
@@ -194,6 +196,15 @@ describe('requestAutopaySetupLink — ordered checks', () => {
     const r = await requestAutopaySetupLink({ customerId: 'cust-1' });
     expect(r.action).toBe('link_created');
     expect(mockFindConsentedChargeableCard).not.toHaveBeenCalled();
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+  });
+
+  it('office auto-enroll judges archive / lane / pause under the lock (skips, never enrolls)', async () => {
+    mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7', stripe_payment_method_id: 'pm_7' });
+    mockTableHandlers.payment_method_consents = { first: () => ({ created_at: new Date('2026-08-15T10:00:00Z') }) };
+    let calls = 0;
+    mockTableHandlers.customers = { first: () => (calls++ === 0 ? { ...CUSTOMER } : { ...CUSTOMER, billing_mode: 'monthly_membership' }) };
+    expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).reason).toBe('unsupported_billing_lane');
     expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
   });
 
@@ -356,8 +367,8 @@ describe('requestAutopaySetupLink — link minting and delivery', () => {
 });
 
 describe('loadAutopaySetupPageData — state machine', () => {
-  it('renders secured for completed / satisfied rows and "saving" (never secured) for a mid-completion row', async () => {
-    for (const status of ['completed', 'satisfied']) {
+  it('renders secured for a completed row and "saving" (never secured) for a mid-completion row', async () => {
+    for (const status of ['completed']) {
       const d = await loadAutopaySetupPageData({ ...PENDING, status });
       expect(d).toEqual(expect.objectContaining({ state: 'secured', kind: 'customer', firstName: 'Pat', cancelFeeNote: null }));
     }
@@ -406,11 +417,14 @@ describe('loadAutopaySetupPageData — state machine', () => {
     expect(mockCreateSetupIntent).not.toHaveBeenCalled();
   });
 
-  it('heals the row to satisfied and renders CLOSED (never a setup-success it did not earn) when Auto Pay was activated elsewhere', async () => {
+  it('retires the row (expired) and renders CLOSED — on every later GET too — when Auto Pay was activated elsewhere', async () => {
     mockCustomerOnAutopay.mockResolvedValue(true);
     expect((await loadAutopaySetupPageData({ ...PENDING })).state).toBe('closed');
     const calls = touches('appointment_card_requests').flatMap((c) => c.calls);
-    expect(calls.find((c) => c[0] === 'update')[1]).toEqual(expect.objectContaining({ status: 'satisfied' }));
+    expect(calls.find((c) => c[0] === 'update')[1]).toEqual(expect.objectContaining({ status: 'expired' }));
+    // A refresh sees the retired row → still closed, never secured.
+    expect((await loadAutopaySetupPageData({ ...PENDING, status: 'expired' })).state).toBe('closed');
+    expect((await loadAutopaySetupPageData({ ...PENDING, status: 'satisfied' })).state).toBe('closed');
   });
 
   it('mints a card_or_bank INSTANT-verification SetupIntent for a healthy customer and persists its id', async () => {
