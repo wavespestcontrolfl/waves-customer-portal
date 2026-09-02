@@ -274,10 +274,14 @@ describe('the audit record', () => {
 });
 
 describe('event provenance', () => {
-  it('the public opt-out route stamps actor:customer on every event it records (source contract)', () => {
+  it('every recorded event carries the caller\'s actor, and the public route calls the rail as the customer (source contract)', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
     const idx = src.indexOf('OptOut.recordServiceOptOutEvent(parsedData, {');
     expect(idx).toBeGreaterThan(0);
-    expect(src.slice(idx, idx + 600)).toMatch(/actor: 'customer'/);
+    const block = src.slice(idx, idx + 800);
+    expect(block).toMatch(/\n\s+actor,\n/);
+    // Never a hardcoded actor in the rail — that overwrote staff parks (pre-push codex P0).
+    expect(block).not.toMatch(/actor: '/);
+    expect(src).toMatch(/applyServiceMixChange\(\{ estimate, body: req\.body \|\| \{\}, actor: 'customer' \}\)/);
   });
 });
