@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Button, Badge, Card, Input, Select } from "../../components/ui";
 import { cn } from "../../components/ui/cn";
 import {
@@ -924,6 +924,9 @@ export default function ProtocolReferenceTabV2() {
   const [selectedTrack, setSelectedTrack] = useState(null);
   const [trackData, setTrackData] = useState(null);
   const [trackError, setTrackError] = useState(null);
+  // Monotonic id of the latest protocol request: a slow earlier selection
+  // must not install its data (or its failure rollback) over a later one.
+  const trackRequestRef = useRef(0);
   const [loading, setLoading] = useState(true);
   const [showFullCalendar, setShowFullCalendar] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
@@ -946,6 +949,8 @@ export default function ProtocolReferenceTabV2() {
 
   const loadTrack = async (key) => {
     const previous = { key: selectedTrack, data: trackData };
+    const requestId = ++trackRequestRef.current;
+    const isCurrent = () => requestId === trackRequestRef.current;
     setSelectedTrack(key);
     setTrackData(null);
     setTrackError(null);
@@ -955,9 +960,11 @@ export default function ProtocolReferenceTabV2() {
       : `program=${key}`;
     try {
       const d = await adminFetch(`/admin/protocols/programs?${param}`);
+      if (!isCurrent()) return;
       setTrackData(d.track || d.program);
       setSelectedConditionalIds([]);
     } catch (e) {
+      if (!isCurrent()) return;
       // Restore the previous selection so the controlled Select (phones)
       // can re-emit a change for the failed key — re-picking the already
       // selected option fires nothing — and offer a direct retry.
