@@ -57,6 +57,7 @@
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
+ *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true (12-month application strip under the lawn price card, arithmetic on visitsPerYear only; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
@@ -2073,6 +2074,14 @@ const gates = {
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   techTips: gateEnvValue('GATE_TECH_TIPS'),
 
+  // Audio-synced call transcript (admin call log). When on, calls whose
+  // call_log.transcript_structured carries diarized segments render them as
+  // a clickable list that follows recording playback; click a line to seek.
+  // OFF unless set, dev AND prod — GET /api/ai/admin/calls reports
+  // transcript_sync_enabled:false and the tab keeps the plain-text
+  // transcript. Read-only, no comms, no writes. Kill switch: unset. Read at
+  // CALL time so a flip needs no redeploy.
+  callTranscriptSync: gateEnvValue('GATE_CALL_TRANSCRIPT_SYNC'),
   // Field dictation upload (2026-09-02): the completion-notes mic falls back
   // to MediaRecorder + server transcription (OpenAI, same transcriber and
   // PAN scrub as call recordings) when SpeechRecognition is unavailable.

@@ -310,6 +310,18 @@ function ChunkLoadFallback() {
   );
 }
 
+// Route-level Suspense placeholder. One element for every lazy page instead
+// of 45 inline copies on the retired slate #94a3b8: inside the admin shell
+// --text-secondary resolves to the zinc/stone token; elsewhere (tech
+// portal's dark theme) the slate fallback keeps its contrast.
+function RouteFallback({ label = 'Loading...' }) {
+  return (
+    <div style={{ color: 'var(--text-secondary, #94a3b8)', padding: 40, fontSize: 14 }} role="status">
+      {label}
+    </div>
+  );
+}
+
 function lazyWithRetry(factory) {
   return lazy(async () => {
     try {
@@ -533,61 +545,61 @@ export default function App() {
           <Route path="/admin/forgot-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminForgotPasswordPage />} />
           <Route path="/admin/reset-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminResetPasswordPage />} />
           <Route path="/tech" element={isNativeApp() ? <Navigate to="/" replace /> : <TechLayout />}>
-            <Route index element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading...</div>}><TechHomePage /></Suspense>} />
+            <Route index element={<Suspense fallback={<RouteFallback label="Loading..." />}><TechHomePage /></Suspense>} />
             {/* Field estimates use the canonical server-priced builder. The retired
                 tech-only calculator duplicated prices client-side and its SMS call
                 posted the wrong request shape, so it could show “sent” after a 400. */}
             <Route path="estimate" element={<Navigate to="/admin/pipeline?tab=new" replace />} />
-            <Route path="protocols" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading protocols...</div>}><TechProtocolsPage /></Suspense>} />
-            <Route path="lawn-diagnostic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn diagnostic...</div>}><TechLawnDiagnosticPage /></Suspense>} />
-            <Route path="social-post" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading social post...</div>}><TechSocialPostPage /></Suspense>} />
+            <Route path="protocols" element={<Suspense fallback={<RouteFallback label="Loading protocols..." />}><TechProtocolsPage /></Suspense>} />
+            <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />
+            <Route path="social-post" element={<Suspense fallback={<RouteFallback label="Loading social post..." />}><TechSocialPostPage /></Suspense>} />
           </Route>
           <Route path="/admin" element={isNativeApp() ? <Navigate to="/" replace /> : <PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
             <Route index element={<Navigate to="dashboard" />} />
-            <Route path="dashboard" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading dashboard...</div>}><AdminDashboardPage /></Suspense>} />
-            <Route path="customers" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading customers...</div>}><AdminCustomersPage /></Suspense>} />
-            <Route path="customers/new" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading customer form...</div>}><AdminCustomersPage /></Suspense>} />
-            <Route path="customers/duplicates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading duplicates...</div>}><AdminDuplicateCustomersPage /></Suspense>} />
-            <Route path="pipeline" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pipeline...</div>}><AdminPipelinePage /></Suspense>} />
+            <Route path="dashboard" element={<Suspense fallback={<RouteFallback label="Loading dashboard..." />}><AdminDashboardPage /></Suspense>} />
+            <Route path="customers" element={<Suspense fallback={<RouteFallback label="Loading customers..." />}><AdminCustomersPage /></Suspense>} />
+            <Route path="customers/new" element={<Suspense fallback={<RouteFallback label="Loading customer form..." />}><AdminCustomersPage /></Suspense>} />
+            <Route path="customers/duplicates" element={<Suspense fallback={<RouteFallback label="Loading duplicates..." />}><AdminDuplicateCustomersPage /></Suspense>} />
+            <Route path="pipeline" element={<Suspense fallback={<RouteFallback label="Loading pipeline..." />}><AdminPipelinePage /></Suspense>} />
             {/* Legacy Pipeline entry routes preserve notifications/bookmarks but
                 no longer mount duplicate copies of EstimatesPageV2. */}
             <Route path="estimates" element={<AdminTabRedirect to="/admin/pipeline" tab="estimates" preserveTabs={['leads', 'estimates', 'new', 'pricing']} />} />
             <Route path="agent-estimate" element={<Suspense fallback={<div style={{color:'#71717a',padding:40}}>Loading Agent Estimate...</div>}><AdminAgentEstimatePage /></Suspense>} />
-            <Route path="estimates/:estimateId/proposal" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading proposal...</div>}><AdminCommercialProposalPage /></Suspense>} />
+            <Route path="estimates/:estimateId/proposal" element={<Suspense fallback={<RouteFallback label="Loading proposal..." />}><AdminCommercialProposalPage /></Suspense>} />
             {/* /admin/dispatch is now the canonical dispatcher surface
                 — Board tab (phase 2 v1) + Schedule tab (existing
                 DispatchPageV2). /admin/schedule still works (redirects
                 to the Schedule tab) so existing bookmarks and internal
                 links aren't broken. */}
-            <Route path="dispatch" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading dispatch...</div>}><AdminDispatchPage /></Suspense>} />
+            <Route path="dispatch" element={<Suspense fallback={<RouteFallback label="Loading dispatch..." />}><AdminDispatchPage /></Suspense>} />
             <Route path="schedule" element={<ScheduleRedirect />} />
             <Route path="revenue" element={<Navigate to="/admin/dashboard" replace />} />
-            <Route path="communications" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading communications...</div>}><AdminCommunicationsPage /></Suspense>} />
-            <Route path="reviews" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading reviews...</div>}><AdminReviewsPage /></Suspense>} />
+            <Route path="communications" element={<Suspense fallback={<RouteFallback label="Loading communications..." />}><AdminCommunicationsPage /></Suspense>} />
+            <Route path="reviews" element={<Suspense fallback={<RouteFallback label="Loading reviews..." />}><AdminReviewsPage /></Suspense>} />
             <Route path="ads" element={<Navigate to="/admin/ppc" replace />} />
-            <Route path="ppc" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading PPC...</div>}><AdminAdsPage /></Suspense>} />
-            <Route path="seo" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading SEO...</div>}><AdminSEOPage /></Suspense>} />
+            <Route path="ppc" element={<Suspense fallback={<RouteFallback label="Loading PPC..." />}><AdminAdsPage /></Suspense>} />
+            <Route path="seo" element={<Suspense fallback={<RouteFallback label="Loading SEO..." />}><AdminSEOPage /></Suspense>} />
             {/* Content Engine + Registry are now tabs inside the Blog hub; keep the old paths as redirects for bookmarks and server actionUrls. */}
             <Route path="content-engine" element={<Navigate to="/admin/blog?tab=autopilot" replace />} />
             <Route path="content-registry" element={<Navigate to="/admin/blog?tab=registry" replace />} />
             <Route path="data-hygiene" element={<Navigate to="/admin/agents?tab=hygiene" replace />} />
-            <Route path="agents" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading agents...</div>}><AgentsHubPage /></Suspense>} />
+            <Route path="agents" element={<Suspense fallback={<RouteFallback label="Loading agents..." />}><AgentsHubPage /></Suspense>} />
             <Route path="agent-decisions" element={<Navigate to="/admin/agents?tab=decisions" replace />} />
             {/* The documented owner-approval queue URL (feature-gates.js, service docs) — the queue lives as a hub tab. */}
             <Route path="drafts" element={<Navigate to="/admin/agents?tab=drafts" replace />} />
-            <Route path="blog" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading blog...</div>}><AdminBlogPage /></Suspense>} />
-            <Route path="knowledge" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge...</div>}><KnowledgeHubPage /></Suspense>} />
-            <Route path="referrals" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading referrals...</div>}><AdminReferralsPage /></Suspense>} />
-            <Route path="social-media" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading social media...</div>}><AdminSocialMediaPage /></Suspense>} />
-            <Route path="tax" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tax...</div>}><AdminTaxPage /></Suspense>} />
+            <Route path="blog" element={<Suspense fallback={<RouteFallback label="Loading blog..." />}><AdminBlogPage /></Suspense>} />
+            <Route path="knowledge" element={<Suspense fallback={<RouteFallback label="Loading knowledge..." />}><KnowledgeHubPage /></Suspense>} />
+            <Route path="referrals" element={<Suspense fallback={<RouteFallback label="Loading referrals..." />}><AdminReferralsPage /></Suspense>} />
+            <Route path="social-media" element={<Suspense fallback={<RouteFallback label="Loading social media..." />}><AdminSocialMediaPage /></Suspense>} />
+            <Route path="tax" element={<Suspense fallback={<RouteFallback label="Loading tax..." />}><AdminTaxPage /></Suspense>} />
             <Route path="pricing" element={<AdminTabRedirect to="/admin/pricing-logic" queryKey="area" tab="strategy" />} />
             {/* /admin/lawn-assessments is the consolidated Assessments hub
                 (Lead Magnets tab + Field Assessment tab). The old standalone
                 /admin/lawn-assessment route redirects to the Field tab so
                 bookmarks and internal links keep working. */}
             <Route path="lawn-assessment" element={<LawnAssessmentRedirect />} />
-            <Route path="lawn-assessments" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading assessments...</div>}><AdminAssessmentsHubPage /></Suspense>} />
-            <Route path="recruiting" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading recruiting...</div>}><AdminRecruitingPage /></Suspense>} />
+            <Route path="lawn-assessments" element={<Suspense fallback={<RouteFallback label="Loading assessments..." />}><AdminAssessmentsHubPage /></Suspense>} />
+            <Route path="recruiting" element={<Suspense fallback={<RouteFallback label="Loading recruiting..." />}><AdminRecruitingPage /></Suspense>} />
             <Route
               path="lawn-protocol"
               element={(
@@ -606,9 +618,9 @@ export default function App() {
                 client consumer of the review/resolve endpoints in
                 server/routes/admin-turf-height.js (discrepancy / ocr_failed
                 triage) until that workflow gets a real home in Schedule. */}
-            <Route path="turf-height" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading turf height review...</div>}><AdminTurfHeightReviewPage /></Suspense>} />
+            <Route path="turf-height" element={<Suspense fallback={<RouteFallback label="Loading turf height review..." />}><AdminTurfHeightReviewPage /></Suspense>} />
             <Route path="equipment-calibration" element={<AdminTabRedirect to="/admin/equipment" tab="calibrations" />} />
-            <Route path="equipment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment...</div>}><AdminEquipmentPage /></Suspense>} />
+            <Route path="equipment" element={<Suspense fallback={<RouteFallback label="Loading equipment..." />}><AdminEquipmentPage /></Suspense>} />
             <Route
               path="kb"
               element={(
@@ -624,38 +636,38 @@ export default function App() {
                 />
               )}
             />
-            <Route path="invoices" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading invoices...</div>}><AdminInvoicesPage /></Suspense>} />
-            <Route path="billing-recovery" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading billing recovery...</div>}><BillingRecoveryPage /></Suspense>} />
-            <Route path="payers" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading payers...</div>}><PayersPage /></Suspense>} />
-            <Route path="inventory" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading inventory...</div>}><AdminInventoryPage /></Suspense>} />
-            <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />
-            <Route path="settings/pest-pressure" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading Pest Pressure settings...</div>}><PestPressureSettingsPage /></Suspense>} />
+            <Route path="invoices" element={<Suspense fallback={<RouteFallback label="Loading invoices..." />}><AdminInvoicesPage /></Suspense>} />
+            <Route path="billing-recovery" element={<Suspense fallback={<RouteFallback label="Loading billing recovery..." />}><BillingRecoveryPage /></Suspense>} />
+            <Route path="payers" element={<Suspense fallback={<RouteFallback label="Loading payers..." />}><PayersPage /></Suspense>} />
+            <Route path="inventory" element={<Suspense fallback={<RouteFallback label="Loading inventory..." />}><AdminInventoryPage /></Suspense>} />
+            <Route path="settings" element={<Suspense fallback={<RouteFallback label="Loading settings..." />}><AdminSettingsPage /></Suspense>} />
+            <Route path="settings/pest-pressure" element={<Suspense fallback={<RouteFallback label="Loading Pest Pressure settings..." />}><PestPressureSettingsPage /></Suspense>} />
             <Route path="health" element={<Navigate to="/admin/customers?view=health" replace />} />
-            <Route path="timetracking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading time tracking...</div>}><TimeTrackingPage /></Suspense>} />
+            <Route path="timetracking" element={<Suspense fallback={<RouteFallback label="Loading time tracking..." />}><TimeTrackingPage /></Suspense>} />
             <Route path="leads" element={<AdminTabRedirect to="/admin/pipeline" tab="leads" />} />
             <Route path="fleet" element={<FleetRedirect />} />
-            <Route path="service-library" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading service library...</div>}><ServiceLibraryPage /></Suspense>} />
-            <Route path="projects" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading projects...</div>}><ProjectsPage /></Suspense>} />
-            <Route path="contracts" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading contracts...</div>}><AdminContractsPage /></Suspense>} />
+            <Route path="service-library" element={<Suspense fallback={<RouteFallback label="Loading service library..." />}><ServiceLibraryPage /></Suspense>} />
+            <Route path="projects" element={<Suspense fallback={<RouteFallback label="Loading projects..." />}><ProjectsPage /></Suspense>} />
+            <Route path="contracts" element={<Suspense fallback={<RouteFallback label="Loading contracts..." />}><AdminContractsPage /></Suspense>} />
             <Route path="documents" element={<Navigate to="/admin/contracts?tab=templates" replace />} />
             <Route path="document-requests" element={<Navigate to="/admin/contracts?tab=requests" replace />} />
             <Route path="discounts" element={<Navigate to="/admin/service-library?tab=discounts" replace />} />
-            <Route path="compliance" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading compliance...</div>}><CompliancePage /></Suspense>} />
+            <Route path="compliance" element={<Suspense fallback={<RouteFallback label="Loading compliance..." />}><CompliancePage /></Suspense>} />
             <Route path="credentials" element={<AdminTabRedirect to="/admin/compliance" tab="credentials" />} />
-            <Route path="newsletter" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading newsletter...</div>}><NewsletterPage /></Suspense>} />
+            <Route path="newsletter" element={<Suspense fallback={<RouteFallback label="Loading newsletter..." />}><NewsletterPage /></Suspense>} />
             <Route path="call-recordings" element={<Navigate to="/admin/communications" replace />} />
             <Route path="phone-numbers" element={<Navigate to="/admin/communications" replace />} />
-            <Route path="email" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading email...</div>}><AdminEmailPage /></Suspense>} />
-            <Route path="banking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading banking...</div>}><AdminBankingPage /></Suspense>} />
-            <Route path="pricing-logic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><PricingHubPage /></Suspense>} />
+            <Route path="email" element={<Suspense fallback={<RouteFallback label="Loading email..." />}><AdminEmailPage /></Suspense>} />
+            <Route path="banking" element={<Suspense fallback={<RouteFallback label="Loading banking..." />}><AdminBankingPage /></Suspense>} />
+            <Route path="pricing-logic" element={<Suspense fallback={<RouteFallback label="Loading pricing..." />}><PricingHubPage /></Suspense>} />
             <Route path="pricing-reality-check" element={<Navigate to="/admin/pricing-logic?section=reality" replace />} />
-            <Route path="tool-health" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tool health...</div>}><AdminToolHealthPage /></Suspense>} />
+            <Route path="tool-health" element={<Suspense fallback={<RouteFallback label="Loading tool health..." />}><AdminToolHealthPage /></Suspense>} />
             <Route path="auto-dispatch" element={<AdminTabRedirect to="/admin/dispatch" tab="automation" />} />
-            <Route path="price-match" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading price match...</div>}><AdminPriceMatchPage /></Suspense>} />
+            <Route path="price-match" element={<Suspense fallback={<RouteFallback label="Loading price match..." />}><AdminPriceMatchPage /></Suspense>} />
             <Route path="price-change" element={<AdminTabRedirect to="/admin/pricing-logic" queryKey="area" tab="notices" />} />
-            <Route path="more" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading…</div>}><AdminMorePage /></Suspense>} />
-            <Route path="_design-system" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading design system...</div>}><DesignSystemPage /></Suspense>} />
-            <Route path="_design-system/flags" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading flags...</div>}><DesignSystemFlagsPage /></Suspense>} />
+            <Route path="more" element={<Suspense fallback={<RouteFallback label="Loading…" />}><AdminMorePage /></Suspense>} />
+            <Route path="_design-system" element={<Suspense fallback={<RouteFallback label="Loading design system..." />}><DesignSystemPage /></Suspense>} />
+            <Route path="_design-system/flags" element={<Suspense fallback={<RouteFallback label="Loading flags..." />}><DesignSystemFlagsPage /></Suspense>} />
           </Route>
           <Route
             path="/*"
