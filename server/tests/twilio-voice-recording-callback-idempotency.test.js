@@ -425,6 +425,36 @@ describe('POST /recording-status', () => {
     expect(tables.triage_items[0]).toMatchObject({ call_log_id: 'c1', reason_code: 'additional_recording', status: 'open' });
   });
 
+  test('a replace clears the old transcript, its structure and provider with the swap', async () => {
+    tables.call_log.push({
+      id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: null,
+      transcription: 'Agent: old words.', transcript_structured: { segments: [] }, transcription_provider: 'openai', transcription_metadata: null,
+    });
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2 }));
+    const row = tables.call_log[0];
+    expect(row.recording_sid).toBe(REC_2);
+    expect(row.transcription).toBeNull();
+    expect(row.transcript_structured).toBeNull();
+    expect(row.transcription_provider).toBeNull();
+  });
+
+  test('a park whose review card cannot be filed answers 500 so Twilio retries; the retry parks and files it', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: 'processing' });
+    const realTx = db.transaction;
+    db.transaction = jest.fn(async (fn) => fn(Object.assign((t) => {
+      const b = db(t);
+      if (t === 'triage_items') b.insert = () => { throw new Error('deadlock detected'); };
+      return b;
+    }, { raw: db.raw })));
+    const res = await post('/recording-status', recordingCallback());
+    expect(res.sendStatus).toHaveBeenCalledWith(500);
+    db.transaction = realTx;
+    const again = await post('/recording-status', recordingCallback());
+    expect(again.sendStatus).toHaveBeenCalledWith(200);
+    expect(tables.call_log[0].metadata.additional_recordings).toHaveLength(1);
+    expect(tables.triage_items).toHaveLength(1);
+  });
+
   test('a replace on a voicemail row (rejected dial-leg audio) resets processing_status so the sweep re-runs it on the new audio', async () => {
     tables.call_log.push({
       id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 12,

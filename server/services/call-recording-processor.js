@@ -608,6 +608,23 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
     } catch (err) {
       logger.error(`[call-proc] PAN quarantine: parked-entry strip failed for call ${call.id}: ${err.message}`);
       deleted = false;
+      // The entry keeps its URL and carries no delete_pending, so nothing in
+      // the recovery predicate would select this row: record the SID as
+      // owed (atomic append) and drop recording_quarantined so the sweep
+      // comes back for it.
+      try {
+        await db('call_log').where({ id: call.id }).update({
+          transcription_metadata: db.raw(
+            "jsonb_set(COALESCE(transcription_metadata, '{}'::jsonb), '{quarantine_owed_sids}',"
+            + " (SELECT COALESCE(jsonb_agg(DISTINCT v), '[]'::jsonb) FROM (SELECT e AS v FROM jsonb_array_elements(COALESCE(transcription_metadata -> 'quarantine_owed_sids', '[]'::jsonb)) e UNION SELECT to_jsonb(?::text)) u), true)"
+            + " || '{\"recording_quarantined\": false}'::jsonb",
+            [parkedSid],
+          ),
+          updated_at: new Date(),
+        });
+      } catch (owedErr) {
+        logger.error(`[call-proc] PAN quarantine: could not record owed delete for ${maskSid(parkedSid)} on call ${call.id}: ${owedErr.message}`);
+      }
     }
     if (deleted) parked.deleted += 1; else parked.pending += 1;
   }

@@ -267,6 +267,28 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(recordingsSpy).toHaveBeenCalledWith(INCOMING);
   });
 
+  test('a listed recording whose delete failed AND whose tombstone failed is still recorded as owed', async () => {
+    const processor = require('../services/call-recording-processor');
+    const recordingsSpy = require('twilio').__recordingsSpy;
+    const P = 'REparked000000000000000000000011';
+    recordingsSpy.mockImplementationOnce(() => ({ remove: async () => {} }))
+      .mockImplementationOnce(() => ({ remove: async () => { throw Object.assign(new Error('twilio 503'), { status: 503 }); } }));
+    db.raw.mockClear();
+    // The tombstone write (the update carrying a metadata patch) fails.
+    db.__builder.update.mockImplementation(async (patch) => { if (patch.metadata) throw new Error('deadlock detected'); return 1; });
+    db.__state.call = {
+      id: 'c-tomb-fail', recording_url: 'https://api.twilio.com/m.mp3', recording_sid: 'REmain0000000000000000000000011',
+      metadata: { additional_recordings: [{ recording_sid: P, recording_url: 'https://api.twilio.com/p.mp3' }] },
+      transcription_metadata: { pan_detected: true, pan_notified: true },
+    };
+    const out = await processor.quarantineCardRecording(db.__state.call, { source: 'transcript_scrub' });
+    db.__builder.update.mockImplementation(async () => 1);
+    expect(out.parked).toEqual({ deleted: 0, pending: 1 });
+    const owed = db.raw.mock.calls.find(([sql, b]) => String(sql).includes("'{quarantine_owed_sids}'") && b && b[0] === P);
+    expect(owed).toBeDefined();
+    expect(String(owed[0])).toContain('"recording_quarantined": false');
+  });
+
   test('an unstamped call still proceeds into the Twilio lookup', async () => {
     const processor = require('../services/call-recording-processor');
     db.__state.call = { id: 'c-clean', recording_url: null, transcription_metadata: null };

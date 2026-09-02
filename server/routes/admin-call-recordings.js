@@ -350,6 +350,11 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         recording_url: chosen.recording_url,
         recording_duration_seconds: chosen.recording_duration_seconds ?? null,
         transcription_status: 'pending',
+        // The old audio's transcript must not survive the swap (a failed
+        // transcription of the adopted audio would fall back to it).
+        transcription: null,
+        transcript_structured: null,
+        transcription_provider: null,
         // The row is no longer "processed": its transcript and extraction
         // describe the previous recording. NULL puts it back in the sweep,
         // so even if the immediate pass below defers (CDN not ready) or

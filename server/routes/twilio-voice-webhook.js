@@ -284,22 +284,51 @@ async function parkAdditionalRecording(row, extra) {
     received_at: new Date().toISOString(),
     parked_because: extra.reason || null,
   };
-  const appended = await db('call_log')
-    .where({ id: row.id })
-    .whereRaw(NOT_PAN_QUARANTINED_SQL)
-    // Append only when this RecordingSid is not already parked — a retry of
-    // the same callback must not grow the list.
-    .whereRaw(
-      "NOT COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> ?::jsonb",
-      [JSON.stringify([{ recording_sid: entry.recording_sid }])],
-    )
-    .update({
-      metadata: db.raw(
-        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}',"
-        + " COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) || ?::jsonb, true)",
-        [JSON.stringify([entry])],
-      ),
-    });
+  const { buildTriageItem } = require('../services/call-routing-gates');
+  const card = () => buildTriageItem({
+    callLogId: row.id,
+    flag: 'additional_recording',
+    extraction: null,
+    severity: 'advisory',
+    extraPayload: {
+      recording_sid: entry.recording_sid,
+      recording_duration_seconds: entry.recording_duration_seconds,
+      parked_because: entry.parked_because,
+      kept_recording_sid: row.recording_sid || null,
+    },
+  });
+  // The park and its review card commit TOGETHER: a card insert that fails
+  // rolls the park back, the error reaches the handler, and the handler
+  // answers 500 so Twilio delivers the callback again — a parked recording
+  // with no card would otherwise be invisible to the office for good.
+  let appended = 0;
+  await db.transaction(async (trx) => {
+    appended = await trx('call_log')
+      .where({ id: row.id })
+      .whereRaw(NOT_PAN_QUARANTINED_SQL)
+      // Append only when this RecordingSid is not already parked — a retry
+      // of the same callback must not grow the list.
+      .whereRaw(
+        "NOT COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> ?::jsonb",
+        [JSON.stringify([{ recording_sid: entry.recording_sid }])],
+      )
+      .update({
+        metadata: trx.raw(
+          "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}',"
+          + " COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) || ?::jsonb, true)",
+          [JSON.stringify([entry])],
+        ),
+      });
+    if (appended > 0) {
+      await trx('triage_items')
+        .insert(card())
+        .onConflict(trx.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
+        .ignore();
+    }
+  }).catch((err) => {
+    err.parkFailed = true;
+    throw err;
+  });
   if (appended === 0) {
     // Either a retry of an already-parked RecordingSid or a PAN stamp that
     // landed after the handler read the row. A quarantined call never keeps
@@ -333,27 +362,12 @@ async function parkAdditionalRecording(row, extra) {
       .first('id')
       .catch(() => null);
     if (anyCard) return { parked: false, quarantined: false, duplicate: true };
-  }
-  try {
-    const { buildTriageItem } = require('../services/call-routing-gates');
-    const item = buildTriageItem({
-      callLogId: row.id,
-      flag: 'additional_recording',
-      extraction: null,
-      severity: 'advisory',
-      extraPayload: {
-        recording_sid: entry.recording_sid,
-        recording_duration_seconds: entry.recording_duration_seconds,
-        parked_because: entry.parked_because,
-        kept_recording_sid: row.recording_sid || null,
-      },
-    });
+    // Parked earlier with no card at all (a pre-transaction row): file it.
     await db('triage_items')
-      .insert(item)
+      .insert(card())
       .onConflict(db.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
       .ignore();
-  } catch (err) {
-    logger.warn(`[recording-status] additional-recording review card skipped for ${maskSid(row.twilio_call_sid)}: ${err.message}`);
+    return { parked: false, quarantined: false, duplicate: true, cardFiled: true };
   }
   return { parked: true, quarantined: false };
 }
@@ -1617,6 +1631,14 @@ router.post('/recording-status', async (req, res) => {
           // fresh branch is `processing_status IS NULL`, and it never
           // re-enters voicemail/spam rows that still carry a transcript.
           write.processing_status = null;
+          // The transcript, its structure and its provider describe the OLD
+          // audio: cleared with the swap, or a transcription failure on the
+          // new audio would fall back to them and finish the call with the
+          // new recording and the old words. PAN stamps (transcription_
+          // metadata) are left alone — they are durable by contract.
+          write.transcription = null;
+          write.transcript_structured = null;
+          write.transcription_provider = null;
           // Last-wins as before, but the superseded recording is kept: the
           // dial-leg recording a voicemail replaced is still evidence.
           write.metadata = db.raw(
@@ -1880,7 +1902,10 @@ router.post('/recording-status', async (req, res) => {
     res.sendStatus(200);
   } catch (err) {
     logger.error(`Recording status webhook error: ${err.message}`);
-    res.sendStatus(200);
+    // A park that did not commit (its review card insert failed and rolled
+    // the park back) is the one failure Twilio must deliver again: a 200
+    // here would drop the recording for good.
+    res.sendStatus(err && err.parkFailed ? 500 : 200);
   }
 });
 
