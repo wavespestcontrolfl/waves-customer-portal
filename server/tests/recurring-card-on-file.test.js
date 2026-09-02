@@ -519,7 +519,9 @@ describe('verifyRecurringCardIntent (trust boundary)', () => {
     // In-transaction re-judgement (Codex #3723 r3 P1): the accept re-checks
     // the bank against the customer it LANDED on, under that customer's lock.
     describe('bankTenderAllowedUnderLock', () => {
-      const trxFor = (row, fail = false) => (() => ({ where: () => ({ first: async () => { if (fail) throw new Error('db down'); return row; } }) }));
+      // The judgement must take the row lock (r4 P1) — the fake trx only
+      // resolves through forUpdate().
+      const trxFor = (row, fail = false) => (() => ({ where: () => ({ forUpdate: () => ({ first: async () => { if (fail) throw new Error('db down'); return row; } }) }) }));
       it('always allows a card', async () => {
         gates.acceptAchCapture = false;
         expect(await bankTenderAllowedUnderLock(trxFor(null), { customerId: 'c1', methodType: 'card' })).toBe(true);

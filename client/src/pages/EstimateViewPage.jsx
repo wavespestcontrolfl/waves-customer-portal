@@ -3325,7 +3325,7 @@ function AcceptanceRecordCard({ acceptance }) {
   );
 }
 
-export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false }) {
+export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card' }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -3369,7 +3369,12 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
             // charges the SAVED method — which may be a bank account — so
             // only a capture accept may say "card".
             ? (prepayCardCapture
-              ? 'Your existing appointment stays scheduled. Your saved card is charged the 12-month total when you confirm.'
+              // A capture accept says "card" only while the capture holds a
+              // card — a bank pick (GATE_ACCEPT_ACH_CAPTURE) reads "bank
+              // account" (Codex #3723 r4 P2).
+              ? (captureMethodType === 'us_bank_account'
+                ? 'Your existing appointment stays scheduled. Your bank account is debited the 12-month total when you confirm.'
+                : 'Your existing appointment stays scheduled. Your saved card is charged the 12-month total when you confirm.')
               : 'Your existing appointment stays scheduled. Your saved payment method on file is charged the 12-month total when you confirm.')
             : 'Your existing appointment stays scheduled. Annual prepay invoice is available for optional payment after confirmation.')
           : 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.'
@@ -7470,6 +7475,7 @@ function EstimateViewPageInner() {
             serviceMode={serviceMode}
             prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
             prepayCardCapture={!!data?.recurringCardPolicy?.required}
+            captureMethodType={inlineAutoPayActive && inlineCardIntent ? inlineCardState.methodType : 'card'}
             depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
               ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. Rescheduling is free but doesn't reset the cancellation window. ${CARD_SURCHARGE_DISCLOSURE}`
               : ((data?.depositPolicy?.required || (serviceMode === 'one_time' && data?.depositPolicy?.requiredForOneTime))

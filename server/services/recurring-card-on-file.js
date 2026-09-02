@@ -460,7 +460,11 @@ async function bankTenderAllowedUnderLock(trx, { customerId, methodType }) {
   if (require('../config/feature-gates').gates.acceptAchCapture !== true) return false;
   if (!customerId) return false;
   try {
-    const row = await trx('customers').where({ id: customerId }).first('ach_status');
+    // FOR UPDATE (Codex #3723 r4 P1): the ACH-failure webhook writes
+    // ach_status in its own transaction — a plain read could see the
+    // pre-failure value and commit a bank the post-commit enrollment then
+    // refuses. The row lock serializes this judgement behind that write.
+    const row = await trx('customers').where({ id: customerId }).forUpdate().first('ach_status');
     return !(row?.ach_status && row.ach_status !== 'active');
   } catch (err) {
     logger.warn(`[recurring-cof] in-lock ach_status recheck failed for customer ${customerId} — refusing bank: ${err.message}`);
