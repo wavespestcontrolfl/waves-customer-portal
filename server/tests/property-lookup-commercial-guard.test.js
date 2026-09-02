@@ -1187,3 +1187,104 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(profile.fieldVerifyFlags.find((f) => f.field === 'commercialSubtype')).toBeDefined();
   });
 });
+
+describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAILS)', () => {
+  // 2026-09-02: a tenant's roach-treatment lead at a 358-unit rental
+  // complex. The AI web search resolved the bare street address to the
+  // complex's listing (Multifamily, 358 units) and the estimate tool typed
+  // the lead Commercial — manual quote required. A unit designator on the
+  // lookup address is the operator saying "one unit": residential.
+  beforeEach(() => { process.env.GATE_UNIT_SCOPE_GUARDRAILS = 'true'; });
+  afterEach(() => { delete process.env.GATE_UNIT_SCOPE_GUARDRAILS; });
+
+  function rentalComplexRecord(overrides = {}) {
+    return {
+      formattedAddress: '1048 Example Lakes Cir, Sarasota, FL 34232',
+      propertyType: 'Multifamily',
+      unitCount: 358,
+      squareFootage: 0,
+      lotSize: 0,
+      stories: 3,
+      yearBuilt: 1996,
+      _source: 'ai_trio',
+      ...overrides,
+    };
+  }
+  const building = '1048 Example Lakes Cir, Sarasota, FL 34232';
+  const unit = '1048 Example Lakes Cir Apt 204, Sarasota, FL 34232';
+
+  test('bare building address: whole-property COMMERCIAL verdict stands', () => {
+    const profile = buildEnrichedProfile(rentalComplexRecord(), null, null, null, null, null, building);
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.commercialSubtype).toBe('multifamily_common_area_residential');
+    expect(profile.residentialUnitLookup).toBeNull();
+  });
+
+  test('unit address: one residential unit, condo pricing, building count kept as context', () => {
+    const profile = buildEnrichedProfile(rentalComplexRecord(), null, null, null, null, null, unit);
+    expect(profile.category).toBe('RESIDENTIAL');
+    expect(profile.isCommercial).toBe(false);
+    expect(profile.commercialSubtype).toBeNull();
+    expect(profile.commercialDetectionSource).toBeNull();
+    expect(profile.propertyType).toBe('Condo');
+    expect(profile.unitCount).toBe(358);
+    expect(profile.residentialUnitLookup).toEqual({
+      wholePropertyCategory: 'COMMERCIAL',
+      wholePropertySubtype: 'multifamily_common_area_residential',
+    });
+    const flag = profile.fieldVerifyFlags.find((f) => f.field === 'propertyType');
+    expect(flag).toBeDefined();
+    expect(flag.priority).toBe('HIGH');
+    expect(flag.reason).toMatch(/358-unit/);
+    expect(flag.reason).toMatch(/ONE residential unit/);
+    // The pricing-time guard must not re-commercialize the profile.
+    expect(isCommercialProfile(profile, {})).toBe(false);
+  });
+
+  test('unit address: the building\'s dimensions are not carried into the unit quote; a verified value is the unit\'s', () => {
+    const whole = buildEnrichedProfile(
+      rentalComplexRecord({ squareFootage: 63096, lotSize: 93940, _source: 'county' }),
+      null, null, null, null, null, unit,
+    );
+    expect(whole.isCommercial).toBe(false);
+    expect(whole.homeSqFt).toBe(0);
+    expect(whole.lotSqFt).toBe(0);
+    // The county master-parcel guidance (which asks to collect the unit
+    // number) stays quiet — the unit's own flag carries the instruction.
+    expect(whole.fieldVerifyFlags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+
+    const verified = buildEnrichedProfile(
+      rentalComplexRecord({
+        squareFootage: 1100, lotSize: 93940, _source: 'county',
+        _fieldEvidence: { squareFootage: { value: 1100, sourceType: 'verified', fieldVerify: false } },
+      }),
+      null, null, null, null, null, unit,
+    );
+    expect(verified.homeSqFt).toBe(1100);
+    expect(verified.lotSqFt).toBe(0);
+  });
+
+  test('unit address on a positive commercial-use record stays commercial ("Suite 200")', () => {
+    const profile = buildEnrichedProfile(
+      rentalComplexRecord({ propertyType: 'Office Building', unitCount: 1 }),
+      null, null, null, null, null, '500 Example Pkwy Suite 200, Sarasota, FL 34232',
+    );
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.commercialSubtype).toBe('office_retail');
+    expect(profile.residentialUnitLookup).toBeNull();
+  });
+
+  test('unit address with a structured satellite COMMERCIAL read stays commercial', () => {
+    const profile = buildEnrichedProfile(
+      rentalComplexRecord(), { propertyUse: 'COMMERCIAL' }, null, null, null, null, unit,
+    );
+    expect(profile.isCommercial).toBe(true);
+  });
+
+  test('gate OFF: unit address changes nothing', () => {
+    delete process.env.GATE_UNIT_SCOPE_GUARDRAILS;
+    const profile = buildEnrichedProfile(rentalComplexRecord(), null, null, null, null, null, unit);
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.residentialUnitLookup).toBeNull();
+  });
+});

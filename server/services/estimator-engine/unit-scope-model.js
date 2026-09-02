@@ -466,9 +466,21 @@ function lookupCategoryConflict({
   // whole-building request on a complex would be exempted and priced as
   // one residential unit (codex r19 P1).
   if (!unitOccupantEvidence) return 'lookup_category:commercial';
+  if (serviceScope === 'residential_unit'
+    && residentialMultifamilyVerdict({ commercialSubtype, commercialDetectionSource })) return null;
+  return 'lookup_category:commercial';
+}
+
+/**
+ * Whether a COMMERCIAL lookup verdict is a residential-multifamily verdict
+ * (an apartment/condo/HOA building typed commercial for the whole-property
+ * question) rather than positive commercial-USE evidence. Shared by the
+ * engine's category-conflict rule and the lookup's own unit-address
+ * reclassification so the two never drift.
+ */
+function residentialMultifamilyVerdict({ commercialSubtype, commercialDetectionSource }) {
   const subtype = String(commercialSubtype || '');
-  const residentialMultifamilyVerdict =
-    RESIDENTIAL_MULTIFAMILY_SUBTYPES.has(subtype)
+  return RESIDENTIAL_MULTIFAMILY_SUBTYPES.has(subtype)
     // The ≥5-unit stacked aggregate: a unit count, not a commercial use —
     // but ONLY when the subtype adds no positive commercial-use evidence.
     // A >4-unit record that ALSO reads office_retail/warehouse/etc. must
@@ -476,8 +488,32 @@ function lookupCategoryConflict({
     // any future subtype defaults to conflicting (codex r17 P1).
     || (commercialDetectionSource === 'property_record_unit_count'
       && NEUTRAL_COMMERCIAL_SUBTYPES.has(subtype));
-  if (serviceScope === 'residential_unit' && residentialMultifamilyVerdict) return null;
-  return 'lookup_category:commercial';
+}
+
+/**
+ * Gate ON only: the manual lookup's answer to "is THIS address one unit
+ * inside a building the whole-property verdict typed COMMERCIAL?". A
+ * lookup run with a dwelling subpremise (Apt/Unit/#) on an
+ * apartment/condo/HOA verdict is a unit occupant's quote — a residential
+ * customer, per the doctrine at the top of this module. Positive
+ * commercial-use verdicts (office/warehouse/retail, or a structured
+ * satellite COMMERCIAL read) never reclassify: a "Suite 200" in an office
+ * park is still commercial. Pure; the caller decides what a true means
+ * for dimensions and flags.
+ */
+function residentialUnitLookupVerdict({
+  address, category, commercialSubtype, commercialDetectionSource,
+  structuredCommercialSignal = false,
+}) {
+  if (!unitScopeGuardrailsEnabled()) return false;
+  if (String(category || '').toUpperCase() !== 'COMMERCIAL') return false;
+  if (!address || !shadowPrivate.hasSubpremiseSignal({ address: String(address) })) return false;
+  // Vision looked at THIS parcel and read a commercial use — the record's
+  // multifamily string does not outrank it (the subtype resolver checks
+  // apartment/multifamily text before the structured signal, so the
+  // subtype alone cannot tell the two apart).
+  if (structuredCommercialSignal || commercialDetectionSource === 'satellite_ai_property_use') return false;
+  return residentialMultifamilyVerdict({ commercialSubtype, commercialDetectionSource });
 }
 
 /**
@@ -594,6 +630,7 @@ module.exports = {
   resolveUnitScopeModel,
   applyUnitScopeToPropertyFacts,
   lookupCategoryConflict,
+  residentialUnitLookupVerdict,
   _private: {
     resolvePropertyUse,
     resolveCustomerRelationship,

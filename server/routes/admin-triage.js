@@ -14,6 +14,8 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { lockTriageCall } = require('../utils/triage-locks');
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 const OPEN_STATES = ['open', 'in_progress'];
@@ -61,12 +63,19 @@ router.get('/', async (req, res) => {
   try {
     const status = ALL_STATES.includes(req.query.status) ? req.query.status : 'open';
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+    // Optional narrowing to one customer's calls — the estimate tool reads
+    // the linked customer's open address-review cards (an owed unit number)
+    // so the property panel can say the address is still being confirmed.
+    // Malformed ids are ignored (full list), never 400: the inbox itself
+    // never sends one.
+    const customerId = UUID_RE.test(String(req.query.customer_id || '')) ? String(req.query.customer_id) : null;
 
     const items = await db('triage_items')
       .leftJoin('call_log', 'triage_items.call_log_id', 'call_log.id')
       .leftJoin('customers', 'call_log.customer_id', 'customers.id')
       .leftJoin('route_feedback', 'triage_items.call_log_id', 'route_feedback.call_log_id')
       .where('triage_items.status', status)
+      .modify((q) => { if (customerId) q.where('call_log.customer_id', customerId); })
       // property_role_confirm payloads embed the customer's OTHER property
       // addresses — the same data admin-customers gates behind requireAdmin —
       // and only an admin can apply them; hide the cards from tech users.

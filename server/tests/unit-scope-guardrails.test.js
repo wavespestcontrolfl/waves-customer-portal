@@ -1774,3 +1774,68 @@ describe('r63 — a reordered unit address is the same property', () => {
     expect(sameStreetAddress('Building A, 123 Main St', '123 Main St')).toBe(false);
   });
 });
+
+describe('residentialUnitLookupVerdict — the manual lookup honors a unit address', () => {
+  const { residentialUnitLookupVerdict } = require('../services/estimator-engine/unit-scope-model');
+  const apartmentVerdict = {
+    address: '1048 Example Lakes Cir Apt 204, Sarasota, FL 34232',
+    category: 'COMMERCIAL',
+    commercialSubtype: 'multifamily_common_area_residential',
+    commercialDetectionSource: 'property_record_commercial_signal',
+  };
+
+  test('gate OFF: never reclassifies', () => {
+    withGate(undefined, () => expect(residentialUnitLookupVerdict(apartmentVerdict)).toBe(false));
+  });
+
+  test('gate ON: Apt/Unit on an apartment/condo/HOA verdict → residential unit', () => {
+    withGate('true', () => {
+      expect(residentialUnitLookupVerdict(apartmentVerdict)).toBe(true);
+      expect(residentialUnitLookupVerdict({
+        ...apartmentVerdict, address: 'Unit 7, 1048 Example Lakes Cir, Sarasota, FL 34232',
+      })).toBe(true);
+      expect(residentialUnitLookupVerdict({
+        ...apartmentVerdict, commercialSubtype: 'hoa_common_area_residential',
+      })).toBe(true);
+      // ≥5-unit count alone, no commercial-use text — same allowlist as
+      // lookupCategoryConflict.
+      expect(residentialUnitLookupVerdict({
+        ...apartmentVerdict, commercialSubtype: 'other', commercialDetectionSource: 'property_record_unit_count',
+      })).toBe(true);
+    });
+  });
+
+  test('gate ON: the bare building address stays the whole-property verdict', () => {
+    withGate('true', () => {
+      expect(residentialUnitLookupVerdict({
+        ...apartmentVerdict, address: '1048 Example Lakes Cir, Sarasota, FL 34232',
+      })).toBe(false);
+      expect(residentialUnitLookupVerdict({ ...apartmentVerdict, address: null })).toBe(false);
+    });
+  });
+
+  test('gate ON: positive commercial-use verdicts never reclassify ("Suite 200" in an office park)', () => {
+    withGate('true', () => {
+      for (const commercialSubtype of ['office_retail', 'warehouse_light', 'medical_office', 'hoa_common_area_commercial']) {
+        expect(residentialUnitLookupVerdict({
+          ...apartmentVerdict, address: '500 Example Pkwy Suite 200, Sarasota, FL 34232', commercialSubtype,
+        })).toBe(false);
+      }
+      // A unit count with a commercial-use subtype is not neutral.
+      expect(residentialUnitLookupVerdict({
+        ...apartmentVerdict, commercialSubtype: 'office_retail', commercialDetectionSource: 'property_record_unit_count',
+      })).toBe(false);
+      // Vision read a commercial use on THIS parcel.
+      expect(residentialUnitLookupVerdict({ ...apartmentVerdict, structuredCommercialSignal: true })).toBe(false);
+      expect(residentialUnitLookupVerdict({
+        ...apartmentVerdict, commercialDetectionSource: 'satellite_ai_property_use',
+      })).toBe(false);
+    });
+  });
+
+  test('a residential verdict is left alone', () => {
+    withGate('true', () => {
+      expect(residentialUnitLookupVerdict({ ...apartmentVerdict, category: 'RESIDENTIAL' })).toBe(false);
+    });
+  });
+});

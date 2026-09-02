@@ -3201,6 +3201,38 @@ export default function EstimateToolViewV2({
       cancelled = true;
     };
   }, [existingCustomerMatch?.id, form.customerId]);
+  // The linked customer's OPEN address-review cards (an owed unit number,
+  // an unverified address) from the call that created the lead. Without
+  // this the property panel prices whatever address the lead carries and
+  // nothing on this page says the office still owes a callback for it —
+  // the Triage Inbox knew, the estimate tool didn't (2026-09-02: a tenant's
+  // bare complex address quoted as a 358-unit commercial property).
+  // Read-only context, same fail-open contract as customerSpend.
+  const [openAddressAsks, setOpenAddressAsks] = useState([]);
+  useEffect(() => {
+    setOpenAddressAsks([]);
+    const customerId = existingCustomerMatch?.id || form.customerId;
+    if (!customerId) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await adminFetch(
+          `/admin/triage?status=open&customer_id=${encodeURIComponent(customerId)}`,
+        );
+        if (!r.ok) return;
+        const d = await r.json();
+        if (cancelled) return;
+        setOpenAddressAsks(
+          (Array.isArray(d.items) ? d.items : []).filter((i) => i.category === "address_review"),
+        );
+      } catch {
+        if (!cancelled) setOpenAddressAsks([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [existingCustomerMatch?.id, form.customerId]);
   const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
   // "" | "saving" | "saved" | "error" — Save-verified action in the
@@ -6004,6 +6036,25 @@ export default function EstimateToolViewV2({
                   form.isRecurringCustomer === "YES"
                     ? " · 15% loyalty discount applied"
                     : ""}
+                </div>
+              )}
+              {openAddressAsks.length > 0 && (
+                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
+                  <strong>Address still being confirmed</strong>
+                  {" — "}
+                  {openAddressAsks.some((i) => i.reason_code === "missing_unit_number")
+                    ? "the caller gave the building but no unit number"
+                    : "the address from the call did not validate"}
+                  {(() => {
+                    const b = openAddressAsks.find((i) => i.payload?.unit_ask_building?.street_line_1)?.payload
+                      ?.unit_ask_building;
+                    return b
+                      ? ` (${[b.street_line_1, b.city, b.postal_code].filter(Boolean).join(", ")})`
+                      : "";
+                  })()}
+                  . Callback pending in the Triage Inbox — this lookup may be the whole building, not
+                  the unit.
                 </div>
               )}
               {/* Gated on the DATA, not on existingCustomerMatch — the
