@@ -680,7 +680,23 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
   // recomputed here (waves-billing rule 1).
   const amount = `$${Number(amountDollars || 0).toFixed(2).replace(/\.00$/, '')}`;
   const { publicPortalUrl } = require('../utils/portal-url');
-  const estimateUrl = `${publicPortalUrl()}/estimate/${estimate.token}`;
+  // Engine-authoritative pricing gate (#3750, GH codex P1 r27): the receipt
+  // itself is owed — but its estimate CTA re-delivers the bearer link, so
+  // for a row (or group link) the shared verdict refuses while the gate is
+  // on the CTA is omitted. Judged on a fresh full read: the receipt's row
+  // carries only contact columns.
+  let estimateUrl = `${publicPortalUrl()}/estimate/${estimate.token}`;
+  try {
+    const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
+    if (gatedSendAuthorityPredicateApplies()) {
+      const verdictRow = await db('estimates').where({ id: estimate.id })
+        .first('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data', 'estimate_group_id');
+      if (!verdictRow || !(await estimateDeliverableUnderGate(db, verdictRow))) estimateUrl = '';
+    }
+  } catch (gateErr) {
+    logger.warn(`[estimate-deposits] receipt link verdict unavailable for estimate ${estimate.id} — omitting the estimate link: ${gateErr.message}`);
+    estimateUrl = '';
+  }
 
   const EmailTemplateLibrary = require('./email-template-library');
   const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
