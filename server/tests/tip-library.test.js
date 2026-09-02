@@ -19,6 +19,7 @@ const {
   tipsForVisit,
   resolveTipIds,
   freezeTechTips,
+  sentenceCount,
 } = require('../services/service-report/tip-library');
 const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
 
@@ -143,6 +144,26 @@ describe('freezeTechTips', () => {
     const exact = 'x'.repeat(MAX_CUSTOM_TIP_CHARS - 26) + ' flip the mats after rain.';
     expect(exact.length).toBeLessThanOrEqual(MAX_CUSTOM_TIP_CHARS);
     expect(freezeTechTips({ ids: [], custom: exact }).tips[0].copy).toBe(exact);
+  });
+
+  test('a gate or access code in a custom line is rejected by the shared copy screen', () => {
+    for (const line of ['Use 4417 to open the side gate.', 'Gate code is 4417.', 'The gate code 4417 gets you in.']) {
+      const { tips, dropped } = freezeTechTips({ ids: [], custom: line });
+      expect(tips).toEqual([]);
+      expect(dropped[0].violations).toContain('access_code');
+    }
+  });
+
+  test('a custom line is one sentence; several are rejected as multi_sentence', () => {
+    expect(sentenceCount('Keep the lanai door sweep tight — that is where the ants come in.')).toBe(1);
+    expect(sentenceCount('Set the A/C fan to Auto so the house settles near 50% humidity.')).toBe(1);
+    expect(sentenceCount('Water 1.25 inches a week, early morning.')).toBe(1);
+    expect(sentenceCount('Flip the mats. Empty the saucers. Trim the hedge!')).toBe(3);
+    expect(sentenceCount('Do you have bromeliads? Flush them weekly.')).toBe(2);
+    const { tips, dropped } = freezeTechTips({ ids: [], custom: 'Flip the mats. Empty the saucers. Trim the hedge. Fix the drip.' });
+    expect(tips).toEqual([]);
+    expect(dropped).toEqual([{ copy: 'Flip the mats. Empty the saucers. Trim the hedge. Fix the drip.', violations: ['multi_sentence'] }]);
+    expect(freezeTechTips({ ids: [], custom: 'Flip the mats after rain so they dry.' }).tips).toHaveLength(1);
   });
 
   test('malformed input freezes nothing', () => {

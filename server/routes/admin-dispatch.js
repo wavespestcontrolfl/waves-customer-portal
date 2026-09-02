@@ -1973,8 +1973,12 @@ function techTipsGateOn() {
 function irrigationSettingsOnFile(prefs) {
   if (!prefs) return false;
   const present = (v) => v != null && v !== '' && !(Array.isArray(v) && v.length === 0);
-  return ['watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_zones', 'rain_sensor']
-    .some((key) => present(prefs[key]));
+  // rain_sensor defaults to false on every row (20260401000084), so only an
+  // explicit true is customer-entered; confirmed fields are an explicit save.
+  return ['watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_zones']
+    .some((key) => present(prefs[key]))
+    || prefs.rain_sensor === true
+    || (Array.isArray(prefs.irrigation_confirmed_fields) && prefs.irrigation_confirmed_fields.length > 0);
 }
 
 // GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
@@ -2014,6 +2018,10 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         ? db('service_records')
           .where({ customer_id: svc.customer_id })
           .whereRaw("structured_notes->'techTips' IS NOT NULL")
+          // "sent" means the customer could open it: typedReportDelivery is
+          // frozen only for non-auto_send postures (review_only /
+          // internal_only / disabled), which reports-public 404s.
+          .whereRaw("COALESCE(structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'")
           .where('service_date', '>=', sentSinceDay)
           .orderBy('service_date', 'desc')
           .select('service_date', db.raw("structured_notes->'techTips' AS tech_tips"))
@@ -2023,7 +2031,7 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       // 20260828000002 — proves nothing about the schedule the tip asks for).
       svc.customer_id
         ? db('property_preferences').where({ customer_id: svc.customer_id })
-          .first('watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_zones', 'rain_sensor')
+          .first('watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_zones', 'rain_sensor', 'irrigation_confirmed_fields')
           .catch(() => null)
         : null,
     ]);
@@ -5385,12 +5393,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const drop = techTipsFreeze.dropped[0];
       logger.warn(`[tech-tips] custom tip rejected on ${req.params.serviceId}: ${drop.violations.join(', ')}`);
       const overCap = drop.violations.includes('over_cap');
-      const tooLong = drop.violations.includes('too_long');
+      const tooLong = drop.violations.includes('too_long') || drop.violations.includes('multi_sentence');
       return res.status(400).json({
         error: overCap
           ? 'Your own tip needs a free slot — three tips is the limit. Remove one, then complete.'
           : tooLong
-            ? 'Your own tip is too long for the report — keep it to one sentence (240 characters), then complete.'
+            ? 'Your own tip needs to be one sentence (up to 240 characters) — it prints as one tip. Shorten it, then complete.'
             : `Your own tip needs different wording before the report can print it (flagged: ${drop.violations.join(', ')}). Reword it, then complete.`,
         code: overCap ? 'TECH_TIP_OVER_CAP' : tooLong ? 'TECH_TIP_TOO_LONG' : 'TECH_TIP_COPY_REJECTED',
         techTip: { copy: drop.copy, violations: drop.violations },

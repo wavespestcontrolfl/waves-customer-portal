@@ -10478,7 +10478,9 @@ export function CompletionPanel({
   // form-provenance recommendations field that prints on the report.
   const [parkedFound, setParkedFound] = useState("");
   const [parkedNext, setParkedNext] = useState("");
-  const techTipsAvailable = techTipsLoading || techTips?.available === true;
+  // Textareas until the payload says otherwise: with the gate off (prod
+  // today) the panel must paint exactly as before, with no loading swap.
+  const techTipsAvailable = techTips?.available === true;
   // Flips true once Generate AI report replaces the notes with clean prose.
   // Before that, the [Protocol]/[Found]/[Next] chip lines in the notes are the
   // selection source of truth (delete a line = deselect); after, the label
@@ -11282,6 +11284,18 @@ export function CompletionPanel({
         .catch(() => {});
     }
   }, [service.customerId]);
+
+  // A restored draft can carry a tip id the library has since retired; the
+  // freeze would drop it silently, so prune to the loaded library (and let
+  // the count follow) as soon as it lands.
+  useEffect(() => {
+    if (techTips?.available !== true) return;
+    const known = new Set((techTips.groups || []).flatMap((g) => (g.tips || []).map((t) => t.id)));
+    setSelectedTipIds((prev) => {
+      const kept = prev.filter((id) => known.has(id));
+      return kept.length === prev.length ? prev : kept;
+    });
+  }, [techTips]);
 
   useEffect(() => {
     let cancelled = false;
@@ -13270,23 +13284,25 @@ export function CompletionPanel({
           "Observations",
           activeSelectedLabels(selectedObservationLabels).length +
             observationFreeText().length,
-          observationsText,
+          observationFreeText(),
         ],
         [
           "Recommendations",
           activeSelectedLabels(selectedRecommendationLabels).length +
             recommendationFreeText().length +
             (isTypedFindings && typedRecommendations.trim() ? 1 : 0),
-          recommendationsText,
+          recommendationFreeText(),
         ],
       ];
-      for (const [label, mergedCount, text] of mergedCounts) {
+      for (const [label, mergedCount, lines] of mergedCounts) {
         if (mergedCount > 20) {
           freeTextProblems.push(
             `${label}: at most 20 entries total (${mergedCount} entered)`,
           );
         }
-        if (freeTextLines(text).some((line) => line.length > 240)) {
+        // the merged lines ([Found]/[Next] and parked ones included) are what
+        // persist — a long tagged line would otherwise be sliced at 240
+        if (lines.some((line) => line.length > 240)) {
           freeTextProblems.push(`${label}: keep each line under 240 characters`);
         }
       }
@@ -15197,7 +15213,7 @@ export function CompletionPanel({
                 freeze during photo analysis (codex r9): they're the vision
                 prompt's context on basic completions, and captions returned
                 against a stale snapshot would persist under the photos. */}
-            {techTipsAvailable ? (
+            {techTipsAvailable && (
               <Field label="Tips from your tech">
                 <TechTipPicker
                   library={techTips}
@@ -15223,33 +15239,37 @@ export function CompletionPanel({
                   }}
                 />
               </Field>
-            ) : (
-              <>
-                <Field label="Observations">
-                  {" "}
-                  <textarea
-                    aria-label="Observations"
-                    value={observationsText}
-                    onChange={(e) => setObservationsText(e.target.value)}
-                    rows={2}
-                    placeholder="Optional — anything you noticed (one per line)"
-                    disabled={generating || photoAnalyzing}
-                    style={{ ...mTextarea, opacity: generating || photoAnalyzing ? 0.55 : 1 }}
-                  />{" "}
-                </Field>
-                <Field label="Recommendations">
-                  {" "}
-                  <textarea
-                    aria-label="Recommendations"
-                    value={recommendationsText}
-                    onChange={(e) => setRecommendationsText(e.target.value)}
-                    rows={2}
-                    placeholder="Optional — next steps if needed (one per line)"
-                    disabled={generating}
-                    style={{ ...mTextarea, opacity: generating ? 0.55 : 1 }}
-                  />{" "}
-                </Field>
-              </>
+            )}
+            {/* Gate off: the textareas as today. Gate on: they stay only while
+                they hold text (a draft saved before the gate flipped), so
+                nothing that will submit is ever hidden from the tech. */}
+            {(!techTipsAvailable || observationsText.trim()) && (
+              <Field label="Observations">
+                {" "}
+                <textarea
+                  aria-label="Observations"
+                  value={observationsText}
+                  onChange={(e) => setObservationsText(e.target.value)}
+                  rows={2}
+                  placeholder="Optional — anything you noticed (one per line)"
+                  disabled={generating || photoAnalyzing}
+                  style={{ ...mTextarea, opacity: generating || photoAnalyzing ? 0.55 : 1 }}
+                />{" "}
+              </Field>
+            )}
+            {(!techTipsAvailable || recommendationsText.trim()) && (
+              <Field label="Recommendations">
+                {" "}
+                <textarea
+                  aria-label="Recommendations"
+                  value={recommendationsText}
+                  onChange={(e) => setRecommendationsText(e.target.value)}
+                  rows={2}
+                  placeholder="Optional — next steps if needed (one per line)"
+                  disabled={generating}
+                  style={{ ...mTextarea, opacity: generating ? 0.55 : 1 }}
+                />{" "}
+              </Field>
             )}
             {/* AI report — drafts customer-facing visit copy into the notes box
                 from the structured visit data (actions, observations, products,
@@ -17502,7 +17522,7 @@ export function CompletionPanel({
             {/* Frozen while an AI draft is in flight (codex P2) — mirrors
                 the mobile variant. Observations also freeze during photo
                 analysis (codex r9): they're the vision prompt's context. */}
-            {techTipsAvailable ? (
+            {techTipsAvailable && (
               <div style={{ marginBottom: 12 }}>
                 <label style={labelStyle}>Tips from your tech</label>{" "}
                 <TechTipPicker
@@ -17528,37 +17548,40 @@ export function CompletionPanel({
                   }}
                 />
               </div>
-            ) : (
-              <>
-                <div style={{ marginBottom: 12 }}>
-                  <label style={{ ...labelStyle, color: D.amber }}>
-                    Observations
-                  </label>{" "}
-                  <textarea
-                    aria-label="Observations"
-                    value={observationsText}
-                    onChange={(e) => setObservationsText(e.target.value)}
-                    rows={2}
-                    placeholder="Optional — anything you noticed (one per line)"
-                    disabled={generating || photoAnalyzing}
-                    style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating || photoAnalyzing ? 0.55 : 1 }}
-                  />{" "}
-                </div>
-                <div style={{ marginBottom: 12 }}>
-                  <label style={{ ...labelStyle, color: D.green }}>
-                    Recommendations
-                  </label>{" "}
-                  <textarea
-                    aria-label="Recommendations"
-                    value={recommendationsText}
-                    onChange={(e) => setRecommendationsText(e.target.value)}
-                    rows={2}
-                    placeholder="Optional — next steps if needed (one per line)"
-                    disabled={generating}
-                    style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating ? 0.55 : 1 }}
-                  />{" "}
-                </div>
-              </>
+            )}
+            {/* Gate off: the textareas as today. Gate on: they stay only while
+                they hold text (a draft saved before the gate flipped). */}
+            {(!techTipsAvailable || observationsText.trim()) && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ ...labelStyle, color: D.amber }}>
+                  Observations
+                </label>{" "}
+                <textarea
+                  aria-label="Observations"
+                  value={observationsText}
+                  onChange={(e) => setObservationsText(e.target.value)}
+                  rows={2}
+                  placeholder="Optional — anything you noticed (one per line)"
+                  disabled={generating || photoAnalyzing}
+                  style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating || photoAnalyzing ? 0.55 : 1 }}
+                />{" "}
+              </div>
+            )}
+            {(!techTipsAvailable || recommendationsText.trim()) && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ ...labelStyle, color: D.green }}>
+                  Recommendations
+                </label>{" "}
+                <textarea
+                  aria-label="Recommendations"
+                  value={recommendationsText}
+                  onChange={(e) => setRecommendationsText(e.target.value)}
+                  rows={2}
+                  placeholder="Optional — next steps if needed (one per line)"
+                  disabled={generating}
+                  style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating ? 0.55 : 1 }}
+                />{" "}
+              </div>
             )}{" "}
           </div>
           {/* AI Service Report — drafts customer-facing visit copy into the

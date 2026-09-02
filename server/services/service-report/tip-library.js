@@ -391,6 +391,15 @@ function resolveTipIds(ids) {
  * whole set is capped at MAX_TIPS_PER_VISIT, and anything malformed yields
  * an empty freeze rather than a throw.
  */
+// Sentence terminators followed by a new sentence (or the end). "A/C",
+// decimals ("1.25") and abbreviations without a following capital don't
+// split; "Do X. Then Y." does.
+function sentenceCount(text) {
+  const t = String(text || '').trim();
+  if (!t) return 0;
+  return (t.match(/[.!?]+(?:["')\]]+)?(?=\s+["'(]?[A-Z0-9]|\s*$)/g) || []).length || 1;
+}
+
 function freezeTechTips(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { tips: [], dropped: [] };
   const tips = resolveTipIds(input.ids);
@@ -399,7 +408,14 @@ function freezeTechTips(input) {
   // tech rewrites it, rather than a silently shortened sentence printing.
   const custom = String(input.custom || '').replace(/\s+/g, ' ').trim();
   if (custom) {
-    const violations = custom.length > MAX_CUSTOM_TIP_CHARS ? ['too_long'] : customerCopyViolations(custom);
+    // One sentence, one slot: a value carrying several sentences would be
+    // several tips under one cap entry. customerCopyViolations also runs
+    // containsReportAccessCode, so a gate code never freezes.
+    const violations = custom.length > MAX_CUSTOM_TIP_CHARS
+      ? ['too_long']
+      : sentenceCount(custom) > 1
+        ? ['multi_sentence']
+        : customerCopyViolations(custom);
     if (violations.length) dropped.push({ copy: custom, violations });
     else if (tips.length < MAX_TIPS_PER_VISIT) tips.push({ id: 'custom', copy: custom, source: 'technician' });
     else dropped.push({ copy: custom, violations: ['over_cap'] });
@@ -419,4 +435,5 @@ module.exports = {
   tipsForVisit,
   resolveTipIds,
   freezeTechTips,
+  sentenceCount,
 };

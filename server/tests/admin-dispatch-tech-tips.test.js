@@ -154,13 +154,15 @@ describe('GET /:serviceId/tech-tips', () => {
     for (const prefs of [
       { irrigation_system: true },
       { irrigation_system: true, watering_days: [], irrigation_run_minutes: null, irrigation_inches_per_week: '', irrigation_zones: null, rain_sensor: null },
+      // the column default (20260401000084) is not customer-entered data
+      { irrigation_system: true, rain_sensor: false, irrigation_confirmed_fields: [] },
       null,
     ]) {
       mockDbCurrent = scriptedDb({ service: SERVICE, prefs, calls: [] });
       const res = await invoke({ serviceId: 'svc-1' });
       expect(res.body.conditions).toEqual({ irrigation_on_file: false });
     }
-    for (const prefs of [{ rain_sensor: false }, { irrigation_zones: 6 }, { irrigation_inches_per_week: 1 }]) {
+    for (const prefs of [{ rain_sensor: true }, { irrigation_zones: 6 }, { irrigation_inches_per_week: 1 }, { irrigation_confirmed_fields: ['wateringDays'] }]) {
       mockDbCurrent = scriptedDb({ service: SERVICE, prefs, calls: [] });
       const res = await invoke({ serviceId: 'svc-1' });
       expect(res.body.conditions).toEqual({ irrigation_on_file: true });
@@ -189,7 +191,7 @@ describe('completion freeze contract', () => {
     // a rejected custom line is an actionable 400 before any write, never a silent drop
     const reject = block.indexOf('if (techTipsFreeze.dropped.length) {');
     expect(reject).toBeGreaterThan(-1);
-    expect(block.slice(reject, reject + 900)).toMatch(/return res\.status\(400\)\.json\(\{[\s\S]*TECH_TIP_COPY_REJECTED/);
+    expect(block.slice(reject, reject + 1600)).toMatch(/return res\.status\(400\)\.json\(\{[\s\S]*TECH_TIP_COPY_REJECTED/);
     // …and it happens before the completion transaction / idempotency claim
     expect(reject).toBeLessThan(block.indexOf('rawIdempotencyKey'));
     // the kill switch holds on the write path too
@@ -217,6 +219,8 @@ describe('route wiring contracts', () => {
     for (const forbidden of ['.update(', '.insert(', '.del(', 'sendCustomerMessage', 'markComplete', 'transitionJobStatus', 'twilio']) {
       expect(block).not.toContain(forbidden);
     }
+    // "sent" = a report the customer could open: undelivered postures are excluded
+    expect(block).toContain("COALESCE(structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'");
     // the 90-day window is an ET calendar day bound from the shared helpers,
     // never the session-zone CURRENT_DATE
     expect(block).not.toMatch(/CURRENT_DATE|now\(\)/i);
