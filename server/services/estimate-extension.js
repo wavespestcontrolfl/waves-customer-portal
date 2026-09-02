@@ -89,18 +89,53 @@ function extensionStatusUpdate(estimate = {}, now = new Date()) {
  *   changed between read and guarded write) so route callers can pass them
  *   straight through.
  */
+// The grouped siblings an extension REVIVES (the sibling update below):
+// same group, unarchived, unlocked, sent / viewed / expired / send_failed
+// with delivery evidence. Judged BEFORE any mutation (uncapped codex P0 r20:
+// the visible-sibling verdict alone let an expired fallback sibling come
+// back to life), and re-asserted in SQL on the revive itself.
+function revivableSiblingsQuery(database, estimate) {
+  return database('estimates')
+    .where({ estimate_group_id: estimate.estimate_group_id })
+    .whereNot({ id: estimate.id })
+    .whereNull('archived_at')
+    .whereNull('price_locked_at')
+    .whereIn('status', ['sent', 'viewed', 'expired', 'send_failed'])
+    .where((b) => b.whereNot('status', 'send_failed').orWhereNotNull('sent_at').orWhereNotNull('viewed_at'));
+}
+
+// The ONE question the public extension-request (generic 404, before the
+// claim) and extendEstimate (409) both ask while the gate is on: may this
+// row, the siblings its link shows, AND the siblings the extension would
+// revive be put back in front of the customer? Fails closed on a read error.
+async function extensionDeliverableUnderGate(database, estimate) {
+  const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate, rowPassesGatedSendAuthority } = require('./pricing-authority-gate');
+  if (!gatedSendAuthorityPredicateApplies()) return true;
+  if (!(await estimateDeliverableUnderGate(database, estimate))) return false;
+  if (!estimate?.estimate_group_id) return true;
+  let revivable;
+  try {
+    revivable = await revivableSiblingsQuery(database, estimate).select('id', 'pricing_authority', 'estimate_data');
+  } catch {
+    return false;
+  }
+  return (Array.isArray(revivable) ? revivable : []).every((sibling) => rowPassesGatedSendAuthority(sibling));
+}
+
 async function extendEstimate({ estimate, days, silent = false, entryPoint, workflow, smsMetadata = {} }) {
   if (!estimate || !estimate.id) throw validationError('Estimate not found');
   // Engine-authoritative pricing gate (#3750, GH codex P1 r14 / uncapped
-  // P0 r17): an extension revives the token — the price becomes viewable
-  // and acceptable again and its refreshed link is redelivered — so a
-  // delivered row the engine never verified (or one whose group link would
-  // show such a sibling) is refused here, in the shared service, for the
-  // public and admin callers alike. The operator re-saves it through the
-  // engine first. Customer-safe copy: the public route returns it verbatim.
+  // P0 r17 + r20): an extension revives the token — the price becomes
+  // viewable and acceptable again and its refreshed link is redelivered —
+  // and a grouped one revives siblings too, so a delivered row the engine
+  // never verified, or a group whose link would show (or whose revive would
+  // resurrect) such a sibling, is refused here, in the shared service, for
+  // the public and admin callers alike. The operator re-saves it through
+  // the engine first. Customer-safe copy: the public route returns it
+  // verbatim (it preflights the same verdict to answer a generic 404 first).
   {
-    const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
-    if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+    const { gatedSendAuthorityPredicateApplies } = require('./pricing-authority-gate');
+    if (gatedSendAuthorityPredicateApplies() && !(await extensionDeliverableUnderGate(db, estimate))) {
       const err = new Error('This estimate can\'t be extended online right now — please call the office and we\'ll refresh it for you.');
       err.statusCode = 409;
       err.code = 'PRICING_AUTHORITY_NOT_SERVER';
@@ -231,6 +266,13 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         // the customer.
         .where((b) => b.whereNot('status', 'send_failed').orWhereNotNull('sent_at').orWhereNotNull('viewed_at'))
         .where((b) => b.whereNull('expires_at').orWhere('expires_at', '<', newExpiry))
+        // Atomic belt to the pre-mutation verdict (uncapped codex P0 r20):
+        // while the gate is on a sibling that fails the authority predicate
+        // is never revived, whatever raced between the verdict and here.
+        .modify((q) => {
+          const { gatedSendAuthorityPredicateApplies, GATED_SEND_AUTHORITY_SQL } = require('./pricing-authority-gate');
+          if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL);
+        })
         .update({
           expires_at: newExpiry,
           // Siblings' expiry reminders stay BURNED — only the extended
@@ -434,6 +476,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
 }
 
 module.exports = {
+  extensionDeliverableUnderGate,
   extendEstimate,
   computeExtensionExpiry,
   extensionStatusUpdate,

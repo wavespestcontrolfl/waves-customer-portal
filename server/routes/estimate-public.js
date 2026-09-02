@@ -10363,6 +10363,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       let nextEstimateData = acceptedEstDataForPricing && typeof acceptedEstDataForPricing === 'object'
         ? { ...acceptedEstDataForPricing }
         : null;
+      // Durable evidence for the LOCKED stamp above (uncapped codex P1 r20 on
+      // #3750): the authority this price carried when it was locked, read
+      // from the row this CAS update locks — the pricing-authority gate
+      // recognizes a LOCKED sibling only through it.
+      nextEstimateData = { ...(nextEstimateData || {}), pricingAuthorityAtLock: String(estimate.pricing_authority || 'NULL').toUpperCase() };
       if (nextEstimateData) {
         // Freeze the RENDERED setup fee at acceptance (PR #3476, Codex
         // r10 P1): a fee-less stored snapshot is repaired WITH the fee at
@@ -15855,8 +15860,9 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     // row-existence oracle; docs/public-route-contracts.md). The admin
     // extension keeps extendEstimate's explicit 409.
     {
-      const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
-      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+      const { gatedSendAuthorityPredicateApplies } = require('../services/pricing-authority-gate');
+      const { extensionDeliverableUnderGate } = require('../services/estimate-extension');
+      if (gatedSendAuthorityPredicateApplies() && !(await extensionDeliverableUnderGate(db, estimate))) {
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }

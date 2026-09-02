@@ -14,7 +14,15 @@ const { isEnabled } = require('../config/feature-gates');
 const { isProposalAuthoredByEditor } = require('./estimate-proposal');
 
 const SERVER_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
-const GATED_SEND_AUTHORITY_SQL = "(UPPER(pricing_authority) = 'SERVER' OR (estimate_data->'proposal'->'enabled' = 'true'::jsonb AND estimate_data->'proposal'->'provenance'->>'source' = 'proposal-editor'))";
+// Acceptance rewrites pricing_authority to LOCKED (the price is frozen), so
+// every accept path stamps the authority the price carried AT LOCK into
+// estimate_data — server-written, from the row being locked — and a LOCKED
+// row passes only on that durable evidence (uncapped codex P1 r20: an
+// accepted, engine-priced sibling must not block its group; an accepted
+// fallback one must). Rows locked before the marker existed carry none and
+// fail closed.
+const PRICING_AUTHORITY_AT_LOCK_KEY = 'pricingAuthorityAtLock';
+const GATED_SEND_AUTHORITY_SQL = "(UPPER(pricing_authority) = 'SERVER' OR (UPPER(pricing_authority) = 'LOCKED' AND estimate_data->>'pricingAuthorityAtLock' = 'SERVER') OR (estimate_data->'proposal'->'enabled' = 'true'::jsonb AND estimate_data->'proposal'->'provenance'->>'source' = 'proposal-editor'))";
 
 function gatedSendAuthorityPredicateApplies() {
   return isEnabled('sendRequiresServerPricing');
@@ -29,8 +37,10 @@ function parseEstimateDataLoose(value) {
 }
 
 function rowPassesGatedSendAuthority(row = {}) {
-  if (String(row.pricing_authority || row.pricingAuthority || '').toUpperCase() === 'SERVER') return true;
+  const authority = String(row.pricing_authority || row.pricingAuthority || '').toUpperCase();
+  if (authority === 'SERVER') return true;
   const data = parseEstimateDataLoose(row.estimate_data ?? row.estimateData);
+  if (authority === 'LOCKED' && String(data?.[PRICING_AUTHORITY_AT_LOCK_KEY] || '').toUpperCase() === 'SERVER') return true;
   return isProposalAuthoredByEditor(data?.proposal);
 }
 
@@ -87,6 +97,7 @@ async function estimateDeliverableUnderGate(database, row = {}) {
 }
 
 module.exports = {
+  PRICING_AUTHORITY_AT_LOCK_KEY,
   SERVER_PRICING_AUTHORITY_SQL,
   GATED_SEND_AUTHORITY_SQL,
   gatedSendAuthorityPredicateApplies,

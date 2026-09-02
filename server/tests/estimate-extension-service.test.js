@@ -44,6 +44,7 @@ const {
   computeExtensionExpiry,
   extensionStatusUpdate,
   EXTENDABLE_STATUSES,
+  extensionDeliverableUnderGate,
 } = require('../services/estimate-extension');
 
 const DAY = 86400000;
@@ -218,5 +219,33 @@ describe('extendEstimate — engine-authoritative pricing gate (#3750, GH codex 
       days: 7,
       entryPoint: 'test',
     })).rejects.toMatchObject({ statusCode: 409, code: 'PRICING_AUTHORITY_NOT_SERVER', message: expect.stringMatching(/call the office/i) });
+  });
+});
+
+describe('extensionDeliverableUnderGate — the siblings an extension would REVIVE are judged too (uncapped codex P0 r20)', () => {
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+  function fakeDatabase(visible, revivable) {
+    let call = 0;
+    const database = jest.fn(() => {
+      const rows = call++ === 0 ? visible : revivable; // visible-sibling read, then revivable read
+      const chain = {
+        where: (c) => { if (typeof c === 'function') c(chain); return chain; },
+        orWhere: (c) => { if (typeof c === 'function') c(chain); return chain; },
+        whereNot: () => chain, whereNull: () => chain, whereIn: () => chain, orWhereIn: () => chain, orWhereNotNull: () => chain,
+        select: async () => rows,
+      };
+      return chain;
+    });
+    return database;
+  }
+  const anchor = { id: 'est-a', estimate_group_id: 'grp-1', status: 'expired', pricing_authority: 'SERVER', estimate_data: '{}' };
+
+  test('an expired CLIENT_FALLBACK sibling (invisible today, revived by the extension) refuses; all-verified siblings pass; gate off always passes', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    expect(await extensionDeliverableUnderGate(fakeDatabase([], [{ id: 'est-b', status: 'expired', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' }]), anchor)).toBe(false);
+    expect(await extensionDeliverableUnderGate(fakeDatabase([], [{ id: 'est-b', status: 'expired', pricing_authority: 'SERVER', estimate_data: '{}' }]), anchor)).toBe(true);
+    expect(await extensionDeliverableUnderGate(fakeDatabase([], []), { ...anchor, estimate_group_id: null })).toBe(true);
+    mockGateState.sendRequiresServerPricing = false;
+    expect(await extensionDeliverableUnderGate(fakeDatabase([], [{ id: 'est-b', status: 'expired', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' }]), anchor)).toBe(true);
   });
 });

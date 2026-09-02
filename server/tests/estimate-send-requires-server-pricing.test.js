@@ -489,3 +489,14 @@ describe('pricing-authority-gate — group-aware verdict (GH codex P1 r14)', () 
     expect(await gate.estimateDeliverableUnderGate(down.database, { ...anchor, pricing_authority: 'CLIENT_FALLBACK' })).toBe(true);
   });
 });
+
+describe('pricing-authority-gate — LOCKED passes only on the durable at-lock marker (uncapped codex P1 r20)', () => {
+  const gate = require('../services/pricing-authority-gate');
+  test('an accepted engine-priced row passes; an accepted fallback row, or a row locked before the marker existed, fails closed — SQL mirrors it', () => {
+    expect(gate.rowPassesGatedSendAuthority({ pricing_authority: 'LOCKED', estimate_data: JSON.stringify({ pricingAuthorityAtLock: 'SERVER' }) })).toBe(true);
+    expect(gate.rowPassesGatedSendAuthority({ pricing_authority: 'LOCKED', estimate_data: { pricingAuthorityAtLock: 'CLIENT_FALLBACK' } })).toBe(false);
+    expect(gate.rowPassesGatedSendAuthority({ pricing_authority: 'LOCKED', estimate_data: '{}' })).toBe(false);
+    expect(gate.PRICING_AUTHORITY_AT_LOCK_KEY).toBe('pricingAuthorityAtLock');
+    expect(gate.GATED_SEND_AUTHORITY_SQL).toContain("UPPER(pricing_authority) = 'LOCKED' AND estimate_data->>'pricingAuthorityAtLock' = 'SERVER'");
+  });
+});
