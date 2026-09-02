@@ -149,6 +149,9 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     }
     const chunks = [];
     const startedAt = Date.now();
+    // onerror is followed by onstop in the MediaRecorder state machine — a
+    // failed recording must not upload its partial chunks as if it were whole.
+    let recordingFailed = false;
     rec.ondataavailable = (ev) => {
       if (ev.data && ev.data.size) chunks.push(ev.data);
     };
@@ -156,10 +159,12 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       stream.getTracks().forEach((t) => t.stop());
       recorderRef.current = null;
       setListening(false);
+      if (recordingFailed) return;
       const blob = new Blob(chunks, { type: rec.mimeType || mimeType || "audio/webm" });
       uploadClip(blob, (Date.now() - startedAt) / 1000);
     };
     rec.onerror = () => {
+      recordingFailed = true;
       stream.getTracks().forEach((t) => t.stop());
       recorderRef.current = null;
       setListening(false);

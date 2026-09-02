@@ -138,6 +138,18 @@ describe("useSpeechDictation upload fallback", () => {
     expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
   });
 
+  it("a recorder error never uploads the partial clip", async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ available: true }) });
+    const { result } = renderHook(() => useSpeechDictation(vi.fn(), { uploadServiceId: "svc-1" }));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    const rec = FakeRecorder.instances[0];
+    await act(async () => { rec.ondataavailable?.({ data: new Blob(["partial"]) }); rec.onerror?.(new Event("error")); rec.onstop?.(); });
+    expect(fetch).toHaveBeenCalledTimes(1); // availability only — no upload
+    expect(result.current.listening).toBe(false);
+    expect(alert).toHaveBeenCalledWith("Dictation error: recording failed");
+  });
+
   it("never touches the upload path when SpeechRecognition exists", async () => {
     window.webkitSpeechRecognition = class { start() {} stop() {} abort() {} };
     const { result } = renderHook(() => useSpeechDictation(vi.fn(), { uploadServiceId: "svc-1" }));
