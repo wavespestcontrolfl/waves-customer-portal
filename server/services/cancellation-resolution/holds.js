@@ -187,7 +187,9 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
       if (priorUnderLock) throw new Error('a hold for this family was written concurrently');
       if (moved.length) {
         const liveVisits = await familyUpcomingVisits(customerId, familyKey, trx);
-        if (liveVisits.length < moved.length) throw new Error(`${familyKey} visits were cancelled before the hold could be written`);
+        // Exactly the moved set: fewer = a wind-down cancelled some; more = a
+        // visit booked in the gap would dispatch during the hold unmoved.
+        if (liveVisits.length !== moved.length) throw new Error(`${familyKey} visits changed before the hold could be written (${liveVisits.length} live vs ${moved.length} moved)`);
       }
       const live = await trx('customers').where({ id: customerId }).first('monthly_rate', 'billing_mode', 'waveguard_tier', 'tier_protected_until');
       if (!live) throw new Error('customer vanished before the hold could be written');
