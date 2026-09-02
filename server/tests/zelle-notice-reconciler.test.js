@@ -48,7 +48,7 @@ const db = require('../models/db');
 const OpenBalance = require('../services/open-balance');
 const { recordManualPayment } = require('../services/invoice-manual-payment');
 const NotificationService = require('../services/notification-service');
-const { maybeHandleZelleNotice, isZelleReconcileEnabled, recoverStaleClaims, RECORDED_BY } = require('../services/zelle-notice-reconciler');
+const { maybeHandleZelleNotice, isZelleReconcileEnabled, recoverStaleClaims, sweepStaleClaims, RECORDED_BY } = require('../services/zelle-notice-reconciler');
 
 const TEXT = fs.readFileSync(path.join(__dirname, 'fixtures', 'zelle-notice-capitalone.txt'), 'utf8');
 const FORWARDED_AUTH = 'mx.google.com; dkim=pass header.i=@notification.capitalone.com header.s=k1; '
@@ -271,6 +271,12 @@ describe('stale claim recovery', () => {
     expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-old', status: 'processing' }]);
   });
 
+  test('the sync-cadence sweep is gate-aware: off ⇒ no reads', async () => {
+    process.env.GATE_ZELLE_NOTICE_RECONCILE = 'false';
+    expect(await sweepStaleClaims()).toBe(0);
+    expect(db).not.toHaveBeenCalled();
+  });
+
   test('nothing stale ⇒ no writes', async () => {
     expect(await recoverStaleClaims()).toBe(0);
     expect(updatesOf('inbound_payment_notices')).toHaveLength(0);
@@ -287,5 +293,7 @@ describe('sync wiring', () => {
     expect(src).toMatch(/zelleHandled = await maybeHandleZelleNotice\(email\)/);
     expect(src).toMatch(/if \(!proofHandled && !approvalControl && !zelleHandled && /);
     expect(src).toMatch(/\(proofHandled \|\| approvalControl \|\| zelleHandled\) && await bellClaimColumnExists\(\)/);
+    // The stale-claim sweep runs on every sync beside the bell sweep.
+    expect(src).toMatch(/sweepUnclaimedCustomerEmailBells\(\)[\s\S]{0,600}require\('\.\.\/zelle-notice-reconciler'\)\.sweepStaleClaims\(\)/);
   });
 });

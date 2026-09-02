@@ -219,6 +219,13 @@ async function recoverStaleClaims() {
   return stale.length;
 }
 
+// Cadence entry point for the email sync (every run): gate-aware, cheap
+// (one indexed read when nothing is stale).
+async function sweepStaleClaims() {
+  if (!isZelleReconcileEnabled()) return 0;
+  return recoverStaleClaims();
+}
+
 async function recentlyApplied(parsed) {
   const since = new Date(Date.now() - DUPLICATE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const dup = await db('inbound_payment_notices')
@@ -330,6 +337,7 @@ module.exports = {
   RECORDED_BY,
   STALE_CLAIM_MS,
   recoverStaleClaims,
+  sweepStaleClaims,
   DUPLICATE_WINDOW_DAYS,
   NEAR_AMOUNT_TOLERANCE_CENTS,
   isZelleReconcileEnabled,

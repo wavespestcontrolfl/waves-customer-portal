@@ -19,6 +19,10 @@ async function syncEmails() {
     // lost forever without this — every run re-offers unclaimed eligible
     // rows (idempotent via the atomic claim) (hook P1).
     await sweepUnclaimedCustomerEmailBells().catch((err) => logger.warn(`[email-sync] bell sweep failed: ${err.message}`));
+    // Zelle notice claims a crashed sync never finished are parked for the
+    // operator on the same cadence (every run, gated inside), not only when
+    // the next notice happens to arrive.
+    await require('../zelle-notice-reconciler').sweepStaleClaims().catch((err) => logger.warn(`[email-sync] Zelle stale-claim sweep failed: ${err.message}`));
 
     if (state?.last_history_id) {
       return incrementalSync(state);
