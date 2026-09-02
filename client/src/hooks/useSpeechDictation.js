@@ -34,6 +34,10 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // True from the first tap until getUserMedia settles: a second tap in that
   // window must not open a second stream nobody can stop.
   const startingRef = useRef(false);
+  // Current dictation target; a transcript that arrives for a previous
+  // target is dropped (the panel can move to another visit mid-upload).
+  const serviceIdRef = useRef(uploadServiceId);
+  serviceIdRef.current = uploadServiceId;
   // Keep the latest callback without re-creating `toggle` each render.
   const onTranscriptRef = useRef(onTranscript);
   onTranscriptRef.current = onTranscript;
@@ -96,11 +100,14 @@ export default function useSpeechDictation(onTranscript, options = {}) {
         const data = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(data?.error || `Transcription failed (HTTP ${r.status})`);
         const text = String(data?.text || "").trim();
+        // The round trip can outlive the field: unmounted, or the panel now
+        // dictates for a different visit. Never append into the wrong notes.
+        if (!mountedRef.current || serviceIdRef.current !== uploadServiceId) return;
         if (text && onTranscriptRef.current) onTranscriptRef.current(text);
       } catch (e) {
-        alert(`Dictation error: ${e.message}`);
+        if (mountedRef.current) alert(`Dictation error: ${e.message}`);
       } finally {
-        setUploading(false);
+        if (mountedRef.current) setUploading(false);
       }
     },
     [uploadServiceId],

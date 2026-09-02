@@ -150,6 +150,24 @@ describe("useSpeechDictation upload fallback", () => {
     expect(alert).toHaveBeenCalledWith("Dictation error: recording failed");
   });
 
+  it("a transcript that lands after the target visit changed is dropped", async () => {
+    const onTranscript = vi.fn();
+    let resolveUpload;
+    fetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ available: true }) })
+      .mockImplementationOnce(() => new Promise((r) => { resolveUpload = r; }))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ available: true }) });
+    const { result, rerender } = renderHook(({ id }) => useSpeechDictation(onTranscript, { uploadServiceId: id }), { initialProps: { id: "svc-1" } });
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.uploading).toBe(true));
+    rerender({ id: "svc-2" });
+    await act(async () => { resolveUpload({ ok: true, json: async () => ({ text: "stale words" }) }); });
+    await waitFor(() => expect(result.current.uploading).toBe(false));
+    expect(onTranscript).not.toHaveBeenCalled();
+  });
+
   it("never touches the upload path when SpeechRecognition exists", async () => {
     window.webkitSpeechRecognition = class { start() {} stop() {} abort() {} };
     const { result } = renderHook(() => useSpeechDictation(vi.fn(), { uploadServiceId: "svc-1" }));
