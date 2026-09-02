@@ -886,10 +886,20 @@ describe('lost-link recovery', () => {
     updates.length = 0;
     makeDb({
       seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', domain_id: 'd1', path_id: 'path-live', target_url: 'https://blog.example/post' }; if (op === 'update') { updates.push(st.payload); return 1; } },
-      seo_link_acquisition_paths: (op) => { if (op === 'first') return { id: 'path-live', superseded_by: null, agent_completable: true }; throw new Error('no path write expected'); },
+      seo_link_acquisition_paths: (op) => { if (op === 'first') return { id: 'path-live', superseded_by: null, agent_completable: true, confidence: 0.7, link_type: 'resource' }; throw new Error('no path write expected'); },
     });
     await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
     expect(updates[0]).not.toHaveProperty('path_id');
+    // …but NOT a path that stands on the other lane, nor one with NULL confidence (the claim refuses both)
+    for (const cur of [{ id: 'path-dir', superseded_by: null, agent_completable: true, confidence: 0.7, link_type: 'directory' }, { id: 'path-nc', superseded_by: null, agent_completable: true, confidence: null, link_type: 'resource' }]) {
+      updates.length = 0;
+      makeDb({
+        seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', domain_id: 'd1', path_id: cur.id, target_url: 'https://blog.example/post' }; if (op === 'update') { updates.push(st.payload); return 1; } },
+        seo_link_acquisition_paths: (op, st) => { if (op === 'first' && st.wheres[0][0].id === cur.id) return cur; if (op === 'first') return { id: 'path-rec' }; },
+      });
+      await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+      expect(updates[0]).toEqual(expect.objectContaining({ path_id: 'path-rec' }));
+    }
   });
 
   test('board lookup matches every spelling of the target page; canonical insert form', () => {

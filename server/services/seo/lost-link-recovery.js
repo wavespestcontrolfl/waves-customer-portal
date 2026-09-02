@@ -34,10 +34,15 @@ const NON_OUTREACH_TYPES = new Set(worker.SIGNUP_TYPES);
  * link — when the registry has not yet given the row a domain.
  */
 async function claimableOutreachPath(trx, row, linkType) {
-  const cur = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first('id', 'superseded_by', 'agent_completable') : null;
-  if (cur && !cur.superseded_by && cur.agent_completable !== false) return {};
-  if (!row.domain_id) return { path_id: null };
   const registry = require('./link-registry');
+  const cur = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first('id', 'superseded_by', 'agent_completable', 'confidence', 'link_type') : null;
+  // …kept only when it STANDS for the worker (live, agent-completable, positive
+  // confidence — the claim refuses NULL/zero) AND is on the reopened lane: a
+  // signup-lane path under an outreach row would leave path and execution
+  // semantics inconsistent
+  const standing = cur && !cur.superseded_by && cur.agent_completable !== false && Number.isFinite(Number(cur.confidence)) && Number(cur.confidence) > 0;
+  if (standing && cur.link_type === registry.pathLinkTypeFor(linkType)) return {};
+  if (!row.domain_id) return { path_id: null };
   const path = registry.acquisitionPathFromLegacyRow({ link_type: linkType, target_url: row.target_url || null });
   const active = () => trx('seo_link_acquisition_paths').where({ domain_id: row.domain_id, path_key: path.path_key }).whereNull('superseded_by').first('id');
   let existing = await active();
