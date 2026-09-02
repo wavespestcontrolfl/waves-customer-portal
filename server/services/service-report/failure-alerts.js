@@ -152,12 +152,16 @@ async function alertServiceReportTokenMintFailed({ serviceRecordId, customerId, 
 // intentional). The route is a one-shot sender, so nothing retries this.
 async function alertCompletionSmsFailed({ serviceRecordId, customerId, smsType, errorClass, error, resumable = true } = {}, { knex = db, trigger = triggerNotification } = {}) {
   try {
-    const dedupeKey = `completion_sms_failed:${serviceRecordId || 'unknown'}`;
+    // The outcome class is part of the dedupe identity: a resumable failure
+    // ("held for retry") whose retry then fails terminally must be able to
+    // replace its own instructions within the window (pre-push Codex P1).
+    const outcome = resumable === false ? 'final' : 'resumable';
+    const dedupeKey = `completion_sms_failed:${serviceRecordId || 'unknown'}:${outcome}`;
     if (await alreadyAlerted(dedupeKey, knex)) return { skipped: true, reason: 'duplicate' };
 
     const context = await loadServiceContext(serviceRecordId, customerId, knex);
     const errorMessage = sanitizeErrorText(error?.message || error?.error || error);
-    logger.warn(`[service-report-alerts] completion SMS failed for record=${serviceRecordId || 'unknown'} class=${errorClass || 'unknown'}`);
+    logger.warn(`[service-report-alerts] completion SMS failed for record=${serviceRecordId || 'unknown'} class=${errorClass || 'unknown'} outcome=${outcome}`);
 
     return await trigger('completion_sms_failed', {
       customerId: context.customerId,

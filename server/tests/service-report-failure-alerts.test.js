@@ -181,9 +181,21 @@ describe('service report failure alerts', () => {
       smsType: 'service_report_v1',
       errorClass: 'TWILIO_30007',
       link: '/admin/customers?customerId=cust-4',
-      dedupeKey: 'completion_sms_failed:svc-4',
+      dedupeKey: 'completion_sms_failed:svc-4:resumable',
     }));
     expect(trigger.mock.calls[0][1].errorMessage).toContain('Carrier violation');
+
+    // A terminal follow-up on the same record is a different outcome — its
+    // own dedupe identity, so it can replace the "held for retry" copy.
+    const trigger2 = jest.fn(async () => ({ bellWritten: true }));
+    await alertCompletionSmsFailed(
+      { serviceRecordId: 'svc-4', resumable: false, error: 'invalid number' },
+      { knex: makeKnex({}), trigger: trigger2 },
+    );
+    expect(trigger2).toHaveBeenCalledWith('completion_sms_failed', expect.objectContaining({
+      dedupeKey: 'completion_sms_failed:svc-4:final',
+      resumable: false,
+    }));
   });
 
   test('completion SMS failure dedupes per record and never throws on a dead DB', async () => {

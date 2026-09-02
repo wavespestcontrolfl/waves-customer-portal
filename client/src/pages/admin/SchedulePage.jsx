@@ -867,7 +867,9 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "completion_sms_send_failed",        // completion text failed at the provider / requeue
 ]);
 export function completionResumeOwedError(error) {
-  return COMPLETION_RESUME_OWED_CODES.has(error?.code);
+  // The 503 is part of the contract: a reused code on any other status is
+  // not a committed closeout and must not pin the body or set the marker.
+  return Number(error?.status) === 503 && COMPLETION_RESUME_OWED_CODES.has(error?.code);
 }
 
 // Station edits a completion would silently DROP while the registry is

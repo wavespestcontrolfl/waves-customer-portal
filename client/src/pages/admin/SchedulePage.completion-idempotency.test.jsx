@@ -380,6 +380,8 @@ describe("completionResumeOwedError", () => {
   });
 
   it("leaves every other error to the existing handlers", () => {
+    // Same code on another status is not the committed-but-not-finalized contract.
+    expect(completionResumeOwedError({ status: 500, code: "completion_sms_send_failed" })).toBe(false);
     expect(completionResumeOwedError({ status: 409, code: "completion_side_effects_running" })).toBe(false);
     expect(completionResumeOwedError({ status: 409, code: "completion_resume_payload_mismatch" })).toBe(false);
     expect(completionResumeOwedError({ status: 500, message: "boom" })).toBe(false);
