@@ -6855,7 +6855,7 @@ const EstimateConverter = {
           extension.familyLines.length ? `Applied automatically: ${extension.familyLines.join('; ')}.` : '',
           extension.creditLines.length ? `Prepaid-term credit issued: ${extension.creditLines.join('; ')}.` : '',
           extension.monthlyRateReviewNeeded
-            ? `Monthly-billed member — extend the ${discountPct}% to their monthly rate manually (current rate ${(Number(effectiveCustomer.monthly_rate) || 0).toFixed(2)}/mo).`
+            ? `Monthly-billed member — extend the ${discountPct}% to their monthly rate manually (current rate $${(Number(effectiveCustomer.monthly_rate) || 0).toFixed(2)}/mo).`
             : '',
           [...extension.reviewFamilies, ...extension.skippedFamilies].length
             ? `Still needs review: ${[...extension.reviewFamilies, ...extension.skippedFamilies].join(', ')}.`
@@ -6977,7 +6977,7 @@ const EstimateConverter = {
       const planReviewPayload = {
         type: 'estimate_converted',
         title: 'Multi-plan rate needs review after re-quote',
-        body: `${customer.first_name} ${customer.last_name} accepted a re-quote at $${convertedMonthlyRate.toFixed(2)}/mo, but they carry other live plans whose pre-ledger amounts could not be attributed — verify their total monthly rate (previous: ${(Number(effectiveCustomer.monthly_rate) || 0).toFixed(2)}/mo).`,
+        body: `${customer.first_name} ${customer.last_name} accepted a re-quote at $${convertedMonthlyRate.toFixed(2)}/mo, but they carry other live plans whose pre-ledger amounts could not be attributed — verify their total monthly rate (previous: $${(Number(effectiveCustomer.monthly_rate) || 0).toFixed(2)}/mo).`,
         options: {
           icon: '💵',
           link: `/admin/customers?customerId=${customerId}`,
