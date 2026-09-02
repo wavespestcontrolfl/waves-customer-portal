@@ -447,12 +447,12 @@ async function loadRows(windowHours) {
       db('notifications')
         .select('id', 'title', 'body', 'link', 'metadata', 'read_at', 'created_at')
         .where({ recipient_type: 'admin', category: DIGEST_CATEGORY })
-        // An unread action digest (ACT: / [Review]) stays awaiting review
-        // until read, however old — like an open approval. FYI / FIX rows
-        // and read actions keep the window.
+        // An unread action (ACT: / [Review]) or unresolved FIX: digest stays
+        // in the feed until read, however old — its email was suppressed, so
+        // this row is the only place it exists. FYI rows keep the window.
         .where((q) =>
           q.where('created_at', '>=', since)
-            .orWhere((u) => u.whereNull('read_at').andWhereRaw("title ~* '^(ACT:|\\[Review\\])'")))
+            .orWhere((u) => u.whereNull('read_at').andWhereRaw("title ~* '^(ACT:|FIX:|\\[Review\\])'")))
         .orderBy('created_at', 'desc')
         .limit(MAX_ITEMS)),
   ]);

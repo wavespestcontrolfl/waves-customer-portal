@@ -103,7 +103,11 @@ function ActivityRow({ item, onReview }) {
   const [open, setOpen] = useState(false);
   const meta = STATUS_META[item.status] || STATUS_META.completed;
   const expandable = item.steps?.length > 0 || item.detail;
-  const needsAction = item.status === "awaiting_review" && item.link;
+  // Review: the owner owes a decision. A digest of any status keeps its
+  // link too (a FIX: digest's remediation page) — its email was suppressed,
+  // so this row is the only way to reach it.
+  const needsAction = !!item.link && (item.status === "awaiting_review" || item.kind === "digest");
+  const actionLabel = item.status === "awaiting_review" ? "Review" : "Open";
   return (
     <li className="border-t border-hairline border-zinc-200 first:border-t-0">
       <div className="flex items-start gap-3 px-3 py-3 md:px-4">
@@ -151,7 +155,7 @@ function ActivityRow({ item, onReview }) {
               onClick={() => onReview?.(item)}
               className="hidden md:inline-flex h-8 items-center rounded-sm border-hairline border-zinc-300 bg-white px-3 text-11 font-medium uppercase tracking-label text-zinc-900 no-underline hover:bg-zinc-50 u-focus-ring"
             >
-              Review
+              {actionLabel}
             </Link>
           )}
           {expandable && (
@@ -174,7 +178,7 @@ function ActivityRow({ item, onReview }) {
             onClick={() => onReview?.(item)}
             className="inline-flex h-11 items-center rounded-sm border-hairline border-zinc-300 bg-white px-4 text-12 font-medium uppercase tracking-label text-zinc-900 no-underline u-focus-ring"
           >
-            Review
+            {actionLabel}
           </Link>
         </div>
       )}

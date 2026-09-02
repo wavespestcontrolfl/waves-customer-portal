@@ -110,6 +110,24 @@ describe("AgentActivityTab", () => {
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/notifications/n9/read", { method: "PUT" }));
   });
 
+  it("a FIX digest keeps its remediation link as Open and marks read on follow", async () => {
+    adminFetch.mockResolvedValueOnce({
+      ...FEED,
+      items: [{
+        id: "digest:n8", kind: "digest", agent: "Waves Ops", notificationId: "n8",
+        title: "lead-to-cash invariants — 2 violations", subtitle: "lead to cash invariants · needs a fix",
+        status: "failed", startedAt: "2026-09-02T10:00:00Z", finishedAt: null, durationMs: null,
+        steps: [], stepsDone: 0, stepsTotal: 1, link: "/admin/invoices", detail: "INV-1042",
+      }],
+    });
+    adminFetch.mockResolvedValue({});
+    renderTab();
+    const links = await screen.findAllByRole("link", { name: "Open" });
+    expect(links[0]).toHaveAttribute("href", "/admin/invoices");
+    fireEvent.click(links[0]);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/notifications/n8/read", { method: "PUT" }));
+  });
+
   it("ignores a slower, superseded window response", async () => {
     let resolveFirst;
     adminFetch.mockImplementationOnce(() => new Promise((r) => { resolveFirst = r; }));
