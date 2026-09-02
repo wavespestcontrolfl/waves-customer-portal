@@ -118,9 +118,11 @@ describe('20260902000020 backfill service_records.service_line', () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));
     row(db, 'r2').service_line = 'lawn'; // edited since → not ours
+    row(db, 'r4').service_type = 'Termite Liquid Treatment Service'; // relabeled since, same line → not ours either
     await migration.down(fakeKnex(db));
     expect(row(db, 'r1').service_line).toBeNull();
     expect(row(db, 'r2').service_line).toBe('lawn');
+    expect(row(db, 'r4').service_line).toBe('termite');
     expect(row(db, 'r-set').service_line).toBe('lawn');
     expect(db.system_settings).toEqual([]);
   });

@@ -79,10 +79,13 @@ exports.down = async function down(knex) {
   const state = await loadState(knex);
   if (!state) return; // no ledger — leave data as-is rather than guess
   for (const rec of Array.isArray(state.stamped) ? state.stamped : []) {
-    if (!rec || !Array.isArray(rec.ids) || !rec.service_line) continue;
+    if (!rec || !Array.isArray(rec.ids) || !rec.service_line || typeof rec.service_type !== 'string') continue;
+    // Only rows still carrying the label AND the line this migration stamped
+    // — a relabel since made the line someone else's verdict (pre-push
+    // codex P1).
     await knex('service_records')
       .whereIn('id', rec.ids)
-      .where({ service_line: rec.service_line })
+      .where({ service_type: rec.service_type, service_line: rec.service_line })
       .update({ service_line: null });
   }
   await knex('system_settings').where({ key: STATE_KEY }).del();
