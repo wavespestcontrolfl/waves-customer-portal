@@ -272,14 +272,14 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
 }
 
 // True when the engine-authoritative pricing gate applies to THIS send: gate
-// on, not an authored proposal (its line items ARE the quote), not a row that
-// already went out (follow-ups keep flowing). Shared by the pre-read check in
-// assertEstimateSendable and by the send CLAIMS, which re-assert it as a WHERE
-// predicate so a revision that stamps CLIENT_FALLBACK between the check and
-// the claim loses the race instead of being delivered (pre-push codex P0).
+// on and not an authored proposal (its line items ARE the quote). Delivered
+// rows are NOT exempt — a revision of a live link can fall back too, and its
+// resend would deliver the unverified price (pre-push codex P0). Shared by
+// the pre-read check in assertEstimateSendable and by the send CLAIMS, which
+// re-assert it as a WHERE predicate so a revision that stamps CLIENT_FALLBACK
+// between the check and the claim loses the race instead of being delivered.
 function sendRequiresServerPricingFor(estimate = {}) {
   if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return false;
-  if (estimate.sent_at) return false;
   return parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled !== true;
 }
 const SEND_CLAIM_PRICING_AUTHORITY_SQL = "COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'";
@@ -361,14 +361,16 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   // save whose server recompute failed or had no replayable inputs persists
   // the BROWSER preview as a NON-authoritative price (pricing_authority
   // CLIENT_FALLBACK — fail-open so a broken engine never blocks the save),
-  // and nothing re-verified that price before delivery. The FIRST send of
-  // such a row is refused while GATE_SEND_REQUIRES_SERVER_PRICING is on and
-  // logged as a would-block while it is off (shadow count before the flip).
-  // Re-saving from the estimate tool reprices through the engine and clears
-  // the stamp. An authored proposal IS the manual quote (exempt like the
-  // gates above); a row that already went out keeps its follow-ups (same
-  // rule as the engine-review gate) — the data audit owns historical rows.
-  if (!isAuthoredProposal && !estimate.sent_at
+  // and nothing re-verified that price before delivery. Every send of such
+  // a row — first send or resend — is refused while
+  // GATE_SEND_REQUIRES_SERVER_PRICING is on and logged as a would-block
+  // while it is off (shadow count before the flip). Re-saving from the
+  // estimate tool reprices through the engine and clears the stamp. An
+  // authored proposal IS the manual quote (exempt like the gates above).
+  // Historical delivered rows are the data audit's job; a revision of a
+  // delivered row that falls back is refused at save time while the gate
+  // is on (reviseAdminEstimate).
+  if (!isAuthoredProposal
     && String(estimate.pricing_authority || '').toUpperCase() === 'CLIENT_FALLBACK') {
     if (sendRequiresServerPricingFor(estimate)) {
       const err = new Error('This estimate\'s price was saved from the browser preview because the pricing engine could not verify it. Open it in the estimate tool and save again so the engine prices it, then send.');
@@ -557,14 +559,40 @@ router.use((req, res, next) => (
     : requireAdmin(req, res, next)
 ));
 
+// Post-commit bell for a save whose engine recompute FAILED (validation audit
+// SEC-002; pre-push codex P1): the resolver fails open and reports the
+// reason, the route rings only after the create/revise transaction committed
+// — never from a dryRun preflight — keyed per estimate so a preflight-plus-
+// save or a retry never rings twice. Best-effort; never fails the request.
+function notifyPricingFallbackAfterCommit(estimate, reason) {
+  if (reason !== 'ENGINE_ERROR' || !estimate?.id) return;
+  try {
+    const NotificationService = require('../services/notification-service');
+    void NotificationService.notifyAdmin(
+      'estimate',
+      `Estimate saved without engine pricing: ${estimate.customer_name || estimate.id}`,
+      'The pricing engine failed while this estimate was saved, so the browser preview was stored as a NON-authoritative price (pricing authority: client fallback). Open it in the estimate tool and save again so the engine prices it before it is sent.',
+      {
+        icon: '\u26A0\uFE0F',
+        link: '/admin/estimates',
+        dedupeKey: `estimate-pricing-fallback:${estimate.id}`,
+        metadata: { estimateId: estimate.id, pricingAuthority: 'CLIENT_FALLBACK', reason },
+      },
+    ).catch((err) => logger.warn(`[pricing-authority] fallback admin notify failed for estimate ${estimate.id}: ${err.message}`));
+  } catch (err) {
+    logger.warn(`[pricing-authority] fallback admin notify setup failed for estimate ${estimate.id}: ${err.message}`);
+  }
+}
+
 // POST /api/admin/estimates — create estimate
 router.post('/', async (req, res, next) => {
   try {
-    const { estimate, reused, memberLinkageWarning } = await createOrReuseAdminEstimate({
+    const { estimate, reused, memberLinkageWarning, pricingFallbackReason } = await createOrReuseAdminEstimate({
       body: req.body,
       technicianId: req.technicianId,
       technician: req.technician,
     });
+    notifyPricingFallbackAfterCommit(estimate, pricingFallbackReason);
     res.status(reused ? 200 : 201).json({
       id: estimate.id,
       token: estimate.token,
@@ -604,7 +632,7 @@ router.put('/:id', async (req, res, next) => {
     // the builder can confirm a server reprice with the operator BEFORE the
     // edit publishes to the customer's live link.
     const dryRun = req.body?.dryRun === true;
-    const { estimate, memberLinkageWarning } = await reviseAdminEstimate({
+    const { estimate, memberLinkageWarning, pricingFallbackReason } = await reviseAdminEstimate({
       estimateId: req.params.id,
       body: req.body,
       technicianId: req.technicianId,
@@ -617,6 +645,7 @@ router.put('/:id', async (req, res, next) => {
       // bedroom re-price waits for — lift the stale-price send guard.
       await require('../services/estimate-clarify-asks').clearEstimateRepricePending(estimate.id)
         .catch((err) => logger.warn(`[estimates] reprice guard clear failed for ${estimate.id}: ${err.message}`));
+      notifyPricingFallbackAfterCommit(estimate, pricingFallbackReason);
     }
     res.json({
       dryRun: dryRun || undefined,
@@ -4171,6 +4200,7 @@ router._internals = {
   assertEstimateSendable,
   sendRequiresServerPricingFor,
   SEND_CLAIM_PRICING_AUTHORITY_SQL,
+  notifyPricingFallbackAfterCommit,
   assertEstimateManagerApprovalResolved,
   leadEstimateAutomationSummary,
   estimateDataHasBlockingLeadAutomation,

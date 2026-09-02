@@ -39,9 +39,15 @@ jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateSent:
 jest.mock('../services/estimate-manual-acceptance', () => ({ markEstimateManuallyAccepted: jest.fn() }));
 jest.mock('../services/admin-estimate-persistence', () => ({
   createOrReuseAdminEstimate: jest.fn(),
+  reviseAdminEstimate: jest.fn(),
   estimateExpiresAt: jest.fn(),
-  estimateViewUrl: jest.fn(),
+  estimateViewUrl: jest.fn(() => 'https://example.test/estimate/tok'),
 }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({})),
+  notifyCustomer: jest.fn(async () => ({})),
+}));
+jest.mock('../services/estimate-clarify-asks', () => ({ clearEstimateRepricePending: jest.fn(async () => ({})) }));
 jest.mock('../routes/estimate-public', () => ({ acceptanceServiceLists: jest.fn(), bookingServiceFor: jest.fn() }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => false) }));
@@ -60,11 +66,27 @@ jest.mock('../config/feature-gates', () => {
 });
 
 const logger = require('../services/logger');
+const adminEstimatesRouter = require('../routes/admin-estimates');
 const {
   assertEstimateSendable,
   sendRequiresServerPricingFor,
   SEND_CLAIM_PRICING_AUTHORITY_SQL,
-} = require('../routes/admin-estimates')._internals;
+  notifyPricingFallbackAfterCommit,
+} = adminEstimatesRouter._internals;
+const { createOrReuseAdminEstimate, reviseAdminEstimate } = require('../services/admin-estimate-persistence');
+const { notifyAdmin } = require('../services/notification-service');
+
+function routeHandler(router, path, method) {
+  const layer = router.stack.find((entry) => entry.route?.path === path && entry.route?.methods?.[method]);
+  if (!layer) throw new Error(`Route not found: ${method.toUpperCase()} ${path}`);
+  return layer.route.stack[layer.route.stack.length - 1].handle;
+}
+function makeRes() {
+  const res = {};
+  res.status = jest.fn(() => res);
+  res.json = jest.fn(() => res);
+  return res;
+}
 
 const fallbackDraft = (extra = {}) => ({
   id: 'est-client-fallback-1',
@@ -112,8 +134,8 @@ describe('assertEstimateSendable — engine-authoritative pricing gate', () => {
     expect(caughtBy(fallbackDraft({ pricing_authority: undefined }))).toBeNull();
   });
 
-  it('never re-blocks a row that already went out (follow-ups keep flowing)', () => {
-    expect(caughtBy(fallbackDraft({ status: 'sent', sent_at: '2026-09-01T12:00:00.000Z' }))).toBeNull();
+  it('blocks a delivered row too — a revision of a live link can fall back, and its resend must not deliver it', () => {
+    expect(caughtBy(fallbackDraft({ status: 'sent', sent_at: '2026-09-01T12:00:00.000Z' }))?.code).toBe('CLIENT_FALLBACK_PRICING');
   });
 
   it('exempts an authored proposal — its line items ARE the quote', () => {
@@ -146,11 +168,11 @@ describe('sendRequiresServerPricingFor — the predicate the send CLAIMS re-asse
     expect(sendRequiresServerPricingFor(fallbackDraft({ pricing_authority: 'SERVER' }))).toBe(true);
   });
 
-  it('never applies with the gate off, to a delivered row, or to an authored proposal', () => {
+  it('never applies with the gate off or to an authored proposal; delivered rows are NOT exempt', () => {
     mockGateState.sendRequiresServerPricing = false;
     expect(sendRequiresServerPricingFor(fallbackDraft())).toBe(false);
     mockGateState.sendRequiresServerPricing = true;
-    expect(sendRequiresServerPricingFor(fallbackDraft({ sent_at: '2026-09-01T12:00:00.000Z' }))).toBe(false);
+    expect(sendRequiresServerPricingFor(fallbackDraft({ sent_at: '2026-09-01T12:00:00.000Z' }))).toBe(true);
     expect(sendRequiresServerPricingFor(fallbackDraft({
       estimate_data: { proposal: { enabled: true, buildings: [] } },
     }))).toBe(false);
@@ -161,5 +183,53 @@ describe('sendRequiresServerPricingFor — the predicate the send CLAIMS re-asse
 
   it('the claim predicate excludes only CLIENT_FALLBACK rows, case-insensitively, and tolerates NULL', () => {
     expect(SEND_CLAIM_PRICING_AUTHORITY_SQL).toBe("COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'");
+  });
+});
+
+describe('post-commit pricing-fallback bell (SEC-002 / pre-push codex P1)', () => {
+  const req = (body = {}, params = {}) => ({ body, params, technicianId: 'tech-1', technician: { id: 'tech-1' }, techRole: 'admin' });
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  it('rings once per estimate after a committed create whose recompute failed, keyed for dedupe', async () => {
+    createOrReuseAdminEstimate.mockResolvedValue({
+      estimate: { id: 'est-cf-9', token: 'tok-cf-9', customer_name: 'Pat Tester', pricing_authority: 'CLIENT_FALLBACK' },
+      reused: false, memberLinkageWarning: null, pricingFallbackReason: 'ENGINE_ERROR',
+    });
+    const res = makeRes();
+    await routeHandler(adminEstimatesRouter, '/', 'post')(req({}), res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(201);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate',
+      expect.stringContaining('Estimate saved without engine pricing'),
+      expect.stringContaining('client fallback'),
+      expect.objectContaining({ dedupeKey: 'estimate-pricing-fallback:est-cf-9', metadata: expect.objectContaining({ estimateId: 'est-cf-9', reason: 'ENGINE_ERROR' }) }),
+    );
+  });
+
+  it('stays silent for a server-priced create and for a NO_INPUTS fallback', async () => {
+    createOrReuseAdminEstimate.mockResolvedValue({ estimate: { id: 'est-ok', token: 't' }, reused: false, memberLinkageWarning: null, pricingFallbackReason: null });
+    await routeHandler(adminEstimatesRouter, '/', 'post')(req({}), makeRes(), jest.fn());
+    createOrReuseAdminEstimate.mockResolvedValue({ estimate: { id: 'est-legacy', token: 't' }, reused: false, memberLinkageWarning: null, pricingFallbackReason: 'NO_INPUTS' });
+    await routeHandler(adminEstimatesRouter, '/', 'post')(req({}), makeRes(), jest.fn());
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('a dryRun revise preflight never rings; the committed revise does', async () => {
+    const revised = { id: 'est-cf-7', token: 'tok-cf-7', status: 'draft', customer_name: 'Pat Tester' };
+    reviseAdminEstimate.mockResolvedValue({ estimate: revised, dryRun: true, memberLinkageWarning: null, pricingFallbackReason: 'ENGINE_ERROR' });
+    await routeHandler(adminEstimatesRouter, '/:id', 'put')(req({ dryRun: true }, { id: 'est-cf-7' }), makeRes(), jest.fn());
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    reviseAdminEstimate.mockResolvedValue({ estimate: revised, memberLinkageWarning: null, pricingFallbackReason: 'ENGINE_ERROR' });
+    await routeHandler(adminEstimatesRouter, '/:id', 'put')(req({}, { id: 'est-cf-7' }), makeRes(), jest.fn());
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe('estimate-pricing-fallback:est-cf-7');
+  });
+
+  it('the helper ignores rows without an id and reasons other than ENGINE_ERROR', () => {
+    notifyPricingFallbackAfterCommit({ id: null }, 'ENGINE_ERROR');
+    notifyPricingFallbackAfterCommit({ id: 'x' }, 'NO_INPUTS');
+    notifyPricingFallbackAfterCommit({ id: 'x' }, null);
+    expect(notifyAdmin).not.toHaveBeenCalled();
   });
 });

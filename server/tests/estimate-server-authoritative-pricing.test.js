@@ -243,16 +243,32 @@ describe('resolveServerAuthoritativePricing', () => {
     expect(out.audit.pricing_authority).toBe('CLIENT_FALLBACK');
     expect(out.totals).toEqual({ monthlyTotal: 114.67, annualTotal: 1376, onetimeTotal: 0 });
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('CLIENT_FALLBACK reason=ENGINE_ERROR'));
-    // The exception surfaces as an admin bell at save time (SEC-002): the
-    // send gate refuses the row until it is re-saved through the engine.
+    // The failure is REPORTED, not belled, here (SEC-002 / pre-push codex
+    // P1): the route rings after the save's transaction committed, never
+    // from a dryRun preflight.
+    expect(out.fallbackReason).toBe('ENGINE_ERROR');
     const { notifyAdmin } = require('../services/notification-service');
-    expect(notifyAdmin).toHaveBeenCalledWith(
-      'estimate',
-      'Estimate saved without engine pricing',
-      expect.stringContaining('engine down'),
-      expect.objectContaining({ metadata: expect.objectContaining({ pricingAuthority: 'CLIENT_FALLBACK', reason: 'ENGINE_ERROR' }) }),
-    );
+    expect(notifyAdmin).not.toHaveBeenCalled();
     errSpy.mockRestore();
+  });
+
+  it('reports NO_INPUTS as the fallback reason and null for a server reprice', async () => {
+    const noInputs = await resolveServerAuthoritativePricing({
+      estimateData: {},
+      clientPreview: { monthlyTotal: 10, annualTotal: 120, onetimeTotal: 0 },
+      quoteRequired: false,
+      now: NOW,
+      recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }),
+    });
+    expect(noInputs.fallbackReason).toBe('NO_INPUTS');
+    const server = await resolveServerAuthoritativePricing({
+      estimateData: {},
+      clientPreview: { monthlyTotal: 10, annualTotal: 120, onetimeTotal: 0 },
+      quoteRequired: false,
+      now: NOW,
+      recompute: async () => ({ recomputed: true, serverResult: { recurring: {} }, serverTotals: { monthlyTotal: 10, annualTotal: 120, onetimeTotal: 0 } }),
+    });
+    expect(server.fallbackReason).toBeNull();
   });
 });
 

@@ -1,4 +1,16 @@
 jest.mock('../models/db', () => jest.fn());
+// Gate values are fixed at module load; this passthrough flips the one gate
+// under test (send-requires-server-pricing revise refusal) per case.
+const mockGateState = { sendRequiresServerPricing: false };
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return {
+    ...actual,
+    isEnabled: (gate) => (gate === 'sendRequiresServerPricing'
+      ? mockGateState.sendRequiresServerPricing
+      : actual.isEnabled(gate)),
+  };
+});
 
 const {
   estimateReviseBlock,
@@ -797,5 +809,51 @@ describe('reviseAdminEstimate', () => {
       now: fixedNow,
     })).rejects.toMatchObject({ statusCode: 409 });
     expect(updates).toHaveLength(0);
+  });
+});
+
+describe('reviseAdminEstimate — engine-authoritative pricing on a LIVE link (SEC-002 / pre-push codex P0)', () => {
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  beforeEach(() => {
+    clearAllEstimatePricingCache();
+    mockGateState.sendRequiresServerPricing = true;
+  });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('a delivered estimate whose recompute fell back is refused (409) with nothing written while the gate is on', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/already with the customer/i) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('the dryRun preflight surfaces the same refusal', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow, dryRun: true,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('with the gate off the revision still saves fail-open and reports the fallback reason for the post-commit bell', async () => {
+    mockGateState.sendRequiresServerPricing = false;
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    const out = await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].pricing_authority).toBe('CLIENT_FALLBACK');
+    expect(out.pricingFallbackReason).toBe('ENGINE_ERROR');
+  });
+
+  test('a server-priced revision of a delivered estimate is unaffected by the gate', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    const out = await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', now: fixedNow,
+      recompute: async () => ({ recomputed: true, source: 'engineInputs', serverResult: { recurring: { services: [], monthlyTotal: 60, annualTotal: 720 }, oneTime: { items: [] } }, serverTotals: { monthlyTotal: 60, annualTotal: 720, onetimeTotal: 0 } }),
+    });
+    expect(updates).toHaveLength(1);
+    expect(out.pricingFallbackReason).toBeNull();
   });
 });

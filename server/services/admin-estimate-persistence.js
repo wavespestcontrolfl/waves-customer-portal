@@ -1235,7 +1235,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   // Quote-required / manager-approval estimates carry no billable price yet —
   // leave them exactly as today (authority null, no recompute).
   if (quoteRequired) {
-    return { totals: clientPreview, audit };
+    return { totals: clientPreview, audit, fallbackReason: null };
   }
 
   let result;
@@ -1290,34 +1290,22 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
     if (drift.hasDrift) {
       logger.warn(`[pricing-authority] server recompute corrected client preview annualDelta=${drift.annualDelta} pctAnnual=${drift.pctAnnual}`);
     }
-    return { totals: result.serverTotals, audit };
+    return { totals: result.serverTotals, audit, fallbackReason: null };
   }
 
   audit.pricing_authority = 'CLIENT_FALLBACK';
   if (result.reason === 'ENGINE_ERROR') {
     // Deploy-bug signal: a billed price that came from a broken engine.
     logger.error(`[pricing-authority] CLIENT_FALLBACK reason=ENGINE_ERROR — persisted client preview as NON-authoritative price${result.error ? ` err=${result.error.message}` : ''}`);
-    // The exception surfaces (validation audit SEC-002, 2026-09-02): the
-    // send gate refuses this row until it is re-saved through the engine,
-    // so the operator hears about it at save time, not at send time.
-    // Best-effort — the bell never fails the save.
-    try {
-      const NotificationService = require('./notification-service');
-      void NotificationService.notifyAdmin(
-        'estimate',
-        'Estimate saved without engine pricing',
-        `The pricing engine failed while an estimate was saved (${result.error?.message || 'unknown error'}), so the browser preview (${Number(clientPreview.annualTotal || 0).toFixed(2)}/yr) was stored as a NON-authoritative price. Open it in the estimate tool and save again so the engine prices it before it is sent.`,
-        { icon: '\u26A0\uFE0F', link: '/admin/estimates', metadata: { pricingAuthority: 'CLIENT_FALLBACK', reason: 'ENGINE_ERROR' } },
-      ).catch((err) => logger.warn(`[pricing-authority] fallback admin notify failed: ${err.message}`));
-    } catch (err) {
-      logger.warn(`[pricing-authority] fallback admin notify setup failed: ${err.message}`);
-    }
   } else {
     // No replayable input (legacy/transitional estimate). Findable via the
     // pricing_authority column; warn rather than page.
     logger.warn(`[pricing-authority] CLIENT_FALLBACK reason=${result.reason} — no replayable engine input; persisted client preview`);
   }
-  return { totals: clientPreview, audit };
+  // fallbackReason rides OUTSIDE audit (audit spreads into the row): the
+  // route rings the admin bell for ENGINE_ERROR only after the save's
+  // transaction committed, never from a dryRun preflight (pre-push codex P1).
+  return { totals: clientPreview, audit, fallbackReason: result.reason || 'UNKNOWN' };
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1707,6 +1695,7 @@ async function resolveEstimateWritePayload({
   technician,
   now = () => new Date(),
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
+  pricingOut = null, // optional side-channel: { fallbackReason } for post-commit alerts
 }) {
   const {
     showOneTimeOption,
@@ -1803,6 +1792,7 @@ async function resolveEstimateWritePayload({
     setupWaiverPriorQualifyingServices,
     recurringCustomer,
   });
+  if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
   const totals = pricing.totals;
   applyResolvedTotalsToEstimateData(trustedEstimateData, totals, quoteRequired);
   // The combined-tier reprice only landed in the persisted/charged totals when
@@ -2016,6 +2006,7 @@ async function createOrReuseAdminEstimate({
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
 }) {
   const linkedLeadId = normalizeLinkedLeadId(body.leadId);
+  const pricingOut = {};
   const writeFields = await resolveEstimateWritePayload({
     database,
     body,
@@ -2023,6 +2014,7 @@ async function createOrReuseAdminEstimate({
     technician,
     now,
     recompute,
+    pricingOut,
   });
   const expiresAt = estimateExpiresAt(now);
   const memberLinkageWarning = await detectUnlinkedMemberAddress(database, body);
@@ -2076,6 +2068,7 @@ async function createOrReuseAdminEstimate({
             estimate: updated,
             reused: true,
             memberLinkageWarning,
+            pricingFallbackReason: pricingOut.fallbackReason || null,
           };
         }
 
@@ -2113,6 +2106,7 @@ async function createOrReuseAdminEstimate({
       estimate: created,
       reused: false,
       memberLinkageWarning,
+      pricingFallbackReason: pricingOut.fallbackReason || null,
     };
   });
 }
@@ -2314,6 +2308,7 @@ async function reviseAdminEstimate({
     customerId: body.customerId || estimate.customer_id || null,
     address: body.address,
   });
+  const pricingOut = {};
   const writeFields = await resolveEstimateWritePayload({
     database,
     body: {
@@ -2330,7 +2325,23 @@ async function reviseAdminEstimate({
     technician,
     now,
     recompute,
+    pricingOut,
   });
+  // Engine-authoritative pricing on a LIVE link (validation audit SEC-002,
+  // pre-push codex P0): a delivered estimate's bearer link renders whatever
+  // is stored, so a revision whose recompute fell back to the browser
+  // preview is not persisted while GATE_SEND_REQUIRES_SERVER_PRICING is on
+  // — nothing is saved (dryRun preflights surface the same refusal), the
+  // operator fixes the inputs and retries. Drafts keep the fail-open save;
+  // the send gate holds them.
+  if ((estimate.sent_at || estimate.viewed_at)
+    && String(writeFields.pricing_authority || '').toUpperCase() === 'CLIENT_FALLBACK'
+    && require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) {
+    throw errorWithStatus(
+      'The pricing engine could not verify this revision and the estimate is already with the customer — nothing was saved. Fix the inputs and try again.',
+      409,
+    );
+  }
 
   // A revision that changes or introduces a group id — OR changes the
   // estimate's contact identity while grouped (codex #3244 r5: a lead-only
@@ -2511,7 +2522,7 @@ async function reviseAdminEstimate({
         }
       }
     }
-    return { estimate: { ...estimate, ...writeFields }, dryRun: true, memberLinkageWarning };
+    return { estimate: { ...estimate, ...writeFields }, dryRun: true, memberLinkageWarning, pricingFallbackReason: pricingOut.fallbackReason || null };
   }
 
   // Atomic revise guard: the editability check above ran on a pre-read, so
@@ -2634,7 +2645,7 @@ async function reviseAdminEstimate({
   try {
     require('./estimate-slot-availability').invalidateEstimate(estimate.id);
   } catch { /* best-effort */ }
-  return { estimate: updated, memberLinkageWarning };
+  return { estimate: updated, memberLinkageWarning, pricingFallbackReason: pricingOut.fallbackReason || null };
 }
 
 module.exports = {
