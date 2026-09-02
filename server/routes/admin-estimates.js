@@ -3536,7 +3536,31 @@ router.put('/:id/proposal', async (req, res, next) => {
     // pre-read; scope the UPDATE to the same editable conditions so a customer
     // accept or another admin's Mark accepted landing between SELECT and UPDATE
     // can't overwrite the locked accepted price/proposal. 409 when it loses.
-    const updateQuery = db('estimates')
+    // The write rides ONE transaction under the group's send advisory lock
+    // (uncapped codex P0 r31): a grouped auto-send validates its published
+    // siblings under that lock and releases it before the provider handoff,
+    // so an unlocked proposal rewrite of a sibling could slip between the
+    // verdict and the handoff and put authored pricing on the automated
+    // link. Same lock order as every send/schedule path (group, then row);
+    // a group with a member mid-send is refused for a retry.
+    const updatedCount = await db.transaction(async (trx) => {
+    if (estimate.estimate_group_id) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-send', String(estimate.estimate_group_id)],
+      );
+      const sendingMember = await trx('estimates')
+        .where({ estimate_group_id: estimate.estimate_group_id, status: 'sending' })
+        .whereNot({ id: estimate.id })
+        .whereNull('archived_at')
+        .first('id');
+      if (sendingMember) {
+        const err = new Error('This multi-property group is being sent right now — wait a moment and retry.');
+        err.statusCode = 409;
+        throw err;
+      }
+    }
+    const updateQuery = trx('estimates')
       .where({ id: estimate.id })
       .whereNull('price_locked_at')
       // An ARCHIVED row is not editable (codex P1, PR #3304): a linkage
@@ -3561,7 +3585,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     // and this UPDATE must not persist a term no billing path enforces
     // (codex #3297 r4c).
     if (savingPaymentTerm) updateQuery.where({ bill_by_invoice: true });
-    const updatedCount = await updateQuery.update({
+    return updateQuery.update({
       estimate_data: JSON.stringify(nextData),
       category: 'COMMERCIAL',
       // Authored totals are NOT engine output: the engine stamp a generated
@@ -3575,6 +3599,7 @@ router.put('/:id/proposal', async (req, res, next) => {
       onetime_total: totals.oneTime,
       updated_at: db.fn.now(),
     });
+    });
     if (!updatedCount) {
       return res.status(409).json({
         error: savingPaymentTerm
@@ -3585,7 +3610,10 @@ router.put('/:id/proposal', async (req, res, next) => {
 
     logger.info(`[estimates] Saved commercial proposal for estimate ${estimate.id} (${normalized.buildings.length} buildings, first-year ${totals.firstYearTotal})`);
     res.json({ success: true, proposal: normalized, totals });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 // GET /api/admin/estimates/:id/proposal.pdf — branded commercial proposal
