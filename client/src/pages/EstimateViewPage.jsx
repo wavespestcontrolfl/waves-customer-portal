@@ -2641,7 +2641,12 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
   const [methodType, setMethodType] = useState(intent?.capturedMethodType || 'card');
   const bank = methodType === 'us_bank_account';
   const bankOffered = Array.isArray(intent?.paymentMethodTypes) && intent.paymentMethodTypes.includes('us_bank_account');
-  useEffect(() => { setAgreed(false); }, [methodType]);
+  // Synchronous mirrors for the save gesture (pre-push Codex P1): a tender
+  // switch clears consent inside the change handler itself, and the
+  // handler reads the live tick through the ref.
+  const methodTypeRef = useRef(methodType);
+  const agreedRef = useRef(false);
+  const setAgreedSync = (v) => { agreedRef.current = v; setAgreed(v); };
 
   useEffect(() => {
     let cancelled = false;
@@ -2657,7 +2662,15 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
       const paymentElement = elements.create('payment');
       paymentElement.mount(mountRef.current);
       paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
-      paymentElement.on('change', (event) => { if (!cancelled) setMethodType(event?.value?.type || 'card'); });
+      paymentElement.on('change', (event) => {
+        if (cancelled) return;
+        const next = event?.value?.type || 'card';
+        if (next !== methodTypeRef.current) {
+          methodTypeRef.current = next;
+          setAgreedSync(false);
+          setMethodType(next);
+        }
+      });
       stripeRef.current = stripe;
       elementsRef.current = elements;
       paymentElementRef.current = paymentElement;
@@ -2668,7 +2681,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
   }, [intent]);
 
   const handleSave = useCallback(async () => {
-    if (!stripeRef.current || !elementsRef.current || !agreed) return;
+    if (!stripeRef.current || !elementsRef.current || !agreedRef.current) return;
     setSubmitting(true);
     setError(null);
     // Lock the Payment Element for the whole confirm (Codex #3723 r2 P1):
@@ -2720,7 +2733,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
       setError(bank ? 'We could not save that bank account. Try again or use a card.' : 'We could not save that card. Try again.');
       setSubmitting(false);
     }
-  }, [intent, onSuccess, bank, agreed]);
+  }, [intent, onSuccess, bank]);
 
   return (
     <div
@@ -2756,7 +2769,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
           <input
             type="checkbox"
             checked={agreed}
-            onChange={(e) => setAgreed(e.target.checked)}
+            onChange={(e) => setAgreedSync(e.target.checked)}
             disabled={submitting}
             style={{ marginTop: 3, width: 16, height: 16, flex: 'none' }}
           />

@@ -53,10 +53,17 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   const [methodType, setMethodType] = useState(intent?.capturedMethodType || 'card');
   const bank = methodType === 'us_bank_account';
   const bankOffered = Array.isArray(intent?.paymentMethodTypes) && intent.paymentMethodTypes.includes('us_bank_account');
+  // Refs mirror the two values the confirm gesture must judge SYNCHRONOUSLY
+  // (pre-push Codex P1): a tender switch clears consent inside the change
+  // handler itself — never only in a post-render effect — so a click landing
+  // right after the switch cannot confirm under a stale tick.
+  const methodTypeRef = useRef(methodType);
+  const agreedRef = useRef(false);
+  const setAgreedSync = (v) => { agreedRef.current = v; setAgreed(v); };
   // The checkbox assents to the RENDERED authorization — if the variant
-  // changes (per-application Auto Pay ↔ immediate annual prepay charge, or
-  // card ↔ bank), the prior check must not carry over (Codex r5 P1).
-  useEffect(() => { setAgreed(false); }, [prepay, methodType]);
+  // changes (per-application Auto Pay ↔ immediate annual prepay charge),
+  // the prior check must not carry over (Codex r5 P1).
+  useEffect(() => { agreedRef.current = false; setAgreed(false); }, [prepay]);
   const [termsOpen, setTermsOpen] = useState(false);
   const [error, setError] = useState(null);
   // Stripe.js failed to load/mount: reported upward so the parent can drop
@@ -107,7 +114,15 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       const paymentElement = elements.create('payment');
       paymentElement.mount(mountRef.current);
       paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
-      paymentElement.on('change', (event) => { if (!cancelled) setMethodType(event?.value?.type || 'card'); });
+      paymentElement.on('change', (event) => {
+        if (cancelled) return;
+        const next = event?.value?.type || 'card';
+        if (next !== methodTypeRef.current) {
+          methodTypeRef.current = next;
+          setAgreedSync(false);
+          setMethodType(next);
+        }
+      });
       stripeRef.current = stripe;
       elementsRef.current = elements;
       paymentElementRef.current = paymentElement;
@@ -135,7 +150,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       // The consent must still be ticked for the tender on screen at the
       // moment of confirm — a tender switch re-arms it (see the effect
       // above), and this closure reads the live value.
-      if (!agreed) {
+      if (!agreedRef.current) {
         return { ok: false, error: 'Please check the authorization box to continue.' };
       }
       setError(null);
@@ -206,7 +221,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         <input
           type="checkbox"
           checked={agreed}
-          onChange={(e) => setAgreed(e.target.checked)}
+          onChange={(e) => setAgreedSync(e.target.checked)}
           // Locked while confirmSetup is awaiting (Codex #2681 r3 P1): the
           // in-flight handler proceeds to /accept on the EARLIER click, so an
           // uncheck landing mid-await would record consent the checkbox no
