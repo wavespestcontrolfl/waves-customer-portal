@@ -342,13 +342,15 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
   const { findGroupSiblingBlockingSend } = adminEstimatesRouter._internals;
   const anchor = { id: 'est-anchor', estimate_group_id: 'grp-1', pricing_authority: 'SERVER', estimate_data: '{}' };
   function fakeDatabase(rows) {
-    const calls = { wheres: [], whereNots: [], whereNulls: [], whereIns: [], forUpdate: false };
+    const calls = { wheres: [], whereNots: [], whereNulls: [], whereIns: [], orWhereIns: [], forUpdate: false };
     const builder = {
       forUpdate: () => { calls.forUpdate = true; return builder; },
-      where: (c) => { calls.wheres.push(c); return builder; },
+      where: (c) => { if (typeof c === 'function') c(builder); else calls.wheres.push(c); return builder; },
+      orWhere: (c) => { if (typeof c === 'function') c(builder); return builder; },
       whereNot: (c) => { calls.whereNots.push(c); return builder; },
       whereNull: (c) => { calls.whereNulls.push(c); return builder; },
       whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return builder; },
+      orWhereIn: (col, vals) => { calls.orWhereIns.push([col, vals]); return builder; },
       select: async () => rows,
     };
     const database = jest.fn(() => builder);
@@ -369,10 +371,15 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
     expect(await findGroupSiblingBlockingSend(anchor, { database })).toBeNull();
     expect(calls.wheres).toEqual([{ estimate_group_id: 'grp-1' }]);
     expect(calls.whereNots).toEqual([{ id: 'est-anchor' }]);
-    expect(calls.whereNulls).toEqual(['archived_at', 'price_locked_at']);
-    // Published (sent/viewed) siblings are judged too — the group link
-    // renders their price (GH codex P1 r6); accepted/declined stay out.
-    expect(calls.whereIns).toEqual([['status', ['draft', 'scheduled', 'send_failed', 'sent', 'viewed']]]);
+    expect(calls.whereNulls).toEqual(expect.arrayContaining(['archived_at', 'price_locked_at']));
+    // The PUBLISHABLE set this send would publish, OR the shared link-visible
+    // scope (live unexpired + terminal accepted/declined) the customer's link
+    // already renders (GH codex P1 r6; uncapped P1 r19).
+    expect(calls.whereIns).toEqual(expect.arrayContaining([
+      ['status', ['draft', 'scheduled', 'send_failed']],
+      ['status', ['sending', 'sent', 'viewed']],
+    ]));
+    expect(calls.orWhereIns).toEqual([['status', ['accepted', 'declined']]]);
     expect(calls.forUpdate).toBe(false);
   });
 
@@ -437,11 +444,13 @@ describe('pricing-authority-gate — the one verdict shared by sends, follow-ups
 describe('pricing-authority-gate — group-aware verdict (GH codex P1 r14)', () => {
   const gate = require('../services/pricing-authority-gate');
   function fakeDb(siblings, { throwOnRead = false } = {}) {
-    const calls = { whereIns: [], whereFns: 0 };
+    const calls = { whereIns: [], orWhereIns: [], whereFns: 0 };
     const chain = {
-      where: (c) => { if (typeof c === 'function') { calls.whereFns += 1; c({ whereNull: () => ({ orWhere: () => chain }) }); } return chain; },
+      where: (c) => { if (typeof c === 'function') { calls.whereFns += 1; c(chain); } return chain; },
+      orWhere: (c) => { if (typeof c === 'function') c(chain); return chain; },
       whereNot: () => chain, whereNull: () => chain,
       whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return chain; },
+      orWhereIn: (col, vals) => { calls.orWhereIns.push([col, vals]); return chain; },
       select: async () => { if (throwOnRead) throw new Error('db down'); return siblings; },
     };
     const database = jest.fn(() => chain);
@@ -453,10 +462,12 @@ describe('pricing-authority-gate — group-aware verdict (GH codex P1 r14)', () 
     mockGateState.sendRequiresServerPricing = true;
     const bad = fakeDb([{ id: 'est-b', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' }]);
     expect(await gate.estimateDeliverableUnderGate(bad.database, anchor)).toBe(false);
-    // The CUSTOMER-VIEWABLE set (sending/sent/viewed, unexpired) — not the
-    // send claims' publishable set: an unsent draft never blocks a nudge.
+    // Exactly what the link renders (isEstimateCustomerViewable): live rows
+    // while unexpired, accepted/declined always — never the send claims'
+    // publishable drafts, so an unsent draft never blocks a nudge.
     expect(bad.calls.whereIns).toEqual([['status', ['sending', 'sent', 'viewed']]]);
-    expect(bad.calls.whereFns).toBe(1);
+    expect(bad.calls.orWhereIns).toEqual([['status', ['accepted', 'declined']]]);
+    expect(bad.calls.whereFns).toBeGreaterThanOrEqual(2);
     const good = fakeDb([
       { id: 'est-b', pricing_authority: 'SERVER', estimate_data: '{}' },
       { id: 'est-c', pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' } } }) },

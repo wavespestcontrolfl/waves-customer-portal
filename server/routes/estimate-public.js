@@ -15848,6 +15848,18 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     const DEDUPE_OPEN = (b) => b.whereNull('extension_requested_at')
       .orWhere('extension_requested_at', '<', db.raw("NOW() - interval '24 hours'"));
 
+    // Engine-authoritative pricing gate (#3750; uncapped codex P0 r19): a
+    // row (or group link) the verdict refuses is INELIGIBLE here — judged
+    // before the auto-grant claim so nothing is burned, and answered with the
+    // same generic 404 as every other ineligible/unknown token (no
+    // row-existence oracle; docs/public-route-contracts.md). The admin
+    // extension keeps extendEstimate's explicit 409.
+    {
+      const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
+      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+        return res.status(404).json({ error: 'Estimate not found' });
+      }
+    }
     // Step 1 — try to claim THE lifetime auto-grant. One conditional UPDATE
     // checks the 24h dedupe AND the unburned cap AND records BOTH stamps, so
     // the burn is atomic with the claim: concurrent POSTs can't double-grant,

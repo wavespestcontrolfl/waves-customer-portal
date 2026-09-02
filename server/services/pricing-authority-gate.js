@@ -44,18 +44,33 @@ function rowPassesGatedSendAuthority(row = {}) {
 // fallback draft must not block an anchor's follow-up, and a stuck fallback
 // 'sending' sibling must not slip through). A sibling read that fails
 // answers "not deliverable": fail closed, never a nudge on a guess.
-const LINK_VISIBLE_SIBLING_STATUSES = ['sending', 'sent', 'viewed'];
+// Mirrors estimate-public isEstimateCustomerViewable EXACTLY (uncapped codex
+// P1 r19): live rows (sending / sent / viewed) only while unexpired, and the
+// terminal accepted / declined rows ALWAYS — the link keeps rendering them,
+// price included. Every sibling verdict in the repo scopes through this one
+// helper so none can drift from what the customer actually sees.
+const LINK_VISIBLE_LIVE_STATUSES = ['sending', 'sent', 'viewed'];
+const LINK_VISIBLE_TERMINAL_STATUSES = ['accepted', 'declined'];
+function applyLinkVisibleSiblingScope(qb, now = new Date()) {
+  return qb
+    .whereNull('archived_at')
+    .where((visible) => visible
+      .where((live) => live
+        .whereIn('status', LINK_VISIBLE_LIVE_STATUSES)
+        .where((unexpired) => unexpired.whereNull('expires_at').orWhere('expires_at', '>', now)))
+      .orWhereIn('status', LINK_VISIBLE_TERMINAL_STATUSES));
+}
+
 async function groupPassesGatedSendAuthority(database, row = {}, now = new Date()) {
   if (!row?.estimate_group_id) return true;
   let siblings;
   try {
-    siblings = await database('estimates')
-      .where({ estimate_group_id: row.estimate_group_id })
-      .whereNot({ id: row.id })
-      .whereNull('archived_at')
-      .whereIn('status', LINK_VISIBLE_SIBLING_STATUSES)
-      .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now))
-      .select('id', 'pricing_authority', 'estimate_data');
+    siblings = await applyLinkVisibleSiblingScope(
+      database('estimates')
+        .where({ estimate_group_id: row.estimate_group_id })
+        .whereNot({ id: row.id }),
+      now,
+    ).select('id', 'pricing_authority', 'estimate_data');
   } catch {
     return false;
   }
@@ -78,5 +93,7 @@ module.exports = {
   rowPassesGatedSendAuthority,
   groupPassesGatedSendAuthority,
   estimateDeliverableUnderGate,
-  LINK_VISIBLE_SIBLING_STATUSES,
+  applyLinkVisibleSiblingScope,
+  LINK_VISIBLE_LIVE_STATUSES,
+  LINK_VISIBLE_TERMINAL_STATUSES,
 };

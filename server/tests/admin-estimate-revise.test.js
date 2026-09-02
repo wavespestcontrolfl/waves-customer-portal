@@ -1161,10 +1161,13 @@ describe('a LIVE row moving into a group has the destination judged and locked, 
   const liveRow = { id: 'est-live', estimate_group_id: null, sent_at: '2026-07-10T11:59:00Z' };
 
   function fakeTrx(siblings) {
-    const calls = { whereIns: [] };
+    const calls = { whereIns: [], orWhereIns: [] };
     const chain = {
-      where: () => chain, whereNot: () => chain, whereNull: () => chain,
+      where: (c) => { if (typeof c === 'function') c(chain); return chain; },
+      orWhere: (c) => { if (typeof c === 'function') c(chain); return chain; },
+      whereNot: () => chain, whereNull: () => chain,
       whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return chain; },
+      orWhereIn: (col, vals) => { calls.orWhereIns.push([col, vals]); return chain; },
       select: async () => siblings,
     };
     const trx = jest.fn(() => chain);
@@ -1190,7 +1193,9 @@ describe('a LIVE row moving into a group has the destination judged and locked, 
     const { trx, calls } = fakeTrx([fallbackSibling]);
     await expect(assertLiveRowMayJoinGroup(trx, liveRow, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' }))
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/without an engine-verified price/i) });
-    expect(calls.whereIns).toEqual([['status', ['draft', 'scheduled', 'send_failed', 'sent', 'viewed']]]);
+    // The link-visible scope (shared helper): live unexpired + terminal rows.
+    expect(calls.whereIns).toEqual([['status', ['sending', 'sent', 'viewed']]]);
+    expect(calls.orWhereIns).toEqual([['status', ['accepted', 'declined']]]);
     const ok = fakeTrx([
       { id: 'est-a', pricing_authority: 'SERVER', estimate_data: '{}' },
       { id: 'est-b', pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' } } }) },

@@ -244,7 +244,10 @@ quoted).)
 expired, I still want this" from the React estimate page's expired/
 not-found screen. Estimate token format gate (same slug-or-64-hex regex as
 the slots router), generic 404 — unknown token, malformed token, ineligible
-row, and gate-off are indistinguishable — 5 req/hr per-IP limit, dark
+row, gate-off, and (while GATE_SEND_REQUIRES_SERVER_PRICING is on) a row or
+group link that fails the engine-pricing-authority verdict (#3750; judged
+before the auto-grant claim, nothing burned) are indistinguishable — 5
+req/hr per-IP limit, dark
 behind GATE_ESTIMATE_EXTENSION_REQUEST (the rate limiter `skip`s while the
 gate is off so a dark probe sees only generic 404s, never a revealing 429,
 and keys via the shared /64-collapsing `rateLimitKey`). Eligibility

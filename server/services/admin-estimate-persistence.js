@@ -2294,14 +2294,15 @@ function revisionGroupLockIds(row, writeFields) {
 // join itself publishes them (GH codex P1 r10).
 async function assertLiveRowMayJoinGroup(trx, row, writeFields) {
   const { isProposalAuthoredByEditor } = require('./estimate-proposal');
+  const { applyLinkVisibleSiblingScope } = require('./pricing-authority-gate');
   for (const groupId of liveGroupMoveDestinationIds(row, writeFields)) {
-    const siblings = await trx('estimates')
-      .where({ estimate_group_id: groupId })
-      .whereNot({ id: row?.id })
-      .whereNull('archived_at')
-      .whereNull('price_locked_at')
-      .whereIn('status', ['draft', 'scheduled', 'send_failed', 'sent', 'viewed'])
-      .select('id', 'pricing_authority', 'estimate_data');
+    // The siblings the joined link will actually render — the shared
+    // link-visible scope (uncapped codex P1 r19), terminal rows included.
+    const siblings = await applyLinkVisibleSiblingScope(
+      trx('estimates')
+        .where({ estimate_group_id: groupId })
+        .whereNot({ id: row?.id }),
+    ).select('id', 'pricing_authority', 'estimate_data');
     for (const sibling of siblings) {
       if (String(sibling.pricing_authority || '').toUpperCase() === 'SERVER') continue;
       let data = sibling.estimate_data;
