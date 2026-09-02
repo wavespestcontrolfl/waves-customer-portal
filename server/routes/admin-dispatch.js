@@ -4682,13 +4682,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
         'customers.city', 'customers.property_type',
-        // Primary-address mirror for the report identity snapshot (the
-        // frozen report address falls back to these when the visit is
-        // unstamped, exactly like the /:token routes' COALESCE).
-        'customers.address_line1 as cust_address_line1',
-        'customers.address_line2 as cust_address_line2',
-        'customers.state as cust_state',
-        'customers.zip as cust_zip',
         // Report application-conditions (weather) capture at the TREATED
         // parcel: stamped visit coords first, the primary home only for
         // non-divergent stamps (codex round-10 P2).
@@ -7064,9 +7057,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // title, and each applied product's approved report facts are
           // frozen INSIDE the transaction so later customer / schedule /
           // technician / catalog edits cannot rewrite this visit's report.
-          // Product facts come from the catalog rows the product loop below
-          // re-validates; a failed read leaves productFacts undefined so the
-          // renderer keeps its live fallback for this record only.
+          // Customer and technician are re-read HERE against the locked row
+          // (not the handler's pre-transaction join): a rename, move, or
+          // reassignment that committed between the preflight read and this
+          // lock must freeze as it stands at commit, not as it stood when the
+          // tech opened the panel (pre-push codex P1). Product facts come
+          // from the catalog rows the product loop below re-validates; a
+          // failed read leaves productFacts undefined so the renderer keeps
+          // its live fallback for this record only.
+          const snapshotVisitRow = lockedSvcRow || svc;
+          const snapshotCustomerRow = await trx('customers')
+            .where({ id: snapshotVisitRow.customer_id })
+            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+            .catch(() => null);
+          const snapshotTechnicianRow = snapshotVisitRow.technician_id
+            ? await trx('technicians').where({ id: snapshotVisitRow.technician_id }).first('name').catch(() => null)
+            : null;
           let reportProductFactsSnapshot;
           try {
             const snapshotProductIds = [...new Set((products || []).map((p) => p?.productId).filter(Boolean))];
@@ -7083,17 +7089,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             logger.warn(`[completion] report product facts snapshot skipped: ${snapshotErr.message}`);
           }
           const reportIdentitySnapshot = buildReportIdentitySnapshot({
-            visit: lockedSvcRow || svc,
-            customer: {
-              first_name: svc.first_name,
-              last_name: svc.last_name,
-              address_line1: svc.cust_address_line1,
-              address_line2: svc.cust_address_line2,
-              city: svc.city,
-              state: svc.cust_state,
-              zip: svc.cust_zip,
-            },
-            technicianName: svc.tech_name,
+            visit: snapshotVisitRow,
+            customer: snapshotCustomerRow || { first_name: svc.first_name, last_name: svc.last_name, city: svc.city },
+            technicianName: snapshotTechnicianRow ? snapshotTechnicianRow.name : svc.tech_name,
             productFacts: reportProductFactsSnapshot,
           });
           const serviceData = {
