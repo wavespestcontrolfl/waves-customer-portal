@@ -128,7 +128,9 @@ export default function CallTranscriptSync({
     const el = activeRef.current;
     const list = listRef.current;
     if (!el || !list) return;
-    const top = el.offsetTop - list.offsetTop;
+    // The list is position: relative, so the row's offsetTop is already in
+    // the list's coordinate space — no parent offset to subtract.
+    const top = el.offsetTop;
     const bottom = top + el.offsetHeight;
     if (top < list.scrollTop) list.scrollTop = top;
     else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
