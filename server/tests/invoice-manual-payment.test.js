@@ -166,7 +166,9 @@ describe('recordManualPayment — refusal contract', () => {
     ['the live payer resolution now naming a payer', {}, false],
   ])('requireSelfPay is fenced under the invoice lock: %s → 409 and nothing written', async (_label, lockedOver, resolvesSelfPay) => {
     db.mockImplementation(() => recorder({ first: openInvoice() }));
-    rowIsSelfPayDue.mockImplementation(async () => resolvesSelfPay);
+    // First call = the pre-lock read (passes); second = under the lock (the race fence being tested).
+    let resolveCalls = 0;
+    rowIsSelfPayDue.mockImplementation(async () => (resolveCalls++ === 0 ? true : resolvesSelfPay));
     let paymentsInsert = null;
     let customerLock = null;
     let payersLock = null;
@@ -190,6 +192,24 @@ describe('recordManualPayment — refusal contract', () => {
     if (!resolvesSelfPay) expect(rowIsSelfPayDue).toHaveBeenCalledWith('cust-1', expect.objectContaining({ id: 'inv-1' }), expect.objectContaining({ database: expect.any(Function) }));
     expect(paymentsInsert).toBeNull();
     expect(sendReceiptEmail).not.toHaveBeenCalled();
+  });
+
+  test('the Zelle predicates refuse on the PRE-LOCK read before the Stripe session is retired (a bad match never cancels a live checkout)', async () => {
+    StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_live', status: 'requires_payment_method' });
+    // amount moved before the call: 409, no PI retire, no transaction
+    db.mockImplementation(() => recorder({ first: openInvoice({ total: '120.00', stripe_payment_intent_id: 'pi_live' }) }));
+    let err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 11700, requireSelfPay: true }));
+    expect(err.statusCode).toBe(409);
+    expect(err.amountMismatch).toEqual({ expectedCents: 11700, actualCents: 12000 });
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    // payer assigned before the call: same
+    db.mockImplementation(() => recorder({ first: openInvoice({ payer_id: 'payer-1', stripe_payment_intent_id: 'pi_live' }) }));
+    err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 11700, requireSelfPay: true }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/no longer an open self-pay invoice/);
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 
   test('expectedAmountCents must be a positive integer', async () => {

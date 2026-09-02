@@ -145,6 +145,23 @@ async function recordManualPayment(id, {
   // after the transfer is recorded; refuse while money is in flight. Runs
   // pre-lock (Stripe call), same as apply-credit; the trx's collectible
   // guard covers the seam.
+  // Zelle-caller predicates FIRST, on the pre-lock read: a stale or raced
+  // automated match must refuse here, BEFORE the customer's live Stripe
+  // session is retired below — never cancel a valid checkout for a
+  // settlement that then records nothing. The under-lock re-checks below
+  // remain the race fences.
+  if (expectedAmountCents != null) {
+    const actualCents = Math.round(invoiceAmountDue(invoice) * 100);
+    if (actualCents !== expectedAmountCents) {
+      throw refusal(409, `Invoice amount due is $${(actualCents / 100).toFixed(2)}, not the $${(expectedAmountCents / 100).toFixed(2)} being recorded — nothing was recorded`, { amountMismatch: { expectedCents: expectedAmountCents, actualCents } });
+    }
+  }
+  if (requireSelfPay) {
+    const { rowIsSelfPayDue } = require('./open-balance');
+    if (invoice.payer_id || invoice.payer_statement_id || !(await rowIsSelfPayDue(invoice.customer_id, invoice))) {
+      throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');
+    }
+  }
   const triagedPiId = invoice.stripe_payment_intent_id || null;
   const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'recording a manual payment' });
   if (openPi) throw refusal(openPi.status, openPi.error);
