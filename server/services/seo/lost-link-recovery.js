@@ -33,25 +33,31 @@ const NON_OUTREACH_TYPES = new Set(worker.SIGNUP_TYPES);
  * registry's partial unique key), or null — left for the periodic catch-up to
  * link — when the registry has not yet given the row a domain.
  */
+const PATH_STANDING_COLUMNS = ['id', 'superseded_by', 'agent_completable', 'confidence', 'link_type'];
 async function claimableOutreachPath(trx, row, linkType) {
   const registry = require('./link-registry');
-  const cur = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first('id', 'superseded_by', 'agent_completable', 'confidence', 'link_type') : null;
-  // …kept only when it STANDS for the worker (live, agent-completable, positive
-  // confidence — the claim refuses NULL/zero) AND is on the reopened lane: a
-  // signup-lane path under an outreach row would leave path and execution
-  // semantics inconsistent
-  const standing = cur && !cur.superseded_by && cur.agent_completable !== false && Number.isFinite(Number(cur.confidence)) && Number(cur.confidence) > 0;
-  if (standing && cur.link_type === registry.pathLinkTypeFor(linkType)) return {};
+  // A path STANDS for the reopened row when it is live, agent-completable,
+  // of positive confidence (the claim refuses NULL/zero) AND on the reopened
+  // lane: a signup-lane path under an outreach row would leave path and
+  // execution semantics inconsistent
+  const stands = (p) => !!p && !p.superseded_by && p.agent_completable !== false && registry.isStandingConfidence(p.confidence) && p.link_type === registry.pathLinkTypeFor(linkType);
+  const cur = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first(...PATH_STANDING_COLUMNS) : null;
+  if (stands(cur)) return {};
   if (!row.domain_id) return { path_id: null };
   const path = registry.acquisitionPathFromLegacyRow({ link_type: linkType, target_url: row.target_url || null });
-  const active = () => trx('seo_link_acquisition_paths').where({ domain_id: row.domain_id, path_key: path.path_key }).whereNull('superseded_by').first('id');
+  const active = () => trx('seo_link_acquisition_paths').where({ domain_id: row.domain_id, path_key: path.path_key }).whereNull('superseded_by').first(...PATH_STANDING_COLUMNS);
   let existing = await active();
   if (!existing) {
-    const ins = await trx('seo_link_acquisition_paths').insert({ ...path, domain_id: row.domain_id })
-      .onConflict(trx.raw('(domain_id, path_key) WHERE superseded_by IS NULL')).ignore().returning(['id']);
-    existing = (ins && ins[0]) || (await active());
+    await trx('seo_link_acquisition_paths').insert({ ...path, domain_id: row.domain_id })
+      .onConflict(trx.raw('(domain_id, path_key) WHERE superseded_by IS NULL')).ignore();
+    existing = await active();
     if (!existing) throw new Error(`lost-link recovery: lost race creating path ${path.path_key}`);
   }
+  // The find-or-create keys on the lane's derived path identity, so it can
+  // hand back the very path just rejected above (the current one already
+  // carries that key) or another non-standing one: a reopen onto a path no
+  // worker may claim would look queued and never be drafted — refuse it.
+  if (!stands(existing)) return { refuse: `outreach path ${path.path_key} is not claimable (disproven, human-only or off-lane) — not reopened` };
   return { path_id: existing.id };
 }
 const OUTREACH_TYPES = new Set(worker.OUTREACH_TYPES);
@@ -173,6 +179,7 @@ async function queueOne(loss, out, scoreMod) {
         // page (find-or-create, the catch-up's own identity), keeping the
         // current path only when it already stands for a worker.
         const pathPatch = await claimableOutreachPath(trx, exists, reopenType);
+        if (pathPatch.refuse) return { refused: pathPatch.refuse };
         return trx('seo_link_prospects').where({ id: exists.id, status: 'lost' }).update({
           status: 'prospect',
           priority: 'high',
@@ -194,6 +201,11 @@ async function queueOne(loss, out, scoreMod) {
           updated_at: new Date(),
         });
       });
+      if (reopened && reopened.refused) {
+        out.skipped++;
+        out.reasons.push({ domain, reason: reopened.refused });
+        return;
+      }
       if (reopened && reopened.raced) {
         out.skipped++;
         out.reasons.push({ domain, reason: `already on board (concurrent ${reopened.raced.status}${reopened.raced.target_page ? ` for ${targetPathOf(reopened.raced.target_page)}` : ''})` });

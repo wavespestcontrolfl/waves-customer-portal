@@ -193,6 +193,32 @@ test('a placement under a domain the owner parked (Watch) or refused (Reject) is
   expect(claimed.map((r) => r.id).sort()).toEqual(['r-q']); // owner rulings hold at the chokepoint; an un-backfilled row (no path yet) is not leased until the catch-up links it (r4)
 });
 
+test('a placement under a domain still being investigated, or ruled not reproducible, is never leased; `new` stays claimable until the investigator ships (Codex #3720 r7 P1)', async () => {
+  mockStore.seo_link_domains.push({ id: 'dI', agent_state: 'investigating' }, { id: 'dN', agent_state: 'not_reproducible' }, { id: 'dNew', agent_state: 'new' });
+  const live = (id, host) => ({ id, domain_id: 'x', submission_url: `https://${host}/add`, superseded_by: null, link_type: 'directory', confidence: 0.7, revision: 1 });
+  mockStore.seo_link_acquisition_paths.push(live('p-i', 'i.example'), live('p-n', 'n.example'), live('p-new', 'new.example'));
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40 };
+  mockStore.seo_link_prospects.push(
+    { ...base, id: 'r-i', domain_id: 'dI', target_domain: 'i.example', path_id: 'p-i', target_url: 'https://i.example/add' },
+    { ...base, id: 'r-n', domain_id: 'dN', target_domain: 'n.example', path_id: 'p-n', target_url: 'https://n.example/add' },
+    { ...base, id: 'r-new', domain_id: 'dNew', target_domain: 'new.example', path_id: 'p-new', target_url: 'https://new.example/add' },
+  );
+  expect((await worker.claim({ n: 5, type: 'signup' })).map((r) => r.id)).toEqual(['r-new']);
+});
+
+test('a placement whose lane drifted from its path\'s while unleased is re-laned by the claim and not handed to the old lane\'s worker (Codex #3720 r7 P1)', async () => {
+  // the investigator re-laned the path to editorial in place; the directory row never held a lease on that revision
+  const relaned = { id: 'p-x', domain_id: 'd1', submission_url: null, superseded_by: null, link_type: 'editorial', confidence: 0.7, revision: 2 };
+  const stillDir = { id: 'p-y', domain_id: 'd2', submission_url: 'https://y.example/add', superseded_by: null, link_type: 'directory', confidence: 0.7, revision: 1 };
+  mockStore.seo_link_acquisition_paths.push(relaned, stillDir);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, automation_policy: 'submit_free', last_classified_at: new Date('2026-08-01'), priority: 'high', domain_rating: 40, leased_path_revision: null, outreach_status: 'none', outreach_sent_at: null, outreach_send_token: null };
+  const drifted = { ...base, id: 'r-x', target_domain: 'x.example', path_id: 'p-x', target_url: 'https://x.example/add' };
+  const fine = { ...base, id: 'r-y', target_domain: 'y.example', path_id: 'p-y', target_url: 'https://y.example/add', domain_rating: 30 };
+  mockStore.seo_link_prospects.push(drifted, fine);
+  expect((await worker.claim({ n: 5, type: 'signup' })).map((r) => r.id)).toEqual(['r-y']);
+  expect(drifted).toMatchObject({ link_type: 'editorial', target_url: null, automation_policy: null, last_classified_at: null, claimed_at: null }); // re-laned, unclassified, not leased
+});
+
 test('a retired path that was ALSO disproven still reaches settlement — the pre-filter is for active disproven paths only (Codex PR r27 P2)', async () => {
   const retiredDead = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old', superseded_by: 'p-new', link_type: 'directory', confidence: 0 };
   const live = { id: 'p-new', domain_id: 'd1', submission_url: 'https://example.com/new', superseded_by: null, link_type: 'directory', confidence: 0.7 };

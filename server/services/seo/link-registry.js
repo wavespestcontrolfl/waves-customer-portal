@@ -150,6 +150,18 @@ function pathLinkTypeFor(linkType) {
   return CLAIMABLE_LINK_TYPES.has(linkType) ? linkType : 'resource';
 }
 
+/**
+ * STANDING confidence — the ONE predicate every worker-facing check shares
+ * (claim, send valve, release-time reconcile, lost-link relink): a path a
+ * worker may act on has a POSITIVE, finite confidence. NULL (schema-permitted,
+ * never assessed), 0 (disproven) and anything non-numeric are all refused,
+ * fail closed. The SQL twin lives in worker.claim()'s candidate pre-filter.
+ */
+function isStandingConfidence(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0;
+}
+
 /** Submission-URL normalization for path identity: lower host, no fragment, no trailing slash. */
 function normalizeSubmissionUrl(url) {
   const raw = String(url || '').trim();
@@ -506,11 +518,22 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
       // bumps the revision (plan §3.2: confidence is not an input), yet a
       // draft produced on a route just declared gone must not stay
       // sendable — the transition runs for that too.
+      // …and a LANE that drifted from the path's while the row was UNLEASED
+      // (an in-place `link_type` change lands on the path without touching
+      // its placements, and an unleased row carries no revision stamp to
+      // compare) is reconciled here regardless of the stamp: the placement
+      // is claimed by ITS lane, so a directory row on a path that is now
+      // editorial would hand the signup runner an outreach route.
       const leasedRev = r.leased_path_revision == null ? null : Number(r.leased_path_revision);
-      if (leasedRev == null) continue; // not released from a lease on this path — nothing to reconcile
-      const revised = cur.revision != null && Number(cur.revision) > leasedRev;
-      const disproven = cur.confidence != null && !(Number(cur.confidence) > 0);
-      if (!revised && !disproven) continue;
+      const pathLane = cur.link_type && CLAIMABLE_LINK_TYPES.has(cur.link_type) ? cur.link_type : null;
+      const laneDrift = !!pathLane && pathLane !== r.link_type;
+      if (leasedRev == null && !laneDrift) continue; // not released from a lease on this path, lane intact — nothing to reconcile
+      const revised = leasedRev != null && cur.revision != null && Number(cur.revision) > leasedRev;
+      // a NULL confidence (unassessed) counts as a disproof exactly as the
+      // claim and the send valve refuse it — a draft on such a path must not
+      // stay sendable until a later positive confidence lets it through
+      const disproven = leasedRev != null && !isStandingConfidence(cur.confidence);
+      if (!revised && !disproven && !laneDrift) continue;
       moved += await moveRows([r], cur, { syncUrl: true }); // the path itself changed: its URL (even null) is the execution truth
       continue;
     }
@@ -525,7 +548,7 @@ module.exports = {
   ATTEMPT_PROVIDERS, ATTEMPT_ACTIONS, ATTEMPT_OUTCOMES, AUTHORITY_DIMENSIONS, AUTHORITY_LEVELS,
   INTAKE_ITEM_STATES, INTAKE_DROP_REASONS, normalizeRawUrl, intakeItemKey,
   NEVER_TARGET_HOSTS, isNeverTargetHost,
-  mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, normalizeSubmissionUrl, pathKey,
+  mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, isStandingConfidence, normalizeSubmissionUrl, pathKey,
   acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain,
   settleRetiredPlacements,
 };

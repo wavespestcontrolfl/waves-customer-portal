@@ -139,10 +139,10 @@ describe('sendOutreach', () => {
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
       chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: 'path-ok' } }),    // [txn] the path it will send on…                // [txn] dailySendCount under the lock
+      chain({ first: { path_id: 'path-ok', leased_path_revision: 1 } }),    // [txn] the path it will send on…                // [txn] dailySendCount under the lock
       chain({ returning: [draftedProspect()] }),   // [txn] CAS claim → returns the locked row
       chain({ returning: [finalRow] }),            // finalize → sent (token-gated)
-    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true } })] }); // …is live and standing
+    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] }); // …is live and standing
 
     const res = await Outreach.sendOutreach({ prospectId: 'p1', approvedBy: 'Adam' });
     expect(res.ok).toBe(true);
@@ -165,10 +165,10 @@ describe('sendOutreach', () => {
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
       chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: 'path-ok' } }),    // [txn] the path it will send on…
+      chain({ first: { path_id: 'path-ok', leased_path_revision: 1 } }),    // [txn] the path it will send on…
       chain({ returning: [draftedProspect()] }), // CAS claim
       chain({ returning: [] }),                  // finalize matched 0 rows
-    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true } })] });
+    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
     expect(res.ok).toBe(false);
     expect(res.code).toBe('finalize_failed');
@@ -204,9 +204,9 @@ describe('sendOutreach', () => {
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
       chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: 'path-ok' } }),    // [txn] the path it will send on…
+      chain({ first: { path_id: 'path-ok', leased_path_revision: 1 } }),    // [txn] the path it will send on…
       chain({ returning: [] }), // another click already flipped drafted→sending
-    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true } })] });
+    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
     expect(res.code).toBe('already_sent');
     expect(gmail.sendMessage).not.toHaveBeenCalled();
@@ -220,10 +220,10 @@ describe('sendOutreach', () => {
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
       chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: 'path-ok' } }),    // [txn] the path it will send on…
+      chain({ first: { path_id: 'path-ok', leased_path_revision: 1 } }),    // [txn] the path it will send on…
       chain({ returning: [draftedProspect({ outreach_body: '' })] }), // but the claimed row is incomplete
       release,                                                        // release our claim
-    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true } })] });
+    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
     expect(res.code).toBe('incomplete_draft');
     expect(gmail.sendMessage).not.toHaveBeenCalled();
@@ -249,10 +249,10 @@ describe('sendOutreach', () => {
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
       chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: 'path-ok' } }),    // [txn] the path it will send on…               // [txn] count
+      chain({ first: { path_id: 'path-ok', leased_path_revision: 1 } }),    // [txn] the path it will send on…               // [txn] count
       chain({ returning: [draftedProspect()] }),  // [txn] CAS claims → returns row
       errMark,                                     // mark sending→send_error (token-gated)
-    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true } })] });
+    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
     expect(res.code).toBe('send_failed');
     expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
@@ -338,6 +338,16 @@ describe('sendOutreach', () => {
       seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
       chain({ first: { c: '0' } }), chain({ result: [] }), chain({ first: { path_id: 'path-unassessed' } })],
       seo_link_acquisition_paths: [chain({ first: { id: 'path-unassessed', superseded_by: null, confidence: null, agent_completable: true } })],
+    });
+    expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test('a draft carrying NO revision stamp is not sent → path_moved: the stamp is required, never skipped (Codex #3720 r7 P1)', async () => {
+    isEnabled.mockReturnValue(true);
+    setDbQueues({
+      seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }), chain({ first: { c: '0' } }), chain({ result: [] }), chain({ first: { path_id: 'path-ok', leased_path_revision: null } })],
+      seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })],
     });
     expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');
     expect(gmail.sendMessage).not.toHaveBeenCalled();

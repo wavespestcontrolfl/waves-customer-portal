@@ -250,9 +250,9 @@ async function sendOutreach({ prospectId, approvedBy = 'admin' }) {
     // zero moved is not proof of a live path: a chain settlement could not
     // resolve (bounded hops) or refused leaves the row on a retired path —
     // re-read and require the path it will send on to be non-superseded
-    // …and STANDING: the draft's lease stamp was consumed when it was saved, so
-    // a later disproof (confidence 0) or a human-step ruling
-    // (agent_completable=false) on the same path shows up only here
+    // …and STANDING: settlement reconciles a disproof only against a lease
+    // stamp, so a later disproof (confidence 0 / NULL) or a human-step ruling
+    // (agent_completable=false) on the same path is re-checked here
     const current = await trx('seo_link_prospects').where({ id: prospectId }).first('path_id', 'leased_path_revision');
     // an UNLINKED prospect (the registry catch-up has not linked it yet) has
     // passed no standing check at all — it is not sent until it has a path
@@ -262,13 +262,16 @@ async function sendOutreach({ prospectId, approvedBy = 'admin' }) {
     // superseding or revising the path waits for this commit instead of
     // slipping in between the standing read and the CAS
     const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'agent_completable', 'revision');
-    const standing = onPath && !onPath.superseded_by && Number.isFinite(Number(onPath.confidence)) && Number(onPath.confidence) > 0 && onPath.agent_completable !== false; // NULL confidence = never assessed = not standing
+    const standing = onPath && !onPath.superseded_by && require('./link-registry').isStandingConfidence(onPath.confidence) && onPath.agent_completable !== false; // NULL confidence = never assessed = not standing
     if (!standing) return { ok: false, code: 'path_moved' };
     // …and the draft must still be bound to the path's CURRENT revision: a
     // stamp that no longer matches means the path changed in place after the
     // draft was written (terms, lane, URL) — copy composed for a route that
-    // no longer exists as such is not sent
-    if (current.leased_path_revision != null && onPath.revision != null && Number(onPath.revision) !== Number(current.leased_path_revision)) return { ok: false, code: 'path_moved' };
+    // no longer exists as such is not sent. The stamp is REQUIRED: every
+    // draft carries one (the lease that produced it, saveDraft, or the
+    // migration's backfill of pre-existing drafts), so a missing stamp is a
+    // draft nothing bound to a revision — not sent either.
+    if (current.leased_path_revision == null || onPath.revision == null || Number(onPath.revision) !== Number(current.leased_path_revision)) return { ok: false, code: 'path_moved' };
     const attemptAt = new Date();
     const claimedRows = await trx('seo_link_prospects')
       .where({ id: prospectId, outreach_status: 'drafted', status: 'prospect', path_id: current.path_id }) // the CAS is bound to the path whose standing was just verified

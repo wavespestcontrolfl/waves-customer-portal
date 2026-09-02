@@ -39,7 +39,7 @@ const NOW = new Date('2026-09-02T00:00:00Z');
 test('follows the whole retirement chain, moves the execution URL, leaves leased and already-live rows alone', async () => {
   const old = { id: 'p-old', submission_url: 'https://example.com/old', superseded_by: 'p-mid', link_type: 'directory' };
   const mid = { id: 'p-mid', submission_url: 'https://example.com/mid', superseded_by: 'p-live', link_type: 'directory' };
-  const live = { id: 'p-live', submission_url: 'https://example.com/join', superseded_by: null, link_type: 'directory', revision: 1 };
+  const live = { id: 'p-live', submission_url: 'https://example.com/join', superseded_by: null, link_type: 'directory', revision: 1, confidence: 0.7 };
   const released = { id: 'r1', path_id: 'p-old', claimed_at: null, link_type: 'directory', target_url: 'https://example.com/old', automation_policy: 'submit_free', last_classified_at: NOW, outreach_status: null, outreach_sent_at: null, outreach_send_token: null };
   const leased = { id: 'r2', path_id: 'p-old', claimed_at: NOW, link_type: 'directory', target_url: 'https://example.com/old', automation_policy: 'submit_free' };
   const onLive = { id: 'r3', path_id: 'p-live', claimed_at: null, link_type: 'directory', target_url: 'https://example.com/join', automation_policy: 'submit_free', leased_path_revision: 1 };
@@ -95,6 +95,24 @@ test('a same-path reconcile at release fires ONCE per lease, syncs the execution
   db._tables.seo_link_prospects.push(idle);
   expect(await settleRetiredPlacements(db, { prospectIds: ['r2'], now: NOW })).toBe(0);
   expect(idle.target_url).toBe('https://example.com/pitch-page');
+});
+
+test('a NULL confidence during the lease is a disproof at release — same predicate as the claim and the send valve (Codex #3720 r7 P1)', async () => {
+  const live = { id: 'p-live', submission_url: 'https://example.com/pitch', superseded_by: null, link_type: 'editorial', revision: 2, confidence: null };
+  const row = { id: 'r1', path_id: 'p-live', claimed_at: null, link_type: 'editorial', target_url: 'https://example.com/pitch', automation_policy: null, leased_path_revision: 2, outreach_status: 'drafted', outreach_send_token: 'tok', outreach_sent_at: null };
+  const db = makeDb({ seo_link_acquisition_paths: [live], seo_link_prospects: [row] });
+  expect(await settleRetiredPlacements(db, { prospectIds: ['r1'], now: NOW })).toBe(1);
+  expect(row).toMatchObject({ outreach_status: 'none', outreach_send_token: null, leased_path_revision: null }); // the draft on an unassessed route is cleared
+});
+
+test('an in-place LANE change on an UNLEASED placement is reconciled at the next settlement even without a stamp (Codex #3720 r7 P1)', async () => {
+  const live = { id: 'p-live', submission_url: null, superseded_by: null, link_type: 'editorial', revision: 2, confidence: 0.7 };
+  // a directory row whose path the investigator re-laned to editorial while the row sat unleased: no stamp to compare
+  const row = { id: 'r1', path_id: 'p-live', claimed_at: null, link_type: 'directory', target_url: 'https://example.com/add', automation_policy: 'submit_free', last_classified_at: NOW, leased_path_revision: null, outreach_status: 'none', outreach_sent_at: null, outreach_send_token: null };
+  const db = makeDb({ seo_link_acquisition_paths: [live], seo_link_prospects: [row] });
+  expect(await settleRetiredPlacements(db, { prospectIds: ['r1'], now: NOW })).toBe(1);
+  expect(row).toMatchObject({ link_type: 'editorial', target_url: null, automation_policy: null, last_classified_at: null }); // lane follows the path; the old lane's route and policy are gone
+  expect(await settleRetiredPlacements(db, { prospectIds: ['r1'], now: NOW })).toBe(0); // lanes agree now — no loop
 });
 
 test('a supersession CYCLE is never a silent no-op — settlement throws so the caller\'s transaction fails loudly', async () => {

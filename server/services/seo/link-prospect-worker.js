@@ -31,9 +31,15 @@ const { WAVES_LOCATIONS } = require('../../config/locations');
 const WORKER = 'hermes';
 const SIGNUP_TYPES = ['directory', 'citation', 'social'];
 const OUTREACH_TYPES = ['editorial', 'resource', 'guest_post', 'haro'];
-// Registry domain states an owner set by hand (Watch / Reject): no placement
-// under such a domain is leased until the owner reopens it.
-const NON_CLAIMABLE_DOMAIN_STATES = ['watching', 'rejected'];
+// Registry domain states under which no placement is leased (plan §7: the
+// registry must not be new / investigating / not_reproducible / rejected /
+// watching): the owner's Watch / Reject rulings, an investigation in flight,
+// and a domain no route could be reproduced on. `new` is deliberately NOT
+// listed yet: on the legacy board every backfilled domain sits at `new` and
+// nothing on main moves it (the investigator that qualifies a domain is PR 2
+// of this split), so listing it would halt every claim — it joins this list
+// with the investigator.
+const NON_CLAIMABLE_DOMAIN_STATES = ['investigating', 'not_reproducible', 'watching', 'rejected'];
 const MAX_ATTEMPTS = 4;
 
 // Recipient sanity check, shared by the outreach send valve (link-prospect-outreach
@@ -234,15 +240,21 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // investigation superseding or revising one of them waits for this commit
     // (its settlement then finds the leased row's stamp) instead of the claim
     // handing Hermes a path/URL that changed between this read and the lease
-    const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).forUpdate().select('id', 'superseded_by', 'confidence', 'submission_url', 'revision', 'agent_completable') : [];
+    const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).forUpdate().select('id', 'superseded_by', 'confidence', 'submission_url', 'revision', 'agent_completable', 'link_type') : [];
     // …nor one the investigator marked NOT agent-completable: its contract
     // requires a human step (plan §6.3), and the outreach lane has no policy
     // filter that would otherwise stop Hermes from leasing it
     // …STANDING means a POSITIVE confidence: a path whose confidence is NULL
     // (schema-permitted — never assessed) or non-numeric has passed no check
     // and is refused exactly like a disproven one (fail closed)
-    const blocked = new Set(paths.filter((p) => p.superseded_by || !(Number.isFinite(Number(p.confidence)) && Number(p.confidence) > 0) || p.agent_completable === false).map((p) => p.id));
-    rows = rows.filter((r) => !blocked.has(r.path_id) && types.includes(r.link_type));
+    const { isStandingConfidence } = require('./link-registry');
+    const blocked = new Set(paths.filter((p) => p.superseded_by || !isStandingConfidence(p.confidence) || p.agent_completable === false).map((p) => p.id));
+    // …and the placement's LANE must be its path's lane: settlement above
+    // reconciles a drifted lane, but a settlement it REFUSED (locked outreach
+    // state) leaves the row where it was — a row whose path now belongs to
+    // another lane is never handed to this lane's worker
+    const laneOf = new Map(paths.map((p) => [p.id, p.link_type || null]));
+    rows = rows.filter((r) => !blocked.has(r.path_id) && types.includes(r.link_type) && (laneOf.get(r.path_id) == null || laneOf.get(r.path_id) === r.link_type));
     if (effectivePolicy) rows = rows.filter((r) => r.automation_policy === effectivePolicy);
     if (rows.length === 0) continue;
     // The LIVE path's submission_url is the execution truth: when the

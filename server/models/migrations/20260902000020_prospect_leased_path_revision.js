@@ -7,6 +7,11 @@
  * is leased (a gate change, a working-origin move, a lane shift) cannot be
  * applied to a leased row; at lease release the registry compares the
  * path's current revision with this stamp and applies the transition then.
+ *
+ * The send valve REQUIRES the stamp on a drafted row (a draft is bound to the
+ * revision it was composed on), so every draft that pre-dates the column is
+ * stamped with its path's CURRENT revision — the same binding saveDraft
+ * writes at draft time. Idempotent: only null stamps are filled.
  */
 exports.up = async function up(knex) {
   const cols = await knex('seo_link_prospects').columnInfo();
@@ -15,6 +20,14 @@ exports.up = async function up(knex) {
       t.integer('leased_path_revision');
     });
   }
+  await knex.raw(`
+    UPDATE seo_link_prospects p
+       SET leased_path_revision = a.revision
+      FROM seo_link_acquisition_paths a
+     WHERE a.id = p.path_id
+       AND p.outreach_status = 'drafted'
+       AND p.leased_path_revision IS NULL
+  `);
 };
 
 exports.down = async function down(knex) {
