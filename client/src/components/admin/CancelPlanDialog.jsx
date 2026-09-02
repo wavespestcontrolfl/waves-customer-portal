@@ -152,7 +152,10 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
   // commercial/unclassified rows). Never commit that from scoped mode: the
   // button label and the hidden prepay disposition would misstate what the
   // request does. The operator flips to Whole plan mode instead.
-  const modeMismatch = !wholeAccount && preview?.wholeAccount === true;
+  // Only once something IS selected: an empty scope also previews as the
+  // whole account, and warning before the operator has ticked anything
+  // reads as a mistake they have not made (ui-verify, 2026-09-02).
+  const modeMismatch = !wholeAccount && families.length > 0 && preview?.wholeAccount === true;
   const scopeBlocked = !wholeAccount && (families.length === 0 || preview?.scopedSupported === false || modeMismatch);
   // !loadErr: a FAILED refresh leaves the prior preview rendered (so the
   // scope checkboxes survive), but it must never back the red button — the
@@ -212,8 +215,8 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
         {!result && (
           <>
             {/* SCOPE */}
-            <fieldset className="flex flex-col gap-2">
-              <legend className="text-12 uppercase tracking-label text-ink-secondary mb-1">Scope</legend>
+            <fieldset className="flex flex-col gap-2 border-0 p-0 m-0 min-w-0">
+              <legend className="text-12 uppercase tracking-label text-ink-secondary mb-1 p-0">Scope</legend>
               <Radio
                 id="cancel-plan-scope-all"
                 name="cancel-plan-scope"
@@ -269,6 +272,7 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
                     <Button
                       size="sm"
                       variant="secondary"
+                      className="shrink-0 whitespace-nowrap"
                       disabled={running}
                       onClick={() => { setWholeAccount(false); setFamilies([...r.families]); }}
                     >
@@ -280,8 +284,8 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
 
             {/* EFFECTIVE DATE — only a choice for an annual-prepay whole-account cancel */}
             {wholeAccount && prepay && (
-              <fieldset className="flex flex-col gap-2">
-                <legend className="text-12 uppercase tracking-label text-ink-secondary mb-1">Effective</legend>
+              <fieldset className="flex flex-col gap-2 border-0 p-0 m-0 min-w-0">
+                <legend className="text-12 uppercase tracking-label text-ink-secondary mb-1 p-0">Effective</legend>
                 <Radio
                   id="cancel-plan-effective-term"
                   name="cancel-plan-effective"
@@ -370,7 +374,13 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
               {!loading && preview && !preview.eligible && (
                 <div className="text-ink-secondary">There is no active plan, recurring service, or upcoming visit on this account to cancel.</div>
               )}
-              {!loading && preview && preview.eligible && impact && (
+              {/* An EMPTY scoped selection previews server-side as the whole
+                  account — showing those numbers under "the selected
+                  services" would misstate what the (disabled) button does. */}
+              {!loading && preview && preview.eligible && !wholeAccount && families.length === 0 && (
+                <div className="text-ink-secondary">Tick at least one service to preview what cancelling it does.</div>
+              )}
+              {!loading && preview && preview.eligible && impact && (wholeAccount || families.length > 0) && (
                 <div>
                   <Fact label="Cancels">{scopeLabel}</Fact>
                   <Fact label="Effective">{fmtDate(preview.effectiveOn)}</Fact>

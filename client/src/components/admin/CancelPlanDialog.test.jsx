@@ -203,6 +203,15 @@ describe('CancelPlanDialog', () => {
     await screen.findByText('the whole plan');
 
     fireEvent.click(screen.getByLabelText('Only these services'));
+    // Nothing ticked yet: an EMPTY scope also previews as the whole account,
+    // but the operator has not selected "every service" — no warning, just
+    // a disabled button (ui-verify 2026-09-02).
+    await screen.findByLabelText(/^Pest Control/);
+    expect(screen.queryByText(/switch to "The whole plan"/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Cancel/ })).toBeDisabled();
+    // ...and the whole-account numbers do not masquerade as the selection's.
+    await screen.findByText(/Tick at least one service/);
+    expect(screen.queryByText('Silver → none')).not.toBeInTheDocument();
     fireEvent.click(screen.getByLabelText(/^Pest Control/));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel Pest Control' })).toBeEnabled());
 
