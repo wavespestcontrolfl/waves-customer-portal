@@ -7,6 +7,7 @@ import {
   reconcileExclusiveProtocolSelections,
   replaceFindingGroupSelection,
   resolveSpecialtyServiceKey,
+  specialtyCompletedWorkWithoutAction,
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "./service-completion-presets";
@@ -55,6 +56,14 @@ describe("specialty pest completion configuration", () => {
       observations: ["No current evidence observed"], actions: ["Active nests treated"],
     })).toBe(msg);
     expect(specialtyFindingActionConflict(mud, ["Active mud nests"], ["Active nests treated"])).toBeNull();
+  });
+
+  test("completed-work findings need a performed action, same message on both sides", () => {
+    const dethatching = SERVICE_COMPLETION_PRESETS.dethatching;
+    const msg = specialtyCompletedWorkWithoutAction(dethatching, ["Heavy debris removed"], []);
+    expect(msg).toContain("requires a completed protocol action");
+    expect(validateSpecialtyClosureCombination("dethatching", { observations: ["Heavy debris removed"], actions: [] })).toBe(msg);
+    expect(specialtyCompletedWorkWithoutAction(dethatching, ["Heavy debris removed"], ["Loose thatch collected"])).toBeNull();
   });
 
   test("work-state findings reject contradictory protocol actions on both sides", () => {

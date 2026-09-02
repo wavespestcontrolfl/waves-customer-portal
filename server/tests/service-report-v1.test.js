@@ -595,6 +595,17 @@ describe('service report v1', () => {
         .toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
       expect(normalizeAdvisoryForTreatmentScope(advisory, { service: inspectionOnly }))
         .toMatchObject({ exterior_reentry_min: 30 });
+      // A bait protocol action (dryDown: false) is an application with no dry-down: targets clear.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: {
+          service_type: 'Fire Ant Treatment',
+          areas_serviced: JSON.stringify(['Front lawn']),
+          structured_notes: { protocolActionScopesCompleted: [
+            { label: 'Broadcast bait application', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true, dryDown: false },
+          ] },
+        },
+        treatmentEvidence: false,
+      })).toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
       // Bait-only typed work is an application but carries no dry-down: targets clear.
       expect(normalizeAdvisoryForTreatmentScope(advisory, {
         service: {

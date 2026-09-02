@@ -379,7 +379,8 @@
       {
         "label": "Broadcast bait application",
         "scope": "exterior",
-        "treatmentApplied": true
+        "treatmentApplied": true,
+        "dryDown": false
       },
       {
         "label": "Broadcast contact treatment",

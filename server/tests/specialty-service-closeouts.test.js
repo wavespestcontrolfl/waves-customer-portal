@@ -4,6 +4,7 @@ const {
   SPECIALTY_SERVICE_CLOSEOUTS,
   observationsForSpecialtyService,
   specialtyActionScopeForAreas,
+  specialtyCompletedWorkWithoutAction,
   specialtyProtocolActionScopes,
   specialtyServiceKey,
   validateSpecialtyAreas,
@@ -210,6 +211,16 @@ describe('specialty service closeout vocabulary', () => {
     expect(validateSpecialtyAreas('bed_bug', [])).toBeNull();
   });
 
+  test('a completed-work finding needs a performed action at submit', () => {
+    expect(validateSpecialtyClosureCombination('dethatching', {
+      observations: ['Full quoted area completed', 'Heavy debris removed'], actions: [],
+    })).toBe('“Full quoted area completed” requires a completed protocol action — add the work performed before submitting.');
+    expect(validateSpecialtyClosureCombination('plugging', {
+      observations: ['9-inch spacing'], actions: ['Sod plugs installed at quoted spacing'],
+    })).toBeNull();
+    expect(specialtyCompletedWorkWithoutAction(SPECIALTY_SERVICE_CLOSEOUTS.bee_wasp_removal, ['Active'], [])).toBeNull();
+  });
+
   test('accepts consistent work state and lanes without work-state rules', () => {
     expect(validateSpecialtyClosureCombination('dethatching', {
       observations: ['Inspection only'], actions: ['Inspection only'],
@@ -231,28 +242,35 @@ describe('specialty service closeout vocabulary', () => {
       actions: ['Void nest treated', 'Inspection and identification only', 'Not a preset action'],
       areas: ['Attic'],
     })).toEqual([
-      { label: 'Void nest treated', scope: 'interior', treatmentApplied: true, treatmentPerformed: true },
-      { label: 'Inspection and identification only', scope: 'interior', treatmentApplied: false, treatmentPerformed: false },
+      { label: 'Void nest treated', scope: 'interior', treatmentApplied: true, treatmentPerformed: true, dryDown: true },
+      { label: 'Inspection and identification only', scope: 'interior', treatmentApplied: false, treatmentPerformed: false, dryDown: false },
     ]);
     expect(specialtyProtocolActionScopes('bee_wasp_removal', {
       actions: ['Void nest treated'], areas: ['Attic', 'Eaves / soffit'],
-    })).toEqual([{ label: 'Void nest treated', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true }]);
+    })).toEqual([{ label: 'Void nest treated', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true, dryDown: true }]);
     expect(specialtyProtocolActionScopes('tick_control', {
       actions: ['Pet-resting or kennel-area treatment'], areas: ['Interior pet areas', 'Furniture near pet areas'],
-    })).toEqual([{ label: 'Pet-resting or kennel-area treatment', scope: 'interior', treatmentApplied: true, treatmentPerformed: true }]);
+    })).toEqual([{ label: 'Pet-resting or kennel-area treatment', scope: 'interior', treatmentApplied: true, treatmentPerformed: true, dryDown: true }]);
+    // A granular bait is an application without a dry-down phase.
+    expect(specialtyProtocolActionScopes('fire_ant', {
+      actions: ['Broadcast bait application', 'Individual mound treatment'], areas: ['Front lawn'],
+    })).toEqual([
+      { label: 'Broadcast bait application', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true, dryDown: false },
+      { label: 'Individual mound treatment', scope: 'exterior', treatmentApplied: true, treatmentPerformed: true, dryDown: true },
+    ]);
     // Completed mechanical work is treatment without a pesticide application.
     expect(specialtyProtocolActionScopes('plugging', {
       actions: ['Sod plugs installed at quoted spacing', 'Installation areas reviewed with customer'], areas: ['Front lawn'],
     })).toEqual([
-      { label: 'Sod plugs installed at quoted spacing', scope: 'exterior', treatmentApplied: false, treatmentPerformed: true },
-      { label: 'Installation areas reviewed with customer', scope: 'exterior', treatmentApplied: false, treatmentPerformed: false },
+      { label: 'Sod plugs installed at quoted spacing', scope: 'exterior', treatmentApplied: false, treatmentPerformed: true, dryDown: false },
+      { label: 'Installation areas reviewed with customer', scope: 'exterior', treatmentApplied: false, treatmentPerformed: false, dryDown: false },
     ]);
     // Heat and steam are treatment without a pesticide application.
     expect(specialtyProtocolActionScopes('bed_bug', {
       actions: ['Heat treatment', 'Vacuuming performed'], areas: ['Primary bedroom'],
     })).toEqual([
-      { label: 'Heat treatment', scope: 'interior', treatmentApplied: false, treatmentPerformed: true },
-      { label: 'Vacuuming performed', scope: 'interior', treatmentApplied: false, treatmentPerformed: true },
+      { label: 'Heat treatment', scope: 'interior', treatmentApplied: false, treatmentPerformed: true, dryDown: false },
+      { label: 'Vacuuming performed', scope: 'interior', treatmentApplied: false, treatmentPerformed: true, dryDown: false },
     ]);
     expect(specialtyProtocolActionScopes('general_pest', { actions: ['Anything'], areas: [] })).toBeNull();
     expect(specialtyActionScopeForAreas(['Other'], 'exterior')).toBe('exterior');

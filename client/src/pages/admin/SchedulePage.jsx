@@ -51,6 +51,7 @@ import {
   exclusiveProtocolSelectionConflict,
   reconcileDependentFindingSelections,
   reconcileExclusiveProtocolSelections,
+  specialtyCompletedWorkWithoutAction,
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
@@ -13197,6 +13198,15 @@ export function CompletionPanel({
       alert(specialtyFindingActionClash);
       return;
     }
+    const completedWorkWithoutAction = specialtyCompletedWorkWithoutAction(
+      specialtyCompletion,
+      activeSelectedLabels(selectedObservationLabels),
+      activeSelectedLabels(selectedProtocolActionLabels),
+    );
+    if (completedWorkWithoutAction) {
+      alert(completedWorkWithoutAction);
+      return;
+    }
     // Don't complete while an AI draft is in flight — the response is about to
     // replace the notes, and submitting now would either lose the generated copy
     // or rebuild the structured fields from soon-to-be-overwritten notes.
@@ -14141,15 +14151,22 @@ export function CompletionPanel({
       return;
     }
     const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
+    // Only dropdown-owned [Found] markers are rewritten: the changed group's
+    // marker goes, a reconciled-away marker from another group goes, and a
+    // free-text technician [Found] note ("Gate inaccessible") stays (codex P2
+    // r15 #3701).
+    const presetValues = new Set(
+      (specialtyCompletion?.findingGroups || []).flatMap((item) => item.options.map((option) => option.value)),
+    );
     if (!detachedAfterInvalidation) {
       setNotes((current) => current
         .split("\n")
         .filter((line) => {
           const match = line.match(/^\s*\[Found\]\s+(.+)$/i);
-          return !match || (
-            !groupValues.has(match[1].trim())
-            && reconciled.includes(match[1].trim())
-          );
+          if (!match) return true;
+          const marker = match[1].trim();
+          if (groupValues.has(marker)) return false;
+          return !presetValues.has(marker) || reconciled.includes(marker);
         })
         .concat(value ? [`[Found] ${value}`] : [])
         .join("\n")

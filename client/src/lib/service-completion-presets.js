@@ -162,3 +162,19 @@ export function specialtyFindingActionConflict(preset, observations, actionLabel
   if (mismatched) return `“${mismatched}” cannot be paired with action “${exclusive}”.`;
   return null;
 }
+
+// Mirror of specialtyCompletedWorkWithoutAction in shared/specialty-service-closeouts.js
+// (the server rejects it at completion): a completed-work finding needs a
+// performed protocol action behind it. Submit-time only — selection order
+// stays free.
+export function specialtyCompletedWorkWithoutAction(preset, observations, actionLabels) {
+  const workState = preset?.workState;
+  if (!workState) return null;
+  const byLabel = new Map((preset.protocols || []).map((action) => [action.label, action]));
+  const performed = (Array.isArray(actionLabels) ? actionLabels : [])
+    .some((label) => byLabel.has(label) && byLabel.get(label).exclusive !== true);
+  const completed = (Array.isArray(observations) ? observations : []).find((value) => workState.completed.includes(value));
+  return completed && !performed
+    ? `“${completed}” requires a completed protocol action — add the work performed before submitting.`
+    : null;
+}

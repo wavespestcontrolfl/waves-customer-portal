@@ -127,13 +127,31 @@ function offPresetSpecialtyAction(spec, actionLabels) {
 // still carry the dynamic-protocol actions its older client offered; those
 // stay accepted (and are simply not part of the preset checks) so an open
 // draft can complete (local audit P1 on #3701).
+// A completed-work finding ("Full quoted area completed", "Heavy debris
+// removed") with no performed protocol action would publish work the report
+// cannot attribute to any action; submit requires the action (codex P1 r15).
+// Mirrored by specialtyCompletedWorkWithoutAction on the client (submit only —
+// selection order must stay free).
+function specialtyCompletedWorkWithoutAction(spec, observations, actionLabels) {
+  const workState = spec?.workState;
+  if (!workState) return null;
+  const byLabel = new Map((spec.protocols || []).map((action) => [action.label, action]));
+  const performed = (Array.isArray(actionLabels) ? actionLabels : [])
+    .some((label) => byLabel.has(label) && byLabel.get(label).exclusive !== true);
+  const completed = (Array.isArray(observations) ? observations : []).find((value) => workState.completed.includes(value));
+  return completed && !performed
+    ? `“${completed}” requires a completed protocol action — add the work performed before submitting.`
+    : null;
+}
+
 function validateSpecialtyClosureCombination(serviceKey, { observations, actions, productCount = 0, enforcePresetActions = true } = {}) {
   const spec = SPECIALTY_SERVICE_CLOSEOUTS[specialtyServiceKey({ serviceKey })];
   if (!spec) return null;
   return validateSpecialtyObservationCombination(serviceKey, observations)
     || (enforcePresetActions ? offPresetSpecialtyAction(spec, actions) : null)
     || exclusiveSpecialtyActionConflict(spec, actions, productCount)
-    || specialtyFindingActionConflict(spec, observations, actions);
+    || specialtyFindingActionConflict(spec, observations, actions)
+    || specialtyCompletedWorkWithoutAction(spec, observations, actions);
 }
 
 // Specialty action scope follows the treated areas when every classified
@@ -171,6 +189,9 @@ function specialtyProtocolActionScopes(serviceKey, { actions, areas } = {}) {
       // the stored re-entry guidance without claiming pesticide use.
       treatmentApplied: byLabel.get(label).treatmentApplied === true,
       treatmentPerformed: byLabel.get(label).treatmentApplied === true || byLabel.get(label).treatmentPerformed === true,
+      // dryDown = the application leaves a until-dry phase (re-entry evidence).
+      // A granular bait is an application with no dry-down (codex P1 r15).
+      dryDown: byLabel.get(label).treatmentApplied === true && byLabel.get(label).dryDown !== false,
     }));
 }
 
@@ -198,6 +219,7 @@ function validateSpecialtyAreas(serviceKey, areas, { enforcePresetAreas = true }
 }
 
 module.exports = {
+  specialtyCompletedWorkWithoutAction,
   validateSpecialtyAreas,
   specialtyActionScopeForAreas,
   specialtyProtocolActionScopes,

@@ -7301,7 +7301,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               || (Array.isArray(products) && products.some((p) => isSprayApplicationMethod(
                 p?.applicationMethod || p?.method || p?.application_method,
               )))
-              || reportProtocolActionScopes.some((s) => s.treatmentApplied)
+              || reportProtocolActionScopes.some((s) => s.treatmentApplied && s.dryDown !== false)
               // Typed work fields record applications too (codex P1 r12 #3701).
               || ActivityIndicators.typedTreatmentEvidence(typedFindingsType, typedFindings?.values).applied
               // Catalog identity: a non-bait pesticide product is evidence even
