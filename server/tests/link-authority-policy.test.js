@@ -276,10 +276,20 @@ describe('§6.3 2b payment — independent of the other dimensions', () => {
     expect(level(r, 'execution')).toBe('AUTO_ACCOUNT');
     expect(level(r, 'payment')).toBe('OWNER_INPUT_REQUIRED');
   });
-  test('no merchant binding → OWNER_MANUAL_PAYMENT even inside policy', () => {
-    for (const mb of [null, {}, { checkout_origin: '' }, { checkout_origin: 'https://x', processor: {} }]) {
-      expect(level(P.decideAuthority({ path: paid({ merchant_binding: mb }), domain: domain(), policy: autoPolicy(), d30Confidence: 0.9 }), 'payment')).toBe('OWNER_MANUAL_PAYMENT');
+  test('no merchant binding → OWNER_MANUAL_PAYMENT even inside policy; a processor host alone never binds a merchant', () => {
+    for (const mb of [
+      null, {}, { checkout_origin: '' }, { checkout_origin: 'https://x', processor: {} },
+      { checkout_origin: 'https://x', processor: { host: 'checkout.stripe.com' } },
+      { checkout_origin: 'https://x', processor: { host: 'checkout.stripe.com', merchant_account_id: '' } },
+      { checkout_origin: 'https://x', processor: { host: 'checkout.stripe.com', merchant_account_id: '   ' } },
+      { checkout_origin: 'https://x', processor: { host: '', merchant_account_id: 'acct_1' } },
+      { checkout_origin: 'https://x', processor: ['checkout.stripe.com', 'acct_1'] },
+    ]) {
+      const r = P.decideAuthority({ path: paid({ merchant_binding: mb }), domain: domain(), policy: autoPolicy(), d30Confidence: 0.9 });
+      expect(level(r, 'payment')).toBe('OWNER_MANUAL_PAYMENT');
+      expect(r.instances.some((i) => i.level === 'AUTO_PAID_WITHIN_POLICY')).toBe(false);
     }
+    expect(P.isValidMerchantBinding({ checkout_origin: 'https://x', processor: { host: 'checkout.stripe.com', merchant_account_id: 'acct_1' } })).toBe(true);
   });
   test('AUTO_PAID_WITHIN_POLICY only when every input is configured, in range, and evidenced', () => {
     const ok = P.decideAuthority({ path: paid(), domain: domain(), policy: autoPolicy(), d30Confidence: 0.7, monthSpendCents: 40000 });

@@ -187,13 +187,17 @@ const LEVELS = Object.freeze({
 
 const isLiteralBoolean = (v) => v === true || v === false;
 const validLegalTermsHash = (h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h);
-// §3.2 merchant_binding: a resolvable recipient identity is a checkout origin
-// plus a processor host; anything less closes the automated purchase flow.
+// §3.2 / §6.3: a resolvable recipient identity is a checkout origin, a
+// processor host AND the independently verified processor merchant account
+// id (`processor.merchant_account_id`) — a host alone never binds a merchant.
+// Anything less closes the automated purchase flow (OWNER_MANUAL_PAYMENT).
+const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0;
 function isValidMerchantBinding(b) {
   if (!b || typeof b !== 'object' || Array.isArray(b)) return false;
-  if (typeof b.checkout_origin !== 'string' || !b.checkout_origin.trim()) return false;
-  if (!b.processor || typeof b.processor !== 'object' || typeof b.processor.host !== 'string' || !b.processor.host.trim()) return false;
-  return true;
+  if (!nonEmpty(b.checkout_origin)) return false;
+  const p = b.processor;
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
+  return nonEmpty(p.host) && nonEmpty(p.merchant_account_id);
 }
 
 // Which authority instances a path REQUIRES (§3.3b / §6.3 2a–2c), independent
