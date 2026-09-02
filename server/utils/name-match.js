@@ -22,8 +22,15 @@ function normalizeNamePart(value) {
 // payer corroboration): NFD splits "é" into "e" + a combining mark, so
 // "José Nuñez" and "Jose Nunez" normalize identically instead of the
 // accented letters vanishing ("jos nuez").
+// Latin letters NFD does not decompose — folded by table so "Søren" is
+// "soren", not "sren".
+const NON_DECOMPOSING = { 'ø': 'o', 'Ø': 'O', 'ł': 'l', 'Ł': 'L', 'œ': 'oe', 'Œ': 'OE', 'æ': 'ae', 'Æ': 'AE', 'ß': 'ss', 'đ': 'd', 'Đ': 'D', 'ð': 'd', 'Ð': 'D', 'þ': 'th', 'Þ': 'TH', 'ı': 'i' };
 function normalizeNameFolded(value) {
-  return normalizeNamePart(String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, ''));
+  const folded = String(value || '')
+    .replace(/[øØłŁœŒæÆßđĐðÐþÞı]/g, (c) => NON_DECOMPOSING[c] || c)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  return normalizeNamePart(folded);
 }
 
 // Common NANP nickname/diminutive groups — "Bob" calling from a line whose
@@ -276,8 +283,6 @@ function payerNameCorroborates(payerName, customer = {}) {
 module.exports = {
   normalizeNamePart,
   normalizeNameFolded,
-  payerFirstNameCompatible,
-  NICKNAME_GROUPS,
   firstNameVariants,
   sameFirstName,
   payerNameCorroborates,

@@ -111,7 +111,8 @@ function memoInvoiceNumbers(memo) {
 // ';' OUTSIDE quoted strings and parenthesised comments, quoted strings and
 // comments are then dropped, and only a clause that itself STARTS with
 // `dkim=pass` is read — so `dkim=pass header.i=@capitalone.com` smuggled
-// inside a quoted envelope local part or a comment can never count. The
+// inside a quoted envelope local part or a comment (even one that tries to
+// close the comment from inside a quoted run) can never count. The
 // signing identity is read after its LAST '@' and its org-domain must be
 // capitalone.com (public-suffix aware, so capitalone.com.evil.example fails).
 function authResultClauses(authResults) {
@@ -128,6 +129,11 @@ function authResultClauses(authResults) {
       continue;
     }
     if (depth > 0) {
+      // Inside a comment: honour quoted-pairs (\) and \\) and a quoted run,
+      // so text an attacker put in an envelope address that Google echoes
+      // into its SPF explanation can never close the comment early.
+      if (ch === '\\' && i + 1 < text.length) { i += 1; continue; }
+      if (ch === '"') { const close = text.indexOf('"', i + 1); i = close === -1 ? text.length : close; continue; }
       if (ch === '(') depth += 1;
       else if (ch === ')') depth -= 1;
       continue;

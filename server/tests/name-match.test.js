@@ -21,6 +21,9 @@ describe('normalizeNamePart', () => {
   test('normalizeNameFolded folds diacritics instead of deleting the letters', () => {
     expect(normalizeNameFolded('JOSÉ NUÑEZ')).toBe('josenunez');
     expect(normalizeNameFolded('José')).not.toBe(normalizeNameFolded('Jos'));
+    expect(normalizeNameFolded('SØREN ŁUKASZ Œ')).toBe('sorenlukaszoe');
+    expect(payerNameCorroborates('SØREN DOE', { first_name: 'Soren', last_name: 'Doe' })).toBe(true);
+    expect(payerNameCorroborates('SØREN DOE', { first_name: 'Sren', last_name: 'Doe' })).toBe(false);
   });
 
   test('lowercases and strips everything but alphanumerics', () => {
