@@ -254,7 +254,19 @@ describe('ScoreRing settles on beforeprint without ever scrolling into view', ()
     expect(screen.getByText('0')).toBeInTheDocument();
     expect(Number(arc().getAttribute('stroke-dashoffset'))).toBeCloseTo(circumference, 5);
 
-    act(() => { window.dispatchEvent(new Event('beforeprint')); });
+    // Deliberately NOT wrapped in act(): the browser snapshots when the
+    // beforeprint handlers return, so the value and arc must be in the DOM
+    // synchronously — act() would drain passive effects and mask a late copy
+    // (codex P1 r1).
+    const prevActEnv = globalThis.IS_REACT_ACT_ENVIRONMENT;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      window.dispatchEvent(new Event('beforeprint'));
+      expect(screen.getByText('72')).toBeInTheDocument();
+    } finally {
+      globalThis.IS_REACT_ACT_ENVIRONMENT = prevActEnv;
+    }
+    act(() => {}); // drain anything left so the remaining assertions see steady state
 
     expect(screen.getByText('72')).toBeInTheDocument();
     expect(Number(arc().getAttribute('stroke-dashoffset'))).toBeCloseTo(circumference * (1 - 0.72), 5);

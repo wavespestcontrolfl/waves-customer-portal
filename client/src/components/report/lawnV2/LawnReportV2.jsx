@@ -141,7 +141,9 @@ function useCountUp(target, run, duration = 900) {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [target, run, reduce, duration]);
-  return shown;
+  // Settled reads the target directly: the print flush commits synchronously
+  // and must not wait on the effect above to copy it into state.
+  return reduce ? target : shown;
 }
 
 // Circular score ring. value null → renders a muted "—" with the tracking color.
