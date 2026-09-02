@@ -202,12 +202,18 @@ describe('completion freeze contract', () => {
     const block = source.slice(start, source.indexOf("\nrouter.", start + 1));
     expect(block).toContain('freezeTechTips(req.body?.techTips)');
     expect(block).toMatch(/techTips: techTipsFreeze\.tips/);
-    // a rejected custom line is an actionable 400 before any write, never a silent drop
-    const reject = block.indexOf('if (techTipsFreeze.dropped.length) {');
+    // a rejected pick is an actionable 400 for a FRESH attempt, never a silent drop —
+    // deferred past replay/conflict handling so a same-key retry keeps replaying
+    // the stored completion even if the library changed (same posture as the
+    // caption gate), and it marks the claimed attempt failed before returning
+    const reject = block.indexOf("if (claim.action === 'proceed' && techTipsFreeze.dropped.length) {");
     expect(reject).toBeGreaterThan(-1);
-    expect(block.slice(reject, reject + 2200)).toMatch(/return res\.status\(400\)\.json\(\{[\s\S]*TECH_TIP_UNKNOWN[\s\S]*TECH_TIP_COPY_REJECTED/);
-    // …and it happens before the completion transaction / idempotency claim
-    expect(reject).toBeLessThan(block.indexOf('rawIdempotencyKey'));
+    expect(reject).toBeGreaterThan(block.indexOf("if (claim.action === 'replay') {"));
+    const rejectBlock = block.slice(reject, reject + 2400);
+    expect(rejectBlock).toMatch(/markCompletionAttemptFailed\([\s\S]*tech_tip_rejected/);
+    expect(rejectBlock).toMatch(/return res\.status\(400\)\.json\(\{[\s\S]*TECH_TIP_UNKNOWN[\s\S]*TECH_TIP_COPY_REJECTED/);
+    // …and still before the completion transaction's first write
+    expect(reject).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
     // the kill switch holds on the write path too
     expect(block).toMatch(/techTipsGateOn\(\)\s*\n?\s*\? freezeTechTips/);
     // ids resolve server-side — the client's copy never reaches the freeze

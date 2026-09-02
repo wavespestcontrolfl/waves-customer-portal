@@ -5394,28 +5394,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const techTipsFreeze = techTipsGateOn()
       ? freezeTechTips(req.body?.techTips)
       : { tips: [], dropped: [] };
-    // A custom line the customer-copy screen refuses (or one over the cap
-    // from a client that didn't count it) is an actionable 400 BEFORE any
-    // write: the tech was told the tip goes on the report, so it must not
-    // quietly vanish from the freeze.
-    if (techTipsFreeze.dropped.length) {
-      const drop = techTipsFreeze.dropped[0];
-      logger.warn(`[tech-tips] custom tip rejected on ${req.params.serviceId}: ${drop.violations.join(', ')}`);
-      const overCap = drop.violations.includes('over_cap');
-      const unknownTip = drop.violations.includes('unknown_tip');
-      const tooLong = drop.violations.includes('too_long') || drop.violations.includes('multi_sentence');
-      return res.status(400).json({
-        error: unknownTip
-          ? 'One of the picked tips is no longer in the library. Remove it, pick again, then complete.'
-          : overCap
-            ? 'Only three tips fit on the report. Remove one, then complete.'
-            : tooLong
-            ? 'Your own tip needs to be one sentence (up to 240 characters) — it prints as one tip. Shorten it, then complete.'
-            : `Your own tip needs different wording before the report can print it (flagged: ${drop.violations.join(', ')}). Reword it, then complete.`,
-        code: unknownTip ? 'TECH_TIP_UNKNOWN' : overCap ? 'TECH_TIP_OVER_CAP' : tooLong ? 'TECH_TIP_TOO_LONG' : 'TECH_TIP_COPY_REJECTED',
-        techTip: { ...(drop.id ? { id: drop.id } : {}), ...(drop.copy ? { copy: drop.copy } : {}), violations: drop.violations },
-      });
-    }
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('service_products').columnInfo().catch(() => ({})),
@@ -5571,6 +5549,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         new Error('photo_caption_banned_copy'),
       );
       return res.status(422).json(photoCaptionBannedCopyPayload(captionBannedViolations));
+    }
+    // Tips from your tech — deferred like the caption gate above: a
+    // rejected pick (retired id, over cap, or a custom line the copy screen
+    // refuses) is an actionable 400 for a FRESH attempt, before any write;
+    // a same-key replay/resume keeps returning the stored completion even
+    // if the library changed since. Nothing the tech was told would print
+    // may vanish silently.
+    if (claim.action === 'proceed' && techTipsFreeze.dropped.length) {
+      const drop = techTipsFreeze.dropped[0];
+      logger.warn(`[tech-tips] pick rejected on ${req.params.serviceId}: ${drop.violations.join(', ')}`);
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('tech_tip_rejected'),
+      ).catch(() => {});
+      const overCap = drop.violations.includes('over_cap');
+      const unknownTip = drop.violations.includes('unknown_tip');
+      const tooLong = drop.violations.includes('too_long') || drop.violations.includes('multi_sentence');
+      return res.status(400).json({
+        error: unknownTip
+          ? 'One of the picked tips is no longer in the library. Remove it, pick again, then complete.'
+          : overCap
+            ? 'Only three tips fit on the report. Remove one, then complete.'
+            : tooLong
+              ? 'Your own tip needs to be one sentence (up to 240 characters) — it prints as one tip. Shorten it, then complete.'
+              : `Your own tip needs different wording before the report can print it (flagged: ${drop.violations.join(', ')}). Reword it, then complete.`,
+        code: unknownTip ? 'TECH_TIP_UNKNOWN' : overCap ? 'TECH_TIP_OVER_CAP' : tooLong ? 'TECH_TIP_TOO_LONG' : 'TECH_TIP_COPY_REJECTED',
+        techTip: { ...(drop.id ? { id: drop.id } : {}), ...(drop.copy ? { copy: drop.copy } : {}), violations: drop.violations },
+      });
     }
     if (claim.action === 'proceed') {
       const internalOnlyProductsBlock = internalOnlyProductsBlockPayload({
