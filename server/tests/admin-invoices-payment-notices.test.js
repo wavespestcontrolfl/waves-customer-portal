@@ -222,7 +222,7 @@ describe('POST /payment-notices/:id/apply', () => {
 describe('POST /payment-notices/:id/apply — post-commit failure', () => {
   test('a non-refusal error after the ledger committed closes the notice as applied (receipt unknown) and returns 200', async () => {
     tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [] };
-    tables.invoices = { firsts: [{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid', payment_recorded_by: 'Adam' }], selects: [], updates: [], calls: [] };
+    tables.invoices = { firsts: [{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid', payment_method: 'zelle', payment_recorded_by: 'Adam', payment_reference: 'Pat Doe' }], selects: [], updates: [], calls: [] };
     OpenBalance.openSelfPayInvoicesByAmountDue.mockResolvedValueOnce([{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', total: '117.00', credit_applied: 0 }]);
     recordManualPayment.mockRejectedValueOnce(new Error('receipt stamp exploded'));
     await withServer(async (call) => {
@@ -232,6 +232,22 @@ describe('POST /payment-notices/:id/apply — post-commit failure', () => {
     });
     const updates = tables.inbound_payment_notices.calls.filter(([m]) => m === 'update').map(([, p]) => p);
     expect(updates[1]).toMatchObject({ status: 'applied', matched_invoice_id: 'inv-1' });
+  });
+});
+
+describe('POST /payment-notices/:id/apply — post-commit failure, not ours', () => {
+  test('a paid invoice under the same recorder but a different tender / reference is NOT this settlement — parks apply_failed (uncertain), 500 surfaces', async () => {
+    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [] };
+    tables.invoices = { firsts: [{ id: 'inv-1', status: 'paid', payment_method: 'check', payment_recorded_by: 'Adam', payment_reference: 'Pat Doe' }], selects: [], updates: [], calls: [] };
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockResolvedValueOnce([{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', total: '117.00', credit_applied: 0 }]);
+    recordManualPayment.mockRejectedValueOnce(new Error('db blip'));
+    await withServer(async (call) => {
+      const r = await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' });
+      expect(r.status).toBe(500);
+    });
+    const updates = tables.inbound_payment_notices.calls.filter(([m]) => m === 'update').map(([, p]) => p);
+    expect(updates[1]).toMatchObject({ status: 'parked', park_reason: 'apply_failed', matched_invoice_id: null });
+    expect(updates[1].apply_error).toMatch(/uncertain/);
   });
 });
 

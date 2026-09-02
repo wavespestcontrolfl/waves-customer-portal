@@ -251,7 +251,7 @@ describe('post-commit failures', () => {
     claimed();
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
     recordManualPayment.mockRejectedValueOnce(new Error('activity_log insert exploded'));
-    tables.invoices = { firsts: [{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid', payment_recorded_by: RECORDED_BY }], returning: [], calls: [] };
+    tables.invoices = { firsts: [{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid', payment_method: 'zelle', payment_recorded_by: RECORDED_BY, payment_reference: 'Pat Doe' }], returning: [], calls: [] };
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', matched_invoice_id: 'inv-1' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('receipt: unknown'), expect.anything());
@@ -358,7 +358,7 @@ describe('stale claim recovery', () => {
   test('a stale claim whose stamped invoice is paid by Zelle under the stamped recorder is CLOSED to match the ledger, never parked', async () => {
     const stale = { id: 'notice-old', email_id: 'email-old', payer_name: 'Old Payer', amount_cents: 5000, matched_invoice_id: 'inv-7', applied_by: RECORDED_BY };
     tables.inbound_payment_notices.selects = [[stale]];
-    tables.invoices = { firsts: [{ id: 'inv-7', invoice_number: 'WPC-2026-0507', customer_id: 'cust-7', status: 'paid', payment_method: 'zelle', payment_recorded_by: RECORDED_BY }], returning: [], calls: [] };
+    tables.invoices = { firsts: [{ id: 'inv-7', invoice_number: 'WPC-2026-0507', customer_id: 'cust-7', status: 'paid', payment_method: 'zelle', payment_recorded_by: RECORDED_BY, payment_reference: 'Old Payer' }], returning: [], calls: [] };
     const orig = db.getMockImplementation();
     db.mockImplementation((table) => { const b = orig(table); if (table === 'inbound_payment_notices') { const q = tables[table].selects; b.select = jest.fn(async () => (q.length ? q.shift() : [])); } return b; });
     expect(await recoverStaleClaims()).toBe(1);
@@ -370,7 +370,7 @@ describe('stale claim recovery', () => {
   test('a stamped invoice settled by someone ELSE (or still open) is not ours — the claim parks apply_failed as before', async () => {
     const stale = { id: 'notice-old', email_id: 'email-old', payer_name: 'Old Payer', amount_cents: 5000, matched_invoice_id: 'inv-7', applied_by: RECORDED_BY };
     tables.inbound_payment_notices.selects = [[stale]];
-    tables.invoices = { firsts: [{ id: 'inv-7', status: 'paid', payment_method: 'zelle', payment_recorded_by: 'Adam' }], returning: [], calls: [] };
+    tables.invoices = { firsts: [{ id: 'inv-7', status: 'paid', payment_method: 'zelle', payment_recorded_by: 'Adam', payment_reference: 'Old Payer' }], returning: [], calls: [] };
     const orig = db.getMockImplementation();
     db.mockImplementation((table) => { const b = orig(table); if (table === 'inbound_payment_notices') { const q = tables[table].selects; b.select = jest.fn(async () => (q.length ? q.shift() : [])); } return b; });
     expect(await recoverStaleClaims()).toBe(1);

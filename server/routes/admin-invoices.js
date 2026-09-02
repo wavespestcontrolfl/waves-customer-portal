@@ -728,6 +728,7 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
     // wait behind the lock until the settlement has committed and the row
     // says applied / parked. recordManualPayment runs its own transaction on
     // another connection and never touches this table, so no deadlock.
+    const zelleRef = require('../services/zelle-notice-reconciler').zelleReference(notice.payer_name);
     const outcome = await db.transaction(async (trx) => {
       const locked = await trx('inbound_payment_notices').where({ id }).forUpdate().first('id', 'status');
       if (!locked || locked.status !== 'processing') {
@@ -737,7 +738,7 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
       try {
         settled = await recordManualPayment(invoiceId, {
           method: 'zelle',
-          reference: notice.payer_name || 'Zelle',
+          reference: zelleRef,
           note: notice.memo ? `Zelle memo: ${notice.memo}` : '',
           recordedBy,
           sendReceipt: true,
@@ -755,8 +756,12 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
         // thrown AFTER the ledger committed — ask the invoice, and never hand a
         // settled notice back to the queue as failed.
         const refusal = [400, 404, 409].includes(err.statusCode);
-        const paid = refusal ? null : await db('invoices').where({ id: invoiceId }).first();
-        if (paid && paid.status === 'paid' && paid.payment_recorded_by === recordedBy) {
+        // Same fingerprint the reconciler's sweep uses (paid + Zelle + this
+        // recorder + this notice's payer reference) — a paid invoice under a
+        // shared display name is not proof this Zelle transfer was recorded.
+        const { settledInvoiceFor } = require('../services/zelle-notice-reconciler');
+        const paid = refusal ? null : await settledInvoiceFor(invoiceId, { recordedBy, reference: zelleRef });
+        if (paid) {
           logger.error(`[admin-invoices:payment-notices] ${invoiceId} settled but a later step threw (${err.message}) — closing notice ${id} as applied, receipt unknown`);
           settled = { invoice: paid, receipt: null };
         } else {

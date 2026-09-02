@@ -236,9 +236,8 @@ async function recoverStaleClaims() {
 // as failed. False otherwise (the caller parks).
 async function closeIfSettled(row) {
   if (!row.matched_invoice_id || !row.applied_by) return false;
-  const inv = await db('invoices').where({ id: row.matched_invoice_id })
-    .first('id', 'invoice_number', 'customer_id', 'status', 'payment_method', 'payment_recorded_by');
-  if (!inv || inv.status !== 'paid' || inv.payment_method !== 'zelle' || inv.payment_recorded_by !== row.applied_by) return false;
+  const inv = await settledInvoiceFor(row.matched_invoice_id, { recordedBy: row.applied_by, reference: zelleReference(row.payer_name) });
+  if (!inv) return false;
   const moved = await db('inbound_payment_notices').where({ id: row.id, status: 'processing' }).update({
     status: row.applied_by === RECORDED_BY ? 'auto_applied' : 'applied',
     park_reason: null,
@@ -286,11 +285,24 @@ function settlementLockKey(parsed) {
 function isRefusal(err) {
   return [400, 404, 409].includes(err?.statusCode);
 }
-// Did OUR settlement commit? True (with the row) when the invoice is paid and
-// the ledger names this reconciler as the recorder.
-async function settledByUs(invoiceId) {
+// The payment_reference both settling paths hand recordManualPayment (it
+// trims to 200) — part of the settlement's fingerprint below.
+function zelleReference(payerName) {
+  return String(payerName || 'Zelle').trim().slice(0, 200);
+}
+
+// THE ONE predicate for "did this notice's settlement commit?" — used by the
+// in-flight recovery of both settling paths and by the stale sweep. A paid
+// invoice alone is not enough: the recorder string is not unique (two admins
+// with one display name, the same admin recording a check meanwhile), so the
+// tender must be Zelle and the ledger's payment_reference must be the
+// notice's payer — the fingerprint recordManualPayment wrote FROM this notice.
+// Returns the invoice row or null.
+async function settledInvoiceFor(invoiceId, { recordedBy, reference }) {
   const row = await db('invoices').where({ id: invoiceId }).first();
-  return row && row.status === 'paid' && row.payment_recorded_by === RECORDED_BY ? row : null;
+  if (!row || row.status !== 'paid' || row.payment_method !== 'zelle') return null;
+  if (row.payment_recorded_by !== recordedBy || (row.payment_reference || '') !== reference) return null;
+  return row;
 }
 
 // { rows, truncated }: the exact-cent query is bounded; a FULL page means
@@ -416,7 +428,7 @@ async function maybeHandleZelleNotice(email) {
       const { recordManualPayment } = require('./invoice-manual-payment');
       settled = await recordManualPayment(match.id, {
         method: 'zelle',
-        reference: parsed.payerName,
+        reference: zelleReference(parsed.payerName),
         note: parsed.memo ? `Zelle memo: ${parsed.memo}` : '',
         recordedBy: RECORDED_BY,
         sendReceipt: true,
@@ -433,7 +445,7 @@ async function maybeHandleZelleNotice(email) {
       // thrown AFTER the ledger committed (a post-commit side effect, the
       // final re-read) — ask the invoice, never label committed money as
       // failed.
-      const paid = isRefusal(err) ? null : await settledByUs(match.id);
+      const paid = isRefusal(err) ? null : await settledInvoiceFor(match.id, { recordedBy: RECORDED_BY, reference: zelleReference(parsed.payerName) });
       if (paid) {
         logger.error(`[zelle-notice] ${match.invoice_number} settled but a later step threw (${err.message}) — recording as applied, receipt unknown`);
         await finishApplied(notice, email, paid, matchMethod, null, trx);
@@ -458,6 +470,8 @@ module.exports = {
   recoverStaleClaims,
   sweepStaleClaims,
   closeIfSettled,
+  settledInvoiceFor,
+  zelleReference,
   DUPLICATE_WINDOW_DAYS,
   NEAR_AMOUNT_TOLERANCE_CENTS,
   isZelleReconcileEnabled,
