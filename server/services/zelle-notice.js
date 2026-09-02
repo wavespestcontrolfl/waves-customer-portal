@@ -106,17 +106,47 @@ function memoInvoiceNumbers(memo) {
 
 // Capital One's OWN DKIM signature is the only proof accepted: the forwarded
 // notice keeps it intact, whereas SPF at contact@ authenticates the
-// forwarder's envelope (gmail.com) — and an SPF clause is forgeable in a
-// way DKIM is not (a quoted local part such as "x@capitalone.com"@evil.example
-// would put capitalone.com after the FIRST '@'). So: dkim=pass clauses only,
-// the signing identity read after its LAST '@', org-domain must be
+// forwarder's envelope (gmail.com) — and SPF text is forgeable in a way DKIM
+// is not. The header is parsed structurally (RFC 8601): clauses are split on
+// ';' OUTSIDE quoted strings and parenthesised comments, quoted strings and
+// comments are then dropped, and only a clause that itself STARTS with
+// `dkim=pass` is read — so `dkim=pass header.i=@capitalone.com` smuggled
+// inside a quoted envelope local part or a comment can never count. The
+// signing identity is read after its LAST '@' and its org-domain must be
 // capitalone.com (public-suffix aware, so capitalone.com.evil.example fails).
+function authResultClauses(authResults) {
+  const text = String(authResults || '');
+  const clauses = [];
+  let cur = '';
+  let depth = 0;
+  let quoted = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '\\' && i + 1 < text.length) { i += 1; continue; }
+      if (ch === '"') quoted = false;
+      continue;
+    }
+    if (depth > 0) {
+      if (ch === '(') depth += 1;
+      else if (ch === ')') depth -= 1;
+      continue;
+    }
+    if (ch === '"') { quoted = true; continue; }
+    if (ch === '(') { depth = 1; continue; }
+    if (ch === ';') { clauses.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  clauses.push(cur);
+  return clauses.map((c) => c.replace(/\s+/g, ' ').trim().toLowerCase()).filter(Boolean);
+}
+
 function dkimSignedByCapitalOne(authResults) {
-  const auth = String(authResults || '').toLowerCase();
-  for (const clause of auth.match(/dkim=pass[^;]*/g) || []) {
-    const m = clause.match(/header\.[di]=([^\s;]+)/);
+  for (const clause of authResultClauses(authResults)) {
+    if (!/^dkim=pass\b/.test(clause)) continue;
+    const m = clause.match(/\bheader\.[di]=([^\s]+)/);
     if (!m) continue;
-    const identity = m[1].replace(/^"+|"+$/g, '');
+    const identity = m[1];
     const signer = identity.slice(identity.lastIndexOf('@') + 1);
     if (signer && psl.get(signer) === ZELLE_SENDER_ORG_DOMAIN) return true;
   }
