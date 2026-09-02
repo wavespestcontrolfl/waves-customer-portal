@@ -9500,7 +9500,9 @@ const CallRecordingProcessor = {
     // A job-applicant veto is an INTENTIONAL skip, not a creation failure —
     // without excluding it here the call would close as
     // customer_creation_failed and pollute failure reporting (codex r4 P2).
-    const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature);
+    // An explicit operator unlink is an INTENTIONAL customer-less result,
+    // never a creation failure to file a card for on every reprocess.
+    const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and

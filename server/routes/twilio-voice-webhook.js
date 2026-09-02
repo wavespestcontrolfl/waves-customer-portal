@@ -323,7 +323,16 @@ async function parkAdditionalRecording(row, extra) {
         .catch((e) => logger.error(`[recording-status] post-quarantine current recording delete failed: ${e.message}`));
       return { parked: false, quarantined: true };
     }
-    return { parked: false, quarantined: false, duplicate: true };
+    // A retry of an already-parked SID files nothing — UNLESS the first
+    // delivery's card insert failed after the park landed: with no card in
+    // ANY status the parked recording is invisible to the office, and the
+    // carrier's retry is the durable second chance to file it. A card that
+    // exists (open, or resolved by adopting / dismissing) is left alone.
+    const anyCard = await db('triage_items')
+      .where({ call_log_id: row.id, reason_code: 'additional_recording' })
+      .first('id')
+      .catch(() => null);
+    if (anyCard) return { parked: false, quarantined: false, duplicate: true };
   }
   try {
     const { buildTriageItem } = require('../services/call-routing-gates');
