@@ -7,15 +7,20 @@
  */
 const {
   normalizeNamePart,
+  normalizeNameFolded,
   firstNameVariants,
   sameFirstName,
   payerNameCorroborates,
 } = require('../utils/name-match');
 
 describe('normalizeNamePart', () => {
-  test('folds diacritics instead of deleting the letters', () => {
-    expect(normalizeNamePart('JOSÉ NUÑEZ')).toBe('josenunez');
-    expect(normalizeNamePart('José')).not.toBe(normalizeNamePart('Jos'));
+  test('stays the byte-identical twin of the call processor SQL normalization (no diacritic folding)', () => {
+    expect(normalizeNamePart('JOSÉ NUÑEZ')).toBe('josnuez');
+  });
+
+  test('normalizeNameFolded folds diacritics instead of deleting the letters', () => {
+    expect(normalizeNameFolded('JOSÉ NUÑEZ')).toBe('josenunez');
+    expect(normalizeNameFolded('José')).not.toBe(normalizeNameFolded('Jos'));
   });
 
   test('lowercases and strips everything but alphanumerics', () => {
