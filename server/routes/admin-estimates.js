@@ -884,10 +884,58 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
   const untouched = { estimate, parkedKey: null };
   let parkedKey = null;
   const featureGates = require('../config/feature-gates');
-  if (!featureGates.isEnabled('estimateLeadServiceSend')) return untouched;
-  if (!featureGates.isEnabled('estimateServiceOptOut') || !featureGates.isEnabled('estimateServiceAdd')) return untouched;
   try {
-    if (!estimate || estimate.estimate_group_id || estimate.price_locked_at) return untouched;
+    if (!estimate) return untouched;
+    // Pending / structural restoration runs BEFORE any gate exit: a kill
+    // switch flipped after an undelivered park must never let the next send
+    // go out on the reduced totals (pre-push codex P0). Only NEW parking is
+    // gated, below.
+    const pendingRow = await db('estimates').where({ id: estimate.id }).first();
+    if (!pendingRow) return untouched;
+    let pendingData = {};
+    try { pendingData = typeof pendingRow.estimate_data === 'string' ? JSON.parse(pendingRow.estimate_data) : (pendingRow.estimate_data || {}); }
+    catch { pendingData = {}; }
+    const OptOut = require('../services/estimate-service-opt-out');
+    {
+      const parkedEvent = OptOut.staffOfferedEvents(pendingData || {})[0] || null;
+      const witnessedParkId = pendingData?.leadServiceHandoffParkId || null;
+      const structuralPending = parkedEvent
+        && !(parkedEvent.parkId ? witnessedParkId === parkedEvent.parkId : Boolean(pendingData?.leadServiceHandoffAt))
+        ? parkedEvent.serviceKey
+        : null;
+      const pendingKey = pendingData?.leadServiceRevertPending?.serviceKey
+        ? String(pendingData.leadServiceRevertPending.serviceKey)
+        : structuralPending;
+      if (pendingKey) {
+        const restored = await revertLeadServiceForSend(estimate.id, pendingKey);
+        if (!restored) {
+          const abort = new Error('This estimate is waiting on a review: an earlier undelivered send left an add-on offer unrestored. Nothing was sent.');
+          abort.statusCode = 409;
+          abort.leadServiceAbort = true;
+          throw abort;
+        }
+        try {
+          await clearLeadServiceRevertPending(estimate.id);
+        } catch (err) {
+          const abort = new Error(`Could not clear the add-on review marker (${err.message}). Nothing was sent.`);
+          abort.statusCode = 503;
+          abort.leadServiceAbort = true;
+          throw abort;
+        }
+        const restoredRow = await db('estimates').where({ id: estimate.id }).first();
+        if (!restoredRow) {
+          const abort = new Error('Estimate disappeared while restoring an add-on offer. Nothing was sent.');
+          abort.statusCode = 409;
+          abort.leadServiceAbort = true;
+          throw abort;
+        }
+        return { estimate: { ...restoredRow, status: estimate.status }, parkedKey: null };
+      }
+    }
+    // NEW parking is gated (strict opt-in, needs opt-out + add).
+    if (!featureGates.isEnabled('estimateLeadServiceSend')) return untouched;
+    if (!featureGates.isEnabled('estimateServiceOptOut') || !featureGates.isEnabled('estimateServiceAdd')) return untouched;
+    if (estimate.estimate_group_id || estimate.price_locked_at) return untouched;
     // Frozen restart quotes (plan_restart) carry the cancellation-time
     // families verbatim and accept validates that array — never reshape
     // them (GH codex r5 P1).
@@ -918,58 +966,6 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
     // anything else; if it still fails the send aborts (the office was
     // paged when the marker was written). Success clears the marker and the
     // restored full bundle goes out (pre-push codex P1).
-    // Pending revert: the durable marker, OR the structural evidence of one
-    // — a staff-parked line on a row that has never had a real delivery
-    // (deliveryState.firstDeliveredAt absent) can only mean an undelivered
-    // send whose marker write failed (GH codex r4 P1). Either way the
-    // restore runs first; if it still fails the send aborts.
-    const OptOut = require('../services/estimate-service-opt-out');
-    // Structural pending = a CURRENT staff park whose own id has no durable
-    // handoff witness. Per-park, never "was this estimate ever delivered":
-    // a resend of a previously delivered estimate can park and then die
-    // before handoff, and the old firstDeliveredAt must not hide that
-    // (pre-push codex P0). A park without an id (pre-witness rows) is
-    // pending unless a witness exists at all.
-    const parkedEvent = OptOut.staffOfferedEvents(estData || {})[0] || null;
-    const witnessedParkId = estData?.leadServiceHandoffParkId || null;
-    const structuralPending = parkedEvent
-      && !(parkedEvent.parkId ? witnessedParkId === parkedEvent.parkId : Boolean(estData?.leadServiceHandoffAt))
-      ? parkedEvent.serviceKey
-      : null;
-    const pendingKey = estData?.leadServiceRevertPending?.serviceKey
-      ? String(estData.leadServiceRevertPending.serviceKey)
-      : structuralPending;
-    if (pendingKey) {
-      const restored = await revertLeadServiceForSend(estimate.id, pendingKey);
-      if (!restored) {
-        const abort = new Error('This estimate is waiting on a review: an earlier undelivered send left an add-on offer unrestored. Nothing was sent.');
-        abort.statusCode = 409;
-        abort.leadServiceAbort = true;
-        throw abort;
-      }
-      // The restored row must be what every message composes from; a marker
-      // clear that fails must not fall back to the stale object (GH codex
-      // r4 P1) — abort, the next send retries idempotently.
-      try {
-        await clearLeadServiceRevertPending(estimate.id);
-      } catch (err) {
-        const abort = new Error(`Could not clear the add-on review marker (${err.message}). Nothing was sent.`);
-        abort.statusCode = 503;
-        abort.leadServiceAbort = true;
-        throw abort;
-      }
-      // The row just changed (restore + marker clear): every message must
-      // compose from it, never from the caller's pre-restore object
-      // (pre-push codex P0).
-      const restoredRow = await db('estimates').where({ id: estimate.id }).first();
-      if (!restoredRow) {
-        const abort = new Error('Estimate disappeared while restoring an add-on offer. Nothing was sent.');
-        abort.statusCode = 409;
-        abort.leadServiceAbort = true;
-        throw abort;
-      }
-      return { estimate: { ...restoredRow, status: estimate.status }, parkedKey: null };
-    }
     if (estData?.serviceOptOut) return untouched; // already shaped once — never re-park on a resend
     // Member exclusion (security-critical, AGENTS.md): the ONE shared
     // evidence reader (snapshot flag, priors in any carrier, recurring flag
@@ -1063,6 +1059,32 @@ function cloneEstimateRow(row) {
     copy.estimate_data = JSON.parse(JSON.stringify(row.estimate_data));
   }
   return copy;
+}
+
+// DURABLE per-park handoff witness, written the moment a provider accepted a
+// message — inside the provider branch, before the next channel leg starts —
+// so a termination between the SMS and email legs can never leave a
+// delivered single-service quote looking undelivered (GH codex r5/r6 P1).
+// Idempotent per send; a failure is logged loudly and the later
+// firstDeliveredAt stamp remains the fallback witness.
+async function stampLeadHandoffWitness(estimate, options) {
+  const ref = options?.leadShapeRef;
+  if (!ref || !ref.parkedKey) return;
+  ref.delivered = true;
+  if (ref.witnessStamped) return;
+  try {
+    await db('estimates')
+      .where({ id: estimate.id })
+      .update({
+        estimate_data: db.raw(
+          "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceHandoffAt}', to_jsonb(?::text)), '{leadServiceHandoffParkId}', to_jsonb(?::text))",
+          [new Date().toISOString(), String(ref.parkId || '')],
+        ),
+      });
+    ref.witnessStamped = true;
+  } catch (err) {
+    logger.error(`[admin-estimates] lead-service handoff witness failed for estimate ${estimate.id}: ${err.message}`);
+  }
 }
 
 // Compensation for a send that delivered on NO channel: the parked line is
@@ -1638,6 +1660,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             // for the send result, but never a first response to the lead.
             const { isRealProviderSend } = require('../services/sms-auto-send');
             channels.sms = { ok: true, real: isRealProviderSend(result) };
+            if (channels.sms.real) await stampLeadHandoffWitness(estimate, options);
           }
         } catch (e) {
           logger.error(`Estimate SMS failed: ${e.message}`);
@@ -1724,6 +1747,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             attachments: proposalAttachments,
             proposalMode,
           });
+          if (result.ok) await stampLeadHandoffWitness(estimate, options);
           channels.email = result.ok
             ? { ok: true, provider: result.template || result.provider || 'email' }
             : { ok: false, error: result.error || 'Email send failed' };
@@ -1749,29 +1773,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // if the snapshot read or the status finalize below throws. A suppressed
   // SMS (gate/template/owner kill) reports ok with real:false and is NOT a
   // handoff, so it never sets this (GH codex P1 r1 + r2).
+  // Safety net: each provider branch stamps the witness the moment it
+  // succeeds (stampLeadHandoffWitness); this catches nothing new but keeps
+  // the in-memory verdict aligned with the channels.
   if (options.leadShapeRef && stampChannels.length > 0) {
-    options.leadShapeRef.delivered = true;
-    // DURABLE handoff witness, written the moment a provider accepted the
-    // message and before any later step that can crash or be terminated by a
-    // deploy: the next send's structural pending check must never mistake a
-    // delivered single-service quote for an undelivered one and restore the
-    // full bundle under a link the customer already holds (GH codex r5 P1).
-    // Best-effort by contract with a loud log — a failure here leaves the
-    // firstDeliveredAt stamp below as the witness, exactly as today.
-    if (options.leadShapeRef.parkedKey) {
-      try {
-        await db('estimates')
-          .where({ id: estimate.id })
-          .update({
-            estimate_data: db.raw(
-              "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceHandoffAt}', to_jsonb(?::text)), '{leadServiceHandoffParkId}', to_jsonb(?::text))",
-              [new Date().toISOString(), String(options.leadShapeRef.parkId || '')],
-            ),
-          });
-      } catch (err) {
-        logger.error(`[admin-estimates] lead-service handoff witness failed for estimate ${estimate.id}: ${err.message}`);
-      }
-    }
+    await stampLeadHandoffWitness(estimate, options);
   }
   const sent = sentChannels.length > 0;
 

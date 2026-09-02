@@ -208,6 +208,10 @@ describe('addedLineReviewOnly — an add the engine could only price for review 
     expect(addedLineReviewOnly(raw, 'pest_control')).toBe(false);
     expect(addedLineReviewOnly({ lineItems: [{ service: 'mosquito', quoteRequired: true }] }, 'mosquito')).toBe(true);
     expect(addedLineReviewOnly({ lineItems: [{ service: 'mosquito', requiresMeasurement: true }] }, 'mosquito')).toBe(true);
+    // Pest low-confidence review state lives on its own markers (GH codex r6 P1).
+    expect(addedLineReviewOnly({ lineItems: [{ service: 'pest_control', requiresManualReview: true }] }, 'pest_control')).toBe(true);
+    expect(addedLineReviewOnly({ lineItems: [{ service: 'pest_control', pricingConfidence: 'low' }] }, 'pest_control')).toBe(true);
+    expect(addedLineReviewOnly({ lineItems: [{ service: 'pest_control', confidence: 'high' }] }, 'pest_control')).toBe(false);
     expect(addedLineReviewOnly({ lineItems: [{ service: 'mosquito' }] }, 'mosquito')).toBe(false);
   });
   it('fails closed without a raw result or without the line', () => {

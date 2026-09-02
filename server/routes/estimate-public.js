@@ -14488,7 +14488,13 @@ function addedLineReviewOnly(rawEngineResult, serviceKey) {
   if (!items) return true;
   const rows = items.filter((li) => li && typeof li === 'object' && recurringServiceKey({ service: li.service, name: li.name }) === serviceKey);
   if (!rows.length) return true;
-  return rows.some((li) => li.quoteRequired === true || li.requiresCustomQuote === true || li.requiresMeasurement === true);
+  return rows.some((li) => li.quoteRequired === true
+    || li.requiresCustomQuote === true
+    || li.requiresMeasurement === true
+    // Pest pricing records its low-confidence review state separately from
+    // the custom-quote trio (GH codex r6 P1).
+    || li.requiresManualReview === true
+    || String(li.pricingConfidence || li.confidence || '').toLowerCase() === 'low');
 }
 
 // Normalized section keys of a result's recurring rows — the add rail's
@@ -14795,7 +14801,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         if (activeMember) return { status: 400, body: ({ error: 'service_not_addable' }) };
       }
       mode = 'add';
-    } else if (OptOut.latestOptOutEventIsStaff(parsedData, serviceKey) && !serviceAddGateOn()) {
+    } else if (actor !== 'staff' && OptOut.latestOptOutEventIsStaff(parsedData, serviceKey) && !serviceAddGateOn()) {
       // A staff-parked offer (lead-service send) re-enters the plan only
       // under the add gate — the lane that created it. Gate off = the offer
       // is withheld from /data and refused here (pre-push codex P0).

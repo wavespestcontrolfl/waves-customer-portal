@@ -66,7 +66,7 @@ beforeEach(() => {
   mockRows.updates.length = 0;
   mockRows.updateThrows = false;
   mockNotify.calls.length = 0;
-  mockRows.queue = [claimedRowFor(newCustomerRow()), parkedRow];
+  mockRows.queue = [claimedRowFor(newCustomerRow()), claimedRowFor(newCustomerRow()), parkedRow];
   mockPlan.active = false;
   mockPlan.throws = false;
   mockGates.estimateLeadServiceSend = true;
@@ -95,7 +95,7 @@ test('lead follows the estimator\'s selection order', async () => {
   const data = JSON.parse(row.estimate_data);
   data.engineRequest.selectedServices = ['LAWN', 'PEST'];
   row.estimate_data = JSON.stringify(data);
-  mockRows.queue = [claimedRowFor(row), parkedRow];
+  mockRows.queue = [claimedRowFor(row), claimedRowFor(row), parkedRow];
   await applyLeadServiceForSend(row);
   expect(mockMixCalls[0].body.serviceKey).toBe('pest_control');
 });
@@ -118,14 +118,14 @@ test('members, grouped, commercial, locked, already-shaped and single-line rows 
     newCustomerRow({ estimate_data: JSON.stringify({ engineRequest: { profile: {}, selectedServices: ['PEST'], options: {} }, inputs: { services: { pest: {} } } }) }),
   ];
   for (const row of cases) {
-    mockRows.queue = [claimedRowFor(row), parkedRow];
+    mockRows.queue = [claimedRowFor(row), claimedRowFor(row), parkedRow];
     expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
   }
   expect(mockMixCalls).toHaveLength(0);
 });
 
 test('member evidence in any carrier — the recurring-customer flag included — and a live active plan are never parked; a lookup failure fails CLOSED', async () => {
-  const run = async (row) => { mockRows.queue = [claimedRowFor(row), parkedRow]; return applyLeadServiceForSend(row); };
+  const run = async (row) => { mockRows.queue = [claimedRowFor(row), claimedRowFor(row), parkedRow]; return applyLeadServiceForSend(row); };
   const flagged = newCustomerRow({ estimate_data: JSON.stringify({ engineRequest: { profile: {}, selectedServices: ['PEST', 'LAWN'], options: { recurringCustomer: 'yes' } } }) });
   expect(await run(flagged)).toEqual({ estimate: flagged, parkedKey: null });
   const flaggedInputs = newCustomerRow({ estimate_data: JSON.stringify({ engineInputs: { isRecurringCustomer: true, services: { pest: {}, lawn: {} } }, engineRequest: { profile: {}, selectedServices: ['PEST', 'LAWN'], options: {} } }) });
@@ -157,14 +157,14 @@ test('a three-line estimate is never shaped — one atomic park or nothing (pre-
     services: [{ key: 'pest_control', isRecurring: true }, { key: 'lawn_care', isRecurring: true }, { key: 'mosquito', isRecurring: true }],
   });
   const row = newCustomerRow({ estimate_data: JSON.stringify({ engineRequest: { profile: {}, selectedServices: ['PEST', 'LAWN', 'MOSQUITO'], options: {} }, inputs: { services: { pest: {}, lawn: {}, mosquito: {} } } }) });
-  mockRows.queue = [claimedRowFor(row), parkedRow];
+  mockRows.queue = [claimedRowFor(row), claimedRowFor(row), parkedRow];
   expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
   expect(mockMixCalls).toHaveLength(0);
 });
 
 test('an archived or locked claimed row is left alone', async () => {
   const row = newCustomerRow();
-  mockRows.queue = [{ ...claimedRowFor(row), archived_at: 'x' }, parkedRow];
+  mockRows.queue = [{ ...claimedRowFor(row), archived_at: 'x' }, { ...claimedRowFor(row), archived_at: 'x' }, parkedRow];
   expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
   expect(mockMixCalls).toHaveLength(0);
 });
@@ -212,7 +212,7 @@ test('a refused or throwing revert is logged, never thrown, and reports false', 
 test('a post-commit reread failure aborts the send with the parked key preserved for compensation (pre-push codex P1)', async () => {
   const row = newCustomerRow();
   // Claimed row first, then NO row on the post-park reread.
-  mockRows.queue = [claimedRowFor(row), null];
+  mockRows.queue = [claimedRowFor(row), claimedRowFor(row), null];
   const leadShapeRef = { parkedKey: null };
   await expect(applyLeadServiceForSend(row, { leadShapeRef })).rejects.toMatchObject({ statusCode: 503, leadServiceParkedKey: 'lawn_care' });
   expect(leadShapeRef.parkedKey).toBe('lawn_care');
@@ -221,7 +221,7 @@ test('a post-commit reread failure aborts the send with the parked key preserved
 
 test('a pre-commit failure is still swallowed (nothing was parked)', async () => {
   const row = newCustomerRow();
-  mockRows.queue = [claimedRowFor(row), parkedRow];
+  mockRows.queue = [claimedRowFor(row), claimedRowFor(row), parkedRow];
   const leadShapeRef = { parkedKey: null };
   mockMix.responder = ({ body }) => { if (body.dryRun) throw new Error('boom'); return { status: 200, body: {} }; };
   expect(await applyLeadServiceForSend(row, { leadShapeRef })).toEqual({ estimate: row, parkedKey: null });
@@ -231,7 +231,7 @@ test('a pre-commit failure is still swallowed (nothing was parked)', async () =>
 test('a row that became grouped or non-residential between the read and the claim is left alone', async () => {
   for (const patch of [{ estimate_group_id: 'g-late' }, { category: 'COMMERCIAL' }]) {
     const row = newCustomerRow();
-    mockRows.queue = [{ ...claimedRowFor(row), ...patch }, parkedRow];
+    mockRows.queue = [{ ...claimedRowFor(row), ...patch }, { ...claimedRowFor(row), ...patch }, parkedRow];
     expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
   }
   expect(mockMixCalls).toHaveLength(0);
@@ -242,7 +242,7 @@ test('the rail never receives the row object itself: each dry run and commit get
   const claimed = claimedRowFor(row);
   // JSONB hydrated as an OBJECT — the shape that made the dry run mutate the row.
   claimed.estimate_data = JSON.parse(claimed.estimate_data);
-  mockRows.queue = [claimed, parkedRow];
+  mockRows.queue = [claimed, claimed, parkedRow];
   await applyLeadServiceForSend(row);
   expect(mockMixCalls).toHaveLength(2);
   const [preview, commit] = mockMixCalls;
@@ -270,6 +270,7 @@ describe('durable revert-pending state (pre-push codex P1)', () => {
     const claimed = claimedRowFor(row);
     claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }] }, leadServiceRevertPending: { serviceKey: 'lawn_care', at: 't' } });
     const restoredRow = { ...claimed, monthly_total: 95, estimate_data: JSON.stringify({ serviceOptOut: { events: [] } }), updated_at: '2026-09-01T10:00:20.000Z' };
+    // pending pre-read → revert's own read → post-clear reread
     mockRows.queue = [claimed, claimed, restoredRow];
     const out = await applyLeadServiceForSend(row);
     // The RESTORED row comes back (with the caller's in-flight status), never
@@ -284,7 +285,7 @@ describe('durable revert-pending state (pre-push codex P1)', () => {
     const row = newCustomerRow();
     const claimed = claimedRowFor(row);
     claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }] }, leadServiceRevertPending: { serviceKey: 'lawn_care', at: 't' } });
-    mockRows.queue = [claimed, claimed];
+    mockRows.queue = [claimed, claimed, claimed];
     mockMix.responder = () => ({ status: 409, body: { error: 'estimate_changed_since_preview' } });
     await expect(applyLeadServiceForSend(row)).rejects.toMatchObject({ statusCode: 409, leadServiceAbort: true });
     expect(mockRows.updates).toHaveLength(0);
@@ -305,7 +306,7 @@ describe('fail-closed marker handling (GH codex r4 P1 x2)', () => {
     const claimed = claimedRowFor(row);
     claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }] } });
     const restoredRow = { ...claimed, estimate_data: JSON.stringify({ serviceOptOut: { events: [] } }) };
-    mockRows.queue = [claimed, claimed, restoredRow];
+    mockRows.queue = [claimed, claimed, claimed, restoredRow];
     const out = await applyLeadServiceForSend(row);
     expect(out.parkedKey).toBeNull();
     expect(mockMixCalls.map((c) => [c.body.serviceKey, c.body.included])).toEqual([['lawn_care', true], ['lawn_care', true]]);
@@ -316,7 +317,7 @@ describe('fail-closed marker handling (GH codex r4 P1 x2)', () => {
     const claimed = claimedRowFor(row);
     // A pre-witness park (no parkId) on a row with ANY handoff witness is a resend, not pending.
     claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), leadServiceHandoffAt: '2026-09-01T00:00:00Z', serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }] } });
-    mockRows.queue = [claimed, claimed];
+    mockRows.queue = [claimed, claimed, claimed];
     expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
     expect(mockMixCalls).toHaveLength(0);
   });
@@ -325,7 +326,7 @@ describe('fail-closed marker handling (GH codex r4 P1 x2)', () => {
     const row = newCustomerRow();
     const claimed = claimedRowFor(row);
     claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }] }, leadServiceRevertPending: { serviceKey: 'lawn_care', at: 't' } });
-    mockRows.queue = [claimed, claimed];
+    mockRows.queue = [claimed, claimed, claimed];
     mockRows.updateThrows = true;
     await expect(applyLeadServiceForSend(row)).rejects.toMatchObject({ statusCode: 503, leadServiceAbort: true });
     mockRows.updateThrows = false;
@@ -335,7 +336,7 @@ describe('fail-closed marker handling (GH codex r4 P1 x2)', () => {
 describe('round-five scope pins (GH codex r5)', () => {
   test('a frozen plan_restart quote is never reshaped', async () => {
     for (const row of [newCustomerRow({ source: 'plan_restart' }), newCustomerRow({ estimate_data: JSON.stringify({ planRestart: true, engineRequest: { profile: {}, selectedServices: ['PEST', 'LAWN'], options: {} } }) })]) {
-      mockRows.queue = [claimedRowFor(row), parkedRow];
+      mockRows.queue = [claimedRowFor(row), claimedRowFor(row), parkedRow];
       expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
     }
     expect(mockMixCalls).toHaveLength(0);
@@ -345,7 +346,7 @@ describe('round-five scope pins (GH codex r5)', () => {
     const row = newCustomerRow();
     const claimed = claimedRowFor(row);
     claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), leadServiceHandoffAt: '2026-09-01T00:00:00Z', leadServiceHandoffParkId: 'park-1', serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', parkId: 'park-1', at: 't1' }] } });
-    mockRows.queue = [claimed, claimed];
+    mockRows.queue = [claimed, claimed, claimed];
     expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
     expect(mockMixCalls).toHaveLength(0);
   });
@@ -355,9 +356,22 @@ describe('round-five scope pins (GH codex r5)', () => {
     const claimed = claimedRowFor(row);
     claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), deliveryState: { firstDeliveredAt: '2026-08-01T00:00:00Z' }, leadServiceHandoffAt: '2026-08-01T00:00:00Z', leadServiceHandoffParkId: 'park-old', serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', parkId: 'park-new', at: 't2' }] } });
     const restoredRow = { ...claimed, estimate_data: JSON.stringify({ serviceOptOut: { events: [] } }) };
-    mockRows.queue = [claimed, claimed, restoredRow];
+    mockRows.queue = [claimed, claimed, claimed, restoredRow];
     const out = await applyLeadServiceForSend(row);
     expect(out.parkedKey).toBeNull();
     expect(mockMixCalls.map((c) => [c.body.serviceKey, c.body.included])).toEqual([['lawn_care', true], ['lawn_care', true]]);
   });
+});
+
+test('pending restoration runs even with every gate OFF — a kill switch never lets a reduced quote resend (pre-push codex P0)', async () => {
+  mockGates.estimateLeadServiceSend = false;
+  const row = newCustomerRow();
+  const claimed = claimedRowFor(row);
+  claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', parkId: 'p1', at: 't1' }] }, leadServiceRevertPending: { serviceKey: 'lawn_care', at: 't' } });
+  const restoredRow = { ...claimed, estimate_data: JSON.stringify({ serviceOptOut: { events: [] } }) };
+  mockRows.queue = [claimed, claimed, restoredRow];
+  const out = await applyLeadServiceForSend(row);
+  expect(out.parkedKey).toBeNull();
+  expect(out.estimate.estimate_data).toBe(restoredRow.estimate_data);
+  expect(mockMixCalls.map((c) => [c.body.serviceKey, c.body.included])).toEqual([['lawn_care', true], ['lawn_care', true]]);
 });
