@@ -210,6 +210,23 @@ function skipTrivia(source, i) {
   }
 }
 
+// Consume one balanced {...} span starting at an opening brace (strings
+// and comments skipped); returns the index just past the closing brace.
+function balancedBraces(source, i) {
+  let depth = 0;
+  while (i < source.length) {
+    if (source.startsWith('//', i) || source.startsWith('/*', i)) { i = skipTrivia(source, i); continue; }
+    const ch = source[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i += 1;
+      while (i < source.length && source[i] !== ch) { if (source[i] === '\\') i += 1; i += 1; }
+    } else if (ch === '{') depth += 1;
+    else if (ch === '}') { depth -= 1; if (depth === 0) return i + 1; }
+    i += 1;
+  }
+  return i;
+}
+
 // Consume one balanced (...) span starting at an opening paren, skipping
 // string literals (a ')' inside a string can't end it early) AND comments
 // (an apostrophe inside a comment — "the customer's rental" — must not
@@ -411,6 +428,21 @@ function isContractCompleted(source, arg) {
   // mutate it (`stripAttribution(data)`) — unless the callee is on the
   // known non-mutating list (GH Codex r11 P2).
   if (escapesThroughCall(source, text)) return false;
+  // Iterating the tracked array with for…of binds each element to a
+  // name the checks above can't see (`for (const row of rows) row.x = …`):
+  // a plain element binding is inspected for mutation/escape through
+  // that name; a destructured one fails closed (GH Codex r17 P2).
+  const forOf = new RegExp(`\\bfor\\s*\\(\\s*(?:const|let|var)\\s+([^)]*?)\\s+of\\s+${text}\\b[^)]*\\)`, 'g');
+  let fo;
+  while ((fo = forOf.exec(source)) !== null) {
+    const binding = fo[1].trim();
+    if (!/^[A-Za-z_$][\w$]*$/.test(binding)) return false;
+    let at = skipTrivia(source, fo.index + fo[0].length);
+    const body = source[at] === '{'
+      ? source.slice(at, balancedBraces(source, at))
+      : source.slice(at, statementEnd(source, at));
+    if (mutatesIdentifier(body, binding) || escapesThroughCall(body, binding)) return false;
+  }
   // A method called ON the tracked value is a mutation unless it is a
   // known read-only one — `rows.unshift(raw)` / `splice` / `fill` would
   // smuggle an unvalidated row into a completed accumulator (GH Codex r12
@@ -474,7 +506,7 @@ const NON_MUTATING_LAST = new Set(['insert', 'batchInsert']);
 // contract module — a same-named local function or an import from
 // anywhere else is a parallel stamping mechanism, and its output launders
 // nothing (GH Codex r6 P2).
-const CANONICAL_IMPORT = /\{[^}]*\bcompleteScheduledServiceInsert\b[^}]*\}\s*=\s*require\(\s*['"][^'"]*\/booking\/create-scheduled-service(?:\.js)?['"]\s*\)/;
+const CANONICAL_IMPORT = /\{[^}]*\bcompleteScheduledServiceInsert\b[^}]*\}\s*=\s*require\(\s*['"][^'"]*\/booking\/create-scheduled-service(?:\.js)?['"]\s*\)|\bimport\s*\{[^}]*\bcompleteScheduledServiceInsert\b[^}]*\}\s*from\s*['"][^'"]*\/booking\/create-scheduled-service(?:\.js)?['"]/;
 const LOCAL_HELPER = /\b(?:function\s+completeScheduledServiceInsert\b|(?:const|let|var)\s+completeScheduledServiceInsert\s*=|completeScheduledServiceInsert\s*:\s*(?:async\s*)?(?:function\b|\())/;
 function importsCanonicalHelper(source) {
   return CANONICAL_IMPORT.test(source) && !LOCAL_HELPER.test(source);
@@ -583,7 +615,7 @@ function withScope(source, index, rest) {
 function statementPrefix(source, refIndex) {
   let lineStart = source.lastIndexOf('\n', refIndex - 1) + 1;
   let prefix = source.slice(lineStart, refIndex).trim();
-  if (!prefix) {
+  if (!prefix && lineStart > 0) {
     const prevEnd = lineStart - 1;
     const prevStart = source.lastIndexOf('\n', prevEnd - 1) + 1;
     prefix = source.slice(prevStart, prevEnd).trim();
@@ -601,16 +633,28 @@ function chaseAlias(source, refIndex, site, statementText = statementPrefix(sour
   // r8 P1). Property targets (`this.visits = …`) can't be chased by name.
   const assign = /^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])/.exec(statementText);
   if (!assign) return;
-  const alias = assign[1];
+  chaseAliasName(source, assign[1], site, new Set());
+}
+
+function chaseAliasName(source, alias, site, seen) {
+  if (seen.has(alias)) return;
+  seen.add(alias);
   // Every later use of the alias is followed through its COMPLETE method
   // chain — `visits.clone().insert(data)`, `visits.where(…).insert(…)` —
-  // not just a first-link `.insert(` (GH Codex r15 P2).
+  // not just a first-link `.insert(` (GH Codex r15 P2). A chain that ends
+  // WITHOUT an insert but is bound to another name (`const refined =
+  // visits.clone()`) propagates the table identity to that name
+  // (GH Codex r17 P2).
   const aliasRe = new RegExp(`(?<![.\\w$])${alias}\\b`, 'g');
   let am;
   while ((am = aliasRe.exec(source)) !== null) {
     const chain = walkLinks(source, am.index + alias.length, alias);
-    if (!/\.insert\s*\(/.test(chain)) continue;
-    site(am.index, `${statementPrefix(source, am.index)} alias:${fingerprintOf(chain)}`, insertArgument(chain));
+    if (/\.insert\s*\(/.test(chain)) {
+      site(am.index, `${statementPrefix(source, am.index)} alias:${fingerprintOf(chain)}`, insertArgument(chain));
+      continue;
+    }
+    const bound = /^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])\s*(?:await\s+)?$/.exec(statementPrefix(source, am.index));
+    if (bound && bound[1] !== alias) chaseAliasName(source, bound[1], site, seen);
   }
 }
 
@@ -669,7 +713,9 @@ function collectInsertSites(source) {
   // scheduled_services …') must not slip past a builder-only scan
   // (GH Codex r5 P1) — including a schema-qualified table
   // (`INSERT INTO public.scheduled_services`, quoted or not; r5 P2).
-  const rawRe = /INSERT\s+INTO\s+(?:["'`]?\w+["'`]?\s*\.\s*)?["'`]?scheduled_services\b/gi;
+  // …and PostgreSQL COPY / psql \copy INTO the table, which write rows
+  // without an INSERT (GH Codex r17 P2).
+  const rawRe = /(?:INSERT\s+INTO|\bCOPY|\\copy)\s+(?:["'`]?\w+["'`]?\s*\.\s*)?["'`]?scheduled_services\b/gi;
   let rawM;
   while ((rawM = rawRe.exec(source)) !== null) {
     // Comment mentions are not sites (the iCal script documents its own
@@ -677,7 +723,9 @@ function collectInsertSites(source) {
     // not by the line's prefix, so `/* import */ await db.raw('INSERT …')`
     // is still a site (GH Codex r16 P2). `#` covers shell/SQL tools.
     if (insideComment(source, rawM.index)) continue;
-    site(rawM.index, `${statementPrefix(source, rawM.index)} raw:INSERT INTO scheduled_services`, null);
+    const verb = /^insert/i.test(rawM[0]) ? 'INSERT INTO' : 'COPY';
+    if (verb === 'COPY' && /\bcopy\s+(?:["'`]?\w+["'`]?\s*\.\s*)?["'`]?scheduled_services\b[^\n]*\bTO\b/i.test(source.slice(rawM.index, rawM.index + 200))) continue; // COPY … TO is an export
+    site(rawM.index, `${statementPrefix(source, rawM.index)} raw:${verb} scheduled_services`, null);
   }
   // Builder refs, schema-qualified or not (`trx('public.scheduled_services')`),
   // plus any CONSTANT bound to the table name in this file
@@ -808,6 +856,11 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("await trx.batchInsert('scheduled_services', rows, 50);")).toEqual(["await trx.batchInsert( batchInsert:scheduled_services, rows"]);
     expect(collectInsertSites("const TABLE = 'scheduled_services';\nawait knex.batchInsert(TABLE, [row]);")).toEqual(["await knex.batchInsert( batchInsert:scheduled_services, ["]);
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
+    // …a for…of loop that mutates or escapes its element is a mutation (r17 P2), a read-only one is fine, a destructured binding fails closed…
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nfor (const row of rows) row.source_action = null;\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nfor (const row of rows) {\n  stripAttribution(row);\n}\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nfor (const [i, row] of rows.entries()) log(i);\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nfor (const row of rows) {\n  if (row.status === 'x') logger.info('row', row);\n}\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
     // …a mutating array method smuggles a row past the helper (r12 P2), while a read-only one is fine…
     for (const smuggle of ['rows.unshift(raw);', 'rows.splice(0, 0, raw);', 'rows.fill(raw);']) {
       expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\n${smuggle}\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
@@ -835,6 +888,9 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("const visits = trx('scheduled_services');\nawait visits.clone().insert(data);")).toEqual(["await alias:visits.clone().insert(data"]);
     expect(collectInsertSites("const visits = trx('scheduled_services');\nconst [row] = await visits\n  .where({ id })\n  .insert(data)\n  .returning('*');")).toEqual(["const [row] = await alias:visits.where({ id }).insert(data"]);
     expect(collectInsertSites("const visits = trx('scheduled_services');\nconst n = await visits.clone().count();")).toEqual([]);
+    // …and a builder DERIVED from the alias carries the table identity (r17 P2).
+    expect(collectInsertSites("const visits = trx('scheduled_services');\nconst refined = visits.clone();\nawait refined.insert(data);")).toEqual(["await alias:refined.insert(data"]);
+    expect(collectInsertSites("const visits = trx('scheduled_services');\nconst refined = visits.where({ a: 1 });\nconst again = refined.clone();\nawait again.insert(data);")).toEqual(["await alias:again.insert(data"]);
     // …including an alias captured through the table-last forms (r7 P2).
     expect(collectInsertSites("const visits = trx.table('scheduled_services');\nawait doStuff();\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
     expect(collectInsertSites("const visits = trx\n  .into('scheduled_services');\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
@@ -873,6 +929,10 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("// await db.raw('INSERT INTO scheduled_services (a) VALUES (1)');")).toEqual([]);
     expect(collectInsertSites("/* documents: INSERT INTO scheduled_services happens below */\nconst x = 1;")).toEqual([]);
     expect(collectInsertSites("const s = 'not // a comment'; await db.raw('INSERT INTO scheduled_services (a) VALUES (1)');")).toHaveLength(1);
+    // COPY / \\copy INTO the table are writers; COPY … TO is an export (r17 P2).
+    expect(collectInsertSites("COPY scheduled_services (customer_id) FROM STDIN;")).toEqual(["raw:COPY scheduled_services"]);
+    expect(collectInsertSites("psql \"$DATABASE_URL\" -c \"\\\\copy scheduled_services from 'rows.csv'\"")).toHaveLength(1);
+    expect(collectInsertSites("COPY scheduled_services TO '/tmp/out.csv';")).toEqual([]);
     // Shell / SQL tools: a psql insert is a site, a # comment is not.
     expect(collectInsertSites('psql "$DATABASE_URL" -c "INSERT INTO scheduled_services (customer_id) VALUES (1)"')).toHaveLength(1);
     expect(collectInsertSites('# never: INSERT INTO scheduled_services\npsql "$DATABASE_URL" -c "SELECT 1"')).toEqual([]);
@@ -888,6 +948,8 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, { trx, cols, source }));\nawait trx('scheduled_services').insert(rows);`)).toEqual([]);
     expect(collectInsertSites(`${IMPORT}const rows = await Promise.all(raws.map((r) => completeScheduledServiceInsert(r, { trx, cols, source })));\nconst visits = trx('scheduled_services');\nawait visits.insert(rows);`)).toEqual([]);
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nawait trx.insert(data).into('scheduled_services');`)).toEqual([]);
+    // …an ESM import of the canonical helper counts too (r17 P2)…
+    expect(collectInsertSites("import { completeScheduledServiceInsert } from '../services/booking/create-scheduled-service.js';\nconst data = await completeScheduledServiceInsert(raw, opts);\nawait trx('scheduled_services').insert(data);")).toEqual([]);
     // …but a same-named helper that is NOT the canonical module's — no
     // import, a local definition, or an import from elsewhere — launders
     // nothing (GH Codex r6 P2)…

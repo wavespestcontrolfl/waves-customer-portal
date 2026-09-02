@@ -145,12 +145,16 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
     // without hold markers would otherwise insert a permanent
     // customer-less appointment through the nullable column
     // (GH Codex r2 P2).
+    // The hold must also carry its estimate: the refresh/supersession
+    // path finds live holds by source_estimate_id, so a hold without one
+    // would be unmanaged capacity until the expiry sweep (GH Codex r17 P2).
     const explicitHold = allowNullCustomer
       && Object.prototype.hasOwnProperty.call(insertData, 'customer_id')
       && insertData.customer_id === null
-      && insertData.reservation_expires_at;
+      && insertData.reservation_expires_at
+      && insertData.source_estimate_id != null && String(insertData.source_estimate_id).trim() !== '';
     if (!explicitHold) {
-      throw contractError('customer_id is required (allowNullCustomer admits only the explicit slot-hold shape: customer_id null + reservation_expires_at)');
+      throw contractError('customer_id is required (allowNullCustomer admits only the explicit slot-hold shape: customer_id null + reservation_expires_at + source_estimate_id)');
     }
   }
   if (!insertData.scheduled_date) throw contractError('scheduled_date is required');
@@ -173,7 +177,11 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
     if (typeof v !== 'string') throw contractError(`source attribution must be a string, got ${typeof v}`);
     return v.trim();
   };
-  const sourceAction = trimmed(source?.sourceAction) || trimmed(insertData.source_action);
+  // The caller's stamped value is inspected FIRST: when it is a valid
+  // string the option is only a fallback and is not validated at all, so
+  // a malformed optional fallback can't reject a correctly stamped
+  // payload (GH Codex r17 P2).
+  const sourceAction = trimmed(insertData.source_action) || trimmed(source?.sourceAction);
   if (!sourceAction) {
     throw contractError('source attribution is required: pass source.sourceAction (e.g. admin_manual, voice_agent, admin_ib)');
   }

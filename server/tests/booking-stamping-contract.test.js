@@ -87,8 +87,11 @@ describe('validation (ungated)', () => {
 
   test('missing customer_id throws; allowNullCustomer admits ONLY the explicit hold shape', async () => {
     await expect(run({ ...BASE, customer_id: null })).rejects.toThrow(/customer_id/);
-    // Explicit null + reservation expiry = the slot-hold shape.
-    await expect(run({ ...BASE, customer_id: null, reservation_expires_at: new Date() }, { allowNullCustomer: true })).resolves.toBeTruthy();
+    // Explicit null + reservation expiry + estimate identity = the slot-hold shape.
+    await expect(run({ ...BASE, customer_id: null, reservation_expires_at: new Date(), source_estimate_id: 'est-1' }, { allowNullCustomer: true })).resolves.toBeTruthy();
+    // A hold without its estimate would be unmanaged capacity (GH Codex r17 P2).
+    await expect(run({ ...BASE, customer_id: null, reservation_expires_at: new Date() }, { allowNullCustomer: true })).rejects.toThrow(/source_estimate_id/);
+    await expect(run({ ...BASE, customer_id: null, reservation_expires_at: new Date(), source_estimate_id: '  ' }, { allowNullCustomer: true })).rejects.toThrow(/source_estimate_id/);
     // Merely omitted customer, or no hold marker: the hatch stays shut
     // (GH Codex r2 P2 — a permanent customer-less appointment).
     const { customer_id, ...omitted } = BASE;
@@ -134,6 +137,10 @@ describe('validation (ungated)', () => {
       await expect(run(BASE, { source: { sourceAction: bad } })).rejects.toThrow(/must be a string/);
       await expect(run({ ...BASE, source_action: bad }, { source: {} })).rejects.toThrow(/must be a string/);
       await expect(run(BASE, { source: { sourceAction: 'admin_ib', bookingSource: bad } })).rejects.toThrow(/must be a string/);
+      // …but a validly STAMPED payload wins before the option is even
+      // looked at, so a malformed optional fallback can't reject it (r17 P2).
+      const out = await run({ ...BASE, source_action: 'legacy_lane' }, { source: { sourceAction: bad } });
+      expect(out.source_action).toBe('legacy_lane');
     }
   });
 
