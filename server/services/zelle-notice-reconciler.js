@@ -17,8 +17,8 @@
  *                                         (normal classification / spam handling still runs)
  *   4. template not parseable           → parked `parse_failed`
  *   5. same payer + amount applied <14d → parked `possible_duplicate`
- *      (re-checked under a payer+amount advisory lock at settlement, so two
- *      copies of one transfer can never both settle)
+ *      (re-checked right before settlement; one invoice takes one notice —
+ *      partial UNIQUE index — so two copies of one transfer never both settle)
  *   6. exact-cent open self-pay invoices (services/open-balance.js):
  *        memo carries exactly one of them → apply (memo_invoice_number)
  *        exactly one whose customer name corroborates the payer → apply (amount_name)
@@ -130,8 +130,8 @@ async function notifyOwner(title, body, noticeId, { needsReview = false } = {}) 
   }
 }
 
-async function finishParked(notice, email, reason, { candidates = null, applyError = null, matchedInvoice = null } = {}, trx = db) {
-  await trx('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
+async function finishParked(notice, email, reason, { candidates = null, applyError = null, matchedInvoice = null } = {}) {
+  await db('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
     status: 'parked',
     park_reason: reason,
     candidates: candidates ? JSON.stringify(candidates) : null,
@@ -152,12 +152,13 @@ async function finishParked(notice, email, reason, { candidates = null, applyErr
   return { status: 'parked', reason };
 }
 
-async function finishApplied(notice, email, invoice, matchMethod, receipt, trx = db) {
+async function finishApplied(notice, email, invoice, matchMethod, receipt) {
   // The payment has COMMITTED — the notice must say so whatever happened to
-  // the claim meanwhile (a stale-claim sweep on another pod could have parked
-  // it during a slow settlement). Verify the transition; a non-processing
-  // row is overwritten and logged, never left contradicting the ledger.
-  const moved = await trx('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
+  // the claim meanwhile (a stale-claim sweep could have parked it during a
+  // settlement slower than STALE_CLAIM_MS). CAS on `processing`; a
+  // non-processing row is overwritten and logged, never left contradicting
+  // the ledger.
+  const moved = await db('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
     status: 'auto_applied',
     park_reason: null,
     match_method: matchMethod,
@@ -169,7 +170,7 @@ async function finishApplied(notice, email, invoice, matchMethod, receipt, trx =
   });
   if (!moved) {
     logger.error(`[zelle-notice] notice ${notice.id} was no longer processing after ${invoice.invoice_number} settled — forcing auto_applied to match the ledger`);
-    await trx('inbound_payment_notices').where({ id: notice.id }).update({
+    await db('inbound_payment_notices').where({ id: notice.id }).update({
       status: 'auto_applied', park_reason: null, apply_error: null, match_method: matchMethod,
       matched_invoice_id: invoice.id, matched_customer_id: invoice.customer_id,
       applied_at: new Date(), applied_by: RECORDED_BY, updated_at: new Date(),
@@ -210,10 +211,12 @@ async function claimNotice(email, parsed) {
 // A claim the sync never finished (process exit, DB blip after the insert)
 // would otherwise sit in `processing` forever: the email row is stored, so
 // no later sync re-enters the hook. Park anything older than the window as
-// apply_failed for the operator — never re-run the money path blind. Safe
-// against an in-flight settlement: the settling path holds the notice's row
-// lock across recordManualPayment + close, so this UPDATE waits behind it
-// and its status='processing' predicate then no longer matches.
+// apply_failed for the operator — never re-run the money path blind. An
+// in-flight settlement is protected by AGE, not a lock (no transaction is
+// held across recordManualPayment): a claim is re-stamped (updated_at) right
+// before settling, so only a settlement slower than the window can be
+// swept — and then closeIfSettled / finishApplied's forced close still make
+// the row match the ledger.
 const STALE_CLAIM_MS = 10 * 60 * 1000;
 async function recoverStaleClaims() {
   const cutoff = new Date(Date.now() - STALE_CLAIM_MS);
@@ -326,10 +329,6 @@ async function recentlyApplied(parsed, database = db) {
   return !!dup;
 }
 
-function settlementLockKey(parsed) {
-  return `zelle-settle:${normalizeNamePart(parsed.payerName)}:${parsed.amountCents}`;
-}
-
 function isRefusal(err) {
   return [400, 404, 409].includes(err?.statusCode);
 }
@@ -435,8 +434,9 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
   // partial UNIQUE index on matched_invoice_id also has the DATABASE refuse
   // two notices settling one invoice — a violation here means another copy
   // of this transfer is already on it.
+  let stamped;
   try {
-    await db('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
+    stamped = await db('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
       matched_invoice_id: match.id,
       matched_customer_id: match.customer_id,
       match_method: matchMethod,
@@ -448,71 +448,68 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
     await finishParked(notice, email, 'possible_duplicate', { candidates });
     return true;
   }
+  if (!stamped) {
+    logger.warn(`[zelle-notice] notice ${notice.id} was no longer processing at settlement time — not settling`);
+    return true;
+  }
 
-  // Settle and close under a ROW LOCK on the notice: the stale-claim sweep
-  // and the operator's Apply both UPDATE this row and therefore wait behind
-  // the lock until the settlement has committed and the row says applied /
-  // parked — a claim can never be "recovered" or re-applied mid-settlement.
-  // recordManualPayment runs its own transaction on another connection and
-  // never touches this table, so holding the lock across it cannot deadlock.
+  // The stamp above returned 0 rows when the claim is no longer processing
+  // (the stale sweep parked it) — nothing to settle.
+  // NO outer transaction across the settlement: recordManualPayment opens
+  // its own, and holding a notice transaction around it would let two
+  // concurrent settlements (a sync + an operator Apply) each take one of the
+  // two pool connections and wait forever for the inner one. The committed
+  // claim IS the serialization: the sweep leaves a fresh processing claim
+  // alone for STALE_CLAIM_MS, Apply / Ignore require `parked`, one invoice
+  // takes one notice (partial UNIQUE index), and the close below is a CAS
+  // on `processing` with a lost close recovered by closeIfSettled.
   //
-  // Then a transaction-scoped ADVISORY lock keyed by normalized payer +
-  // amount: the duplicate check above ran before any lock, so two distinct
-  // copies of one bank notice (a re-forward, a second filter) could both see
-  // no prior application and settle two invoices for one transfer. Same-key
-  // settlements serialize here and re-run the check while holding the key
-  // through commit — the second copy sees the first one's applied row and
-  // parks. Lock order is always own-notice row → advisory key, so no cycle.
-  await db.transaction(async (trx) => {
-    const locked = await trx('inbound_payment_notices').where({ id: notice.id }).forUpdate().first('id', 'status');
-    if (!locked || locked.status !== 'processing') {
-      logger.warn(`[zelle-notice] notice ${notice.id} is ${locked?.status || 'gone'} at settlement time — not settling`);
-      return;
+  // Duplicate re-check right before settling: two copies of one transfer
+  // that both matched can only have matched the SAME single invoice, which
+  // the index refused above; this catches the copy whose first check ran
+  // before the other's close committed.
+  if (await recentlyApplied(parsed)) {
+    logger.warn(`[zelle-notice] notice ${notice.id}: same payer + amount applied while this copy was being matched — parking as possible_duplicate`);
+    await finishParked(notice, email, 'possible_duplicate', { candidates });
+    return true;
+  }
+  let settled;
+  try {
+    const { recordManualPayment } = require('./invoice-manual-payment');
+    settled = await recordManualPayment(match.id, {
+      method: 'zelle',
+      reference: zelleReference(parsed.payerName),
+      note: parsed.memo ? `Zelle memo: ${parsed.memo}` : '',
+      recordedBy: RECORDED_BY,
+      sendReceipt: true,
+      via: 'both',
+      // Fenced under the invoice lock: the ledger records exactly the
+      // notice's amount or nothing.
+      expectedAmountCents: parsed.amountCents,
+      // Re-checks payer / statement / live payer resolution on the locked
+      // invoice — a reassignment after exactOpenInvoices() refuses.
+      requireSelfPay: true,
+    });
+  } catch (err) {
+    // A statusCode-shaped refusal settled nothing. Anything else may have
+    // thrown AFTER the ledger committed (a post-commit side effect, the
+    // final re-read) — ask the invoice, never label committed money as
+    // failed.
+    const paid = isRefusal(err) ? null : await settledInvoiceFor(match.id, { recordedBy: RECORDED_BY, reference: zelleReference(parsed.payerName) });
+    if (paid) {
+      logger.error(`[zelle-notice] ${match.invoice_number} settled but a later step threw (${err.message}) — recording as applied, receipt unknown`);
+      await finishApplied(notice, email, paid, matchMethod, null);
+      return true;
     }
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [settlementLockKey(parsed)]);
-    if (await recentlyApplied(parsed, trx)) {
-      logger.warn(`[zelle-notice] notice ${notice.id}: same payer + amount applied while this copy was being matched — parking as possible_duplicate`);
-      await finishParked(notice, email, 'possible_duplicate', { candidates }, trx);
-      return;
-    }
-    let settled;
-    try {
-      const { recordManualPayment } = require('./invoice-manual-payment');
-      settled = await recordManualPayment(match.id, {
-        method: 'zelle',
-        reference: zelleReference(parsed.payerName),
-        note: parsed.memo ? `Zelle memo: ${parsed.memo}` : '',
-        recordedBy: RECORDED_BY,
-        sendReceipt: true,
-        via: 'both',
-        // Fenced under the invoice lock: the ledger records exactly the
-        // notice's amount or nothing.
-        expectedAmountCents: parsed.amountCents,
-        // Re-checks payer / statement / live payer resolution on the locked
-        // invoice — a reassignment after exactOpenInvoices() refuses.
-        requireSelfPay: true,
-      });
-    } catch (err) {
-      // A statusCode-shaped refusal settled nothing. Anything else may have
-      // thrown AFTER the ledger committed (a post-commit side effect, the
-      // final re-read) — ask the invoice, never label committed money as
-      // failed.
-      const paid = isRefusal(err) ? null : await settledInvoiceFor(match.id, { recordedBy: RECORDED_BY, reference: zelleReference(parsed.payerName) });
-      if (paid) {
-        logger.error(`[zelle-notice] ${match.invoice_number} settled but a later step threw (${err.message}) — recording as applied, receipt unknown`);
-        await finishApplied(notice, email, paid, matchMethod, null, trx);
-        return;
-      }
-      logger.error(`[zelle-notice] apply failed for ${match.invoice_number} (email ${email.id}): ${err.message}`);
-      await finishParked(notice, email, 'apply_failed', {
-        candidates,
-        applyError: isRefusal(err) ? err.message : `Settlement outcome uncertain (${err.message}) — check the invoice before applying`,
-        matchedInvoice: match,
-      }, trx);
-      return;
-    }
-    await finishApplied(notice, email, settled.invoice || match, matchMethod, settled.receipt, trx);
-  });
+    logger.error(`[zelle-notice] apply failed for ${match.invoice_number} (email ${email.id}): ${err.message}`);
+    await finishParked(notice, email, 'apply_failed', {
+      candidates,
+      applyError: isRefusal(err) ? err.message : `Settlement outcome uncertain (${err.message}) — check the invoice before applying`,
+      matchedInvoice: match,
+    });
+    return true;
+  }
+  await finishApplied(notice, email, settled.invoice || match, matchMethod, settled.receipt);
   return true;
 }
 

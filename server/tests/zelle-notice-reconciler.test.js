@@ -82,7 +82,7 @@ function builder(table) {
     return t.firsts.length ? t.firsts.shift() : null;
   });
   b.select = jest.fn(async () => []);
-  b.update = jest.fn(async (patch) => { t.calls.push(['update', patch]); return 1; });
+  b.update = jest.fn(async (patch) => { t.calls.push(['update', patch]); return t.updates && t.updates.length ? t.updates.shift() : 1; });
   b.returning = jest.fn(async () => (t.returning.length ? t.returning.shift() : []));
   return b;
 }
@@ -185,57 +185,61 @@ describe('auto-apply', () => {
   });
 });
 
-describe('settlement under the row lock', () => {
-  test('the settle-and-close step takes the notice row lock, and a row no longer processing under it is not settled', async () => {
+describe('settlement without a held transaction (pool floor is 2)', () => {
+  const oneExact = () => OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+
+  test('no transaction is held across recordManualPayment; the claim is the serialization', async () => {
     claimed();
-    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
-    tables.inbound_payment_notices.locks = [{ id: 'notice-1', status: 'parked' }]; // a sweep parked it before we got the lock
+    oneExact();
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
-    expect(db.transaction).toHaveBeenCalled();
-    expect(tables.inbound_payment_notices.calls).toContainEqual(['forUpdate']);
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(recordManualPayment).toHaveBeenCalledTimes(1);
+  });
+
+  test('a claim no longer processing when the match is stamped (0 rows — the sweep parked it) is not settled', async () => {
+    claimed();
+    oneExact();
+    tables.inbound_payment_notices.updates = [0]; // the stamp's CAS on status = processing
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
     expect(recordManualPayment).not.toHaveBeenCalled();
     expect(closesOf('inbound_payment_notices')).toHaveLength(0);
   });
 
-  test('settlement serializes on a payer+amount advisory lock and re-runs the duplicate check under it', async () => {
+  test('the duplicate check is re-run right before settling — a copy applied meanwhile parks possible_duplicate', async () => {
     claimed();
-    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
-    // Pre-lock check: clean. Under the lock: a second copy of the same transfer
-    // settled meanwhile (committed status applied/auto_applied).
+    oneExact();
+    // Pre-match check: clean. Right before settling: a second copy of the same transfer settled meanwhile.
     tables.inbound_payment_notices.firsts.push(null, { id: 'notice-0' });
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
-    const raw = db.raw.mock.calls.find(([sql]) => /pg_advisory_xact_lock/.test(sql));
-    expect(raw).toBeTruthy();
-    expect(raw[1]).toEqual(['zelle-settle:patdoe:11700']);
-    expect(tables.inbound_payment_notices.calls).toContainEqual(['forUpdate']);
     expect(recordManualPayment).not.toHaveBeenCalled();
     expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'possible_duplicate' });
   });
 
-  test('a settlement that commits closes the row inside the same transaction', async () => {
+  test('a settlement that commits closes the claim with a CAS on processing', async () => {
     claimed();
-    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+    oneExact();
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
-    const calls = tables.inbound_payment_notices.calls.map(([m]) => m);
-    expect(calls.indexOf('forUpdate')).toBeLessThan(calls.lastIndexOf('update'));
-    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied' });
+    const calls = tables.inbound_payment_notices.calls;
+    const closeAt = calls.findIndex(([m, p]) => m === 'update' && p.status === 'auto_applied');
+    expect(closeAt).toBeGreaterThan(-1);
+    expect(calls[closeAt - 1]).toEqual(['where', { id: 'notice-1', status: 'processing' }]);
   });
 
-  test('the match is COMMITTED on the claim before the settlement transaction opens (matched invoice + recorder), so a lost close is recoverable', async () => {
+  test('the match is COMMITTED on the claim before settling (matched invoice + recorder), so a lost close is recoverable', async () => {
     claimed();
-    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+    oneExact();
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     const calls = tables.inbound_payment_notices.calls;
     const stampAt = calls.findIndex(([m, p]) => m === 'update' && p.matched_invoice_id === 'inv-1' && !p.status);
     expect(stampAt).toBeGreaterThan(-1);
     expect(calls[stampAt][1]).toMatchObject({ match_method: 'amount_name', matched_customer_id: 'cust-1', applied_by: RECORDED_BY });
-    expect(stampAt).toBeLessThan(calls.findIndex(([m]) => m === 'forUpdate'));
     expect(calls[stampAt - 1]).toEqual(['where', { id: 'notice-1', status: 'processing' }]);
+    expect(stampAt).toBeLessThan(calls.findIndex(([m, p]) => m === 'update' && p.status === 'auto_applied'));
   });
 
   test('the DB refusing the stamp (another notice already holds this invoice — partial UNIQUE index) parks possible_duplicate, nothing settles', async () => {
     claimed();
-    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+    oneExact();
     const orig = db.getMockImplementation();
     db.mockImplementation((table) => {
       const b = orig(table);

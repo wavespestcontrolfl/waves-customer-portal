@@ -723,70 +723,71 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
       const current = await db('inbound_payment_notices').where({ id }).first('status');
       return res.status(409).json({ error: `Payment notice is ${current?.status || 'gone'}, not parked`, status: current?.status || null });
     }
-    // Settle + close under a ROW LOCK on the notice: a concurrent Apply, an
-    // Ignore, or the reconciler's stale-claim sweep all UPDATE this row and
-    // wait behind the lock until the settlement has committed and the row
-    // says applied / parked. recordManualPayment runs its own transaction on
-    // another connection and never touches this table, so no deadlock.
+    // NO transaction held across the settlement (recordManualPayment opens
+    // its own; an outer one would let a sync settlement and this Apply each
+    // hold one of the two pool connections and wait forever for the inner
+    // one). The committed claim is the serialization: a second Apply or an
+    // Ignore requires `parked` (409 now), the reconciler's sweep leaves a
+    // fresh processing claim alone, and the close below is a CAS on
+    // `processing` — a lost close is recovered by closeIfSettled.
     const zelleRef = require('../services/zelle-notice-reconciler').zelleReference(notice.payer_name);
-    const outcome = await db.transaction(async (trx) => {
-      const locked = await trx('inbound_payment_notices').where({ id }).forUpdate().first('id', 'status');
-      if (!locked || locked.status !== 'processing') {
-        return { refused: { status: 409, body: { error: `Payment notice is ${locked?.status || 'gone'}, not processing`, status: locked?.status || null } } };
-      }
-      let settled;
-      try {
-        settled = await recordManualPayment(invoiceId, {
-          method: 'zelle',
-          reference: zelleRef,
-          note: notice.memo ? `Zelle memo: ${notice.memo}` : '',
-          recordedBy,
-          sendReceipt: true,
-          via: 'both',
-          // Atomic with the paid flip: the exact-cent check above is advisory
-          // (dropdown truth); the fence under the invoice lock is what
-          // guarantees the ledger records the notice's amount or nothing.
-          expectedAmountCents: notice.amount_cents,
-          // The self-pay check above is likewise pre-lock: re-run on the
-          // locked invoice so a payer assigned meanwhile refuses.
-          requireSelfPay: true,
-        });
-      } catch (err) {
-        // A statusCode-shaped refusal settled nothing. Anything else may have
-        // thrown AFTER the ledger committed — ask the invoice, and never hand a
-        // settled notice back to the queue as failed.
-        const refusal = [400, 404, 409].includes(err.statusCode);
-        // Same fingerprint the reconciler's sweep uses (paid + Zelle + this
-        // recorder + this notice's payer reference) — a paid invoice under a
-        // shared display name is not proof this Zelle transfer was recorded.
-        const { settledInvoiceFor } = require('../services/zelle-notice-reconciler');
-        const paid = refusal ? null : await settledInvoiceFor(invoiceId, { recordedBy, reference: zelleRef });
-        if (paid) {
-          logger.error(`[admin-invoices:payment-notices] ${invoiceId} settled but a later step threw (${err.message}) — closing notice ${id} as applied, receipt unknown`);
-          settled = { invoice: paid, receipt: null };
-        } else {
-          await trx('inbound_payment_notices').where({ id })
-            .update({ status: 'parked', park_reason: 'apply_failed', apply_error: refusal ? err.message : `Settlement outcome uncertain (${err.message}) — check the invoice before applying`, matched_invoice_id: null, applied_by: null, updated_at: trx.fn.now() });
-          return { failed: err };
-        }
-      }
-      const { invoice, receipt } = settled;
-      await trx('inbound_payment_notices').where({ id }).update({
-        status: 'applied',
-        park_reason: null,
-        apply_error: null,
-        match_method: 'manual',
-        matched_invoice_id: invoiceId,
-        matched_customer_id: invoice?.customer_id || exact.customer_id,
-        applied_at: trx.fn.now(),
-        applied_by: recordedBy,
-        updated_at: trx.fn.now(),
+    let settled;
+    try {
+      settled = await recordManualPayment(invoiceId, {
+        method: 'zelle',
+        reference: zelleRef,
+        note: notice.memo ? `Zelle memo: ${notice.memo}` : '',
+        recordedBy,
+        sendReceipt: true,
+        via: 'both',
+        // Atomic with the paid flip: the exact-cent check above is advisory
+        // (dropdown truth); the fence under the invoice lock is what
+        // guarantees the ledger records the notice's amount or nothing.
+        expectedAmountCents: notice.amount_cents,
+        // The self-pay check above is likewise pre-lock: re-run on the
+        // locked invoice so a payer assigned meanwhile refuses.
+        requireSelfPay: true,
       });
-      return { invoice, receipt };
+    } catch (err) {
+      // A statusCode-shaped refusal settled nothing. Anything else may have
+      // thrown AFTER the ledger committed — ask the invoice, and never hand a
+      // settled notice back to the queue as failed.
+      const refusal = [400, 404, 409].includes(err.statusCode);
+      // Same fingerprint the reconciler's sweep uses (paid + Zelle + this
+      // recorder + this notice's payer reference) — a paid invoice under a
+      // shared display name is not proof this Zelle transfer was recorded.
+      const { settledInvoiceFor } = require('../services/zelle-notice-reconciler');
+      const paid = refusal ? null : await settledInvoiceFor(invoiceId, { recordedBy, reference: zelleRef });
+      if (paid) {
+        logger.error(`[admin-invoices:payment-notices] ${invoiceId} settled but a later step threw (${err.message}) — closing notice ${id} as applied, receipt unknown`);
+        settled = { invoice: paid, receipt: null };
+      } else {
+        await db('inbound_payment_notices').where({ id, status: 'processing' })
+          .update({ status: 'parked', park_reason: 'apply_failed', apply_error: refusal ? err.message : `Settlement outcome uncertain (${err.message}) — check the invoice before applying`, matched_invoice_id: null, applied_by: null, updated_at: db.fn.now() });
+        throw err;
+      }
+    }
+    const { invoice, receipt } = settled;
+    const closed = await db('inbound_payment_notices').where({ id, status: 'processing' }).update({
+      status: 'applied',
+      park_reason: null,
+      apply_error: null,
+      match_method: 'manual',
+      matched_invoice_id: invoiceId,
+      matched_customer_id: invoice?.customer_id || exact.customer_id,
+      applied_at: db.fn.now(),
+      applied_by: recordedBy,
+      updated_at: db.fn.now(),
     });
-    if (outcome.refused) return res.status(outcome.refused.status).json(outcome.refused.body);
-    if (outcome.failed) throw outcome.failed;
-    const { invoice, receipt } = outcome;
+    if (!closed) {
+      // The ledger committed; a sweep parked the claim during a settlement
+      // slower than its window. Force the row to match the ledger.
+      logger.error(`[admin-invoices:payment-notices] notice ${id} was no longer processing after ${invoiceId} settled — forcing applied to match the ledger`);
+      await db('inbound_payment_notices').where({ id }).update({
+        status: 'applied', park_reason: null, apply_error: null, match_method: 'manual', matched_invoice_id: invoiceId,
+        matched_customer_id: invoice?.customer_id || exact.customer_id, applied_at: db.fn.now(), applied_by: recordedBy, updated_at: db.fn.now(),
+      });
+    }
     await db('emails').where({ id: notice.email_id }).update({ auto_action: `zelle_notice_applied:${invoice?.invoice_number || exact.invoice_number}`, updated_at: new Date() })
       .catch((err) => logger.warn(`[admin-invoices:payment-notices] auto_action stamp failed: ${err.message}`));
     res.json({ ok: true, invoice, receipt });
