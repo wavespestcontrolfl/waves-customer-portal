@@ -387,7 +387,23 @@ const SUCCESSOR_COLUMNS = ['id', 'superseded_by', 'submission_url', 'link_type']
 // never moves (a send may still be executing, or needs human
 // reconciliation) — it keeps the retired path, which nothing can claim.
 const OUTREACH_LOCKED = new Set(['sending', 'sent', 'send_error']);
-const PLACEMENT_MOVE_COLUMNS = ['id', 'path_id', 'link_type', 'outreach_status', 'outreach_sent_at'];
+const PLACEMENT_MOVE_COLUMNS = ['id', 'path_id', 'link_type', 'outreach_status', 'outreach_sent_at', 'outreach_send_token'];
+
+/**
+ * The move UPDATE is OPTIMISTIC on everything the decision read: the path,
+ * the lease, and the outreach state (status, sent stamp, send token). The
+ * send path flips a draft to `sending` WITHOUT taking the lease, so a
+ * snapshot taken just before it must miss — otherwise the stale
+ * draft-clearing patch would erase the token the finalizer is about to
+ * match, leaving a sent message with no sent marker (a later duplicate).
+ */
+function observedWhere(q, row) {
+  let w = q('seo_link_prospects').where({ id: row.id }).whereNull('claimed_at');
+  for (const col of ['path_id', 'outreach_status', 'outreach_sent_at', 'outreach_send_token']) {
+    w = row[col] == null ? w.whereNull(col) : w.where(col, row[col]);
+  }
+  return w;
+}
 
 /**
  * The patch that moves ONE placement onto `target`, or null when the move
@@ -421,7 +437,7 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
     for (const row of rows) {
       const patch = movePatch(row, target, now);
       if (!patch) continue;
-      moved += await q('seo_link_prospects').where({ id: row.id }).whereNull('claimed_at').update(patch);
+      moved += await observedWhere(q, row).update(patch);
     }
     return moved;
   };

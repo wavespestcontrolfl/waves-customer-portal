@@ -1117,7 +1117,9 @@ async function investigatePaths(db, {
             // the probe bit stays unset (existence, not coverage) and the
             // no-progress valve parks the domain for review rather than
             // closing a route nobody fully read
-            probeDefinitive = !page.truncated && text.length <= PAGE_EXCERPT_CHARS;
+            // (same substantive-text floor as content coverage: a short
+            // client-rendered shell shows the model nothing of the route)
+            probeDefinitive = !page.truncated && text.length >= MIN_COVERAGE_TEXT_CHARS && text.length <= PAGE_EXCERPT_CHARS;
             // A WORKING fallback origin carries EVERY still-queued apex URL:
             // the apex is dead, so probes, known paths, and provenance hints
             // alike re-base onto the origin that answers — a known custom

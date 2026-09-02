@@ -255,12 +255,22 @@ function validateInvestigation(data) {
   const valid = validateFn(data);
   if (!valid) return { valid, errors: (validateFn.errors || []).map((e) => `${e.instancePath || '(root)'} ${e.message}`) };
   const seen = new Map();
+  const replaces = new Map();
   for (const [i, p] of (data.paths || []).entries()) {
     const key = pathKey(p.acquisition_type, p.submission_url);
     if (seen.has(key)) {
       return { valid: false, errors: [`/paths/${i} duplicates the identity of /paths/${seen.get(key)} (${key}) — report each (acquisition_type, submission_url) once, merging what you observed`] };
     }
     seen.set(key, i);
+    // ONE successor per predecessor: two paths naming the same
+    // replaces_path_id would let array order decide which one retires the
+    // predecessor and inherits its placements (and their worker lane)
+    if (p.replaces_path_id) {
+      if (replaces.has(p.replaces_path_id)) {
+        return { valid: false, errors: [`/paths/${i} names the same replaces_path_id as /paths/${replaces.get(p.replaces_path_id)} (${p.replaces_path_id}) — a predecessor has exactly one successor; name it on the path you observed replacing it`] };
+      }
+      replaces.set(p.replaces_path_id, i);
+    }
   }
   return { valid: true, errors: [] };
 }

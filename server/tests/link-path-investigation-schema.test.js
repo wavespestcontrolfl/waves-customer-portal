@@ -164,4 +164,12 @@ describe('investigator output schema', () => {
     expect(validateInvestigation(good({ paths: [goodPath({ acquisition_type: 'resource_outreach', submission_url: null, payment_required: false, fee_scope: null, link_type: 'resource' })] })).valid).toBe(true);
     expect(validateInvestigation(good({ paths: [goodPath({ acquisition_type: 'membership', payment_required: true, fee_scope: 'per_location', link_type: 'directory' })] })).valid).toBe(true);
   });
+
+  test('a predecessor has exactly one successor — two paths naming the same replaces_path_id are rejected (Codex PR r25 P1)', () => {
+    const pred = '5f0b6c1e-1111-4222-8333-444455556666';
+    const dup = validateInvestigation(good({ paths: [goodPath({ replaces_path_id: pred }), goodPath({ submission_url: 'https://example.com/join-2', replaces_path_id: pred })] }));
+    expect(dup.valid).toBe(false);
+    expect(dup.errors[0]).toMatch(/\/paths\/1 names the same replaces_path_id as \/paths\/0/);
+    expect(validateInvestigation(good({ paths: [goodPath({ replaces_path_id: pred }), goodPath({ submission_url: 'https://example.com/join-2', replaces_path_id: null })] })).valid).toBe(true);
+  });
 });

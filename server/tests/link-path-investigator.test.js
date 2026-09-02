@@ -2662,4 +2662,41 @@ describe('full run', () => {
     const both = pathRowFrom({ ...modelPath(), ...verifyPriceEvidence([{ ...page, excerpt: `${text} Join for USD 95 / year. Renewal USD 95.`, text: `${text} Join for USD 95 / year. Renewal USD 95.` }], modelPath()) }, { legalTermsHash: null, now: NOW, evidence: {} });
     expect([both.estimated_cost_cents, both.renewal_cost_cents]).toEqual([9500, 9500]);
   });
+
+  // ---- Codex PR round 25 -------------------------------------------------
+
+  test('settlement is optimistic on the outreach state it read — a send that starts in between makes the move miss (Codex PR r25 P1)', async () => {
+    const { settleRetiredPlacements } = require('../services/seo/link-registry');
+    const d = domainRow();
+    const old = { id: uid(), domain_id: d.id, submission_url: null, link_type: 'editorial', superseded_by: null };
+    const next = { id: uid(), domain_id: d.id, submission_url: null, link_type: 'resource', superseded_by: null };
+    old.superseded_by = next.id;
+    const drafted = { id: uid(), domain_id: d.id, path_id: old.id, claimed_at: null, link_type: 'editorial', outreach_status: 'drafted', outreach_send_token: 'tok-9', outreach_to_email: 'ed@example.com', outreach_sent_at: null };
+    const inner = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [old, next], seo_link_prospects: [drafted] });
+    // the send path claims the draft (status → sending, lease untouched) right after settlement snapshotted it
+    const db = (t) => {
+      const q = inner(t);
+      if (t === 'seo_link_prospects') {
+        const then = q.then.bind(q);
+        q.then = (res, rej) => then((rows) => { if (drafted.outreach_status === 'drafted') drafted.outreach_status = 'sending'; return res(rows); }, rej);
+      }
+      return q;
+    };
+    db.raw = inner.raw; db.ref = inner.ref; db.transaction = inner.transaction; db._tables = inner._tables;
+    expect(await settleRetiredPlacements(db, { pathIds: [old.id], successor: next, now: NOW })).toBe(0);
+    expect(drafted).toMatchObject({ path_id: old.id, outreach_status: 'sending', outreach_send_token: 'tok-9', outreach_to_email: 'ed@example.com' }); // the token the finalizer will match survives
+  });
+
+  test('a short client-rendered shell on a probe route is existence, not probe coverage (Codex PR r25 P1)', async () => {
+    const registerBit = 1 << investigator.PROBE_PATHS.indexOf('/register');
+    const d = domainRow({ agent_state: 'investigating', probe_coverage_mask: ((1 << investigator.PROBE_PATHS.length) - 1) & ~registerBit });
+    const db = makeDb({ seo_link_domains: [d] });
+    const fetcher = async (url) => (url.endsWith('/register')
+      ? { status: 200, finalUrl: url, contentType: 'text/html', html: '<html><body><div id="app">Loading…</div><script src="/app.js"></script></body></html>', blocked: false, truncated: false }
+      : okFetch(url));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('watching');
+    expect(Number(dom.probe_coverage_mask) & registerBit).toBe(0);
+  });
 });
