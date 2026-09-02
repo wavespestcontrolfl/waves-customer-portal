@@ -3,7 +3,7 @@ const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
-const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
 const { cockroachSnapshotOf, resolveCockroachProgram, cockroachProgramSignature } = require('./cockroach-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
@@ -4037,8 +4037,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const readTimeSprayEvidence = applications.some((app) => isSprayApplicationMethod(app.method) || isInferredPesticideApplication(app))
     || structuredActionScope(service).hasTreatment
     || typedEvidence.dryDown;
-  // Application verdict (applicationMade): any product application, dry-down or not.
-  const applicationEvidence = readTimeSprayEvidence || typedEvidence.applied;
+  // Application verdict (applicationMade): any product application, dry-down
+  // or not — an applied pest bait / gel / trunk-injection row counts here
+  // (the same rule the web and PDF apply to rows), never a termite / rodent
+  // monitoring device (local audit P1 on #3701).
+  const applicationEvidence = readTimeSprayEvidence
+    || applications.some(isProductApplicationRow)
+    || typedEvidence.applied;
   // Treatment occurred, chemical or not — the aftercare/precaution gate for
   // the PDF; applicationMade stays the pesticide-application verdict.
   const treatmentPerformed = applicationEvidence || structuredActionScope(service).hasNonChemicalTreatment || typedEvidence.performed;
