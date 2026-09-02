@@ -185,16 +185,15 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
       // the customer no longer owns.
       const priorUnderLock = await trx('plan_holds').where({ customer_id: customerId, family_key: familyKey }).where('created_at', '>=', floor).first('id');
       if (priorUnderLock) throw new Error('a hold for this family was written concurrently');
-      if (moved.length) {
-        const liveVisits = await familyUpcomingVisits(customerId, familyKey, trx);
-        // Exactly the moved set, by identity: a cancelled moved visit or a
-        // visit booked in the gap (which would dispatch during the hold
-        // unmoved) both refuse the hold.
-        const liveIds = liveVisits.map((v) => String(v.id)).sort();
-        const movedIds = moved.map((v) => String(v.id)).sort();
-        if (liveIds.length !== movedIds.length || liveIds.some((id, i) => id !== movedIds[i])) {
-          throw new Error(`${familyKey} visits changed before the hold could be written (live ${liveIds.join(',')} vs moved ${movedIds.join(',')})`);
-        }
+      // Exactly the moved set, by identity — including the expected-EMPTY
+      // case: a cancelled moved visit, or a visit booked in the gap (the
+      // family's first one included) that would dispatch during the hold
+      // unmoved, both refuse the hold.
+      const liveVisits = await familyUpcomingVisits(customerId, familyKey, trx);
+      const liveIds = liveVisits.map((v) => String(v.id)).sort();
+      const movedIds = moved.map((v) => String(v.id)).sort();
+      if (liveIds.length !== movedIds.length || liveIds.some((id, i) => id !== movedIds[i])) {
+        throw new Error(`${familyKey} visits changed before the hold could be written (live ${liveIds.join(',')} vs moved ${movedIds.join(',')})`);
       }
       const live = await trx('customers').where({ id: customerId }).first('monthly_rate', 'billing_mode', 'waveguard_tier', 'tier_protected_until');
       if (!live) throw new Error('customer vanished before the hold could be written');

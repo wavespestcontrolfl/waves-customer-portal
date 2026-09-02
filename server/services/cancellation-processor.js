@@ -257,7 +257,16 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db, { pinned
     for (const f of uniqueServiceFamilies(detectWaveGuardPlanKeys(row))) if (!owned.includes(f)) owned.push(f);
   }
   const pinned = Array.isArray(pinnedScope) && pinnedScope.length ? pinnedScope : null;
-  if (pinned) for (const f of pinned) if (!owned.includes(f)) owned.push(f);
+  if (pinned) {
+    // A live row still in a swept family = a visit booked after the sweep
+    // (under the writer lock this is the only way one exists). The wind-down
+    // must not demote the account and report the family cancelled while
+    // that visit stays dispatchable — refuse; the run parks and a fresh
+    // preview re-sweeps it.
+    const stillLive = pinned.filter((f) => owned.includes(f));
+    if (stillLive.length) return { ok: false, error: 'scope_still_live', families: stillLive };
+    for (const f of pinned) owned.push(f);
+  }
   const inScope = pinned ? [...pinned] : scopedFamilies.filter((f) => owned.includes(f));
   if (!inScope.length) return { ok: false, error: 'scope_not_owned' };
   const remaining = owned.filter((f) => !inScope.includes(f));
@@ -387,12 +396,10 @@ async function applyScopedWindDown(customerId, entryPlan, {
   await db.transaction(async (trx) => {
     await lockCustomerComms(trx, customerId);
     if (Array.isArray(scopedFamilies) && scopedFamilies.length) {
-      let fresh;
-      try {
-        fresh = await planScopedWindDown(customerId, scopedFamilies, trx, { pinnedScope: entryPlan.inScope });
-      } catch (replanErr) {
-        fresh = { ok: false, error: replanErr.message };
-      }
+      // A read failure propagates as scoped_wind_down (retrying a fresh
+      // preview cannot repair a connection/schema fault); only successfully
+      // read live state that no longer matches is scoped_pricing_changed.
+      const fresh = await planScopedWindDown(customerId, scopedFamilies, trx, { pinnedScope: entryPlan.inScope });
       if (!fresh.ok) {
         throw new ScopedPricingChangedError(`scoped wind-down could not be re-planned at the boundary (${fresh.error})`);
       }
