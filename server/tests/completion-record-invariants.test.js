@@ -48,7 +48,7 @@ describe('PREDICATES registry', () => {
   });
 
   test('grace periods age from completion-specific markers (visit completed_at, recap claim stamp), never the row\'s general updated_at', () => {
-    expect(_private.COMPLETED_MARKER_AT).toBe('GREATEST(sr.created_at, COALESCE(ss.completed_at, sr.created_at), COALESCE(sr.recap_sms_sent_at, sr.created_at))');
+    expect(_private.COMPLETED_MARKER_AT).toBe('GREATEST(canonical.created_at, COALESCE(ss.completed_at, canonical.created_at), COALESCE(canonical.recap_sms_sent_at, canonical.created_at))');
     expect(_private.COMPLETED_MARKER_AT).not.toContain('updated_at');
     expect(PREDICATES.completed_record_without_report_token.sql).toContain(`${_private.COMPLETED_MARKER_AT} < now() - interval '2 hours'`);
     expect(PREDICATES.completed_record_without_comms_marker.sql).toContain(`${_private.COMPLETED_MARKER_AT} < now() - interval '24 hours'`);
@@ -61,21 +61,36 @@ describe('PREDICATES registry', () => {
     // A stamped report_generated_at never hides a missing token.
     expect(token).not.toContain('report_generated_at');
     // The CANONICAL sibling (the newest succeeded attempt's record, else the
-    // newest completed) decides: frozen snapshot first, live catalog when the
+    // newest completed) is the ONE row eligibility, grace, and the closeout
+    // rule are read from: frozen snapshot first, live catalog when the
     // snapshot is absent or malformed — never "absent = owed".
-    const canonical = _private.CANONICAL_SIBLING_FROZE_FALSE('requiresServiceReport');
-    expect(canonical).toMatch(/FROM service_completion_attempts a\s+WHERE a\.service_id = ss\.id AND a\.status = 'succeeded'\s+ORDER BY a\.updated_at DESC\s+LIMIT 1\)\) IS TRUE DESC,\s+fr\.created_at DESC\s+LIMIT 1/);
-    expect(canonical).toContain(`WHEN ${_private.FROZEN_SNAPSHOT_VALID}`);
-    expect(canonical).toContain("THEN canonical.snap->>'requiresServiceReport' = 'false'");
-    expect(canonical).toContain('FROM services cat');
-    expect(canonical).toContain(`AND ${_private.CATALOG_NOT_OWED.requiresServiceReport})`);
-    expect(canonical).toContain("NOT IN ('', 'default', 'inferred_v1', 'fallback_inference')");
-    // Strict snapshot twin of frozenCloseoutRequirements: v=1 + every boolean typed.
+    const sibling = _private.CANONICAL_COMPLETED_SIBLING;
+    expect(sibling).toMatch(/FROM service_records fr\s+WHERE fr\.scheduled_service_id = ss\.id AND fr\.status = 'completed'/);
+    expect(sibling).toMatch(/FROM service_completion_attempts a\s+WHERE a\.service_id = ss\.id AND a\.status = 'succeeded'\s+ORDER BY a\.updated_at DESC\s+LIMIT 1\)\) IS TRUE DESC,\s+fr\.created_at DESC\s+LIMIT 1/);
+    const notOwed = _private.CANONICAL_NOT_OWED('requiresServiceReport');
+    expect(notOwed).toContain(`WHEN ${_private.FROZEN_SNAPSHOT_VALID}`);
+    expect(notOwed).toContain("THEN canonical.snap->>'requiresServiceReport' = 'false'");
+    expect(notOwed).toContain('FROM services cat');
+    expect(notOwed).toContain(`AND ${_private.CATALOG_NOT_OWED.requiresServiceReport})`);
+    expect(notOwed).toContain("NOT IN ('', 'default', 'inferred_v1', 'fallback_inference')");
+    // Strict snapshot twin of frozenCloseoutRequirements: NUMERIC v=1 (a
+    // string "1" is rejected there too) + every boolean typed.
+    expect(_private.FROZEN_SNAPSHOT_VALID).toContain("jsonb_typeof(canonical.snap->'v') = 'number'");
+    expect(_private.FROZEN_SNAPSHOT_VALID).toContain("(canonical.snap->>'v')::numeric = 1");
+    expect(_private.FROZEN_SNAPSHOT_VALID).not.toContain("->>'v' = '1'");
     for (const f of ['requiresServiceReport', 'requiresApplicationLog', 'requiresCustomerSignature', 'requiresCustomerNotice', 'requiresLicense']) {
       expect(_private.FROZEN_SNAPSHOT_VALID).toContain(`jsonb_typeof(canonical.snap->'${f}') = 'boolean'`);
     }
     expect(_private.CATALOG_NOT_OWED.requiresCustomerNotice).toBe('COALESCE(cat.requires_customer_notice, cat.requires_application_log, false) = false');
-    expect(token).toContain(`NOT EXISTS (${_private.CANONICAL_SIBLING_FROZE_FALSE('requiresServiceReport')})`);
+    // Eligibility (backfill / posture / project) + grace + the rule are ALL
+    // evaluated inside the one canonical-sibling subquery; no per-sibling
+    // `service_records sr` scan remains, and the rule fails toward a finding.
+    expect(token).toContain(`SELECT 1 FROM (${sibling}) canonical`);
+    expect(token).toContain(`WHERE ${_private.OWES_CUSTOMER_ARTIFACT}`);
+    expect(token).toContain(`AND (${notOwed}) IS NOT TRUE)`);
+    expect(token).not.toMatch(/FROM service_records sr\b/);
+    expect(_private.OWES_CUSTOMER_ARTIFACT).toContain("canonical.structured_notes->>'backfill'");
+    expect(_private.OWES_CUSTOMER_ARTIFACT).not.toContain('sr.');
     expect(token).not.toContain("requiresServiceReport', 'true') <> 'false'");
     const comms = PREDICATES.completed_record_without_comms_marker.sql;
     expect(comms).toMatch(/FROM scheduled_services ss/);
@@ -87,8 +102,10 @@ describe('PREDICATES registry', () => {
     expect(_private.TERMINAL_SMS_STATUSES).toEqual(['sent', 'skipped_recap_sms_already_sent', 'blocked']);
     expect(comms).toContain("completionSmsStatus' IN ('sent', 'skipped_recap_sms_already_sent', 'blocked')");
     expect(comms).not.toMatch(/'sending'|'deferred'/);
-    // The CANONICAL sibling's frozen "no customer notice owed" exempts the visit.
-    expect(comms).toContain(`NOT EXISTS (${_private.CANONICAL_SIBLING_FROZE_FALSE('requiresCustomerNotice')})`);
+    // Same canonical-sibling read for the notice: eligibility, grace, rule.
+    expect(comms).toContain(`SELECT 1 FROM (${_private.CANONICAL_COMPLETED_SIBLING}) canonical`);
+    expect(comms).toContain(`AND (${_private.CANONICAL_NOT_OWED('requiresCustomerNotice')}) IS NOT TRUE)`);
+    expect(comms).not.toMatch(/FROM service_records sr\b/);
     // A delivered video recap (provider-confirmed sent_at) is a completion notice.
     expect(comms).toMatch(/service_recaps rc\s+WHERE rc\.scheduled_service_id = ss\.id AND rc\.sent_at IS NOT NULL/);
     // An unconfirmed recap claim is not delivery evidence: it may only appear
@@ -130,8 +147,14 @@ describe('legacy cutovers and project-backed visits', () => {
     expect(rec).toContain(_private.COMPLETED_TRANSITION_SINCE('2026-04-27'));
     expect(rec).toMatch(/h\.job_id = ss\.id[\s\S]*h\.to_status = 'completed'[\s\S]*h\.transitioned_at >= '2026-04-27'::date/);
     expect(rec).not.toContain("ss.scheduled_date >= '2026-04-27'");
+    // The record check has no grace (the record is written IN the completion
+    // transaction); the tracker stamp is written post-commit, so its
+    // qualifying transition must predate a short grace window.
+    expect(rec).not.toContain('now() - interval');
     const stamp = PREDICATES.completed_visit_without_completed_at.sql;
-    expect(stamp).toContain(_private.COMPLETED_TRANSITION_SINCE('2026-04-22'));
+    expect(_private.TRACKER_STAMP_GRACE).toBe('15 minutes');
+    expect(stamp).toContain(_private.COMPLETED_TRANSITION_SINCE('2026-04-22', '15 minutes'));
+    expect(stamp).toMatch(/h\.transitioned_at >= '2026-04-22'::date\s+AND h\.transitioned_at < now\(\) - interval '15 minutes'\)/);
     expect(stamp).not.toContain("sr.created_at >= '2026-04-22'");
     expect(stamp).not.toContain("ss.scheduled_date >= '2026-04-22'");
     // An incomplete record is completion evidence for the stamp check too.

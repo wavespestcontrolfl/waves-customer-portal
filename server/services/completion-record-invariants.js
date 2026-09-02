@@ -21,7 +21,9 @@
  * documents the sibling model), and the report token / completion text can
  * live on a different sibling than the row a naive scan would land on. Each
  * predicate therefore asks "does ANY sibling carry the artifact" and only
- * fails when none does. A project-backed visit (a project row or a
+ * fails when none does — while WHETHER the visit owes the artifact at all
+ * (backfill, delivery posture, frozen closeout rule) is read from the ONE
+ * canonical sibling closeout-status.js reads it from. A project-backed visit (a project row or a
  * project_completion sibling) is excluded from the service-report checks
  * as a whole — its artifact and delivery live on the project report
  * (closeout-status.js switches the entire visit to that path).
@@ -69,12 +71,19 @@ const COMMS_MARKER_SINCE = '2026-07-01';
 // The visit was transitioned to 'completed' on or after `since` (the
 // canonical job-status ledger every completion rail writes through
 // transitionJobStatus). A visit with no such transition row is legacy.
-const COMPLETED_TRANSITION_SINCE = (since) => `
+// `olderThan` (an interval literal) additionally requires the transition to
+// predate a grace window — the tracker stamp is written by a best-effort
+// markComplete AFTER the completion transaction commits, so a sweep landing
+// in that window would otherwise report a stamp that lands seconds later
+// (codex P2 r7).
+const COMPLETED_TRANSITION_SINCE = (since, olderThan = null) => `
       EXISTS (
         SELECT 1 FROM job_status_history h
          WHERE h.job_id = ss.id
            AND h.to_status = 'completed'
-           AND h.transitioned_at >= '${since}'::date)`;
+           AND h.transitioned_at >= '${since}'::date${olderThan ? `
+           AND h.transitioned_at < now() - interval '${olderThan}'` : ''})`;
+const TRACKER_STAMP_GRACE = '15 minutes';
 
 // completionSmsStatus values closeout-status.js classifies as done or
 // not_required (a settled outcome); everything else is pending or failed.
@@ -85,8 +94,8 @@ const TERMINAL_SMS_STATUSES = Object.freeze(['sent', 'skipped_recap_sms_already_
 // the day; this is the long tail).
 const INCOMPLETE_FOLLOWUP_GRACE_DAYS = 7;
 
-// The instant a record last became "complete" for grace-period purposes.
-// created_at alone ages a recap-rail re-completion of an office-handoff
+// The instant the CANONICAL record last became "complete" for grace-period
+// purposes. created_at alone ages a recap-rail re-completion of an office-handoff
 // record straight past the window (codex P2); the row's general updated_at
 // moves on every report/delivery/correction write and would restart the
 // window forever (codex P1). So: the record's creation, the visit's tracker
@@ -96,16 +105,19 @@ const INCOMPLETE_FOLLOWUP_GRACE_DAYS = 7;
 // re-completing an old incomplete record advances the claim stamp even
 // though markComplete's already-complete branch preserves the old
 // completed_at (codex P2 r2).
-const COMPLETED_MARKER_AT = 'GREATEST(sr.created_at, COALESCE(ss.completed_at, sr.created_at), COALESCE(sr.recap_sms_sent_at, sr.created_at))';
+const COMPLETED_MARKER_AT = 'GREATEST(canonical.created_at, COALESCE(ss.completed_at, canonical.created_at), COALESCE(canonical.recap_sms_sent_at, canonical.created_at))';
 
-// A completed record that OWES the customer a report / a completion notice:
-// not a backfill, delivery not suppressed, not a project close (the project
-// report lane owns those). Shared by the token and comms predicates.
+// The CANONICAL completed record OWES the customer a report / a completion
+// notice: not a backfill, delivery not suppressed, not a project close (the
+// project report lane owns those). Evaluated on the canonical sibling only
+// (codex P2 r7): closeout-status reads backfill / typedReportDelivery from
+// the record that closed the visit, so an older ordinary sibling beside a
+// canonical backfill or internal_only completion must not re-open the visit.
+// Shared by the token and comms predicates.
 const OWES_CUSTOMER_ARTIFACT = `
-      sr.status = 'completed'
-      AND COALESCE(sr.structured_notes->>'backfill', 'false') <> 'true'
-      AND COALESCE(sr.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
-      AND sr.completion_source IS DISTINCT FROM 'project_completion'`;
+      COALESCE(canonical.structured_notes->>'backfill', 'false') <> 'true'
+      AND COALESCE(canonical.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
+      AND canonical.completion_source IS DISTINCT FROM 'project_completion'`;
 
 // Visit-level project exclusion: a project row linked to the visit, or a
 // project_completion sibling, moves the WHOLE visit to the project report
@@ -119,25 +131,41 @@ const VISIT_NOT_PROJECT_BACKED = `
                AND (pc.completion_source = 'project_completion'
                     OR EXISTS (SELECT 1 FROM projects pj2 WHERE pj2.service_record_id = pc.id)))`;
 
-// The CANONICAL sibling's closeout requirement, resolved the way
-// closeout-status.js resolves it: the record pinned by the newest SUCCEEDED
-// completion attempt when that record is still a completed sibling, else the
-// newest completed record (codex P2 r5/r6 + pre-push P1). Reading only that
-// row means neither a stale legacy sibling nor a stale sibling that froze
-// "not owed" can out-vote the record that actually closed the visit.
-// FROZEN-FIRST: a strictly valid snapshot (v=1, every boolean typed, photo
-// count a non-negative number, non-empty source — the twin of
-// frozenCloseoutRequirements) decides. Absent or malformed (soft-failed
-// lookup, migration-window write) falls to the LIVE catalog like
-// closeout-status does, not to "owed" (codex P2 r6): an explicit catalog
-// rule (closeout_requirements_source outside the inferred set) with the
-// flag false exempts; the inferred path (no row / inferred source) never
-// exempts a report and only exempts a notice when its application-log
-// default is false — that default is name/category inference in JS, so the
-// sweep keeps the conservative "owed" there.
+// The CANONICAL completed sibling, resolved the way closeout-status.js
+// resolves it: the record pinned by the newest SUCCEEDED completion attempt
+// when that record is still a completed sibling, else the newest completed
+// record (codex P2 r5/r6 + pre-push P1). Reading only that row means neither
+// a stale legacy sibling nor a stale sibling that froze "not owed" can
+// out-vote the record that actually closed the visit. One row, aliased
+// `canonical` by its consumers.
+const CANONICAL_COMPLETED_SIBLING = `
+                 SELECT fr.id, fr.created_at, fr.recap_sms_sent_at, fr.completion_source, fr.structured_notes,
+                        fr.structured_notes->'closeoutRequirements' AS snap
+                   FROM service_records fr
+                  WHERE fr.scheduled_service_id = ss.id AND fr.status = 'completed'
+                  ORDER BY (fr.id = (SELECT a.service_record_id
+                                       FROM service_completion_attempts a
+                                      WHERE a.service_id = ss.id AND a.status = 'succeeded'
+                                      ORDER BY a.updated_at DESC
+                                      LIMIT 1)) IS TRUE DESC,
+                           fr.created_at DESC
+                  LIMIT 1`;
+
+// The canonical sibling's closeout requirement. FROZEN-FIRST: a strictly
+// valid snapshot (numeric v=1, every boolean typed, photo count a
+// non-negative number, non-empty source — the twin of
+// frozenCloseoutRequirements, which rejects a string "1" too, codex P2 r7)
+// decides. Absent or malformed (soft-failed lookup, migration-window write)
+// falls to the LIVE catalog like closeout-status does, not to "owed" (codex
+// P2 r6): an explicit catalog rule (closeout_requirements_source outside the
+// inferred set) with the flag false exempts; the inferred path (no row /
+// inferred source) never exempts a report and only exempts a notice when its
+// application-log default is false — that default is name/category
+// inference in JS, so the sweep keeps the conservative "owed" there.
 const FROZEN_SNAPSHOT_VALID = `
                        jsonb_typeof(canonical.snap) = 'object'
-                       AND canonical.snap->>'v' = '1'
+                       AND jsonb_typeof(canonical.snap->'v') = 'number'
+                       AND (canonical.snap->>'v')::numeric = 1
                        AND jsonb_typeof(canonical.snap->'requiresServiceReport') = 'boolean'
                        AND jsonb_typeof(canonical.snap->'requiresApplicationLog') = 'boolean'
                        AND jsonb_typeof(canonical.snap->'requiresCustomerSignature') = 'boolean'
@@ -153,20 +181,10 @@ const CATALOG_NOT_OWED = Object.freeze({
   // bool(requires_customer_notice, bool(requires_application_log, false)).
   requiresCustomerNotice: `COALESCE(cat.requires_customer_notice, cat.requires_application_log, false) = false`,
 });
-const CANONICAL_SIBLING_FROZE_FALSE = (requirement) => `
-                 SELECT 1 FROM (
-                   SELECT fr.structured_notes->'closeoutRequirements' AS snap
-                     FROM service_records fr
-                    WHERE fr.scheduled_service_id = ss.id AND fr.status = 'completed'
-                    ORDER BY (fr.id = (SELECT a.service_record_id
-                                         FROM service_completion_attempts a
-                                        WHERE a.service_id = ss.id AND a.status = 'succeeded'
-                                        ORDER BY a.updated_at DESC
-                                        LIMIT 1)) IS TRUE DESC,
-                             fr.created_at DESC
-                    LIMIT 1
-                 ) canonical
-                  WHERE CASE
+// TRUE when the canonical sibling says the requirement is NOT owed. Consumers
+// test it with IS NOT TRUE so an unexpected NULL errs toward a finding.
+const CANONICAL_NOT_OWED = (requirement) => `
+                  CASE
                     WHEN ${FROZEN_SNAPSHOT_VALID}
                       THEN canonical.snap->>'${requirement}' = 'false'
                     ELSE EXISTS (
@@ -228,10 +246,10 @@ const PREDICATES = Object.freeze({
           ) g
          GROUP BY g.scheduled_service_id`),
   },
-  // A frozen catalog rule saying the service owes no report
-  // (closeoutRequirements.requiresServiceReport=false) on the CANONICAL
-  // sibling (attempt-pinned record, else newest completed) exempts the
-  // visit (codex P2 r5/r6); an absent snapshot reads the live catalog.
+  // Eligibility (backfill / posture / the frozen or catalog rule saying the
+  // service owes no report) and the grace window are read from the CANONICAL
+  // sibling (attempt-pinned record, else newest completed) — codex P2
+  // r5/r6/r7; the token itself may sit on ANY sibling.
   completed_record_without_report_token: {
     label: 'Completed non-project visits (>2h) that owe a customer report and have no sibling record with a report token',
     href: '/admin/dispatch',
@@ -241,12 +259,11 @@ const PREDICATES = Object.freeze({
          WHERE ss.status = 'completed'
            AND ${VISIT_NOT_PROJECT_BACKED}
            AND EXISTS (
-                 SELECT 1 FROM service_records sr
-                  WHERE sr.scheduled_service_id = ss.id
-                    AND ${OWES_CUSTOMER_ARTIFACT}
+                 SELECT 1 FROM (${CANONICAL_COMPLETED_SIBLING}) canonical
+                  WHERE ${OWES_CUSTOMER_ARTIFACT}
                     AND ${COMPLETED_MARKER_AT} >= '${REPORT_TOKEN_SINCE}'::date
-                    AND ${COMPLETED_MARKER_AT} < now() - interval '2 hours')
-           AND NOT EXISTS (${CANONICAL_SIBLING_FROZE_FALSE('requiresServiceReport')})
+                    AND ${COMPLETED_MARKER_AT} < now() - interval '2 hours'
+                    AND (${CANONICAL_NOT_OWED('requiresServiceReport')}) IS NOT TRUE)
            AND NOT EXISTS (
                  SELECT 1 FROM service_records tok
                   WHERE tok.scheduled_service_id = ss.id
@@ -260,14 +277,16 @@ const PREDICATES = Object.freeze({
     // visit, or a recap re-completing an old FK-healed record, runs on
     // today's code and owes the stamp (codex P2 r3/r4). An 'incomplete'
     // record is completion evidence too — /complete still calls
-    // markComplete for visitOutcome 'incomplete' (codex P2 r5).
+    // markComplete for visitOutcome 'incomplete' (codex P2 r5). The
+    // transition must be older than TRACKER_STAMP_GRACE: markComplete stamps
+    // after the completion commit (codex P2 r7).
     sql: aggregate(`
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
            AND ss.completed_at IS NULL
            AND ${BEFORE_TODAY_ET}
-           AND ${COMPLETED_TRANSITION_SINCE(TRACKING_STAMP_SINCE)}
+           AND ${COMPLETED_TRANSITION_SINCE(TRACKING_STAMP_SINCE, TRACKER_STAMP_GRACE)}
            AND EXISTS (
                  SELECT 1 FROM service_records sr
                   WHERE sr.scheduled_service_id = ss.id
@@ -279,11 +298,10 @@ const PREDICATES = Object.freeze({
   // or a sent report email on the sibling that OWNS the report artifact
   // (its report_view_token), as closeout-status pairs delivery with the
   // artifact record. 'sending' and 'deferred' are pending there and stay
-  // findings once 24h old; NULL and 'failed' are findings. A frozen catalog
-  // rule saying the service owes no notice
-  // (closeoutRequirements.requiresCustomerNotice=false) on the CANONICAL
-  // sibling (attempt-pinned record, else newest completed) exempts the
-  // visit (codex P2 r5/r6); an absent snapshot reads the live catalog.
+  // findings once 24h old; NULL and 'failed' are findings. Eligibility
+  // (backfill / posture / the frozen or catalog rule saying the service owes
+  // no notice) and the grace window are read from the CANONICAL sibling
+  // (attempt-pinned record, else newest completed) — codex P2 r5/r6/r7.
   // A delivered video recap
   // (service_recaps.sent_at — set only on provider confirmation,
   // recap-delivery.js) is a completion notice too (codex P2 r5).
@@ -296,12 +314,11 @@ const PREDICATES = Object.freeze({
          WHERE ss.status = 'completed'
            AND ${VISIT_NOT_PROJECT_BACKED}
            AND EXISTS (
-                 SELECT 1 FROM service_records sr
-                  WHERE sr.scheduled_service_id = ss.id
-                    AND ${OWES_CUSTOMER_ARTIFACT}
+                 SELECT 1 FROM (${CANONICAL_COMPLETED_SIBLING}) canonical
+                  WHERE ${OWES_CUSTOMER_ARTIFACT}
                     AND ${COMPLETED_MARKER_AT} >= '${COMMS_MARKER_SINCE}'::date
-                    AND ${COMPLETED_MARKER_AT} < now() - interval '24 hours')
-           AND NOT EXISTS (${CANONICAL_SIBLING_FROZE_FALSE('requiresCustomerNotice')})
+                    AND ${COMPLETED_MARKER_AT} < now() - interval '24 hours'
+                    AND (${CANONICAL_NOT_OWED('requiresCustomerNotice')}) IS NOT TRUE)
            AND NOT EXISTS (
                  SELECT 1 FROM service_records sib
                   WHERE sib.scheduled_service_id = ss.id
@@ -365,8 +382,8 @@ module.exports = {
   PREDICATE_KEYS,
   runPredicate,
   _private: {
-    SAMPLE, RECORD_FK_SINCE, TRACKING_STAMP_SINCE, REPORT_TOKEN_SINCE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, COMPLETED_TRANSITION_SINCE,
-    OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES, CANONICAL_SIBLING_FROZE_FALSE, FROZEN_SNAPSHOT_VALID, CATALOG_NOT_OWED,
+    SAMPLE, RECORD_FK_SINCE, TRACKING_STAMP_SINCE, REPORT_TOKEN_SINCE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, COMPLETED_TRANSITION_SINCE, TRACKER_STAMP_GRACE,
+    OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES, CANONICAL_COMPLETED_SIBLING, CANONICAL_NOT_OWED, FROZEN_SNAPSHOT_VALID, CATALOG_NOT_OWED,
     COMPLETED_MARKER_AT, INCOMPLETE_FOLLOWUP_GRACE_DAYS, aggregate,
   },
 };
