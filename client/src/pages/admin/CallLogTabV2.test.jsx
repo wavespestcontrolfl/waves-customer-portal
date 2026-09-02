@@ -122,6 +122,27 @@ describe("CallLogTabV2 synced transcript", () => {
     });
   });
 
+  it("fails closed: a rejected reload drops the synced view", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      if (String(url).includes("route-calibration")) return { ok: true, json: async () => ({}) };
+      calls += 1;
+      if (calls === 1) return { ok: true, json: async () => ({ calls: [CALL], transcript_sync_enabled: true }) };
+      throw new Error("network down");
+    }));
+    renderTab();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Transcription/ }));
+    expect((await screen.findAllByRole("button", { name: /Speaker/ })).length).toBe(2);
+
+    // The search debounce issues a second /ai/admin/calls request — which
+    // now rejects. The synced view must not survive on stale data.
+    fireEvent.change(screen.getByPlaceholderText(/Search calls/i), { target: { value: "jane" } });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /Speaker/ })).not.toBeInTheDocument();
+    });
+  });
+
   it("keeps the plain transcript when the gate is off", async () => {
     stubCalls({ calls: [CALL], transcript_sync_enabled: false });
     renderTab();

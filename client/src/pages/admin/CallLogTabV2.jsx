@@ -21,7 +21,7 @@
 //   silent truncation that hides recent calls.
 // - Disposition gap: missed calls that lack an operator-set
 //   disposition should surface in a clear "needs review" state.
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { CheckCircle2, MessageSquare, PhoneCall, Voicemail, XCircle } from "lucide-react";
 import {
@@ -334,6 +334,19 @@ export default function CallLogTabV2() {
     if (handle) playerRefs.current.set(id, handle);
     else playerRefs.current.delete(id);
   };
+  // Parsed once per fetch, not per playback tick: every timeupdate rerenders
+  // the list, and parsing 200 structured transcripts on each tick would
+  // stutter the highlight.
+  const syncedSegmentsById = useMemo(() => {
+    const map = new Map();
+    if (!transcriptSyncEnabled) return map;
+    for (const c of calls) {
+      if (!c?.recording_available || !c.transcript_structured) continue;
+      const segs = parseTranscriptSegments(c.transcript_structured);
+      if (segs.length) map.set(c.id, segs);
+    }
+    return map;
+  }, [calls, transcriptSyncEnabled]);
 
   const loadCalls = (search = "") => {
     const q = search
@@ -353,7 +366,12 @@ export default function CallLogTabV2() {
         }
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        // Fail closed: a rejected reload must not leave the gated transcript
+        // UI enabled on stale data.
+        setTranscriptSyncEnabled(false);
+        setLoading(false);
+      });
   };
 
   useEffect(() => {
@@ -1419,10 +1437,7 @@ export default function CallLogTabV2() {
                       (() => {
                         const open = expandedTranscripts.has(c.id);
                         const shown = displayTranscript(c);
-                        const syncedSegments =
-                          transcriptSyncEnabled && c.recording_available
-                            ? parseTranscriptSegments(c.transcript_structured)
-                            : [];
+                        const syncedSegments = syncedSegmentsById.get(c.id) || [];
                         const synced = syncedSegments.length > 0;
                         const preview =
                           shown.length > 120

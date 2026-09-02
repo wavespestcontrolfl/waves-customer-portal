@@ -34,6 +34,9 @@ describe("parseTranscriptSegments", () => {
     expect(parseTranscriptSegments(null)).toEqual([]);
     expect(parseTranscriptSegments("not json")).toEqual([]);
     expect(parseTranscriptSegments({ segments: [{ text: "   ", start_ms: 1 }, { text: "no time" }] })).toEqual([]);
+    // normalizeOpenAISegments persists start_ms: null for an untimed segment —
+    // Number(null) is 0, so it must be rejected before coercion.
+    expect(parseTranscriptSegments({ segments: [{ id: "u", text: "untimed", start_ms: null, end_ms: null }, { id: "e", text: "empty", start_ms: "" }] })).toEqual([]);
   });
 
   it("sorts by start and keeps the last spoken line lit through silence", () => {

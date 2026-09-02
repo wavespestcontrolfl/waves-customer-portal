@@ -31,6 +31,12 @@ export function parseTranscriptSegments(structured) {
         s &&
         typeof s.text === "string" &&
         s.text.trim() &&
+        // normalizeOpenAISegments persists start_ms: null when the provider
+        // omitted the timestamp; Number(null) is 0, so guard before coercing
+        // or an untimed line renders as a clickable 0:00.
+        s.start_ms !== null &&
+        s.start_ms !== undefined &&
+        s.start_ms !== "" &&
         Number.isFinite(Number(s.start_ms)),
     )
     .map((s, i) => ({
@@ -101,7 +107,7 @@ export default function CallTranscriptSync({
         "m-0 p-0 list-none max-h-72 overflow-y-auto",
         className,
       )}
-      aria-label="Transcript, click a line to play from there"
+      aria-label="Transcript, click a line to seek the recording there"
     >
       {list.map((seg, i) => {
         const isActive = i === active;
