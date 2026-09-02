@@ -61,7 +61,11 @@ async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, ve
 // GET /api/admin/triage?status=open  → list items + per-status counts
 router.get('/', async (req, res) => {
   try {
-    const status = ALL_STATES.includes(req.query.status) ? req.query.status : 'open';
+    // 'active' = every still-owed card (open OR in_progress — a claimed
+    // card is still pending work); the inbox's own tabs read one state.
+    const status = req.query.status === 'active'
+      ? OPEN_STATES
+      : [ALL_STATES.includes(req.query.status) ? req.query.status : 'open'];
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
     // Optional narrowing to one customer's calls — the estimate tool reads
     // the linked customer's open address-review cards (an owed unit number)
@@ -74,7 +78,7 @@ router.get('/', async (req, res) => {
       .leftJoin('call_log', 'triage_items.call_log_id', 'call_log.id')
       .leftJoin('customers', 'call_log.customer_id', 'customers.id')
       .leftJoin('route_feedback', 'triage_items.call_log_id', 'route_feedback.call_log_id')
-      .where('triage_items.status', status)
+      .whereIn('triage_items.status', status)
       .modify((q) => { if (customerId) q.where('call_log.customer_id', customerId); })
       // property_role_confirm payloads embed the customer's OTHER property
       // addresses — the same data admin-customers gates behind requireAdmin —

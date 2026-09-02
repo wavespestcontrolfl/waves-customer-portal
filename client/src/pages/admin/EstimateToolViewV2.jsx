@@ -3217,7 +3217,9 @@ export default function EstimateToolViewV2({
     (async () => {
       try {
         const r = await adminFetch(
-          `/admin/triage?status=open&customer_id=${encodeURIComponent(customerId)}`,
+          // active = open OR in_progress: a card the office already claimed
+          // is still an owed callback (pre-push codex P1).
+          `/admin/triage?status=active&customer_id=${encodeURIComponent(customerId)}`,
         );
         if (!r.ok) return;
         const d = await r.json();
