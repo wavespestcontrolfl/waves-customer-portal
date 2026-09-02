@@ -304,12 +304,30 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
     if (!relinked) {
       return res.status(409).json({ error: 'A pass is still working this call. Change the customer once it finishes.', reason: 'already_processing' });
     }
+    // The call's own timeline entry (customer_interactions, keyed on
+    // metadata.call_log_id and unique per call) moves with the link: to the
+    // new customer, or away entirely on an unlink — the row is derived
+    // from the call, so a reprocess cannot re-mint it under the new
+    // customer while it still sits under the old one.
+    const timelineQuery = () => db('customer_interactions')
+      .where({ interaction_type: 'call' })
+      .whereRaw("metadata ->> 'call_log_id' = ?", [String(call.id)]);
+    const timelineMoved = customerId
+      ? await timelineQuery().update({ customer_id: customerId }).catch(() => 0)
+      : await timelineQuery().del().catch(() => 0);
+    const warnings = [];
     if (call.twilio_call_sid) {
+      // Best-effort here; the hourly call-log relink sweep re-homes any
+      // linked call whose thread still sits under another customer, so a
+      // failure is reported, not silently swallowed.
       await require('../services/conversations').syncVoiceMessageForCall(call.twilio_call_sid)
-        .catch((e) => logger.warn(`[call-recordings] voice message re-home after relink failed for ${maskSid(call.twilio_call_sid)}: ${e.message}`));
+        .catch((e) => {
+          logger.warn(`[call-recordings] voice message re-home after relink failed for ${maskSid(call.twilio_call_sid)}: ${e.message}`);
+          warnings.push('voice_message_rehome_failed: the hourly relink sweep will retry it');
+        });
     }
-    logger.info(`[call-recordings] call ${call.id} customer link set by operator (${customerId ? 'linked' : 'unlinked'})`);
-    res.json({ success: true, customer_id: customerId, override });
+    logger.info(`[call-recordings] call ${call.id} customer link set by operator (${customerId ? 'linked' : 'unlinked'}; timeline rows moved: ${timelineMoved})`);
+    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, warnings });
   } catch (err) { next(err); }
 });
 

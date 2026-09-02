@@ -62,6 +62,7 @@ function mockDb(firstResults) {
       whereRaw(sql, bindings) { b.wheres.push(['raw', sql, bindings]); return b; },
       first: () => Promise.resolve(queue.shift() ?? null),
       update: (patch) => { updates.push({ table, patch, wheres: [...b.wheres] }); return Object.assign(Promise.resolve(1), { catch: () => Promise.resolve(1) }); },
+      del: () => { updates.push({ table, patch: { __deleted: true }, wheres: [...b.wheres] }); return Object.assign(Promise.resolve(1), { catch: () => Promise.resolve(1) }); },
     };
     return b;
   });
@@ -184,8 +185,26 @@ describe('PUT /calls/:id/customer', () => {
     expect(write.patch.customer_id).toBe(CUSTOMER_ID);
     expect(write.patch.metadata.sql).toContain("'{customer_link_override}'");
     expect(JSON.parse(write.patch.metadata.bindings[0])).toMatchObject({ customer_id: CUSTOMER_ID, previous_customer_id: 'old-customer' });
+    // The call's timeline entry moves with the link.
+    const timeline = updates.find((u) => u.table === 'customer_interactions');
+    expect(timeline.patch).toEqual({ customer_id: CUSTOMER_ID });
+    expect(JSON.stringify(timeline.wheres)).toContain(CALL_ID);
     expect(require('../services/conversations').syncVoiceMessageForCall).toHaveBeenCalledWith(SID);
   });
+  test('an unlink removes the call\'s derived timeline entry and reports a failed thread re-home instead of hiding it', async () => {
+    const updates = mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }]);
+    require('../services/conversations').syncVoiceMessageForCall.mockRejectedValueOnce(new Error('thread busy'));
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: null }) });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.customer_id).toBeNull();
+      expect(body.warnings).toEqual([expect.stringMatching(/voice_message_rehome_failed/)]);
+    });
+    const timeline = updates.find((u) => u.table === 'customer_interactions');
+    expect(timeline.patch).toEqual({ __deleted: true });
+  });
+
   test('refuses a relink while a pass holds the claim', async () => {
     const updates = mockDb([{ id: CALL_ID, customer_id: null, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
     // The conditional update matches no rows while processing_status = processing.

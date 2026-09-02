@@ -173,6 +173,10 @@ Per file, with the proving test.
   human request with an unknown party, an unknown kind, or a kind that
   belongs to the other party is a 400, and model output with a mismatched
   pairing is dropped rather than re-labelled.
+- Pre-push Codex round 17 (1 P1, fixed): a customer relink moves the
+  call's derived timeline entry to the new customer (an unlink removes it),
+  and a failed voice-thread re-home is reported in the response (the hourly
+  relink sweep retries it) instead of being swallowed.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 
