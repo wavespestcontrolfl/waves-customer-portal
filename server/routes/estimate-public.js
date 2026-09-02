@@ -15046,12 +15046,16 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     }
     invalidateSendSnapshotPricingBundle(parsedData);
 
+    // A staff park carries its own id so the send path can prove THIS park
+    // was delivered (per-park handoff witness), never an earlier shape.
+    const parkId = actor === 'staff' && mode === 'remove' ? crypto.randomUUID() : null;
     OptOut.recordServiceOptOutEvent(parsedData, {
       serviceKey,
       label,
       included,
       mode,
       actor,
+      ...(parkId ? { parkId } : {}),
       at: new Date().toISOString(),
       removedInputs: included === false ? applied.removedInputs : null,
       provenance: provenance && Object.keys(provenance).length ? provenance : null,
@@ -15169,6 +15173,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     logger.info(`[estimate] ${estimate.id}: service ${mode === 'remove' ? 'removed' : mode} ${serviceKey} by ${actor} ($${next.monthlyTotal}/mo, $${next.annualTotal}/yr, tier ${next.waveGuardTier || 'none'})`);
     return { status: 200, body: ({
       success: true, serviceKey, label, included, mode,
+      ...(parkId ? { parkId } : {}),
       previous, next, disclosures: impact.disclosures,
     }) };
 }

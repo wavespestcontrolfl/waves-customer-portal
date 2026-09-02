@@ -13,6 +13,7 @@ const {
   serviceIsPresentInInputs,
   recordServiceOptOutEvent,
   staffOfferedKeys,
+  staffOfferedEvents,
   latestOptOutEventIsStaff,
   memberEvidenceInEstimateData,
   currentlyOptedOutKeys,
@@ -147,6 +148,7 @@ describe('staffOfferedKeys', () => {
     recordServiceOptOutEvent(data, { serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }, {});
     recordServiceOptOutEvent(data, { serviceKey: 'mosquito', included: false, actor: 'customer', at: 't2' }, {});
     expect(staffOfferedKeys(data)).toEqual(['lawn_care']);
+    expect(staffOfferedEvents(data).map((e) => e.serviceKey)).toEqual(['lawn_care']);
     expect(latestOptOutEventIsStaff(data, 'lawn_care')).toBe(true);
     expect(latestOptOutEventIsStaff(data, 'mosquito')).toBe(false);
     recordServiceOptOutEvent(data, { serviceKey: 'lawn_care', included: true, actor: 'customer', at: 't3' }, {});

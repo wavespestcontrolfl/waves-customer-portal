@@ -924,8 +924,17 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
     // send whose marker write failed (GH codex r4 P1). Either way the
     // restore runs first; if it still fails the send aborts.
     const OptOut = require('../services/estimate-service-opt-out');
-    const structuralPending = !estData?.deliveryState?.firstDeliveredAt && !estData?.leadServiceHandoffAt
-      ? (OptOut.staffOfferedKeys(estData || {})[0] || null)
+    // Structural pending = a CURRENT staff park whose own id has no durable
+    // handoff witness. Per-park, never "was this estimate ever delivered":
+    // a resend of a previously delivered estimate can park and then die
+    // before handoff, and the old firstDeliveredAt must not hide that
+    // (pre-push codex P0). A park without an id (pre-witness rows) is
+    // pending unless a witness exists at all.
+    const parkedEvent = OptOut.staffOfferedEvents(estData || {})[0] || null;
+    const witnessedParkId = estData?.leadServiceHandoffParkId || null;
+    const structuralPending = parkedEvent
+      && !(parkedEvent.parkId ? witnessedParkId === parkedEvent.parkId : Boolean(estData?.leadServiceHandoffAt))
+      ? parkedEvent.serviceKey
       : null;
     const pendingKey = estData?.leadServiceRevertPending?.serviceKey
       ? String(estData.leadServiceRevertPending.serviceKey)
@@ -1013,7 +1022,10 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
         continue;
       }
       parkedKey = serviceKey;
-      if (leadShapeRef) leadShapeRef.parkedKey = serviceKey;
+      if (leadShapeRef) {
+        leadShapeRef.parkedKey = serviceKey;
+        leadShapeRef.parkId = commit.body?.parkId || null;
+      }
       // The park is COMMITTED. From here every failure must surface — a
       // swallowed reread would deliver full-bundle in-memory content over a
       // parked row and lose the key compensation needs (pre-push codex P1).
@@ -1752,8 +1764,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           .where({ id: estimate.id })
           .update({
             estimate_data: db.raw(
-              "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceHandoffAt}', to_jsonb(?::text))",
-              [new Date().toISOString()],
+              "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceHandoffAt}', to_jsonb(?::text)), '{leadServiceHandoffParkId}', to_jsonb(?::text))",
+              [new Date().toISOString(), String(options.leadShapeRef.parkId || '')],
             ),
           });
       } catch (err) {

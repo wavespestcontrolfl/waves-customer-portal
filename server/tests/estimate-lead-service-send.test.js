@@ -314,7 +314,8 @@ describe('fail-closed marker handling (GH codex r4 P1 x2)', () => {
   test('a delivered row with a staff-parked line (a resend) is NOT treated as pending', async () => {
     const row = newCustomerRow();
     const claimed = claimedRowFor(row);
-    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), deliveryState: { firstDeliveredAt: '2026-09-01T00:00:00Z' }, serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }] } });
+    // A pre-witness park (no parkId) on a row with ANY handoff witness is a resend, not pending.
+    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), leadServiceHandoffAt: '2026-09-01T00:00:00Z', serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }] } });
     mockRows.queue = [claimed, claimed];
     expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
     expect(mockMixCalls).toHaveLength(0);
@@ -340,12 +341,23 @@ describe('round-five scope pins (GH codex r5)', () => {
     expect(mockMixCalls).toHaveLength(0);
   });
 
-  test('a durable handoff witness (leadServiceHandoffAt) makes a staff-parked row NOT structurally pending', async () => {
+  test('a durable handoff witness for THIS park makes a staff-parked row NOT structurally pending', async () => {
     const row = newCustomerRow();
     const claimed = claimedRowFor(row);
-    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), leadServiceHandoffAt: '2026-09-01T00:00:00Z', serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }] } });
+    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), leadServiceHandoffAt: '2026-09-01T00:00:00Z', leadServiceHandoffParkId: 'park-1', serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', parkId: 'park-1', at: 't1' }] } });
     mockRows.queue = [claimed, claimed];
     expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
     expect(mockMixCalls).toHaveLength(0);
+  });
+
+  test('a prior delivery of an EARLIER shape never hides an undelivered park: witness ids must match (pre-push codex P0)', async () => {
+    const row = newCustomerRow();
+    const claimed = claimedRowFor(row);
+    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), deliveryState: { firstDeliveredAt: '2026-08-01T00:00:00Z' }, leadServiceHandoffAt: '2026-08-01T00:00:00Z', leadServiceHandoffParkId: 'park-old', serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', parkId: 'park-new', at: 't2' }] } });
+    const restoredRow = { ...claimed, estimate_data: JSON.stringify({ serviceOptOut: { events: [] } }) };
+    mockRows.queue = [claimed, claimed, restoredRow];
+    const out = await applyLeadServiceForSend(row);
+    expect(out.parkedKey).toBeNull();
+    expect(mockMixCalls.map((c) => [c.body.serviceKey, c.body.included])).toEqual([['lawn_care', true], ['lawn_care', true]]);
   });
 });

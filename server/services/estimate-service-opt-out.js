@@ -466,6 +466,20 @@ function latestOptOutEventIsStaff(parsedData = {}, serviceKey) {
   return staffOfferedKeys(parsedData).includes(serviceKey);
 }
 
+// The latest event per service, for lines whose CURRENT state is a staff
+// park — the send path matches each park's own id against the durable
+// handoff witness, so a prior delivery of an earlier shape can never hide an
+// undelivered park (GH codex pre-push P0 on #3711).
+function staffOfferedEvents(parsedData = {}) {
+  const events = parsedData?.serviceOptOut?.events;
+  if (!Array.isArray(events)) return [];
+  const latest = new Map();
+  for (const e of events) {
+    if (e && e.serviceKey) latest.set(e.serviceKey, e);
+  }
+  return Array.from(latest.values()).filter((e) => e.included === false && e.actor === 'staff');
+}
+
 function staffOfferedKeys(parsedData = {}) {
   const events = parsedData?.serviceOptOut?.events;
   if (!Array.isArray(events)) return [];
@@ -512,6 +526,7 @@ module.exports = {
   serviceOptOutAddableKeys,
   buildServiceAddInputs,
   staffOfferedKeys,
+  staffOfferedEvents,
   latestOptOutEventIsStaff,
   memberEvidenceInEstimateData,
 };
