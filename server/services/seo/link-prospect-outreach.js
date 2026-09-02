@@ -229,11 +229,12 @@ async function sendOutreach({ prospectId, approvedBy = 'admin' }) {
     // a later disproof (confidence 0) or a human-step ruling
     // (agent_completable=false) on the same path shows up only here
     const current = await trx('seo_link_prospects').where({ id: prospectId }).first('path_id');
-    if (current && current.path_id) {
-      const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).first('id', 'superseded_by', 'confidence', 'agent_completable');
-      const standing = onPath && !onPath.superseded_by && !(onPath.confidence != null && !(Number(onPath.confidence) > 0)) && onPath.agent_completable !== false;
-      if (!standing) return { ok: false, code: 'path_moved' };
-    }
+    // an UNLINKED prospect (the registry catch-up has not linked it yet) has
+    // passed no standing check at all — it is not sent until it has a path
+    if (!current || !current.path_id) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
+    const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).first('id', 'superseded_by', 'confidence', 'agent_completable');
+    const standing = onPath && !onPath.superseded_by && !(onPath.confidence != null && !(Number(onPath.confidence) > 0)) && onPath.agent_completable !== false;
+    if (!standing) return { ok: false, code: 'path_moved' };
     const attemptAt = new Date();
     const claimedRows = await trx('seo_link_prospects')
       .where({ id: prospectId, outreach_status: 'drafted', status: 'prospect' })

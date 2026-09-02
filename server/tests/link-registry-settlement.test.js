@@ -23,6 +23,7 @@ function makeDb(seed) {
       whereNotNull(col) { preds.push((row) => get(row, col) != null); return q; },
       select() { return q; },
       forUpdate() { return q; },
+      orderBy() { return q; },
       async first() { return rows()[0] ? { ...rows()[0] } : undefined; },
       async update(patch) { const hit = rows(); for (const r of hit) Object.assign(r, patch); return hit.length; },
       then(res, rej) { return Promise.resolve(rows().map((r) => ({ ...r }))).then(res, rej); },
@@ -94,5 +95,19 @@ test('a same-path reconcile at release fires ONCE per lease, syncs the execution
   db._tables.seo_link_prospects.push(idle);
   expect(await settleRetiredPlacements(db, { prospectIds: ['r2'], now: NOW })).toBe(0);
   expect(idle.target_url).toBe('https://example.com/pitch-page');
+});
+
+test('a supersession CYCLE is never a silent no-op — settlement throws so the caller\'s transaction fails loudly', async () => {
+  const a = { id: 'p-a', submission_url: null, superseded_by: 'p-b', link_type: 'editorial' };
+  const bb = { id: 'p-b', submission_url: null, superseded_by: 'p-a', link_type: 'editorial' };
+  const row = { id: 'r1', path_id: 'p-a', claimed_at: null, link_type: 'editorial', outreach_status: null };
+  const db = makeDb({ seo_link_acquisition_paths: [a, bb], seo_link_prospects: [row] });
+  await expect(settleRetiredPlacements(db, { prospectIds: ['r1'], now: NOW })).rejects.toThrow(/supersession cycle/);
+  // …while a long (legitimate) chain resolves to its end
+  const chain = Array.from({ length: 12 }, (_, i) => ({ id: `c-${i}`, submission_url: `https://example.com/v${i}`, superseded_by: i < 11 ? `c-${i + 1}` : null, link_type: 'directory', revision: 1 }));
+  const far = { id: 'r2', path_id: 'c-0', claimed_at: null, link_type: 'directory', target_url: 'https://example.com/v0', automation_policy: 'submit_free', outreach_status: null };
+  const db2 = makeDb({ seo_link_acquisition_paths: chain, seo_link_prospects: [far] });
+  expect(await settleRetiredPlacements(db2, { prospectIds: ['r2'], now: NOW })).toBe(1);
+  expect(far).toMatchObject({ path_id: 'c-11', target_url: 'https://example.com/v11' });
 });
 

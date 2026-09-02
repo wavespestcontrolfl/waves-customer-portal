@@ -341,7 +341,6 @@ async function ensureDomain(q, { domain, source, sourceDetail = null, sourceRef 
   return { id: row.id, domain: key, created, touched, touchId: (touchRow && touchRow.id) || null };
 }
 
-const SUPERSESSION_MAX_HOPS = 8;
 
 /**
  * Placements follow path supersession (§3.2) — ONE mechanism, two callers:
@@ -451,20 +450,48 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
   }
   if (!Array.isArray(prospectIds) || !prospectIds.length) return 0;
   const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').whereNotNull('path_id').select(...PLACEMENT_MOVE_COLUMNS);
-  let moved = 0;
-  for (const r of rows) {
-    if (!r.path_id) continue; // an un-backfilled legacy row has no path to follow
-    // Every worker-mode caller runs inside a transaction: the traversed path
-    // rows are LOCKED (FOR UPDATE) until the move commits, so an investigation
-    // retiring the chosen successor in parallel waits for this commit and its
-    // own retired-chain settlement then sees the placement on that row —
-    // never a non-claimable placement left on a successor retired between
-    // this read and the write.
-    let cur = await q('seo_link_acquisition_paths').where({ id: r.path_id }).forUpdate().first(...SUCCESSOR_COLUMNS);
-    for (let hop = 0; cur && cur.superseded_by && hop < SUPERSESSION_MAX_HOPS; hop++) {
-      cur = await q('seo_link_acquisition_paths').where({ id: cur.superseded_by }).forUpdate().first(...SUCCESSOR_COLUMNS);
+  const linked = (rows || []).filter((r) => r.path_id); // an un-backfilled legacy row has no path to follow
+  if (!linked.length) return 0;
+  // Pass 1 — resolve every chain WITHOUT locks, collecting the path ids
+  // involved. Cycle-safe rather than hop-capped: a chain is followed to its
+  // end however long it is, and a cycle (data corruption — supersession
+  // requires an active predecessor) throws, so no caller can ever mistake
+  // an unresolved chain for a clean no-op.
+  const involved = new Set();
+  const walk = async (startId, read) => {
+    const seen = new Set();
+    let id = startId;
+    let last = null;
+    while (id) {
+      if (seen.has(id)) throw new Error(`link-registry: supersession cycle at path ${id}`);
+      seen.add(id);
+      const p = await read(id);
+      if (!p) return null;
+      last = p;
+      id = p.superseded_by;
     }
-    if (!cur || cur.superseded_by) continue; // the chain did not resolve
+    return last;
+  };
+  for (const r of linked) {
+    await walk(r.path_id, async (id) => { involved.add(id); return q('seo_link_acquisition_paths').where({ id }).first('id', 'superseded_by'); });
+  }
+  // Pass 2 — lock the involved path rows in ONE deterministic order (sorted
+  // ids), held until the caller's transaction commits: two parallel claims /
+  // sweeps touching the same paths in opposite row order can no longer
+  // deadlock each other. Every worker-mode caller runs inside a transaction.
+  const locked = new Map();
+  if (involved.size) {
+    for (const p of await q('seo_link_acquisition_paths').whereIn('id', [...involved].sort()).orderBy('id').forUpdate().select(...SUCCESSOR_COLUMNS)) locked.set(p.id, p);
+  }
+  // Pass 3 — re-walk under the locks (a successor appended between passes is
+  // fetched and locked on demand) and apply the moves.
+  let moved = 0;
+  for (const r of linked) {
+    const cur = await walk(r.path_id, async (id) => {
+      if (!locked.has(id)) { const p = await q('seo_link_acquisition_paths').where({ id }).forUpdate().first(...SUCCESSOR_COLUMNS); if (p) locked.set(id, p); }
+      return locked.get(id) || null;
+    });
+    if (!cur || cur.superseded_by) continue; // the chain led nowhere (path deleted)
     if (cur.id === r.path_id) {
       // same path, still live — but did it CHANGE while this placement was
       // leased? The lease stamped the path revision it was taken on; a

@@ -138,10 +138,10 @@ describe('sendOutreach', () => {
       chain({ first: draftedProspect() }),         // pre-read (fast-fail checks)
       chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: null } }),         // [txn] the path it will send on (none linked → nothing to verify)                // [txn] dailySendCount under the lock
+      chain({ first: { path_id: 'path-ok' } }),    // [txn] the path it will send on…                // [txn] dailySendCount under the lock
       chain({ returning: [draftedProspect()] }),   // [txn] CAS claim → returns the locked row
       chain({ returning: [finalRow] }),            // finalize → sent (token-gated)
-    ] });
+    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true } })] }); // …is live and standing
 
     const res = await Outreach.sendOutreach({ prospectId: 'p1', approvedBy: 'Adam' });
     expect(res.ok).toBe(true);
@@ -163,10 +163,10 @@ describe('sendOutreach', () => {
       chain({ first: draftedProspect() }),
       chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: null } }),         // [txn] the path it will send on (none linked → nothing to verify)
+      chain({ first: { path_id: 'path-ok' } }),    // [txn] the path it will send on…
       chain({ returning: [draftedProspect()] }), // CAS claim
       chain({ returning: [] }),                  // finalize matched 0 rows
-    ] });
+    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true } })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
     expect(res.ok).toBe(false);
     expect(res.code).toBe('finalize_failed');
@@ -200,9 +200,9 @@ describe('sendOutreach', () => {
       chain({ first: draftedProspect() }),
       chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: null } }),         // [txn] the path it will send on (none linked → nothing to verify)
+      chain({ first: { path_id: 'path-ok' } }),    // [txn] the path it will send on…
       chain({ returning: [] }), // another click already flipped drafted→sending
-    ] });
+    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true } })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
     expect(res.code).toBe('already_sent');
     expect(gmail.sendMessage).not.toHaveBeenCalled();
@@ -215,10 +215,10 @@ describe('sendOutreach', () => {
       chain({ first: draftedProspect() }),                            // pre-read looks complete
       chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: null } }),         // [txn] the path it will send on (none linked → nothing to verify)
+      chain({ first: { path_id: 'path-ok' } }),    // [txn] the path it will send on…
       chain({ returning: [draftedProspect({ outreach_body: '' })] }), // but the claimed row is incomplete
       release,                                                        // release our claim
-    ] });
+    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true } })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
     expect(res.code).toBe('incomplete_draft');
     expect(gmail.sendMessage).not.toHaveBeenCalled();
@@ -243,10 +243,10 @@ describe('sendOutreach', () => {
       chain({ first: draftedProspect() }),
       chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: null } }),         // [txn] the path it will send on (none linked → nothing to verify)               // [txn] count
+      chain({ first: { path_id: 'path-ok' } }),    // [txn] the path it will send on…               // [txn] count
       chain({ returning: [draftedProspect()] }),  // [txn] CAS claims → returns row
       errMark,                                     // mark sending→send_error (token-gated)
-    ] });
+    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true } })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
     expect(res.code).toBe('send_failed');
     expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
@@ -276,8 +276,12 @@ describe('sendOutreach', () => {
         move, // the transition clears the draft
       ],
       seo_link_acquisition_paths: [
-        chain({ first: { id: 'path-old', superseded_by: 'path-new', submission_url: null, link_type: 'editorial' } }),
-        chain({ first: { id: 'path-new', superseded_by: null, submission_url: null, link_type: 'editorial', revision: 1, confidence: 0.7 } }),
+        chain({ first: { id: 'path-old', superseded_by: 'path-new' } }), // pass 1: resolve the chain…
+        chain({ first: { id: 'path-new', superseded_by: null } }),
+        chain({ result: [ // pass 2: lock the involved paths in sorted order
+          { id: 'path-new', superseded_by: null, submission_url: null, link_type: 'editorial', revision: 1, confidence: 0.7 },
+          { id: 'path-old', superseded_by: 'path-new', submission_url: null, link_type: 'editorial' },
+        ] }),
       ],
     });
     const res = await Outreach.sendOutreach({ prospectId: 'p1', approvedBy: 'Adam' });
@@ -405,8 +409,12 @@ describe('saveDraft', () => {
         move, // the transition (draft cleared, unclassified) onto the live successor
       ],
       seo_link_acquisition_paths: [
-        chain({ first: { id: 'path-old', superseded_by: 'path-new', submission_url: null, link_type: 'editorial' } }),
-        chain({ first: { id: 'path-new', superseded_by: null, submission_url: null, link_type: 'editorial', revision: 1, confidence: 0.7 } }),
+        chain({ first: { id: 'path-old', superseded_by: 'path-new' } }), // pass 1: resolve the chain…
+        chain({ first: { id: 'path-new', superseded_by: null } }),
+        chain({ result: [ // pass 2: lock the involved paths in sorted order
+          { id: 'path-new', superseded_by: null, submission_url: null, link_type: 'editorial', revision: 1, confidence: 0.7 },
+          { id: 'path-old', superseded_by: 'path-new', submission_url: null, link_type: 'editorial' },
+        ] }),
       ],
     });
     const res = await Outreach.saveDraft({ prospectId: 'p1', to: 'a@b.com', subject: 's', body: 'b' });

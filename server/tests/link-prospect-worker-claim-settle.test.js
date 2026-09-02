@@ -190,7 +190,7 @@ test('a placement under a domain the owner parked (Watch) or refused (Reject) is
     { ...base, id: 'r-legacy', domain_id: null, target_domain: 'legacy.example', path_id: null, target_url: 'https://legacy.example/add' },
   );
   const claimed = await worker.claim({ n: 5, type: 'signup' });
-  expect(claimed.map((r) => r.id).sort()).toEqual(['r-legacy', 'r-q']); // owner rulings hold at the chokepoint; un-backfilled legacy rows are unaffected
+  expect(claimed.map((r) => r.id).sort()).toEqual(['r-q']); // owner rulings hold at the chokepoint; an un-backfilled row (no path yet) is not leased until the catch-up links it (r4)
 });
 
 test('a retired path that was ALSO disproven still reaches settlement — the pre-filter is for active disproven paths only (Codex PR r27 P2)', async () => {
@@ -351,5 +351,17 @@ test('a skipped report on a path that changed during the lease reopens the place
   const rep = await worker.report({ prospect_id: 'r1', outcome: 'skipped', lease_token: claimed.lease_token });
   expect(rep).toMatchObject({ ok: true, status: 'prospect', attempts: 0, reopened_on_successor: true });
   expect(row).toMatchObject({ path_id: 'p-new', status: 'prospect', attempts: 0, claimed_at: null });
+});
+
+test('a board row the catch-up has not linked to a path yet is never leased or previewed (Codex #3720 r4 P1)', async () => {
+  const live = { id: 'p-ok', domain_id: 'd1', submission_url: 'https://ok.example/add', superseded_by: null, link_type: 'directory', confidence: 0.7, revision: 1 };
+  mockStore.seo_link_acquisition_paths.push(live);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40 };
+  mockStore.seo_link_prospects.push(
+    { ...base, id: 'r-unlinked', target_domain: 'new.example', path_id: null, target_url: 'https://new.example/add' },
+    { ...base, id: 'r-ok', target_domain: 'ok.example', path_id: 'p-ok', target_url: 'https://ok.example/add' },
+  );
+  expect((await worker.claim({ n: 5, type: 'signup', preview: true })).map((r) => r.id)).toEqual(['r-ok']);
+  expect((await worker.claim({ n: 5, type: 'signup' })).map((r) => r.id)).toEqual(['r-ok']);
 });
 

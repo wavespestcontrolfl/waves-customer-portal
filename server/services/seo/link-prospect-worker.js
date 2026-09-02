@@ -96,6 +96,11 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       // reads (locked outreach state — the registry refuses to move it and
       // no worker may re-serve it)
       .whereNull('outreach_sent_at')
+      // …and it must be LINKED to an acquisition path at all: a board row the
+      // periodic catch-up has not yet linked (up to hours after insert) has
+      // passed no confidence / completability / supersession check, so it is
+      // not leased — nor previewed — until the registry knows its path
+      .whereNotNull('path_id')
       // …and a DISPROVEN path (confidence 0 — gone, omitted under coverage,
       // or an unobserved claim) is filtered here, before ordering and LIMIT,
       // so a prefix of higher-ranked rows on dead routes can never consume
@@ -104,9 +109,9 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       // the only thing that moves such a placement onto its successor, and
       // each one is consumed by it exactly once (moved, unclassified, then
       // ineligible until the classifier has read the successor).
-      .where((b) => b.whereNull('path_id').orWhereNotIn('path_id',
+      .whereNotIn('path_id',
         trx('seo_link_acquisition_paths').select('id').whereNull('superseded_by') // ACTIVE rows only — a retired zero-confidence path still reaches settlement
-          .where((s) => s.where('confidence', '<=', 0).orWhere('agent_completable', false)))) // disproven, or a route whose contract needs a human step
+          .where((s) => s.where('confidence', '<=', 0).orWhere('agent_completable', false))) // disproven, or a route whose contract needs a human step
       // …and the owner's registry ruling holds at the chokepoint: a placement
       // on a domain the owner parked (Watch) or refused (Reject) is never
       // leased, whatever its own status/policy/confidence still read
@@ -151,8 +156,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // SETTLE rows on superseded paths (moved, unclassified, not leased), so the
     // preview excludes them rather than report a retired URL as claimable.
     if (preview) {
-      const previewRows = await base.where((b) => b.whereNull('path_id').orWhereNotIn('path_id',
-        trx('seo_link_acquisition_paths').select('id').whereNotNull('superseded_by')));
+      const previewRows = await base.whereNotIn('path_id', trx('seo_link_acquisition_paths').select('id').whereNotNull('superseded_by'));
       return previewRows.map((r) => ({ ...r }));
     }
 
