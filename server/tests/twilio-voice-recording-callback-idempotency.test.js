@@ -221,6 +221,10 @@ describe('decideRecordingAttach (pure)', () => {
   test('first delivery attaches', () => {
     expect(decideRecordingAttach({ recording_sid: null, recording_url: null }, { recording_sid: REC_1 })).toEqual({ action: 'attach' });
   });
+  test('a first recording for a row a pass is working (or finished) without audio is parked, not installed under it', () => {
+    expect(decideRecordingAttach({ recording_sid: null, recording_url: null, processing_status: 'processing' }, { recording_sid: REC_1 })).toEqual({ action: 'park', reason: 'processing_status_processing' });
+    expect(decideRecordingAttach({ recording_sid: null, recording_url: null, processing_status: 'processed' }, { recording_sid: REC_1 })).toEqual({ action: 'park', reason: 'processing_status_processed' });
+  });
   test('the same RecordingSid again is a duplicate — never a rewrite', () => {
     for (const status of [null, 'pending', 'processing', 'processed', 'voicemail']) {
       expect(decideRecordingAttach({ recording_sid: REC_1, recording_url: URL_1, processing_status: status }, { recording_sid: REC_1 }).action).toBe('duplicate');
@@ -311,6 +315,22 @@ describe('POST /recording-status', () => {
     expect(row.processing_status).toBe('processing');
     expect(row.metadata.superseded_recordings).toBeUndefined();
     expect(row.metadata.additional_recordings).toEqual([expect.objectContaining({ recording_sid: REC_2, parked_because: 'processing_status_processing' })]);
+    expect(tables.triage_items).toHaveLength(1);
+    jest.advanceTimersByTime(15 * 60 * 1000);
+    expect(processor.processRecording).not.toHaveBeenCalled();
+  });
+
+  test('a first attach decided on a stale read is parked when a pass claims the recording-less row before the write', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: null, recording_url: null, processing_status: null, transcription: 'cached builtin text', metadata: null });
+    let claimed = false;
+    tables.__afterFirst = (row) => {
+      if (!claimed && row.twilio_call_sid === PARENT) { claimed = true; row.processing_status = 'processing'; row.processing_token = 'tok'; }
+    };
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1 }));
+    const row = tables.call_log[0];
+    expect(row.recording_sid).toBeNull();
+    expect(row.recording_url).toBeNull();
+    expect(row.metadata.additional_recordings).toEqual([expect.objectContaining({ recording_sid: REC_1, parked_because: 'processing_status_processing' })]);
     expect(tables.triage_items).toHaveLength(1);
     jest.advanceTimersByTime(15 * 60 * 1000);
     expect(processor.processRecording).not.toHaveBeenCalled();

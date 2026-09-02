@@ -148,6 +148,9 @@ Per file, with the proving test.
   `created_at` after the call even when reached through the lead; the
   `customer_creation_failed` review card is filed inside the finalization
   transaction, fenced by the status write it describes.
+- Pre-push Codex round 9 (1 P1, fixed): the first attach carries the same
+  processing/processed fence as a replace; a load-bearing row with no
+  recording yet parks the arrival rather than installing it under the pass.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 

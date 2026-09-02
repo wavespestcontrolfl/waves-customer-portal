@@ -206,14 +206,19 @@ const RECORDING_LOAD_BEARING_STATUSES = new Set(['processing', 'processed']);
 function decideRecordingAttach(row, incoming) {
   const currentSid = row?.recording_sid || null;
   const currentUrl = String(row?.recording_url || '').trim();
-  if (!currentSid && !currentUrl) return { action: 'attach' };
   if (currentSid && incoming?.recording_sid && currentSid === incoming.recording_sid) {
     return { action: 'duplicate' };
   }
+  // A pass in flight, or one that finished, on a row with NO recording yet
+  // (a PAN-masked transcript pass, a manual Process on a cached Twilio
+  // transcript) is load-bearing too: installing the first recording under
+  // it would let that pass finalize as processed without ever transcribing
+  // the audio, and the retry would then skip it as already_processed.
   const status = row?.processing_status == null ? null : String(row.processing_status);
   if (RECORDING_LOAD_BEARING_STATUSES.has(status)) {
     return { action: 'park', reason: `processing_status_${status}` };
   }
+  if (!currentSid && !currentUrl) return { action: 'attach' };
   return {
     action: 'replace',
     superseded: {
@@ -1586,14 +1591,11 @@ router.post('/recording-status', async (req, res) => {
             if (baseline.recording_sid) this.where('recording_sid', baseline.recording_sid);
             else this.whereNull('recording_sid');
           })
-          // A replace is decided on the status the row had when it was
-          // READ; a pass can claim it between that read and this write and
-          // start transcribing the old audio. Re-checked in the write.
-          .modify((q) => {
-            if (attach.action === 'replace') {
-              q.whereRaw("processing_status IS DISTINCT FROM 'processing' AND processing_status IS DISTINCT FROM 'processed'");
-            }
-          })
+          // Attach and replace are both decided on the status the row had
+          // when it was READ; a pass can claim it between that read and this
+          // write (and start transcribing the old audio, or finalize without
+          // the new audio). Re-checked in the write; zero rows re-decides.
+          .whereRaw("processing_status IS DISTINCT FROM 'processing' AND processing_status IS DISTINCT FROM 'processed'")
           .update(write);
         if (updated > 0) {
           matchedSid = baseline.twilio_call_sid;
