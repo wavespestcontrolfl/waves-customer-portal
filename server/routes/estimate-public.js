@@ -44,7 +44,6 @@ const {
   serviceExcludedFromPercentDiscount,
   serviceManualRecurringDiscountEligible,
   lineFlagsBlockPercentDiscount,
-  determineWaveGuardTier,
 } = require('../services/pricing-engine/discount-engine');
 const slotReservation = require('../services/slot-reservation');
 // Rung 1 of the global scheduling lock order (ORDERING CONTRACT,
@@ -13759,48 +13758,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
   }
 });
 
-// Ceiling for PUT /:token/select-tier: the highest WaveGuard tier the
-// estimate's own qualifying services earn, read from carriers the ENGINE
-// wrote — the last opt-out commit's stamp, else the stored result / raw
-// engineResult tier (an existing member's prior services are already folded
-// in there), else the qualifying-row count of the stored recurring rows for
-// legacy blobs that carry no engine tier. A row with no recurring evidence at
-// all resolves to Bronze, so an upgrade on it fails closed to the office.
+// Ceiling for PUT /:token/select-tier: the tier the ENGINE wrote for the
+// estimate's current mix, read from the stored carriers the portal's readers
+// accept (serviceOptOutEngineTierReference — the last opt-out commit's stamp,
+// the mapped result, the raw engineResult; an existing member's prior
+// services are already folded in there). No engine-written tier in ANY
+// carrier fails closed to Bronze: deriving one from the stored rows would
+// re-run today's qualifying policy over a quote the engine priced under
+// yesterday's (rodent bait joined WaveGuard 2026-08-29; synthesized row flags
+// are not evidence — pre-push codex P0s on this lane), so an upgrade on such
+// a row is the office lane (owner ruling 2026-09-01).
 function selectTierCeiling(estData = {}) {
   const data = estData && typeof estData === 'object' ? estData : {};
   const OptOut = require('../services/estimate-service-opt-out');
-  const stamped = OptOut.serviceOptOutEngineTierReference(data);
-  if (stamped) return normalizeWaveGuardTierLabel(stamped);
-  const estResult = data.result && typeof data.result === 'object' ? data.result : data;
-  const rows = recurringServicesWithSupplements(estResult);
-  // A bare legacy rodent row — no new-model marker (perApplicationBilled /
-  // stations) and no affirmative stamp — was priced under the pre-2026-08-29
-  // posture: monthly-billed, NO tier count, no % (rodent-bait-legacy-replay).
-  // rodent_bait joined the live qualifying list on 08-29, so counting such a
-  // row here would resolve a legacy pest+rodent blob to Silver although its
-  // engine wrote Bronze (GH codex P0 on #3741). Same conservative default as
-  // recurringServiceReceivesTierDiscount.
-  const bareLegacyRodentRow = (svc) => recurringServiceKey(svc) === 'rodent_bait'
-    && svc.perApplicationBilled !== true
-    && !(Number(svc.stations) > 0)
-    && svc.countsTowardWaveGuardTier !== true
-    && svc.waveGuardTierEligible !== true;
-  const keys = rows
-    .filter((svc) => !bareLegacyRodentRow(svc))
-    .filter(recurringServiceCountsTowardTier)
-    .map(recurringServiceKey)
-    .filter(Boolean);
-  // Frozen affirmative posture (pre-push codex P1): a saved row stamped
-  // qualifying counts even when the live WAVEGUARD.qualifyingServices no
-  // longer lists its key — the ceiling reads what the engine wrote for the
-  // quote, never today's policy. Rows stamped false stay excluded either way.
-  const frozenQualifying = rows
-    .filter((svc) => svc.countsTowardWaveGuardTier !== false && svc.waveGuardTierEligible !== false
-      && (svc.countsTowardWaveGuardTier === true || svc.waveGuardTierEligible === true))
-    .map(recurringServiceKey)
-    .filter(Boolean);
-  const active = [...new Set([...keys, ...frozenQualifying])];
-  return normalizeWaveGuardTierLabel(determineWaveGuardTier(active, { assumeQualifying: frozenQualifying }).tier);
+  return normalizeWaveGuardTierLabel(OptOut.serviceOptOutEngineTierReference(data) || 'Bronze');
 }
 
 // PUT /api/estimates/:token/select-tier — customer selects a WaveGuard tier

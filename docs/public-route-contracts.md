@@ -505,10 +505,13 @@ preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
 estimate's qualifying services (400 `tier_not_available_for_current_services`
 + `maxTier`; downgrades stay allowed): the ceiling is the last opt-out
 commit's `serviceOptOut.engineTier` stamp, else the stored `result` /
-`engineResult` tier, else the qualifying-row count of the stored recurring
-rows — never the row's own `waveguard_tier`, which holds the customer's last
-selection once the route writes it back (validation audit SEC-001,
-2026-09-02; before it the ceiling applied only to opted-out estimates).
+`engineResult` tier (every carrier shape the portal's readers accept), else
+Bronze — fail closed, never a re-count of the stored rows under today's
+qualifying policy, and never the row's own `waveguard_tier`, which holds the
+customer's last selection once the route writes it back (validation audit
+SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
+estimates). A membership reconcile that reprices the mix refreshes the
+opt-out stamp with the row tier.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,

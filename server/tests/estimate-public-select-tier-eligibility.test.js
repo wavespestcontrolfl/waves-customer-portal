@@ -177,52 +177,19 @@ describe('selectTierCeiling', () => {
     expect(serviceOptOutEngineTierReference({ recurring: { waveGuardTier: '' }, engineResult: { waveGuard: { tier: 'gold' } } })).toBe('gold');
   });
 
-  test('legacy blob with no engine tier resolves from its qualifying recurring rows (palm never counts)', () => {
-    const rows = (services) => ({ result: { recurring: { services } } });
-    expect(selectTierCeiling(rows([
-      { name: 'Pest Control', service: 'pest_control', mo: 37.33 },
-      { name: 'Lawn Care', service: 'lawn_care', mo: 38 },
-    ]))).toBe('Silver');
-    expect(selectTierCeiling(rows([
-      { name: 'Pest Control', service: 'pest_control', mo: 37.33 },
-      { name: 'Lawn Care', service: 'lawn_care', mo: 38 },
-      { name: 'Palm Injection', service: 'palm_injection', mo: 14.58 },
-    ]))).toBe('Silver');
-    expect(selectTierCeiling(rows([{ name: 'Pest Control', service: 'pest_control', mo: 37.33 }]))).toBe('Bronze');
-  });
-
-  test('legacy rows stamped qualifying keep their frozen posture; rows stamped false stay excluded', () => {
-    const rows = (services) => ({ result: { recurring: { services } } });
-    // A key the live qualifying list never carried, frozen as qualifying on the row
-    expect(selectTierCeiling(rows([
-      { name: 'Pest Control', service: 'pest_control', mo: 37.33 },
-      { name: 'Legacy Program', service: 'legacy_program', mo: 20, countsTowardWaveGuardTier: true },
-    ]))).toBe('Silver');
-    expect(selectTierCeiling(rows([
-      { name: 'Pest Control', service: 'pest_control', mo: 37.33 },
-      { name: 'Legacy Program', service: 'legacy_program', mo: 20, waveGuardTierEligible: true },
-    ]))).toBe('Silver');
-    // An explicit false outranks the live list AND an affirmative sibling flag
-    expect(selectTierCeiling(rows([
-      { name: 'Pest Control', service: 'pest_control', mo: 37.33 },
-      { name: 'Lawn Care', service: 'lawn_care', mo: 38, countsTowardWaveGuardTier: false },
-    ]))).toBe('Bronze');
-    expect(selectTierCeiling(rows([
-      { name: 'Pest Control', service: 'pest_control', mo: 37.33 },
-      { name: 'Lawn Care', service: 'lawn_care', mo: 38, waveGuardTierEligible: true, countsTowardWaveGuardTier: false },
-    ]))).toBe('Bronze');
-  });
-
-  test('a bare legacy rodent row never counts; new-model or stamped rodent rows do (GH codex P0)', () => {
+  test('no engine-written tier in any carrier fails closed to Bronze whatever the rows say', () => {
     const rows = (services) => ({ result: { recurring: { services } } });
     const pest = { name: 'Pest Control', service: 'pest_control', mo: 37.33 };
-    // Pre-2026-08-29 posture: monthly-billed rodent bait, no tier count.
-    expect(selectTierCeiling(rows([pest, { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 59 }]))).toBe('Bronze');
-    // New-model evidence (per-application billing / station allowance) counts.
-    expect(selectTierCeiling(rows([pest, { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 29.67, perApplicationBilled: true }]))).toBe('Silver');
-    expect(selectTierCeiling(rows([pest, { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 29.67, stations: 6 }]))).toBe('Silver');
-    // A frozen affirmative stamp counts even on a bare-looking row.
-    expect(selectTierCeiling(rows([pest, { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 29.67, countsTowardWaveGuardTier: true }]))).toBe('Silver');
+    const lawn = { name: 'Lawn Care', service: 'lawn_care', mo: 38 };
+    // Two live qualifiers, but no engine tier — deriving Silver here would
+    // re-run today's policy over a quote priced under yesterday's.
+    expect(selectTierCeiling(rows([pest, lawn]))).toBe('Bronze');
+    // Row flags are not evidence: synthesized rows carry them for every
+    // recurring line (palm included), and a stamped legacy rodent row was
+    // priced under the pre-2026-08-29 no-tier posture.
+    expect(selectTierCeiling(rows([pest, lawn, { name: 'Palm Injection', service: 'palm_injection', mo: 14.58, countsTowardWaveGuardTier: true }]))).toBe('Bronze');
+    expect(selectTierCeiling(rows([pest, { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 29.67, perApplicationBilled: true, stations: 6 }]))).toBe('Bronze');
+    expect(selectTierCeiling({ engineResult: { lineItems: [{ service: 'pest_control' }, { service: 'lawn_care' }] } })).toBe('Bronze');
   });
 
   test('no recurring evidence at all fails closed to Bronze', () => {
