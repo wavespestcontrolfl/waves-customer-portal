@@ -4436,8 +4436,8 @@ const EstimateConverter = {
           // customer (or a former one), keep its real start; if it was a lead,
           // overwrite the lead-intake date with today. Uses the already-loaded
           // row, not database.raw, to stay mock-friendly.
-          member_since: ['active_customer', 'won', 'at_risk', ...FORMER_CUSTOMER_STAGES].includes(customer.pipeline_stage)
-            ? (customer.member_since || etDateString())
+          member_since: ['active_customer', 'won', 'at_risk', ...FORMER_CUSTOMER_STAGES].includes(effectiveCustomer.pipeline_stage)
+            ? (effectiveCustomer.member_since || etDateString())
             : etDateString(),
           // An all-commercial recurring plan is NOT a WaveGuard membership. Store
           // the explicit non-member 'Commercial' tier (in the CHECK + every
@@ -4478,8 +4478,12 @@ const EstimateConverter = {
             // dues product: explicit monthly_membership so the monthly cron
             // charges the disclosed $/mo and completions are dues-covered
             // (codex #3591 r21 P0).
+            // LOCKED snapshot, never the pre-lock row (pre-push codex P0): a
+            // mode change committing before the customer lock must be the
+            // mode this stamp preserves, or the classification and the
+            // written rail disagree.
             billing_mode: preservesExistingMembership
-              ? (customer.billing_mode || null)
+              ? (effectiveCustomer.billing_mode || null)
               : (pinnedLegacyRodentOnlyPlan ? 'monthly_membership' : 'per_application'),
             // Fee semantics documented on stampedPerApplicationFee above —
             // shared with the membership.started email payload.
@@ -6599,7 +6603,7 @@ const EstimateConverter = {
       billingLane: acceptedBillingLaneForConversion({
         billingTerm,
         preservesExistingMembership,
-        customerBillingMode: customer.billing_mode || null,
+        customerBillingMode: effectiveCustomer.billing_mode || null,
         waveguardTier: commercialOnlyRecurring ? 'Commercial' : (tier === 'none' ? null : tier),
         monthlyRate: convertedMonthlyRate,
       }),
@@ -6757,14 +6761,14 @@ const EstimateConverter = {
     if (!suppressRecurringConversion && !commercialOnlyRecurring
       && priorQualifyingKeys.length > 0
       && tier && tier !== 'none'
-      && (extensionApplied || extensionNeedsReview || isMembershipTierUpgrade(customer.waveguard_tier, tier))) {
+      && (extensionApplied || extensionNeedsReview || isMembershipTierUpgrade(effectiveCustomer.waveguard_tier, tier))) {
       const discountPct = Math.round((discount || 0) * 100);
       const appliedClauses = extensionApplied
         ? [
           extension.familyLines.length ? `Applied automatically: ${extension.familyLines.join('; ')}.` : '',
           extension.creditLines.length ? `Prepaid-term credit issued: ${extension.creditLines.join('; ')}.` : '',
           extension.monthlyRateReviewNeeded
-            ? `Monthly-billed member — extend the ${discountPct}% to their monthly rate manually (current rate $${(Number(customer.monthly_rate) || 0).toFixed(2)}/mo).`
+            ? `Monthly-billed member — extend the ${discountPct}% to their monthly rate manually (current rate ${(Number(effectiveCustomer.monthly_rate) || 0).toFixed(2)}/mo).`
             : '',
           [...extension.reviewFamilies, ...extension.skippedFamilies].length
             ? `Still needs review: ${[...extension.reviewFamilies, ...extension.skippedFamilies].join(', ')}.`
@@ -6886,7 +6890,7 @@ const EstimateConverter = {
       const planReviewPayload = {
         type: 'estimate_converted',
         title: 'Multi-plan rate needs review after re-quote',
-        body: `${customer.first_name} ${customer.last_name} accepted a re-quote at $${convertedMonthlyRate.toFixed(2)}/mo, but they carry other live plans whose pre-ledger amounts could not be attributed — verify their total monthly rate (previous: $${(Number(customer.monthly_rate) || 0).toFixed(2)}/mo).`,
+        body: `${customer.first_name} ${customer.last_name} accepted a re-quote at $${convertedMonthlyRate.toFixed(2)}/mo, but they carry other live plans whose pre-ledger amounts could not be attributed — verify their total monthly rate (previous: ${(Number(effectiveCustomer.monthly_rate) || 0).toFixed(2)}/mo).`,
         options: {
           icon: '💵',
           link: `/admin/customers?customerId=${customerId}`,
