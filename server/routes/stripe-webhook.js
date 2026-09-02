@@ -4647,6 +4647,41 @@ async function handleSetupIntentSucceeded(setupIntent) {
         && !!(await db('annual_prepay_terms').where({ source_estimate_id: estimate.id }).first('id'));
     }
     if (prepayLane) return;
+    // Bound to the ACCEPTED intent (Codex #3723 r2 P1): the accept stamps
+    // the SetupIntent it verified; any other recurring intent for this
+    // estimate is a superseded capture (e.g. a bank intent the kill switch
+    // refused, replaced by a card-only one) and must not enroll. Legacy
+    // accepts without the stamp keep the pre-stamp behavior.
+    {
+      let estimateData = estimate.estimate_data;
+      if (typeof estimateData === 'string') {
+        try { estimateData = JSON.parse(estimateData); } catch { estimateData = null; }
+      }
+      const acceptedIntentId = estimateData?.acceptedRecurringCardSetupIntentId || null;
+      if (acceptedIntentId && acceptedIntentId !== setupIntent.id) {
+        logger.info(`[stripe-webhook] recurring card intent ${setupIntent.id} superseded by accepted ${acceptedIntentId} (estimate ${estimate.id}) — not enrolling`);
+        return;
+      }
+    }
+    // Re-apply the bank kill switch (GATE_ACCEPT_ACH_CAPTURE) at recovery:
+    // a bank method is enrolled only while the current tender policy still
+    // offers bank to this estimate's customer. A lookup failure on a
+    // bank-capable intent rethrows (retry), never enrolls.
+    if (Array.isArray(setupIntent.payment_method_types) && setupIntent.payment_method_types.includes('us_bank_account')) {
+      const pmRef = setupIntent.payment_method;
+      let pmType = typeof pmRef === 'object' && pmRef?.type ? pmRef.type : null;
+      if (!pmType) {
+        try {
+          pmType = (await require('../services/stripe').retrievePaymentMethod(typeof pmRef === 'string' ? pmRef : pmRef.id))?.type || null;
+        } catch (err) {
+          throw new Error(`recurring-cof backstop: captured method lookup failed (${err.message}) — retry`);
+        }
+      }
+      if (pmType !== 'card' && (await RecurringCards.resolveRecurringCaptureTender(estimate)) !== 'card_or_bank') {
+        logger.info(`[stripe-webhook] recurring bank intent ${setupIntent.id} refused at recovery — tender no longer offered (estimate ${estimate.id})`);
+        return;
+      }
+    }
     const PayerService = require('../services/payer');
     let appt = await findLinkedUpcomingAppointment(estimate).catch((err) => {
       throw new Error(`recurring-cof backstop: linked-appointment lookup failed (${err.message}) — retry`);

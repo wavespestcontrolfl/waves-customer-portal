@@ -35,6 +35,10 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
+  // The mounted Payment Element — locked read-only while a confirm is in
+  // flight so the tender cannot change under the consent that was ticked
+  // (Codex #3723 r2 P1).
+  const paymentElementRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [agreed, setAgreed] = useState(false);
   // Tender the customer picked inside the Payment Element ('card' or
@@ -106,6 +110,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       paymentElement.on('change', (event) => { if (!cancelled) setMethodType(event?.value?.type || 'card'); });
       stripeRef.current = stripe;
       elementsRef.current = elements;
+      paymentElementRef.current = paymentElement;
     }).catch(() => {
       if (!cancelled) {
         setError('Could not load the secure card form. Check your connection and try again.');
@@ -127,7 +132,18 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       if (!stripeRef.current || !elementsRef.current) {
         return { ok: false, error: 'The secure card form is still loading — try again in a moment.' };
       }
+      // The consent must still be ticked for the tender on screen at the
+      // moment of confirm — a tender switch re-arms it (see the effect
+      // above), and this closure reads the live value.
+      if (!agreed) {
+        return { ok: false, error: 'Please check the authorization box to continue.' };
+      }
       setError(null);
+      // Lock the element for the whole confirm: the tender picked when the
+      // box was ticked is the one that gets confirmed and consented.
+      const lock = (readOnly) => { try { paymentElementRef.current?.update?.({ readOnly }); } catch { /* element gone */ } };
+      lock(true);
+      const fail = (message) => { lock(false); setError(message); return { ok: false, error: message }; };
       try {
         const existing = await stripeRef.current.retrieveSetupIntent(intent.clientSecret);
         if (existing?.setupIntent?.status === 'succeeded') {
@@ -137,9 +153,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
           // carries capturedMethodType.
           const replayedTypes = existing.setupIntent.payment_method_types || [];
           if (replayedTypes.includes('us_bank_account') && !intent?.capturedMethodType) {
-            const message = 'Your payment method was already saved. Please refresh this page to continue.';
-            setError(message);
-            return { ok: false, error: message };
+            return fail('Your payment method was already saved. Please refresh this page to continue.');
           }
           return { ok: true, setupIntentId: existing.setupIntent.id };
         }
@@ -149,9 +163,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
           redirect: 'if_required',
         });
         if (result.error) {
-          const message = result.error.message || (bank ? 'We could not save that bank account. Try a card instead.' : 'We could not save that card. Try another card.');
-          setError(message);
-          return { ok: false, error: message };
+          return fail(result.error.message || (bank ? 'We could not save that bank account. Try a card instead.' : 'We could not save that card. Try another card.'));
         }
         const si = result.setupIntent;
         if (si && si.status === 'succeeded') {
@@ -160,15 +172,11 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         // Instant-verified banks land 'succeeded' like cards; a bank that
         // could not instant-verify never gets here (Stripe surfaces the
         // error above) — no micro-deposit pending state exists at accept.
-        const message = bank
+        return fail(bank
           ? 'That bank account could not be verified instantly. Use a card to finish booking.'
-          : 'That card could not be saved. Try again in a moment.';
-        setError(message);
-        return { ok: false, error: message };
+          : 'That card could not be saved. Try again in a moment.');
       } catch {
-        const message = bank ? 'We could not save that bank account. Try again or use a card.' : 'We could not save that card. Try again.';
-        setError(message);
-        return { ok: false, error: message };
+        return fail(bank ? 'We could not save that bank account. Try again or use a card.' : 'We could not save that card. Try again.');
       }
     },
   }), [ready, agreed, intent, bank]);

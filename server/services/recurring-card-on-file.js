@@ -82,7 +82,7 @@ function isPrepayCardAndChargeEnabled() {
 // sibling pick (same query shape, minus the advisory lock); the trx
 // re-resolves authoritatively under its lock. Lookup failure returns null
 // — callers fall through to the phone match, exactly like the trx.
-async function resolveGroupedEstimateOwnerId(estimate, database = db) {
+async function resolveGroupedEstimateOwnerId(estimate, database = db, { throwOnError = false } = {}) {
   if (!estimate?.estimate_group_id) return null;
   try {
     const sibling = await database('estimates')
@@ -98,6 +98,10 @@ async function resolveGroupedEstimateOwnerId(estimate, database = db) {
       .first('id');
     return live?.id || null;
   } catch (err) {
+    // throwOnError: callers that must fail CLOSED on an unreadable owner
+    // (the bank tender gate) get the error; the policy resolver keeps the
+    // fall-through-to-phone-match posture.
+    if (throwOnError) throw err;
     logger.warn('[recurring-cof] grouped-sibling owner lookup failed — falling through to the phone match', { error: err.message });
     return null;
   }
@@ -127,10 +131,18 @@ async function resolveGroupedEstimateOwnerId(estimate, database = db) {
 // customer" when the match itself errored.
 async function resolveProspectiveAcceptCustomer(estimate) {
   let customerId = estimate?.customer_id || null;
-  if (!customerId) {
-    customerId = await resolveGroupedEstimateOwnerId(estimate);
-  }
   let lookupFailed = false;
+  if (!customerId) {
+    // A failed sibling lookup is a FAILED lookup (Codex #3723 r2 P1) —
+    // the phone match still runs (unchanged policy posture), but the
+    // fail-closed tender gate sees the signal and offers card only.
+    try {
+      customerId = await resolveGroupedEstimateOwnerId(estimate, db, { throwOnError: true });
+    } catch (err) {
+      lookupFailed = true;
+      logger.warn('[recurring-cof] grouped-sibling owner lookup failed — falling through to the phone match', { error: err.message });
+    }
+  }
   if (!customerId && estimate?.customer_phone) {
     try {
       const gates = require('../routes/estimate-public');
@@ -1322,6 +1334,7 @@ module.exports = {
   prepayChargeMethodKey,
   sweepStrandedPrepayAutoCharges,
   createRecurringCardSetupIntentForEstimate,
+  resolveRecurringCaptureTender,
   verifyRecurringCardIntent,
   completeRecurringCardEnrollment,
   _private: {

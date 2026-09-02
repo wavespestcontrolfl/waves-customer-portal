@@ -2627,6 +2627,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
+  const paymentElementRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [agreed, setAgreed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -2659,6 +2660,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
       paymentElement.on('change', (event) => { if (!cancelled) setMethodType(event?.value?.type || 'card'); });
       stripeRef.current = stripe;
       elementsRef.current = elements;
+      paymentElementRef.current = paymentElement;
     }).catch(() => {
       if (!cancelled) setError('Could not load the secure card form. Check your connection and try again.');
     });
@@ -2666,9 +2668,13 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
   }, [intent]);
 
   const handleSave = useCallback(async () => {
-    if (!stripeRef.current || !elementsRef.current) return;
+    if (!stripeRef.current || !elementsRef.current || !agreed) return;
     setSubmitting(true);
     setError(null);
+    // Lock the Payment Element for the whole confirm (Codex #3723 r2 P1):
+    // the tender the consent was ticked for is the one confirmed.
+    const lock = (readOnly) => { try { paymentElementRef.current?.update?.({ readOnly }); } catch { /* element gone */ } };
+    lock(true);
     try {
       // Re-tap after a succeeded setup — honor the captured card instead of
       // re-confirming.
@@ -2678,6 +2684,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
         // consent on screen may not match what Stripe holds — fail closed.
         const replayedTypes = existing.setupIntent.payment_method_types || [];
         if (replayedTypes.includes('us_bank_account') && !intent?.capturedMethodType) {
+          lock(false);
           setError('Your payment method was already saved. Please refresh this page to continue.');
           setSubmitting(false);
           return;
@@ -2691,6 +2698,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
         redirect: 'if_required',
       });
       if (result.error) {
+        lock(false);
         setError(result.error.message || (bank ? 'We could not save that bank account. Try a card instead.' : 'We could not save that card. Try another card.'));
         setSubmitting(false);
         return;
@@ -2702,15 +2710,17 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
       }
       // Instant-verified banks land 'succeeded' like cards; there is no
       // micro-deposit pending state at accept (GATE_ACCEPT_ACH_CAPTURE).
+      lock(false);
       setError(bank
         ? 'That bank account could not be verified instantly. Use a card to finish booking.'
         : 'That card could not be saved. Try again in a moment.');
       setSubmitting(false);
     } catch {
+      lock(false);
       setError(bank ? 'We could not save that bank account. Try again or use a card.' : 'We could not save that card. Try again.');
       setSubmitting(false);
     }
-  }, [intent, onSuccess, bank]);
+  }, [intent, onSuccess, bank, agreed]);
 
   return (
     <div

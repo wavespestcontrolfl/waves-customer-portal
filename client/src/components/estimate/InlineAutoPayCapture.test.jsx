@@ -152,7 +152,7 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
     }));
     const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
     const ref = React.createRef();
-    render(
+    const first = render(
       <InlineAutoPayCapture
         ref={ref}
         intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'] }}
@@ -161,12 +161,17 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
     );
     await flush();
     await act(async () => { handlers.ready(); });
+    // Consent must be ticked at confirm time (Codex r2: the tender is
+    // locked to the one the box was ticked for).
+    expect((await ref.current.confirmSetup()).error).toMatch(/authorization box/);
+    await act(async () => { first.getByRole('checkbox').click(); });
     const result = await ref.current.confirmSetup();
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/refresh this page/);
+    first.unmount();
     // With the tender resolved by the mint, the same replay passes through.
     const ref2 = React.createRef();
-    render(
+    const second = render(
       <InlineAutoPayCapture
         ref={ref2}
         intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: 'us_bank_account' }}
@@ -174,6 +179,7 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
       />,
     );
     await flush();
+    await act(async () => { second.getByRole('checkbox').click(); });
     expect(await ref2.current.confirmSetup()).toEqual({ ok: true, setupIntentId: 'seti_1' });
   });
 

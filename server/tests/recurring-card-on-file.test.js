@@ -601,6 +601,12 @@ describe('createRecurringCardSetupIntentForEstimate', () => {
         expect((await createRecurringCardSetupIntentForEstimate(UNLINKED)).paymentMethodTypes).toEqual(['card', 'us_bank_account']);
       });
 
+      it('fails toward card when the grouped-sibling owner lookup errors (Codex #3723 r2 P1)', async () => {
+        mockDbFixtures.estimates = () => { throw new Error('sibling lookup down'); };
+        mockMatchAcceptCustomerByPhone.mockResolvedValue({ match: null });
+        expect((await createRecurringCardSetupIntentForEstimate({ ...UNLINKED, estimate_group_id: 'grp-1' })).paymentMethodTypes).toEqual(['card']);
+      });
+
       it('fails toward card when the phone match itself errors', async () => {
         mockMatchAcceptCustomerByPhone.mockRejectedValue(new Error('lookup down'));
         expect((await createRecurringCardSetupIntentForEstimate(UNLINKED)).paymentMethodTypes).toEqual(['card']);
