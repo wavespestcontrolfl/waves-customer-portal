@@ -14910,7 +14910,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // tier (codex #3684 r2 P1).
     const priors = [];
     for (const carrier of [
-      parsedData, parsedData.engineInputs, parsedData.inputs, parsedData.engineRequest?.options,
+      parsedData, parsedData.engineInputs, parsedData.engineInput, parsedData.inputs, parsedData.engineRequest?.options,
     ]) {
       if (!carrier || typeof carrier !== 'object') continue;
       if (!Array.isArray(carrier.priorQualifyingServices)) continue;
@@ -14918,20 +14918,16 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         if (p != null && !priors.includes(p)) priors.push(p);
       }
     }
-    // A surviving recurring flag in a replay shape — the reconciler deletes
-    // these for lapsed members, so one still standing is (normally) a verified
-    // active member whose only marker may be that flag. Same truthy coercion
-    // as the reconciler's own trigger (codex #3684 r4 P1).
-    const survivingRecurringFlag = [
-      parsedData.engineInputs, parsedData.inputs, parsedData.engineRequest?.options,
-    ].filter((s) => s && typeof s === 'object').some((s) => {
-      const v = s.recurringCustomer ?? s.isRecurringCustomer;
-      if (v == null || v === false) return false;
-      const normalized = String(v).trim().toLowerCase();
-      return normalized !== '' && normalized !== 'no' && normalized !== 'false' && normalized !== '0';
-    });
-    const memberEvidence = parsedData.membershipSnapshot?.isExistingCustomer === true
-      || priors.length > 0 || survivingRecurringFlag;
+    // Member evidence comes from the ONE shared reader (snapshot flag, priors
+    // in any carrier incl. the public-wizard `engineInput` shape, a surviving
+    // recurring flag in any replay shape — the reconciler deletes those for
+    // lapsed members, so one still standing is a verified member's marker;
+    // codex #3684 r4 P1) — the same reader the `/data` addable stamp and the
+    // send-time lead scope use, so no carrier shape can reach the recompute
+    // as a new customer here while counting as a member there (pre-push
+    // codex P0). `priors` above is gathered separately only because the
+    // recompute needs the list itself.
+    const memberEvidence = OptOut.memberEvidenceInEstimateData(parsedData) || priors.length > 0;
     // STRICT verification before member pricing can be WRITTEN (pre-push
     // codex P0 on e77857d): reconcileFrozenMembershipSnapshot never throws —
     // a failed live-plan lookup leaves member artifacts standing unverified,
