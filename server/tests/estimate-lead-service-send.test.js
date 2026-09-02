@@ -25,7 +25,7 @@ jest.mock('../models/db', () => {
   const dbh = () => ({
     where: () => ({
       first: async () => (mockRows.queue.length > 1 ? mockRows.queue.shift() : mockRows.queue[0]),
-      update: async (payload) => { mockRows.updates.push(payload); return 1; },
+      update: async (payload) => { if (mockRows.updateThrows) throw new Error('db down'); mockRows.updates.push(payload); return 1; },
     }),
   });
   dbh.fn = { now: () => 'now' };
@@ -64,6 +64,7 @@ const parkedRow = { id: 'est-1', status: 'viewed', monthly_total: 40, updated_at
 beforeEach(() => {
   mockMixCalls.length = 0;
   mockRows.updates.length = 0;
+  mockRows.updateThrows = false;
   mockNotify.calls.length = 0;
   mockRows.queue = [claimedRowFor(newCustomerRow()), parkedRow];
   mockPlan.active = false;
@@ -287,5 +288,45 @@ describe('durable revert-pending state (pre-push codex P1)', () => {
     mockMix.responder = () => ({ status: 409, body: { error: 'estimate_changed_since_preview' } });
     await expect(applyLeadServiceForSend(row)).rejects.toMatchObject({ statusCode: 409, leadServiceAbort: true });
     expect(mockRows.updates).toHaveLength(0);
+  });
+});
+
+describe('fail-closed marker handling (GH codex r4 P1 x2)', () => {
+  test('a marker write failure throws (the send already failed; the outage surfaces)', async () => {
+    mockRows.updateThrows = true;
+    await expect(markLeadServiceRevertPending({ id: 'est-1', customer_name: 'Pat' }, 'lawn_care')).rejects.toMatchObject({ statusCode: 503 });
+    mockRows.updateThrows = false;
+    // The office is still paged even when the marker could not persist.
+    expect(mockNotify.calls).toHaveLength(1);
+  });
+
+  test('a staff-parked line on a never-delivered row is treated as pending even without the marker', async () => {
+    const row = newCustomerRow();
+    const claimed = claimedRowFor(row);
+    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }] } });
+    const restoredRow = { ...claimed, estimate_data: JSON.stringify({ serviceOptOut: { events: [] } }) };
+    mockRows.queue = [claimed, claimed, restoredRow];
+    const out = await applyLeadServiceForSend(row);
+    expect(out.parkedKey).toBeNull();
+    expect(mockMixCalls.map((c) => [c.body.serviceKey, c.body.included])).toEqual([['lawn_care', true], ['lawn_care', true]]);
+  });
+
+  test('a delivered row with a staff-parked line (a resend) is NOT treated as pending', async () => {
+    const row = newCustomerRow();
+    const claimed = claimedRowFor(row);
+    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), deliveryState: { firstDeliveredAt: '2026-09-01T00:00:00Z' }, serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }] } });
+    mockRows.queue = [claimed, claimed];
+    expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
+    expect(mockMixCalls).toHaveLength(0);
+  });
+
+  test('a marker-clear failure after a successful restore aborts the send', async () => {
+    const row = newCustomerRow();
+    const claimed = claimedRowFor(row);
+    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }] }, leadServiceRevertPending: { serviceKey: 'lawn_care', at: 't' } });
+    mockRows.queue = [claimed, claimed];
+    mockRows.updateThrows = true;
+    await expect(applyLeadServiceForSend(row)).rejects.toMatchObject({ statusCode: 503, leadServiceAbort: true });
+    mockRows.updateThrows = false;
   });
 });

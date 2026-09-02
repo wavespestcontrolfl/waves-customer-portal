@@ -17,7 +17,7 @@ const {
   memberEvidenceInEstimateData,
   currentlyOptedOutKeys,
 } = require('../services/estimate-service-opt-out');
-const { optOutImpact, recurringServiceKeysOf } = require('../routes/estimate-public');
+const { optOutImpact, recurringServiceKeysOf, addedLineReviewOnly } = require('../routes/estimate-public');
 
 const requestOnly = () => ({
   engineRequest: {
@@ -196,5 +196,20 @@ describe('recurringServiceKeysOf — the "did the requested line join" check', (
     const supplementalOnly = { recurring: { services: [{ service: 'pest_control' }, { name: 'Palm Injection' }] } };
     expect(recurringServiceKeysOf(supplementalOnly).has('mosquito')).toBe(false);
     expect(recurringServiceKeysOf(null).size).toBe(0);
+  });
+});
+
+describe('addedLineReviewOnly — an add the engine could only price for review is refused (GH codex r4 P1)', () => {
+  it('flags the requested line when it carries any review-only marker', () => {
+    const raw = { lineItems: [{ service: 'pest_control', name: 'Pest Control' }, { service: 'lawn_care', name: 'Lawn Care', requiresCustomQuote: true }] };
+    expect(addedLineReviewOnly(raw, 'lawn_care')).toBe(true);
+    expect(addedLineReviewOnly(raw, 'pest_control')).toBe(false);
+    expect(addedLineReviewOnly({ lineItems: [{ service: 'mosquito', quoteRequired: true }] }, 'mosquito')).toBe(true);
+    expect(addedLineReviewOnly({ lineItems: [{ service: 'mosquito', requiresMeasurement: true }] }, 'mosquito')).toBe(true);
+    expect(addedLineReviewOnly({ lineItems: [{ service: 'mosquito' }] }, 'mosquito')).toBe(false);
+  });
+  it('fails closed without a raw result or without the line', () => {
+    expect(addedLineReviewOnly(null, 'mosquito')).toBe(true);
+    expect(addedLineReviewOnly({ lineItems: [{ service: 'pest_control' }] }, 'mosquito')).toBe(true);
   });
 });

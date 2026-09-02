@@ -14433,6 +14433,18 @@ function optOutPrepayRate(result, estData) {
 // no pricing rows) must not shadow a populated engineResult, and a removal
 // with NO trustworthy before-state fails closed at the route (pre-push codex
 // P0 on 9389704). Mapping errors propagate; the route refuses.
+// The raw engine line for `serviceKey` carries a review-only marker: the
+// engine could not auto-price it (quoteRequired / requiresCustomQuote /
+// requiresMeasurement — the same trio estimate-engine's own acceptability
+// check reads). Missing raw result = cannot prove it is auto-priced → true.
+function addedLineReviewOnly(rawEngineResult, serviceKey) {
+  const items = Array.isArray(rawEngineResult?.lineItems) ? rawEngineResult.lineItems : null;
+  if (!items) return true;
+  const rows = items.filter((li) => li && typeof li === 'object' && recurringServiceKey({ service: li.service, name: li.name }) === serviceKey);
+  if (!rows.length) return true;
+  return rows.some((li) => li.quoteRequired === true || li.requiresCustomQuote === true || li.requiresMeasurement === true);
+}
+
 // Normalized section keys of a result's recurring rows — the add rail's
 // "did the requested line actually join" check.
 function recurringServiceKeysOf(result) {
@@ -14881,6 +14893,13 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       const beforeKeys = recurringServiceKeysOf(beforeResult);
       const afterKeys = recurringServiceKeysOf(afterResult);
       if (beforeKeys.has(serviceKey) || !afterKeys.has(serviceKey)) {
+        return { status: 409, body: ({ error: 'add_unavailable' }) };
+      }
+      // A line the engine priced only as review-only (custom-quote /
+      // measurement / quote-required marker — e.g. lawn on a lot-fallback
+      // turf basis) must not be confirmed as an auto-applied price that
+      // then parks the estimate in the review lane (GH codex r4 P1).
+      if (addedLineReviewOnly(reprice.rawEngineResult, serviceKey)) {
         return { status: 409, body: ({ error: 'add_unavailable' }) };
       }
     }
@@ -25350,6 +25369,7 @@ module.exports.confirmationServiceLabel = confirmationServiceLabel;
 module.exports.optOutImpact = optOutImpact;
 module.exports.applyServiceMixChange = applyServiceMixChange;
 module.exports.recurringServiceKeysOf = recurringServiceKeysOf;
+module.exports.addedLineReviewOnly = addedLineReviewOnly;
 module.exports.resolveOptOutBeforeResult = resolveOptOutBeforeResult;
 module.exports.optOutResultHasPricingRows = optOutResultHasPricingRows;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;

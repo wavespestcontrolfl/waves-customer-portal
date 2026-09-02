@@ -911,16 +911,37 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
     // anything else; if it still fails the send aborts (the office was
     // paged when the marker was written). Success clears the marker and the
     // restored full bundle goes out (pre-push codex P1).
-    if (estData?.leadServiceRevertPending?.serviceKey) {
-      const key = String(estData.leadServiceRevertPending.serviceKey);
-      const restored = await revertLeadServiceForSend(estimate.id, key);
+    // Pending revert: the durable marker, OR the structural evidence of one
+    // — a staff-parked line on a row that has never had a real delivery
+    // (deliveryState.firstDeliveredAt absent) can only mean an undelivered
+    // send whose marker write failed (GH codex r4 P1). Either way the
+    // restore runs first; if it still fails the send aborts.
+    const OptOut = require('../services/estimate-service-opt-out');
+    const structuralPending = !estData?.deliveryState?.firstDeliveredAt
+      ? (OptOut.staffOfferedKeys(estData || {})[0] || null)
+      : null;
+    const pendingKey = estData?.leadServiceRevertPending?.serviceKey
+      ? String(estData.leadServiceRevertPending.serviceKey)
+      : structuralPending;
+    if (pendingKey) {
+      const restored = await revertLeadServiceForSend(estimate.id, pendingKey);
       if (!restored) {
         const abort = new Error('This estimate is waiting on a review: an earlier undelivered send left an add-on offer unrestored. Nothing was sent.');
         abort.statusCode = 409;
         abort.leadServiceAbort = true;
         throw abort;
       }
-      await clearLeadServiceRevertPending(estimate.id);
+      // The restored row must be what every message composes from; a marker
+      // clear that fails must not fall back to the stale object (GH codex
+      // r4 P1) — abort, the next send retries idempotently.
+      try {
+        await clearLeadServiceRevertPending(estimate.id);
+      } catch (err) {
+        const abort = new Error(`Could not clear the add-on review marker (${err.message}). Nothing was sent.`);
+        abort.statusCode = 503;
+        abort.leadServiceAbort = true;
+        throw abort;
+      }
       // The row just changed (restore + marker clear): every message must
       // compose from it, never from the caller's pre-restore object
       // (pre-push codex P0).
@@ -934,7 +955,6 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
       return { estimate: { ...restoredRow, status: estimate.status }, parkedKey: null };
     }
     if (estData?.serviceOptOut) return untouched; // already shaped once — never re-park on a resend
-    const OptOut = require('../services/estimate-service-opt-out');
     // Member exclusion (security-critical, AGENTS.md): the ONE shared
     // evidence reader (snapshot flag, priors in any carrier, recurring flag
     // in any replay shape) PLUS a live active-plan check that fails CLOSED
@@ -1327,6 +1347,8 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
 }
 
 async function markLeadServiceRevertPending(estimate, serviceKey) {
+  let markerWritten = false;
+  let markerError = null;
   try {
     await db('estimates')
       .where({ id: estimate.id })
@@ -1337,7 +1359,9 @@ async function markLeadServiceRevertPending(estimate, serviceKey) {
         ),
         updated_at: db.fn.now(),
       });
+    markerWritten = true;
   } catch (err) {
+    markerError = err;
     logger.error(`[admin-estimates] lead-service revert-pending marker failed for estimate ${estimate?.id}: ${err.message}`);
   }
   try {
@@ -1350,6 +1374,15 @@ async function markLeadServiceRevertPending(estimate, serviceKey) {
     );
   } catch (err) {
     logger.error(`[admin-estimates] lead-service revert-pending bell failed for estimate ${estimate?.id}: ${err.message}`);
+  }
+  // Fail CLOSED when the durable marker could not persist (GH codex r4 P1):
+  // the send already failed; surfacing the outage is right, and the next
+  // send is still guarded structurally (a staff-parked line on a never-
+  // delivered row is treated as pending — see applyLeadServiceForSend).
+  if (!markerWritten) {
+    const err = new Error(`Send delivered on no channel and the add-on review marker could not be written (${markerError?.message || 'unknown'}). Check the estimate before resending.`);
+    err.statusCode = 503;
+    throw err;
   }
 }
 

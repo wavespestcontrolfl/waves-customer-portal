@@ -4731,7 +4731,10 @@ function EstimateViewPageInner() {
   // built from the stamp — a ladder pick the server did not stamp must
   // never hide a priced add-on behind the office inquiry (pre-push codex P1).
   const addableStamp = data?.serviceOptOut?.addable || [];
-  const pricedAddOffer = data?.cta?.terminalState == null && addableStamp.length
+  // Recurring mode only, like the legacy ladder: a priced add rewrites the
+  // estimate as a recurring bundle, never from the one-time flow (GH codex
+  // r4 P2).
+  const pricedAddOffer = data?.cta?.terminalState == null && serviceMode === 'recurring' && addableStamp.length
     ? (addServiceOffer && addableStamp.some((a) => a?.key === addServiceOffer.serviceKey)
       ? addServiceOffer
       : offerFromAddable(addableStamp))
