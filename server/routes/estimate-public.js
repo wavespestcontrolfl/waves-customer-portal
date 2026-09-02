@@ -15374,7 +15374,25 @@ router.post('/:token/referral-link', referralLinkLimiter, async (req, res) => {
     if (!estimate || !isEstimateCustomerViewable(estimate) || estimate.status !== 'accepted' || !estimate.customer_id) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
-    const share = await require('../services/referral-share').buildReferralShareForCustomer(estimate.customer_id);
+    // The durable promoter row is written under the estimate row lock with
+    // the call-side linkage verdict re-run on the LOCKED row and HELD through
+    // enrollment (estimates → leads → call_log → customers), so a linkage
+    // correction landing after the pre-check can never enroll the wrong
+    // customer (pre-push codex P1). Every gate re-checked on the locked row.
+    const share = await db.transaction(async (trx) => {
+      const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+      if (!locked || !isEstimateCustomerViewable(locked) || locked.status !== 'accepted' || !locked.customer_id) return null;
+      const linkData = parseEstimateDataSafe(locked);
+      const eng = linkData?.estimatorEngine;
+      if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return null;
+      if (await callSideBlockForEstimateData(trx, linkData)) return null;
+      const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+      if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
+        await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
+      }
+      if (linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true })) return null;
+      return require('../services/referral-share').buildReferralShareForCustomer(locked.customer_id, { conn: trx });
+    });
     if (!share) return res.status(404).json({ error: 'Estimate not found' });
     if (share.unavailable) {
       return res.status(503).json({ error: 'Referral link unavailable — please try again' });

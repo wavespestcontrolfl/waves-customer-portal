@@ -199,7 +199,12 @@ async function sendSMS(to, body, options = {}) {
 // ---------------------------------------------------------------------------
 // 1. enrollPromoter
 // ---------------------------------------------------------------------------
-async function enrollPromoter(customerId) {
+// conn: a caller already holding a transaction (the estimate referral tap
+// re-verifies the call-side linkage on a locked estimate row and enrolls
+// under that same lock — GH codex P1 on #3710) passes its trx so the whole
+// enroll rides it; otherwise the enroll opens its own transaction exactly as
+// before.
+async function enrollPromoter(customerId, { conn = null } = {}) {
   const settings = await getSettings();
   // The whole enroll runs in ONE transaction opened by a customer-row lock
   // (codex #3379 r1 P1): the public report's referral tap made concurrent
@@ -211,7 +216,7 @@ async function enrollPromoter(customerId) {
   // FOR UPDATE serializes per customer: the second request waits, then
   // takes the already-enrolled path against the winner's row. All callers
   // (portal Refer tab included) inherit the same atomicity.
-  const runEnroll = () => db.transaction(async (trx) => {
+  const enrollWork = async (trx) => {
     const customer = await trx('customers').where({ id: customerId }).forUpdate().first();
     if (!customer) throw new Error('Customer not found');
 
@@ -276,7 +281,8 @@ async function enrollPromoter(customerId) {
 
     logger.info(`[ReferralEngine] Enrolled promoter ${promoter.id} for customer ${customerId}`);
     return { promoter, alreadyEnrolled: false };
-  });
+  };
+  const runEnroll = () => (conn ? enrollWork(conn) : db.transaction(enrollWork));
   return runEnroll();
 }
 

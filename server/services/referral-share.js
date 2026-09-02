@@ -53,24 +53,31 @@ function formatRefereeAmount(cents) {
  * wrong account). No account-scoped match = a genuine cross-account
  * collision → rethrow for manual resolution, never a guessed attribution.
  */
+// conn: an outer transaction (the estimate tap holds the estimate row lock
+// and the call-side verdict through enrollment); every read and the enroll
+// ride it when given.
 async function buildReferralShareForCustomer(customerId, {
   database = db,
   referralEngine = require('./referral-engine'),
+  conn = null,
 } = {}) {
   if (!customerId) return null;
   const settings = await referralEngine.getLiveSettings();
   if (!settings?.program_active) return null;
 
+  const dbx = conn || database;
   let promoter;
   try {
-    ({ promoter } = await referralEngine.enrollPromoter(customerId));
+    ({ promoter } = await (conn
+      ? referralEngine.enrollPromoter(customerId, { conn })
+      : referralEngine.enrollPromoter(customerId)));
   } catch (err) {
     if (err?.code !== '23505') throw err;
-    const profile = await database('customers')
+    const profile = await dbx('customers')
       .where({ id: customerId })
       .first('id', 'phone', 'account_id');
     promoter = profile?.phone && profile?.account_id
-      ? await database('referral_promoters as rp')
+      ? await dbx('referral_promoters as rp')
         .join('customers as c', 'rp.customer_id', 'c.id')
         .where('rp.customer_phone', profile.phone)
         .where('c.account_id', profile.account_id)

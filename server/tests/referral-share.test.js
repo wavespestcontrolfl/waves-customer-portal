@@ -112,4 +112,13 @@ describe('buildReferralShareForCustomer', () => {
     mockEngine.getPromoterReferralLink.mockReturnValue('');
     expect(await buildReferralShareForCustomer('cust-1')).toEqual({ unavailable: true });
   });
+
+  test('an outer transaction is threaded through the enroll and the household fallback reads (GH codex P1 on #3710)', async () => {
+    mockEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 2500, base_url: 'https://wavespestcontrol.com' });
+    mockEngine.enrollPromoter.mockResolvedValue({ promoter: { id: 'promo-1', referral_code: 'WAVES-TEST01' } });
+    mockEngine.getPromoterReferralLink.mockReturnValue('https://wavespestcontrol.com/r/WAVES-TEST01');
+    const conn = jest.fn();
+    await buildReferralShareForCustomer('cust-1', { conn });
+    expect(mockEngine.enrollPromoter).toHaveBeenCalledWith('cust-1', { conn });
+  });
 });
