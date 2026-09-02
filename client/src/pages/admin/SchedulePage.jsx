@@ -15250,6 +15250,36 @@ export function CompletionPanel({
                 />
               </Field>
             )}
+            {/* Lines parked from the notes when an AI draft replaced them
+                stay visible and editable here — they still submit as
+                findings / internal next steps, so the tech can correct or
+                remove them after editing the generated prose. */}
+            {parkedFound.trim() && (
+              <Field label="Findings carried from your notes">
+                {" "}
+                <textarea
+                  aria-label="Findings carried from your notes"
+                  value={parkedFound}
+                  onChange={(e) => setParkedFound(e.target.value)}
+                  rows={2}
+                  disabled={generating || photoAnalyzing}
+                  style={{ ...mTextarea, opacity: generating || photoAnalyzing ? 0.55 : 1 }}
+                />{" "}
+              </Field>
+            )}
+            {parkedNext.trim() && (
+              <Field label="Next steps carried from your notes">
+                {" "}
+                <textarea
+                  aria-label="Next steps carried from your notes"
+                  value={parkedNext}
+                  onChange={(e) => setParkedNext(e.target.value)}
+                  rows={2}
+                  disabled={generating}
+                  style={{ ...mTextarea, opacity: generating ? 0.55 : 1 }}
+                />{" "}
+              </Field>
+            )}
             {/* Gate off: the textareas as today. Gate on: they stay only while
                 they hold text (a draft saved before the gate flipped), so
                 nothing that will submit is ever hidden from the tech. */}
@@ -17557,6 +17587,38 @@ export function CompletionPanel({
                     chipText: D.text,
                   }}
                 />
+              </div>
+            )}
+            {/* Parked note lines stay visible and editable after an AI draft
+                replaced the notes (see the mobile branch). */}
+            {parkedFound.trim() && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ ...labelStyle, color: D.amber }}>
+                  Findings carried from your notes
+                </label>{" "}
+                <textarea
+                  aria-label="Findings carried from your notes"
+                  value={parkedFound}
+                  onChange={(e) => setParkedFound(e.target.value)}
+                  rows={2}
+                  disabled={generating || photoAnalyzing}
+                  style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating || photoAnalyzing ? 0.55 : 1 }}
+                />{" "}
+              </div>
+            )}
+            {parkedNext.trim() && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ ...labelStyle, color: D.green }}>
+                  Next steps carried from your notes
+                </label>{" "}
+                <textarea
+                  aria-label="Next steps carried from your notes"
+                  value={parkedNext}
+                  onChange={(e) => setParkedNext(e.target.value)}
+                  rows={2}
+                  disabled={generating}
+                  style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating ? 0.55 : 1 }}
+                />{" "}
               </div>
             )}
             {/* Gate off: the textareas as today. Gate on: they stay only while
