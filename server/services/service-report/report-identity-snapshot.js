@@ -74,15 +74,14 @@ function resolveVisitAddress({ visit = {}, customer = {} } = {}) {
  * @param {object} args
  * @param {object} args.visit          locked scheduled_services row (service_address_*, service_type)
  * @param {object|null} args.customer  { first_name, last_name, address_line1, address_line2, city, state, zip }
- *                                      — null when the in-trx read failed: customer AND address are then
- *                                      omitted (never a partial freeze) and the renderer keeps them live
+ *                                      — null when the row is missing: customer AND address are then
+ *                                      omitted together (never a partial freeze) and the renderer keeps them live
  * @param {string|null} args.technicianName  technicians.name at completion; null = omitted, stays live
- * @param {object|undefined} args.productFacts  { [productId]: approvedReportProductFacts|null } — undefined
- *                                      when the catalog read failed so render falls back live
+ * @param {object|undefined} args.productFacts  { [productId]: approvedReportProductFacts|null }
  * @param {Date} [args.frozenAt]
  *
- * Every leg is independently optional so a failed read degrades THAT leg
- * to today's live behavior instead of freezing a stale or blank value.
+ * Every leg is independently optional so a missing row degrades THAT leg
+ * to today's live behavior instead of freezing a blank value.
  */
 function buildReportIdentitySnapshot({
   visit = {},

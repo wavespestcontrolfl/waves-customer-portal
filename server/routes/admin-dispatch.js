@@ -7065,47 +7065,39 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // from the catalog rows the product loop below re-validates; a
           // failed read leaves productFacts undefined so the renderer keeps
           // its live fallback for this record only.
-          // Every leg is fail-soft the SAME way: a read that fails freezes
-          // NOTHING for that leg (the key is omitted and the renderer keeps
-          // its live fallback for this record) — never a partial freeze
-          // built from the stale preflight join (pre-push codex P1).
+          // These reads run INSIDE the transaction and propagate like every
+          // other in-trx read here: a failed statement aborts the Postgres
+          // transaction, so a swallowed rejection could not make the leg
+          // "fail-soft" — it would only rename the rollback (pre-push codex
+          // P1). A missing row (deleted customer, no technician) still just
+          // omits that leg via buildReportIdentitySnapshot.
           const snapshotVisitRow = lockedSvcRow || svc;
           const snapshotCustomerRow = await trx('customers')
             .where({ id: snapshotVisitRow.customer_id })
-            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip')
-            .catch((readErr) => {
-              logger.warn(`[completion] report identity snapshot: customer read skipped: ${readErr.message}`);
-              return null;
-            });
+            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip');
           const snapshotTechnicianRow = snapshotVisitRow.technician_id
-            ? await trx('technicians').where({ id: snapshotVisitRow.technician_id }).first('name').catch(() => null)
+            ? await trx('technicians').where({ id: snapshotVisitRow.technician_id }).first('name')
             : null;
           // ONE catalog read set inside the trx serves both the frozen report
           // facts and the product loop's validation below, so the facts the
           // report freezes are the rows the completion actually validated
           // against (pre-push codex P1).
-          const completionCatalogRowsById = new Map();
-          let reportProductFactsSnapshot;
-          try {
-            const snapshotProductIds = [...new Set((products || []).map((p) => p?.productId).filter(Boolean))];
-            const snapshotCatalogRows = snapshotProductIds.length
+          const snapshotProductIds = [...new Set((products || []).map((p) => p?.productId).filter(Boolean))];
+          const completionCatalogRowsById = new Map(
+            (snapshotProductIds.length
               ? await trx('products_catalog').whereIn('id', snapshotProductIds).select('*')
-              : [];
-            for (const row of snapshotCatalogRows) completionCatalogRowsById.set(String(row.id), row);
-            reportProductFactsSnapshot = {};
-            for (const productId of snapshotProductIds) {
-              reportProductFactsSnapshot[String(productId)] = approvedReportProductFacts(
-                completionCatalogRowsById.get(String(productId)) || null,
-              );
-            }
-          } catch (snapshotErr) {
-            completionCatalogRowsById.clear();
-            reportProductFactsSnapshot = undefined;
-            logger.warn(`[completion] report product facts snapshot skipped: ${snapshotErr.message}`);
+              : []
+            ).map((row) => [String(row.id), row]),
+          );
+          const reportProductFactsSnapshot = {};
+          for (const productId of snapshotProductIds) {
+            reportProductFactsSnapshot[String(productId)] = approvedReportProductFacts(
+              completionCatalogRowsById.get(String(productId)) || null,
+            );
           }
           const reportIdentitySnapshot = buildReportIdentitySnapshot({
             visit: snapshotVisitRow,
-            customer: snapshotCustomerRow,
+            customer: snapshotCustomerRow || null,
             technicianName: snapshotTechnicianRow ? snapshotTechnicianRow.name : null,
             productFacts: reportProductFactsSnapshot,
           });
@@ -7984,10 +7976,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               err.isOperational = true; err.statusCode = 400;
               throw err;
             }
-            // Same read set the report identity snapshot froze from; the
-            // per-id read only runs when that batch read failed.
-            const product = completionCatalogRowsById.get(String(p.productId))
-              || await trx('products_catalog').where({ id: p.productId }).first();
+            // Same read set the report identity snapshot froze from.
+            const product = completionCatalogRowsById.get(String(p.productId));
             if (!product) {
               const err = new Error(`Product not found: ${p.productId}`);
               err.isOperational = true; err.statusCode = 400;

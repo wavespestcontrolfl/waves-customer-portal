@@ -168,7 +168,7 @@ describe('applyReportIdentitySnapshot', () => {
 });
 
 describe('buildReportIdentitySnapshot degrades per leg', () => {
-  test('a failed customer read omits customer AND address; a missing tech omits technicianName', () => {
+  test('a missing customer row omits customer AND address; a missing tech omits technicianName', () => {
     const snapshot = buildReportIdentitySnapshot({
       visit: { service_type: 'Original Lawn Service', service_address_line1: '200 Palm Ave' },
       customer: null,
