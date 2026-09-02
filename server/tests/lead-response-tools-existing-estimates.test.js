@@ -13,6 +13,13 @@ jest.mock('../services/pricing-authority-gate', () => ({
   estimateDeliverableUnderGate: jest.fn(async () => mockGate.deliverable),
 }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: async (url) => url }));
+const mockCallSide = { block: null, throws: false };
+jest.mock('../utils/estimate-claim-sql', () => ({
+  callSideBlockForEstimateData: jest.fn(async () => {
+    if (mockCallSide.throws) throw new Error('call_log unavailable');
+    return mockCallSide.block;
+  }),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/estimate-automation-duplicates', () => ({
   blockIfAutomatedEstimateDuplicate: jest.fn(),
@@ -55,6 +62,8 @@ beforeEach(() => {
   builder.limit.mockClear();
   mockGate.applies = false;
   mockGate.deliverable = true;
+  mockCallSide.block = null;
+  mockCallSide.throws = false;
 });
 
 describe('check_existing_estimates viewability', () => {
@@ -106,6 +115,22 @@ describe('check_existing_estimates viewability', () => {
       totalWithheld: 'pricing-authority-not-server', viewUrlWithheld: 'pricing-authority-not-server',
     });
     expect(out.estimates[0].total).toBeUndefined();
+  });
+
+  test('a durable call-side block hides an otherwise open row (public data route parity)', async () => {
+    mockCallSide.block = 'call_missing';
+    pages.push([row({ id: 'e-blocked', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-1' } }) })]);
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' });
+    expect(out).toEqual({ hasEstimates: false, estimates: [], unviewableEstimates: 1 });
+    expect(JSON.stringify(out)).not.toMatch(/tk-|149/);
+  });
+
+  test('an unreadable call-side verdict fails closed', async () => {
+    mockCallSide.throws = true;
+    pages.push([row({ id: 'e-unknown' })]);
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' });
+    expect(out.hasEstimates).toBe(false);
+    expect(out.unviewableEstimates).toBe(1);
   });
 
   test('no candidates at all', async () => {

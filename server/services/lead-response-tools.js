@@ -136,6 +136,22 @@ async function executeLeadTool(toolName, input) {
       // the composer-customer-links.js pattern). Hidden rows are counted so
       // the agent can offer a fresh quote without quoting the old one.
       const { isEstimateCustomerViewable } = require('../routes/estimate-public');
+      const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+      // The public data route's verdict is viewability AND the durable
+      // call-side block (uncapped codex P1 r34): an engine draft whose call
+      // is missing, reprocessing, quarantined, or repointed is refused by the
+      // page even when the row itself looks open. Any failure to read that
+      // verdict hides the row (fail closed).
+      const customerCanOpen = async (row) => {
+        if (!isEstimateCustomerViewable(row)) return false;
+        try {
+          const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+          return !(await callSideBlockForEstimateData(db, data));
+        } catch (err) {
+          logger.warn('[lead-tools] check_existing_estimates: call-side verdict unavailable, row hidden', { estimateId: row.id, error: err.message });
+          return false;
+        }
+      };
       const LIMIT = 5;
       const PAGE = 15;
       const viewable = [];
@@ -144,7 +160,7 @@ async function executeLeadTool(toolName, input) {
         for (let offset = 0; ; offset += PAGE) {
           const rows = await baseQuery().orderBy('created_at', 'desc').offset(offset).limit(PAGE);
           for (const row of rows) {
-            if (isEstimateCustomerViewable(row)) { if (viewable.length < LIMIT) viewable.push(row); }
+            if (viewable.length < LIMIT && await customerCanOpen(row)) viewable.push(row);
             else hiddenCount += 1;
           }
           if (viewable.length >= LIMIT || rows.length < PAGE) break;
