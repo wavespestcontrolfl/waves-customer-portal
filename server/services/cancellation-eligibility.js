@@ -1,6 +1,5 @@
 const db = require('../models/db');
 const { etDateString } = require('../utils/datetime-et');
-const { resolveBillingLane } = require('./billing-lane');
 
 // The same "still cancellable" allowlist the admin series-cancel path and the
 // customer portal's upcoming-visits query use. Deliberately excludes terminal
@@ -33,6 +32,34 @@ const LIVE_TRACK_STATES = ['en_route', 'on_property'];
  *    otherwise-empty account they are nothing-to-cancel),
  *  - live billing: a positive monthly rate or an armed next_charge_date.
  */
+// The two visit-side legs of "cancellable work", as query builders so every
+// caller (the eligibility gate here, the admin decided-term latch's
+// new-work check) applies the SAME predicate — including the track-state
+// exclusion the sweep mirrors.
+function recurringSeriesQuery(customerId) {
+  return db('scheduled_services').where({ customer_id: customerId, recurring_ongoing: true });
+}
+function upcomingCancellableQuery(customerId) {
+  return db('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereIn('status', CANCELLABLE_STATUSES)
+    .where(function () {
+      this.where('scheduled_date', '>=', etDateString()).orWhere('status', 'rescheduled');
+    })
+    .whereRaw("(track_state IS NULL OR track_state NOT IN ('complete', 'en_route', 'on_property'))");
+}
+
+// Ids of every visit the processor would act on (recurring anchors and
+// upcoming cancellable visits) — the set a caller compares against a
+// retained/covered set.
+async function cancellableVisitIds(customerId) {
+  const [recurring, upcoming] = await Promise.all([
+    recurringSeriesQuery(customerId).select('id'),
+    upcomingCancellableQuery(customerId).select('id'),
+  ]);
+  return [...new Set([...(recurring || []), ...(upcoming || [])].map((r) => String(r.id)))];
+}
+
 async function hasCancellableWork(customerId) {
   if (!customerId) return false;
   // Lazy require: annual-prepay-renewals is a heavy module and
@@ -40,17 +67,8 @@ async function hasCancellableWork(customerId) {
   // at call time keeps the import graph cycle-free.
   const { coveredTermsAsOf } = require('./annual-prepay-renewals');
   const [recurringRow, upcomingRow, billingRow, liveTermRow] = await Promise.all([
-    db('scheduled_services')
-      .where({ customer_id: customerId, recurring_ongoing: true })
-      .first('id'),
-    db('scheduled_services')
-      .where({ customer_id: customerId })
-      .whereIn('status', CANCELLABLE_STATUSES)
-      .where(function () {
-        this.where('scheduled_date', '>=', etDateString()).orWhere('status', 'rescheduled');
-      })
-      .whereRaw("(track_state IS NULL OR track_state NOT IN ('complete', 'en_route', 'on_property'))")
-      .first('id'),
+    recurringSeriesQuery(customerId).first('id'),
+    upcomingCancellableQuery(customerId).first('id'),
     db('customers')
       .where({ id: customerId })
       .first('monthly_rate', 'next_charge_date', 'billing_mode', 'waveguard_tier'),
@@ -76,16 +94,29 @@ async function hasCancellableWork(customerId) {
   // decoration, not something to cancel. The membership armed-date leg
   // still covers an unpriced member (NULL rate = manual quote pending):
   // an explicit monthly_membership lane IS a plan to cancel.
+  return !!recurringRow
+    || !!upcomingRow
+    || liveBillingFromRow(billingRow)
+    || !!liveTermRow;
+}
+
+// The billing legs of "cancellable work" (live monthly dues or an armed
+// charge on the membership lane), from the customer row — one classifier
+// for the gate here and for the admin latch's new-work check.
+function liveBillingFromRow(billingRow) {
+  const { resolveBillingLane } = require('./billing-lane');
   const lane = billingRow ? resolveBillingLane(billingRow) : null;
   const liveDues = lane?.mode === 'monthly_membership'
     && Number(billingRow?.monthly_rate) > 0;
   const armedCharge = billingRow?.next_charge_date != null
     && lane?.mode === 'monthly_membership';
-  return !!recurringRow
-    || !!upcomingRow
-    || liveDues
-    || armedCharge
-    || !!liveTermRow;
+  return !!(liveDues || armedCharge);
+}
+async function hasLiveBilling(customerId) {
+  const billingRow = await db('customers')
+    .where({ id: customerId })
+    .first('monthly_rate', 'next_charge_date', 'billing_mode', 'waveguard_tier');
+  return liveBillingFromRow(billingRow);
 }
 
-module.exports = { CANCELLABLE_STATUSES, LIVE_TRACK_STATES, hasCancellableWork };
+module.exports = { CANCELLABLE_STATUSES, LIVE_TRACK_STATES, hasCancellableWork, cancellableVisitIds, hasLiveBilling };

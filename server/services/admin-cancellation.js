@@ -1265,18 +1265,21 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             // cancel — fall through and run the processor (#3727 r4).
             if (tied) {
               try {
-                const { CANCELLABLE_STATUSES } = require('./cancellation-eligibility');
+                // The SAME predicate the eligibility gate applies (track-
+                // state exclusion included): a live/done row the sweep would
+                // never touch is not new work and must not break the latch.
+                const { cancellableVisitIds, hasLiveBilling } = require('./cancellation-eligibility');
                 const covered = new Set((await liveCoveredKeepIds(term, customerId)).map(String));
-                const today = etDateString();
-                const [recurring, upcoming, rescheduled] = await Promise.all([
-                  db('scheduled_services').where({ customer_id: customerId, recurring_ongoing: true }).select('id'),
-                  db('scheduled_services').where({ customer_id: customerId }).whereIn('status', CANCELLABLE_STATUSES).where('scheduled_date', '>=', today).select('id'),
-                  db('scheduled_services').where({ customer_id: customerId, status: 'rescheduled' }).select('id'),
-                ]);
-                const extra = [...new Set([...recurring, ...upcoming, ...rescheduled].map((r) => String(r.id)))].filter((id) => !covered.has(id));
+                const extra = (await cancellableVisitIds(customerId)).filter((id) => !covered.has(id));
                 if (extra.length) {
                   tied = false;
                   logger.info(`[admin-cancellation] case ${prior.id} stays churned but new cancellable work exists (${extra.join(', ')}) — processing fresh`);
+                } else if (await hasLiveBilling(customerId)) {
+                  // Billing re-armed (live dues / an armed charge on the
+                  // membership lane) while still churned is work the
+                  // processor must disarm again — same eligibility authority.
+                  tied = false;
+                  logger.info(`[admin-cancellation] case ${prior.id} stays churned but billing is live again — processing fresh`);
                 }
               } catch (workErr) {
                 tied = false;
