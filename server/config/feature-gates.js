@@ -269,6 +269,17 @@ const gates = {
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
 
+  // Booking stamping contract (Tier 2 consolidation): the shared
+  // field-stamping authority in services/booking/create-scheduled-service.js
+  // that scheduled_services insert sites converge on. Gate OFF = no
+  // behavioral enrichment: the contract only validates and stamps
+  // provenance attribution (source_action/booking_source, caller values
+  // always win), so adopting a call site changes nothing at rest. Gate ON
+  // = enrichment stamps apply (catalog-identity snapshot completion for
+  // rows the caller left snapshot-less).
+  // Fail-closed ==='true' in EVERY environment; kill switch: unset.
+  bookingStampingContract: process.env.GATE_BOOKING_STAMPING_CONTRACT === 'true',
+
   // Two-program combined visits retired (owner 2026-08-31, follow-through
   // on the 08-28 combo ruling "I want to remove all of these"): with visit
   // groups live, a sold pest + termite-bait pair (and lawn + tree & shrub)
@@ -2020,6 +2031,15 @@ const gates = {
   // the listing can never disagree with what /query actually does.
   // (gateEnvValue is a hoisted function declaration, safe to call here.)
   ibThreads: gateEnvValue('GATE_IB_THREADS'),
+
+  // Tips from your tech (scope + owner decisions 2026-09-01): the completion
+  // screen's searchable tip picker (replacing the free-text Observations /
+  // Recommendations boxes) and, in a later PR, the quoted note on the live
+  // service report. OFF unless set ('1' / 'true' / 'on'), in dev AND prod — the
+  // gate-off answer of GET /admin/dispatch/:serviceId/tech-tips is
+  // { available: false } and the completion screen keeps today's textareas.
+  // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
+  techTips: gateEnvValue('GATE_TECH_TIPS'),
 
 };
 

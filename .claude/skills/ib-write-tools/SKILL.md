@@ -1,6 +1,6 @@
 ---
 name: ib-write-tools
-description: Use when adding or modifying an Intelligence Bar tool that writes anything (creates, updates, sends, schedules). Every IB write goes through the preview → pending-action card → /confirm-action trust boundary, and new write tools MUST register in write-gates.js or they ship as unconfirmed writes.
+description: Use when adding or changing an Intelligence Bar tool that writes anything (create, update, send, schedule) — every write goes through the confirm trust boundary and must register in write-gates.js.
 ---
 
 # Intelligence Bar write tools — the trust boundary

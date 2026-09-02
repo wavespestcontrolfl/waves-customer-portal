@@ -45,6 +45,7 @@ const { resolveTechPhotoUrl } = require('../tech-photo');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
 const {
   formatTechnicianForCustomer,
+  isGenericTechnicianLabel,
   initialsForCustomerTechnicianName,
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
@@ -1631,6 +1632,20 @@ function buildProtocolPayload(record) {
     // #3516). Records predating the field render findings recommendations
     // only. The merged list above stays for its internal/recap consumers.
     structuredRecommendations: uniqueStrings(parseJsonArray(structured.formRecommendations)),
+    // Tips from your tech, frozen at completion (freezeTechTips): registry
+    // copy resolved server-side from ids, plus at most one screened line in
+    // the technician's own words. Read verbatim — the note shows what the
+    // customer was told on the day, not today's registry text.
+    techTips: parseJsonArray(structured.techTips)
+      .filter((tip) => tip && typeof tip === 'object' && typeof tip.copy === 'string' && tip.copy.trim())
+      .map((tip) => ({
+        id: String(tip.id || ''),
+        copy: String(tip.copy).trim(),
+        source: tip.source === 'technician' ? 'technician' : 'library',
+        ...(tip.link && typeof tip.link.path === 'string' && tip.link.path.startsWith('/portal')
+          ? { link: { label: String(tip.link.label || 'My Property'), path: tip.link.path } }
+          : {}),
+      })),
     visitOutcome: protocol.visitOutcome || structured.visitOutcome || null,
   };
 }
@@ -5208,6 +5223,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       return loc ? { id: loc.id, name: loc.name, reviewUrl: loc.googleReviewUrl } : null;
     })(),
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
+    // Tips from your tech (GATE_TECH_TIPS, live report only — the client
+    // renders it under the Visit Timeline). Null unless the gate is on and
+    // the record froze tips. The technician's first name comes from the
+    // visit's frozen technician row (owner: first name only, no sign-off);
+    // the client composes the greeting from customerName.
+    techNote: featureGates.gateEnvValue?.('GATE_TECH_TIPS') === true && (protocol.techTips || []).length
+      ? {
+        tips: protocol.techTips,
+        technicianFirstName: String(service.technician_first_name || '').trim()
+          || (technicianName && !isGenericTechnicianLabel(technicianName) ? technicianName.split(/\s+/)[0] : null),
+      }
+      : null,
     // Owner directive 2026-07-05: the report mirrors the estimate document and
     // shows the customer's own email/phone with the service address. Like the
     // estimate, the report token is a shareable bearer link the customer owns —

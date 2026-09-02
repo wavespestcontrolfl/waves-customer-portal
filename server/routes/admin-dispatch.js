@@ -37,6 +37,13 @@ const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApp
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
+const { tipsForVisit, freezeTechTips } = require('../services/service-report/tip-library');
+const { gateEnvValue } = require('../config/feature-gates');
+const {
+  IRRIGATION_SIZING_FIELDS,
+  RAIN_SENSOR_CONFIRMED_FIELD,
+  parseConfirmedFields,
+} = require('../services/irrigation-schedule-confirmation');
 const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
@@ -1955,6 +1962,116 @@ router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
         pestPressureConfig: config,
         serviceLine,
       }),
+    });
+  } catch (err) { next(err); }
+});
+
+// GATE_TECH_TIPS at call time. Suites that mock feature-gates with a partial
+// shape read this as off — today's behaviour — instead of throwing.
+function techTipsGateOn() {
+  return typeof gateEnvValue === 'function' && gateEnvValue('GATE_TECH_TIPS') === true;
+}
+
+// "Irrigation on file" for the portal tip = the customer has entered any of
+// the settings the tip asks for. Empty strings, empty arrays and nulls
+// don't count; the irrigation_system flag never does.
+const IRRIGATION_ON_FILE_CONFIRMED = new Set([...IRRIGATION_SIZING_FIELDS, RAIN_SENSOR_CONFIRMED_FIELD]);
+function irrigationSettingsOnFile(prefs) {
+  if (!prefs) return false;
+  const present = (v) => v != null && v !== '' && !(Array.isArray(v) && v.length === 0);
+  // rain_sensor defaults to false on every row (20260401000084), so only an
+  // explicit true is customer-entered. The confirmation ledger is shared
+  // with turf-profile entries (turf_grass / turf_county) that say nothing
+  // about a watering schedule — only the irrigation sizing fields and the
+  // rain sensor count as an explicit save.
+  return [...IRRIGATION_SIZING_FIELDS, 'irrigation_zones']
+    .some((key) => present(prefs[key]))
+    || prefs.rain_sensor === true
+    || parseConfirmedFields(prefs.irrigation_confirmed_fields).some((f) => IRRIGATION_ON_FILE_CONFIRMED.has(f));
+}
+
+// GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
+// tip-picker payload (tips-from-your-tech PR 2). Gate-off answers
+// { available: false } and the client keeps the free-text Observations /
+// Recommendations boxes. Gate-on returns the whole registry grouped for the
+// visit's service line and season (tip-library.tipsForVisit — nothing is
+// hidden, the client searches), plus two per-customer facts the picker
+// renders as marks: when each tip was last frozen into one of this
+// customer's reports in the last 90 days (so a repeat is deliberate), and
+// whether the property already has irrigation on file (the portal tip's
+// condition). Read-only.
+router.get('/:serviceId/tech-tips', async (req, res, next) => {
+  try {
+    if (!techTipsGateOn()) return res.json({ available: false });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit (the customer's tip
+    // history and irrigation status are customer data); admins keep
+    // office-wide reach — same rule as the completion routes.
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    // The visit's calendar day as YYYY-MM-DD (same derivation the rest of
+    // this file uses for scheduled_date) — never `new Date('YYYY-MM-DD')`,
+    // which is UTC midnight, i.e. the previous ET evening.
+    const visitDay = svc.scheduled_date
+      ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
+      : null;
+    const library = tipsForVisit({
+      serviceLine: detectServiceLine(svc.service_type),
+      date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
+    });
+    // The 90-day window is ET calendar days: the database's own current
+    // date follows the session zone (UTC on Railway) and would roll the
+    // cutoff a day early through the Eastern evening. service_date is a
+    // DATE column, so the bound is the ET day string itself.
+    const sentSinceDay = etDateString(addETDays(new Date(), -90));
+    const [sentRows, prefs] = await Promise.all([
+      svc.customer_id
+        ? db('service_records')
+          .where({ customer_id: svc.customer_id })
+          .whereRaw("structured_notes->'techTips' IS NOT NULL")
+          // "sent" means the customer could open it: typedReportDelivery is
+          // frozen only for non-auto_send postures (review_only /
+          // internal_only / disabled), which reports-public 404s.
+          .whereRaw("COALESCE(structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'")
+          // an incomplete closeout freezes its picks but delivers no report
+          .whereRaw("COALESCE(structured_notes->>'visitOutcome', '') <> 'incomplete'")
+          .where('service_date', '>=', sentSinceDay)
+          .orderBy('service_date', 'desc')
+          .select('service_date', db.raw("structured_notes->'techTips' AS tech_tips"))
+          .catch(() => [])
+        : [],
+      // The real settings, never irrigation_system (defaults on since
+      // 20260828000002 — proves nothing about the schedule the tip asks for).
+      svc.customer_id
+        ? db('property_preferences').where({ customer_id: svc.customer_id })
+          .first('watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_system_type', 'irrigation_zones', 'rain_sensor', 'irrigation_confirmed_fields')
+          .catch(() => null)
+        : null,
+    ]);
+    // Newest first, so the first date seen per id is the most recent send.
+    // Values are YYYY-MM-DD calendar days (service_date is a DATE column;
+    // pg hands it back as a Date at UTC midnight) — the client formats the
+    // day from its components, never through new Date().
+    const lastSent = {};
+    for (const row of sentRows) {
+      const day = String(row.service_date instanceof Date ? row.service_date.toISOString() : row.service_date || '').slice(0, 10);
+      const tips = Array.isArray(row.tech_tips) ? row.tech_tips : [];
+      for (const tip of tips) {
+        if (tip?.id && day && !lastSent[tip.id]) lastSent[tip.id] = day;
+      }
+    }
+    res.json({
+      available: true,
+      ...library,
+      lastSent,
+      conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
     });
   } catch (err) { next(err); }
 });
@@ -4376,6 +4493,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       observations,
       structuredObservations,
       recommendations,
+      // technician-internal next steps (parked [Next] lines) — merged below,
+      // never into the form-provenance list
+      internalRecommendations,
       formResponses,
       formStartedAt,
       invoiceAlreadySent = false,
@@ -5283,6 +5403,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const reportRecommendations = normalizeCompletionTextArray([
       ...(Array.isArray(recommendations) ? recommendations : []),
       ...taggedCompletionNoteLines(technicianNotes, ['next']),
+      // parked [Next] lines from the completion screen: internal, same
+      // standing as tagged note lines; never in formRecommendations
+      ...(Array.isArray(internalRecommendations) ? internalRecommendations.filter((v) => typeof v === 'string') : []),
     ]);
     // Provenance-kept copy of ONLY the form's recommendation field — the
     // merged list above folds in [Next] technician-note lines, and the
@@ -5292,6 +5415,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const formRecommendations = normalizeCompletionTextArray(
       Array.isArray(recommendations) ? recommendations : [],
     );
+    // Tips from your tech: the client sends ids (+ an optional line in the
+    // tech's own words); the registry copy is resolved and frozen here so
+    // the report shows what the customer was told on the day, and a custom
+    // line goes through the customer-copy screen like every other verbatim
+    // customer string. Ids on the wire, never copy.
+    // Gated at the freeze too: with the kill switch unset a stale or crafted
+    // client cannot keep the feature alive through the completion body.
+    const techTipsFreeze = techTipsGateOn()
+      ? freezeTechTips(req.body?.techTips)
+      : { tips: [], dropped: [] };
     // Typed lanes (mosquito_event, one-time pest, …) record their work in the
     // typed findings schema, never through the specialty presets, even when
     // their profile key aliases onto a specialty lane (mosquito_one_time →
@@ -5541,6 +5674,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         new Error('photo_caption_banned_copy'),
       );
       return res.status(422).json(photoCaptionBannedCopyPayload(captionBannedViolations));
+    }
+    // Tips from your tech — deferred like the caption gate above: a
+    // rejected pick (retired id, over cap, or a custom line the copy screen
+    // refuses) is an actionable 400 for a FRESH attempt, before any write;
+    // a same-key replay/resume keeps returning the stored completion even
+    // if the library changed since. Nothing the tech was told would print
+    // may vanish silently.
+    if (claim.action === 'proceed' && techTipsFreeze.dropped.length) {
+      const drop = techTipsFreeze.dropped[0];
+      logger.warn(`[tech-tips] pick rejected on ${req.params.serviceId}: ${drop.violations.join(', ')}`);
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('tech_tip_rejected'),
+      ).catch(() => {});
+      const overCap = drop.violations.includes('over_cap');
+      const unknownTip = drop.violations.includes('unknown_tip');
+      const tooLong = drop.violations.includes('too_long') || drop.violations.includes('multi_sentence');
+      return res.status(400).json({
+        error: unknownTip
+          ? 'One of the picked tips is no longer in the library. Remove it, pick again, then complete.'
+          : overCap
+            ? 'Only three tips fit on the report. Remove one, then complete.'
+            : tooLong
+              ? 'Your own tip needs to be one sentence (up to 240 characters) — it prints as one tip. Shorten it, then complete.'
+              : `Your own tip needs different wording before the report can print it (flagged: ${drop.violations.join(', ')}). Reword it, then complete.`,
+        code: unknownTip ? 'TECH_TIP_UNKNOWN' : overCap ? 'TECH_TIP_OVER_CAP' : tooLong ? 'TECH_TIP_TOO_LONG' : 'TECH_TIP_COPY_REJECTED',
+        techTip: { ...(drop.id ? { id: drop.id } : {}), ...(drop.copy ? { copy: drop.copy } : {}), violations: drop.violations },
+      });
     }
     if (claim.action === 'proceed') {
       const internalOnlyProductsBlock = internalOnlyProductsBlockPayload({
@@ -6847,6 +7008,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             recommendations: reportRecommendations,
             formObservations,
             formRecommendations,
+            ...(techTipsFreeze.tips.length ? { techTips: techTipsFreeze.tips } : {}),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)

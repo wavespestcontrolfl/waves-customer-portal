@@ -1,6 +1,6 @@
 ---
 name: pricing-config
-description: Use for ANY change to pricing values, brackets, fees, or discounts. Pricing is DB-authoritative — editing constants.js alone is inert and the change will silently not ship. This is the checklist that makes a pricing change real.
+description: Use for ANY change to pricing values, brackets, fees, or discounts — pricing is DB-authoritative, so editing constants.js alone silently ships nothing.
 ---
 
 # Pricing changes are DB-authoritative

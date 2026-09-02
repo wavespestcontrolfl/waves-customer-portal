@@ -281,13 +281,163 @@ async function recheckTopicTargeting(run, pr, gh) {
     const data = parse(file.content)?.data || {};
     const index = await topicGate.loadLiveIndex();
     const res = topicGate.evaluateDraftTargeting({ frontmatter: data, body: file.content }, { index, service: brief.service || null });
-    if (res.ok) return { ok: true };
+    // The head file rides along so the affiliate belt below can read it
+    // without a second GitHub fetch.
+    if (res.ok) return { ok: true, content: file.content };
     // Gate findings are deterministic for this head + live corpus (another
     // post owns the entity / framing drifted); everything above is transient.
     return { ok: false, deterministic: true, reason: res.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ') };
   } catch (err) {
     return { ok: false, reason: `gate could not run: ${err.message}` };
   }
+}
+
+// Affiliate belt (owner ruling 2026-08-31): a head whose blog file carries
+// <AffiliateLink> auto-merges ONLY if the run carries the owner's approval
+// stamp (trust_build_approved_by — set by approve-autonomous-run.js on an
+// affiliate_review park). A run that somehow reached astro_pr_pending_merge
+// without it (or whose file gained the component on the branch) is
+// withheld, never merged. Pure: the head content comes from the topic
+// recheck's fetch. An unreadable head (no content) fails closed.
+// Head blog file content for lanes that don't run the topic recheck
+// (refresh PRs): same candidate-path probe as recheckTopicTargeting, null
+// when unreadable (the belt then fails closed).
+// Refresh PRs: the ACTUAL refresh target file at the PR head, resolved the
+// way publishRefresh resolves it (explicit draft.file_path, else the
+// brief/draft target URL through the publisher's resolver, registry
+// fallback included) — a blog refresh yields the blog file, a service/city
+// refresh yields that page (which carries no affiliate surface). Anything
+// unresolvable → null → the belt fails closed.
+async function headRefreshFileContent(run, pr) {
+  let publisher;
+  try { publisher = require('../content-astro/astro-publisher'); } catch (_) { return null; }
+  if (typeof publisher.resolveExistingAstroFileForTarget !== 'function') return null;
+  const dp = parseJsonObject(run.draft_payload);
+  // publishRefresh's own precedence: explicit file_path, else
+  // brief.target_url, else draft.page_url (refreshTargetUrlForRun) — never
+  // the draft-first resolver, which can pick a stale canonical.
+  let target = dp.file_path || null;
+  if (!target) {
+    try { target = (await refreshTargetUrlForRun(run)) || (await resolveTargetForRun(run)).url || null; } catch (_) { return null; }
+  }
+  if (!target) return null;
+  try {
+    const resolved = await publisher.resolveExistingAstroFileForTarget(target, { ref: pr.head?.ref });
+    const content = resolved?.file?.content;
+    return typeof content === 'string' ? { content } : null;
+  } catch (_) { return null; }
+}
+
+// head: a string (the topic recheck's content), { content } (the refresh
+// target file), or null/undefined (unreadable — fail closed). The approval is BOUND to the reviewed draft: every affiliate
+// product id on the head must be one the approved draft_payload body
+// referenced, so a branch push after approval cannot add products.
+async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
+  const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
+  if (content === null) return { ok: false, reason: 'head blog file unavailable for the affiliate belt' };
+  // Frontmatter is parsed FIRST and every affiliate scan runs on the BODY:
+  // tag-shaped text in YAML (a comment documenting <AffiliateLink>) is not
+  // rendered affiliate material and must not withhold an affiliate-free PR
+  // forever (Codex #3646 r17 P1). Unparseable frontmatter → scan the raw
+  // file (over-detects: the safe, withholding direction).
+  let fmHead = {};
+  let bodyHead = content;
+  try {
+    const { parse: parseFmEarly } = require('../content-astro/frontmatter');
+    const parsed = parseFmEarly(content);
+    fmHead = parsed?.data || {};
+    bodyHead = typeof parsed?.content === 'string' ? parsed.content : content;
+  } catch (_) { /* unparseable — raw scan below fails closed */ }
+  // A RENDERED <AffiliateLink> only — the guardrails counting view masks
+  // code fences and comments, so a code-fenced example must not withhold an
+  // affiliate-free PR forever. Guardrails unavailable → the raw scan
+  // over-detects, which is the safe (withholding) direction.
+  let hasAffiliate;
+  try { hasAffiliate = require('./content-guardrails').affiliateProductIdsIn(bodyHead).length > 0; }
+  catch (_) { hasAffiliate = /<AffiliateLink\b/.test(bodyHead); }
+  if (!hasAffiliate) return { ok: true };
+  // The kill switch is re-checked at MERGE time: an approval taken while the
+  // lane was open must not publish affiliate material after
+  // GATE_AFFILIATE_LINKS was unset (exact 'true', same call-time read as
+  // content-guardrails).
+  if (process.env.GATE_AFFILIATE_LINKS !== 'true') {
+    return { ok: false, reason: 'head carries <AffiliateLink> but GATE_AFFILIATE_LINKS is not "true" — the affiliate lane is dark; auto-merge withheld' };
+  }
+  if (!run?.trust_build_approved_by) {
+    return { ok: false, reason: 'head carries <AffiliateLink> but the run has no owner approval (affiliate_review) — approve with approve-autonomous-run.js or dismiss' };
+  }
+  const dp = parseJsonObject(run.draft_payload);
+  // The approval is bound to the exact COMMIT the approved publish created
+  // (draft_payload.trust_build_approved_head_sha, same binding the named-
+  // competitor merge gate uses). A head that moved afterwards is never
+  // auto-merged and there is deliberately no "re-approve" path (the run has
+  // left affiliate_review): like the named-competitor lane, the PR waits
+  // for a HUMAN merge after review (merged-by-human reconciliation
+  // finalizes it) or a dismiss. Absent SHA fails closed the same way.
+  const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
+  if (!approvedSha || !prHeadSha || approvedSha !== String(prHeadSha).toLowerCase()) {
+    return { ok: false, reason: `affiliate approval is bound to head ${approvedSha ? approvedSha.slice(0, 7) : '(none)'} but the PR head is ${prHeadSha ? String(prHeadSha).slice(0, 7) : '(unknown)'} — auto-merge withheld; review the new head and merge by hand (or dismiss)` };
+  }
+  let ids;
+  try { ({ affiliateProductIdsIn: ids } = require('./content-guardrails')); } catch (_) { return { ok: false, reason: 'content-guardrails unavailable for the affiliate belt' }; }
+  const approved = new Set(ids(dp?.body || ''));
+  const headIds = ids(bodyHead);
+  const extra = headIds.filter((id) => !approved.has(id));
+  if (extra.length) return { ok: false, reason: `head references affiliate product(s) the approved draft did not: ${extra.join(', ')}` };
+  // The FULL affiliate guardrail contract is re-run on the HEAD file at
+  // MERGE time (not a partial state check): registration, risk-class/label
+  // currency, page-type eligibility, and placement against the LIVE
+  // registry — the approval and green preview may be days old, and a row
+  // paused, gone stale, or narrowed since then must not land. P0s only:
+  // the P1 placement nudges were judged at review time.
+  // The AUTHORITATIVE registry lives in the astro repo — the local vendored
+  // copy can lag an astro-only row merge (pause, narrowed post types or
+  // placements) until a portal sync + deploy, so the merge-time recheck
+  // reads the LIVE base-branch registry.json with the same client that
+  // fetched the head file; unreadable fails closed (Codex #3646 r15 P1).
+  // PINNED read: the registry is fetched at the default branch's current
+  // SHA and that SHA is re-checked immediately before gh.mergePr — a
+  // registry row paused/narrowed between the read and the merge withholds
+  // instead of merging atop the newer base (Codex #3646 r22 P1; covers
+  // the case where the body-image snapshot guard is a no-op).
+  let liveRegistry = null;
+  let registryBaseSha = null;
+  try {
+    registryBaseSha = gh && typeof gh.getBranchSha === 'function'
+      ? await gh.getBranchSha(typeof gh.env === 'function' ? gh.env().defaultBranch : undefined)
+      : null;
+  } catch (_) { registryBaseSha = null; }
+  if (!registryBaseSha) {
+    return { ok: false, reason: 'cannot pin the astro base for the registry read — auto-merge withheld (fail closed)' };
+  }
+  try {
+    const f = await gh.getFile('packages/affiliate-registry/registry.json', registryBaseSha);
+    if (f && typeof f.content === 'string') liveRegistry = JSON.parse(f.content);
+  } catch (_) { liveRegistry = null; }
+  if (!liveRegistry || typeof liveRegistry !== 'object') {
+    return { ok: false, reason: 'authoritative astro registry unreadable at merge time — auto-merge withheld (fail closed)' };
+  }
+  let guard;
+  try {
+    guard = require('./content-guardrails');
+  } catch (_) { return { ok: false, reason: 'guardrails unavailable for the merge-time affiliate recheck' }; }
+  const hard = guard._internals
+    .affiliateComponentFindings(bodyHead, '', fmHead, { targetIsBlog: true, registry: liveRegistry })
+    .filter((f) => f.severity === 'P0');
+  if (hard.length) {
+    return { ok: false, reason: `affiliate guardrail contract no longer clear at merge time: ${[...new Set(hard.map((f) => f.code))].join(', ')} — re-verify the registry rows or dismiss` };
+  }
+  return { ok: true, registryBaseSha };
+}
+
+// The belt's registry snapshot must still be the base tip right before the
+// merge call — a registry merge landing mid-gate invalidates the verdict.
+async function registryBaseMoved(aff, gh) {
+  if (!aff || !aff.registryBaseSha) return false; // non-affiliate PR — no snapshot taken
+  try {
+    const tip = await gh.getBranchSha(typeof gh.env === 'function' ? gh.env().defaultBranch : undefined);
+    return String(tip || '') !== String(aff.registryBaseSha);
+  } catch (_) { return true; } // unknown tip — fail closed
 }
 
 const TOPIC_BLOCKED_SKIP_REASON = 'topic_targeting_blocked';
@@ -1411,6 +1561,15 @@ async function maybeAutoMerge(run, pr) {
           withheld = { pending: true, reason: `topic_targeting_blocked: ${topic.reason}`, ...(topic.deterministic ? { parked: true } : {}) };
           return null;
         }
+        // 3.8a Affiliate belt — see recheckAffiliateApproval. Withheld (not
+        //      parked): the fix is the owner's approval, which the next tick
+        //      then honors.
+        const aff = await affiliateBeltVerdict(run, topic.content, pr.head?.sha, gh);
+        if (!aff.ok) {
+          logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
+          withheld = { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
+          return null;
+        }
         // 3.8 The recheck above was more async work (GitHub + corpus reads):
         //     an operator dismiss/requeue landing during it must still block
         //     the merge — repeat the queue re-check immediately before merging.
@@ -1428,6 +1587,11 @@ async function maybeAutoMerge(run, pr) {
           withheld = { pending: true, reason: 'base_moved_during_gating' };
           return null;
         }
+        // 3.9a …and the one the affiliate belt read the registry at.
+        if (await registryBaseMoved(aff, gh)) {
+          withheld = { pending: true, reason: 'registry_base_moved_during_gating' };
+          return null;
+        }
         return doMerge();
       });
       if (withheld) {
@@ -1436,7 +1600,32 @@ async function maybeAutoMerge(run, pr) {
         return withheld;
       }
     } else {
-      mergeRes = await doMerge();
+      // Refresh PRs skip the topic recheck but not the affiliate belt: a
+      // refresh that PRESERVES affiliate links also parks at affiliate_review
+      // (every affiliate-bearing draft does during the pilot), so the same
+      // approval stamp is required before auto-merge. The belt inspects the
+      // ACTUAL refresh target file at the head (publisher resolver). The
+      // guards and the merge run under the same advisory lock + FOR UPDATE
+      // queue row as the blog path so nothing can land between them.
+      let withheld = null;
+      const { withTopicMergeLock } = require('./topic-targeting-gate');
+      mergeRes = await withTopicMergeLock(db, async (trx) => {
+        const aff = await affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha, gh);
+        if (!aff.ok) {
+          logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
+          withheld = { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
+          return null;
+        }
+        if (!(await queueRowStillParkedLocked(run, trx))) {
+          logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during the affiliate belt (operator action)`);
+          withheld = { pending: true, reason: 'queue_row_moved_during_gating' };
+          return null;
+        }
+        if (await baseMovedSinceBodyImageCheck()) { withheld = { pending: true, reason: 'base_moved_during_gating' }; return null; }
+        if (await registryBaseMoved(aff, gh)) { withheld = { pending: true, reason: 'registry_base_moved_during_gating' }; return null; }
+        return doMerge();
+      });
+      if (withheld) return withheld;
     }
   } catch (err) {
     if (err?.code === 'TOPIC_MERGE_LOCK_BUSY') {
@@ -1646,6 +1835,9 @@ async function pollPending() {
         'id', 'opportunity_id', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url',
         'draft_payload', 'reviewer_notes', 'created_at',
         'poll_pending_reason', 'poll_pending_since', 'poll_pending_annotated_at',
+        // the affiliate belt's approval stamp (Codex PR3 r6: without these the
+        // belt read undefined and withheld every approved affiliate PR)
+        'trust_build_approved_by', 'trust_build_approved_at',
       );
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] pending-run query failed: ${err.message}`);
@@ -1725,6 +1917,7 @@ module.exports = {
   pollPending,
   pollRun,
   _internals: {
+    affiliateBeltVerdict,
     autoMergeEnabled,
     blogMergeSocialShareEnabled,
     maxAutoMergesPerPoll,

@@ -875,7 +875,7 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
 // review-request.js) presign technicians.photo_s3_key on demand
 // at the trusted-context boundary they already authenticate. There
 // is NO public unauthenticated proxy — adding one would put a new
-// route outside AGENTS.md's allowed-list of public-by-token routes
+// route outside the docs/public-route-contracts.md inventory of public-by-token routes
 // (P0; Codex caught this on PR #344). UUIDs are not secrets —
 // booking responses already expose technician_id to unauth callers.
 //

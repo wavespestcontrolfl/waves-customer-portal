@@ -13,10 +13,13 @@ const {
   SERVICE_LINES,
   SEASONS,
   MAX_TIPS_PER_VISIT,
+  MAX_CUSTOM_TIP_CHARS,
   seasonForDate,
   registryLineFor,
   tipsForVisit,
   resolveTipIds,
+  freezeTechTips,
+  sentenceCount,
 } = require('../services/service-report/tip-library');
 const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
 
@@ -101,6 +104,93 @@ describe('seasonForDate', () => {
   test('the ET calendar day decides, not UTC', () => {
     // 2026-05-31 23:30 ET is still May in ET but already June 1 in UTC.
     expect(seasonForDate(new Date('2026-06-01T03:30:00Z'))).toBe('dry');
+  });
+
+  test('a YYYY-MM-DD calendar day is read as that day, never as UTC midnight', () => {
+    expect(seasonForDate('2026-06-01')).toBe('wet');
+    expect(seasonForDate('2026-11-01')).toBe('dry');
+    expect(seasonForDate('2026-10-31')).toBe('wet');
+  });
+});
+
+describe('freezeTechTips', () => {
+  test('resolves ids and appends a clean custom line as the technician\'s own', () => {
+    const { tips, dropped } = freezeTechTips({ ids: ['light_warm_bulbs'], custom: '  Keep the lanai door sweep tight — that is where the ants come in.  ' });
+    expect(dropped).toEqual([]);
+    expect(tips.map((t) => t.id)).toEqual(['light_warm_bulbs', 'custom']);
+    expect(tips[1]).toEqual({ id: 'custom', copy: 'Keep the lanai door sweep tight — that is where the ants come in.', source: 'technician' });
+  });
+
+  test('a custom line the customer-copy screen rejects is dropped and reported', () => {
+    const { tips, dropped } = freezeTechTips({ ids: [], custom: 'The ants are gone and your home is safe now.' });
+    expect(tips).toEqual([]);
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0].violations.length).toBeGreaterThan(0);
+  });
+
+  test('the cap counts the custom line; three library picks leave no room', () => {
+    const { tips, dropped } = freezeTechTips({ ids: ['light_warm_bulbs', 'water_bromeliads', 'moisture_ac_drip'], custom: 'Flip the mats.' });
+    expect(tips).toHaveLength(MAX_TIPS_PER_VISIT);
+    expect(tips.map((t) => t.source)).toEqual(['library', 'library', 'library']);
+    expect(dropped).toEqual([{ copy: 'Flip the mats.', violations: ['over_cap'] }]);
+  });
+
+  test('an over-long custom line is rejected as too_long, never truncated', () => {
+    const long = `Flip the mats after rain. ${'Really. '.repeat(40)}`.trim();
+    expect(long.length).toBeGreaterThan(MAX_CUSTOM_TIP_CHARS);
+    const { tips, dropped } = freezeTechTips({ ids: [], custom: long });
+    expect(tips).toEqual([]);
+    expect(dropped).toEqual([{ copy: long, violations: ['too_long'] }]);
+    const exact = 'x'.repeat(MAX_CUSTOM_TIP_CHARS - 26) + ' flip the mats after rain.';
+    expect(exact.length).toBeLessThanOrEqual(MAX_CUSTOM_TIP_CHARS);
+    expect(freezeTechTips({ ids: [], custom: exact }).tips[0].copy).toBe(exact);
+  });
+
+  test('a gate or access code in a custom line is rejected by the shared copy screen', () => {
+    for (const line of ['Use 4417 to open the side gate.', 'Gate code is 4417.', 'The gate code 4417 gets you in.']) {
+      const { tips, dropped } = freezeTechTips({ ids: [], custom: line });
+      expect(tips).toEqual([]);
+      expect(dropped[0].violations).toContain('access_code');
+    }
+  });
+
+  test('a custom line is one sentence; several are rejected as multi_sentence', () => {
+    expect(sentenceCount('Keep the lanai door sweep tight — that is where the ants come in.')).toBe(1);
+    expect(sentenceCount('Set the A/C fan to Auto so the house settles near 50% humidity.')).toBe(1);
+    expect(sentenceCount('Water 1.25 inches a week, early morning.')).toBe(1);
+    expect(sentenceCount('Flip the mats. Empty the saucers. Trim the hedge!')).toBe(3);
+    expect(sentenceCount('Do you have bromeliads? Flush them weekly.')).toBe(2);
+    // capitalisation is not a sentence boundary signal
+    expect(sentenceCount('Flip the mats. then empty the saucers.')).toBe(2);
+    expect(sentenceCount('flip the mats! empty the saucers')).toBe(2);
+    expect(freezeTechTips({ ids: [], custom: 'Flip the mats. then empty the saucers.' }).dropped[0].violations).toEqual(['multi_sentence']);
+    const { tips, dropped } = freezeTechTips({ ids: [], custom: 'Flip the mats. Empty the saucers. Trim the hedge. Fix the drip.' });
+    expect(tips).toEqual([]);
+    expect(dropped).toEqual([{ copy: 'Flip the mats. Empty the saucers. Trim the hedge. Fix the drip.', violations: ['multi_sentence'] }]);
+    expect(freezeTechTips({ ids: [], custom: 'Flip the mats after rain so they dry.' }).tips).toHaveLength(1);
+  });
+
+  test('an unknown id and a pick past the cap are reported, never silently dropped', () => {
+    const { tips, dropped } = freezeTechTips({ ids: ['light_warm_bulbs', 'retired_tip', 'water_bromeliads', 'moisture_ac_drip', 'seal_door_sweeps'] });
+    expect(tips.map((t) => t.id)).toEqual(['light_warm_bulbs', 'water_bromeliads', 'moisture_ac_drip']);
+    expect(dropped).toEqual([
+      { id: 'retired_tip', violations: ['unknown_tip'] },
+      { id: 'seal_door_sweeps', violations: ['over_cap'] },
+    ]);
+    expect(freezeTechTips({ ids: ['light_warm_bulbs', 'light_warm_bulbs'] }).dropped).toEqual([]);
+  });
+
+  test('malformed input freezes nothing', () => {
+    for (const bad of [undefined, null, 'x', 42, ['light_warm_bulbs'], { ids: 'light_warm_bulbs' }]) {
+      expect(freezeTechTips(bad).tips).toEqual([]);
+    }
+    // a non-string custom value is ignored, never stringified into copy
+    for (const custom of [{ text: 'x' }, ['Flip the mats.'], 42, true]) {
+      expect(freezeTechTips({ ids: ['light_warm_bulbs'], custom })).toEqual({
+        tips: [expect.objectContaining({ id: 'light_warm_bulbs', source: 'library' })],
+        dropped: [],
+      });
+    }
   });
 });
 

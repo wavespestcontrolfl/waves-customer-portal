@@ -4,7 +4,7 @@
  *   GET  /api/public/lawn-diagnostic/:token                 — read-only report
  *   POST /api/public/lawn-diagnostic/:token/quote-request   — request-a-quote CTA
  *
- * Both are on the AGENTS.md public-by-token allowlist. The read route returns a
+ * Both are listed in docs/public-route-contracts.md. The read route returns a
  * strictly whitelisted, customer-safe payload — never internal scores, raw AI,
  * product names, label constraints, reconciliation/QA internals, or tech notes.
  */

@@ -15775,7 +15775,7 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
 
 // POST /api/estimates/:token/extension-request — one-click "my link expired
 // but I still want this" from the React expired/not-found screen.
-// Contract (AGENTS.md public-by-token allowlist): estimate token format gate,
+// Contract (docs/public-route-contracts.md entry): estimate token format gate,
 // generic 404 (unknown token, malformed token, ineligible row, and gate-off
 // are indistinguishable), 5 req/hr rate limit, dark behind
 // GATE_ESTIMATE_EXTENSION_REQUEST.
@@ -24280,7 +24280,7 @@ const serviceDetailsGateOn = () => process.env.GATE_SERVICE_DETAILS_PDF !== 'fal
 // Estimate token format gate (same pattern as estimate-slots-public.js):
 // legacy admin slug tokens (nameSlug-8hex) OR the 64-hex format. Rejecting
 // malformed tokens before the DB read keeps this surface probe-resistant,
-// matching the public-route contract in AGENTS.md.
+// matching the route's entry in docs/public-route-contracts.md.
 const SERVICE_DETAILS_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 
 const serviceDetailsSendLimiter = rateLimit({

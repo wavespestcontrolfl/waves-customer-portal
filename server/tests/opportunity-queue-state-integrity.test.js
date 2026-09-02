@@ -249,7 +249,8 @@ describe('named-competitor publish janitor (autonomous-runner)', () => {
     expect(reviewUpdate.filters).toEqual(expect.arrayContaining([
       ['whereIn', 'opportunity_id', ['opp1']],
       ['outcome', 'completed_pending_review'],
-      ['skip_reason', 'named_competitor_review'],
+      // both approve-and-publish kinds (affiliate_review joined 2026-08-31)
+      ['whereIn', 'skip_reason', ['named_competitor_review', 'affiliate_review']],
     ]));
     expect(reviewUpdate.updates.skip_reason).toBe('named_competitor_publish_interrupted');
     expect(reviewUpdate.updates.outcome).toBeUndefined();

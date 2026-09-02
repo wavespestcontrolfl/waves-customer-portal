@@ -144,6 +144,41 @@ function registryChecksum(bytes) {
   return hash.digest('hex');
 }
 
+// Query-parameter presence, case-insensitive on the NAME ("Tag=" is still
+// the associate tag to Amazon).
+function hasParamCi(url, name) {
+  const want = String(name).toLowerCase();
+  for (const [k] of url.searchParams) if (k.toLowerCase() === want) return true;
+  return false;
+}
+// Non-empty value, case-insensitive on the name — "?tag=" is not an
+// associate tag (Codex PR3 r10).
+function paramValueCi(url, name) {
+  const want = String(name).toLowerCase();
+  for (const [k, v] of url.searchParams) if (k.toLowerCase() === want && String(v).trim()) return String(v).trim();
+  return '';
+}
+
+const AFFILIATE_NETWORK_HOSTS = Object.freeze(['amzn.to', 'awin1.com', 'shareasale.com', 'anrdoezrs.net', 'jdoqocy.com', 'tkqlhce.com', 'dpbolvw.net', 'prf.hn', 'pxf.io', 'sjv.io', 'linksynergy.com', 'refersion.com', 'goaffpro.com']);
+// DNS-normalized host: lowercase, no trailing dot (amzn.to. resolves like
+// amzn.to), no leading www.
+function normalizeHostname(hostname) {
+  // At most ONE DNS root dot is stripped; any empty label left (amazon.com..,
+  // .amazon.com, a..b) is malformed → '' (fails every host check).
+  const h = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  if (!h || h.startsWith('.') || h.endsWith('.') || h.includes('..')) return '';
+  return h.replace(/^www\./, '');
+}
+function isAffiliateNetworkHost(hostname) {
+  const host = normalizeHostname(hostname);
+  return AFFILIATE_NETWORK_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+}
+
+function isAmazonHost(hostname) {
+  const host = normalizeHostname(hostname);
+  return host === 'amzn.to' || /(^|\.)amazon\.[a-z.]+$/.test(host);
+}
+
 function parseHttpsUrl(raw) {
   try {
     const u = new URL(String(raw || ''));
@@ -173,21 +208,50 @@ function validateProduct(row, { now = new Date() } = {}) {
   if (row.risk_class === 'red' && row.status !== 'prohibited') {
     errors.push('a red-class product may exist only as a status:"prohibited" denial record — red is never linkable');
   }
-  // A prohibited/denial row needs no URL or approval fields; everything
+  // A prohibited/denial row is NEVER linkable — it must carry no URL at all
+  // (a plain_url would render as a fallback link upstream); everything
   // below governs rows that could render.
-  if (row.status === 'prohibited') return errors;
+  if (row.status === 'prohibited') {
+    if (row.approved_affiliate_url) errors.push('a prohibited row must not carry approved_affiliate_url');
+    if (row.plain_url) errors.push('a prohibited row must not carry plain_url');
+    return errors;
+  }
   const url = parseHttpsUrl(row.approved_affiliate_url);
   if (!url) errors.push('approved_affiliate_url must be an https URL');
-  if (row.plain_url !== undefined && row.plain_url !== null && !parseHttpsUrl(row.plain_url)) {
-    errors.push('plain_url, when present, must be an https URL');
+  for (const f of ['approved_affiliate_url', 'plain_url', 'label_url']) {
+    const u = row[f] ? parseHttpsUrl(row[f]) : null;
+    if (u && !normalizeHostname(u.hostname)) errors.push(`${f} has a malformed hostname (empty DNS label)`);
   }
-  if (String(row.merchant).trim().toLowerCase() === 'amazon' && url) {
-    const host = url.hostname.toLowerCase();
-    if (host !== 'amazon.com' && host !== 'www.amazon.com') {
-      errors.push('amazon products must link amazon.com directly — never amzn.to, redirects, or cloak domains (Associates policy)');
-    } else if (!url.searchParams.get('tag')) {
-      errors.push('amazon approved_affiliate_url is missing the tag= associate parameter');
+  if (row.plain_url !== undefined && row.plain_url !== null) {
+    const plain = parseHttpsUrl(row.plain_url);
+    if (!plain) errors.push('plain_url, when present, must be an https URL');
+    // The UNTRACKED fallback for EVERY merchant: no query string at all (a
+    // paused/stale product must stop earning — "?ref=waves" on a vendor
+    // domain is still a tracking link), no network/shortlink host.
+    else if (plain.search) errors.push('plain_url must carry no query string (it is the untracked fallback)');
+    if (plain && isAffiliateNetworkHost(plain.hostname)) errors.push('plain_url must not be an affiliate-network or shortlink host');
+    if (plain && (isAmazonHost(plain.hostname) || /\bamazon\b/i.test(String(row.merchant || '')))) {
+      // The UNTRACKED fallback: a direct amazon.com page with no associate
+      // parameters (a tagged plain_url would monetize a paused product).
+      const h = normalizeHostname(plain.hostname);
+      if (h !== 'amazon.com') errors.push('amazon plain_url must be a direct amazon.com URL — never amzn.to, redirects, or cloak domains');
+      if (hasParamCi(plain, 'tag') || hasParamCi(plain, 'ascsubtag')) errors.push('amazon plain_url must carry no tag=/ascsubtag (it is the untracked fallback)');
     }
+  }
+  // Amazon policy keys off the URL and a normalized merchant, never the
+  // free-form spelling alone ("Amazon US", "Amazon.com"): any amazon.* or
+  // amzn.to destination is an Amazon link (parity with the astro schema).
+  if (url && (/\bamazon\b/i.test(String(row.merchant || '')) || isAmazonHost(url.hostname))) {
+    const host = normalizeHostname(url.hostname);
+    if (host !== 'amazon.com') {
+      errors.push('amazon products must link amazon.com directly — never amzn.to, redirects, or cloak domains (Associates policy)');
+    } else if (!paramValueCi(url, 'tag')) {
+      errors.push('amazon approved_affiliate_url is missing a non-empty tag= associate parameter');
+    }
+  }
+  if (!Array.isArray(row.allowed_placements) || row.allowed_placements.length === 0
+    || row.allowed_placements.some((p) => typeof p !== 'string' || !/^[a-z0-9-]+$/.test(p))) {
+    errors.push('allowed_placements must be a non-empty array of kebab-case placement ids (a row authorizes no placement otherwise)');
   }
   if (!Array.isArray(row.allowed_post_types) || row.allowed_post_types.length === 0) {
     errors.push('allowed_post_types must be a non-empty array');

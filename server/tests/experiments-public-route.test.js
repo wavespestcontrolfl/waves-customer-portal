@@ -1,7 +1,7 @@
 /**
  * /api/public/experiments — the client-side GrowthBook surface (Phase 2).
  *
- * Contract (mirrored in AGENTS.md's public-route inventory):
+ * Contract (mirrored in docs/public-route-contracts.md):
  *  - POST /exposure is gated behind GATE_GROWTHBOOK (404 when off).
  *  - SERVER-owned experiment keys are ALWAYS refused — sticky replay trusts
  *    experiment_exposures, so a public post must never pre-assign a real

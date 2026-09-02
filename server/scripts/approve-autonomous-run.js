@@ -8,6 +8,9 @@
  *   - named_competitor_review → PUBLISH the reviewed draft (PR or live) via the
  *     autonomous runner, then complete the opportunity. A human signs off on
  *     every competitor naming.
+ *   - affiliate_review → same publish path (owner ruling 2026-08-31: every
+ *     post carrying <AffiliateLink> is owner-approved during the pilot;
+ *     reviewer_notes list the products with their registry risk class).
  *
  * Usage:
  *   node server/scripts/approve-autonomous-run.js --id=<run_uuid> --by=adam
@@ -50,13 +53,13 @@ if (!RUN_ID) {
       return;
     }
 
-    if (run.skip_reason === 'named_competitor_review') {
+    if (run.skip_reason === 'named_competitor_review' || run.skip_reason === 'affiliate_review') {
       // Publish the reviewed draft (PR or live) + complete the opportunity.
       // The runner atomically claims + publishes + owns the final opportunity/run
       // state (done for live; parked as astro_pr_pending_merge for a PR).
       const runner = require('../services/content/autonomous-runner');
       const result = await runner.approveAndPublishNamedCompetitor(run.opportunity_id, { runId: run.id, approvedBy: APPROVED_BY });
-      console.log(`Named-competitor run ${RUN_ID} approved by ${APPROVED_BY} → ${result.published_url || result.astro_pr_url || result.publish_status || 'submitted'}`);
+      console.log(`${run.skip_reason === 'affiliate_review' ? 'Affiliate-review' : 'Named-competitor'} run ${RUN_ID} approved by ${APPROVED_BY} → ${result.published_url || result.astro_pr_url || result.publish_status || 'submitted'}`);
       return;
     }
 

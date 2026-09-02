@@ -4,7 +4,7 @@
  *   POST /api/public/lawn-assessment/analyze    — prospect uploads photos → teaser
  *   POST /api/public/lawn-assessment/:id/claim  — contact capture → full report + pricing
  *
- * Both on the AGENTS.md public-route allowlist. Trust boundary:
+ * Both listed in docs/public-route-contracts.md. Trust boundary:
  *  - The FULL report is server-gated. /analyze runs the shared lawn-diagnostic
  *    ladder, persists the result, and returns ONLY a teaser built from the same
  *    egress allowlist as the public report (never the raw contract). The full

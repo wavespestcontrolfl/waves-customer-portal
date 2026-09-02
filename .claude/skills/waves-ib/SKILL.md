@@ -1,6 +1,6 @@
 ---
 name: waves-ib
-description: Use when working on the Intelligence Bar — adding or modifying a tool or tool module, wiring a new context, changing the route, touching pageData wrappers, or debugging why a tool doesn't load. Covers the architecture, the context→tools mapping, the design decisions, and the contract-test gate every tool must pass. For WRITE tools also load ib-write-tools (the confirm trust boundary).
+description: Use when working on the Intelligence Bar — adding or changing a tool, module, context, the route, or pageData wrappers, or debugging why a tool does not load. Writes also load ib-write-tools.
 ---
 
 # Intelligence Bar — architecture and tool development

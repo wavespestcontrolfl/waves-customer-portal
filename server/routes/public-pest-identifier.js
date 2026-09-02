@@ -5,7 +5,7 @@
  *   POST /api/public/pest-identifier/:id/claim  — contact capture → full report + pricing
  *   GET  /api/public/pest-identifier/:token     — tokenized full report (post-claim)
  *
- * All on the AGENTS.md public-route allowlist. Mirrors the lawn-assessment
+ * All listed in docs/public-route-contracts.md. Mirrors the lawn-assessment
  * funnel exactly (same gate-404 contract, honeypot, Turnstile enforcement,
  * per-IP + daily paid caps, one-shot claim transaction, server-gated full
  * report). Customer-visible copy comes ONLY from the fixed PEST_LIBRARY
