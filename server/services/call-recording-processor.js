@@ -6657,6 +6657,13 @@ const CallRecordingProcessor = {
           transcription_metadata: JSON.stringify(await withPanStamps(call.id, transcriptionProvenance.metadata)),
           updated_at: new Date(),
         };
+        // A text-only replacement (Gemini fallback, unlabeled fallback) must
+        // not leave a previous run's diarized segments beside the new flat
+        // transcript — the admin transcript sync would seek by stale offsets
+        // (codex #3731 r2 P1). No segments and no contact pass → clear it.
+        if (!result.structuredSegments && !contactPassTranscript) {
+          transcriptUpdate.transcript_structured = null;
+        }
         if (result.structuredSegments || contactPassTranscript) {
           transcriptUpdate.transcript_structured = JSON.stringify({
             provider: result.provider,

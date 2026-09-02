@@ -7,6 +7,7 @@ import CallTranscriptSync, {
   activeSegmentIndex,
   formatClock,
   parseTranscriptSegments,
+  segmentsMatchTranscript,
 } from "./CallTranscriptSync";
 
 const STRUCTURED = {
@@ -53,6 +54,16 @@ describe("parseTranscriptSegments", () => {
     expect(activeSegmentIndex(segs, 5000)).toBe(1);
     expect(activeSegmentIndex(segs, 99999)).toBe(1);
     expect(activeSegmentIndex([], 10)).toBe(-1);
+  });
+
+  it("only trusts segments that still read as the flat transcript", () => {
+    const segs = parseTranscriptSegments(STRUCTURED);
+    const flat = "Agent: Thanks for calling Waves.\nCaller: Hi, I need a WDO inspection.\nAgent: Sure, when is closing?";
+    expect(segmentsMatchTranscript(segs, flat)).toBe(true);
+    // Text-only reprocess rewrote the transcript; the old blob is stale.
+    expect(segmentsMatchTranscript(segs, "Agent: Waves Pest Control.\nCaller: I want to cancel my lawn plan.\nAgent: Let me pull that up.")).toBe(false);
+    expect(segmentsMatchTranscript(segs, "")).toBe(false);
+    expect(segmentsMatchTranscript([], flat)).toBe(false);
   });
 
   it("formats clock offsets", () => {

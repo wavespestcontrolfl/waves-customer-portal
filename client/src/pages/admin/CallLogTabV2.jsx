@@ -36,6 +36,7 @@ import {
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import CallTranscriptSync, {
   parseTranscriptSegments,
+  segmentsMatchTranscript,
 } from "../../components/admin/CallTranscriptSync";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import { describeProcessResult } from "../../lib/callProcessResult";
@@ -329,7 +330,14 @@ export default function CallLogTabV2() {
   // the playback position of whichever recording is currently playing.
   const [transcriptSyncEnabled, setTranscriptSyncEnabled] = useState(false);
   const playerRefs = useRef(new Map());
-  const [playback, setPlayback] = useState({ id: null, ms: 0 });
+  // Per-recording positions: two recordings can play at once and each
+  // open transcript must follow its own player.
+  const [playbackById, setPlaybackById] = useState({});
+  // Only the newest /ai/admin/calls request may update state — overlapping
+  // requests (mount, 300 ms search debounce, auto-process refresh) resolve
+  // in any order, and a stale success must never re-enable the gate after
+  // a newer failure reset it.
+  const loadSeqRef = useRef(0);
   const playerRefFor = (id) => (handle) => {
     if (handle) playerRefs.current.set(id, handle);
     else playerRefs.current.delete(id);
@@ -343,7 +351,7 @@ export default function CallLogTabV2() {
     for (const c of calls) {
       if (!c?.recording_available || !c.transcript_structured) continue;
       const segs = parseTranscriptSegments(c.transcript_structured);
-      if (segs.length) map.set(c.id, segs);
+      if (segs.length && segmentsMatchTranscript(segs, c.transcription)) map.set(c.id, segs);
     }
     return map;
   }, [calls, transcriptSyncEnabled]);
@@ -352,11 +360,14 @@ export default function CallLogTabV2() {
     const q = search
       ? `?search=${encodeURIComponent(search)}&limit=1000`
       : "?days=365&limit=200";
+    loadSeqRef.current += 1;
+    const seq = loadSeqRef.current;
     return Promise.allSettled([
       adminFetch(`/ai/admin/calls${q}`),
       adminFetch("/ai/admin/calls/route-calibration?days=30"),
     ])
       .then(([callsResult, calibrationResult]) => {
+        if (seq !== loadSeqRef.current) return; // superseded
         if (callsResult.status !== "fulfilled") throw callsResult.reason;
         const d = callsResult.value;
         setCalls(d.calls || []);
@@ -367,6 +378,7 @@ export default function CallLogTabV2() {
         setLoading(false);
       })
       .catch(() => {
+        if (seq !== loadSeqRef.current) return; // superseded
         // Fail closed: a rejected reload must not leave the gated transcript
         // UI enabled on stale data.
         setTranscriptSyncEnabled(false);
@@ -1426,7 +1438,7 @@ export default function CallLogTabV2() {
                           recordingId={c.recording_sid || c.id}
                           className="w-full h-8"
                           onTimeUpdate={(seconds) =>
-                            setPlayback({ id: c.id, ms: seconds * 1000 })
+                            setPlaybackById((prev) => ({ ...prev, [c.id]: seconds * 1000 }))
                           }
                         />{" "}
                       </div>
@@ -1470,9 +1482,7 @@ export default function CallLogTabV2() {
                               <div className="px-1 pb-2">
                                 <CallTranscriptSync
                                   segments={syncedSegments}
-                                  currentMs={
-                                    playback.id === c.id ? playback.ms : -1
-                                  }
+                                  currentMs={playbackById[c.id] ?? -1}
                                   onSeek={(ms) =>
                                     playerRefs.current
                                       .get(c.id)

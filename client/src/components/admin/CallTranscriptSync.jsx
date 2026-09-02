@@ -51,6 +51,33 @@ export function parseTranscriptSegments(structured) {
     .sort((a, b) => a.startMs - b.startMs);
 }
 
+// A diarized blob can outlive its transcript: a force-reprocess that falls
+// back to a text-only provider, or a re-transcription backfill, rewrites
+// `transcription` while the old `transcript_structured` stays beside it. Only
+// sync when the segments still read as the same call — most segment
+// openings must occur in the flat text (speaker labels and punctuation
+// ignored). Otherwise the plain transcript is the truth.
+const MATCH_SAMPLE = 20;
+const MATCH_CHARS = 24;
+function normalizeForMatch(text) {
+  return String(text || "")
+    .replace(/(^|\n)\s*(?:agent|caller|customer|speaker\s*[a-z0-9]+)\s*:/gi, " ")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+export function segmentsMatchTranscript(segments, transcription) {
+  const flat = normalizeForMatch(transcription);
+  if (!flat || !segments.length) return false;
+  const sample = segments.slice(0, MATCH_SAMPLE);
+  let hits = 0;
+  for (const seg of sample) {
+    const probe = normalizeForMatch(seg.text).slice(0, MATCH_CHARS).trim();
+    if (probe && flat.includes(probe)) hits += 1;
+  }
+  return hits / sample.length >= 0.6;
+}
+
 export function activeSegmentIndex(segments, currentMs) {
   if (!Number.isFinite(currentMs) || !segments.length) return -1;
   let active = -1;

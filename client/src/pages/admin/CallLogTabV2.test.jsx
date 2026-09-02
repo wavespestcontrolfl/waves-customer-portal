@@ -143,6 +143,14 @@ describe("CallLogTabV2 synced transcript", () => {
     });
   });
 
+  it("falls back to plain text when the stored segments no longer match the transcript", async () => {
+    stubCalls({ calls: [{ ...CALL, transcription: "Agent: Waves Pest Control.\nCaller: I want to cancel my lawn plan." }], transcript_sync_enabled: true });
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: /^Transcription/ }));
+    expect(screen.queryByRole("button", { name: /Speaker/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/cancel my lawn plan/)).toBeInTheDocument();
+  });
+
   it("keeps the plain transcript when the gate is off", async () => {
     stubCalls({ calls: [CALL], transcript_sync_enabled: false });
     renderTab();
