@@ -433,6 +433,20 @@ describe("committed-body persistence for resume-owed visits", () => {
     }
   });
 
+  it("keeps the committed idempotencyKey in the persisted body — the panel seeds both refs from ONE snapshot", () => {
+    // The reopened panel restores completionIdempotencyKeyRef from this key
+    // so the POST replay and the /completion-status poll agree; a fresh key
+    // would read the original attempt as succeeded_other_key.
+    const map = stubStorage();
+    try {
+      persistCompletionResumeOwed("svc-k", { a: 1, idempotencyKey: "key-123", completionPhotos: [{ data: "x" }] });
+      expect(restoreCompletionResumeOwedBody("svc-k")).toEqual({ a: 1, idempotencyKey: "key-123" });
+      expect(map.size).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("clears both keys together", () => {
     const map = stubStorage();
     try {

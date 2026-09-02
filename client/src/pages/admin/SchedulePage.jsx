@@ -10614,7 +10614,13 @@ export function CompletionPanel({
   const recapRequestRef = useRef(0);
   const recapAbortRef = useRef(null);
   const draftSnapshotRef = useRef(null);
-  const completionIdempotencyKeyRef = useRef(null);
+  // ONE restored snapshot for the whole committed chain (pre-push codex P1
+  // #3745 r4): the persisted body carries the original idempotencyKey, and
+  // the status poll must use that SAME key — a fresh key would classify the
+  // original attempt as succeeded_other_key and discard its stored response.
+  // Lazy: one localStorage read + JSON.parse per mount, not per render.
+  const [restoredResumeBody] = useState(() => restoreCompletionResumeOwedBody(service?.id));
+  const completionIdempotencyKeyRef = useRef(restoredResumeBody?.idempotencyKey || null);
   // Consecutive completion_side_effects_running retries in the current
   // submit chain — see SIDE_EFFECTS_RETRY_MS for the contract.
   const sideEffectsRetryRef = useRef(0);
@@ -10629,7 +10635,7 @@ export function CompletionPanel({
   // Restored from the persisted committed body when the durable marker is
   // set (codex P1 #3745 r4) — photos stripped, which the server's resume
   // hash tolerates — so a reopened panel replays instead of rebuilding.
-  const lastSubmitBodyRef = useRef(restoreCompletionResumeOwedBody(service?.id));
+  const lastSubmitBodyRef = useRef(restoredResumeBody);
   // Initialized from the DURABLE marker: a panel reopened on a marker-owed
   // visit is mid-committed-chain even though the in-memory refs died with
   // the previous mount — without this, the reopened panel's fresh key gets
