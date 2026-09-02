@@ -1528,6 +1528,24 @@ violations at the severity noted.
   accepted-only + linked-customer, inactive program = 404, `err.code`-only
   logging (PG constraint errors quote phone numbers). Treat the gate, the
   no-enroll-on-read rule, and the PII-in-logs rule as security-critical.)
+  `/api/estimates/:token/change-request` (POST; the non-decline half of the
+  customer soft-exit sheet, GATE_ESTIMATE_SOFT_EXIT. `kind:'change'` parks
+  ONE `service_requests` row (`requested_service='estimate_change_request'`)
+  + an admin bell through the measurement review's shared notify core;
+  `kind:'still_deciding'` writes one `activity_log` row and nothing else.
+  The estimate is NEVER mutated and the customer is NEVER auto-messaged.
+  Guards mirror measurement-review exactly: gate with a gate-aware limiter
+  skip (dark = generic 404), token format gate, 5/hr shared IPv6-safe key,
+  full customer-viewability + accepted/declined exclusion re-validated on the
+  LOCKED row, the durable call-side linkage verdict re-checked under the
+  estimates → leads → call_log lock order and held through the insert, open-
+  request dedupe pre-checked under the lock. The same gate lets
+  `PUT /:token/decline` accept optional `reason` / `competitorName` /
+  `competitorPrice` / `note`, validated by `customerDispositionUpdates`
+  against the normalized loss codes the staff modal writes; with the gate
+  dark those fields are ignored so the plain decline stays byte-identical.
+  Treat the gate, the lock ordering, the no-comms contract, and the no-
+  estimate-write contract as security-critical.)
   `/api/public/careers/apply` (POST; public job-application intake for the
   careers funnel. Guards mirror the lead webhook: GATE_JOB_APPLICATIONS
   (404 dark until flipped, unobservable-when-dark), IP limiter (6/10min)

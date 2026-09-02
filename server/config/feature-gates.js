@@ -56,6 +56,7 @@
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true (12-month application strip under the lawn price card, arithmetic on visitsPerYear only; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
+ *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
  *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE.
  *     ⚠ PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true
  *     AND GATE_AUTO_APPLY_ACCOUNT_CREDIT=true are BOTH also set — the prod
@@ -1465,6 +1466,17 @@ const gates = {
   // a read). Live program settings still decide whether the card shows at
   // all. Dev-open, prod dark. Enable with GATE_ESTIMATE_SUCCESS_REFERRAL=true.
   estimateSuccessReferral: isProd ? process.env.GATE_ESTIMATE_SUCCESS_REFERRAL === 'true' : true,
+  // Customer soft exit on a sent estimate: the "Not what you expected?" sheet.
+  // Three outcomes, none of which message the customer: a reason-tagged
+  // decline (PUT /:token/decline gains optional reason/competitor/note
+  // fields that land in the disposition columns the staff modal already
+  // writes), a "still deciding" signal (one activity_log row, no bell), and
+  // a change request (POST /:token/change-request parks ONE service_requests
+  // row + an admin bell; the estimate is never mutated). Gates the /data
+  // `softExit` flag that renders the sheet, the reason fields on /decline,
+  // and the change-request route. Dev-open, prod dark.
+  // Enable with GATE_ESTIMATE_SOFT_EXIT=true.
+  estimateSoftExit: isProd ? process.env.GATE_ESTIMATE_SOFT_EXIT === 'true' : true,
 
   // The `lawn_area` block on POST /public/quote/calculate — the priced
   // treatable-area basis the website estimator renders as "Priced for N sq

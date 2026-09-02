@@ -1022,11 +1022,18 @@ window.fetch = async (input, init) => {
       glassDefault: true,
       lawnCalendar: true,
       ...referral,
+      // softExit mirrors the GATE_ESTIMATE_SOFT_EXIT /data flag on a live row so
+      // the "Not what you expected?" sheet is exercised in preview.
+      softExit: true,
+      softExitChange: true,
       ...(pdfPass && documentRenderAffirmed(proposal) ? { documentRender: true } : {}),
     });
   }
   if (url.includes('/referral-link')) {
     return respond({ code: 'WAVES-PREVIEW1', link: 'https://wavespestcontrol.com/r/WAVES-PREVIEW1', smsBody: 'We use Waves Pest Control and they’ll take $25 off your first service with my code WAVES-PREVIEW1. wavespestcontrol.com/r/WAVES-PREVIEW1', emailSubject: '$25 off Waves Pest Control', emailBody: 'We use Waves Pest Control and they’ll take $25 off your first service with my code WAVES-PREVIEW1.\n\nhttps://wavespestcontrol.com/r/WAVES-PREVIEW1' });
+  }
+  if (url.includes('/change-request') || url.endsWith('/decline')) {
+    return respond({ success: true, deduped: false });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;

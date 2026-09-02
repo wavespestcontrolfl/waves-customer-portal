@@ -74,6 +74,10 @@ export default function WinLossSlicesCard() {
   // service line / lead source / WaveGuard tier, plus the sent-cohort
   // funnel. Older payloads without these keys render the original card.
   const dispositions = data?.byDisposition || [];
+  // "Still deciding" (soft-exit signal): a side channel next to the
+  // dispositions so the office can tell went-quiet-while-deciding from
+  // never-engaged (GH codex r3 P2). Absent on older payloads.
+  const stillDeciding = data?.stillDeciding && data.stillDeciding.signaled > 0 ? data.stillDeciding : null;
   const serviceLines = (data?.byServiceLine || []).slice(0, 8);
   const leadSources = (data?.byLeadSource || []).slice(0, 8);
   const tiers = data?.byWaveguardTier || [];
@@ -86,6 +90,7 @@ export default function WinLossSlicesCard() {
   // not the recent-send total (GH codex P2).
   const hasCohorts = (cohorts?.cohorts || []).some((c) => c.sent > 0);
   const hasAuditData = dispositions.length > 0
+    || !!stillDeciding
     || serviceLines.length > 0
     || leadSources.length > 0
     || hasCohorts;
@@ -260,6 +265,32 @@ export default function WinLossSlicesCard() {
                       </td>
                     </tr>
                   ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {stillDeciding && (
+            <div>
+              <div className="text-13 text-zinc-500 mb-1">Said &ldquo;still deciding&rdquo; on the estimate</div>
+              <table className="w-full text-13">
+                <tbody>
+                  <tr className="border-b border-hairline">
+                    <td className="py-1 text-zinc-700">Signaled</td>
+                    <td className="py-1 text-right font-medium text-zinc-900 tabular-nums">{stillDeciding.signaled}</td>
+                  </tr>
+                  <tr className="border-b border-hairline">
+                    <td className="py-1 text-zinc-700">Accepted afterwards</td>
+                    <td className="py-1 text-right font-medium text-zinc-900 tabular-nums">{stillDeciding.wonAfter}</td>
+                  </tr>
+                  <tr className="border-b border-hairline">
+                    <td className="py-1 text-zinc-700">Lost afterwards</td>
+                    <td className="py-1 text-right font-medium text-zinc-900 tabular-nums">{stillDeciding.lostAfter}</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1 text-zinc-700">Expired after opening (vs. went silent)</td>
+                    <td className="py-1 text-right font-medium text-zinc-900 tabular-nums">{stillDeciding.expiredViewedAfter}</td>
+                  </tr>
                 </tbody>
               </table>
             </div>
