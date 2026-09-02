@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const {
   addETDays,
   addETMonthsByWeekday,
@@ -912,8 +913,15 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   // commits and derives its decision from the settled tier + schedule
   // (Codex #3011 r2 — evidence-vs-write races). On a plain pool connection
   // forUpdate is a single-statement no-op, so this changes nothing there.
+  // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) BEFORE the row lock:
+  // the alignment below rewrites the tier and re-seeds the ledger — the
+  // writes the scoped cancellation wind-down serializes on. Reentrant for
+  // the seeder / converter / admin-schedule callers that already hold it.
   let customerQuery = database('customers').where({ id: customerId }).first();
-  if (database.isTransaction) customerQuery = customerQuery.forUpdate();
+  if (database.isTransaction) {
+    await lockCustomerComms(database, customerId);
+    customerQuery = customerQuery.forUpdate();
+  }
   const customer = await customerQuery;
   if (!customer) return { synced: false, reason: 'customer_not_found' };
 
@@ -981,13 +989,20 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   );
 
   if (Object.keys(alignment.updates).length) {
-    await database('customers').where({ id: customerId }).update(alignment.updates);
-    if (alignment.updates.monthly_rate !== undefined && alignment.planRateComponents) {
-      // Seed the detected per-plan components with the minted rate (codex
-      // #3245 r7); gate-aware error policy lives in the helper.
-      await require('./plan-rate-ledger')
-        .seedLedgerComponents(database, customerId, alignment.planRateComponents, { source: 'plan_sync' });
-    }
+    const applyAlignment = async (handle) => {
+      await handle('customers').where({ id: customerId }).update(alignment.updates);
+      if (alignment.updates.monthly_rate !== undefined && alignment.planRateComponents) {
+        // Seed the detected per-plan components with the minted rate (codex
+        // #3245 r7); gate-aware error policy lives in the helper.
+        await require('./plan-rate-ledger')
+          .seedLedgerComponents(handle, customerId, alignment.planRateComponents, { source: 'plan_sync' });
+      }
+    };
+    // A caller's transaction already holds rung 6 (taken above, before the
+    // row lock); a bare connection gets a scoped transaction so the tier
+    // write and the ledger seed commit together under the key.
+    if (database.isTransaction) await applyAlignment(database);
+    else await withCustomerCommsLock(database, customerId, applyAlignment);
   }
 
   if (alignment.inferredTier && Object.keys(alignment.updates).length) {

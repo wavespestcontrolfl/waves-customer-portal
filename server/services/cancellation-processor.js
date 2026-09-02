@@ -16,6 +16,7 @@ const PORTAL_CANCEL_REASON_PREFIX = 'Portal cancellation request';
 // POST /api/requests gate, the /api/schedule payload, and this sweep can
 // never drift; re-exported below for existing consumers.
 const { CANCELLABLE_STATUSES, LIVE_TRACK_STATES } = require('./cancellation-eligibility');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 // Card-hold outcomes that leave money unresolved: the fee path never throws
 // into the host flow — a decline / ambiguous Stripe outcome / post-charge
 // write failure comes back as a reason code with the hold parked for review.
@@ -227,7 +228,11 @@ function tierDiscountRate(tier) {
  * label moves. Fails closed when a monthly lane's ledger cannot attribute
  * the scoped families (unattributed-only scalar).
  */
-async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
+// pinnedScope (wind-down boundary re-plan): the families this run ALREADY
+// swept own no live rows any more, so their ownership is taken as given and
+// only the SURVIVING side (remaining families, their components, their
+// per-application rows) is re-derived from live state.
+async function planScopedWindDown(customerId, scopedFamilies, dbh = db, { pinnedScope = null } = {}) {
   const { inferTierFromServiceCount, uniqueServiceFamilies, detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
   const { loadComponents } = require('./plan-rate-ledger');
   const customer = await dbh('customers').where({ id: customerId })
@@ -251,7 +256,9 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
     if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
     for (const f of uniqueServiceFamilies(detectWaveGuardPlanKeys(row))) if (!owned.includes(f)) owned.push(f);
   }
-  const inScope = scopedFamilies.filter((f) => owned.includes(f));
+  const pinned = Array.isArray(pinnedScope) && pinnedScope.length ? pinnedScope : null;
+  if (pinned) for (const f of pinned) if (!owned.includes(f)) owned.push(f);
+  const inScope = pinned ? [...pinned] : scopedFamilies.filter((f) => owned.includes(f));
   if (!inScope.length) return { ok: false, error: 'scope_not_owned' };
   const remaining = owned.filter((f) => !inScope.includes(f));
   if (!remaining.length) return { ok: false, error: 'scope_is_whole_account' };
@@ -323,7 +330,7 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
     // GH r26 P1). A row invoiced between preview and commit drops out of the
     // recomputed plan and trips scoped_pricing_changed, like any drift.
     if (perAppRows.length) {
-      const invoiced = await db('invoices')
+      const invoiced = await dbh('invoices')
         .whereIn('scheduled_service_id', perAppRows.map((r) => r.id))
         .whereNot({ status: 'void' })
         .select('scheduled_service_id');
@@ -338,8 +345,65 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
   };
 }
 
-async function applyScopedWindDown(customerId, plan, { requestId, actorLabel = 'Portal', lateFeeWaived = false } = {}) {
+// Canonical string of a scoped plan's money-bearing facts — the same shape
+// the admin commit builds from the approved preview (approvedScopedPricing)
+// and reasserts at the wind-down boundary.
+function scopedPricingFingerprint(plan) {
+  return [
+    `tier=${plan.tierAfter ?? ''}`,
+    `monthly=${plan.scalarAfter ?? ''}`,
+    `rates=${(plan.remainingRates || []).map((r) => `${r.family}:${r.before}:${r.after}`).sort().join(',')}`,
+    `perapp=${(plan.perAppRows || []).map((p) => `${p.id}:${p.before}:${p.after}`).sort().join(',')}`,
+  ].join('|');
+}
+
+class ScopedPricingChangedError extends Error {
+  constructor(message) { super(message); this.code = 'scoped_pricing_changed'; }
+}
+
+// Apply the scoped wind-down (tier demote + surviving-family reprice).
+//
+// The whole thing — re-plan, approval compare, reprice, demote — runs in
+// ONE transaction that FIRST takes the per-customer writer lock (rung 6 of
+// scheduling/occupancy.js's ORDERING CONTRACT, utils/customer-comms-lock):
+// every writer that inserts a scheduled_services row or rewrites the plan
+// ledger / tier holds the same key, so a surviving-family visit or component
+// can land only BEFORE the re-plan (then it is priced here, and a mismatch
+// with the approved facts refuses the run) or AFTER the commit (then its
+// writer prices it off the demoted tier). No silent window (#3666 r34 P2;
+// the drift-guard / phantom-check attempts that preceded this were closable
+// only from the writers' side).
+//
+// `scopedFamilies` present = re-plan from live rows at the boundary with the
+// entry plan's swept scope pinned; `approvedScopedPricing` present = the
+// fresh plan must serialize to exactly it or ScopedPricingChangedError is
+// thrown (the run parks scoped_pricing_changed and a fresh preview
+// re-approves the live numbers). Neither = apply `plan` as given under the
+// lock (test harnesses).
+async function applyScopedWindDown(customerId, entryPlan, {
+  requestId, actorLabel = 'Portal', lateFeeWaived = false, scopedFamilies = null, approvedScopedPricing = null,
+} = {}) {
+  let plan = entryPlan;
   await db.transaction(async (trx) => {
+    await lockCustomerComms(trx, customerId);
+    if (Array.isArray(scopedFamilies) && scopedFamilies.length) {
+      let fresh;
+      try {
+        fresh = await planScopedWindDown(customerId, scopedFamilies, trx, { pinnedScope: entryPlan.inScope });
+      } catch (replanErr) {
+        fresh = { ok: false, error: replanErr.message };
+      }
+      if (!fresh.ok) {
+        throw new ScopedPricingChangedError(`scoped wind-down could not be re-planned at the boundary (${fresh.error})`);
+      }
+      if (approvedScopedPricing != null) {
+        const live = scopedPricingFingerprint(fresh);
+        if (live !== approvedScopedPricing) {
+          throw new ScopedPricingChangedError(`scoped pricing drifted since approval (approved ${approvedScopedPricing} vs live ${live})`);
+        }
+      }
+      plan = fresh;
+    }
     if (plan.monthlyLane) {
       await trx('customer_plan_rates').where({ customer_id: customerId }).whereIn('family_key', plan.inScope).del();
       // CAS like the per-application lane below: the plan was computed at
@@ -432,6 +496,7 @@ async function applyScopedWindDown(customerId, plan, { requestId, actorLabel = '
   } catch (noteErr) {
     logger.warn(`[cancellation-processor] scoped audit note failed for ${customerId}: ${noteErr.message}`);
   }
+  return { plan };
 }
 
 /**
@@ -699,6 +764,10 @@ async function processCancellationRequest({
         // (see the gated block near the end of this function).
         const { resetLedgerToScalar } = require('./plan-rate-ledger');
         await db.transaction(async (trx) => {
+          // Rung 6 before the customers row lock: this transaction rewrites
+          // the plan ledger and tier, the writes the scoped wind-down and
+          // every booking/ledger writer serialize on.
+          await lockCustomerComms(trx, customerId);
           await trx('customers').where({ id: customerId }).update(update);
           // The ledger clear is atomic with the wind-down REGARDLESS of the
           // ledger-read gate (codex r48): rows left behind while the gate
@@ -1219,31 +1288,30 @@ async function processCancellationRequest({
     }
     if (!scopedWoundDown) errors.push('scoped_wind_down');
   }
-  // The operator approved SPECIFIC numbers: a ledger/hold/tier write landing
-  // after the commit's validation would recompute different prices here and
-  // silently charge them. Reassert the approved snapshot at the wind-down
-  // boundary — a mismatch refuses the repricing (partial + belled; a fresh
-  // preview re-approves the live numbers).
-  if (scoped && scopedPlan?.ok && approvedScopedPricing != null) {
-    const live = [
-      `tier=${scopedPlan.tierAfter ?? ''}`,
-      `monthly=${scopedPlan.scalarAfter ?? ''}`,
-      `rates=${(scopedPlan.remainingRates || []).map((r) => `${r.family}:${r.before}:${r.after}`).sort().join(',')}`,
-      `perapp=${(scopedPlan.perAppRows || []).map((p) => `${p.id}:${p.before}:${p.after}`).sort().join(',')}`,
-    ].join('|');
-    if (live !== approvedScopedPricing) {
-      errors.push('scoped_pricing_changed');
-      logger.error(`[cancellation-processor] scoped pricing drifted since approval for ${customerId} — wind-down refused (approved ${approvedScopedPricing} vs live ${live})`);
-      scopedPlan = { ok: false, error: 'pricing_changed' };
-    }
-  }
+  // The operator approved SPECIFIC numbers, and the sweep above is slow: a
+  // ledger/hold/tier write — or a surviving-family visit — landing after
+  // the commit's validation must be priced or refused, never silently
+  // charged. applyScopedWindDown re-plans the surviving side from live rows
+  // under the per-customer writer lock and reasserts the approved snapshot
+  // in the same transaction; a mismatch refuses the repricing
+  // (scoped_pricing_changed: partial + belled; a fresh preview re-approves
+  // the live numbers).
   if (scoped && scopedPlan?.ok) {
     try {
-      await applyScopedWindDown(customerId, scopedPlan, { requestId, actorLabel, lateFeeWaived: feeWaiverConfirmed });
+      const applied = await applyScopedWindDown(customerId, scopedPlan, {
+        requestId, actorLabel, lateFeeWaived: feeWaiverConfirmed, scopedFamilies, approvedScopedPricing,
+      });
+      scopedPlan = applied.plan;
       scopedWoundDown = true;
     } catch (err) {
-      errors.push('scoped_wind_down');
-      logger.error(`[cancellation-processor] scoped wind-down failed for ${customerId}: ${err.message}`);
+      if (err && err.code === 'scoped_pricing_changed') {
+        errors.push('scoped_pricing_changed');
+        logger.error(`[cancellation-processor] scoped pricing drifted since approval for ${customerId} — wind-down refused (${err.message})`);
+        scopedPlan = { ...scopedPlan, ok: false, error: 'pricing_changed' };
+      } else {
+        errors.push('scoped_wind_down');
+        logger.error(`[cancellation-processor] scoped wind-down failed for ${customerId}: ${err.message}`);
+      }
     }
   }
 
@@ -1373,7 +1441,7 @@ async function processCancellationRequest({
 }
 
 module.exports = {
-  processCancellationRequest, raiseTermiteRetrievalTask, rentedTermiteStationState,
+  processCancellationRequest, raiseTermiteRetrievalTask, rentedTermiteStationState, scopedPricingFingerprint,
   planScopedWindDown, applyScopedWindDown, familyOfServiceRow, priorCancelledVisits,
   CHURN_REASON, PORTAL_CANCEL_REASON_PREFIX, CANCELLABLE_STATUSES,
 };

@@ -72,7 +72,8 @@ jest.mock('../models/db', () => {
 });
 
 const { startHold, runPlanHoldLifecycle } = require('../services/cancellation-resolution/holds');
-const { planScopedWindDown } = require('../services/cancellation-processor');
+const { planScopedWindDown, applyScopedWindDown, scopedPricingFingerprint } = require('../services/cancellation-processor');
+const lockCalls = () => require('../models/db').raw.mock.calls.filter(([sql]) => /pg_advisory_xact_lock/.test(sql)).map(([, b]) => b);
 const { etDateString } = require('../utils/datetime-et');
 
 function seed({ holds = [], customers = [], components = [], visits = [], invoices = [] } = {}) {
@@ -311,5 +312,75 @@ describe('planScopedWindDown (ruling C-3)', () => {
     mockState.tables.invoices = [{ id: 'inv-1', scheduled_service_id: invoicedId, status: 'void' }];
     const voided = await planScopedWindDown('c1', ['lawn_care']);
     expect(voided.perAppRows).toHaveLength(1);
+  });
+});
+
+describe('scoped wind-down under the rung-6 writer lock (#3666 r34 — the pricing race)', () => {
+  const visitRow = (family, extra = {}) => ({
+    id: `v-${family}`, customer_id: 'c1', status: 'confirmed', scheduled_date: daysOut(10),
+    recurring_ongoing: true, is_recurring: true, service_type: family === 'lawn_care' ? 'Lawn Care Service' : 'Quarterly Pest Control Service',
+    ...extra,
+  });
+  const perAppCustomer = () => ({ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true });
+
+  test('pinnedScope: after the sweep the swept family owns no live rows, yet the boundary re-plan keeps it in scope and re-derives ONLY the surviving side', async () => {
+    seed({ customers: [perAppCustomer()], visits: [visitRow('lawn_care'), { ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 }] });
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    expect(entry.ok).toBe(true);
+    // The sweep cancelled the lawn rows.
+    mockState.tables.scheduled_services = [{ ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 }];
+    expect((await planScopedWindDown('c1', ['lawn_care'])).error).toBe('scope_not_owned');
+    const fresh = await planScopedWindDown('c1', ['lawn_care'], require('../models/db'), { pinnedScope: entry.inScope });
+    expect(fresh.ok).toBe(true);
+    expect(fresh.inScope).toEqual(['lawn_care']);
+    expect(fresh.remaining).toEqual(['pest_control']);
+    expect(scopedPricingFingerprint(fresh)).toBe(scopedPricingFingerprint(entry));
+    // A surviving-family visit that appeared during the sweep IS in the fresh plan.
+    mockState.tables.scheduled_services.push({ ...visitRow('pest_control'), id: 'v-new', estimated_price: 90, primary_line_price: 90 });
+    const drifted = await planScopedWindDown('c1', ['lawn_care'], require('../models/db'), { pinnedScope: entry.inScope });
+    expect(drifted.perAppRows.map((r) => r.id).sort()).toEqual(['v-new', 'v-pest_control']);
+    expect(scopedPricingFingerprint(drifted)).not.toBe(scopedPricingFingerprint(entry));
+  });
+
+  test('a surviving-family visit landing between approval and the boundary refuses the wind-down (scoped_pricing_changed) — no demote, no reprice', async () => {
+    seed({ customers: [perAppCustomer()], visits: [visitRow('lawn_care'), { ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 }] });
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    const approved = scopedPricingFingerprint(entry);
+    mockState.tables.scheduled_services = [
+      { ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 },
+      { ...visitRow('pest_control'), id: 'v-new', estimated_price: 90, primary_line_price: 90 },
+    ];
+    mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
+    await expect(applyScopedWindDown('c1', entry, { requestId: 'req-1', scopedFamilies: ['lawn_care'], approvedScopedPricing: approved }))
+      .rejects.toMatchObject({ code: 'scoped_pricing_changed' });
+    expect(mockState.tables.customers[0].waveguard_tier).toBe('Silver');
+    expect(mockState.tables.scheduled_services.every((r) => r.estimated_price === 90)).toBe(true);
+  });
+
+  test('unchanged live state applies the FRESH plan under the lock — the lock is the first statement, the demote and reprice land, the request is stamped', async () => {
+    seed({ customers: [perAppCustomer()], visits: [visitRow('lawn_care'), { ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 }] });
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    const approved = scopedPricingFingerprint(entry);
+    mockState.tables.scheduled_services = [{ ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 }];
+    mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
+    require('../models/db').raw.mockClear();
+    const out = await applyScopedWindDown('c1', entry, { requestId: 'req-1', scopedFamilies: ['lawn_care'], approvedScopedPricing: approved });
+    expect(lockCalls()[0]).toEqual(['customer-comms:c1']);
+    expect(out.plan.remaining).toEqual(['pest_control']);
+    expect(mockState.tables.customers[0].waveguard_tier).toBe('Bronze');
+    expect(mockState.tables.scheduled_services[0].estimated_price).toBeGreaterThan(90);
+    expect(JSON.parse(mockState.tables.service_requests[0].metadata).cancel_plan.scopedWindDownCommitted).toBe(true);
+  });
+
+  test('a plan hold takes the same writer lock before touching the ledger', async () => {
+    seed({
+      customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: 150, billing_mode: 'monthly_membership', active: true, tier_protected_until: null }],
+      components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 }, { customer_id: 'c1', family_key: 'pest_control', monthly_rate: 60 }],
+      visits: [visitRow('lawn_care'), visitRow('pest_control')],
+    });
+    require('../models/db').raw.mockClear();
+    const res = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) });
+    expect(res.holdId).toBeTruthy();
+    expect(lockCalls()).toContainEqual(['customer-comms:c1']);
   });
 });

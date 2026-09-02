@@ -29,6 +29,7 @@
 const crypto = require('crypto');
 const { isEnabled } = require('../config/feature-gates');
 const logger = require('./logger');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
 const UNATTRIBUTED = 'unattributed';
 
@@ -473,6 +474,12 @@ async function applyAcceptToLedger(database, {
 // finer attribution — reset to a single unattributed component matching the
 // scalar, or clear entirely when the rate is cleared/zeroed.
 async function resetLedgerToScalar(database, customerId, rate, { source = 'scalar_write' } = {}) {
+  // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): ledger rewrites
+  // serialize against the cancellation wind-down, which re-plans and
+  // reprices the surviving families under the same per-customer key.
+  // Reentrant no-op for callers already holding it; every caller passes a
+  // transaction/savepoint handle (a bare connection would fence nothing).
+  await lockCustomerComms(database, customerId);
   if (!(await ledgerTableExists(database))) return;
   await database('customer_plan_rates').where({ customer_id: customerId }).del();
   const amount = roundMoney(rate);
@@ -497,6 +504,7 @@ async function resetLedgerToScalar(database, customerId, rate, { source = 'scala
 async function seedLedgerComponents(database, customerId, components = {}, { source = 'plan_sync' } = {}) {
   try {
     await database.transaction(async (sp) => {
+      await lockCustomerComms(sp, customerId); // rung 6 — see resetLedgerToScalar
       if (!(await ledgerTableExists(sp))) return;
       await sp('customer_plan_rates').where({ customer_id: customerId }).del();
       for (const [family, rate] of Object.entries(components)) {

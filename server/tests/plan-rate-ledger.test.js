@@ -76,6 +76,8 @@ function makeLedgerDb(initialRows = [], { hasTable = true } = {}) {
   };
   db.schema = { hasTable: async () => hasTable };
   db.store = store;
+  // Rung 6 (customer-comms) advisory lock taken by every ledger rewrite.
+  db.raw = jest.fn(async () => ({ rows: [] }));
   return db;
 }
 
@@ -436,6 +438,9 @@ describe('seedLedgerComponents (codex r7/r8)', () => {
     await seedLedgerComponents(db, 'cust-1', { pest_control: 45, mosquito: 30 }, { source: 'plan_sync' });
     expect(db.store.map((r) => [r.family_key, r.monthly_rate]).sort())
       .toEqual([['mosquito', 30], ['pest_control', 45]]);
+    // The rewrite serializes against the cancellation wind-down on the
+    // per-customer writer lock (rung 6), taken before the first write.
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-comms:cust-1']);
   });
 
   test('authoritative failures throw; advisory failures warn', async () => {
@@ -946,6 +951,8 @@ describe('resetLedgerToScalar', () => {
       { customer_id: 'cust-1', family_key: 'lawn_care', monthly_rate: 50 },
     ]);
     await resetLedgerToScalar(db, 'cust-1', 75, { source: 'admin_edit' });
+    // Rung 6 first: the reset serializes against the cancellation wind-down.
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-comms:cust-1']);
     expect(db.store).toHaveLength(1);
     expect(db.store[0]).toMatchObject({ family_key: UNATTRIBUTED, monthly_rate: 75 });
     await resetLedgerToScalar(db, 'cust-1', 0, { source: 'admin_edit' });

@@ -23,6 +23,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { CANCELLABLE_STATUSES } = require('../cancellation-eligibility');
+const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 
 const HOLDABLE_FAMILIES = ['lawn_care', 'mosquito', 'tree_shrub'];
 
@@ -167,6 +168,10 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
   let holdId = null;
   try {
     await db.transaction(async (trx) => {
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): a hold rewrites
+      // the plan ledger and the customer's rate — the writes the scoped
+      // cancellation wind-down serializes on under the same key.
+      await lockCustomerComms(trx, customerId);
       const [hold] = await trx('plan_holds').insert({
         customer_id: customerId,
         cancellation_case_id: caseId || null,
@@ -218,6 +223,7 @@ async function cancelHold(holdId, { compensateVisits = true } = {}) {
   const hold = await db('plan_holds').where({ id: holdId }).first('*');
   if (!hold || hold.status !== 'active') return false;
   await db.transaction(async (trx) => {
+    await lockCustomerComms(trx, hold.customer_id); // rung 6 — see startHold
     const claimed = await trx('plan_holds').where({ id: holdId, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
     if (!claimed) return;
     if (hold.held_monthly_rate != null) {
@@ -379,6 +385,7 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
         continue;
       }
       await db.transaction(async (trx) => {
+        await lockCustomerComms(trx, hold.customer_id); // rung 6 — see startHold
         const claimed = await trx('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'resumed', resumed_at: new Date(), updated_at: new Date() });
         if (!claimed) return;
         if (hold.held_monthly_rate != null) {
