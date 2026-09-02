@@ -34,6 +34,19 @@ afterEach(() => {
 });
 
 describe('getActivity loader', () => {
+  it('reads the gate at call time — unsetting the env after load turns the feed off without a restart', async () => {
+    const before = process.env.GATE_AGENT_ACTIVITY;
+    process.env.GATE_AGENT_ACTIVITY = '';
+    try {
+      const feed = await getActivity({ windowHours: 24 });
+      expect(feed.available).toBe(false);
+    } finally {
+      process.env.GATE_AGENT_ACTIVITY = before;
+    }
+    const feed = await getActivity({ windowHours: 24 });
+    expect(feed.available).toBe(true);
+  });
+
   it('reports a missing table as unavailable and keeps the rest of the feed', async () => {
     mockTableErrors.message_drafts = Object.assign(new Error('relation "message_drafts" does not exist'), { code: MISSING_TABLE_SQLSTATE });
     const feed = await getActivity({ windowHours: 24 });

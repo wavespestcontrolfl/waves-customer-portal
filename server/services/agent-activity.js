@@ -18,7 +18,10 @@
 // status ∈ running | awaiting_review | blocked | completed | failed | skipped
 
 const db = require('../models/db');
-const { isEnabled } = require('../config/feature-gates');
+// gateEnvValue at CALL time (the techTips idiom): the `gates` object in
+// feature-gates.js is evaluated once at boot, so isEnabled() would freeze
+// the flag until a redeploy — a kill switch has to work on the next request.
+const { gateEnvValue } = require('../config/feature-gates');
 
 const STATUSES = ['running', 'awaiting_review', 'blocked', 'completed', 'failed', 'skipped'];
 const MAX_WINDOW_HOURS = 24 * 14;
@@ -85,6 +88,8 @@ function gateDetail(result) {
     .map((f) => (typeof f === 'string' ? f : f?.name || f?.reason || f?.code))
     .filter(Boolean);
   if (names.length) return names.slice(0, 4).join(' · ');
+  // Runner error shape: { ok: false, error: 'uniqueness_gate_unavailable' }
+  if (typeof result.error === 'string' && result.error) return humanize(result.error);
   if (typeof result.total_score === 'number' && typeof result.min_total_score === 'number') {
     return `score ${result.total_score} / min ${result.min_total_score}`;
   }
@@ -96,6 +101,10 @@ function runStatus(run) {
   if (!outcome) return run.completed_at ? 'completed' : 'running';
   if (outcome === 'completed_published') return 'completed';
   if (outcome === 'completed_pending_review') return 'awaiting_review';
+  // publishing_named_competitor: the approved draft is being published now.
+  if (outcome.startsWith('publishing')) return 'running';
+  // deferred_publish_cap / deferred_gate_retry: parked for a later tick.
+  if (outcome.startsWith('deferred')) return 'skipped';
   if (outcome === 'skipped_gate_fail') return 'blocked';
   if (outcome.startsWith('skipped')) return 'skipped';
   if (outcome.startsWith('failed')) return 'failed';
@@ -103,7 +112,10 @@ function runStatus(run) {
 }
 
 function contentRunItem(run, awaitingReplyByRun) {
-  const draft = parseJson(run.draft_payload, {}) || {};
+  // Titles come from the two projected JSON paths (draft_title /
+  // draft_frontmatter_title) so the query never pulls whole article bodies;
+  // a raw draft_payload is still honoured for callers that pass one.
+  const draft = run.draft_payload ? parseJson(run.draft_payload, {}) || {} : {};
   const status = runStatus(run);
   const steps = [];
   let reachedEnd = false;
@@ -134,14 +146,18 @@ function contentRunItem(run, awaitingReplyByRun) {
   const stepsTotal = steps.length;
   const awaiting = awaitingReplyByRun.get(String(run.id));
   const title =
+    run.draft_title ||
+    run.draft_frontmatter_title ||
     draft.title ||
     draft.frontmatter?.title ||
     [humanize(run.action_type), humanize(run.page_type)].filter(Boolean).join(' · ') ||
     'Content run';
+  // An open approval is the owner's action; it outranks the run's own
+  // skip_reason (every emailed approval sits on a run that was parked).
   const detail =
+    (awaiting ? `Awaiting emailed reply (${awaiting.token})` : null) ||
     run.failure_message ||
     (run.skip_reason ? humanize(run.skip_reason) : null) ||
-    (awaiting ? `Awaiting emailed reply (${awaiting.token})` : null) ||
     (run.published_url ? run.published_url : null);
   return {
     id: `run:${run.id}`,
@@ -169,9 +185,20 @@ function smsDraftItem(draft) {
     kind: 'sms_draft',
     agent: SMS_AGENT,
     title: draft.customer_name
-      ? `Reply draft for ${draft.customer_name}`
-      : 'Reply draft for inbound text',
-    subtitle: [humanize(draft.intent), draft.drafter ? `drafter ${draft.drafter}` : null]
+      ? `${draft.campaign_type || draft.purpose ? 'Draft' : 'Reply draft'} for ${draft.customer_name}`
+      : draft.campaign_type || draft.purpose
+        ? 'Proactive draft'
+        : 'Reply draft for inbound text',
+    // Proactive lanes (campaign / purpose) describe the row better than the
+    // inbound intent classifier, which only applies to reply drafts.
+    subtitle: [
+      draft.campaign_type
+        ? `${humanize(draft.campaign_type)} campaign`
+        : draft.purpose
+          ? humanize(draft.purpose)
+          : humanize(draft.intent),
+      draft.drafter ? `drafter ${draft.drafter}` : null,
+    ]
       .filter(Boolean)
       .join(' · '),
     status: 'awaiting_review',
@@ -268,16 +295,20 @@ async function loadRows(windowHours) {
       throw err;
     }
   };
-  const [runs, drafts, jobs] = await Promise.all([
-    safe('autonomous_runs', () =>
-      db('autonomous_runs')
+  const runQuery = () =>
+    db('autonomous_runs')
         .select(
           'id', 'action_type', 'page_type', 'shadow_mode', 'outcome', 'skip_reason', 'failure_message',
-          'draft_payload', 'published_url', 'claimed_at', 'completed_at', 'created_at', 'total_ms',
+          db.raw("draft_payload->>'title' AS draft_title"),
+          db.raw("draft_payload->'frontmatter'->>'title' AS draft_frontmatter_title"),
+          'published_url', 'claimed_at', 'completed_at', 'created_at', 'total_ms',
           'claim_ms', 'brief_ms', 'agent_ms', 'uniqueness_gate_ms', 'quality_gate_ms', 'seo_completion_gate_ms',
           'publish_ms', 'index_submit_ms', 'link_plan_ms',
           'uniqueness_gate_result', 'quality_gate_result', 'seo_completion_gate_result',
-        )
+        );
+  const [runs, drafts, jobs] = await Promise.all([
+    safe('autonomous_runs', () =>
+      runQuery()
         .where('created_at', '>=', since)
         .orderBy('created_at', 'desc')
         .limit(MAX_ITEMS)),
@@ -286,6 +317,7 @@ async function loadRows(windowHours) {
         .leftJoin('customers as c', 'c.id', 'd.customer_id')
         .select(
           'd.id', 'd.intent', 'd.drafter', 'd.draft_ms', 'd.created_at', 'd.inbound_message', 'd.draft_response',
+          'd.campaign_type', 'd.purpose',
           db.raw("NULLIF(TRIM(CONCAT_WS(' ', c.first_name, c.last_name)), '') AS customer_name"),
         )
         .where('d.status', 'pending')
@@ -299,21 +331,30 @@ async function loadRows(windowHours) {
         .orderBy('last_started_at', 'desc')
         .limit(MAX_ITEMS)),
   ]);
-  // Approvals are scoped to the runs actually loaded (one awaiting row per
-  // run_id, unique in the schema), so no cap can drop a loaded run's row.
+  // Awaiting approvals: every one on a loaded run (so no cap can drop it)
+  // PLUS any raised inside the window whose run is older than the window —
+  // the owner's open decision is what matters, not the run's age. Runs for
+  // those stragglers are loaded by id so they render like the rest.
   const runIds = runs.map((r) => r.id);
-  const approvals = runIds.length
-    ? await safe('content_email_approvals', () =>
-      db('content_email_approvals')
-        .select('run_id', 'token', 'status', 'kind', 'created_at')
-        .where({ status: 'awaiting_reply' })
-        .whereIn('run_id', runIds))
+  const approvals = await safe('content_email_approvals', () =>
+    db('content_email_approvals')
+      .select('run_id', 'token', 'status', 'kind', 'created_at')
+      .where({ status: 'awaiting_reply' })
+      .where((q) => {
+        q.where('created_at', '>=', since);
+        if (runIds.length) q.orWhereIn('run_id', runIds);
+      })
+      .limit(MAX_ITEMS));
+  const loaded = new Set(runIds.map(String));
+  const missingRunIds = approvals.map((a) => a.run_id).filter((id) => id && !loaded.has(String(id)));
+  const stragglers = missingRunIds.length
+    ? await safe('autonomous_runs', () => runQuery().whereIn('id', missingRunIds))
     : [];
-  return { runs, approvals, drafts, jobs, unavailable };
+  return { runs: runs.concat(stragglers), approvals, drafts, jobs, unavailable };
 }
 
 async function getActivity({ windowHours } = {}) {
-  if (!isEnabled('agentActivity')) return { available: false, items: [], agents: [], summary: summarize([]) };
+  if (gateEnvValue('GATE_AGENT_ACTIVITY') !== true) return { available: false, items: [], agents: [], summary: summarize([]) };
   const hours = clampWindowHours(windowHours);
   const rows = await loadRows(hours);
   const feed = buildActivity(rows);

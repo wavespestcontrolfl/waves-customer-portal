@@ -42,6 +42,9 @@ describe('runStatus', () => {
     expect(runStatus({ outcome: 'skipped_gate_fail' })).toBe('blocked');
     expect(runStatus({ outcome: 'skipped_no_opportunity' })).toBe('skipped');
     expect(runStatus({ outcome: 'failed_agent' })).toBe('failed');
+    expect(runStatus({ outcome: 'publishing_named_competitor' })).toBe('running');
+    expect(runStatus({ outcome: 'deferred_publish_cap' })).toBe('skipped');
+    expect(runStatus({ outcome: 'completed_no_changes' })).toBe('completed');
     expect(runStatus({ outcome: null, completed_at: null })).toBe('running');
   });
 });
@@ -82,6 +85,45 @@ describe('buildActivity', () => {
     expect(gate.status).toBe('blocked');
     expect(gate.detail).toBe('reentry_safety_claim');
     expect(item.detail).toBe('quality gate');
+  });
+
+  it('projected title columns win over the raw payload; an error-shaped gate result becomes the step detail', () => {
+    const { items } = buildActivity({
+      runs: [{
+        ...RUN_BASE,
+        draft_payload: undefined,
+        draft_title: null,
+        draft_frontmatter_title: 'Frontmatter Title',
+        outcome: 'skipped_gate_fail',
+        skip_reason: 'uniqueness_gate',
+        uniqueness_gate_result: { ok: false, error: 'uniqueness_gate_unavailable' },
+      }],
+    });
+    expect(items[0].title).toBe('Frontmatter Title');
+    expect(items[0].steps.find((s) => s.key === 'uniqueness_gate').detail).toBe('uniqueness gate unavailable');
+  });
+
+  it('an open approval outranks the skip reason in the detail line', () => {
+    const { items } = buildActivity({
+      runs: [{ ...RUN_BASE, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review' }],
+      approvals: [{ run_id: 'run-1', status: 'awaiting_reply', token: 'EA-aaaa1111' }],
+    });
+    expect(items[0].detail).toBe('Awaiting emailed reply (EA-aaaa1111)');
+  });
+
+  it('describes proactive drafts by their lane, reply drafts by intent', () => {
+    const { items } = buildActivity({
+      drafts: [
+        { id: 'p1', customer_name: 'Sam Sample', campaign_type: 'reactivation', intent: null, created_at: '2026-09-02T12:00:00Z' },
+        { id: 'p2', customer_name: null, purpose: 'balance_reminder', intent: null, created_at: '2026-09-02T11:00:00Z' },
+        { id: 'r1', customer_name: 'Pat Tester', intent: 'reschedule_request', created_at: '2026-09-02T10:00:00Z' },
+      ],
+    });
+    expect(items.map((i) => [i.title, i.subtitle])).toEqual([
+      ['Draft for Sam Sample', 'reactivation campaign'],
+      ['Proactive draft', 'balance reminder'],
+      ['Reply draft for Pat Tester', 'reschedule request'],
+    ]);
   });
 
   it('shows the running stage on an in-flight run', () => {

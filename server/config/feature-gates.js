@@ -2073,7 +2073,9 @@ const gates = {
   // message_drafts and job_health (server/services/agent-activity.js). OFF
   // unless set ('1' / 'true' / 'on'), in dev AND prod — gate-off answer of
   // GET /admin/agents/activity is { available: false } and the tab shows a
-  // "not enabled" note. Kill switch: unset. Read at CALL time.
+  // "not enabled" note. Kill switch: unset. This entry is for
+  // logGateStatus; the service reads gateEnvValue('GATE_AGENT_ACTIVITY')
+  // at CALL time (the techTips idiom), so a flip needs no redeploy.
   agentActivity: gateEnvValue('GATE_AGENT_ACTIVITY'),
 };
 
