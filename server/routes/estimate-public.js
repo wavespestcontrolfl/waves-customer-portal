@@ -12166,6 +12166,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // completion time, weeks later). Surface it NOW as an office exception
     // so the amount is stamped before the first visit. Best-effort;
     // prepay-annual accepts bill from the term, not per application.
+    let perVisitCompletenessAlertFired = false;
     if (!treatAsOneTime && customerId && paymentMethodPreference !== 'prepay_annual'
       && acceptedAppointmentsToRegister.length) {
       try {
@@ -12175,6 +12176,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         if (unpriced.length) {
           const custRow = await db('customers').where({ id: customerId }).first('per_application_fee');
           if (!(custRow?.per_application_fee != null && Number(custRow.per_application_fee) > 0)) {
+            perVisitCompletenessAlertFired = true;
             await require('../services/notification-service').notifyAdmin(
               'billing',
               'Recurring accept booked with no per-application amount',
@@ -12301,10 +12303,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       }
     }
     // Deferred per-application fee park (DATA-001) — same post-commit contract.
-    // The per-visit completeness check above (§3.7) already owns the case
-    // with a BOOKED visit (GH codex P1 on #3751: two bells for one accept);
-    // the converter's bell covers only an accept that booked nothing.
-    if (acceptConversion?.perApplicationFeeNotification && !acceptedAppointmentsToRegister.length) {
+    // The per-visit completeness check above (§3.7) owns the accept when it
+    // actually fired (an UNPRICED booked visit and no customer fee); the
+    // converter's bell covers every other shape — nothing booked, or a
+    // booked visit priced from an explicit first-application amount while
+    // the customer fee that prices every LATER visit stayed null (GH codex
+    // P1 ×2 on #3751: never two bells, never zero).
+    if (acceptConversion?.perApplicationFeeNotification && !perVisitCompletenessAlertFired) {
       const feeNotify = acceptConversion.perApplicationFeeNotification;
       try {
         const NotificationService = require('../services/notification-service');

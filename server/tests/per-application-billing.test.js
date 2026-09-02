@@ -84,6 +84,17 @@ describe('perApplicationChargeAmount', () => {
     })).toBeNull();
   });
 
+  test('a legacy count-less termite-monitoring row is grandfathered at plan annual ÷ 4 checks (GH codex P1)', () => {
+    const flatMonthlyTermite = resolveBillingCadence({ monthlyRate: 34, annualRate: 408, frequencyKey: 'monthly' });
+    expect(perApplicationChargeAmount({
+      billingCadence: flatMonthlyTermite,
+      annualRate: 408,
+      monthlyRate: 34,
+      visitsPerYear: null,
+      serviceKey: 'termite_bait',
+    })).toBe(102);
+  });
+
   test('monthly residential pest with no visit count still bills the cadence amount — the plan IS twelve visits', () => {
     const monthlyPest = resolveBillingCadence({ monthlyRate: 87.36, annualRate: 1048.32, frequencyKey: 'monthly' });
     expect(perApplicationChargeAmount({

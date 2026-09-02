@@ -89,12 +89,22 @@ function intervalPriceFromAnnual(annualAmount, frequencyKey) {
  * the cadence amount, and so does a MONTHLY cadence on residential pest
  * control, whose monthly plan IS twelve visits (legacy rows encode
  * { frequency: 'monthly' } with no visitsPerYear — pre-push codex P0). A
- * monthly cadence on any other family is a tier plan's display rate whose
- * visit count could not be read, so the amount is unknown (null) and the
- * converter parks the fee instead of repeating that under-collection
+ * legacy count-less termite-monitoring row (flat monthly, quarterly station
+ * checks — the customer-facing card derives "$X/mo → $3X/check" from the
+ * same four checks a year) is grandfathered at plan annual ÷ 4 so its
+ * accepted billing stays truthful to what the card promised (GH codex P1 on
+ * #3751). A monthly cadence on any other family is a tier plan's display
+ * rate whose visit count could not be read, so the amount is unknown (null)
+ * and the converter parks the fee instead of repeating that under-collection
  * (validation audit DATA-001, 2026-09-02). Callers pass the unit's
  * serviceKey as that family evidence.
  */
+// Station checks a year on a legacy flat-monthly termite-monitoring row —
+// the same figure estimate-public's customer card derives its per-check
+// amount from (TERMITE_CHECKS_PER_YEAR) and constants.TERMITE
+// monitoringVisitsPerYear.
+const LEGACY_TERMITE_MONITORING_CHECKS_PER_YEAR = 4;
+
 function perApplicationChargeAmount({
   billingCadence = null,
   annualRate,
@@ -103,17 +113,22 @@ function perApplicationChargeAmount({
   serviceKey = null,
 } = {}) {
   const cadenceAmount = roundMoney(billingCadence?.amount);
-  const visits = Number(visitsPerYear);
+  let visits = Number(visitsPerYear);
   if (!Number.isFinite(visits) || visits <= 0) {
     // Unknown visit count: a per-visit cadence still bills the cadence
     // amount (one charge per visit by construction), and so does monthly
-    // residential pest — its monthly plan IS twelve visits. A MONTHLY
-    // cadence on any other family is the display rate of a tier plan whose
-    // visit count we could not read — stamping it repeats the T&S
-    // 2026-07-18 under-collection, so the amount is unknown and the
+    // residential pest — its monthly plan IS twelve visits. A legacy
+    // count-less termite-monitoring row is grandfathered at the four
+    // station checks a year its customer-facing card already derives from.
+    // A MONTHLY cadence on any other family is the display rate of a tier
+    // plan whose visit count we could not read — stamping it repeats the
+    // T&S 2026-07-18 under-collection, so the amount is unknown and the
     // converter parks the fee (DATA-001).
     if (String(billingCadence?.frequencyKey || '') !== 'monthly') return cadenceAmount;
-    return String(serviceKey || '') === 'pest_control' ? cadenceAmount : null;
+    const key = String(serviceKey || '');
+    if (key === 'pest_control') return cadenceAmount;
+    if (key === 'termite_bait') visits = LEGACY_TERMITE_MONITORING_CHECKS_PER_YEAR;
+    else return null;
   }
   const annual = Number(annualRate || 0);
   const monthly = Number(monthlyRate ?? billingCadence?.monthlyRate ?? 0);
