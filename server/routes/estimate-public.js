@@ -1962,7 +1962,7 @@ const SERVICE_COPY = {
     aiBody: 'We reviewed your lot, resting zones, and mosquito pressure before pricing this plan.',
     askChips: [
       'How long does each visit last?',
-      'Pet & kid safe?',
+      'What precautions should I follow for pets and children?',
       'When does the season start?',
       'What about my pool area?',
     ],
@@ -2026,12 +2026,7 @@ const SERVICE_COPY = {
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed the slab area before pricing this estimate',
     aiBody: 'We priced the pre-slab soil treatment from the measured slab area, selected product, and warranty option.',
-    askChips: [
-      'What product is used?',
-      'Do I get documentation?',
-      'What warranty is selected?',
-      'When should this be done?',
-    ],
+    askChips: [],
     priceWording: {
       dayLine: "That's about {amount}/day for this quote.",
     },
@@ -2043,7 +2038,7 @@ const SERVICE_COPY = {
     aiBody: 'We priced the Bora-Care borate wood treatment from the measured attic and surface areas and the product application rate.',
     askChips: [
       'What does Bora-Care treat?',
-      'Is Bora-Care safe for pets & kids?',
+      'What precautions should I follow with Bora-Care around pets and children?',
       'What product is used for Bora-Care?',
       'When should this be done?',
     ],
@@ -2066,6 +2061,30 @@ const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for lawn care.",
     },
   },
+  wdo_inspection: {
+    headline: "Hey {first}, here's your WDO inspection quote.",
+    aiEyebrow: 'Your inspection',
+    aiTitle: 'Your WDO inspection was prepared for this property',
+    aiBody: 'This quote covers the wood-destroying organism inspection and required Florida reporting for the property shown above.',
+    askChips: [],
+    priceWording: {},
+  },
+  termite_foam: {
+    headline: "Hey {first}, here's your termite foam treatment quote.",
+    aiEyebrow: 'Your treatment plan',
+    aiTitle: 'This quote was prepared for the targeted termite treatment area',
+    aiBody: 'This is a localized foam treatment for the identified termite treatment area, not a recurring pest-control plan.',
+    askChips: ['Where will the foam be applied?', 'What does this treatment cover?', 'What precautions should I follow for this application?', 'How do I schedule the treatment?'],
+    priceWording: {},
+  },
+  trap_only: {
+    headline: "Hey {first}, here's your trap-only monitoring plan.",
+    aiEyebrow: 'Your monitoring plan',
+    aiTitle: 'This trap-only plan was prepared for your property',
+    aiBody: 'The plan separates the initial setup and inspection from the ongoing trap-monitoring service and its scheduled cadence.',
+    askChips: ['What is included in setup?', 'How often are traps checked?', 'What happens if I need an extra callback?', 'How is the monitoring plan billed?'],
+    priceWording: {},
+  },
   bundle: {
     headline: "Hey {first}, here's your custom Waves plan.",
     aiEyebrow: 'Waves AI',
@@ -2075,7 +2094,7 @@ const SERVICE_COPY = {
       'What is included in this plan?',
       'How do you handle ants?',
       'How does your lawn assessment tech work?',
-      'Are pets and kids safe?',
+      'What precautions should I follow for pets and children?',
     ],
     priceWording: {
       dayLine: "That's about {amount}/day for this plan.",
@@ -2219,10 +2238,10 @@ const GENERIC_PEST_SERVICE_CHIPS = ['How do you handle ants?', 'Can you treat in
 
 // Safety quick-question shown for any chemical service. Shared so the React
 // data contract surfaces it for roach cleanouts exactly like buildEstimateAskPrompts.
-const SAFETY_ASK_CHIP = 'Are pets and kids safe?';
+const SAFETY_ASK_CHIP = 'What precautions should I follow for pets and children?';
 // Bora-Care-only quotes use a Bora-Care-worded safety chip so it routes to the
 // borate-specific answer instead of the generic label-direction safety copy.
-const BORA_CARE_SAFETY_ASK_CHIP = 'Is Bora-Care safe for pets & kids?';
+const BORA_CARE_SAFETY_ASK_CHIP = 'What precautions should I follow with Bora-Care around pets and children?';
 // Bora-Care service chip — shared between the SSR prompt builder and the React
 // pricing contract so a Bora-Care add-on surfaces it on both paths.
 const BORA_CARE_ASK_CHIP = 'What does Bora-Care treat?';
@@ -3121,7 +3140,7 @@ function recurringServiceKey(svc = {}) {
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('termite') && raw.includes('bait')) return 'termite_bait';
-  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('preslab') || /\bpre\s+slab\b/.test(words)) return 'pre_slab_termiticide';
+  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('preslab') || raw.includes('slab_pretreat') || /\bpre\s+slab\b|\bslab\s+pre\s?treat\b/.test(words)) return 'pre_slab_termiticide';
   if (raw.includes('termite') && /(trench|trenching|liquid|barrier|termidor|treatment)/.test(raw)) return 'termite_trenching';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
@@ -3174,6 +3193,9 @@ function recurringServiceDisplayName(key) {
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'rodent': return 'Rodent Remediation';
+    case 'wdo_inspection': return 'WDO Inspection';
+    case 'termite_foam': return 'Termite Foam Treatment';
+    case 'trap_only': return 'Trap-Only Monitoring';
     case 'commercial_lawn': return 'Commercial Turf Treatment Program';
     case 'commercial_tree_shrub': return 'Commercial Tree & Shrub';
     case 'commercial_pest': return 'Commercial Pest Control';
@@ -3200,7 +3222,7 @@ function isPreSlabOneTimeItem(item = {}) {
     .join(' ')
     .toLowerCase()
     .replace(/[_-]+/g, ' ');
-  return raw.includes('pre slab')
+  return (raw.includes('pre slab') || /\bslab pre ?treat/.test(raw))
     && (raw.includes('termite') || raw.includes('termiticide') || raw.includes('soil treatment') || raw.includes('termidor'));
 }
 
@@ -3248,6 +3270,19 @@ function boraCareCustomerCopy() {
   return {
     note: 'Bora-Care is a borate wood treatment applied to the measured attic and surface areas. It treats bare wood for termites, wood-boring beetles, and wood-decay fungi.',
   };
+}
+
+function hasRegulatedCertificateServiceMix(recurring = [], oneTimeItems = []) {
+  const recurringRows = Array.isArray(recurring) ? recurring : [];
+  const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  const isRegulatedRow = (row = {}) => /\bwdo\b|wood destroying|pre slab|slab pre ?treat/i.test(
+    [row.key, row.service, row.name, row.label].filter(Boolean).join(' ').replace(/[_-]+/g, ' '),
+  );
+  return recurringRows.some(isRegulatedRow)
+    || oneTimeRows.some((row) => (
+      ['wdo_inspection', 'pre_slab_termiticide'].includes(serviceCategoryForOneTimeItem(row))
+      || isRegulatedRow(row)
+    ));
 }
 
 function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
@@ -5625,7 +5660,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // ── Waves AI block ──────────────────────────────────────────────
   // Canonical customer-facing AI/property explanation. The same payload
   // is exposed to the React v2 estimate via GET /:token/data.
-  const intelligence = buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
+  const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
+  const intelligence = isRegulatedCertificateSurface
+    ? null
+    : buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
   // "Show your work" extension of the same card: parcel-outline satellite
   // image swaps in for the plain one when available, and the facts /
   // parcel-match / quality-note block lands after the metrics grid. All
@@ -5833,7 +5871,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     pestRecurring,
     hasPestOneTime,
   );
-  const estimateAskEnabled = isEstimateAskAnswerable({
+  const estimateAskEnabled = !isRegulatedCertificateSurface && isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,
   });
@@ -15373,6 +15411,83 @@ router.post('/:token/bundle-inquiry', addServiceRequestLimiter, async (req, res,
 // post-estimate-versions token uses. Malformed tokens 404 before any DB read.
 const EXTENSION_REQUEST_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 
+// Mirrors measurementReviewLimiter: gate-aware skip so a dark gate answers the
+// generic 404 on every probe, shared IPv6-safe key.
+const softExitLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.isEnabled('estimateSoftExit'),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
+// POST /api/estimates/:token/change-request — the non-decline half of the
+// soft-exit sheet (GATE_ESTIMATE_SOFT_EXIT). body.kind:
+//   'change'         → parks ONE service_requests row + admin bell (note
+//                      required; topics optional chips)
+//   'still_deciding' → one activity_log row, no bell, no request row
+// Neither touches the estimate or messages the customer. Contract mirrors
+// measurement-review: gate + token-format gate + generic 404 (unknown /
+// malformed / ineligible / gate-off indistinguishable) + gate-aware limiter,
+// call-side verdict re-checked on the locked row for the request write.
+router.post('/:token/change-request', softExitLimiter, async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('estimateSoftExit')) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!req.params.token || !EXTENSION_REQUEST_TOKEN_RE.test(req.params.token)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const estimateRow = await db('estimates').where({ token: req.params.token }).first();
+    if (estimateRow && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimateRow))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const { createEstimateChangeRequest, recordEstimateStillDeciding } = require('../services/estimate-change-request');
+    // Same locked-row linkage re-check the measurement review runs: lead
+    // locked before call_log, verdict HELD through customer resolution and
+    // the insert.
+    const callSideBlockedFor = async (trx, lockedRow) => {
+      const linkData = parseEstimateDataSafe(lockedRow);
+      const eng = linkData?.estimatorEngine;
+      if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
+      if (await callSideBlockForEstimateData(trx, linkData)) return true;
+      const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+      if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
+        await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
+      }
+      return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true }));
+    };
+    const kind = String(req.body?.kind || 'change');
+    // Unknown kinds are a validation error, never a silent change request
+    // (pre-push codex P1) — but only once the token has cleared the public
+    // eligibility gates, so a probe cannot tell gate state from a 400.
+    if (!['change', 'still_deciding'].includes(kind)) {
+      const { isSoftExitEligible } = require('../services/estimate-change-request');
+      if (estimateRow && isEstimateCustomerViewable(estimateRow) && isSoftExitEligible(estimateRow)) {
+        return res.status(400).json({ error: 'kind must be change or still_deciding' });
+      }
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const result = kind === 'still_deciding'
+      ? await recordEstimateStillDeciding({ estimateToken: req.params.token, callSideBlockedFor })
+      : await createEstimateChangeRequest({
+        estimateToken: req.params.token,
+        topics: req.body?.topics,
+        note: req.body?.note,
+        callSideBlockedFor,
+      });
+    res.status(result.deduped ? 200 : 201).json(result);
+  } catch (err) {
+    const status = Number(err.status || err.statusCode || 0);
+    if (status >= 400 && status < 500) {
+      return res.status(status).json({ error: err.message || 'Request could not be processed' });
+    }
+    next(err);
+  }
+});
+
 // Mirrors extensionRequestLimiter exactly (codex #3376 r2): the shared
 // add-service limiter runs BEFORE the handler's gate check, so a dark gate
 // would leak a distinctive 429 on the ninth probe instead of the promised
@@ -15749,6 +15864,18 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
     const guard = resolveEstimateDeclineGuard(estimate);
     if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
     if (guard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
+    // Customer-stated reason (GATE_ESTIMATE_SOFT_EXIT): optional, validated
+    // against the same normalized loss codes the staff modal writes. With the
+    // gate dark the fields are ignored outright — the plain decline stays
+    // byte-identical to today — so a probe cannot detect the gate by a 400.
+    // Validated only after the guard cleared the token for the same reason.
+    let customerReason = null;
+    if (featureGates.isEnabled('estimateSoftExit')) {
+      const { customerDispositionUpdates } = require('../services/estimate-disposition');
+      const parsedReason = customerDispositionUpdates(req.body || {});
+      if (parsedReason.error) return res.status(400).json({ error: parsedReason.error });
+      customerReason = parsedReason.updates;
+    }
     // LIVE call-linkage revalidation ATOMIC with the decline write (codex
     // P0 r26, P1 GH r6): the whole transition runs in ONE transaction
     // with the call row locked FOR UPDATE and held through the UPDATE — a
@@ -15793,13 +15920,23 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
           status: 'declined',
           declined_at: trx.fn.now(),
           updated_at: trx.fn.now(),
-          // Normalized loss disposition (estimator audit 2026-08-29): this
-          // is the one CUSTOMER-authored decline path — no reason is
-          // collected, the classification IS the reason. COALESCE keeps any
-          // earlier staff stamp.
-          disposition: trx.raw("COALESCE(disposition, 'declined_by_customer')"),
+          // Normalized loss disposition (estimator audit 2026-08-29): the
+          // CUSTOMER-authored decline path. Without a stated reason the
+          // classification IS the reason; with one (soft-exit sheet) the
+          // customer's own code lands. COALESCE keeps any earlier staff
+          // stamp either way — a staff ruling on a live row is rare and
+          // deliberate, and the customer's words survive in the note.
+          disposition: customerReason
+            ? trx.raw('COALESCE(disposition, ?)', [customerReason.disposition])
+            : trx.raw("COALESCE(disposition, 'declined_by_customer')"),
           disposition_source: trx.raw("COALESCE(disposition_source, 'customer')"),
           disposition_at: trx.raw('COALESCE(disposition_at, NOW())'),
+          ...(customerReason ? {
+            disposition_note: trx.raw('COALESCE(disposition_note, ?)', [customerReason.disposition_note]),
+            competitor_name: trx.raw('COALESCE(competitor_name, ?)', [customerReason.competitor_name]),
+            competitor_price: trx.raw('COALESCE(competitor_price, ?)', [customerReason.competitor_price]),
+            decline_reason: trx.raw('COALESCE(decline_reason, ?)', [customerReason.decline_reason]),
+          } : {}),
         });
       // Click-to-estimate mints only (GitHub #3391 round P1, mirrors the
       // acceptance path): the customer just REJECTED the very thing the
@@ -15850,7 +15987,10 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
     // Notify admin of declined estimate
     try {
       const NotificationService = require('../services/notification-service');
-      await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo`, { icon: '\u274C', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
+      const reasonSuffix = customerReason
+        ? ` \u2014 ${customerReason.decline_reason}${customerReason.competitor_name ? ` (${customerReason.competitor_name}${customerReason.competitor_price != null ? ` at $${customerReason.competitor_price}` : ''})` : ''}`
+        : '';
+      await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo${reasonSuffix}`, { icon: '\u274C', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id, reason: customerReason?.disposition || null } });
     } catch (e) { logger.error(`[notifications] Estimate declined notification failed: ${e.message}`); }
 
     res.json({ success: true });
@@ -18544,6 +18684,9 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'bora_care': return 'Bora-Care Wood Treatment Service';
     case 'termite_trenching': return 'Termite Trenching';
     case 'rodent': return 'Rodent Remediation';
+    case 'wdo_inspection': return 'WDO Inspection';
+    case 'termite_foam': return 'Termite Foam Treatment';
+    case 'trap_only': return 'Trap-Only Monitoring';
     case 'bundle': return 'Recurring services';
     default: return fallback || recurringServiceDisplayName(category) || 'Service';
   }
@@ -18575,6 +18718,16 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (isNonServiceOneTimeItem(item)) return null;
   const name = item?.name || item?.label || item?.service || '';
   const service = String(item?.service || '').toLowerCase();
+  // `termite_inspection` is the standalone FS 482.226 inspection (project-types.js:
+  // "not for real-estate transactions — use WDO for those") and stays OFF the
+  // regulated certificate surface; only the WDO report itself maps here.
+  if (service === 'wdo' || service === 'wdo_inspection') return 'wdo_inspection';
+  // Canonical catalog key for the slab pre-treat (completion-lane-registry routes
+  // it to pre_treatment_termite_certificate); the name-based matcher below
+  // covers its "Slab Pre-Treat Termite Service" label.
+  if (service === 'termite_slab_pretreat' || service.includes('slab_pretreat')) return 'pre_slab_termiticide';
+  if (service === 'termite_foam' || service === 'foam_drill') return 'termite_foam';
+  if (service.startsWith('trap_only_')) return 'trap_only';
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
   // Bora-Care carries the canonical service key `bora_care`; classify it before
   // the generic termite-install heuristic so an install-worded label
@@ -22081,9 +22234,17 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // sections, so its chip is missing from the section-derived list. Prepend it (so
   // it survives the 6-chip cap), matching the merged one-time rows the SSR Ask
   // Waves prompt builder now reads.
-  const askChips = oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
-    ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
-    : askChipsBase;
+  // Regulated check sees the RAW normalized rows too: the contract's aligned
+  // breakdown (show_one_time_option) can drop a WDO row, and the Ask bar must
+  // not surface on an FDACS certificate surface (pre-push codex P1).
+  const askChips = hasRegulatedCertificateServiceMix(services, [
+    ...oneTimeBreakdownItems,
+    ...(normalizeOneTimeBreakdown(estData)?.items || []),
+  ])
+    ? []
+    : oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
+      ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
+      : askChipsBase;
   // (Breakdown labels were normalized up top, before sections were built —
   // the embedded contribution rows and this breakdown are the same objects.)
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
@@ -24524,10 +24685,24 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
+    // Category + regulated-surface decisions see the RAW normalized rows
+    // unioned with the bundle items (same union as the glass scope check
+    // below): alignOneTimeChoiceBreakdown (show_one_time_option) replaces raw
+    // rows with the synthetic choice + preserved pest/Bora add-ons, which
+    // would drop a WDO row and let the AI narrative + Ask bar render on an
+    // FDACS certificate surface (pre-push codex P1).
+    const oneTimeItemsForCategory = [
+      ...(normalizeOneTimeBreakdown(estimateDataForIntelligence)?.items || []),
+      ...(pricingBundle?.oneTimeBreakdown?.items || []),
+    ];
     const serviceCategory = deriveServiceCategory(
       estimateDataForIntelligence,
       recurringServicesForIntelligence,
-      pricingBundle?.oneTimeBreakdown?.items || []
+      oneTimeItemsForCategory,
+    );
+    const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(
+      recurringServicesForIntelligence,
+      oneTimeItemsForCategory,
     );
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
@@ -24547,29 +24722,33 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
       commercialNoSlotAccept,
     });
-    const intelligence = buildWaveGuardIntelligencePayload(
-      {
-        ...estimate,
-        satelliteUrl: estimate.satellite_url || null,
-        tier: estimate.waveguard_tier || null,
-      },
-      estimateDataForIntelligence,
-      { pricingBundle, recurringServices: recurringServicesForIntelligence },
-    );
-    try {
-      const assistantContext = buildEstimateAssistantContext({
-        estimate,
-        estData: estimateDataForIntelligence,
-        pricingBundle,
-        selectedFrequency: '',
-        serviceMode: defaultServiceMode,
-      });
-      intelligence.supportSources = loadPublicEstimateSupportSources({
-        question: 'What is included in this WaveGuard estimate?',
-        context: assistantContext,
-      });
-    } catch (err) {
-      logger.warn(`[estimate-data] intelligence support context skipped: ${err.message}`);
+    const intelligence = isRegulatedCertificateSurface
+      ? null
+      : buildWaveGuardIntelligencePayload(
+          {
+            ...estimate,
+            satelliteUrl: estimate.satellite_url || null,
+            tier: estimate.waveguard_tier || null,
+          },
+          estimateDataForIntelligence,
+          { pricingBundle, recurringServices: recurringServicesForIntelligence },
+        );
+    if (intelligence) {
+      try {
+        const assistantContext = buildEstimateAssistantContext({
+          estimate,
+          estData: estimateDataForIntelligence,
+          pricingBundle,
+          selectedFrequency: '',
+          serviceMode: defaultServiceMode,
+        });
+        intelligence.supportSources = loadPublicEstimateSupportSources({
+          question: 'What is included in this WaveGuard estimate?',
+          context: assistantContext,
+        });
+      } catch (err) {
+        logger.warn(`[estimate-data] intelligence support context skipped: ${err.message}`);
+      }
     }
 
     const terminalState = (() => {
@@ -24898,6 +25077,19 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
+      // Soft-exit sheet (GATE_ESTIMATE_SOFT_EXIT). Include-when-TRUE only:
+      // gate on, a live accept-active row, never a staff draft preview (the
+      // write 404s a draft). Absent otherwise so gate-off responses stay
+      // byte-identical.
+      ...(featureGates.isEnabled('estimateSoftExit') && !adminDraftPreview && isEstimateAcceptActive(estimate)
+        ? {
+          softExit: true,
+          // The change branch needs a customer the resolver can attach or
+          // create (linked id, or a phone to create from); an unlinked
+          // email-only estimate would 400 on submit, so the page withholds
+          // the branch instead (GH codex P2). Include-when-true.
+          ...(estimate.customer_id || String(estimate.customer_phone || '').trim() ? { softExitChange: true } : {}),
+        } : {}),
       // Services this customer has opted out of. Present only when there is
       // something to report, so a gate-off (or never-used) response stays
       // byte-identical to today. The page renders the "Add it back" row from
@@ -25067,6 +25259,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           ? (String(estimate.satellite_url || '').startsWith('https://maps.googleapis.com/') ? estimate.satellite_url : null)
           : (estimate.satellite_url || null),
         intelligence,
+        // The server's regulated-surface decision (WDO / pre-treatment
+        // certificate — AGENTS.md: no AI narrative, no ask bar), computed from
+        // the raw one-time rows BEFORE any breakdown alignment. The React page
+        // consumes this ahead of its own row-based derivation, so a public
+        // breakdown that no longer carries the regulated row cannot resurrect
+        // the Ask bar (codex r5 P1). Present only when true so every other
+        // response stays byte-identical.
+        ...(isRegulatedCertificateSurface ? { regulatedCertificateSurface: true } : {}),
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,
@@ -25290,6 +25490,7 @@ module.exports._resetPerApplicationColumnsProbeForTests = resetPerApplicationCol
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
+module.exports.hasRegulatedCertificateServiceMix = hasRegulatedCertificateServiceMix;
 module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;

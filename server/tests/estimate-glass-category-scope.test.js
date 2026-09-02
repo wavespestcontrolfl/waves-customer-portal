@@ -45,11 +45,39 @@
 //   matcher. Every input source is now scanned and unioned, and the scope
 //   path classifies rows through scopeCategoryForOneTimeItem (stinging split
 //   out; copy classification untouched).
-const { glassCategoryEligible, deriveServiceCategory } = require('../routes/estimate-public');
+const { glassCategoryEligible, deriveServiceCategory, hasRegulatedCertificateServiceMix } = require('../routes/estimate-public');
 
 const PEST_LAWN_SCOPE = ['pest_control', 'lawn_care'];
 
 describe('glassCategoryEligible service-category scope (GATE_ESTIMATE_GLASS_CATEGORIES)', () => {
+  test('mixed estimates remain regulated certificate surfaces when any WDO or pre-slab line is present', () => {
+    expect(hasRegulatedCertificateServiceMix(
+      [{ service: 'pest_control', name: 'Pest Control' }],
+      [{ service: 'wdo_inspection', name: 'WDO Inspection' }],
+    )).toBe(true);
+    expect(hasRegulatedCertificateServiceMix(
+      [{ service: 'pest_control', name: 'Pest Control' }],
+      [{ service: 'termite_foam', name: 'Termite Foam Treatment' }],
+    )).toBe(false);
+    expect(hasRegulatedCertificateServiceMix(
+      [{ service: 'pest_control', name: 'Pest Control' }],
+      [{ service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment' }],
+    )).toBe(true);
+    expect(hasRegulatedCertificateServiceMix(
+      [],
+      [{ service: 'termite_trenching', name: 'Liquid Termiticide Treatment' }],
+    )).toBe(false);
+    // Canonical catalog key + label for the slab pre-treat (the completion lane
+    // routes it to pre_treatment_termite_certificate).
+    expect(hasRegulatedCertificateServiceMix([], [{ service: 'termite_slab_pretreat', name: 'Slab Pre-Treat Termite Service' }])).toBe(true);
+    expect(hasRegulatedCertificateServiceMix([], [{ name: 'Slab Pre-Treat Termite Service' }])).toBe(true);
+    expect(deriveServiceCategory({}, [], [{ service: 'termite_slab_pretreat', name: 'Slab Pre-Treat Termite Service' }])).toBe('pre_slab_termiticide');
+    // The standalone termite inspection (FS 482.226, "not for real-estate
+    // transactions") is NOT a WDO report: it keeps the intelligence + ask UI.
+    expect(hasRegulatedCertificateServiceMix([], [{ service: 'termite_inspection', name: 'Termite Inspection Service' }])).toBe(false);
+    expect(deriveServiceCategory({}, [], [{ service: 'termite_inspection', name: 'Termite Inspection Service' }])).not.toBe('wdo_inspection');
+  });
+
   test('empty scope list releases every estimate', () => {
     expect(glassCategoryEligible({}, [], [], [])).toBe(true);
   });
@@ -298,10 +326,9 @@ describe('glassCategoryEligible service-category scope (GATE_ESTIMATE_GLASS_CATE
   });
 
   test('r2b: unclassifiable estimates fail closed under a scoped release', () => {
-    // e.g. a one-time WDO inspection: no engine-input mapping and the item
-    // classifier returns null — the derived default would be pest_control.
+    // WDO has explicit customer copy, but remains outside a pest/lawn release.
     const wdoItem = [{ service: 'wdo_inspection', name: 'WDO Inspection' }];
-    expect(deriveServiceCategory({}, [], wdoItem)).toBe('pest_control');
+    expect(deriveServiceCategory({}, [], wdoItem)).toBe('wdo_inspection');
     expect(glassCategoryEligible({}, [], wdoItem, PEST_LAWN_SCOPE)).toBe(false);
     expect(glassCategoryEligible({}, [], [], PEST_LAWN_SCOPE)).toBe(false);
   });
