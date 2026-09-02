@@ -358,7 +358,9 @@ const TRIGGER_REGISTRY = {
     group: 'Alerts',
     build: (p) => ({
       title: 'Completion text not delivered',
-      body: `${p.customerName || 'A customer'} did not receive their completion text${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.smsType ? ` [${p.smsType}]` : ''}${p.errorClass ? ` — ${p.errorClass}` : ''}${p.errorMessage ? `: ${p.errorMessage}` : ''}. Nothing retries it automatically; re-send from the customer's service.`,
+      body: `${p.customerName || 'A customer'} did not receive their completion text${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.smsType ? ` [${p.smsType}]` : ''}${p.errorClass ? ` — ${p.errorClass}` : ''}${p.errorMessage ? `: ${p.errorMessage}` : ''}. ${p.resumable === false
+        ? 'The provider refused it permanently — fix the phone number on file before any text can reach them.'
+        : 'Nothing retries it automatically; the closeout is held for retry — retry it from the tech portal.'}`,
       link: p.link || '/admin/dispatch',
     }),
   },

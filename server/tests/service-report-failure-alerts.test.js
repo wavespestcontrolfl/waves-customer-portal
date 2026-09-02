@@ -219,6 +219,12 @@ describe('service report failure alerts', () => {
     expect(builtSms.body).toContain('Ben Ortiz');
     expect(builtSms.body).toContain('TWILIO_30007');
     expect(builtSms.body).toContain('service_report_v1');
+    expect(builtSms.body).toContain('held for retry');
+    // A permanent provider refusal finalizes the closeout — the copy must
+    // not promise a retry that cannot re-send.
+    const builtTerminal = sms.build({ customerName: 'Ben Ortiz', resumable: false });
+    expect(builtTerminal.body).not.toContain('held for retry');
+    expect(builtTerminal.body).toContain('phone number');
   });
 
   test('push tags are per service record so concurrent failures do not replace each other', () => {

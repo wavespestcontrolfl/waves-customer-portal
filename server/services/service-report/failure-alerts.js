@@ -150,7 +150,7 @@ async function alertServiceReportTokenMintFailed({ serviceRecordId, customerId, 
 // The completion SMS itself failed (provider failure or a thrown error in the
 // send path — NOT a quiet-hours deferral or a consent block, which are
 // intentional). The route is a one-shot sender, so nothing retries this.
-async function alertCompletionSmsFailed({ serviceRecordId, customerId, smsType, errorClass, error } = {}, { knex = db, trigger = triggerNotification } = {}) {
+async function alertCompletionSmsFailed({ serviceRecordId, customerId, smsType, errorClass, error, resumable = true } = {}, { knex = db, trigger = triggerNotification } = {}) {
   try {
     const dedupeKey = `completion_sms_failed:${serviceRecordId || 'unknown'}`;
     if (await alreadyAlerted(dedupeKey, knex)) return { skipped: true, reason: 'duplicate' };
@@ -167,6 +167,9 @@ async function alertCompletionSmsFailed({ serviceRecordId, customerId, smsType, 
       smsType: smsType || null,
       errorClass: sanitizeErrorText(errorClass) || null,
       errorMessage,
+      // false = a permanent provider refusal: the closeout finalized and the
+      // bell copy must not promise a retry that cannot re-send.
+      resumable: resumable !== false,
       link: adminLink(context.customerId),
       dedupeKey,
     });

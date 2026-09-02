@@ -12382,6 +12382,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         serviceRecordId: record.id,
       });
     } else if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit) {
+      // Set the moment the provider ACCEPTS the text and read by the catch
+      // below: a route-local failure after acceptance (the post-send notes
+      // merge, an event insert) must never be reported as "not delivered"
+      // (GitHub Codex r3 P1).
+      let completionSmsProviderAccepted = false;
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
         // Use the recap STORED on the record (the server-generated effectiveCustomerRecap,
@@ -12742,6 +12747,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             sendingNotes.completionSmsMmsFallbackAt = smsNotesDelta.completionSmsMmsFallbackAt;
             sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
           }
+          completionSmsProviderAccepted = smsResult.sent === true;
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
           // worker retries a 'blocked' status — so the held text is requeued
@@ -12752,6 +12758,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // review claim is NOT marked failed on this path. If the enqueue
           // itself fails, fall through to the ordinary blocked handling.
           let completionHoldQueued = false;
+          let completionHoldQueueError = null;
           if (!smsResult.sent
             && smsResult.code === 'QUIET_HOURS_HOLD'
             && smsResult.deferred
@@ -12830,6 +12837,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // the ask (delivered replays mark the request delivered via
               // the finalization hook instead).
             } catch (queueErr) {
+              completionHoldQueueError = queueErr;
               logger.error(`[dispatch] Completion SMS requeue failed for record ${record.id}: ${queueErr.message}`);
             }
           }
@@ -12839,20 +12847,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             record.structured_notes = { ...sendingNotes, ...smsNotesDelta };
             logger.info(`[dispatch] Completion SMS for customer ${svc.customer_id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
           } else if (!smsResult.sent) {
+            // A quiet-hours hold whose scheduled-SMS enqueue FAILED is not a
+            // policy block even though the result still says blocked: the
+            // deferral was never persisted and no worker will ever send it
+            // (GitHub Codex r3 P1) — it is a delivery failure with the
+            // enqueue error.
+            const holdEnqueueFailed = !!completionHoldQueueError;
+            const policyBlocked = smsResult.blocked && !holdEnqueueFailed;
             Object.assign(smsNotesDelta, {
-              completionSmsStatus: smsResult.blocked ? 'blocked' : 'failed',
-              completionSmsError: smsResult.reason || smsResult.code || 'SMS send failed',
+              completionSmsStatus: policyBlocked ? 'blocked' : 'failed',
+              completionSmsError: holdEnqueueFailed
+                ? `send-window requeue failed: ${completionHoldQueueError.message || completionHoldQueueError}`
+                : (smsResult.reason || smsResult.code || 'SMS send failed'),
               completionSmsFailedAt: new Date().toISOString(),
             });
             const failedNotes = { ...sendingNotes, ...smsNotesDelta };
             await mergeRecordNotesKeys(record.id, smsNotesDelta);
             record.structured_notes = failedNotes;
             await markBundledReviewFailed(smsResult);
-            logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+            logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${holdEnqueueFailed ? 'send-window requeue failed' : (smsResult.code || smsResult.reason || 'unknown')}`);
             // 'blocked' is a policy outcome (consent / opt-out) and intentional;
-            // only a provider FAILURE bells — this is a one-shot sender and
+            // only a delivery FAILURE bells — this is a one-shot sender and
             // nothing retries it, so the bell is the only signal.
-            if (!smsResult.blocked) {
+            if (!policyBlocked) {
+              // A permanent provider refusal (twilio-sms.js terminal: true —
+              // e.g. an invalid number) cannot be recovered by re-running
+              // the send, so the closeout finalizes and the bell says what
+              // to fix. Everything else — a retryable provider failure or a
+              // failed requeue — is recoverable by re-entering this lane.
+              const resumable = holdEnqueueFailed || smsResult.terminal !== true;
               const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
               await alertCompletionSmsFailed({
                 serviceRecordId: record.id,
@@ -12862,9 +12885,39 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 // generic code PROVIDER_FAILURE and carries the actionable
                 // Twilio classification (21610, 21614, 20429 …) in
                 // providerErrorCode — same precedence as dropped-call-sms.js.
-                errorClass: smsResult.providerErrorCode || smsResult.code || 'provider_failure',
-                error: smsResult.reason || smsResult.code || 'SMS send failed',
+                errorClass: holdEnqueueFailed
+                  ? 'SEND_WINDOW_REQUEUE_FAILED'
+                  : (smsResult.providerErrorCode || smsResult.code || 'provider_failure'),
+                error: holdEnqueueFailed
+                  ? completionHoldQueueError
+                  : (smsResult.reason || smsResult.code || 'SMS send failed'),
+                resumable,
               });
+              if (resumable) {
+                // Keep the missing report / pay-link text RECOVERABLE
+                // (GitHub Codex r3 P1): finalizing succeeded here would make
+                // every later submit replay the stored response, and there
+                // is no dedicated completion-SMS resend action (building
+                // one is a customer-comm side effect — Adam's call). Same
+                // release-for-resume + 503 exit as the token-mint failure:
+                // the 'failed' marker above is not completionSmsAlreadyHandled,
+                // so the tech's retry re-enters this lane and re-sends.
+                const sendErr = holdEnqueueFailed
+                  ? completionHoldQueueError
+                  : new Error(smsResult.reason || smsResult.code || 'Completion SMS provider failure');
+                const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, sendErr);
+                if (!released) {
+                  logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+                }
+                return res.status(503).json({
+                  error: released
+                    ? 'The completion text could not be sent — the closeout is saved but NOT finalized. Retry the closeout to send it.'
+                    : `The completion text could not be sent — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+                  code: 'completion_sms_send_failed',
+                  ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+                  serviceRecordId: record.id,
+                });
+              }
             }
           } else {
             Object.assign(smsNotesDelta, {
@@ -12946,8 +12999,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // reached the customer — a "not delivered, re-send it" bell would
         // direct a duplicate completion / pay-link text, so it is logged as
         // an accepted-but-unaudited handoff instead (GitHub Codex r2 P1).
-        if (e.providerOutcome?.sent === true) {
-          logger.warn(`[dispatch] Completion SMS for service_record ${record.id} was accepted by the provider (${e.providerOutcome.providerMessageId || 'no message id'}) but its audit failed — no failure bell, do not re-send`);
+        // completionSmsProviderAccepted covers the route-local writes AFTER
+        // acceptance (the 'sent' notes merge, event inserts) that throw a
+        // plain error with no providerOutcome (GitHub Codex r3 P1).
+        if (completionSmsProviderAccepted || e.providerOutcome?.sent === true) {
+          logger.warn(`[dispatch] Completion SMS for service_record ${record.id} was accepted by the provider (${e.providerOutcome?.providerMessageId || 'no message id'}) but a post-send write failed — no failure bell, do not re-send`);
         } else {
           const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
           await alertCompletionSmsFailed({

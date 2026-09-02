@@ -855,6 +855,21 @@ export function completionResumeOwed(serviceId) {
   }
 }
 
+// The completion route's "committed but NOT finalized" 503s: the closeout
+// row is saved, the attempt was released to the immediately-resumable state,
+// and a re-submit under the same key resumes the missing side effect. Every
+// code here gets the same treatment in handleSubmit — the durable reopen
+// marker plus the committed-body pin so the retry replays byte-for-byte
+// (a rebuilt body can 409 completion_resume_payload_mismatch).
+export const COMPLETION_RESUME_OWED_CODES = new Set([
+  "backfill_invoice_mint_failed",      // REQUIRED completion invoice did not mint
+  "service_report_token_mint_failed",  // report link could not be minted; report text withheld
+  "completion_sms_send_failed",        // completion text failed at the provider / requeue
+]);
+export function completionResumeOwedError(error) {
+  return COMPLETION_RESUME_OWED_CODES.has(error?.code);
+}
+
 // Station edits a completion would silently DROP while the registry is
 // loading or failed to load: the payload posts no station entries in that
 // state (an unloaded registry is unavailable, not empty), but a
@@ -14108,15 +14123,18 @@ export function CompletionPanel({
         }
         return;
       }
-      if (e?.code === "backfill_invoice_mint_failed") {
-        // The closeout committed but its REQUIRED invoice didn't mint. Mark
-        // the visit as owing a resume so the dispatch page can reopen this
-        // panel for the (now completed) visit even after a reload — the
-        // re-submitted completion replays through the server's resume claim
-        // and retries the mint.
+      if (completionResumeOwedError(e)) {
+        // The closeout committed but a required side effect (invoice mint,
+        // report link, completion text) didn't finish. Mark the visit as
+        // owing a resume so the dispatch page can reopen this panel for the
+        // (now completed) visit even after a reload, and pin the committed
+        // chain so the re-submit replays the SAME body through the server's
+        // resume claim — a rebuilt body (fresh station capturedAt) would 409
+        // completion_resume_payload_mismatch instead of resuming.
         try {
           localStorage.setItem(completionResumeOwedKey(service.id), "1");
         } catch { /* storage full — the mounted panel's retry still works */ }
+        sideEffectsCommittedRef.current = true;
       } else if (e?.code === "completion_resume_payload_mismatch") {
         // A marker-resume rebuilt from the draft can differ from the
         // committed body (photos live only in memory). The closeout itself
