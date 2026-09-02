@@ -285,6 +285,40 @@ describe('POST /calls/:id/adopt-recording', () => {
     expect(processor.processRecording).toHaveBeenCalledWith(SID, { force: true, operator: true });
   });
 
+  test('with another callback-parked recording still waiting, the card stays open and is retargeted to it', async () => {
+    const OTHER = 'RE' + '3'.repeat(32);
+    const row = call();
+    row.metadata.additional_recordings.push({ recording_sid: OTHER, recording_url: 'https://api.twilio.com/x/RE3.mp3', recording_duration_seconds: 20, received_at: 'T2', parked_because: 'write_contended' });
+    const updates = mockDb([row]);
+    processor.processRecording.mockResolvedValue({ success: true, callSid: SID });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ adopted: PARKED, remaining_for_review: 1 });
+    });
+    const card = updates.find((u) => u.table === 'triage_items');
+    expect(card.patch.status).toBeUndefined();
+    expect(JSON.parse(card.patch.payload.bindings[0])).toMatchObject({ recording_sid: OTHER, parked_because: 'write_contended', kept_recording_sid: PARKED, remaining_for_review: 1 });
+  });
+
+  test('a review-card update that fails is reported as a warning on the successful adoption, never swallowed', async () => {
+    mockDb([call()]);
+    processor.processRecording.mockResolvedValue({ success: true, callSid: SID });
+    const realImpl = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const b = realImpl(table);
+      if (table === 'triage_items') b.update = () => Promise.reject(new Error('deadlock detected'));
+      return b;
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ success: true, adopted: PARKED });
+      expect(body.warning).toMatch(/review card could not be updated/);
+    });
+  });
+
   test('a deferred or failed reprocess keeps the review card open and reports the call as queued, never as done', async () => {
     for (const outcome of [
       { success: false, skipped: true, reason: 'recording_not_ready' },

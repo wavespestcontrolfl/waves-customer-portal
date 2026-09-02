@@ -370,6 +370,32 @@ describe('POST /recording-status', () => {
     expect(tables.call_log[0]).toEqual(before);
   });
 
+  test('a park that loses to a PAN stamp between the read and the write deletes the incoming recording instead of parking it', async () => {
+    // The handler reads a processed, unquarantined row and decides "park";
+    // the transcription webhook stamps pan_detected before the park UPDATE
+    // runs. The parked list must stay empty, no review card may name audio
+    // that no longer exists, and the recording that just arrived is the one
+    // deleted at Twilio.
+    tables.call_log.push({
+      id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 45,
+      processing_status: 'processed', transcription: 'Agent: fixture line.', metadata: null,
+    });
+    let stamped = false;
+    tables.__afterFirst = (row) => {
+      if (!stamped && row.twilio_call_sid === PARENT) { stamped = true; row.transcription_metadata = JSON.stringify({ pan_detected: true }); }
+    };
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    const row = tables.call_log[0];
+    expect(row.recording_sid).toBe(REC_1);
+    expect(metaOf(row).additional_recordings).toBeUndefined();
+    expect(tables.triage_items).toHaveLength(0);
+    expect(processor.quarantineCardRecording).toHaveBeenCalledTimes(1);
+    expect(processor.quarantineCardRecording).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'c1', recording_sid: REC_2, recording_url: `${URL_2}.mp3` }),
+      { source: 'recording_status_post_quarantine_park' },
+    );
+  });
+
   test('parking is idempotent per RecordingSid — a retried callback appends once', async () => {
     tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: 'processing' });
     await post('/recording-status', recordingCallback());

@@ -56,19 +56,47 @@ const PROCESS_RESULT_CLASS = {
 };
 const ADMIN_BRIDGE_PHONE_KEYS = new Set(["9415993489"]);
 
-// Wrap the first case-insensitive occurrence of `quote` in a <mark> so the
+// The server grounds commitment evidence with call-commitments.js
+// normalizeForMatch (lower-case; every run of non-alphanumerics is one
+// space). Mirror it here with a map from each normalized character back to
+// its offset in the original text, so a quote the server accepted always
+// finds its words in the transcript — a missing apostrophe or comma used to
+// leave the Jump action pointing at nothing.
+function normalizeWithOffsets(text) {
+  const src = String(text);
+  let norm = "";
+  const offsets = [];
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i].toLowerCase();
+    if (ch.length === 1 && /[a-z0-9]/.test(ch)) {
+      norm += ch;
+      offsets.push(i);
+    } else if (norm.length && norm[norm.length - 1] !== " ") {
+      norm += " ";
+      offsets.push(i);
+    }
+  }
+  return { norm, offsets };
+}
+
+// Wrap the first normalized occurrence of `quote` in a <mark> so the
 // evidence jump lands on the words. Plain text when there is no match.
 export function renderTranscriptWithHighlight(text, quote, id) {
   if (!quote || !text) return text;
-  const at = String(text).toLowerCase().indexOf(String(quote).toLowerCase());
+  const q = normalizeWithOffsets(quote).norm.trim();
+  if (!q) return text;
+  const { norm, offsets } = normalizeWithOffsets(text);
+  const at = norm.indexOf(q);
   if (at < 0) return text;
+  const start = offsets[at];
+  const end = offsets[at + q.length - 1] + 1;
   return (
     <>
-      {text.slice(0, at)}
+      {text.slice(0, start)}
       <mark id={`call-transcript-mark-${id}`} className="not-italic bg-zinc-200 text-ink-primary rounded-xs px-0.5">
-        {text.slice(at, at + quote.length)}
+        {text.slice(start, end)}
       </mark>
-      {text.slice(at + quote.length)}
+      {text.slice(end)}
     </>
   );
 }

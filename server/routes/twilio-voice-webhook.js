@@ -270,6 +270,12 @@ function builtinTranscriptMayReplace(row) {
 // so the office can listen and adopt it deliberately (the adopt-recording
 // admin action swaps it in and force-reprocesses). Idempotent per
 // RecordingSid: a retried callback does not append twice or file twice.
+// Carried by every write that would keep audio on the row — the attach
+// UPDATE and the park UPDATE alike — so a PAN stamp landing between the
+// handler's read and its write makes the write skip instead of storing
+// card audio on a quarantined call.
+const NOT_PAN_QUARANTINED_SQL = "(transcription_metadata IS NULL OR (transcription_metadata::jsonb ->> 'pan_detected') IS DISTINCT FROM 'true')";
+
 async function parkAdditionalRecording(row, extra) {
   const entry = {
     recording_sid: extra.recording_sid || null,
@@ -278,8 +284,9 @@ async function parkAdditionalRecording(row, extra) {
     received_at: new Date().toISOString(),
     parked_because: extra.reason || null,
   };
-  await db('call_log')
+  const appended = await db('call_log')
     .where({ id: row.id })
+    .whereRaw(NOT_PAN_QUARANTINED_SQL)
     // Append only when this RecordingSid is not already parked — a retry of
     // the same callback must not grow the list.
     .whereRaw(
@@ -293,6 +300,22 @@ async function parkAdditionalRecording(row, extra) {
         [JSON.stringify([entry])],
       ),
     });
+  if (appended === 0) {
+    // Either a retry of an already-parked RecordingSid (nothing to add; the
+    // review card below is idempotent) or a PAN stamp landed after the
+    // handler read the row. A quarantined call never keeps audio, parked or
+    // attached: delete the incoming recording at Twilio instead of parking
+    // it, and file no card for audio that no longer exists.
+    const now = await db('call_log').where({ id: row.id }).first('transcription_metadata');
+    if (isPanQuarantinedRow(now)) {
+      logger.warn(`[recording-status] recording ${maskSid(entry.recording_sid)} for ${maskSid(row.twilio_call_sid)} arrived as the call was PAN-quarantined — deleting instead of parking`);
+      await require('../services/call-recording-processor').quarantineCardRecording(
+        { ...row, recording_sid: entry.recording_sid, recording_url: entry.recording_url },
+        { source: 'recording_status_post_quarantine_park' },
+      ).catch((e) => logger.error(`[recording-status] post-quarantine parked recording delete failed: ${e.message}`));
+      return { parked: false, quarantined: true };
+    }
+  }
   try {
     const { buildTriageItem } = require('../services/call-routing-gates');
     const item = buildTriageItem({
@@ -314,6 +337,7 @@ async function parkAdditionalRecording(row, extra) {
   } catch (err) {
     logger.warn(`[recording-status] additional-recording review card skipped for ${maskSid(row.twilio_call_sid)}: ${err.message}`);
   }
+  return { parked: true, quarantined: false };
 }
 
 function sanitizeVoiceProviderError(value) {
@@ -1542,12 +1566,13 @@ router.post('/recording-status', async (req, res) => {
       // whatever still cannot be written is parked, so a RecordingSid is
       // never dropped on the floor — Twilio gets a 200 and will not retry.
       const park = async (row, reason) => {
-        await parkAdditionalRecording(row, {
+        const outcome = await parkAdditionalRecording(row, {
           recording_sid: RecordingSid,
           recording_url: recordingData.recording_url,
           recording_duration_seconds: recordingData.recording_duration_seconds,
           reason,
         });
+        if (outcome.quarantined) return;
         logger.warn(`[recording-status] recording ${maskSid(RecordingSid)} for ${maskSid(row.twilio_call_sid)} parked for review (${reason}) — recording_url kept`);
       };
       for (let round = 0; round < 2 && targetRow && !isPanQuarantinedRow(targetRow); round += 1) {

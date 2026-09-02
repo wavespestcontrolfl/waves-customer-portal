@@ -441,13 +441,40 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     const result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true });
     if (result?.success === true) {
       // Only a completed pass closes the review card; a deferred or failed
-      // one leaves it open with the row queued for the sweep.
-      await db('triage_items')
+      // one leaves it open with the row queued for the sweep. And it closes
+      // only when no other parked recording still awaits a decision — the
+      // recording this adoption replaced stays in the list as evidence, not
+      // as a review item; any other callback-parked entry keeps the card
+      // open, retargeted to it, so it does not vanish from the inbox with no
+      // operator decision recorded.
+      const stillForReview = remaining.filter((r) => r.parked_because !== 'replaced_by_operator');
+      const openCard = db('triage_items')
         .where({ call_log_id: call.id, reason_code: 'additional_recording' })
-        .whereIn('status', ['open', 'in_progress'])
-        .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Adopted ${chosen.recording_sid}` })
-        .catch(() => {});
-      return res.json({ success: true, adopted: chosen.recording_sid, result });
+        .whereIn('status', ['open', 'in_progress']);
+      // The adoption and reprocess are done either way; a card update that
+      // fails is reported, not swallowed, so a stale card never hides
+      // behind a plain success.
+      let warning = null;
+      try {
+        if (stillForReview.length === 0) {
+          await openCard.update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Adopted ${chosen.recording_sid}` });
+        } else {
+          const next = stillForReview[0];
+          await openCard.update({
+            payload: db.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+              recording_sid: next.recording_sid,
+              recording_duration_seconds: next.recording_duration_seconds ?? null,
+              parked_because: next.parked_because,
+              kept_recording_sid: chosen.recording_sid,
+              remaining_for_review: stillForReview.length,
+            })]),
+          });
+        }
+      } catch (cardErr) {
+        logger.warn(`[call-recordings] additional-recording review card not updated for call ${call.id}: ${cardErr.message}`);
+        warning = 'The recording was adopted and processed, but its review card could not be updated; resolve it from the Triage inbox.';
+      }
+      return res.json({ success: true, adopted: chosen.recording_sid, remaining_for_review: stillForReview.length, ...(warning ? { warning } : {}), result });
     }
     if (result?.skipped && result?.reason === 'already_processing') {
       return res.status(409).json({ ...result, adopted: chosen.recording_sid, error: 'The recording was adopted but another pass is still working this call; the sweep will process the adopted audio once it goes quiet.' });
