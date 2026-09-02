@@ -186,7 +186,7 @@ const isLeadsTable = (value) => /^(?:[^.\s]+\.)?leads(?:\s+as\s+\S+)?$/i.test(va
 // Knex's optional second TABLE-OPTIONS argument — `db('leads', { only:
 // true })`, or a stored `opts` / `config.tableOpts` — after a table token.
 // (The dynamic pass parses the argument list structurally: tableArg.)
-const TABLE_OPTS = String.raw`\s*(?:,\s*(?:\{[^{}]*\}|[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*)?`;
+const TABLE_OPTS = String.raw`\s*(?:,\s*(?:\{[^{}]*\}|[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*(?:\s*\((?:[^()]|\([^()]*\))*\))?)\s*)?`;
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // The knex builder shapes, built for a given "table token": the quoted
@@ -253,9 +253,9 @@ function insertFirstMatches(code, argRe) {
 // (`'INSERT ' + 'INTO leads'`) — constant SQL split at token boundaries is
 // still one statement. (A mid-word split is deliberate obfuscation beyond
 // textual scanning.)
-// …and the JavaScript ESCAPES for whitespace (`'INSERT\\nINTO leads'` is
-// whitespace at runtime).
-const RAW_SEP = String.raw`(?:\s*${Q}\s*\+\s*${Q}\s*|\s*\/\*[\s\S]*?\*\/\s*|\s*--[^\n]*(?:\n|\\n)\s*|(?:\s|\\[ntr])+)`;
+// …and every JavaScript ESCAPE that is whitespace at runtime (\n \t \r \f
+// \v and their \x / \u spellings).
+const RAW_SEP = String.raw`(?:\s*${Q}\s*\+\s*${Q}\s*|\s*\/\*[\s\S]*?\*\/\s*|\s*--[^\n]*(?:\n|\\n)\s*|(?:\s|\\[ntrfv]|\\x0[9A-Da-d]|\\u000[9A-Da-d])+)`;
 // Optional schema qualifier: a bare or quoted identifier — a DOUBLE-quoted
 // one may hold any punctuation PostgreSQL allows ("tenant-one"."leads").
 const SQL_SCHEMA = String.raw`(?:(?:"[^"\n]+"|${Q}?[\w$]+${Q}?)\s*\.\s*)?`;
@@ -558,6 +558,40 @@ function balancedBodyFactories(src, bodyRe, localDeclRes = [], captureAt = null)
 // A leads builder handed to one of these is created at the CALL site, which
 // is therefore the registered writer. A helper that only reads its builder
 // parameter (`whereBuilderWarrantyExpiring(qb)`) is not one.
+// Bindings from DESTRUCTURING declarations whose right-hand side is an
+// array / object literal: `const [a, b] = [x, y]` pairs positionally, `const
+// { k: alias } = { k: v }` by key. Each binding whose value satisfies
+// `isBuilder(rhsText)` is returned as { name, index (keyword start) } so
+// the caller can note it like an ordinary declaration.
+function destructuredBindings(src, isBuilder) {
+  const out = [];
+  const arrRe = /\b(?:const|let|var)\s*\[([^\]]*)\]\s*=\s*\[((?:[^\[\]]|\[[^\[\]]*\])*)\]/g;
+  let m;
+  while ((m = arrRe.exec(src))) {
+    const lhs = splitTopLevel(m[1]);
+    const rhs = splitTopLevel(m[2]);
+    lhs.forEach((l, i) => {
+      const name = l.trim().replace(/^\.\.\./, '').split(/[=\s]/)[0];
+      if (/^[A-Za-z_$][\w$]*$/.test(name) && rhs[i] !== undefined && isBuilder(rhs[i])) out.push({ name, index: m.index, 0: m[0], rhs: rhs[i] });
+    });
+  }
+  const objRe = /\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g;
+  while ((m = objRe.exec(src))) {
+    const values = new Map();
+    for (const part of splitTopLevel(m[2])) {
+      const kv = part.match(/^\s*([A-Za-z_$][\w$]*)\s*:\s*([\s\S]*)$/);
+      if (kv) values.set(kv[1], kv[2]);
+    }
+    for (const part of splitTopLevel(m[1])) {
+      const kv = part.trim().match(/^([A-Za-z_$][\w$]*)\s*(?::\s*([A-Za-z_$][\w$]*))?/);
+      if (!kv) continue;
+      const rhs = values.get(kv[1]);
+      if (rhs !== undefined && isBuilder(rhs)) out.push({ name: kv[2] || kv[1], index: m.index, 0: m[0], rhs });
+    }
+  }
+  return out;
+}
+
 // Insertion helpers IMPORTED from a sibling module — `const { writeRow } =
 // require('./writers')` / `import { writeRow } from './writers'`: the
 // module is read (relative specifiers only; a package cannot be a Waves
@@ -582,7 +616,14 @@ function relativeImports(src, filePath) {
     // named bindings.
     if (m[9]) out.push({ resolved, ns: m[9] });
     const ns = m[5] || m[7];
-    if (ns) { out.push({ resolved, ns }); continue; }
+    if (ns) {
+      // `const writeRow = require('./writers').writeRow` (or ['writeRow'])
+      // — a MEMBER extracted straight off the require is a named binding.
+      const member = m[5] ? src.slice(m.index + m[0].length).match(/^\s*(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*['"]([A-Za-z_$][\w$]*)['"]\s*\])/) : null;
+      if (member) { out.push({ resolved, bindings: [[member[1] || member[2], ns]] }); continue; }
+      out.push({ resolved, ns });
+      continue;
+    }
     const bindings = (m[1] || m[3] || m[10] || '').split(',')
       .map((part) => part.split(/\s*(?::|\bas\b)\s*/).map((x) => x && x.trim()))
       .filter(([orig]) => orig);
@@ -1021,6 +1062,10 @@ function aliasInsertPatterns(src, token, filePath, imports = 'all') {
   // (non-awaited) initializer is a stored builder.
   let cnd;
   while ((cnd = condDeclRe.exec(src))) { builders.add(cnd[1]); noteDecl(cnd[1], cnd); }
+  // DESTRUCTURED initializers — `const [query] = [db('leads')]`, `const { q }
+  // = { q: db('leads') }` — bind the element / key that holds a builder.
+  const headTest = new RegExp(String.raw`^\s*[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)\s*$`);
+  for (const d of destructuredBindings(src, (rhs) => headTest.test(rhs))) { builders.add(d.name); noteDecl(d.name, d); }
   // Builders stored in OBJECT PROPERTIES — `const queries = { lead:
   // db('leads') }; queries.lead.insert(row)`. The use pattern keys on the
   // property name reached through any object.
@@ -1048,11 +1093,17 @@ function aliasInsertPatterns(src, token, filePath, imports = 'all') {
     ...(imports === 'only' ? [] : insertingHelperNames(src)),
     ...(imports === 'skip' ? [] : importedInsertingHelpers(src, filePath)),
   ]);
+  // The helper call's ARGUMENT LIST is walked balanced, then searched for a
+  // builder head — `writeRow((db('leads')), row)` included.
+  const headInArgs = new RegExp(String.raw`[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`);
   for (const helper of helperNames) {
-    patternsExtra.push(new RegExp(
-      String.raw`${helperCallee(helper)}\s*\((?:[^()]|\([^()]*\))*?[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`,
-      'g'
-    ));
+    const re = new RegExp(String.raw`${helperCallee(helper)}\s*(?=\()`, 'g');
+    re.helperArgs = (m, bareView) => {
+      const end = afterBalanced(bareView, m.index + m[0].length);
+      if (end === -1 || !headInArgs.test(src.slice(m.index + m[0].length, end))) return -1;
+      return end;
+    };
+    patternsExtra.push(re);
   }
   // Arrow FACTORY returning the builder — `const baseQuery = () =>
   // db('leads'); … baseQuery().insert(row)` (the v2-promotion-readiness
@@ -1329,7 +1380,9 @@ function tableArg(code, open, { multi = false } = {}) {
   parts.push(code.slice(prev, k));
   if (!multi) {
     if (parts.length > 2) return null;
-    if (parts.length === 2 && !/^\s*(?:\{[\s\S]*\}|[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*$/.test(parts[1])) return null;
+    // Options: an object literal, a stored identifier / member path, or a
+    // CALL producing them (`getTableOptions()`).
+    if (parts.length === 2 && !/^\s*(?:\{[\s\S]*\}|[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*(?:\s*\([\s\S]*\))?)\s*$/.test(parts[1])) return null;
   }
   return { expr: parts[0], end: k + 1 };
 }
@@ -1417,11 +1470,22 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     ...(imports === 'skip' ? [] : importedInsertingHelpers(src, filePath)),
   ]);
   for (const helper of dynHelpers) {
-    const useRe = new RegExp(String.raw`${helperCallee(helper)}\s*\((?:[^()]|\([^()]*\))*?[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(`, 'g');
+    const useRe = new RegExp(String.raw`${helperCallee(helper)}\s*(?=\()`, 'g');
+    const headRe = /[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(/g;
     let use;
     while ((use = useRe.exec(code))) {
-      const arg = argOf(use);
-      if (arg) record(use.index, arg.end - use.index, arg.expr);
+      // Walk the argument list balanced, then try each builder head inside
+      // it for a dynamic table argument.
+      const open = use.index + use[0].length;
+      const end = afterBalanced(code, open);
+      if (end === -1) continue;
+      const args = code.slice(open, end);
+      headRe.lastIndex = 0;
+      let h;
+      while ((h = headRe.exec(args))) {
+        const arg = tableArg(code, open + h.index + h[0].length - 1);
+        if (arg && arg.expr.trim()) { record(use.index, end - use.index, arg.expr); break; }
+      }
     }
   }
   // Stored builders over a dynamic table — `const target = db(table);
@@ -1456,6 +1520,19 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     if (!arg || !arg.expr.trim() || isResolved(arg.expr)) continue;
     if (!dynBuilders.has(cnd[1])) dynBuilders.set(cnd[1], arg.expr);
     noteDynDecl(cnd[1], cnd);
+  }
+  // Destructured initializers over a dynamic table — the dynamic mirror.
+  const dynRhsExpr = (rhs) => {
+    const h = rhs.match(/^\s*[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(/);
+    if (!h) return null;
+    const a = tableArg(rhs, h[0].length - 1);
+    return a && a.expr.trim() && a.end === rhs.trimEnd().length && !isResolved(a.expr) ? a.expr : null;
+  };
+  if (hasInsert) {
+    for (const d of destructuredBindings(code, (rhs) => dynRhsExpr(rhs) !== null)) {
+      if (!dynBuilders.has(d.name)) dynBuilders.set(d.name, dynRhsExpr(d.rhs));
+      noteDynDecl(d.name, d);
+    }
   }
   // Builders stored in OBJECT PROPERTIES over a dynamic table —
   // `const queries = { lead: db(table) }; queries.lead.insert(row)`.
@@ -1666,6 +1743,11 @@ function scanSourceForLeadInserts(src, filePath, imports = 'all') {
       // The chain walk first — it is cheap and rejects most head matches —
       // then the scope checks, which scan the file.
       let len = m[0].length;
+      if (pattern.helperArgs) {
+        const end = pattern.helperArgs(m, bare);
+        if (end === -1) continue;
+        len = end - m.index;
+      }
       if (pattern.chain) {
         let from = m.index + m[0].length;
         if (pattern.callArgs) { from = afterBalanced(bare, from); if (from === -1) continue; }
@@ -1789,6 +1871,11 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['triple-nested chain arguments', "await db('leads').modify(qb => qb.whereIn('id', ids.map(id => normalize(id)))).insert(row);"],
     ['deeply nested insert payload before .into', "await db.insert(rows.map(row => normalize(row, opts.get('k')))).into('leads');"],
     ['insert payload before .table', "await db.insert(rows.map(row => normalize(row))).table('leads');"],
+    ['destructured array stored builder', "const [query] = [db('leads')];\nawait query.insert(row);"],
+    ['destructured object stored builder', "const { q: query } = { q: db('leads'), n: 1 };\nawait query.insert(row);"],
+    ['computed table-options argument', "await db('leads', getTableOptions()).insert(row);"],
+    ['form-feed escape inside raw SQL', "await db.raw('INSERT\\fINTO leads(name) VALUES (?)', [name]);"],
+    ['parenthesized builder passed to a helper', "function writeRow(builder, row) { return builder.insert(row); }\nawait writeRow((db('leads')), row);"],
     ['escaped newline inside raw SQL', "await db.raw('INSERT\\nINTO leads(name) VALUES (?)', [name]);"],
     ['optional factory invocation before the table', "await getDb?.()('leads').insert(row);"],
     ['punctuated schema in a knex literal', "await db('tenant-one.leads').insert(row);"],
@@ -1940,6 +2027,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(found("const { writeRow } = require('./barrel');\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
     expect(found("const { writeRow } = require('./barrel-spread');\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
     expect(found("import { writeRow } from './barrel.mjs';\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
+    expect(found("const writeRow = require('./writers').writeRow;\nawait writeRow(db('leads'), row);", route)).toEqual(["await writeRow(db('leads'), row);"]);
+    expect(found("const write = require('./writers')['writeRow'];\nawait write(db('leads'), row);", route)).toEqual(["await write(db('leads'), row);"]);
     // Local export ALIASES — the fact travels under the exported name.
     fs.writeFileSync(path.join(dir, 'alias-exports.js'), "function writeRow(qb, row) {\n  return qb.insert(row);\n}\nconst leadQuery = () => db('leads');\nexports.persist = writeRow;\nmodule.exports = { save: writeRow, leadQ: leadQuery, leadQuery };\n");
     expect(found("const { save } = require('./alias-exports');\nawait save(db('leads'), row);", route)).toEqual(["await save(db('leads'), row);"]);
@@ -2034,6 +2123,13 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(deepPayload[0].expr).toBe('table');
     const defaultParam = scanSourceForDynamicTableInserts("const TABLE = 'audit';\nfunction write(TABLE = resolveTable(kind), row) {\n  return db(TABLE).insert(row);\n}");
     expect(defaultParam).toHaveLength(1);
+    const destructuredDyn = scanSourceForDynamicTableInserts('const [query] = [db(table)];\nawait query.insert(row);');
+    expect(destructuredDyn).toHaveLength(1);
+    expect(destructuredDyn[0].expr).toBe('table');
+    const computedOpts = scanSourceForDynamicTableInserts('await db(table, getTableOptions()).insert(row);');
+    expect(computedOpts).toHaveLength(1);
+    const parenHelper = scanSourceForDynamicTableInserts('function writeRow(builder, row) { return builder.insert(row); }\nawait writeRow((db(table)), row);');
+    expect(parenHelper).toHaveLength(1);
     const optionalFactory = scanSourceForDynamicTableInserts('await getDb?.()(table).insert(row);');
     expect(optionalFactory).toHaveLength(1);
     const destructuredHelper = scanSourceForDynamicTableInserts('function writeRow({ qb }, row) { return qb.insert(row); }\nawait writeRow({ qb: db(table) }, row);');
@@ -2327,6 +2423,30 @@ describe('lead-writer registry (#3137 groundwork)', () => {
               if (param && !governed.has(param)) { governed.add(param); grew = true; }
             }
           }
+        }
+        // A local helper that RETURNS a governed value (`function configFor(
+        // type) { return TYPES[type]; }`) hands out the same object: its
+        // CALL is a governed head for the mutation checks, and a binding of
+        // its result joins the governed set.
+        const returners = new Set();
+        let grewR = true;
+        while (grewR) {
+          grewR = false;
+          for (const fn of balancedFunctionBodies(bare)) {
+            if (returners.has(fn.name)) continue;
+            const returnsGoverned = [...governed, ...returners].some((n) => new RegExp(String.raw`\breturn\s+${escapeRe(n)}\b`).test(fn.body)
+              || new RegExp(String.raw`\breturn\s+${escapeRe(n)}\s*\(`).test(fn.body));
+            if (returnsGoverned) { returners.add(fn.name); grewR = true; }
+          }
+        }
+        for (const r of returners) {
+          const callHead = String.raw`\b${escapeRe(r)}\s*\((?:[^()]|\([^()]*\))*\)`;
+          const viaCall = bare.match(new RegExp(String.raw`${callHead}\s*(?:\.[\w$]+|\[[^\]]*\])+\s*(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*\/%&|^])?=(?!=)|(?:Object\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)|Reflect\s*\.\s*(?:set|defineProperty|deleteProperty|setPrototypeOf))\s*\(\s*${callHead}`));
+          expect({ file: w.file, returner: r, mutation: viaCall && viaCall[0].trim() })
+            .toEqual({ file: w.file, returner: r, mutation: null });
+          const bindRe = new RegExp(String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*${escapeRe(r)}\s*\(`, 'g');
+          let bm;
+          while ((bm = bindRe.exec(bare))) governed.add(bm[1]);
         }
         // A CLONE of a governed value (`{ ...TYPES[type], table: 'leads' }`)
         // can override the table inside the literal, where no property
