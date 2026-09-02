@@ -468,6 +468,14 @@ describe('nextCallStatus (pure) and POST /call-status', () => {
     }
   });
 
+  test('a duplicate "completed" carrying CallDuration "0" keeps the real duration; a larger one advances it', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, direction: 'outbound-api', status: 'completed', duration_seconds: 95 });
+    await post('/call-status', { CallSid: PARENT, CallStatus: 'completed', CallDuration: '0', Direction: 'outbound-api', From: '+15555550100', To: '+15555550101' });
+    expect(tables.call_log[0]).toMatchObject({ status: 'completed', duration_seconds: 95 });
+    await post('/call-status', { CallSid: PARENT, CallStatus: 'completed', CallDuration: '120', Direction: 'outbound-api', From: '+15555550100', To: '+15555550101' });
+    expect(tables.call_log[0].duration_seconds).toBe(120);
+  });
+
   test('a genuine "completed" after "ringing" still lands with its duration', async () => {
     tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, direction: 'outbound-api', status: 'ringing', duration_seconds: 0 });
     await post('/call-status', { CallSid: PARENT, CallStatus: 'completed', CallDuration: '61', Direction: 'outbound-api', From: '+15555550100', To: '+15555550101' });

@@ -2137,12 +2137,17 @@ router.post('/call-status', async (req, res) => {
         // zero a completed call's real length (which drops it from the
         // duration-gated recording sweeps).
         const status = nextCallStatus(existing.status, CallStatus);
-        const retained = status === existing.status && status !== CallStatus;
+        const incomingDuration = parseInt(CallDuration || 0) || 0;
+        // On a row that is already terminal the duration never decreases: a
+        // retried "completed" or a late leg callback can carry
+        // CallDuration "0" (a truthy string) and would otherwise zero the
+        // real length, dropping the call from the duration-gated sweeps.
+        const duration = TERMINAL_CALL_STATUSES.has(existing.status)
+          ? Math.max(Number(existing.duration_seconds) || 0, incomingDuration)
+          : (incomingDuration || Number(existing.duration_seconds) || 0);
         await trx('call_log').where('twilio_call_sid', CallSid).update({
           status,
-          duration_seconds: retained
-            ? (existing.duration_seconds || 0)
-            : parseInt(CallDuration || existing.duration_seconds || 0),
+          duration_seconds: duration,
           updated_at: new Date(),
         });
         return;

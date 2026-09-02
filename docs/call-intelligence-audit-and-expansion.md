@@ -166,6 +166,9 @@ Per file, with the proving test.
   for the records it is about to write); the paid-revenue figure is a
   separate aggregate over every later paid invoice in integer cents, not a
   sum of the capped display list.
+- Pre-push Codex round 15 (1 P1, fixed): on a terminal row the call duration
+  never decreases — a duplicate completed callback carrying "0" keeps the
+  real length.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 
