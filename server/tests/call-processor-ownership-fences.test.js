@@ -153,3 +153,29 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(gates).toContain("additional_recording: 'service_unknown',");
   });
 });
+
+// The recording-status webhook's replace fence refuses a swap only while
+// the row is load-bearing, so the recording loaded BEFORE the claim can be
+// replaced before the claim lands. The post-claim re-read must therefore
+// reload the recording and transcript columns, not just metadata — or the
+// pass transcribes the superseded audio against a row that now holds the
+// replacement (codex #3736 gh-r5).
+describe('processRecording re-reads the recording it is accountable for after the claim', () => {
+  const { body } = processRecordingBody();
+  const reread = body.indexOf("const claimedRow = await db('call_log').where({ id: call.id }).first(");
+  test('the post-claim read exists and selects the recording + transcript columns', () => {
+    expect(reread).toBeGreaterThan(-1);
+    const stmt = body.slice(reread, body.indexOf(');', reread));
+    for (const col of ['metadata', 'recording_url', 'recording_sid', 'transcription', 'transcription_provider', 'transcript_structured', 'transcription_metadata']) {
+      expect(stmt).toContain(`'${col}'`);
+    }
+    expect(body.slice(reread, reread + 1200)).toContain('Object.assign(call, claimedRow)');
+  });
+  test('the re-read happens after the claim and before the recording is transcribed', () => {
+    const claim = body.indexOf("processing_token: procToken,");
+    const transcribe = body.indexOf('await transcribeRecording(call.recording_url');
+    expect(claim).toBeGreaterThan(-1);
+    expect(transcribe).toBeGreaterThan(reread);
+    expect(reread).toBeGreaterThan(claim);
+  });
+});

@@ -302,6 +302,20 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(String(flag[0])).toContain('"recording_quarantined": false');
   });
 
+  test('a provenance write after a failed list read carries quarantine_lists_unread forward and keeps the quarantine INCOMPLETE (codex #3736 gh-r5)', async () => {
+    const processor = require('../services/call-recording-processor');
+    db.__state.call = { transcription_metadata: { pan_detected: true, pan_notified: true, recording_quarantined: false, quarantine_lists_unread: true } };
+    const out = await processor.withPanStamps('c-unread', { provider: 'openai', recording_quarantined: true });
+    expect(out.pan_detected).toBe(true);
+    expect(out.quarantine_lists_unread).toBe(true);
+    expect(out.recording_quarantined).toBe(false);
+    // Without the flag the stamp merge is unchanged: a complete quarantine stays complete.
+    db.__state.call = { transcription_metadata: { pan_detected: true, recording_quarantined: true } };
+    const complete = await processor.withPanStamps('c-complete', { provider: 'openai' });
+    expect(complete.recording_quarantined).toBe(true);
+    expect(complete.quarantine_lists_unread).toBeUndefined();
+  });
+
   test('a call with no primary recording completes once every listed recording is deleted', async () => {
     const processor = require('../services/call-recording-processor');
     const P = 'REparked000000000000000000000013';

@@ -729,6 +729,16 @@ async function withPanStamps(callId, metadata) {
       if (prior.quarantine_recording_sid && !out.quarantine_recording_sid) out.quarantine_recording_sid = prior.quarantine_recording_sid;
       if (Array.isArray(prior.quarantine_owed_sids) && prior.quarantine_owed_sids.length && !out.quarantine_owed_sids) out.quarantine_owed_sids = prior.quarantine_owed_sids;
       if (prior.pan_notified === true) out.pan_notified = true;
+      // The unread-lists flag is the INCOMPLETE marker recovery selects on
+      // (Codex #3736 r5 P1): a provenance write landing right after a
+      // failed list read must carry it — and must not present the
+      // quarantine as complete while lists that may still hold audio are
+      // unread. The helper's own list sweep is the only thing that clears
+      // it, on a successful re-read.
+      if (prior.quarantine_lists_unread === true) {
+        out.quarantine_lists_unread = true;
+        out.recording_quarantined = false;
+      }
     }
   } catch (err) {
     logger.warn(`[call-proc] pan-stamp merge failed for call ${callId}: ${err.message}`);
@@ -6674,8 +6684,26 @@ const CallRecordingProcessor = {
     // peer can write linkage state (every stamp/clear is token-fenced).
     // Inside the outer guard: a transient failure releases the claim to
     // the retry path instead of wedging the row at 'processing'.
-    const claimedRow = await db('call_log').where({ id: call.id }).first('metadata');
-    if (claimedRow) call.metadata = claimedRow.metadata;
+    //
+    // The recording and transcript columns are re-read for the same
+    // reason (Codex #3736 r5 P1): the recording-status webhook's replace
+    // fence only refuses a swap while the row is load-bearing, so
+    // recording A loaded above can be replaced by B between that load and
+    // the claim — this pass would then hold the claim and transcribe A
+    // against a row whose audio (and cleared transcript) is B. From the
+    // claim on, the status fence refuses every swap, so this read is the
+    // recording the pass is accountable for.
+    const claimedRow = await db('call_log').where({ id: call.id }).first(
+      'metadata', 'recording_url', 'recording_sid', 'recording_duration_seconds',
+      'transcription', 'transcription_provider', 'transcript_structured', 'transcription_metadata',
+    );
+    if (claimedRow) {
+      const before = call.recording_sid || null;
+      Object.assign(call, claimedRow);
+      if ((call.recording_sid || null) !== before) {
+        logger.warn(`[call-proc] ${maskSid(callSid)}: recording changed between load and claim (${maskSid(before)} → ${maskSid(call.recording_sid)}) — processing the current one`);
+      }
+    }
     // A customer link set by a PERSON (admin relink/unlink — metadata.
     // customer_link_override) outranks everything this pass would resolve
     // from the transcript: it seeds the pre-linked customer, the phantom
