@@ -2354,7 +2354,9 @@ function assertPerApplicationAddOnPriced({
   if (!perApplicationUnresolved || preservesExistingMembership || suppressRecurringConversion) return;
   if (billingTerm === 'prepay_annual') return;
   if (!(customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)) return;
-  const err = new Error('This add-on\'s per-visit price could not be derived from the accepted plan, and it must not bill at the account\'s existing per-visit fee — nothing was booked. Please call the office to add it.');
+  // Customer-facing (the public accept route returns it verbatim): pricing
+  // units say "per application", never "per visit" (AGENTS.md price copy).
+  const err = new Error('This add-on\'s per-application price could not be derived from the accepted plan, and it must not bill at the account\'s existing per-application fee — nothing was booked. Please call the office to add it.');
   err.code = 'PER_APPLICATION_ADD_ON_UNPRICED';
   // Same operational-error contract as the converter's other fail-closed
   // refusals (palmRecurringLineInvalidError): the public accept route
@@ -4405,8 +4407,8 @@ const EstimateConverter = {
       logger.warn(`[estimate-converter] per-application fee unresolved for estimate ${estimateId} (customer ${customerId}) — left NULL; completions bill nothing until it is set`);
       perApplicationFeeNotification = {
         type: 'billing',
-        title: 'Per-visit fee not set on a new per-application customer',
-        body: `Estimate #${estimateId} converted to per-application billing, but the per-visit charge could not be derived from the accepted plan (no billing cadence or visit count on the quote). Visits will complete with no billable amount until the fee is set — invoice the first visit by hand or re-quote.`,
+        title: 'Per-application fee not set on a new per-application customer',
+        body: `Estimate #${estimateId} converted to per-application billing, but the per-application charge could not be derived from the accepted plan (no billing cadence or visit count on the quote). Applications will complete with no billable amount until the fee is set — invoice the first application by hand or re-quote.`,
         options: {
           icon: '\u{1F4B3}',
           link: '/admin/customers',
