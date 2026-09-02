@@ -1291,7 +1291,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   // plan-rate review, commercial schedule) — dispatched post-commit exactly
   // like the accept route does.
   const NotificationService = require('./notification-service');
-  for (const key of ['commercialScheduleNotification', 'tierUpgradeNotification', 'planRateReviewNotification']) {
+  for (const key of ['commercialScheduleNotification', 'tierUpgradeNotification', 'planRateReviewNotification', 'perApplicationFeeNotification']) {
     const n = conversion?.[key];
     if (!n) continue;
     try {

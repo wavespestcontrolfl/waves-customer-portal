@@ -745,8 +745,13 @@ async function markEstimateManuallyAccepted({
         // message (convert monthly or bill the prepay manually) rather than a
         // generic 500. The trx rolls back either way, so no partial
         // customer/visit/term/invoice is left behind.
-        if (err && err.isOperational && err.statusCode === 422) {
-          throw httpError(err.message, 422);
+        // Every operational 4xx keeps its status and code (GH codex P1 on
+        // #3751): the unpriced per-application add-on refusal is a 409 the
+        // operator must see as re-quote guidance, not a generic 500.
+        if (err && err.isOperational && Number(err.statusCode) >= 400 && Number(err.statusCode) < 500) {
+          const operational = httpError(err.message, Number(err.statusCode));
+          if (err.code) operational.code = err.code;
+          throw operational;
         }
         // Surface the atomic overlap guard as a 409 that keeps its tag, so the
         // booking route can detect it and degrade to a standard booking with a
@@ -895,6 +900,21 @@ async function markEstimateManuallyAccepted({
         ).catch((err) => logger.warn(`[estimate-manual-acceptance] commercial-schedule admin notify failed for estimate ${acceptedEstimate.id}: ${err.message}`));
       } catch (err) {
         logger.warn(`[estimate-manual-acceptance] commercial-schedule admin notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
+      }
+    }
+    // Deferred per-application fee park (DATA-001) — same post-commit contract.
+    if (conversion?.perApplicationFeeNotification) {
+      const feeNotify = conversion.perApplicationFeeNotification;
+      try {
+        const NotificationService = require('./notification-service');
+        void NotificationService.notifyAdmin(
+          feeNotify.type,
+          feeNotify.title,
+          feeNotify.body,
+          feeNotify.options,
+        ).catch((err) => logger.warn(`[estimate-manual-acceptance] per-application fee admin notify failed for estimate ${acceptedEstimate.id}: ${err.message}`));
+      } catch (err) {
+        logger.warn(`[estimate-manual-acceptance] per-application fee admin notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
       }
     }
     // Deferred combined-tier upgrade review notification — same post-commit

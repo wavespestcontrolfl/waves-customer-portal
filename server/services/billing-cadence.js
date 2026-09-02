@@ -84,18 +84,42 @@ function intervalPriceFromAnnual(annualAmount, frequencyKey) {
  * plan's exact annual divided by its visits. Stamping the monthly display
  * rate instead undercollects on every calendar month without a visit
  * (tree & shrub audit 2026-07-18: six completions x annual/12 collects half
- * the accepted annual). Falls back to the cadence amount whenever the visit
- * count is unknown, so cadence-matched plans are byte-identical.
+ * the accepted annual). With an unknown visit count a per-visit cadence
+ * (quarterly / bimonthly / every-6-weeks — one charge per visit) still bills
+ * the cadence amount, and so does a MONTHLY cadence on residential pest
+ * control, whose monthly plan IS twelve visits (legacy rows encode
+ * { frequency: 'monthly' } with no visitsPerYear — pre-push codex P0). A
+ * monthly cadence on any other family is a plan's display rate whose visit
+ * count could not be read — a legacy count-less termite-monitoring row
+ * included, whose card discloses monthly installments that no per-check
+ * division honours (GH codex P0 r2 on #3751) — so the amount is unknown
+ * (null) and the converter parks the fee instead of repeating that
+ * under-collection (validation audit DATA-001, 2026-09-02). Callers pass
+ * the unit's serviceKey as that family evidence.
  */
 function perApplicationChargeAmount({
   billingCadence = null,
   annualRate,
   monthlyRate,
   visitsPerYear,
+  serviceKey = null,
 } = {}) {
   const cadenceAmount = roundMoney(billingCadence?.amount);
-  const visits = Number(visitsPerYear);
-  if (!Number.isFinite(visits) || visits <= 0) return cadenceAmount;
+  let visits = Number(visitsPerYear);
+  if (!Number.isFinite(visits) || visits <= 0) {
+    // Unknown visit count: a per-visit cadence still bills the cadence
+    // amount (one charge per visit by construction), and so does monthly
+    // residential pest — its monthly plan IS twelve visits. A MONTHLY
+    // cadence on any other family is the display rate of a plan whose
+    // visit count we could not read — a legacy count-less termite row
+    // included: its customer card discloses monthly installments, and
+    // dividing its annual by four station checks would bill $3X per check
+    // against that disclosure (GH codex P0 r2 on #3751). Stamping the
+    // monthly figure instead repeats the T&S 2026-07-18 under-collection,
+    // so the amount is unknown and the converter parks the fee (DATA-001).
+    if (String(billingCadence?.frequencyKey || '') !== 'monthly') return cadenceAmount;
+    return String(serviceKey || '') === 'pest_control' ? cadenceAmount : null;
+  }
   const annual = Number(annualRate || 0);
   const monthly = Number(monthlyRate ?? billingCadence?.monthlyRate ?? 0);
   // Same correspondence guard as resolveBillingCadence: an annual that
@@ -296,8 +320,15 @@ function resolveBillingCadence({
   estimateData,
   fallbackFrequencyKey = 'monthly',
 } = {}) {
-  const normalized = normalizeFrequencyKey(frequencyKey)
+  // `inferred` records whether the cadence came from the caller's key or
+  // the estimate's own data, as opposed to the fallback: a fallback-only
+  // cadence is a display convenience, never evidence of a per-application
+  // price (validation audit DATA-001 / pre-push codex P0 — the accept path
+  // stamped a fabricated quarterly amount on the reserved visit).
+  const evidenced = normalizeFrequencyKey(frequencyKey)
     || inferFrequencyKeyFromEstimateData(estimateData)
+    || null;
+  const normalized = evidenced
     || normalizeFrequencyKey(fallbackFrequencyKey)
     || 'monthly';
   const display = displayForFrequencyKey(normalized);
@@ -318,6 +349,7 @@ function resolveBillingCadence({
 
   return {
     frequencyKey: normalized,
+    inferred: !!evidenced,
     frequencyLabel: display.frequencyLabel,
     intervalMonths: billingIntervalMonthsForFrequencyKey(normalized),
     monthlyRate: roundMoney(monthlyRate),

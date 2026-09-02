@@ -4293,7 +4293,11 @@ router.post('/:id/mark-accepted', async (req, res, next) => {
     clearRouteCacheForRequest(req, ['/admin/dashboard']);
     res.json({ success: true, ...result });
   } catch (err) {
-    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    // err.code rides along (same shape as POST /:id/send): the converter's
+    // fail-closed pricing refusals (PER_APPLICATION_ADD_ON_UNPRICED,
+    // LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE — docs/public-route-contracts.md)
+    // reach the admin UI machine-distinguishable (pre-push codex P1 on #3751).
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     next(err);
   }
 });

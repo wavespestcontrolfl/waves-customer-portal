@@ -507,6 +507,17 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+`/accept` fails CLOSED when the accepted plan's money cannot be resolved
+(#3751): 409 `{ error, code }` with nothing booked and call-the-office copy
+— `PER_APPLICATION_ADD_ON_UNPRICED` (an established per-application
+customer adding a unit whose per-application price cannot be derived),
+`LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE` (an in-flight count-less termite
+quote whose card discloses monthly installments — re-issued by the
+office, never converted against its card), and
+`INVOICE_MODE_PER_APPLICATION_UNRESOLVED` (an invoice-mode recurring
+accept with no resolved per-application amount — never the monthly
+display rate). Same contract via the admin manual-acceptance path, which
+preserves these 4xx verbatim.
 `/select-tier` refuses any tier above the tier the ENGINE wrote for the
 estimate's qualifying services (400 `tier_not_available_for_current_services`
 + `maxTier`; downgrades stay allowed): the ceiling is the last opt-out

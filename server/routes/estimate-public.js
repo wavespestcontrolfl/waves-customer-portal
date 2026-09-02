@@ -1584,23 +1584,18 @@ function resolveRecurringFirstVisitAmountFromFrequency(frequency = {}, { prefMon
   return total > 0 ? total : null;
 }
 
-function resolveRecurringInvoiceFirstVisitAmount({
-  recurringFirstVisitAmount = null,
-  effectiveBillingCadence = null,
-  monthlyTotal = null,
-} = {}) {
+// The invoice-mode first invoice bills the RESOLVED per-application amount
+// the accept hands in — nothing else. The former fallbacks (the cadence
+// amount, then a synthesized monthly×3 "quarter") billed the monthly display
+// rate of a monthly-billed tier as if it were a per-application charge, or a
+// fabricated figure when the visit price was unresolved (pre-push P0 on
+// #3751). Unresolved now returns null and the draft refuses.
+function resolveRecurringInvoiceFirstVisitAmount({ recurringFirstVisitAmount = null } = {}) {
   const firstVisitAmount = Number(recurringFirstVisitAmount);
   if (Number.isFinite(firstVisitAmount) && firstVisitAmount > 0) {
     return Math.round(firstVisitAmount * 100) / 100;
   }
-  const cadenceAmount = Number(effectiveBillingCadence?.amount);
-  if (Number.isFinite(cadenceAmount) && cadenceAmount > 0) {
-    return Math.round(cadenceAmount * 100) / 100;
-  }
-  const monthly = Number(monthlyTotal);
-  return Number.isFinite(monthly) && monthly > 0
-    ? Math.round(monthly * 3 * 100) / 100
-    : null;
+  return null;
 }
 
 function estimateAcceptError(message, status = 422) {
@@ -1795,14 +1790,16 @@ function buildEstimateInvoiceModeDraft({
   }
 
   const monthly = roundInvoiceAmount(effectiveMonthlyTotal ?? estimate.monthly_total ?? estimate.monthlyTotal ?? 0) || 0;
-  const firstVisitInvoiceAmount = resolveRecurringInvoiceFirstVisitAmount({
-    recurringFirstVisitAmount,
-    effectiveBillingCadence,
-    monthlyTotal: monthly,
-  });
+  const firstVisitInvoiceAmount = resolveRecurringInvoiceFirstVisitAmount({ recurringFirstVisitAmount });
   const amount = roundInvoiceAmount(firstVisitInvoiceAmount);
   if (!(amount > 0)) {
-    throw estimateAcceptError('Invoice-mode recurring acceptance requires a billable first-visit amount.');
+    // Refuse rather than invoice the monthly display rate or a synthesized
+    // amount (pre-push P0 on #3751): the accept resolves the per-application
+    // price (first-application amount, else the tier's per-application
+    // price) and an unresolved one is a call-the-office program.
+    const err = estimateAcceptError('Invoice-mode recurring acceptance requires a resolved per-application amount — please call the office to confirm this program\'s pricing.', 409);
+    err.code = 'INVOICE_MODE_PER_APPLICATION_UNRESOLVED';
+    throw err;
   }
   const svcType = recurringInvoiceServiceLabel(recurringSvcList);
   const cadenceLabel = String(effectiveBillingCadence?.frequencyLabel || selectedFrequency?.label || 'Recurring').toLowerCase();
@@ -1822,8 +1819,11 @@ function buildEstimateInvoiceModeDraft({
     const recurringAnnual = Number(manualDiscountItemization?.recurringAnnual) || 0;
     const perApplication = Number(manualDiscountItemization?.perApplication) || 0;
     if (!(recurringAnnual > 0) && !(perApplication > 0)) return 0;
+    // A monthly-billed tier is invoiced PER APPLICATION here (never the
+    // monthly figure — owner ruling 2026-09-01), so its credit slice is the
+    // per-application slice, not annual/12 (pre-push P0 on #3751).
     const billingKey = String(selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || '').toLowerCase();
-    const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : billingKey === 'monthly' ? 1 : null;
+    const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : null;
     if (intervalMonths != null && recurringAnnual > 0) {
       return Math.round(((recurringAnnual * intervalMonths) / 12) * 100) / 100;
     }
@@ -10260,11 +10260,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           annualRate: effectiveAnnualTotal,
           monthlyRate: effectiveMonthlyTotal,
           visitsPerYear: Number(selectedFrequency?.visitsPerYear) || null,
+          // Tier accepts are never residential pest — the family evidence
+          // keeps an unknown visit count unpriced (DATA-001).
+          serviceKey: acceptedServiceTierKey || null,
         })
       : null;
-    const visitEstimatedPrice = treatAsOneTime
-      ? effectiveOneTimeTotal
-      : (billingTerm === 'prepay_annual' ? null : (firstApplicationInvoiceAmount || selectedTierPerApplicationPrice || effectiveBillingCadence?.amount));
+    const visitEstimatedPrice = acceptVisitEstimatedPrice({
+      treatAsOneTime,
+      billingTerm,
+      oneTimeTotal: effectiveOneTimeTotal,
+      firstApplicationInvoiceAmount,
+      tierBillsMonthly: selectedServiceTierBillsMonthly,
+      tierPerApplicationPrice: selectedTierPerApplicationPrice,
+      cadenceAmount: effectiveBillingCadence?.amount,
+      cadenceInferred: effectiveBillingCadence?.inferred !== false,
+    });
     const acceptedOneTimeServiceLabel = treatAsOneTime
       ? buildOneTimeInvoiceServiceLabel({
           estimate,
@@ -11060,6 +11070,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           };
           if (visitEstimatedPrice != null && Number.isFinite(Number(visitEstimatedPrice))) {
             updates.estimated_price = Number(visitEstimatedPrice);
+          } else if (!treatAsOneTime) {
+            // Unresolved (or prepay-covered) recurring acceptance: the adopted
+            // row must not keep a price unrelated to THIS estimate — a stale
+            // estimated_price would bill at completion and would also satisfy
+            // the §3.7 completeness check below that should be ringing
+            // (pre-push codex P0). Cleared explicitly, never omitted.
+            updates.estimated_price = null;
           }
           // T&S tier accepts adopting an existing (non-held) appointment:
           // stamp the accepted tier's catalog identity (see
@@ -11210,9 +11227,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // figure (its gross+discount lines then rebuild it, total unchanged).
           // Single-service keeps the raw resolver value — its ladder already
           // nets the credit into the amount.
-          recurringFirstVisitAmount: acceptPlanCreditSlice
+          // A monthly-billed service tier has NO first-visit resolver value
+          // (both are null by design) — bill the tier-aware per-application
+          // price the visit row carries (acceptVisitEstimatedPrice) and let
+          // the draft refuse when even that is unresolved, instead of the
+          // draft's old fallback to the monthly display rate (pre-push P0).
+          recurringFirstVisitAmount: (acceptPlanCreditSlice
             ? (firstApplicationInvoiceAmount ?? recurringFirstVisitAmount)
-            : recurringFirstVisitAmount,
+            : recurringFirstVisitAmount) ?? visitEstimatedPrice,
           effectiveBillingCadence,
           selectedFrequency,
           manualDiscountItemization: acceptManualDiscountItemization,
@@ -11607,6 +11629,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             billingTerm,
             recurringServices: conversionRecurringServices,
           });
+          // The converter ran with skipSetupInvoice and no firstApplicationAmount,
+          // so its deferred unresolved-fee bell cannot know THIS route is about
+          // to invoice the first application — rewrite the payload with the
+          // amount minted here, or staff would be told to invoice it by hand a
+          // second time (GH codex P1 r7 on #3751).
+          if (shouldCreateStandardDraftInvoice && includesFirstApplicationLine && standardConversionResult?.perApplicationFeeNotification) {
+            standardConversionResult.perApplicationFeeNotification.body = EstimateConverter.perApplicationFeeUnresolvedBody(estimate.id, standardFirstApplicationAmount);
+          }
           // Disclosed rodent bait-station setup (owner 2026-08-29; codex
           // #3591 r3 P1): a non-member's accepted estimate carries a
           // one-time rodent_bait_setup row that the standard invoice must
@@ -12175,6 +12205,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // completion time, weeks later). Surface it NOW as an office exception
     // so the amount is stamped before the first visit. Best-effort;
     // prepay-annual accepts bill from the term, not per application.
+    let perVisitCompletenessAlertFired = false;
     if (!treatAsOneTime && customerId && paymentMethodPreference !== 'prepay_annual'
       && acceptedAppointmentsToRegister.length) {
       try {
@@ -12182,14 +12213,37 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           (appt) => !(appt?.estimated_price != null && Number(appt.estimated_price) > 0),
         );
         if (unpriced.length) {
-          const custRow = await db('customers').where({ id: customerId }).first('per_application_fee');
-          if (!(custRow?.per_application_fee != null && Number(custRow.per_application_fee) > 0)) {
-            await require('../services/notification-service').notifyAdmin(
+          const custRow = await db('customers').where({ id: customerId })
+            .first('per_application_fee', 'billing_mode', 'waveguard_tier', 'monthly_rate');
+          // The lane comes from the ONE resolver every billing reader uses
+          // (billing-lane resolveBillingLane): explicit mode, else the legacy
+          // split — a NULL-mode row with a real WaveGuard tier and a monthly
+          // rate IS a monthly member (GH codex P1 r6). Monthly dues or a
+          // prepaid term cover the visit: no per-application fee is expected
+          // there and the alert would invite a manual invoice on top.
+          const { resolveBillingLane } = require('../services/billing-lane');
+          const lane = resolveBillingLane(custRow || {}).mode;
+          const duesCovered = lane === 'monthly_membership' || lane === 'annual_prepay';
+          if (!duesCovered && !(custRow?.per_application_fee != null && Number(custRow.per_application_fee) > 0)) {
+            // The flag suppresses the converter's own unpriced-per-application
+            // bell below, so it must reflect a PERSISTED alert: notifyAdmin
+            // resolves null (no throw) when creation fails, and a failed
+            // alert here must not also swallow the deferred one (pre-push P1
+            // on #3751).
+            const completenessAlert = await require('../services/notification-service').notifyAdmin(
               'billing',
               'Recurring accept booked with no per-application amount',
               'A recurring accept committed without a visit price or per-application fee on file — stamp the amount before the first visit or its completion falls back to manual invoicing.',
-              { link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, scheduledServiceIds: unpriced.map((a) => a.id) } },
+              // bell:true — an office exception that must ring under the
+              // admin bell policy, exactly like the converter's deferred
+              // per-application bell it stands in for.
+              { link: `/admin/customers/${customerId}`, bell: true, metadata: { estimateId: estimate.id, scheduledServiceIds: unpriced.map((a) => a.id) } },
             );
+            // Fired = a ROW exists. notifyAdmin resolves null on a failed
+            // create and a truthy { id: null, suppressed: true } sentinel on
+            // policy suppression — neither reached the office, so neither
+            // may silence the converter's deferred bell (GH codex P1 r4).
+            perVisitCompletenessAlertFired = !!(completenessAlert && !completenessAlert.suppressed && completenessAlert.id != null);
           }
         }
       } catch (e) {
@@ -12307,6 +12361,27 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         ).catch((e) => logger.error(`[estimate-accept] commercial-schedule admin notify failed: ${e.message}`));
       } catch (e) {
         logger.error(`[estimate-accept] commercial-schedule admin notify setup failed: ${e.message}`);
+      }
+    }
+    // Deferred per-application fee park (DATA-001) — same post-commit contract.
+    // The per-visit completeness check above (§3.7) owns the accept when it
+    // actually fired (an UNPRICED booked visit and no customer fee); the
+    // converter's bell covers every other shape — nothing booked, or a
+    // booked visit priced from an explicit first-application amount while
+    // the customer fee that prices every LATER visit stayed null (GH codex
+    // P1 ×2 on #3751: never two bells, never zero).
+    if (acceptConversion?.perApplicationFeeNotification && !perVisitCompletenessAlertFired) {
+      const feeNotify = acceptConversion.perApplicationFeeNotification;
+      try {
+        const NotificationService = require('../services/notification-service');
+        void NotificationService.notifyAdmin(
+          feeNotify.type,
+          feeNotify.title,
+          feeNotify.body,
+          feeNotify.options,
+        ).catch((e) => logger.error(`[estimate-accept] per-application fee admin notify failed: ${e.message}`));
+      } catch (e) {
+        logger.error(`[estimate-accept] per-application fee admin notify setup failed: ${e.message}`);
       }
     }
     // Deferred combined-tier upgrade review notification — same post-commit
@@ -13762,6 +13837,37 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     next(err);
   }
 });
+
+// Price stamped on the reserved visit row at accept — completion bills it
+// ahead of the customer-level fee. One-time: the one-time total. Annual
+// prepay: none (the term covers the visit). Otherwise the first-application
+// invoice amount, else the tier plan's true per-application price, else the
+// billing-cadence amount — EXCEPT for a monthly-billed tier plan whose
+// per-application price could not be derived: its cadence amount is the
+// monthly display rate, and stamping it would bill a third of a quarterly
+// plan's visit price on every completion (validation audit DATA-001 /
+// pre-push codex P0). Such a row stays unpriced and completion parks it.
+// The cadence amount itself counts only when the cadence was INFERRED from
+// the selection or the estimate (resolveBillingCadence `inferred`) — a
+// fallback-only quarterly cadence is a display convenience the converter
+// treats as "no cadence" (fee NULL), so stamping its amount on the row would
+// bill a fabricated price (pre-push codex P0).
+function acceptVisitEstimatedPrice({
+  treatAsOneTime = false,
+  billingTerm = 'standard',
+  oneTimeTotal = null,
+  firstApplicationInvoiceAmount = null,
+  tierBillsMonthly = false,
+  tierPerApplicationPrice = null,
+  cadenceAmount = null,
+  cadenceInferred = true,
+} = {}) {
+  if (treatAsOneTime) return oneTimeTotal;
+  if (billingTerm === 'prepay_annual') return null;
+  if (firstApplicationInvoiceAmount) return firstApplicationInvoiceAmount;
+  if (tierBillsMonthly) return Number(tierPerApplicationPrice) > 0 ? tierPerApplicationPrice : null;
+  return cadenceInferred ? cadenceAmount : null;
+}
 
 // Ceiling for PUT /:token/select-tier: the tier the ENGINE wrote for the
 // estimate's current mix, read from the stored carriers the portal's readers
@@ -20901,9 +21007,12 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
   // OLD flat-monthly payloads (perTreatment/visitsPerYear null, e.g.
   // pre-flag termite monitoring) keep the display-only derivation
   // ($29.75/mo → $89.25/check) AND the monthly note: without a visit count
-  // the converter's per-application division can't run, so their accept
-  // path still bills the flat monthly and the note stays truthful for
-  // exactly the estimates it still applies to.
+  // the converter's per-application division can't run, and the monthly
+  // lane may not be opened for a new conversion (owner ruling 2026-09-01),
+  // so their accept is REFUSED with a call-the-office message
+  // (estimate-converter assertLegacyMonthlyTermiteConvertible) and the
+  // office re-issues the quote — the note stays truthful for the quote as
+  // issued, and no billing state ever contradicts it.
   let effectiveVisits = visitsPerYear;
   const billedPerApplication = !!(displayPrice && visitsPerYear);
   if (key === 'termite_bait' && !billedPerApplication && monthly != null) {
@@ -25789,6 +25898,7 @@ async function handleEstimateAsk(req, res, next) {
 
 module.exports = router;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
+module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
 module.exports.selectTierCeiling = selectTierCeiling;
 module.exports.applyMembershipRepriceToEstimate = applyMembershipRepriceToEstimate;
 module.exports.shapePreferenceAddOns = shapePreferenceAddOns;

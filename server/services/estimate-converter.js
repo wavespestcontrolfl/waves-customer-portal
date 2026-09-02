@@ -76,16 +76,19 @@ function acceptedBillingLaneForConversion({
 // multi-service accept returns an EXPLICIT null — no single per-application
 // figure exists, and sendMembershipStarted keeps an explicit null blank so
 // the row drops (round-1 fix) instead of resurrecting a stale row fee.
+// The per-application amount the membership.started email may quote for
+// THIS acceptance: the derived per-visit charge of a single recurring unit,
+// or nothing. It never falls back to the monthly figure — the converter no
+// longer stamps that as a fee and completion will not bill it, so quoting
+// it "per application" would promise a charge that never comes (validation
+// audit DATA-001 / pre-push codex P1). An unresolved amount (null) makes the
+// email omit the per-application line.
 function emailPerApplicationAmountForConversion({
   recurringUnitCount,
-  billingCadence,
   perApplicationAmount,
-  monthlyRate,
 }) {
-  if (recurringUnitCount === 1 && billingCadence && Number(billingCadence.amount) > 0) {
-    return Number(perApplicationAmount);
-  }
-  return (recurringUnitCount === 1 && Number(monthlyRate) > 0) ? Number(monthlyRate) : null;
+  if (recurringUnitCount !== 1) return null;
+  return Number(perApplicationAmount) > 0 ? Number(perApplicationAmount) : null;
 }
 
 function findGrassTypeDeep(node, depth = 6) {
@@ -2310,6 +2313,138 @@ function recurringMixHasMembershipFeeService(recurringServices = []) {
 // existing-member waiver (struck-through display) and the annual-prepay
 // waiver (fee shown, waived on prepay selection). Set only through the
 // confirm-gated operatorPriceAdjustment tool param.
+// Customer-level per-application fee stamped at conversion — the completion
+// fallback for per-app visits carrying no row price (precedence commentary at
+// the call site). Returns null when the fee cannot be derived: the retired
+// monthly-rate fallback stamped a quarterly plan's MONTHLY figure as its
+// per-visit charge and under-collected two thirds of every visit (validation
+// audit DATA-001, 2026-09-02) — a NULL fee makes completion say "no billable
+// amount on file — invoice manually" instead.
+function resolveConvertedPerApplicationFee({
+  pinnedLegacyRodentOnlyPlan = false,
+  preservesExistingMembership = false,
+  customer = {},
+  recurringUnitCount = 0,
+  perApplicationAmount = null,
+} = {}) {
+  if (pinnedLegacyRodentOnlyPlan && !preservesExistingMembership) return null;
+  if (preservesExistingMembership) return customer.per_application_fee ?? null;
+  if (customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0) {
+    return Number(customer.per_application_fee);
+  }
+  if (recurringUnitCount === 1 && Number(perApplicationAmount) > 0) return Number(perApplicationAmount);
+  return null;
+}
+
+// FAIL-CLOSED money guard (GH codex P1 on #3751): an established
+// per-application customer accepting a single monthly-billed unit whose
+// per-visit charge could not be derived. The resolver rightly preserves the
+// account's existing fee, so the add-on's rows would carry no price and
+// completion would bill the ORIGINAL plan's fee for an unrelated add-on
+// (completion-charge-verdict's customer-fee fallback), while the park bell
+// stays silent because the stamped fee is non-null. Refuse the conversion
+// instead — the accept rolls back and the office prices the add-on.
+function assertPerApplicationAddOnPriced({
+  perApplicationUnresolved = false,
+  customer = {},
+  preservesExistingMembership = false,
+  suppressRecurringConversion = false,
+  pinnedLegacyRodentOnlyPlan = false,
+  billingTerm = 'standard',
+} = {}) {
+  if (!perApplicationUnresolved || preservesExistingMembership || suppressRecurringConversion) return;
+  // A pinned pre-realignment rodent-only plan bills on the monthly dues lane
+  // and carries no per-application fee by design — nothing to refuse.
+  if (pinnedLegacyRodentOnlyPlan) return;
+  if (billingTerm === 'prepay_annual') return;
+  if (!(customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)) return;
+  // Customer-facing (the public accept route returns it verbatim): pricing
+  // units say "per application", never "per visit" (AGENTS.md price copy).
+  const err = new Error('This add-on\'s per-application price could not be derived from the accepted plan, and it must not bill at the account\'s existing per-application fee — nothing was booked. Please call the office to add it.');
+  err.code = 'PER_APPLICATION_ADD_ON_UNPRICED';
+  // Same operational-error contract as the converter's other fail-closed
+  // refusals (palmRecurringLineInvalidError): the public accept route
+  // translates err.status, the global handler honours isOperational.
+  err.isOperational = true;
+  err.status = 409;
+  err.statusCode = 409;
+  throw err;
+}
+
+// A legacy flat-monthly termite-monitoring unit: the ONE recurring line is
+// termite bait with no visit count (pre-split payloads carry the flat
+// monthly only). Its customer card still discloses "Billed $X/mo"
+// (estimate-public keeps that note for exactly this shape).
+// ANY count-less flat-monthly termite component refuses — a singleton or a
+// bundle with pest / mosquito / anything else (pre-push codex P0 r8: a
+// bundled legacy termite line would otherwise convert to per-application
+// billing on a combined cadence amount while its card promises monthly
+// installments). Billing riders (bond, station rental) are not components
+// (riderAwareSingleRecurringUnit's rule). The line's own monthly figure is
+// the evidence; a singleton also honours the estimate-level monthly rate
+// (pre-split payloads sometimes carry the figure only there).
+function legacyFlatMonthlyTermiteUnit(recurringServices = [], monthlyRate = 0) {
+  const lines = (Array.isArray(recurringServices) ? recurringServices : [])
+    .filter((svc) => svc && !isTermiteBillingRiderLine(svc));
+  return lines.some((line) => {
+    if (recurringServiceKey(line) !== 'termite_bait') return false;
+    if (visitsPerYearForRecurringService(line)) return false;
+    const lineMonthly = Number(line.mo ?? line.monthly ?? line.monthlyRate ?? 0);
+    if (lineMonthly > 0) return true;
+    return lines.length === 1 && Number(monthlyRate) > 0;
+  });
+}
+
+// An in-flight legacy count-less termite estimate is REFUSED before any
+// billing state is written (GH codex P0 r2/r3 on #3751): no per-application
+// amount honours its disclosed monthly installments, and the monthly-dues
+// lane may not be opened for a new conversion (owner ruling 2026-09-01:
+// per application or annual prepay only) — so neither incompatible outcome
+// is committed. The office re-issues it from the current estimator, whose
+// termite rows carry a visit count and disclose the per-application price.
+// Exemptions mirror assertPerApplicationAddOnPriced: nothing recurring is
+// converted, an existing membership is preserved as-is, a pinned legacy
+// rodent plan, or an annual prepay (its term covers the year).
+function assertLegacyMonthlyTermiteConvertible({
+  recurringServices = [],
+  monthlyRate = 0,
+  preservesExistingMembership = false,
+  suppressRecurringConversion = false,
+  pinnedLegacyRodentOnlyPlan = false,
+  billingTerm = 'standard',
+  // Pre-migration deploy window (GH codex P2 r5): without the billing
+  // columns the customer update writes neither billing_mode nor a fee, the
+  // row lands on the legacy monthly-dues lane and the monthly cron honours
+  // the quote's installments — nothing to refuse there.
+  billingModeColumnsExist = true,
+} = {}) {
+  if (!billingModeColumnsExist) return;
+  if (preservesExistingMembership || suppressRecurringConversion || pinnedLegacyRodentOnlyPlan) return;
+  if (billingTerm === 'prepay_annual') return;
+  if (!legacyFlatMonthlyTermiteUnit(recurringServices, monthlyRate)) return;
+  // Customer-facing (the public accept route returns it verbatim).
+  const err = new Error('This estimate was issued with a flat monthly termite-monitoring price that our current per-application billing can\'t honor automatically — nothing was booked. Please call the office and we\'ll re-issue it with today\'s per-application pricing.');
+  err.code = 'LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE';
+  err.isOperational = true;
+  err.status = 409;
+  err.statusCode = 409;
+  throw err;
+}
+
+// One source of copy for the unresolved-fee bell. With a first-application
+// amount invoiced by the acceptance — the converter's own standard invoice,
+// or the public route's mint (it rewrites the deferred payload with its
+// amount; GH codex P1 r7 on #3751) — staff are pointed at LATER
+// applications only; otherwise they are told no first invoice exists.
+function perApplicationFeeUnresolvedBody(estimateId, firstApplicationAmount = 0) {
+  const lead = 'Estimate #' + estimateId + ' converted to per-application billing, but the per-application charge could not be derived from the accepted plan (no billing cadence or visit count on the quote). ';
+  const amount = Number(firstApplicationAmount);
+  if (amount > 0) {
+    return lead + 'The first application ($' + amount.toFixed(2) + ') is invoiced by this acceptance; later applications will complete with no billable amount until the fee is set — set the per-application price or re-quote.';
+  }
+  return lead + 'No first-application invoice was created by this acceptance, and applications will complete with no billable amount until the fee is set — invoice the first application by hand and set the per-application price, or re-quote.';
+}
+
 function estimateOperatorSetupFeeWaived(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
   return data?.operatorPriceAdjustment?.waiveSetupFee === true;
@@ -4040,6 +4175,12 @@ const EstimateConverter = {
       : commercialOnlyRecurring
         ? { tier: 'none', discount: 0 } // written as the non-member 'Commercial' sentinel below
         : determineTier(combinedServiceCount, recurringServicesForConversion.length > 0);
+    // A legacy count-less termite row (pre-split payload: flat monthly only)
+    // infers NO cadence on purpose: its card discloses monthly installments
+    // that no per-application amount honours, and no monthly lane may be
+    // opened for it (owner ruling 2026-09-01) — its conversion is REFUSED
+    // before any billing state is written (assertLegacyMonthlyTermite-
+    // Convertible; GH codex P0 r2/r3 on #3751).
     const inferredFrequencyKey = estimateData.customerSelection?.frequency
       || inferFrequencyKeyFromEstimateData(estimateData);
     // Combined routing only trusts the customer's REAL accepted selection —
@@ -4087,8 +4228,25 @@ const EstimateConverter = {
           annualRate: parseFloat(estimate.annual_total || 0),
           monthlyRate,
           visitsPerYear: singleRecurringUnitVisits,
+          // Family evidence for the unknown-visits case: monthly residential
+          // pest bills its cadence amount per visit; monthly tier plans do not.
+          serviceKey: singleRecurringUnit ? recurringServiceKey(singleRecurringUnit) : null,
         })
       : null;
+    // A single SCHEDULING unit whose per-visit charge could not be derived —
+    // no inferable billing cadence at all, or a monthly-billed tier plan
+    // whose visit count is unknown (perApplicationChargeAmount returned
+    // null): NO downstream fallback may stand in for the visit price
+    // (validation audit DATA-001 / pre-push codex P0s — the cadence-less
+    // case bypassed a monthly-only definition, and a supplement-only plan
+    // (scalar rodent bait, whose unit comes from supplementStandaloneUnits so
+    // riderAwareSingleRecurringUnit is null) bypassed a line-based one).
+    // Keyed on recurringUnitCount — the count the fee stamp and the row
+    // price writer use. Consumers: the first-application invoice amount
+    // (allowFallback off), the customer-level fee stamp (null → park) and
+    // the established-customer add-on refusal.
+    const perApplicationUnresolved = recurringUnitCount === 1
+      && !(Number(perApplicationAmount) > 0);
 
     // A CURRENT monthly member accepting an add-on/upgrade estimate keeps
     // their membership model — an unconditional per_application stamp would
@@ -4101,7 +4259,11 @@ const EstimateConverter = {
     // Shared predicate (billing-cadence.js) — the estimate display surfaces
     // read the same function so the "Billed $X/mo" disclosure can never
     // drift from the billing behavior decided here.
-    const preservesExistingMembership = customerPreservesMonthlyMembership(customer);
+    // Re-derived from the LOCKED customer snapshot once it is taken below
+    // (pre-push codex P1): a billing-mode change committing before the lock
+    // must not bypass the unpriced-add-on refusal or reject a now-monthly
+    // member on a stale pre-lock read.
+    let preservesExistingMembership = customerPreservesMonthlyMembership(customer);
     // An ADD-ON accept (existing recurring customer buying a NEW service
     // family) must not clobber monthly_rate with just the add-on's monthly:
     // for a monthly member the cron charges monthly_rate directly, so the
@@ -4135,7 +4297,10 @@ const EstimateConverter = {
         .where({ id: customerId })
         .forUpdate()
         .first();
-      if (lockedCustomerRow) effectiveCustomer = lockedCustomerRow;
+      if (lockedCustomerRow) {
+        effectiveCustomer = lockedCustomerRow;
+        preservesExistingMembership = customerPreservesMonthlyMembership(effectiveCustomer);
+      }
     }
     const addOnContext = suppressRecurringConversion
       ? { addOnBase: 0, hadOtherLiveFamilies: false, sameFamilyAtOtherProperty: null }
@@ -4299,18 +4464,70 @@ const EstimateConverter = {
     // lane (billing_mode monthly_membership below — codex #3591 r21 P0):
     // no per-application fee exists for it. The customers-row stamp stays
     // the ONE fallback authority, so the legacy branch lives here.
-    const stampedPerApplicationFee = (pinnedLegacyRodentOnlyPlan && !preservesExistingMembership)
-      ? null
-      : preservesExistingMembership
-      ? (customer.per_application_fee ?? null)
-      : ((customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)
-        ? Number(customer.per_application_fee)
-        : ((recurringUnitCount === 1
-          && billingCadence && Number(billingCadence.amount) > 0)
-          ? Number(perApplicationAmount)
-          : (recurringUnitCount === 1 && Number(monthlyRate) > 0
-            ? Number(monthlyRate)
-            : null)));
+    // Both read the LOCKED customer snapshot (effectiveCustomer), never the
+    // pre-lock row — the file's customer-lock contract.
+    assertPerApplicationAddOnPriced({
+      perApplicationUnresolved,
+      customer: effectiveCustomer,
+      preservesExistingMembership,
+      suppressRecurringConversion,
+      pinnedLegacyRodentOnlyPlan,
+      billingTerm,
+    });
+    // An in-flight legacy count-less termite link is refused here, before
+    // the customer update below would stamp billing_mode='per_application'
+    // with no fee against its disclosed monthly installments (GH codex P0
+    // r3 on #3751).
+    assertLegacyMonthlyTermiteConvertible({
+      recurringServices: recurringServicesForConversion,
+      monthlyRate,
+      preservesExistingMembership,
+      suppressRecurringConversion,
+      pinnedLegacyRodentOnlyPlan,
+      billingTerm,
+      billingModeColumnsExist,
+    });
+    const stampedPerApplicationFee = resolveConvertedPerApplicationFee({
+      pinnedLegacyRodentOnlyPlan,
+      preservesExistingMembership,
+      customer: effectiveCustomer,
+      recurringUnitCount,
+      perApplicationAmount,
+    });
+    // Fail closed (validation audit DATA-001, 2026-09-02): when the single
+    // recurring unit's per-visit charge cannot be derived — no inferable
+    // billing cadence, or a monthly-billed tier plan whose visit count is
+    // unknown — the fee stays NULL and completion reports "no billable
+    // amount on file — invoice manually" instead of silently collecting the
+    // MONTHLY figure on every visit. The owner hears about it post-commit,
+    // deferred exactly like the commercial-schedule bell so a rolled-back
+    // accept never pages. Annual prepay is covered by its term, not this fee.
+    // Only once the billing columns exist (GH codex P1 r2 on #3751): in the
+    // pre-migration deploy window the update below stamps neither
+    // billing_mode nor the fee, the row stays on the legacy monthly-dues
+    // lane and the monthly cron keeps collecting — a "converted to
+    // per-application, invoice by hand" bell would then be false and invite
+    // a duplicate manual invoice on top of monthly billing.
+    let perApplicationFeeNotification = null;
+    if (billingModeColumnsExist
+      && !suppressRecurringConversion && billingTerm !== 'prepay_annual'
+      && !pinnedLegacyRodentOnlyPlan && !preservesExistingMembership
+      && recurringUnitCount === 1 && stampedPerApplicationFee == null) {
+      logger.warn(`[estimate-converter] per-application fee unresolved for estimate ${estimateId} (customer ${customerId}) — left NULL; completions bill nothing until it is set`);
+      perApplicationFeeNotification = {
+        type: 'billing',
+        title: 'Per-application fee not set on a new per-application customer',
+        body: perApplicationFeeUnresolvedBody(estimateId),
+        options: {
+          icon: '\u{1F4B3}',
+          link: '/admin/customers',
+          bell: true,
+          // One bell per estimate across retries and dispatch paths.
+          dedupeKey: `per-application-fee-unresolved:${estimateId}`,
+          metadata: { estimateId, customerId },
+        },
+      };
+    }
     // 1. Update customer to active. Clear deleted_at: admin screens filter
     //    on whereNull('deleted_at'), so reactivating a soft-deleted customer
     //    without clearing it would create an actively-billed customer no
@@ -4328,8 +4545,8 @@ const EstimateConverter = {
           // customer (or a former one), keep its real start; if it was a lead,
           // overwrite the lead-intake date with today. Uses the already-loaded
           // row, not database.raw, to stay mock-friendly.
-          member_since: ['active_customer', 'won', 'at_risk', ...FORMER_CUSTOMER_STAGES].includes(customer.pipeline_stage)
-            ? (customer.member_since || etDateString())
+          member_since: ['active_customer', 'won', 'at_risk', ...FORMER_CUSTOMER_STAGES].includes(effectiveCustomer.pipeline_stage)
+            ? (effectiveCustomer.member_since || etDateString())
             : etDateString(),
           // An all-commercial recurring plan is NOT a WaveGuard membership. Store
           // the explicit non-member 'Commercial' tier (in the CHECK + every
@@ -4370,8 +4587,12 @@ const EstimateConverter = {
             // dues product: explicit monthly_membership so the monthly cron
             // charges the disclosed $/mo and completions are dues-covered
             // (codex #3591 r21 P0).
+            // LOCKED snapshot, never the pre-lock row (pre-push codex P0): a
+            // mode change committing before the customer lock must be the
+            // mode this stamp preserves, or the classification and the
+            // written rail disagree.
             billing_mode: preservesExistingMembership
-              ? (customer.billing_mode || null)
+              ? (effectiveCustomer.billing_mode || null)
               : (pinnedLegacyRodentOnlyPlan ? 'monthly_membership' : 'per_application'),
             // Fee semantics documented on stampedPerApplicationFee above —
             // shared with the membership.started email payload.
@@ -5896,9 +6117,20 @@ const EstimateConverter = {
           billingCadence,
           perApplicationAmount,
           monthlyRate,
-          allowFallback: opts.allowFirstApplicationFallback !== false,
+          // An unresolved per-visit charge must not fall back to the cadence
+          // / monthly amount either — the first invoice would otherwise bill
+          // the display rate the fee stamp just refused (DATA-001).
+          allowFallback: opts.allowFirstApplicationFallback !== false && !perApplicationUnresolved,
         })
         : 0;
+      // The unresolved-fee bell (built above, dispatched post-commit) must
+      // not tell staff to invoice a first application this acceptance is
+      // about to invoice itself (pre-push codex P1): with an explicit
+      // first-application amount on the way, point them at LATER
+      // applications only.
+      if (perApplicationFeeNotification && Number(standardFirstApplicationAmount) > 0) {
+        perApplicationFeeNotification.body = perApplicationFeeUnresolvedBody(estimateId, standardFirstApplicationAmount);
+      }
       const setupFeeApplies = billingTerm === 'standard'
         ? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringServicesForConversion, estimateData })
         : false;
@@ -6488,15 +6720,13 @@ const EstimateConverter = {
       billingLane: acceptedBillingLaneForConversion({
         billingTerm,
         preservesExistingMembership,
-        customerBillingMode: customer.billing_mode || null,
+        customerBillingMode: effectiveCustomer.billing_mode || null,
         waveguardTier: commercialOnlyRecurring ? 'Commercial' : (tier === 'none' ? null : tier),
         monthlyRate: convertedMonthlyRate,
       }),
       perApplicationAmount: emailPerApplicationAmountForConversion({
         recurringUnitCount,
-        billingCadence,
         perApplicationAmount,
-        monthlyRate,
       }),
       includedServices: recurringServicesForConversion
         .map((svc) => svc.name || svc.serviceName || svc.service_name || svc.label)
@@ -6551,6 +6781,23 @@ const EstimateConverter = {
           logger.warn(`[estimate-converter] commercial-schedule admin notify setup failed: ${err.message}`);
         }
       }
+    }
+
+    // Per-application fee park (DATA-001) — same dispatch-or-defer contract
+    // as the commercial-schedule bell above.
+    if (perApplicationFeeNotification && opts.deferCommercialScheduleNotification !== true) {
+      try {
+        const NotificationService = require('./notification-service');
+        void NotificationService.notifyAdmin(
+          perApplicationFeeNotification.type,
+          perApplicationFeeNotification.title,
+          perApplicationFeeNotification.body,
+          perApplicationFeeNotification.options
+        ).catch((err) => logger.warn(`[estimate-converter] per-application fee admin notify failed: ${err.message}`));
+      } catch (err) {
+        logger.warn(`[estimate-converter] per-application fee admin notify setup failed: ${err.message}`);
+      }
+      perApplicationFeeNotification = null; // fired — nothing to defer
     }
 
     // Combined-tier upgrade review (owner case 2026-08-05): when this
@@ -6631,14 +6878,14 @@ const EstimateConverter = {
     if (!suppressRecurringConversion && !commercialOnlyRecurring
       && priorQualifyingKeys.length > 0
       && tier && tier !== 'none'
-      && (extensionApplied || extensionNeedsReview || isMembershipTierUpgrade(customer.waveguard_tier, tier))) {
+      && (extensionApplied || extensionNeedsReview || isMembershipTierUpgrade(effectiveCustomer.waveguard_tier, tier))) {
       const discountPct = Math.round((discount || 0) * 100);
       const appliedClauses = extensionApplied
         ? [
           extension.familyLines.length ? `Applied automatically: ${extension.familyLines.join('; ')}.` : '',
           extension.creditLines.length ? `Prepaid-term credit issued: ${extension.creditLines.join('; ')}.` : '',
           extension.monthlyRateReviewNeeded
-            ? `Monthly-billed member — extend the ${discountPct}% to their monthly rate manually (current rate $${(Number(customer.monthly_rate) || 0).toFixed(2)}/mo).`
+            ? `Monthly-billed member — extend the ${discountPct}% to their monthly rate manually (current rate $${(Number(effectiveCustomer.monthly_rate) || 0).toFixed(2)}/mo).`
             : '',
           [...extension.reviewFamilies, ...extension.skippedFamilies].length
             ? `Still needs review: ${[...extension.reviewFamilies, ...extension.skippedFamilies].join(', ')}.`
@@ -6760,7 +7007,7 @@ const EstimateConverter = {
       const planReviewPayload = {
         type: 'estimate_converted',
         title: 'Multi-plan rate needs review after re-quote',
-        body: `${customer.first_name} ${customer.last_name} accepted a re-quote at $${convertedMonthlyRate.toFixed(2)}/mo, but they carry other live plans whose pre-ledger amounts could not be attributed — verify their total monthly rate (previous: $${(Number(customer.monthly_rate) || 0).toFixed(2)}/mo).`,
+        body: `${customer.first_name} ${customer.last_name} accepted a re-quote at $${convertedMonthlyRate.toFixed(2)}/mo, but they carry other live plans whose pre-ledger amounts could not be attributed — verify their total monthly rate (previous: $${(Number(effectiveCustomer.monthly_rate) || 0).toFixed(2)}/mo).`,
         options: {
           icon: '💵',
           link: `/admin/customers?customerId=${customerId}`,
@@ -6845,6 +7092,8 @@ const EstimateConverter = {
       // it (dispatched inline otherwise) — so callers can dispatch whatever
       // comes back without double-send risk.
       commercialScheduleNotification,
+      // Same deferral contract as commercialScheduleNotification (DATA-001).
+      perApplicationFeeNotification,
       // Same deferral contract as commercialScheduleNotification.
       tierUpgradeNotification,
       planRateReviewNotification,
@@ -7004,3 +7253,8 @@ module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
 module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;
 module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmountForConversion;
 module.exports.applyFrozenExistingServiceExtension = applyFrozenExistingServiceExtension;
+module.exports.resolveConvertedPerApplicationFee = resolveConvertedPerApplicationFee;
+module.exports.assertPerApplicationAddOnPriced = assertPerApplicationAddOnPriced;
+module.exports.legacyFlatMonthlyTermiteUnit = legacyFlatMonthlyTermiteUnit;
+module.exports.assertLegacyMonthlyTermiteConvertible = assertLegacyMonthlyTermiteConvertible;
+module.exports.perApplicationFeeUnresolvedBody = perApplicationFeeUnresolvedBody;
