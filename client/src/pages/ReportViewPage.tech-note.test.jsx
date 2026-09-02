@@ -4,7 +4,7 @@
 // never repeats the hero's "Hi", stable per report, live only.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { TechNoteCard, composeTechNote, techNoteSeed } from './ReportViewPage';
 
@@ -89,7 +89,7 @@ describe('TechNoteCard', () => {
     const { rerender } = render(<TechNoteCard data={payload({ ...withPhoto('https://cdn.example/broken.jpg'), serviceRecordId: 'rec-1' })} mode="live" />);
     const img = document.querySelector('#tech-note img');
     expect(img).not.toBeNull();
-    img.dispatchEvent(new Event('error'));
+    fireEvent.error(img);
     expect(document.querySelector('#tech-note img')).toBeNull();
     rerender(<TechNoteCard data={payload({ ...withPhoto('https://cdn.example/adam.jpg'), serviceRecordId: 'rec-2' })} mode="live" />);
     expect(document.querySelector('#tech-note img')).toHaveAttribute('src', 'https://cdn.example/adam.jpg');
