@@ -216,6 +216,7 @@ describe('applyReportIdentitySnapshotToLegacyPdf (documents.js generator inputs)
     });
     expect(out.customer).toMatchObject({ id: 'c1', first_name: 'Original', last_name: 'Customer', address_line1: '200 Palm Ave', address_line2: 'Unit 2', city: 'Parrish', zip: '34219' });
     expect(out.service.technician_name).toBe('Alex Benson');
+    expect(out.service.service_type).toBe('Original Lawn Service');
     expect(out.products[0]).toMatchObject({ product_name: 'Celsius WG', epa_reg_number: '432-1507' });
     expect(out.products[1]).toEqual({ product_id: 'other', product_name: 'Bare' });
 

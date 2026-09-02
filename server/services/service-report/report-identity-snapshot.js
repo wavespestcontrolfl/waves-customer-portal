@@ -225,9 +225,11 @@ function applyReportIdentitySnapshotToLegacyPdf({ customer, service, products = 
     outCustomer.state = snapshot.address.state ?? null;
     outCustomer.zip = snapshot.address.zip ?? null;
   }
-  const outService = snapshot.technicianName
-    ? { ...service, technician_name: snapshot.technicianName }
-    : service;
+  const outService = { ...service };
+  if (snapshot.technicianName) outService.technician_name = snapshot.technicianName;
+  // The generator's heading, callback classification, and aftercare copy
+  // key on service.service_type — same frozen title the V1 report uses.
+  if (snapshot.serviceTitle) outService.service_type = snapshot.serviceTitle;
   const facts = snapshot.productFacts && typeof snapshot.productFacts === 'object' ? snapshot.productFacts : null;
   const outProducts = (products || []).map((product) => {
     const frozen = facts ? facts[canonicalProductId(product?.product_id)] : null;
