@@ -717,7 +717,12 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
     if (saved && String(saved.customer_id) !== String(request.customer_id)) {
       logger.warn(`[autopay-setup-link] pm ownership mismatch: pm ${stripePaymentMethodId} belongs to ${saved.customer_id}, request customer ${request.customer_id}`);
       await alertNeedsReview({ customerId: request.customer_id, requestId: request.id, reason: 'pm_ownership_mismatch' });
-      await revertClaim();
+      // Permanent: the succeeded intent is bound to that method, so a
+      // pending row would replay the same mismatch until expiry (GH Codex
+      // P2). Retire the link; the office mints a fresh one after review.
+      await db('appointment_card_requests')
+        .where({ id: request.id, status: 'completing', updated_at: claimStamp })
+        .update({ status: 'expired', updated_at: new Date() });
       return { ok: false, code: 'pm_ownership_mismatch' };
     }
     if (!saved) {

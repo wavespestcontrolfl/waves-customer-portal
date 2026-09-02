@@ -708,6 +708,17 @@ describe('completion tail (page POST + webhook)', () => {
     expect(updates[updates.length - 1]).toEqual(expect.objectContaining({ status: 'expired' }));
   });
 
+  it('a payment-method ownership mismatch alerts the office and retires the link (permanent, never a replay loop)', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
+    mockTableHandlers.payment_methods = { first: () => ({ id: 'pm-row-x', customer_id: 'cust-OTHER', method_type: 'card' }) };
+    const r = await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
+    expect(r).toEqual({ ok: false, code: 'pm_ownership_mismatch' });
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+    const updates = touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'update').map((c) => c[1]);
+    expect(updates[updates.length - 1]).toEqual(expect.objectContaining({ status: 'expired' }));
+  });
+
   it('never reattaches a method the customer removed: PM_NOT_ATTACHED retires the link (method_removed, permanent)', async () => {
     mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
     mockTableHandlers.payment_methods = { first: () => null };
