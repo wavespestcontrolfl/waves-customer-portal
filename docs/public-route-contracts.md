@@ -501,6 +501,17 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+`/select-tier` refuses any tier above the tier the ENGINE wrote for the
+estimate's qualifying services (400 `tier_not_available_for_current_services`
++ `maxTier`; downgrades stay allowed): the ceiling is the last opt-out
+commit's `serviceOptOut.engineTier` stamp, else the stored `result` /
+`engineResult` tier (every carrier shape the portal's readers accept), else
+Bronze — fail closed, never a re-count of the stored rows under today's
+qualifying policy, and never the row's own `waveguard_tier`, which holds the
+customer's last selection once the route writes it back (validation audit
+SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
+estimates). A membership reconcile that reprices the mix refreshes the
+opt-out stamp with the row tier.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,

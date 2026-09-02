@@ -8287,6 +8287,33 @@ function sendEstimatePage(res, token, estimate, estData, membership, opts = {}) 
 // estimate.estimate_data in place so every downstream consumer
 // (buildEstimateMembershipContext, buildPricingBundle's annual-prepay gate, the
 // server-HTML renderPage) sees the reconciled value. Never throws.
+// Apply a membership-reconcile reprice to the in-memory row + blob: the
+// authoritative result, the totals, the ROW tier (acceptance reads it for
+// discount math — leaving the stale member tier would reapply e.g. a
+// Platinum discount to Bronze-priced data at invoice time), and the opt-out
+// commit stamp `serviceOptOut.engineTier` when one exists. That stamp is the
+// first engine-tier reference the opt-out gate and the select-tier ceiling
+// read (serviceOptOutEngineTierReference); left alone it would outrank the
+// reconciled result and let a lapsed member re-select their old member tier
+// (pre-push codex P0 on #3741). A successful reprice also supersedes any
+// earlier fail-closed flag — without that a transient failure would leave the
+// estimate permanently quote-required.
+function applyMembershipRepriceToEstimate(estimate, estData, reprice) {
+  estData.result = reprice.serverResult;
+  delete estData.membershipLapsedRequote;
+  estimate.monthly_total = reprice.serverTotals?.monthlyTotal ?? 0;
+  estimate.annual_total = reprice.serverTotals?.annualTotal ?? 0;
+  estimate.onetime_total = reprice.serverTotals?.onetimeTotal ?? 0;
+  const repricedTier = reprice.serverResult?.recurring?.waveGuardTier
+    || reprice.serverResult?.recurring?.tier
+    || null;
+  estimate.waveguard_tier = repricedTier;
+  if (estData.serviceOptOut && typeof estData.serviceOptOut === 'object') {
+    estData.serviceOptOut.engineTier = repricedTier;
+  }
+  return estimate;
+}
+
 async function reconcileFrozenMembershipSnapshot(estimate) {
   try {
     if (!estimate || !estimate.customer_id) return;
@@ -8483,20 +8510,7 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
       ...(verifiedWaiverKeys ? { setupWaiverPriorQualifyingServices: verifiedWaiverKeys } : {}),
     });
     if (reprice.recomputed) {
-      estData.result = reprice.serverResult;
-      // A successful authoritative reprice supersedes any earlier fail-closed
-      // flag — without this a transient failure would leave the estimate
-      // permanently quote-required.
-      delete estData.membershipLapsedRequote;
-      estimate.monthly_total = reprice.serverTotals.monthlyTotal ?? 0;
-      estimate.annual_total = reprice.serverTotals.annualTotal ?? 0;
-      estimate.onetime_total = reprice.serverTotals.onetimeTotal ?? 0;
-      // Acceptance reads the ROW tier for discount math — leaving the stale
-      // member tier would reapply e.g. a Platinum discount to Bronze-priced
-      // data at invoice time.
-      estimate.waveguard_tier = reprice.serverResult?.recurring?.waveGuardTier
-        || reprice.serverResult?.recurring?.tier
-        || null;
+      applyMembershipRepriceToEstimate(estimate, estData, reprice);
     } else {
       estData.membershipLapsedRequote = true;
     }
@@ -13744,6 +13758,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
   }
 });
 
+// Ceiling for PUT /:token/select-tier: the tier the ENGINE wrote for the
+// estimate's current mix, read from the stored carriers the portal's readers
+// accept (serviceOptOutEngineTierReference — the last opt-out commit's stamp,
+// the mapped result, the raw engineResult; an existing member's prior
+// services are already folded in there). No engine-written tier in ANY
+// carrier fails closed to Bronze: deriving one from the stored rows would
+// re-run today's qualifying policy over a quote the engine priced under
+// yesterday's (rodent bait joined WaveGuard 2026-08-29; synthesized row flags
+// are not evidence — pre-push codex P0s on this lane), so an upgrade on such
+// a row is the office lane (owner ruling 2026-09-01).
+function selectTierCeiling(estData = {}) {
+  const data = estData && typeof estData === 'object' ? estData : {};
+  const OptOut = require('../services/estimate-service-opt-out');
+  return normalizeWaveGuardTierLabel(OptOut.serviceOptOutEngineTierReference(data) || 'Bronze');
+}
+
 // PUT /api/estimates/:token/select-tier — customer selects a WaveGuard tier
 router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) => {
   try {
@@ -13771,29 +13801,26 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
 
     const previousTier = estimate.waveguard_tier || 'Bronze';
 
-    // Eligibility clamp for opted-out estimates. This route applies a FLAT tier
-    // percentage with no eligibility check of its own — harmless while the tier
-    // on the row is the one the engine wrote, but PUT /:token/service-opt-out
-    // makes a lower tier reachable on demand: remove a qualifying line (engine
-    // writes Silver), then call this with Gold and accept bills from the
-    // persisted totals. Scoped deliberately to estimates carrying an opt-out
-    // record — every other estimate keeps this route's existing behaviour.
-    const optOutRecord = parseEstimateDataSafe(estimate)?.serviceOptOut;
-    if (optOutRecord) {
-      // Ceiling = the tier the ENGINE wrote at the last opt-out commit, never
-      // the row's waveguard_tier — that column holds the customer's own last
-      // selection once this route writes it back, and clamping on it would
-      // make a dip to Bronze permanent (codex #3684 r1 P2). Fall back to the
-      // row only for a record predating the engineTier stamp.
-      const engineTier = String(optOutRecord.engineTier || estimate.waveguard_tier || 'Bronze');
-      const engineRank = ALLOWED_TIERS.findIndex((t) => t.toLowerCase() === engineTier.toLowerCase());
-      const requestedRank = ALLOWED_TIERS.indexOf(selectedTier);
-      if (engineRank >= 0 && requestedRank > engineRank) {
-        return res.status(400).json({
-          error: 'tier_not_available_for_current_services',
-          maxTier: ALLOWED_TIERS[engineRank],
-        });
-      }
+    // Eligibility ceiling for EVERY estimate (validation audit SEC-001,
+    // 2026-09-02). This route applies a FLAT tier percentage; the ceiling used
+    // to apply only to estimates carrying an opt-out record, so any token
+    // holder could persist Platinum on a one-service quote — 20% off the row
+    // totals that every no-replay accept and the converter bill from. The
+    // ceiling is the tier the ENGINE wrote for the current mix (see
+    // selectTierCeiling), never the row's waveguard_tier — that column holds
+    // the customer's own last selection once this route writes it back, and
+    // clamping on it would make a dip to Bronze permanent (codex #3684 r1 P2).
+    // Downgrades stay allowed; an upgrade above the earned tier is the office
+    // lane (owner ruling 2026-09-01: a hand-picked tier is never self-serve).
+    const engineTier = selectTierCeiling(parseEstimateDataSafe(estimate));
+    const engineRank = Math.max(0, ALLOWED_TIERS.findIndex((t) => t.toLowerCase() === engineTier.toLowerCase()));
+    const requestedRank = ALLOWED_TIERS.indexOf(selectedTier);
+    if (requestedRank > engineRank) {
+      logger.info(`[estimate] ${estimate.id}: refused ${selectedTier} tier — engine tier is ${ALLOWED_TIERS[engineRank]}`);
+      return res.status(400).json({
+        error: 'tier_not_available_for_current_services',
+        maxTier: ALLOWED_TIERS[engineRank],
+      });
     }
 
     // Server-side pricing — never trust client totals.
@@ -25734,6 +25761,8 @@ async function handleEstimateAsk(req, res, next) {
 
 module.exports = router;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
+module.exports.selectTierCeiling = selectTierCeiling;
+module.exports.applyMembershipRepriceToEstimate = applyMembershipRepriceToEstimate;
 module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
 // Legacy/textual setup-row recognizer — shared with setup-fee-obligation's
 // snapshot evidence so a frozen legacy row ("WaveGuard Membership Setup")
