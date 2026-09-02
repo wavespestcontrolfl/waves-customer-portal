@@ -112,6 +112,7 @@ describe('getOpsQueue', () => {
       pending: 1 + 2 + 2, // digest, c2 + c5, d1 + p1
       parked: 1 + 1 + 1 + 1 + 1 + 1 + 1, // ga4, c1, opp-1, ea-1, pa-1, da-1, aa-2
       failed: 1 + 1 + 1 + 1 + 1, // pricing, c3, ea-2, d2, aa-1
+      truncated: false,
     });
     expect(typeof q.generatedAt).toBe('string');
   });
