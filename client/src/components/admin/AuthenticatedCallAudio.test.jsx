@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
 
@@ -104,5 +104,39 @@ describe("AuthenticatedCallAudio", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Loading recording");
     await screen.findByLabelText("Call recording");
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("AuthenticatedCallAudio playback handle", () => {
+  it("seekTo before load triggers the authenticated load, then seeks and plays; timeupdate reports seconds", async () => {
+    localStorage.setItem("waves_admin_token", "staff-jwt");
+    const blob = new Blob(["audio-bytes"], { type: "audio/mpeg" });
+    fetch.mockResolvedValue({ ok: true, status: 200, blob: vi.fn().mockResolvedValue(blob) });
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    const onTimeUpdate = vi.fn();
+    const ref = React.createRef();
+
+    render(<AuthenticatedCallAudio ref={ref} recordingId="RE123" onTimeUpdate={onTimeUpdate} />);
+    expect(fetch).not.toHaveBeenCalled();
+
+    act(() => ref.current.seekTo(12.5));
+    expect(screen.getByRole("status")).toHaveTextContent("Loading recording");
+
+    const player = await screen.findByLabelText("Call recording");
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(player.currentTime).toBe(12.5);
+
+    act(() => ref.current.seekTo(3));
+    expect(player.currentTime).toBe(3);
+    expect(play).toHaveBeenCalledTimes(2);
+
+    player.currentTime = 7;
+    fireEvent.timeUpdate(player);
+    expect(onTimeUpdate).toHaveBeenCalledWith(7);
+
+    act(() => ref.current.seekTo("nope"));
+    expect(player.currentTime).toBe(7);
+    play.mockRestore();
   });
 });

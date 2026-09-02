@@ -34,6 +34,9 @@ import {
   cn,
 } from "../../components/ui";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
+import CallTranscriptSync, {
+  parseTranscriptSegments,
+} from "../../components/admin/CallTranscriptSync";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import { describeProcessResult } from "../../lib/callProcessResult";
 
@@ -321,6 +324,16 @@ export default function CallLogTabV2() {
       else next.add(id);
       return next;
     });
+  // Audio-synced transcript (GATE_CALL_TRANSCRIPT_SYNC, reported by the
+  // calls endpoint). One player handle per call id for click-to-seek, and
+  // the playback position of whichever recording is currently playing.
+  const [transcriptSyncEnabled, setTranscriptSyncEnabled] = useState(false);
+  const playerRefs = useRef(new Map());
+  const [playback, setPlayback] = useState({ id: null, ms: 0 });
+  const playerRefFor = (id) => (handle) => {
+    if (handle) playerRefs.current.set(id, handle);
+    else playerRefs.current.delete(id);
+  };
 
   const loadCalls = (search = "") => {
     const q = search
@@ -334,6 +347,7 @@ export default function CallLogTabV2() {
         if (callsResult.status !== "fulfilled") throw callsResult.reason;
         const d = callsResult.value;
         setCalls(d.calls || []);
+        setTranscriptSyncEnabled(d.transcript_sync_enabled === true);
         if (calibrationResult.status === "fulfilled") {
           setRouteCalibration(calibrationResult.value);
         }
@@ -1390,8 +1404,12 @@ export default function CallLogTabV2() {
                             : ""}
                         </div>{" "}
                         <AuthenticatedCallAudio
+                          ref={playerRefFor(c.id)}
                           recordingId={c.recording_sid || c.id}
                           className="w-full h-8"
+                          onTimeUpdate={(seconds) =>
+                            setPlayback({ id: c.id, ms: seconds * 1000 })
+                          }
                         />{" "}
                       </div>
                     )}
@@ -1401,6 +1419,11 @@ export default function CallLogTabV2() {
                       (() => {
                         const open = expandedTranscripts.has(c.id);
                         const shown = displayTranscript(c);
+                        const syncedSegments =
+                          transcriptSyncEnabled && c.recording_available
+                            ? parseTranscriptSegments(c.transcript_structured)
+                            : [];
+                        const synced = syncedSegments.length > 0;
                         const preview =
                           shown.length > 120
                             ? shown.slice(0, 120).trim() + "…"
@@ -1428,9 +1451,25 @@ export default function CallLogTabV2() {
                                 {open ? "▾" : "▸"}
                               </span>{" "}
                             </button>{" "}
-                            <div className="px-2 pb-2 text-14 md:text-12 text-ink-secondary italic leading-relaxed">
-                              "{open ? shown : preview}"
-                            </div>{" "}
+                            {open && synced ? (
+                              <div className="px-1 pb-2">
+                                <CallTranscriptSync
+                                  segments={syncedSegments}
+                                  currentMs={
+                                    playback.id === c.id ? playback.ms : -1
+                                  }
+                                  onSeek={(ms) =>
+                                    playerRefs.current
+                                      .get(c.id)
+                                      ?.seekTo(ms / 1000)
+                                  }
+                                />
+                              </div>
+                            ) : (
+                              <div className="px-2 pb-2 text-14 md:text-12 text-ink-secondary italic leading-relaxed">
+                                "{open ? shown : preview}"
+                              </div>
+                            )}{" "}
                           </div>
                         );
                       })()}
