@@ -351,18 +351,27 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db, { pinned
     ok: true, owned, inScope, remaining, tierBefore, tierAfter, discountBefore, discountAfter,
     monthlyLane, perApplicationLane, remainingRates, perAppRows,
     scalarBefore: customer.monthly_rate == null ? null : Number(customer.monthly_rate), scalarAfter,
+    billingMode: customer.billing_mode || null,
   };
 }
 
 // Canonical string of a scoped plan's money-bearing facts — the same shape
 // the admin commit builds from the approved preview (approvedScopedPricing)
 // and reasserts at the wind-down boundary.
+// tierbefore + mode: a tier or billing-mode edit that commits during the
+// sweep (both take the writer lock ahead of the boundary re-plan) changes
+// the plan's INPUTS even when every priced output stays the same (e.g. a
+// per-application account whose surviving visits are all invoiced) — it
+// must be re-approved, never silently overwritten or applied on the wrong
+// lane's assets.
 function scopedPricingFingerprint(plan) {
   return [
     `tier=${plan.tierAfter ?? ''}`,
     `monthly=${plan.scalarAfter ?? ''}`,
     `rates=${(plan.remainingRates || []).map((r) => `${r.family}:${r.before}:${r.after}`).sort().join(',')}`,
     `perapp=${(plan.perAppRows || []).map((p) => `${p.id}:${p.before}:${p.after}`).sort().join(',')}`,
+    `tierbefore=${plan.tierBefore ?? ''}`,
+    `mode=${plan.billingMode ?? ''}`,
   ].join('|');
 }
 
@@ -395,6 +404,11 @@ async function applyScopedWindDown(customerId, entryPlan, {
   let plan = entryPlan;
   await db.transaction(async (trx) => {
     await lockCustomerComms(trx, customerId);
+    // The customers ROW too: a billing-mode-only admin edit takes no writer
+    // lock (it fences tier/rate edits only), so the re-plan below must read
+    // a row no such edit can change until this commits — and one that
+    // already committed is what it reads.
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
     if (Array.isArray(scopedFamilies) && scopedFamilies.length) {
       // A read failure propagates as scoped_wind_down (retrying a fresh
       // preview cannot repair a connection/schema fault); only successfully
@@ -411,6 +425,14 @@ async function applyScopedWindDown(customerId, entryPlan, {
       }
       plan = fresh;
     }
+    // A hold on a swept family created after the processor's unlocked
+    // invalidation pass (startHold takes this same lock) would survive the
+    // cancel and later text a false restart — retire it here, under the
+    // lock, before the ledger/tier writes.
+    await trx('plan_holds')
+      .where({ customer_id: customerId, status: 'active' })
+      .whereIn('family_key', plan.inScope || [])
+      .update({ status: 'cancelled', updated_at: new Date() });
     if (plan.monthlyLane) {
       await trx('customer_plan_rates').where({ customer_id: customerId }).whereIn('family_key', plan.inScope).del();
       // CAS like the per-application lane below: the plan was computed at

@@ -49,6 +49,7 @@ function mockMakeBuilder(table) {
     whereNot(arg) { const e = Object.entries(arg); filters.push((r) => !e.every(([k, v]) => String(r[k]) === String(v))); return builder; },
     whereNull(k) { filters.push((r) => r[k] == null); return builder; },
     whereRaw() { return builder; },
+    forUpdate() { mockState.forUpdate = (mockState.forUpdate || 0) + 1; return builder; },
     leftJoin() { return builder; },
     orderBy() { return builder; },
     select(...cols) { return Promise.resolve(applied().map((r) => ({ ...r }))); },
@@ -467,7 +468,7 @@ describe('boundary re-plan refusals', () => {
     const db = require('../models/db');
     const real = db.getMockImplementation();
     db.mockImplementation((table) => {
-      if (String(table).startsWith('customers')) return { where() { return this; }, first: async () => { throw new Error('connection reset'); } };
+      if (String(table).startsWith('customers')) return { where() { return this; }, forUpdate() { return this; }, first: async () => { throw new Error('connection reset'); } };
       return real(table);
     });
     try {
@@ -475,5 +476,46 @@ describe('boundary re-plan refusals', () => {
       expect(err.message).toMatch(/connection reset/);
       expect(err.code).toBeUndefined();
     } finally { db.mockImplementation(real); }
+  });
+});
+
+describe('boundary inputs and holds under the lock (Codex r3)', () => {
+  const visitRow = (family, extra = {}) => ({
+    id: `v-${family}`, customer_id: 'c1', status: 'confirmed', scheduled_date: daysOut(10),
+    recurring_ongoing: true, is_recurring: true, service_type: family === 'lawn_care' ? 'Lawn Care Service' : 'Quarterly Pest Control Service',
+    ...extra,
+  });
+  const perAppCustomer = () => ({ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true });
+
+  test('the fingerprint carries the pre-cancel tier and billing mode — a tier or mode edit during the sweep is refused even with unchanged priced outputs', async () => {
+    seed({ customers: [perAppCustomer()], visits: [visitRow('lawn_care'), visitRow('pest_control')] });
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    const approved = scopedPricingFingerprint(entry);
+    expect(approved).toMatch(/\|tierbefore=Silver\|mode=per_application$/);
+    // No priced rows (no per-app prices) → tier/monthly/rates/perapp identical…
+    mockState.tables.scheduled_services = [visitRow('pest_control')];
+    mockState.tables.customers[0].billing_mode = 'monthly_membership';
+    mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
+    // …but the lane changed: refused, nothing applied.
+    await expect(applyScopedWindDown('c1', entry, { requestId: 'req-1', scopedFamilies: ['lawn_care'], approvedScopedPricing: approved }))
+      .rejects.toMatchObject({ code: 'scoped_pricing_changed' });
+    expect(mockState.tables.customers[0].waveguard_tier).toBe('Silver');
+  });
+
+  test('the wind-down transaction locks the customers row and retires an in-scope hold that slipped in after the unlocked invalidation pass', async () => {
+    seed({
+      customers: [perAppCustomer()],
+      visits: [visitRow('lawn_care'), visitRow('pest_control')],
+      holds: [{ id: 'h-late', customer_id: 'c1', family_key: 'lawn_care', status: 'active', resume_on: daysOut(30) },
+        { id: 'h-keep', customer_id: 'c1', family_key: 'pest_control', status: 'active', resume_on: daysOut(30) }],
+    });
+    const entry = await planScopedWindDown('c1', ['lawn_care']);
+    mockState.tables.scheduled_services = [visitRow('pest_control')];
+    mockState.tables.service_requests = [{ id: 'req-1', metadata: null }];
+    mockState.forUpdate = 0;
+    await applyScopedWindDown('c1', entry, { requestId: 'req-1', scopedFamilies: ['lawn_care'], approvedScopedPricing: scopedPricingFingerprint(entry) });
+    expect(mockState.forUpdate).toBeGreaterThan(0);
+    expect(mockState.tables.plan_holds.find((h) => h.id === 'h-late').status).toBe('cancelled');
+    expect(mockState.tables.plan_holds.find((h) => h.id === 'h-keep').status).toBe('active');
   });
 });

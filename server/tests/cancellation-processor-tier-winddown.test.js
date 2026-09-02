@@ -56,6 +56,7 @@ jest.mock('../models/db', () => {
       whereNot(col, val) { conds.push((r) => r[col] !== val); return q; },
       del() { const keep = rows.filter((r) => !matches(r, conds)); const n = rows.length - keep.length; tables[table] = keep; return Promise.resolve(n); },
       whereRaw() { return q; },
+      forUpdate() { return q; },
       select() { return Promise.resolve(rows.filter((r) => matches(r, conds))); },
       first(...cols) {
         const row = rows.find((r) => matches(r, conds)) || null;
