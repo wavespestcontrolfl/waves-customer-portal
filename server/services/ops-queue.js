@@ -19,6 +19,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools');
 const { computeStalledCalls, MIN_DURATION_SECONDS } = require('./call-processing-stall-watchdog');
+const { activityLabel } = require('./intelligence-bar/authorization-contract');
 
 const ITEM_LIMIT = 25;
 const SCAN_LIMIT = 200;
@@ -49,7 +50,12 @@ function tally(items) {
 // count query per lane on a view that refreshes on demand.
 function finish(items, { truncated = false, total = null } = {}) {
   const rank = { failed: 0, parked: 1, pending: 2 };
-  const sorted = [...items].sort((a, b) => {
+  // Lanes scan failed and open sets separately; a row can only be in one
+  // state, but dedupe by id defensively so a race between the two reads
+  // never double-counts.
+  const seen = new Set();
+  const unique = items.filter((it) => (seen.has(it.id) ? false : (seen.add(it.id), true)));
+  const sorted = [...unique].sort((a, b) => {
     const r = (rank[a.status] ?? 3) - (rank[b.status] ?? 3);
     if (r !== 0) return r;
     return String(b.at || '').localeCompare(String(a.at || ''));
@@ -91,12 +97,10 @@ async function laneCallProcessing() {
   // cap, exactly as its candidates() query does — otherwise rows that can
   // never become stalls (dead-air blips, SID-less rows) fill the oldest-first
   // page and hide the real ones behind them.
-  const rows = await db('call_log')
-    .where(function whereOpen() {
-      this.where(function whereLive() {
-        this.where(function liveStatus() {
-          this.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing']);
-        })
+  // Eligibility applies to every retryable state — null / pending /
+  // processing AND no_transcription (the processor cannot reclaim an
+  // ineligible no_transcription row either; it would sit "pending" forever).
+  const eligible = (b) => b
           .whereNotNull('twilio_call_sid')
           .where(function longEnoughToProcess() {
             this.whereRaw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [MIN_DURATION_SECONDS - 1])
@@ -110,31 +114,36 @@ async function laneCallProcessing() {
                 this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'").whereNotNull('transcription');
               });
           });
-      })
-        // no_transcription is a known-failed retry the processor re-runs
-        // promptly with no age fence — open work, not windowed.
-        .orWhere('processing_status', 'no_transcription')
-        // extraction_failed: retried while under the attempt cap AND inside
-        // the processor's 7-day fence (PAN-quarantined rows keep recording_url
-        // null by design and still retry); outside either it is terminal.
-        .orWhere(function whereExtractionFailed() {
-          this.where('processing_status', 'extraction_failed')
-            .where('created_at', '>', since(RECENT_DAYS))
-            .where(function somethingToProcess() {
-              this.whereRaw("NULLIF(btrim(recording_url), '') IS NOT NULL")
-                .orWhere(function panQuarantined() {
-                  this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'").whereNotNull('transcription');
-                });
-            });
-        });
-    })
-    // Oldest claim first: a stuck call is by definition old, and a
-    // newest-first cap would hide exactly the rows this lane exists for.
+  // Column set = the watchdog's candidates() select: computeStalledCalls
+  // reads metadata (recording-ready time), the SID and the customer id.
+  const columns = ['id', 'twilio_call_sid', 'customer_id', 'from_phone', 'to_phone', 'direction', 'processing_status', 'processing_heartbeat_at', 'processing_started_at', 'updated_at', 'created_at', 'extraction_attempts', 'metadata', 'recording_url', 'recording_duration_seconds', 'duration_seconds', 'transcription', 'transcription_metadata'];
+  // Live/retryable rows: oldest claim first — a stuck call is by definition
+  // old, and a newest-first cap would hide exactly the rows this lane exists
+  // for. no_transcription is retried promptly with no age fence.
+  const live = await eligible(db('call_log')
+    .where(function liveStatus() {
+      this.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing', 'no_transcription']);
+    }))
     .orderByRaw('COALESCE(processing_heartbeat_at, processing_started_at, updated_at, created_at) ASC')
     .limit(SCAN_LIMIT)
-    // Column set = the watchdog's candidates() select: computeStalledCalls
-    // reads metadata (recording-ready time), the SID and the customer id.
-    .select('id', 'twilio_call_sid', 'customer_id', 'from_phone', 'to_phone', 'direction', 'processing_status', 'processing_heartbeat_at', 'processing_started_at', 'updated_at', 'created_at', 'extraction_attempts', 'metadata', 'recording_url', 'recording_duration_seconds', 'duration_seconds', 'transcription', 'transcription_metadata');
+    .select(columns);
+  // extraction_failed: retried while under the attempt cap AND inside the
+  // processor's 7-day fence (PAN-quarantined rows keep recording_url null by
+  // design and still retry); at the cap it is terminal. Scanned SEPARATELY so
+  // a backlog of live rows can never push failures out of the page.
+  const failedRows = await db('call_log')
+    .where('processing_status', 'extraction_failed')
+    .where('created_at', '>', since(RECENT_DAYS))
+    .where(function somethingToProcess() {
+      this.whereRaw("NULLIF(btrim(recording_url), '') IS NOT NULL")
+        .orWhere(function panQuarantined() {
+          this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'").whereNotNull('transcription');
+        });
+    })
+    .orderBy('updated_at', 'desc')
+    .limit(SCAN_LIMIT)
+    .select(columns);
+  const rows = [...failedRows, ...live];
   // One stall definition, the watchdog's (grace window, live-claim heartbeat,
   // alert ceiling, eligibility) — the tab must never disagree with the bell.
   const stalledIds = new Set(computeStalledCalls(rows).map((r) => r.id));
@@ -165,7 +174,7 @@ async function laneCallProcessing() {
       href: '/admin/communications#tab=calls',
     };
   });
-  return finish(items, { truncated: hitCap(rows) });
+  return finish(items, { truncated: hitCap(live) || hitCap(failedRows) });
 }
 
 async function laneContentParks() {
@@ -186,21 +195,22 @@ async function laneContentParks() {
   const exact = Number(result?.counts?.pending_review);
   const total = Number.isFinite(exact) ? Math.max(exact, items.length) : items.length;
   // Every pending_review row is a park, so the exact count IS the parked
-  // count — not just the page that was listed.
-  return { ...finish(items, { truncated: total > items.length, total }), parked: total };
+  // count. The count is exact even when the item page is short — never
+  // mark it truncated (that renders as a "150+" floor).
+  return { ...finish(items, { total }), parked: total };
 }
 
 async function laneEmailApprovals() {
-  const rows = await db('content_email_approvals')
-    .where(function whereOpen() {
-      this.whereIn('status', ['awaiting_reply', 'executing'])
-        .orWhere(function whereFailed() {
-          this.where('status', 'failed').where('updated_at', '>', since(RECENT_DAYS));
-        });
-    })
-    .orderBy('created_at', 'desc')
-    .limit(SCAN_LIMIT)
-    .select('id', 'token', 'kind', 'status', 'last_error', 'email_sent_at', 'created_at');
+  const cols = ['id', 'token', 'kind', 'status', 'last_error', 'email_sent_at', 'created_at', 'updated_at'];
+  // Failures scanned separately (never crowded out by the open set) and
+  // timestamped by the failure event, not the original request.
+  const failedRows = await db('content_email_approvals')
+    .where('status', 'failed').where('updated_at', '>', since(RECENT_DAYS))
+    .orderBy('updated_at', 'desc').limit(SCAN_LIMIT).select(cols);
+  const openRows = await db('content_email_approvals')
+    .whereIn('status', ['awaiting_reply', 'executing'])
+    .orderBy('created_at', 'desc').limit(SCAN_LIMIT).select(cols);
+  const rows = [...failedRows, ...openRows];
   const items = rows.map((r) => ({
     id: r.id,
     title: `${r.token} · ${String(r.kind || '').replace(/_/g, ' ')}`,
@@ -208,9 +218,9 @@ async function laneEmailApprovals() {
     detail: r.status === 'failed'
       ? `approval failed${r.last_error ? ` — ${String(r.last_error).slice(0, 140)}` : ''}`
       : r.status === 'executing' ? 'reply received, executing' : (r.email_sent_at ? 'awaiting an email reply' : 'approval email not yet sent'),
-    at: iso(r.created_at),
+    at: iso(r.status === 'failed' ? (r.updated_at || r.created_at) : r.created_at),
   }));
-  return finish(items, { truncated: hitCap(rows) });
+  return finish(items, { truncated: hitCap(failedRows) || hitCap(openRows) });
 }
 
 async function laneIbPendingActions() {
@@ -219,10 +229,12 @@ async function laneIbPendingActions() {
     .where('expires_at', '>', new Date())
     .orderBy('created_at', 'desc')
     .limit(SCAN_LIMIT)
-    .select('id', 'tool_name', 'summary', 'context', 'expires_at', 'created_at');
+    .select('id', 'tool_name', 'context', 'expires_at', 'created_at');
+  // Title from the tool label only: the card's `summary` flattens display
+  // params (an SMS body among them) and never belongs in a metadata view.
   const items = rows.map((r) => ({
     id: r.id,
-    title: r.summary || String(r.tool_name || '').replace(/_/g, ' '),
+    title: activityLabel(r.tool_name || ''),
     status: 'parked',
     detail: `awaiting confirmation on the card${r.context ? ` · ${r.context}` : ''} · expires ${iso(r.expires_at)}`,
     at: iso(r.created_at),
@@ -231,26 +243,16 @@ async function laneIbPendingActions() {
 }
 
 async function laneReportDelivery() {
-  const deliveries = await db('service_report_deliveries')
-    .where(function whereOpen() {
-      this.whereIn('status', ['queued', 'sending'])
-        .orWhere(function whereFailed() {
-          this.where('status', 'failed').where('failed_at', '>', since(RECENT_DAYS));
-        });
-    })
-    .orderBy('created_at', 'desc')
-    .limit(SCAN_LIMIT)
-    .select('id', 'service_record_id', 'channel', 'status', 'attempts', 'max_attempts', 'next_attempt_at', 'failed_at', 'created_at');
-  const pdfs = await db('service_report_pdf_jobs')
-    .where(function whereOpen() {
-      this.whereIn('status', ['queued', 'rendering'])
-        .orWhere(function whereFailed() {
-          this.where('status', 'failed').where('failed_at', '>', since(RECENT_DAYS));
-        });
-    })
-    .orderBy('created_at', 'desc')
-    .limit(SCAN_LIMIT)
-    .select('id', 'service_record_id', 'status', 'failed_at', 'created_at');
+  const dCols = ['id', 'service_record_id', 'channel', 'status', 'attempts', 'max_attempts', 'next_attempt_at', 'failed_at', 'created_at'];
+  const pCols = ['id', 'service_record_id', 'status', 'failed_at', 'created_at'];
+  // Failed and open sets scanned separately so a delivery backlog can never
+  // push the failures out of the page.
+  const dFailed = await db('service_report_deliveries').where('status', 'failed').where('failed_at', '>', since(RECENT_DAYS)).orderBy('failed_at', 'desc').limit(SCAN_LIMIT).select(dCols);
+  const dOpen = await db('service_report_deliveries').whereIn('status', ['queued', 'sending']).orderBy('created_at', 'desc').limit(SCAN_LIMIT).select(dCols);
+  const pFailed = await db('service_report_pdf_jobs').where('status', 'failed').where('failed_at', '>', since(RECENT_DAYS)).orderBy('failed_at', 'desc').limit(SCAN_LIMIT).select(pCols);
+  const pOpen = await db('service_report_pdf_jobs').whereIn('status', ['queued', 'rendering']).orderBy('created_at', 'desc').limit(SCAN_LIMIT).select(pCols);
+  const deliveries = [...dFailed, ...dOpen];
+  const pdfs = [...pFailed, ...pOpen];
   const items = [
     ...deliveries.map((r) => ({
       id: `delivery:${r.id}`,
@@ -269,7 +271,7 @@ async function laneReportDelivery() {
       at: iso(r.failed_at || r.created_at),
     })),
   ];
-  return finish(items, { truncated: hitCap(deliveries) || hitCap(pdfs) });
+  return finish(items, { truncated: [dFailed, dOpen, pFailed, pOpen].some(hitCap) });
 }
 
 async function laneFollowUps() {
@@ -299,16 +301,17 @@ async function laneFollowUps() {
 
 async function laneAdminAlerts() {
   // Open, plus snoozed alerts whose snooze has elapsed — they are due again.
-  const rows = await db('admin_alerts')
-    .where(function whereDue() {
-      this.where('status', 'open')
-        .orWhere(function whereSnoozeElapsed() {
-          this.where('status', 'snoozed').where('snoozed_until', '<=', new Date());
-        });
-    })
-    .orderBy('last_seen_at', 'desc')
-    .limit(SCAN_LIMIT)
-    .select('id', 'type', 'status', 'severity', 'title', 'href', 'detected_at', 'last_seen_at');
+  const due = (b) => b.where(function whereDue() {
+    this.where('status', 'open')
+      .orWhere(function whereSnoozeElapsed() {
+        this.where('status', 'snoozed').where('snoozed_until', '<=', new Date());
+      });
+  });
+  const aCols = ['id', 'type', 'status', 'severity', 'title', 'href', 'detected_at', 'last_seen_at'];
+  // High/critical (the failed rows) scanned separately from the rest.
+  const hot = await due(db('admin_alerts')).whereIn('severity', ['critical', 'high']).orderBy('last_seen_at', 'desc').limit(SCAN_LIMIT).select(aCols);
+  const rest = await due(db('admin_alerts')).whereNotIn('severity', ['critical', 'high']).orderBy('last_seen_at', 'desc').limit(SCAN_LIMIT).select(aCols);
+  const rows = [...hot, ...rest];
   const items = rows.map((r) => ({
     id: r.id,
     title: r.title || String(r.type || '').replace(/_/g, ' '),
@@ -317,7 +320,7 @@ async function laneAdminAlerts() {
     at: iso(r.last_seen_at || r.detected_at),
     href: r.href || null,
   }));
-  return finish(items, { truncated: hitCap(rows) });
+  return finish(items, { truncated: hitCap(hot) || hitCap(rest) });
 }
 
 const LANES = [

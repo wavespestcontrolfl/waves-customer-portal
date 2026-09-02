@@ -36,6 +36,9 @@ jest.mock('../services/content/autonomous-review-queue', () => ({
   listReviewItems: (...a) => mockReviewItems(...a),
 }));
 // The stall rule is the watchdog's; here it is a fixture: c1 is stalled.
+jest.mock('../services/intelligence-bar/authorization-contract', () => ({
+  activityLabel: (name) => ({ send_sms: 'Send a text message' })[name] || String(name).replace(/_/g, ' '),
+}));
 jest.mock('../services/call-processing-stall-watchdog', () => ({
   computeStalledCalls: (rows) => rows.filter((r) => r.id === 'c1'),
   MIN_DURATION_SECONDS: 11,
@@ -71,10 +74,10 @@ describe('getOpsQueue', () => {
     ];
     fixtures.content_email_approvals = [
       { id: 'ea-1', token: 'EA-1a2b3c4d', kind: 'named_competitor_review', status: 'awaiting_reply', email_sent_at: ago(10), created_at: ago(10) },
-      { id: 'ea-2', token: 'EA-ffffffff', kind: 'trust_build_1_of_3', status: 'failed', last_error: 'smtp', created_at: ago(200) },
+      { id: 'ea-2', token: 'EA-ffffffff', kind: 'trust_build_1_of_3', status: 'failed', last_error: 'smtp', created_at: ago(20000), updated_at: ago(200) },
     ];
     fixtures.ib_pending_actions = [
-      { id: 'pa-1', tool_name: 'send_sms', summary: 'Send a text message to Jane', context: 'customers', expires_at: ago(-5), created_at: ago(1) },
+      { id: 'pa-1', tool_name: 'send_sms', summary: 'send_sms — to: +15550000100, message: SECRET SMS BODY', context: 'customers', expires_at: ago(-5), created_at: ago(1) },
     ];
     fixtures.service_report_deliveries = [
       { id: 'd1', service_record_id: 'rec-11111111', channel: 'email', status: 'queued', attempts: 0, max_attempts: 5, created_at: ago(3) },
@@ -114,7 +117,9 @@ describe('getOpsQueue', () => {
 
     expect(by.content.items).toEqual([expect.objectContaining({ id: 'opp-1', status: 'parked', title: 'Best ant bait for lanais', detail: 'parked: affiliate review' })]);
     expect(by.approvals.items.map((i) => [i.id, i.status])).toEqual([['ea-2', 'failed'], ['ea-1', 'parked']]);
-    expect(by.ib.items).toEqual([expect.objectContaining({ id: 'pa-1', status: 'parked', title: 'Send a text message to Jane' })]);
+    expect(by.approvals.items[0].at).toBe(ago(200)); // the failure event, not the request
+    expect(by.ib.items).toEqual([expect.objectContaining({ id: 'pa-1', status: 'parked', title: 'Send a text message' })]);
+    expect(JSON.stringify(by.ib)).not.toContain('SECRET');
     expect(by.reports.items.map((i) => [i.id, i.status])).toEqual([
       ['delivery:d2', 'failed'], ['pdf:p1', 'pending'], ['delivery:d1', 'pending'], // newest first within a status
     ]);
@@ -170,7 +175,7 @@ describe('getOpsQueue scan cap', () => {
     expect(ib.truncated).toBe(true);
     expect(ib.total).toBe(200);
     const content = q.lanes.find((l) => l.key === 'content');
-    expect(content).toMatchObject({ total: 150, parked: 150, truncated: true });
+    expect(content).toMatchObject({ total: 150, parked: 150, truncated: false }); // exact count, no "+"
     expect(q.totals.parked).toBeGreaterThanOrEqual(150);
     expect(q.totals.truncated).toBe(true);
   });
