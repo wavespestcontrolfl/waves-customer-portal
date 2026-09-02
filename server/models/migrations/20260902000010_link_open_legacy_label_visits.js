@@ -90,6 +90,7 @@ exports.up = async function up(knex) {
   const prior = await loadState(knex);
   const state = { linked: Array.isArray(prior?.linked) ? prior.linked : [], ambiguous: [], conflicts: [] };
   const alreadyLinked = new Set(state.linked.map((l) => l.id));
+  state.linked = [...state.linked];
 
   const catalog = await knex('services').select('id', 'name', 'service_key', 'is_active', 'is_archived');
   const cols = [
@@ -127,10 +128,17 @@ exports.up = async function up(knex) {
       [svc.id, svc.service_key, ...candidates, svc.id, ...candidates],
     );
     if (hasSnapshotCol) q = stampSnapshot ? q.whereNull('service_key_snapshot') : q.where({ service_key_snapshot: v.service_key_snapshot });
+    // The cadence is resolution evidence too (GH codex r1 P2): an admin
+    // moving the series between scan and write must make the link miss.
+    if (hasPatternCol) q = v.recurring_pattern == null ? q.whereNull('recurring_pattern') : q.where({ recurring_pattern: v.recurring_pattern });
     const patch = { service_id: svc.id };
     if (stampSnapshot) patch.service_key_snapshot = svc.service_key;
     const count = await q.update(patch);
-    if (count && !alreadyLinked.has(v.id)) {
+    if (count) {
+      // A rerun that relinks a previously ledgered visit (unlinked and
+      // repointed since) records the NEW linkage, not the stale one (GH
+      // codex r1 P2).
+      if (alreadyLinked.has(v.id)) state.linked = state.linked.filter((l) => l.id !== v.id);
       state.linked.push({
         id: v.id,
         service_type: v.service_type,
@@ -138,7 +146,9 @@ exports.up = async function up(knex) {
         service_key_snapshot: stampSnapshot ? svc.service_key : null,
         // The snapshot the row ALREADY carried (agreeing case): down()
         // requires it unchanged but never clears it (pre-push codex P1).
-        prior_service_key_snapshot: stampSnapshot ? null : (snapshot || null),
+        // Stored EXACTLY as the row carries it (whitespace included) so the
+        // rollback predicate matches the row (GH codex r1 P2).
+        prior_service_key_snapshot: stampSnapshot ? null : (v.service_key_snapshot ?? null),
       });
     }
   }

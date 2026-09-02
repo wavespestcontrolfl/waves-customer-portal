@@ -98,6 +98,14 @@ describe('20260902000020 backfill service_records.service_line', () => {
     expect(row(db, 'r2').service_line).toBe('pest'); // theirs, kept
   });
 
+  test('a relabel between scan and write is never stamped with the old label\'s line', async () => {
+    const db = seedDb();
+    db._raceOnce = (d) => { d.service_records.find((r) => r.id === 'r4').service_type = 'Lawn Care'; }; // 'Termite' → 'Lawn Care' mid-flight
+    await migration.up(fakeKnex(db));
+    expect(row(db, 'r4').service_line).toBeNull();
+    expect(state(db).stamped.find((s) => s.service_type === 'Termite')).toBeUndefined();
+  });
+
   test('idempotent: a re-run stamps nothing new and keeps the ledger', async () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));

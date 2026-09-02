@@ -193,6 +193,36 @@ describe('20260902000010 link open legacy-label visits through the shared bridge
     expect(state(db).linked).toEqual(first);
   });
 
+  test('a rerun that relinks a previously ledgered visit records the NEW linkage', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    Object.assign(row(db, 'v-cad'), { service_id: null, service_key_snapshot: null, recurring_pattern: 'monthly' }); // unlinked + repointed since
+    await migration.up(fakeKnex(db));
+    const rec = state(db).linked.filter((l) => l.id === 'v-cad');
+    expect(rec).toEqual([{ id: 'v-cad', service_type: 'Pest Control', service_id: 'svc-pm', service_key_snapshot: 'pest_general_monthly', prior_service_key_snapshot: null }]);
+  });
+
+  test('write-time guard: a cadence change between scan and write makes the link miss', async () => {
+    const db = seedDb();
+    let edited = false;
+    await migration.up(fakeKnex(db, {
+      catalogEditDuringWrite: (d) => { if (!edited) { edited = true; d.scheduled_services.find((r) => r.id === 'v-cad').recurring_pattern = 'monthly'; } },
+    }));
+    expect(row(db, 'v-cad').service_id).toBeNull();
+    expect(state(db).linked.map((l) => l.id)).not.toContain('v-cad');
+  });
+
+  test('an agreeing snapshot with surrounding whitespace is ledgered verbatim so down() matches the row', async () => {
+    const db = seedDb();
+    row(db, 'v-agree').service_key_snapshot = ' pest_general_quarterly ';
+    await migration.up(fakeKnex(db));
+    expect(row(db, 'v-agree').service_id).toBe('svc-pq');
+    expect(state(db).linked.find((l) => l.id === 'v-agree').prior_service_key_snapshot).toBe(' pest_general_quarterly ');
+    await migration.down(fakeKnex(db));
+    expect(row(db, 'v-agree').service_id).toBeNull();
+    expect(row(db, 'v-agree').service_key_snapshot).toBe(' pest_general_quarterly ');
+  });
+
   test('down() unlinks only rows still open with the exact linkage/snapshot this migration set', async () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));

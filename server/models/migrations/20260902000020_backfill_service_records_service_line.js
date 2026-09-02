@@ -42,22 +42,25 @@ exports.up = async function up(knex) {
     .whereNotNull('service_type')
     .select('id', 'service_type');
 
+  // Grouped by the RAW stored label so the write can re-check it verbatim.
   const byLabel = new Map();
   for (const r of rows) {
-    const label = String(r.service_type || '').trim();
-    if (!label) continue;
-    if (!byLabel.has(label)) byLabel.set(label, []);
-    byLabel.get(label).push(r.id);
+    if (typeof r.service_type !== 'string' || !r.service_type.trim()) continue;
+    if (!byLabel.has(r.service_type)) byLabel.set(r.service_type, []);
+    byLabel.get(r.service_type).push(r.id);
   }
 
   for (const [label, ids] of byLabel) {
-    const line = detectServiceLine(label);
+    const line = detectServiceLine(label.trim());
     if (!line) continue;
     // Ledger only the ids the CAS write actually touched (RETURNING): a row
     // a concurrent writer filled between scan and write is theirs, and
-    // down() must never clear it (pre-push codex P1).
+    // down() must never clear it (pre-push codex P1). The label is
+    // re-checked too — a relabel between scan and write must not receive
+    // the OLD label's line (GH codex r1 P2).
     const updated = await knex('service_records')
       .whereIn('id', ids)
+      .where({ service_type: label })
       .whereNull('service_line')
       .update({ service_line: line }, ['id']);
     const stampedIds = (Array.isArray(updated) ? updated : []).map((r) => (r && typeof r === 'object' ? r.id : r)).filter(Boolean);
