@@ -62,8 +62,14 @@ function emailOutcome(result) {
   return { ok: !failed, channel: 'email', result, ...(failed ? { error: result.error || 'send failed' } : {}) };
 }
 
+// gateEnvValue at CALL time (techTips idiom): the gates object is evaluated
+// once at boot, so isEnabled() would freeze the kill switch until a redeploy.
+// Guarded like admin-dispatch's techTips read: several sender suites mock
+// feature-gates with a partial object, and a missing gateEnvValue must read
+// as "off" (email path), never throw inside a digest send.
 function inAppEnabled() {
-  return featureGates().isEnabled('opsDigestsInApp');
+  const gates = featureGates();
+  return typeof gates.gateEnvValue === 'function' && gates.gateEnvValue('GATE_OPS_DIGESTS_IN_APP') === true;
 }
 
 /**

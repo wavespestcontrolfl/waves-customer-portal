@@ -6,10 +6,10 @@ const mockNotifyAdmin = jest.fn();
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const gates = require('../config/feature-gates');
-
+// The helper reads the env at call time, so the tests flip the variable
+// after load — exactly what a Railway flip does without a restart.
 function withGate(on) {
-  gates.gates.opsDigestsInApp = on;
+  process.env.GATE_OPS_DIGESTS_IN_APP = on ? 'true' : '';
 }
 
 const { deliverOpsDigest, htmlToText, CATEGORY } = require('../services/ops-digest');
