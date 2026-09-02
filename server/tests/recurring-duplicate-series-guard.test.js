@@ -722,7 +722,9 @@ describe('the series creators consume the guard (source guards)', () => {
     // transaction, before the parent insert; the escape hatch bypasses it
     // exactly as it bypasses the preflight.
     const backstop = scheduleSrc.indexOf('checkActiveSeriesLocked(trx, {');
-    const parentInsert = scheduleSrc.indexOf("[svc] = await trx('scheduled_services').insert(insertData)");
+    // The parent insert now takes the booking-contract-completed payload
+    // (adminCreateInsert); the guard must still run before it.
+    const parentInsert = scheduleSrc.indexOf("[svc] = await trx('scheduled_services').insert(adminCreateInsert)");
     expect(backstop).toBeGreaterThan(-1);
     expect(parentInsert).toBeGreaterThan(backstop);
     expect(scheduleSrc).toContain('req.body.allowDuplicateSeries !== true');

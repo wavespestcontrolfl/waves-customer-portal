@@ -82,7 +82,6 @@ const CONTRACT_MODULE_CERTIFIED_WRITES = ['data.idempotency_key = idempotencyKey
 // multiset. Shrink-only.
 const FROZEN_LEGACY_INSERT_SITES_2026_09 = {
   'server/routes/admin-schedule.js': [
-    "post / :: [svc] = await trx( scheduled_services').insert(insertData",
     "post / :: const [childRow] = await trx( scheduled_services').insert(childData",
     "post / :: const [boosterRow] = await trx( scheduled_services').insert(boosterData",
     "put /:id/update-details :: const [childRow] = await trx( scheduled_services').insert(childData",
@@ -500,7 +499,14 @@ function isContractCompleted(rawSource, arg) {
     const open = mm.index + mm[0].length - 1;
     const cb = topLevelArgs(source.slice(open + 1, balancedParens(source, open) - 1))[0] || '';
     const params = /^\s*(?:async\s*)?(?:\(([^)]*)\)|([A-Za-z_$][\w$]*))\s*=>/.exec(cb) || /^\s*(?:async\s*)?function\s*[\w$]*\s*\(([^)]*)\)/.exec(cb);
-    if (!params) continue;
+    // A NAMED callback (`rows.forEach(stripAttribution)`) is opaque to this
+    // scan — fail closed on it, as on every other opaque shape (#3702
+    // deferred P2). Methods that take no callback keep their read-only
+    // verdict.
+    if (!params) {
+      if (CALLBACK_METHODS.has(mm[1])) return false;
+      continue;
+    }
     const list = (params[1] ?? params[2] ?? '').split(',').map((x) => x.trim().replace(/=.*$/, '').trim()).filter(Boolean);
     // A callback that also binds the ARRAY parameter (`(row, i, array) =>
     // { array[i] = raw; }`) can replace completed rows through it — fail
@@ -565,7 +571,101 @@ function stripCallArgs(text) {
 // list (`mutate(makeOptions(), data)`) can't hide it (r12 P2); the same
 // check runs on a callback's element parameter (`rows.forEach((row) =>
 // stripAttribution(row))` — r14 P2).
-function escapesThroughCall(text, id) {
+// Any `return` STATEMENT carrying a bare reference to the tracked value
+// (`return data`, `return { payload: data }`, `return ok ? data : null`)
+// hands it to the wrapper (GH codex r3 P2). Statement-bounded by `;`/`}`.
+function returnsRef(body, id) {
+  const ret = /\breturn\b([^;}]*)/g;
+  let m;
+  while ((m = ret.exec(body)) !== null) {
+    if (bareRef(id).test(m[1])) return true;
+  }
+  return false;
+}
+
+function isBlockFunction(arg) {
+  const a = String(arg || '').trim();
+  const arrow = /^(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/.test(a);
+  const fn = /^(?:async\s+)?function\b[^{]*\{/.test(a);
+  return (arrow || fn) && a.endsWith('}');
+}
+
+// String CONTENTS blanked to spaces (length preserved; quotes kept):
+// prose such as `'price the visit (this customer\'s lane…'` or
+// `\`Can't price (…)\`` must not read as a call named `visit` whose
+// "argument" swallows the rest of the handler (first adopter,
+// admin-schedule). Template TEXT is blanked too; a `${…}` expression inside
+// one is real code and is kept verbatim (nested braces balanced).
+function blankStringContents(source) {
+  // Index just past the string/template that OPENS at `i` (quote char at
+  // source[i]). Templates recurse through `${…}` expressions, which may
+  // themselves hold quoted strings (`${f('}')}`) or nested templates — a
+  // brace inside one must not close the expression early, or the rest of
+  // the expression would be blanked and a mutation inside it hidden
+  // (pre-push codex P1).
+  const endOfString = (i) => {
+    const q = source[i];
+    let j = i + 1;
+    while (j < source.length && source[j] !== q) {
+      if (source[j] === '\\') { j += 2; continue; }
+      if (q !== '`' && source[j] === '\n') return j; // unterminated quote: stop at the line
+      if (q === '`' && source.startsWith('${', j)) { j = endOfExpression(j + 2); continue; }
+      j += 1;
+    }
+    return j < source.length ? j + 1 : source.length;
+  };
+  // Index just past the `}` closing a template expression whose body
+  // starts at `k`, skipping strings/templates and balancing braces.
+  const endOfExpression = (k) => {
+    let depth = 1;
+    while (k < source.length && depth > 0) {
+      const ch = source[k];
+      if (ch === "'" || ch === '"' || ch === '`') { k = endOfString(k); continue; }
+      if (ch === '{') depth += 1;
+      else if (ch === '}') depth -= 1;
+      k += 1;
+    }
+    return k;
+  };
+  let out = '';
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch !== "'" && ch !== '"' && ch !== '`') { out += ch; i += 1; continue; }
+    const j = endOfString(i);
+    const literal = source.slice(i, j);
+    if (ch !== '`') {
+      // quoted string: keep the quotes, blank the contents
+      out += literal.replace(/[^\n]/g, (c, idx) => (idx === 0 || (idx === literal.length - 1 && literal.endsWith(ch) && literal.length > 1) ? c : ' '));
+    } else {
+      // template: blank the text, keep every ${…} expression verbatim
+      let k = 1;
+      let piece = '`';
+      while (k < literal.length - (literal.endsWith('`') && literal.length > 1 ? 1 : 0)) {
+        // An ESCAPED `\${` is inert template text, not an interpolation
+        // (GH codex r3 P2) — blank the escape pair and move on.
+        if (literal[k] === '\\') { piece += '  '; k += 2; continue; }
+        if (literal.startsWith('${', k)) {
+          const exprEnd = endOfExpression(i + k + 2) - i;
+          // The expression is code: recurse so a quoted string INSIDE it
+          // (`${format("invalid data")}`) is blanked like any other string
+          // instead of reading as a bare reference (GH codex r2 P2).
+          piece += blankStringContents(literal.slice(k, exprEnd));
+          k = exprEnd;
+          continue;
+        }
+        piece += literal[k] === '\n' ? '\n' : ' ';
+        k += 1;
+      }
+      out += piece + (literal.endsWith('`') && literal.length > 1 ? '`' : '');
+    }
+    i = j;
+  }
+  return out;
+}
+
+function escapesThroughCall(rawText, id) {
+  const text = blankStringContents(rawText);
   const callRe = /([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(/g;
   let cm;
   while ((cm = callRe.exec(text)) !== null) {
@@ -574,7 +674,16 @@ function escapesThroughCall(text, id) {
     // Any BARE reference to the tracked object inside an argument counts
     // (`mutate({ payload: data })`, `mutate([data])`) — a property read
     // (`data.id`) or a spread copy (`{ ...data }`) does not (GH Codex r21 P2).
-    if (!args.some((a) => bareRef(id).test(a))) continue;
+    // A BLOCK-BODIED function argument is scope, not a value: the tracked
+    // object referenced inside `db.transaction(async (trx) => { … })` does
+    // not escape through `transaction` — its body's own calls are judged
+    // by this same loop. An EXPRESSION-bodied arrow (`wrap(() => data)`)
+    // returns the value and stays an escape (first adopter: the admin
+    // create parent lives inside a transaction callback).
+    // …unless that body RETURNS the tracked value (`wrap(() => { return
+    // data; })`) — the wrapper then holds it (GH codex r1 P2).
+    const valueArgs = args.filter((a) => !isBlockFunction(a) || returnsRef(a, id));
+    if (!valueArgs.some((a) => bareRef(id).test(a))) continue;
     const callee = cm[1].replace(/\s+/g, '');
     const last = callee.split('.').pop();
     if (NOT_A_FUNCTION.has(callee)) continue; // `if (data)` is not a call
@@ -594,9 +703,17 @@ function mutatesIdentifier(text, id) {
     + `|${prop}\\s*(?:\\+\\+|--)`
     + `|(?:\\+\\+|--)\\s*${prop}`
     + `|\\bdelete\\s+${id}\\b`
+    // destructuring ASSIGNMENT onto a property (`({ x: data.x } = raw)`,
+    // `[data.x] = arr`) — a write the property-assignment form above
+    // cannot see (#3702 deferred P2)
+    // — nested patterns too (`({ meta: { status: data.status } } = raw)`),
+    // so inner braces are allowed; `;` and `=` still bound the pattern
+    // (GH codex r2 P2)
+    + `|[{\\[][^;=]*${prop}[^;=]*[}\\]]\\s*=(?![=>])`
     + `|\\bObject\\s*\\.\\s*assign\\s*\\(\\s*${id}\\b`,
   ).test(text);
 }
+const CALLBACK_METHODS = new Set(['map', 'filter', 'forEach', 'some', 'every', 'find', 'findIndex', 'reduce', 'flatMap']);
 const READ_ONLY_METHODS = new Set(['map', 'filter', 'forEach', 'some', 'every', 'find', 'findIndex', 'slice', 'includes', 'indexOf', 'join', 'concat', 'reduce', 'flat', 'flatMap', 'entries', 'keys', 'values', 'at', 'toString', 'hasOwnProperty', 'toJSON']);
 const NON_MUTATING_CALLEES = new Set(['completeScheduledServiceInsert', 'JSON.stringify', 'structuredClone', 'Object.keys', 'Object.values', 'Object.entries', 'Object.freeze', 'Array.isArray', 'String']);
 const NON_MUTATING_LAST = new Set(['insert', 'batchInsert']);
@@ -814,7 +931,15 @@ function collectInsertSites(source, { sql = false } = {}) {
   // (`INSERT INTO public.scheduled_services`, quoted or not; r5 P2).
   // …and PostgreSQL COPY / psql \copy INTO the table, which write rows
   // without an INSERT (GH Codex r17 P2).
-  const rawRe = /(?:INSERT\s+INTO(?:\s+ONLY)?|MERGE\s+INTO(?:\s+ONLY)?|\bCOPY|\\copy)\s+(?:["'`]?\w+["'`]?\s*\.\s*)?["'`]?scheduled_services\b/gi;
+  // Between SQL tokens, whitespace OR a SQL comment (`INSERT /* … */ INTO`,
+  // `INSERT -- x\n INTO`) — the comment lives INSIDE the string literal, so
+  // it is part of the statement, not a JavaScript comment (#3702 deferred
+  // P2).
+  const SQL_GAP = String.raw`(?:\s|/\*[\s\S]*?\*/|--[^\n]*\n)+`;
+  const rawRe = new RegExp(
+    String.raw`(?:INSERT${SQL_GAP}INTO(?:${SQL_GAP}ONLY)?|MERGE${SQL_GAP}INTO(?:${SQL_GAP}ONLY)?|\bCOPY|\\copy)${SQL_GAP}(?:["'\x60]?\w+["'\x60]?\s*\.\s*)?["'\x60]?scheduled_services\b`,
+    'gi',
+  );
   let rawM;
   while ((rawM = rawRe.exec(source)) !== null) {
     // Comment mentions are not sites (the iCal script documents its own
@@ -1171,6 +1296,30 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("await trx('scheduled_services').where({ id }).first();")).toEqual([]);
     // …nor an insert into a DIFFERENT table on the next line.
     expect(collectInsertSites("await trx('scheduled_services').where({ id }).update({ a: 1 });\nawait trx('lead_activities').insert({ b: 2 });")).toEqual([]);
+    // …a completed payload used inside a BLOCK-bodied callback (the transaction shape every route writer has) is not an escape through the outer call; an expression-bodied arrow returning it is (first adopter)…
+    expect(collectInsertSites(`${IMPORT}await db.transaction(async (trx) => {\n  const data = await completeScheduledServiceInsert(raw, opts);\n  await trx('scheduled_services').insert(data).returning('*');\n});`)).toEqual([]);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nwrap(() => data);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}await db.transaction(async (trx) => {\n  const data = await completeScheduledServiceInsert(raw, opts);\n  mutate(data);\n  await trx('scheduled_services').insert(data);\n});`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nconst hint = 'price the visit (this customer\\'s lane does not bill)';\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nif (!ok) throw httpError(\`Can't price (\${why}) today\`);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`stamping \${mutate(data)}\`);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`x \${label('}')} \${mutate(data)}\`);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`x \${\`inner \${mutate(data)}\`}\`);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nwrap(() => { return data; });\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\n({ meta: { status: data.status } } = raw);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`x \${format("invalid data")}\`);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nwrap(() => { return { payload: data }; });\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nwrap(() => { return ok ? data : null; });\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`example: \\\${mutate(data)} is inert text\`);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
+    // …the three #3702 deferred shapes: a NAMED callback is opaque and fails closed…
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach(stripAttribution);\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nconst n = rows.indexOf(first);\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
+    // …a destructuring ASSIGNMENT onto a property is a mutation…
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\n({ source_action: data.source_action } = raw);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\n[data.status] = statuses;\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    // …and a SQL comment between raw keywords is still the statement.
+    expect(collectInsertSites("await db.raw('INSERT /* fast path */ INTO scheduled_services (id) VALUES (?)', [id]);")).toHaveLength(1);
+    expect(collectInsertSites("await db.raw(`INSERT -- audit\n INTO public.scheduled_services (id) VALUES (?)`, [id]);")).toHaveLength(1);
   });
 
   test('the certified-wrapper check sees every write shape, increments included (self-check)', () => {
