@@ -280,14 +280,18 @@ async function laneReportDelivery() {
   // the sweep is down, this view is the only place it shows.
   const staleClaim = (r, claimStatus, staleMs) => r.status === claimStatus
     && r.locked_at && new Date(r.locked_at).getTime() <= Date.now() - staleMs;
-  // Failed and open sets scanned separately so a delivery backlog can never
-  // push the failures out of the page.
+  // Failed, claimed and queued sets scanned separately so a backlog can never
+  // push the failures — or the stale claims — out of the page. Claims scan
+  // OLDEST lock first: a stale claim is by definition old, and a newest-first
+  // cap would hide exactly the rows the stale rule exists for.
   const dFailed = await db('service_report_deliveries').where('status', 'failed').where('failed_at', '>', since(RECENT_DAYS)).orderBy('failed_at', 'desc').limit(SCAN_LIMIT).select(dCols);
-  const dOpen = await db('service_report_deliveries').whereIn('status', ['queued', 'sending']).orderBy('created_at', 'desc').limit(SCAN_LIMIT).select(dCols);
+  const dClaimed = await db('service_report_deliveries').where('status', 'sending').orderByRaw('COALESCE(locked_at, created_at) ASC').limit(SCAN_LIMIT).select(dCols);
+  const dQueued = await db('service_report_deliveries').where('status', 'queued').orderBy('created_at', 'desc').limit(SCAN_LIMIT).select(dCols);
   const pFailed = await db('service_report_pdf_jobs').where('status', 'failed').where('failed_at', '>', since(RECENT_DAYS)).orderBy('failed_at', 'desc').limit(SCAN_LIMIT).select(pCols);
-  const pOpen = await db('service_report_pdf_jobs').whereIn('status', ['queued', 'rendering']).orderBy('created_at', 'desc').limit(SCAN_LIMIT).select(pCols);
-  const deliveries = [...dFailed, ...dOpen];
-  const pdfs = [...pFailed, ...pOpen];
+  const pClaimed = await db('service_report_pdf_jobs').where('status', 'rendering').orderByRaw('COALESCE(locked_at, created_at) ASC').limit(SCAN_LIMIT).select(pCols);
+  const pQueued = await db('service_report_pdf_jobs').where('status', 'queued').orderBy('created_at', 'desc').limit(SCAN_LIMIT).select(pCols);
+  const deliveries = [...dFailed, ...dClaimed, ...dQueued];
+  const pdfs = [...pFailed, ...pClaimed, ...pQueued];
   const items = [
     ...deliveries.map((r) => ({
       id: `delivery:${r.id}`,
@@ -312,7 +316,7 @@ async function laneReportDelivery() {
       at: iso(r.failed_at || r.created_at),
     })),
   ];
-  return finish(items, { truncated: [dFailed, dOpen, pFailed, pOpen].some(hitCap) });
+  return finish(items, { truncated: [dFailed, dClaimed, dQueued, pFailed, pClaimed, pQueued].some(hitCap) });
 }
 
 async function laneFollowUps() {
