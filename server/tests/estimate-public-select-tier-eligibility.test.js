@@ -76,7 +76,7 @@ const express = require('express');
 const db = require('../models/db');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
-const { selectTierCeiling } = require('../routes/estimate-public');
+const { selectTierCeiling, applyMembershipRepriceToEstimate } = require('../routes/estimate-public');
 const { serviceOptOutEngineTierReference } = require('../services/estimate-service-opt-out');
 
 let server;
@@ -236,6 +236,43 @@ describe('selectTierCeiling', () => {
     expect(serviceOptOutEngineTierReference(data)).toBe('Gold');
     expect(selectTierCeiling(data)).toBe('Gold');
     expect(serviceOptOutEngineTierReference({})).toBeNull();
+  });
+});
+
+describe('membership reconcile refreshes the opt-out stamp the ceiling reads (pre-push codex P0)', () => {
+  test('a lapsed member cannot re-select the old member tier after the reconcile reprice', () => {
+    // Sent as a Gold member with an opt-out commit stamped Gold; the plan
+    // lapsed and the reconcile repriced the mix at the non-member tier.
+    const estimate = { id: 'est-lapsed', waveguard_tier: 'Gold', monthly_total: 90, annual_total: 1080, onetime_total: 0 };
+    const estData = {
+      result: { recurring: { waveGuardTier: 'Gold', services: [{ service: 'pest_control', mo: 90 }] } },
+      serviceOptOut: { engineTier: 'Gold', events: [] },
+      membershipLapsedRequote: true,
+    };
+    const reprice = {
+      recomputed: true,
+      serverResult: { recurring: { waveGuardTier: 'Bronze', services: [{ service: 'pest_control', mo: 112 }] } },
+      serverTotals: { monthlyTotal: 112, annualTotal: 1344, onetimeTotal: 0 },
+    };
+    applyMembershipRepriceToEstimate(estimate, estData, reprice);
+    expect(estimate.waveguard_tier).toBe('Bronze');
+    expect(estimate.monthly_total).toBe(112);
+    expect(estData.membershipLapsedRequote).toBeUndefined();
+    expect(estData.serviceOptOut.engineTier).toBe('Bronze');
+    expect(serviceOptOutEngineTierReference(estData)).toBe('Bronze');
+    expect(selectTierCeiling(estData)).toBe('Bronze');
+  });
+
+  test('a blob without an opt-out record gains no stamp', () => {
+    const estimate = { waveguard_tier: 'Silver' };
+    const estData = { result: { recurring: { waveGuardTier: 'Silver' } } };
+    applyMembershipRepriceToEstimate(estimate, estData, {
+      recomputed: true,
+      serverResult: { recurring: { waveGuardTier: 'Bronze' } },
+      serverTotals: { monthlyTotal: 50, annualTotal: 600, onetimeTotal: 0 },
+    });
+    expect(estData.serviceOptOut).toBeUndefined();
+    expect(selectTierCeiling(estData)).toBe('Bronze');
   });
 });
 

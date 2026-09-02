@@ -8288,6 +8288,33 @@ function sendEstimatePage(res, token, estimate, estData, membership, opts = {}) 
 // estimate.estimate_data in place so every downstream consumer
 // (buildEstimateMembershipContext, buildPricingBundle's annual-prepay gate, the
 // server-HTML renderPage) sees the reconciled value. Never throws.
+// Apply a membership-reconcile reprice to the in-memory row + blob: the
+// authoritative result, the totals, the ROW tier (acceptance reads it for
+// discount math — leaving the stale member tier would reapply e.g. a
+// Platinum discount to Bronze-priced data at invoice time), and the opt-out
+// commit stamp `serviceOptOut.engineTier` when one exists. That stamp is the
+// first engine-tier reference the opt-out gate and the select-tier ceiling
+// read (serviceOptOutEngineTierReference); left alone it would outrank the
+// reconciled result and let a lapsed member re-select their old member tier
+// (pre-push codex P0 on #3741). A successful reprice also supersedes any
+// earlier fail-closed flag — without that a transient failure would leave the
+// estimate permanently quote-required.
+function applyMembershipRepriceToEstimate(estimate, estData, reprice) {
+  estData.result = reprice.serverResult;
+  delete estData.membershipLapsedRequote;
+  estimate.monthly_total = reprice.serverTotals?.monthlyTotal ?? 0;
+  estimate.annual_total = reprice.serverTotals?.annualTotal ?? 0;
+  estimate.onetime_total = reprice.serverTotals?.onetimeTotal ?? 0;
+  const repricedTier = reprice.serverResult?.recurring?.waveGuardTier
+    || reprice.serverResult?.recurring?.tier
+    || null;
+  estimate.waveguard_tier = repricedTier;
+  if (estData.serviceOptOut && typeof estData.serviceOptOut === 'object') {
+    estData.serviceOptOut.engineTier = repricedTier;
+  }
+  return estimate;
+}
+
 async function reconcileFrozenMembershipSnapshot(estimate) {
   try {
     if (!estimate || !estimate.customer_id) return;
@@ -8484,20 +8511,7 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
       ...(verifiedWaiverKeys ? { setupWaiverPriorQualifyingServices: verifiedWaiverKeys } : {}),
     });
     if (reprice.recomputed) {
-      estData.result = reprice.serverResult;
-      // A successful authoritative reprice supersedes any earlier fail-closed
-      // flag — without this a transient failure would leave the estimate
-      // permanently quote-required.
-      delete estData.membershipLapsedRequote;
-      estimate.monthly_total = reprice.serverTotals.monthlyTotal ?? 0;
-      estimate.annual_total = reprice.serverTotals.annualTotal ?? 0;
-      estimate.onetime_total = reprice.serverTotals.onetimeTotal ?? 0;
-      // Acceptance reads the ROW tier for discount math — leaving the stale
-      // member tier would reapply e.g. a Platinum discount to Bronze-priced
-      // data at invoice time.
-      estimate.waveguard_tier = reprice.serverResult?.recurring?.waveGuardTier
-        || reprice.serverResult?.recurring?.tier
-        || null;
+      applyMembershipRepriceToEstimate(estimate, estData, reprice);
     } else {
       estData.membershipLapsedRequote = true;
     }
@@ -25777,6 +25791,7 @@ async function handleEstimateAsk(req, res, next) {
 module.exports = router;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.selectTierCeiling = selectTierCeiling;
+module.exports.applyMembershipRepriceToEstimate = applyMembershipRepriceToEstimate;
 module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
 // Legacy/textual setup-row recognizer — shared with setup-fee-obligation's
 // snapshot evidence so a frozen legacy row ("WaveGuard Membership Setup")
