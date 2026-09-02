@@ -1,0 +1,182 @@
+/**
+ * Ops queue — read-only projection of every long-running lane (GATE_ADMIN_OPS_QUEUE).
+ * Invariants: every lane is isolated (one failing lane degrades to an error row);
+ * statuses normalize to pending / parked / failed; failed-first ordering;
+ * the route is admin-only and 404 while the gate is off.
+ */
+
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+
+const fixtures = {};
+const mockJobHealth = jest.fn();
+const mockReviewItems = jest.fn();
+
+// Minimal knex-shaped stub: every builder method chains, awaiting resolves the
+// table's fixture rows (or throws when the fixture is an Error).
+jest.mock('../models/db', () => {
+  const make = (table) => {
+    const chain = new Proxy({}, {
+      get(_t, prop) {
+        if (prop === 'then') {
+          const rows = fixtures[table];
+          return (resolve, reject) => (rows instanceof Error ? reject(rows) : resolve(rows || []));
+        }
+        return () => chain;
+      },
+    });
+    return chain;
+  };
+  return jest.fn((table) => make(table));
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/intelligence-bar/job-health-tools', () => ({
+  getScheduledJobHealth: (...a) => mockJobHealth(...a),
+}));
+jest.mock('../services/content/autonomous-review-queue', () => ({
+  listReviewItems: (...a) => mockReviewItems(...a),
+}));
+
+const { getOpsQueue, LANES } = require('../services/ops-queue');
+
+const NOW = Date.now();
+const ago = (min) => new Date(NOW - min * 60000).toISOString();
+
+describe('getOpsQueue', () => {
+  beforeEach(() => {
+    for (const k of Object.keys(fixtures)) delete fixtures[k];
+    mockJobHealth.mockResolvedValue({ jobs: [
+      { job: 'pricing-sweep', state: 'failing', consecutive_failures: 3, last_error: 'boom', last_started_at: ago(30) },
+      { job: 'ga4-sync', state: 'stale', last_success_age_minutes: 20000, last_success_at: ago(20000) },
+      { job: 'digest', state: 'running', last_started_at: ago(2) },
+      { job: 'healthy-one', state: 'healthy', last_success_at: ago(5) },
+    ] });
+    mockReviewItems.mockResolvedValue([
+      { id: 'opp-1', skip_reason: 'affiliate_review', brief: { title: 'Best ant bait for lanais' }, run: { completed_at: ago(60) } },
+    ]);
+    fixtures.call_log = [
+      { id: 'c1', from_phone: '+19415550100', direction: 'inbound', processing_status: 'processing', processing_started_at: ago(45), created_at: ago(50) },
+      { id: 'c2', from_phone: '+19415550101', direction: 'inbound', processing_status: null, updated_at: ago(1), created_at: ago(1) },
+      { id: 'c3', from_phone: '+19415550102', direction: 'outbound', processing_status: 'extraction_failed', extraction_attempts: 3, created_at: ago(90) },
+    ];
+    fixtures.content_email_approvals = [
+      { id: 'ea-1', token: 'EA-1a2b3c4d', kind: 'named_competitor_review', status: 'awaiting_reply', email_sent_at: ago(10), created_at: ago(10) },
+      { id: 'ea-2', token: 'EA-ffffffff', kind: 'trust_build_1_of_3', status: 'failed', last_error: 'smtp', created_at: ago(200) },
+    ];
+    fixtures.ib_pending_actions = [
+      { id: 'pa-1', tool_name: 'send_sms', summary: 'Send a text message to Jane', context: 'customers', expires_at: ago(-5), created_at: ago(1) },
+    ];
+    fixtures.service_report_deliveries = [
+      { id: 'd1', service_record_id: 'rec-11111111', channel: 'email', status: 'queued', attempts: 0, max_attempts: 5, created_at: ago(3) },
+      { id: 'd2', service_record_id: 'rec-22222222', channel: 'email', status: 'failed', attempts: 5, max_attempts: 5, failed_at: ago(30), created_at: ago(60) },
+    ];
+    fixtures.service_report_pdf_jobs = [
+      { id: 'p1', service_record_id: 'rec-33333333', status: 'rendering', created_at: ago(2) },
+    ];
+    fixtures.dispatch_alerts = [
+      { id: 'da-1', severity: 'warn', payload: JSON.stringify({ customerName: 'Holly Thompson', serviceName: 'Termite re-treat' }), created_at: ago(500) },
+    ];
+    fixtures.admin_alerts = [
+      { id: 'aa-1', type: 'closeout_contradiction', severity: 'high', title: 'Closeout contradiction on 123 Gulf Dr', href: '/admin/dispatch', last_seen_at: ago(20) },
+      { id: 'aa-2', type: 'missing_required_photos', severity: 'low', title: 'Missing photos', last_seen_at: ago(40) },
+    ];
+  });
+
+  test('normalizes every lane to pending / parked / failed with failed-first ordering and lane totals', async () => {
+    const q = await getOpsQueue();
+    expect(q.lanes.map((l) => l.key)).toEqual(LANES.map((l) => l.key));
+    const by = Object.fromEntries(q.lanes.map((l) => [l.key, l]));
+
+    expect(by.jobs.items.map((i) => [i.id, i.status])).toEqual([
+      ['pricing-sweep', 'failed'], ['ga4-sync', 'parked'], ['digest', 'pending'],
+    ]);
+    expect(by.jobs.items[0].detail).toMatch(/3 consecutive failures — boom/);
+
+    expect(by.calls.items.map((i) => [i.id, i.status])).toEqual([
+      ['c3', 'failed'], ['c1', 'parked'], ['c2', 'pending'],
+    ]);
+    expect(by.calls.items[1].detail).toMatch(/stalled in processing/);
+
+    expect(by.content.items).toEqual([expect.objectContaining({ id: 'opp-1', status: 'parked', title: 'Best ant bait for lanais', detail: 'parked: affiliate review' })]);
+    expect(by.approvals.items.map((i) => [i.id, i.status])).toEqual([['ea-2', 'failed'], ['ea-1', 'parked']]);
+    expect(by.ib.items).toEqual([expect.objectContaining({ id: 'pa-1', status: 'parked', title: 'Send a text message to Jane' })]);
+    expect(by.reports.items.map((i) => [i.id, i.status])).toEqual([
+      ['delivery:d2', 'failed'], ['pdf:p1', 'pending'], ['delivery:d1', 'pending'], // newest first within a status
+    ]);
+    expect(by.followups.items).toEqual([expect.objectContaining({ status: 'parked', title: 'Holly Thompson · Termite re-treat' })]);
+    expect(by.alerts.items.map((i) => [i.id, i.status])).toEqual([['aa-1', 'failed'], ['aa-2', 'parked']]);
+
+    expect(by.calls).toMatchObject({ pending: 1, parked: 1, failed: 1, total: 3, error: null });
+    expect(q.totals).toEqual({
+      pending: 1 + 1 + 2, // digest, c2, d1 + p1
+      parked: 1 + 1 + 1 + 1 + 1 + 1 + 1, // ga4, c1, opp-1, ea-1, pa-1, da-1, aa-2
+      failed: 1 + 1 + 1 + 1 + 1, // pricing, c3, ea-2, d2, aa-1
+    });
+    expect(typeof q.generatedAt).toBe('string');
+  });
+
+  test('a lane that throws degrades to an error row and never takes the view down', async () => {
+    fixtures.content_email_approvals = new Error('relation "content_email_approvals" does not exist');
+    mockJobHealth.mockRejectedValue(new Error('job_health missing'));
+    const q = await getOpsQueue();
+    const by = Object.fromEntries(q.lanes.map((l) => [l.key, l]));
+    expect(by.approvals).toMatchObject({ error: expect.stringMatching(/does not exist/), items: [], total: 0 });
+    expect(by.jobs).toMatchObject({ error: 'job_health missing', items: [] });
+    expect(by.calls.total).toBe(3);
+  });
+
+  test('items are capped per lane and never carry tool params, transcripts, or bodies', async () => {
+    fixtures.ib_pending_actions = Array.from({ length: 40 }, (_, i) => ({
+      id: `pa-${i}`, tool_name: 'send_sms', summary: `Send ${i}`, params: { body: 'SECRET BODY' }, expires_at: ago(-5), created_at: ago(i),
+    }));
+    fixtures.call_log = [{ id: 'c1', from_phone: '+1', direction: 'inbound', processing_status: 'processing', transcription: 'SECRET TRANSCRIPT', processing_started_at: ago(1), created_at: ago(1) }];
+    const q = await getOpsQueue();
+    const by = Object.fromEntries(q.lanes.map((l) => [l.key, l]));
+    expect(by.ib.items).toHaveLength(25);
+    expect(by.ib.total).toBe(40);
+    expect(JSON.stringify(q)).not.toContain('SECRET');
+  });
+});
+
+describe('GET /api/admin/agents/queue', () => {
+  jest.mock('../middleware/admin-auth', () => ({
+    adminAuthenticate: (req, res, next) => {
+      const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+      const users = { admin: { id: 'admin-1', role: 'admin' }, tech: { id: 'tech-1', role: 'technician' } };
+      const user = users[token];
+      if (!user) return res.status(401).json({ error: 'auth' });
+      req.technician = user; req.technicianId = user.id; req.techRole = user.role;
+      return next();
+    },
+    requireTechOrAdmin: (req, res, next) => (['admin', 'technician'].includes(req.techRole) ? next() : res.status(403).json({ error: 'staff' })),
+    requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'admin' })),
+  }));
+  const original = process.env.GATE_ADMIN_OPS_QUEUE;
+  afterAll(() => {
+    if (original === undefined) delete process.env.GATE_ADMIN_OPS_QUEUE; else process.env.GATE_ADMIN_OPS_QUEUE = original;
+  });
+
+  async function withServer(fn) {
+    const express = require('express');
+    const router = require('../routes/admin-agents');
+    const app = express();
+    app.use('/api/admin/agents', router);
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
+    const server = app.listen(0);
+    try { return await fn(`http://127.0.0.1:${server.address().port}`); } finally { await new Promise((r) => server.close(r)); }
+  }
+
+  test('gate off → availability false and 404; gate on → admin gets the queue, tech 403', async () => {
+    delete process.env.GATE_ADMIN_OPS_QUEUE;
+    await withServer(async (base) => {
+      const a = await fetch(`${base}/api/admin/agents/queue/availability`, { headers: { Authorization: 'Bearer admin' } });
+      expect(await a.json()).toEqual({ available: false });
+      expect((await fetch(`${base}/api/admin/agents/queue`, { headers: { Authorization: 'Bearer admin' } })).status).toBe(404);
+      process.env.GATE_ADMIN_OPS_QUEUE = 'true';
+      expect((await fetch(`${base}/api/admin/agents/queue`, { headers: { Authorization: 'Bearer tech' } })).status).toBe(403);
+      const ok = await fetch(`${base}/api/admin/agents/queue`, { headers: { Authorization: 'Bearer admin' } });
+      expect(ok.status).toBe(200);
+      const body = await ok.json();
+      expect(body.lanes).toHaveLength(LANES.length);
+    });
+  });
+});
