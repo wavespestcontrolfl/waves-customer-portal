@@ -142,6 +142,15 @@ describe('buildActivity', () => {
       expect(items[0].status).toBe('awaiting_review');
       expect(items[0].detail).toBe('Awaiting emailed reply (EA-newest01)');
     }
+    // a newer terminal row after an older awaiting one means DECIDED, not awaiting
+    const decidedLater = [
+      { run_id: 'run-1', status: 'awaiting_reply', token: 'EA-older001', created_at: '2026-09-02T08:00:00Z', email_sent_at: '2026-09-02T08:00:05Z' },
+      { run_id: 'run-1', status: 'approved', token: 'EA-older001', created_at: '2026-09-02T09:00:00Z' },
+    ];
+    for (const approvals of [decidedLater, [...decidedLater].reverse()]) {
+      const { items } = buildActivity({ runs: [{ ...RUN_BASE, outcome: 'completed_pending_review' }], approvals });
+      expect(items[0]).toMatchObject({ status: 'completed', detail: 'approved by email reply' });
+    }
   });
 
   it('an open approval outranks the skip reason in the detail line', () => {
