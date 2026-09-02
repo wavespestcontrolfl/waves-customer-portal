@@ -579,6 +579,19 @@ describe('service report v1', () => {
         },
         treatmentEvidence: false,
       })).toMatchObject({ interior_reentry_min: 120 });
+      // Pre-reentryWait entries (persisted before the field existed) re-derive the wait by label:
+      // heat keeps its guidance, mechanical work clears, an unknown legacy label fails closed.
+      const legacyEntry = (label) => ({
+        service_type: 'Bed Bug Treatment',
+        areas_serviced: JSON.stringify(['Primary bedroom']),
+        structured_notes: { protocolActionScopesCompleted: [{ label, scope: 'interior', treatmentApplied: false, treatmentPerformed: true }] },
+      });
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: legacyEntry('Heat treatment'), treatmentEvidence: false }))
+        .toMatchObject({ interior_reentry_min: 120 });
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: legacyEntry('Vacuuming performed'), treatmentEvidence: false }))
+        .toMatchObject({ interior_reentry_min: 0 });
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: legacyEntry('Retired thermal remediation'), treatmentEvidence: false }))
+        .toMatchObject({ interior_reentry_min: 120 });
       // Purely mechanical performed work (plugging, dethatching, nest removal) has no waiting period: targets clear.
       expect(normalizeAdvisoryForTreatmentScope(advisory, {
         service: {

@@ -498,6 +498,23 @@ function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
 // would falsely match \binterior\b). Only entries with treatmentApplied ===
 // true assert scope; an inspection / declined / no-access action contributes
 // nothing and must not fire the interior re-entry countdown.
+// Entries persisted before `reentryWait` existed carry treatmentPerformed
+// without it. Re-derive the wait from the server-owned preset metadata by
+// label; a label the presets no longer know fails closed and keeps the
+// stored guidance — an issued report must never lose its wait on a
+// re-read (local audit P1 on the #3701 follow-up).
+let specialtyActionByLabel = null;
+function performedActionKeepsWait(entry) {
+  if (entry.reentryWait !== undefined) return entry.reentryWait === true;
+  if (!specialtyActionByLabel) {
+    const { SPECIALTY_SERVICE_CLOSEOUTS } = require('../../../shared/specialty-service-closeouts');
+    specialtyActionByLabel = new Map(Object.values(SPECIALTY_SERVICE_CLOSEOUTS)
+      .flatMap((spec) => spec.protocols.map((action) => [action.label, action])));
+  }
+  const action = specialtyActionByLabel.get(String(entry.label || '').trim());
+  return action ? action.reentryWait === true : true;
+}
+
 function structuredActionScope(service = {}) {
   const structured = parseJsonObject(service.structured_notes);
   const entries = []
@@ -524,7 +541,7 @@ function structuredActionScope(service = {}) {
     hasActions = true;
     if (entry.treatmentApplied !== true) {
       if (entry.treatmentPerformed === true) hasNonChemicalTreatment = true;
-      if (entry.treatmentPerformed === true && entry.reentryWait === true) hasReentryWait = true;
+      if (entry.treatmentPerformed === true && performedActionKeepsWait(entry)) hasReentryWait = true;
       continue;
     }
     if (entry.dryDown !== false) hasDryDownTreatment = true;
