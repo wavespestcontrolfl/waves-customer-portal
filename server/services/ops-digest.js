@@ -35,8 +35,7 @@ function notificationService() {
 }
 
 const CATEGORY = 'ops_digest';
-const MAX_BODY_CHARS = 8000;
-const MAX_TITLE_CHARS = 200; // notifications.title is varchar(200)
+const MAX_TITLE_CHARS = 200; // notifications.title is varchar(200); body is text (uncapped)
 
 function htmlToText(html) {
   return String(html || '')
@@ -94,7 +93,8 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
     const result = await sendEmail();
     return emailOutcome(result);
   }
-  const body = String(text || htmlToText(html) || '').slice(0, MAX_BODY_CHARS);
+  // Whole body: with the email skipped this row is the only copy.
+  const body = String(text || htmlToText(html) || '');
   // Subjects carry aggregated text (customer names, bucket lists); the row
   // keeps the full subject in metadata while the title fits the column.
   const title = String(subject || '').slice(0, MAX_TITLE_CHARS);

@@ -62,6 +62,14 @@ describe('deliverOpsDigest', () => {
     expect(out).toMatchObject({ ok: true, channel: 'email', fallback: true });
   });
 
+  it('gate on: stores the whole body — never truncated', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n3' });
+    const text = 'request '.repeat(2000); // 16,000 chars
+    await deliverOpsDigest({ key: 'unworked-comms', subject: 'FIX: unworked', text, sendEmail: jest.fn() });
+    expect(mockNotifyAdmin.mock.calls[0][2]).toHaveLength(text.length);
+  });
+
   it('gate on: caps the stored title at the 200-char column and keeps the full subject in metadata', async () => {
     withGate(true);
     mockNotifyAdmin.mockResolvedValue({ id: 'n2' });
