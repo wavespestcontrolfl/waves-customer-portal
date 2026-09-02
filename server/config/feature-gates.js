@@ -27,6 +27,7 @@
  *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
  *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
  *   GATE_AGENT_ACTIVITY=true    (Activity tab in /admin/agents — read-only feed over existing ledgers; dark in dev AND prod)
+ *   GATE_OPS_DIGESTS_IN_APP=true (owner ops digests become ops_digest bell rows in the Activity feed instead of contact@ emails; dark in dev AND prod)
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
@@ -2128,6 +2129,17 @@ const gates = {
   // logGateStatus; the service reads gateEnvValue('GATE_AGENT_ACTIVITY')
   // at CALL time (the techTips idiom), so a flip needs no redeploy.
   agentActivity: gateEnvValue('GATE_AGENT_ACTIVITY'),
+
+  // Ops digests in-app — server/services/ops-digest.js deliverOpsDigest.
+  // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become
+  // ops_digest bell rows the Activity feed lists, and the email is skipped
+  // (bell-write failure still emails). OFF (default, dev AND prod): every
+  // sender emails exactly as before. Requires GATE_AGENT_ACTIVITY too (the
+  // rows need a surface) — with it off the helper fails closed to email.
+  // The reply-to-approve flows and the stripe-webhook-health / llm-dispatch
+  // FIX alerts are not routed here. Kill switch: unset. This entry is for
+  // logGateStatus; the helper reads both env vars at CALL time.
+  opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

@@ -37,6 +37,7 @@
 
 const sendgrid = require('../sendgrid-mail');
 const logger = require('../logger');
+const { deliverOpsDigest } = require('../ops-digest');
 const db = require('../../models/db');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 const { runExclusive } = require('../../utils/cron-lock');
@@ -359,16 +360,23 @@ async function sendComposed(composed, { mailer, database, markerKey, markerAt = 
   }
 
   try {
-    await mailer.sendOne({
-      to,
-      fromEmail: fromEmail(),
-      fromName: FROM_NAME,
+    await deliverOpsDigest({
+      key: `impact-digest:${label}`,
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
-      categories,
-      // A SendGrid validation body echoes the address — PII in Railway logs.
-      suppressErrorLog: true,
+      link: '/admin/blog?tab=autopilot',
+      sendEmail: () => mailer.sendOne({
+        to,
+        fromEmail: fromEmail(),
+        fromName: FROM_NAME,
+        subject: composed.subject,
+        html: composed.html,
+        text: composed.text,
+        categories,
+        // A SendGrid validation body echoes the address — PII in Railway logs.
+        suppressErrorLog: true,
+      }),
     });
   } catch (err) {
     // Never interpolate err.message here (may echo the recipient address).
