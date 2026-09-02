@@ -59,9 +59,10 @@ export function describeAutopaySetupLinkResult(result) {
   const reason = String(result.reason || '');
   if (reason === 'gate_off') return { tone: 'muted', text: 'Auto Pay setup links are switched off (GATE_AUTOPAY_SETUP_LINK)' };
   if (reason === 'template_inactive') return { tone: 'muted', text: 'The Auto Pay setup text is inactive in Templates — copy the link instead' };
-  if (reason === 'payer_billed' || reason === 'payer_check_uncertain') {
-    return { tone: 'muted', text: 'Skipped — this customer bills to a third-party payer' };
-  }
+  if (reason === 'payer_billed') return { tone: 'muted', text: 'Skipped — this customer bills to a third-party payer' };
+  // A transient lookup failure is NOT a confirmed payer — say so, so the
+  // operator retries instead of assuming third-party billing.
+  if (reason === 'payer_check_uncertain') return { tone: 'bad', text: 'Could not confirm who this customer bills to — try again in a moment' };
   if (reason === 'request_exists') return { tone: 'muted', text: 'A live Auto Pay setup link already exists for this customer' };
   // Shared vocabulary (already-active, paused, lane, SMS gate, phone, send
   // outcomes) is customer-scoped in the base formatter.
