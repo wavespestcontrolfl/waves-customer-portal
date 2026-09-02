@@ -55,6 +55,8 @@ describe('getOpsQueue', () => {
     ]);
     fixtures.call_log = [
       { id: 'c1', from_phone: '+15550000100', direction: 'inbound', processing_status: 'processing', processing_started_at: ago(45), created_at: ago(50) },
+      // A live heartbeat beats an old start: still pending, not stalled.
+      { id: 'c5', from_phone: '+15550000105', direction: 'inbound', processing_status: 'processing', processing_started_at: ago(45), processing_heartbeat_at: ago(1), created_at: ago(50) },
       { id: 'c2', from_phone: '+15550000101', direction: 'inbound', processing_status: null, updated_at: ago(1), created_at: ago(1) },
       { id: 'c3', from_phone: '+15550000102', direction: 'outbound', processing_status: 'extraction_failed', extraction_attempts: 3, created_at: ago(90) },
     ];
@@ -92,7 +94,7 @@ describe('getOpsQueue', () => {
     expect(by.jobs.items[0].detail).toMatch(/3 consecutive failures — boom/);
 
     expect(by.calls.items.map((i) => [i.id, i.status])).toEqual([
-      ['c3', 'failed'], ['c1', 'parked'], ['c2', 'pending'],
+      ['c3', 'failed'], ['c1', 'parked'], ['c2', 'pending'], ['c5', 'pending'],
     ]);
     expect(by.calls.items[1].detail).toMatch(/stalled in processing/);
 
@@ -105,9 +107,9 @@ describe('getOpsQueue', () => {
     expect(by.followups.items).toEqual([expect.objectContaining({ status: 'parked', title: 'Test Customer · Termite re-treat' })]);
     expect(by.alerts.items.map((i) => [i.id, i.status])).toEqual([['aa-1', 'failed'], ['aa-2', 'parked']]);
 
-    expect(by.calls).toMatchObject({ pending: 1, parked: 1, failed: 1, total: 3, error: null });
+    expect(by.calls).toMatchObject({ pending: 2, parked: 1, failed: 1, total: 4, error: null });
     expect(q.totals).toEqual({
-      pending: 1 + 1 + 2, // digest, c2, d1 + p1
+      pending: 1 + 2 + 2, // digest, c2 + c5, d1 + p1
       parked: 1 + 1 + 1 + 1 + 1 + 1 + 1, // ga4, c1, opp-1, ea-1, pa-1, da-1, aa-2
       failed: 1 + 1 + 1 + 1 + 1, // pricing, c3, ea-2, d2, aa-1
     });
@@ -121,7 +123,7 @@ describe('getOpsQueue', () => {
     const by = Object.fromEntries(q.lanes.map((l) => [l.key, l]));
     expect(by.approvals).toMatchObject({ error: expect.stringMatching(/does not exist/), items: [], total: 0 });
     expect(by.jobs).toMatchObject({ error: 'job_health missing', items: [] });
-    expect(by.calls.total).toBe(3);
+    expect(by.calls.total).toBe(4);
   });
 
   test('items are capped per lane and never carry tool params, transcripts, or bodies', async () => {

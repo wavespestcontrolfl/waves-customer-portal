@@ -81,9 +81,11 @@ async function laneCallProcessing() {
       this.whereNull('processing_status')
         .orWhereIn('processing_status', ['pending', 'processing', 'extraction_failed', 'no_transcription']);
     })
-    .orderBy('created_at', 'desc')
+    // Oldest claim first: a stuck call is by definition old, and a
+    // newest-first cap would hide exactly the rows this lane exists for.
+    .orderByRaw('COALESCE(processing_heartbeat_at, processing_started_at, updated_at, created_at) ASC')
     .limit(SCAN_LIMIT)
-    .select('id', 'from_phone', 'direction', 'processing_status', 'processing_started_at', 'updated_at', 'created_at', 'extraction_attempts');
+    .select('id', 'from_phone', 'direction', 'processing_status', 'processing_heartbeat_at', 'processing_started_at', 'updated_at', 'created_at', 'extraction_attempts');
   const stallBefore = Date.now() - CALL_STALL_MINUTES * 60000;
   const items = rows.map((r) => {
     const ps = r.processing_status || 'pending';
@@ -93,8 +95,10 @@ async function laneCallProcessing() {
       status = 'failed';
       detail = ps === 'no_transcription' ? 'no transcript could be produced' : `extraction failed (${r.extraction_attempts || 0} attempt${r.extraction_attempts === 1 ? '' : 's'})`;
     } else {
-      const claimed = new Date(r.processing_started_at || r.updated_at || r.created_at).getTime();
-      if (claimed && claimed < stallBefore) {
+      // The heartbeat is the authoritative liveness signal (the processor
+      // stamps it mid-run); start/updated are the fallback for old rows.
+      const lastAlive = new Date(r.processing_heartbeat_at || r.processing_started_at || r.updated_at || r.created_at).getTime();
+      if (lastAlive && lastAlive < stallBefore) {
         status = 'parked';
         detail = `stalled in ${ps} for over ${CALL_STALL_MINUTES} minutes`;
       }
