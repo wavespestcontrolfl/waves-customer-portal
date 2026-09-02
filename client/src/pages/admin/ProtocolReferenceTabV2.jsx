@@ -598,28 +598,25 @@ function ProtocolMixCard({
           <div className="overflow-x-auto border-hairline border-zinc-200 rounded-md">
             {" "}
             <table className="w-full border-collapse">
-              {" "}
               <thead className="bg-zinc-50">
-                {" "}
                 <tr>
-                  {" "}
                   <th className="px-3 py-2 text-left text-11 u-label text-ink-tertiary">
                     Product
-                  </th>{" "}
+                  </th>
                   <th className="px-3 py-2 text-left text-11 u-label text-ink-tertiary">
                     Label / Safety
-                  </th>{" "}
+                  </th>
                   <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
                     Area Mix
-                  </th>{" "}
+                  </th>
                   <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
                     Mat$
-                  </th>{" "}
+                  </th>
                   <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
                     {fullTankLabel}
-                  </th>{" "}
-                </tr>{" "}
-              </thead>{" "}
+                  </th>
+                </tr>
+              </thead>
               <tbody>
                 {plan.items?.map((item, idx) => {
                   const checked = item.conditional
@@ -638,7 +635,6 @@ function ProtocolMixCard({
                       key={`${idx}-${item.raw}`}
                       className="border-t border-hairline border-zinc-100 align-top"
                     >
-                      {" "}
                       <td className="px-3 py-3 min-w-[260px]">
                         {" "}
                         <div className="flex items-start gap-2">
@@ -681,7 +677,7 @@ function ProtocolMixCard({
                             </div>{" "}
                           </div>{" "}
                         </div>{" "}
-                      </td>{" "}
+                      </td>
                       <td className="px-3 py-3 min-w-[220px]">
                         {" "}
                         <div className="text-12 text-ink-primary">
@@ -714,7 +710,7 @@ function ProtocolMixCard({
                           </div>
                         )}
                         <LabelLinks product={item.product} className="mt-1" />
-                      </td>{" "}
+                      </td>
                       <td className="px-3 py-3 text-right whitespace-nowrap">
                         {areaMix ? (
                           <>
@@ -735,7 +731,7 @@ function ProtocolMixCard({
                         ) : (
                           <div className="u-nums text-13 font-medium text-zinc-900">—</div>
                         )}
-                      </td>{" "}
+                      </td>
                       <td className="px-3 py-3 text-right whitespace-nowrap">
                         <div className={numClass}>
                           {fmtMoney(areaMix?.materialCost)}
@@ -745,7 +741,7 @@ function ProtocolMixCard({
                             inventory
                           </div>
                         )}
-                      </td>{" "}
+                      </td>
                       <td className="px-3 py-3 text-right whitespace-nowrap">
                         {tankMix ? (
                           <>
@@ -760,12 +756,12 @@ function ProtocolMixCard({
                         ) : (
                           <div className="u-nums text-13 font-medium text-zinc-900">—</div>
                         )}
-                      </td>{" "}
+                      </td>
                     </tr>
                   );
                 })}
-              </tbody>{" "}
-            </table>{" "}
+              </tbody>
+            </table>
           </div>{" "}
         </div>{" "}
       </Card>{" "}
@@ -1035,64 +1031,65 @@ export default function ProtocolReferenceTabV2() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex gap-2 flex-wrap overflow-x-auto">
-        {lawnTracks.map((t) => {
-          const active = selectedTrack === t.key;
-          return (
-            <button
-              key={t.key}
-              onClick={() => loadTrack(t.key)}
-              className={cn(
-                "px-4 py-2.5 rounded-md u-focus-ring flex-shrink-0 text-left transition-colors border-hairline",
-                active
-                  ? "bg-zinc-900 border-zinc-900 text-white"
-                  : "bg-white border-zinc-200 text-ink-primary hover:bg-zinc-50",
-              )}
-            >
-              {" "}
-              <div className="text-13 font-medium">
-                {t.name?.substring(0, 35) || t.key}
-              </div>{" "}
-              <div
+      {/* Protocol picker. Phones: one Select (the wrapping tile row ran to
+          four ragged lines). md+: a uniform grid so every tile is the same
+          width — lawn tracks first, then the service programs. */}
+      <div>
+        <label htmlFor="protocol-track-select" className="sr-only">
+          Protocol
+        </label>
+        <Select
+          id="protocol-track-select"
+          className="md:hidden"
+          value={selectedTrack || ""}
+          onChange={(e) => loadTrack(e.target.value)}
+        >
+          {!selectedTrack && <option value="">Choose a protocol…</option>}
+          {lawnTracks.map((t) => (
+            <option key={t.key} value={t.key}>
+              {t.name || t.key} — {t.visits} visits/year
+            </option>
+          ))}
+          {servicePrograms.map((program) => (
+            <option key={program.key} value={program.key}>
+              {program.name || program.key} — {program.visits} templates
+            </option>
+          ))}
+        </Select>
+        <div className="hidden md:grid grid-cols-3 lg:grid-cols-4 gap-2">
+          {[
+            ...lawnTracks.map((t) => ({ ...t, meta: `${t.visits} visits/year` })),
+            ...servicePrograms.map((p) => ({ ...p, meta: `${p.visits} templates` })),
+          ].map((t) => {
+            const active = selectedTrack === t.key;
+            return (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => loadTrack(t.key)}
+                aria-pressed={active}
                 className={cn(
-                  "text-11 mt-0.5 u-label",
-                  active ? "text-white/70" : "text-ink-tertiary",
+                  "min-w-0 px-4 py-2.5 rounded-md u-focus-ring text-left transition-colors border-hairline",
+                  active
+                    ? "bg-zinc-900 border-zinc-900 text-white"
+                    : "bg-white border-zinc-200 text-ink-primary hover:bg-zinc-50",
                 )}
               >
-                {t.visits} visits/year
-              </div>{" "}
-            </button>
-          );
-        })}
-        <div className="w-px bg-zinc-200 self-stretch mx-1 flex-shrink-0" />
-        {servicePrograms.map((program) => {
-          const active = selectedTrack === program.key;
-          return (
-            <button
-              key={program.key}
-              onClick={() => loadTrack(program.key)}
-              className={cn(
-                "px-4 py-2.5 rounded-md u-focus-ring flex-shrink-0 text-left transition-colors border-hairline",
-                active
-                  ? "bg-zinc-900 border-zinc-900 text-white"
-                  : "bg-white border-zinc-200 text-ink-primary hover:bg-zinc-50",
-              )}
-            >
-              {" "}
-              <div className="text-13 font-medium">
-                {program.name?.substring(0, 35) || program.key}
-              </div>{" "}
-              <div
-                className={cn(
-                  "text-11 mt-0.5 u-label",
-                  active ? "text-white/70" : "text-ink-tertiary",
-                )}
-              >
-                {program.visits} templates
-              </div>{" "}
-            </button>
-          );
-        })}
+                <div className="text-13 font-medium truncate">
+                  {t.name || t.key}
+                </div>
+                <div
+                  className={cn(
+                    "text-11 mt-0.5 u-label",
+                    active ? "text-white/70" : "text-ink-tertiary",
+                  )}
+                >
+                  {t.meta}
+                </div>
+              </button>
+            );
+          })}
+        </div>
       </div>
       {trackData && (
         <div className="flex flex-col gap-3">
@@ -1178,7 +1175,7 @@ export default function ProtocolReferenceTabV2() {
                 SAFETY
               </span>
               {safetyRules.map((rule, i) => (
-                <Badge key={i} tone="alert" className="whitespace-nowrap">
+                <Badge key={i} tone="alert" className="h-auto min-h-5 whitespace-normal text-left py-0.5 leading-snug">
                   {rule}
                 </Badge>
               ))}
@@ -1267,9 +1264,7 @@ export default function ProtocolReferenceTabV2() {
               <div className="overflow-x-auto">
                 {" "}
                 <table className="w-full border-collapse">
-                  {" "}
                   <thead>
-                    {" "}
                     <tr className="border-b border-hairline border-zinc-200">
                       {[
                         { k: "#", cls: "text-center" },
@@ -1292,8 +1287,8 @@ export default function ProtocolReferenceTabV2() {
                           {h.k}
                         </th>
                       ))}
-                    </tr>{" "}
-                  </thead>{" "}
+                    </tr>
+                  </thead>
                   <tbody>
                     {trackData.visits?.map((v, i) => {
                       const isCurrentMonth = v.month === currentMonthAbbr;
@@ -1305,7 +1300,6 @@ export default function ProtocolReferenceTabV2() {
                             isCurrentMonth && "bg-zinc-50",
                           )}
                         >
-                          {" "}
                           <td
                             className={cn(
                               "px-2.5 py-2 text-12 font-medium text-center align-top",
@@ -1315,7 +1309,7 @@ export default function ProtocolReferenceTabV2() {
                             )}
                           >
                             {v.visit}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 text-12 font-medium text-ink-primary whitespace-nowrap align-top">
                             {v.month}
                             {isCurrentMonth && (
@@ -1323,18 +1317,18 @@ export default function ProtocolReferenceTabV2() {
                                 NOW
                               </span>
                             )}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 text-12 text-ink-primary align-top">
                             {parseProductLines(v.primary).map((p, pi) => (
                               <CalendarLine key={pi} line={p} />
                             ))}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 text-12 text-ink-secondary align-top">
                             {parseProductLines(v.secondary).map((p, pi) => (
                               <CalendarLine key={pi} line={p} muted />
                             ))}
                             {!v.secondary && "\u2014"}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">
                             {formatProtocolCost(v.material_cost)}
                             {Number.isFinite(parseFloat(v.conditional_cost)) &&
@@ -1355,10 +1349,10 @@ export default function ProtocolReferenceTabV2() {
                                   spot
                                 </div>
                               )}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">
                             {formatProtocolCost(v.labor_cost)}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 align-top">
                             {" "}
                             <TierDotsV2
@@ -1366,15 +1360,15 @@ export default function ProtocolReferenceTabV2() {
                               tier4x={v.tier_4x}
                               tier6x={v.tier_6x}
                             />{" "}
-                          </td>{" "}
+                          </td>
                           <td className="px-2.5 py-2 text-11 text-ink-tertiary whitespace-pre-wrap align-top">
                             {visitSopText(v) || "\u2014"}
-                          </td>{" "}
+                          </td>
                         </tr>
                       );
                     })}
-                  </tbody>{" "}
-                </table>{" "}
+                  </tbody>
+                </table>
               </div>{" "}
             </Card>
           )}

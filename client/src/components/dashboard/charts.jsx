@@ -674,7 +674,7 @@ export function CompletionGauge({ completed = 0, total = 0, remaining = 0, cance
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
   const data = [{ name: 'Completed', value: pct, fill: CHART_SUCCESS }];
   return (
-    <div className="grid grid-cols-2 gap-4 items-center">
+    <div className="grid grid-cols-[minmax(0,1fr)_minmax(8rem,auto)] gap-4 items-center">
       <div style={{ height: 180 }}>
         <ResponsiveContainer
           width="100%"
