@@ -362,7 +362,7 @@ const SUPERSESSION_MAX_HOPS = 8;
  * the board catch-up keys legacy placements on it); a URL-less successor
  * (outreach) leaves target_url alone. Returns the number of rows moved.
  */
-const SUCCESSOR_COLUMNS = ['id', 'superseded_by', 'submission_url', 'link_type', 'revision'];
+const SUCCESSOR_COLUMNS = ['id', 'superseded_by', 'submission_url', 'link_type', 'revision', 'confidence'];
 
 /**
  * A moved placement takes the successor's LANE and is left UNCLASSIFIED:
@@ -448,6 +448,7 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
   const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').whereNotNull('path_id').select(...PLACEMENT_MOVE_COLUMNS);
   let moved = 0;
   for (const r of rows) {
+    if (!r.path_id) continue; // an un-backfilled legacy row has no path to follow
     let cur = await q('seo_link_acquisition_paths').where({ id: r.path_id }).first(...SUCCESSOR_COLUMNS);
     for (let hop = 0; cur && cur.superseded_by && hop < SUPERSESSION_MAX_HOPS; hop++) {
       cur = await q('seo_link_acquisition_paths').where({ id: cur.superseded_by }).first(...SUCCESSOR_COLUMNS);
@@ -459,8 +460,14 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
       // higher revision now (a gate change, a working-origin move, a lane
       // shift) is a same-path transition the immediate write skipped
       // because the row was leased: apply it at release.
+      // …and a DISPROOF during the lease (confidence dropped to 0) never
+      // bumps the revision (plan §3.2: confidence is not an input), yet a
+      // draft produced on a route just declared gone must not stay
+      // sendable — the transition runs for that too.
       const leasedRev = r.leased_path_revision == null ? null : Number(r.leased_path_revision);
-      if (leasedRev == null || cur.revision == null || Number(cur.revision) <= leasedRev) continue;
+      const revised = leasedRev != null && cur.revision != null && Number(cur.revision) > leasedRev;
+      const disproven = cur.confidence != null && !(Number(cur.confidence) > 0);
+      if (!revised && !disproven) continue;
     }
     moved += await moveRows([r], cur);
   }

@@ -319,12 +319,33 @@ describe('saveDraft', () => {
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect({ outreach_status: 'none', owner: null }) }),
       upd,
+      chain({ result: [] }), // release-side settlement's row read: the path is live → nothing to move
     ] });
     const res = await Outreach.saveDraft({ prospectId: 'p1', to: ' a@b.com ', subject: 's', body: 'b', owner: 'Adam' });
     expect(res.ok).toBe(true);
     expect(upd.update).toHaveBeenCalledWith(expect.objectContaining({
       outreach_status: 'drafted', outreach_to_email: 'a@b.com', owner: 'Adam',
     }));
+  });
+
+  test('a draft written against a placement whose path was superseded is discarded → path_moved (settlement in the same transaction)', async () => {
+    const upd = chain({ returning: [draftedProspect({ outreach_to_email: 'a@b.com' })] });
+    const move = chain({ result: 1 });
+    setDbQueues({
+      seo_link_prospects: [
+        chain({ first: draftedProspect({ outreach_status: 'none', owner: null }) }),
+        upd,
+        chain({ result: [{ id: 'p1', path_id: 'path-old', link_type: 'editorial', outreach_status: 'drafted', outreach_sent_at: null, outreach_send_token: null, leased_path_revision: null }] }), // settlement's row read
+        move, // the transition (draft cleared, unclassified) onto the live successor
+      ],
+      seo_link_acquisition_paths: [
+        chain({ first: { id: 'path-old', superseded_by: 'path-new', submission_url: null, link_type: 'editorial' } }),
+        chain({ first: { id: 'path-new', superseded_by: null, submission_url: null, link_type: 'editorial', revision: 1, confidence: 0.7 } }),
+      ],
+    });
+    const res = await Outreach.saveDraft({ prospectId: 'p1', to: 'a@b.com', subject: 's', body: 'b' });
+    expect(res.code).toBe('path_moved');
+    expect(move.update).toHaveBeenCalledWith(expect.objectContaining({ path_id: 'path-new', outreach_status: 'none', outreach_send_token: null }));
   });
 });
 

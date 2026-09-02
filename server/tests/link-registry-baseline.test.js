@@ -56,6 +56,7 @@ function fakeDb(seed = {}) {
       orWhere(a, b) { return add((row) => cmp(row, a, b), true); },
       whereNot(a, b) { return add((row) => !cmp(row, a, b)); },
       whereNull(col) { return add((row) => row[col] == null); },
+      whereNotNull(col) { return add((row) => row[col] != null); },
       whereIn(col, vals) { return add((row) => vals.includes(row[col])); },
       whereRaw(sql, bindings) {
         if (/target_domain/.test(sql)) return add((row) => canon(row.target_domain) === bindings[0]);

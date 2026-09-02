@@ -20,11 +20,15 @@ function makeDb({ updateRows = 1 } = {}) {
     b.whereNull = jest.fn((c) => { b.nulls.push(c); return b; });
     b.limit = jest.fn(() => Promise.resolve([]));   // reconcileFromProfile → no active row
     b.first = jest.fn(() => Promise.resolve(null)); // reconcileByDomain → no active row
+    b.whereNotNull = jest.fn(() => b);
+    b.select = jest.fn(() => b);
+    b.then = (res, rej) => Promise.resolve([]).then(res, rej); // release-side settlement's row read → nothing to move here
     b.select = jest.fn(() => Promise.resolve([]));
     b.update = jest.fn((p) => { updates.push({ patch: p, wheres: b.wheres, raws: b.raws, nulls: b.nulls }); return Promise.resolve(updateRows); });
     return b;
   });
   db.raw = jest.fn((sql, bind) => ({ __raw: sql, bind }));
+  db.transaction = jest.fn(async (cb) => cb(db)); // markLive releases + settles in one transaction
   return updates;
 }
 

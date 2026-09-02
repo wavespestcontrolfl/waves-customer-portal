@@ -18,22 +18,23 @@ jest.mock('../models/db', () => {
     const eq = (l, r) => (l instanceof Date && r instanceof Date ? l.getTime() === r.getTime() : l === r);
     const cmp = (op, l, r) => (op === '<' ? l < r : op === '<=' ? l <= r : eq(l, r));
     const vals = (arr) => (arr && typeof arr._rows === 'function' ? arr._rows().map((r) => r[(arr._select || ['id'])[0]]) : arr); // a sub-builder resolves lazily as a sub-select
+    // grouped where: OR-combined like knex's callback builder, nesting allowed
+    const group = (fn) => {
+      const sub = [];
+      const g = {
+        where(col, op, v) { if (typeof col === 'function') { sub.push(group(col)); return g; } sub.push(v === undefined ? (row) => eq(get(row, col), op) : (row) => cmp(op, get(row, col), v)); return g; },
+        whereNull(col) { sub.push((row) => get(row, col) == null); return g; },
+        whereNotNull(col) { sub.push((row) => get(row, col) != null); return g; },
+        orWhere(col, op, v) { sub.push(v === undefined ? (row) => eq(get(row, col), op) : (row) => cmp(op, get(row, col), v)); return g; },
+        orWhereNotIn(col, arr) { sub.push((row) => !vals(arr).includes(get(row, col))); return g; },
+      };
+      fn(g);
+      return (row) => sub.some((p) => p(row));
+    };
     const q = {
       where(a, b, c) {
-        if (typeof a === 'function') {
-          // grouped where: OR-combined like knex's callback builder
-          const sub = [];
-          const g = {
-            whereNull(col) { sub.push((row) => get(row, col) == null); return g; },
-            whereNotNull(col) { sub.push((row) => get(row, col) != null); return g; },
-            orWhere(col, op, v) { sub.push((row) => cmp(op, get(row, col), v)); return g; },
-            orWhereNotIn(col, arr) { sub.push((row) => !vals(arr).includes(get(row, col))); return g; },
-          };
-          a(g);
-          preds.push((row) => sub.some((p) => p(row)));
-          return q;
-        }
-        if (typeof a === 'object') preds.push((row) => Object.entries(a).every(([k, v]) => get(row, k) === v));
+        if (typeof a === 'function') { preds.push(group(a)); return q; }
+        if (typeof a === 'object') preds.push((row) => Object.entries(a).every(([k, v]) => eq(get(row, k), v)));
         else if (c !== undefined) preds.push((row) => cmp(b, get(row, a), c));
         else preds.push((row) => eq(get(row, a), b));
         return q;
@@ -253,5 +254,29 @@ test('the lease stamps the path revision; a same-path change that lands while le
   const [c2] = await worker.claim({ n: 5, type: 'signup' });
   await worker.report({ prospect_id: 'r2', outcome: 'failed', lease_token: c2.lease_token });
   expect(row2).toMatchObject({ claimed_at: null, automation_policy: 'submit_free' });
+});
+
+test('a path the investigator marked NOT agent-completable is never leased — before the limit and after settlement (Codex #3720 r1 P1)', async () => {
+  const human = { id: 'p-human', domain_id: 'd1', submission_url: 'https://example.com/apply', superseded_by: null, link_type: 'directory', confidence: 0.8, revision: 1, agent_completable: false };
+  const ok = { id: 'p-ok', domain_id: 'd2', submission_url: 'https://ok.example/add', superseded_by: null, link_type: 'directory', confidence: 0.7, revision: 1, agent_completable: true };
+  mockStore.seo_link_acquisition_paths.push(human, ok);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high' };
+  mockStore.seo_link_prospects.push(
+    { ...base, id: 'r-human', target_domain: 'example.com', path_id: 'p-human', target_url: 'https://example.com/apply', domain_rating: 90 },
+    { ...base, id: 'r-ok', target_domain: 'ok.example', path_id: 'p-ok', target_url: 'https://ok.example/add', domain_rating: 10 },
+  );
+  expect((await worker.claim({ n: 1, type: 'signup' })).map((r) => r.id)).toEqual(['r-ok']); // the human-step route never consumed the limit
+});
+
+test('a confidence drop to zero during the lease is reconciled at release even though the revision did not move (Codex #3720 r1 P1)', async () => {
+  const path = { id: 'p-live', domain_id: 'd1', submission_url: 'https://example.com/join', superseded_by: null, link_type: 'directory', confidence: 0.7, revision: 2 };
+  mockStore.seo_link_acquisition_paths.push(path);
+  const row = { id: 'r1', status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, attempts: 0, automation_policy: 'submit_free', last_classified_at: new Date('2026-08-01'), priority: 'high', domain_rating: 40, target_domain: 'example.com', path_id: 'p-live', target_url: 'https://example.com/join', quality_signals: null };
+  mockStore.seo_link_prospects.push(row);
+  const [claimed] = await worker.claim({ n: 5, type: 'signup' });
+  path.confidence = 0; // disproven while leased — confidence is not a §3.2 input, so revision stays 2
+  const rep = await worker.report({ prospect_id: 'r1', outcome: 'failed', lease_token: claimed.lease_token });
+  expect(rep.ok).toBe(true);
+  expect(row).toMatchObject({ claimed_at: null, automation_policy: null, last_classified_at: null }); // the transition ran: nothing composed on a dead route stays actionable
 });
 

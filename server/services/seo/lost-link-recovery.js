@@ -344,7 +344,7 @@ async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
         notes: q.raw("COALESCE(notes, '') || ?", [`${closeNote} Placement for ${returnedPage} is tracked by prospect ${owner.id} (${owner.status}); this recovery row is superseded.`]),
         updated_at: now,
       });
-      if (n) superseded += n; else pending++;
+      if (n) { superseded += n; await require('./link-registry').settleRetiredPlacements(q, { prospectIds: [row.id], now }); } else pending++;
       continue;
     }
     const n = await unsentRow(row.id).update({
@@ -360,7 +360,9 @@ async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
       notes: q.raw("COALESCE(notes, '') || ?", [samePage ? closeNote : `${closeNote} Target page moved ${row.target_page} → ${returnedPage} to follow the returned link.`]),
       updated_at: now,
     });
-    if (n) resolved += n; else pending++;
+    // closed as live / rejected = released into a NON-claimable state: the
+    // placement follows a superseded or changed path in this same transaction
+    if (n) { resolved += n; await require('./link-registry').settleRetiredPlacements(q, { prospectIds: [row.id], now }); } else pending++;
   }
   if (resolved || superseded || pending) logger.info(`[lost-link-recovery] ${domain}: link restored on its own — ${resolved} recovery prospect(s) closed as live, ${superseded} superseded, ${pending} moved on concurrently (left for reconciliation)`);
   return { resolved, superseded, pending };

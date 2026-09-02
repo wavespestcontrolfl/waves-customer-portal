@@ -105,7 +105,8 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       // each one is consumed by it exactly once (moved, unclassified, then
       // ineligible until the classifier has read the successor).
       .where((b) => b.whereNull('path_id').orWhereNotIn('path_id',
-        trx('seo_link_acquisition_paths').select('id').where('confidence', '<=', 0).whereNull('superseded_by'))) // ACTIVE disproven only — a retired zero-confidence path still reaches settlement
+        trx('seo_link_acquisition_paths').select('id').whereNull('superseded_by') // ACTIVE rows only — a retired zero-confidence path still reaches settlement
+          .where((s) => s.where('confidence', '<=', 0).orWhere('agent_completable', false)))) // disproven, or a route whose contract needs a human step
       // …and the owner's registry ruling holds at the chokepoint: a placement
       // on a domain the owner parked (Watch) or refused (Reject) is never
       // leased, whatever its own status/policy/confidence still read
@@ -178,8 +179,11 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // at confidence 0); neither is a route a worker may act on, whatever
     // policy the placement still carries.
     const pathIds = [...new Set(rows.map((r) => r.path_id).filter(Boolean))];
-    const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'superseded_by', 'confidence', 'submission_url', 'revision') : [];
-    const blocked = new Set(paths.filter((p) => p.superseded_by || (p.confidence != null && !(Number(p.confidence) > 0))).map((p) => p.id));
+    const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'superseded_by', 'confidence', 'submission_url', 'revision', 'agent_completable') : [];
+    // …nor one the investigator marked NOT agent-completable: its contract
+    // requires a human step (plan §6.3), and the outreach lane has no policy
+    // filter that would otherwise stop Hermes from leasing it
+    const blocked = new Set(paths.filter((p) => p.superseded_by || (p.confidence != null && !(Number(p.confidence) > 0)) || p.agent_completable === false).map((p) => p.id));
     rows = rows.filter((r) => !blocked.has(r.path_id) && types.includes(r.link_type));
     if (effectivePolicy) rows = rows.filter((r) => r.automation_policy === effectivePolicy);
     if (rows.length === 0) return [];

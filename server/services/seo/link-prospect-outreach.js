@@ -148,13 +148,28 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
   // read above and this update: only write an OPEN prospect that is still unsent and in
   // a re-draftable state (none/drafted). 0 rows → a send raced us / status moved on, so
   // we must not resurrect the draft.
-  const rows = await db('seo_link_prospects')
-    .where({ id: prospectId, status: 'prospect' })
-    .whereNull('outreach_sent_at')
-    .where((b) => b.whereNull('outreach_status').orWhereIn('outreach_status', ['none', 'drafted']))
-    .update(patch)
-    .returning('*');
+  // The draft write releases any Hermes lease into `drafted` — a NON-claimable
+  // state — so the placement is settled onto its live acquisition path in the
+  // SAME transaction. If that settlement MOVED the row (its path was superseded
+  // or changed while the operator drafted against the stale prospect), the
+  // just-written draft was composed for a retired route and the transition
+  // has already cleared it: report path_moved so the operator re-drafts.
+  const { rows, moved } = await db.transaction(async (trx) => {
+    const written = await trx('seo_link_prospects')
+      .where({ id: prospectId, status: 'prospect' })
+      .whereNull('outreach_sent_at')
+      .where((b) => b.whereNull('outreach_status').orWhereIn('outreach_status', ['none', 'drafted']))
+      .update(patch)
+      .returning('*');
+    if (!written || written.length === 0) return { rows: written, moved: 0 };
+    const n = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: [prospectId] });
+    return { rows: written, moved: n };
+  });
   if (!rows || rows.length === 0) return { ok: false, code: 'send_in_flight' };
+  if (moved) {
+    logger.info(`[link-outreach] draft for ${prospectId} discarded — its acquisition path moved while drafting`);
+    return { ok: false, code: 'path_moved', error: 'the placement\'s acquisition path changed while you drafted; reload and draft again' };
+  }
   logger.info(`[link-outreach] draft saved for ${prospectId}`); // no recipient (PII)
   return { ok: true, prospect: rows[0] };
 }
