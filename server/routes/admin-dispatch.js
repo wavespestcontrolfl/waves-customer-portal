@@ -7071,12 +7071,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // "fail-soft" — it would only rename the rollback (pre-push codex
           // P1). A missing row (deleted customer, no technician) still just
           // omits that leg via buildReportIdentitySnapshot.
+          // The visit row (stamped address, service_type) is the LOCKED row;
+          // the customer and technician are looked up by the SAME ids
+          // recordInsert persists below (svc.customer_id / svc.technician_id),
+          // so the frozen name can never disagree with the FK the report
+          // routes join for the photo (pre-push codex P1).
           const snapshotVisitRow = lockedSvcRow || svc;
           const snapshotCustomerRow = await trx('customers')
-            .where({ id: snapshotVisitRow.customer_id })
+            .where({ id: svc.customer_id })
             .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip');
-          const snapshotTechnicianRow = snapshotVisitRow.technician_id
-            ? await trx('technicians').where({ id: snapshotVisitRow.technician_id }).first('name')
+          const snapshotTechnicianRow = svc.technician_id
+            ? await trx('technicians').where({ id: svc.technician_id }).first('name')
             : null;
           // ONE catalog read set inside the trx serves both the frozen report
           // facts and the product loop's validation below, so the facts the
