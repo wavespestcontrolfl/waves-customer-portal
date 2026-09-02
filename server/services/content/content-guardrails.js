@@ -1951,8 +1951,11 @@ const NON_RENDERING_CHILD_RE = (() => {
   const arr = '\\[' + trivia + '(?:' + lit + '?' + trivia + ',' + trivia + ')*' + '(?:' + lit + trivia + ')?' + '\\]';
   return new RegExp('\\{' + trivia + '(?:' + lit + '|' + arr + ')' + trivia + '\\}', 'g');
 })();
-function affiliateLinkTextIsEmpty(masked, strView, start, attrs) {
-  if (attrs.trimEnd().endsWith('/')) return true;
+// Returns the link's RENDERED anchor text ('' when self-closing, empty,
+// hidden-only, or unclosed) — the emptiness rule and the brief's anchor
+// binding both read it.
+function affiliateLinkVisibleText(masked, strView, start, attrs) {
+  if (attrs.trimEnd().endsWith('/')) return '';
   const openEnd = start + '<AffiliateLink'.length + attrs.length; // index of '>'
   const tagRe = /<(\/?)AffiliateLink(?=[\s/>])/g;
   tagRe.lastIndex = openEnd + 1;
@@ -1983,14 +1986,14 @@ function affiliateLinkTextIsEmpty(masked, strView, start, attrs) {
         // fragment delimiters (<></>) render nothing either (Codex #508 r5/r6).
         // Whitespace character references (&nbsp; &#32; …) decode to
         // whitespace the anchor cannot show either (Codex #508 r8).
-        return !text.replace(/<>|<\/>/g, '').replace(NON_RENDERING_CHILD_RE, '').replace(WHITESPACE_ENTITY_RE, ' ').trim();
+        return text.replace(/<>|<\/>/g, '').replace(NON_RENDERING_CHILD_RE, '').replace(WHITESPACE_ENTITY_RE, ' ').trim();
       }
     } else {
       const a = tagAttrsAt(masked, t.index);
       if (a !== null && !a.trimEnd().endsWith('/')) depth += 1;
     }
   }
-  return true; // unclosed — nothing renders
+  return ''; // unclosed — nothing renders
 }
 
 function collectAffiliateLinkTags(text) {
@@ -2020,10 +2023,11 @@ function collectAffiliateLinkTags(text) {
   while ((m = re.exec(masked)) !== null) {
     if (strView[m.index] === ' ') continue; // string/attr display text
     const attrs = tagAttrsAt(masked, m.index);
-    if (attrs === null) { tags.push({ start: m.index, attrs: '', productId: null, placement: null, emptyText: true }); continue; }
+    if (attrs === null) { tags.push({ start: m.index, attrs: '', productId: null, placement: null, text: '', emptyText: true }); continue; }
     const productId = literalAttribute(attrs, 'product');
     const placement = literalAttribute(attrs, 'placement');
-    tags.push({ start: m.index, attrs, productId: productId || null, placement: placement || null, emptyText: affiliateLinkTextIsEmpty(masked, strView, m.index, attrs) });
+    const text = affiliateLinkVisibleText(masked, strView, m.index, attrs);
+    tags.push({ start: m.index, attrs, productId: productId || null, placement: placement || null, text, emptyText: !text });
   }
   return tags;
 }
@@ -2625,7 +2629,11 @@ function spiderIdBoardContractFinding(body) {
 
 // All affiliate policy findings for a draft — an ARRAY (several can apply,
 // and review/redraft needs each named). Deduped per (code, product).
-function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsBlog = false, isRefresh = false, priorBody = null, registry = null } = {}) {
+// `allowedProducts` (optional): the operator brief's affiliate_products —
+// when present, the ONLY products the draft may link, each at its bound
+// placement and anchor text (pre-push Codex P1 on #3752: the registry check
+// alone let the writer swap in any other active product).
+function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsBlog = false, isRefresh = false, priorBody = null, registry = null, allowedProducts = null } = {}) {
   const findings = [];
   const seen = new Set();
   const push = (severity, code, key, message) => {
@@ -2682,6 +2690,18 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
     }
     if (tag.emptyText) {
       push('P0', 'EMPTY_AFFILIATE_LINK_TEXT', tag.productId || '(no-product)', 'Draft contains an <AffiliateLink> with no visible link text (self-closing, empty, comment-only, or unclosed) — the component renders its children as the anchor text, so this ships an empty, unusable product link; the astro publish gate rejects it.');
+    }
+    if (Array.isArray(allowedProducts) && allowedProducts.length) {
+      const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const spec = allowedProducts.find((p) => p && p.product_id === tag.productId);
+      const allowedIds = allowedProducts.map((p) => p && p.product_id).filter(Boolean).join(', ');
+      if (!spec) {
+        push('P0', 'AFFILIATE_PRODUCT_NOT_IN_BRIEF', tag.productId || '(no-product)', `Draft links affiliate product "${tag.productId || '(none)'}" which the brief did not authorize — the brief binds exactly: ${allowedIds}; never substitute another product, even an approved one.`);
+      } else if (spec.placement && tag.placement !== spec.placement) {
+        push('P0', 'AFFILIATE_PRODUCT_NOT_IN_BRIEF', `${tag.productId}:placement`, `Draft links affiliate product "${tag.productId}" with placement "${tag.placement || '(none)'}" — the brief binds placement "${spec.placement}".`);
+      } else if (spec.anchor && !tag.emptyText && norm(tag.text) !== norm(spec.anchor)) {
+        push('P0', 'AFFILIATE_PRODUCT_NOT_IN_BRIEF', `${tag.productId}:anchor`, `Draft links affiliate product "${tag.productId}" with anchor text "${tag.text.slice(0, 80)}" — the brief binds the anchor "${spec.anchor}" exactly.`);
+      }
     }
     for (const { name } of eachJsxAttr(tag.attrs)) {
       if (name !== 'product' && name !== 'placement') {
@@ -6414,7 +6434,7 @@ function literalPhoneInTitleFinding(frontmatter) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -6488,7 +6508,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // above, no bypass). affiliateComponentFindings owns registration,
     // risk-class/label-review, page-class eligibility, disclosure,
     // density/CTA placement, and the refresh no-additions rule.
-    ...affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsBlog, isRefresh, priorBody }),
+    ...affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsBlog, isRefresh, priorBody, allowedProducts: allowedAffiliateProducts }),
     // InlineCTA's destination contract holds for EVERY draft (the component
     // is allowlisted outside affiliate posts too) — a javascript: or
     // expression-valued ctaHref must park here, not at the astro gate after

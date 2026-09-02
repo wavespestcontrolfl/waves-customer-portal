@@ -993,6 +993,27 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('a brief\'s affiliate_products allowlist binds product, placement and anchor (pre-push Codex P1 on #3752)', () => {
+    withAffiliateEnv(() => {
+      const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+      const allowed = [{ product_id: 'acurite-glass-rain-gauge', placement: 'primary-rec', anchor: 'a glass rain gauge' }];
+      const body = (tag) => `Intro.\n\n[quote](/quote/)\n\n## Sec\n\nUse ${tag} here.`;
+      const codes = (tag, opts) => affiliateCodes(guardrails.evaluate({ body: body(tag), frontmatter: fm() }, { targetIsBlog: true, allowedAffiliateProducts: allowed, ...opts }));
+      // Exact product + placement + anchor: clean. Vendored registry rows are the real six.
+      expect(codes('<AffiliateLink product="acurite-glass-rain-gauge" placement="primary-rec">a glass rain gauge</AffiliateLink>')).not.toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
+      expect(codes('<AffiliateLink product="acurite-glass-rain-gauge" placement="primary-rec">A  glass rain gauge</AffiliateLink>')).not.toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF'); // case/whitespace-insensitive
+      // Another ACTIVE registry product the brief did not name, a wrong placement, a reworded anchor: each blocks.
+      expect(codes('<AffiliateLink product="xlux-soil-moisture-meter" placement="primary-rec">a moisture meter</AffiliateLink>')).toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
+      expect(codes('<AffiliateLink product="acurite-glass-rain-gauge" placement="alt-rec">a glass rain gauge</AffiliateLink>')).toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
+      expect(codes('<AffiliateLink product="acurite-glass-rain-gauge" placement="primary-rec">this cheap gauge</AffiliateLink>')).toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
+      // No allowlist on the brief → the registry rules alone apply.
+      expect(codes('<AffiliateLink product="xlux-soil-moisture-meter" placement="primary-rec">a moisture meter</AffiliateLink>', { allowedAffiliateProducts: null })).not.toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
+      // The shared brief-derived options carry the operator brief's list (run-level gate AND writer self-lint).
+      expect(deriveSyncGuardrailOptions({}, { action_type: 'new_supporting_blog', voice_constraints: { operator_brief: { affiliate_products: allowed } } }).allowedAffiliateProducts).toEqual(allowed);
+      expect(deriveSyncGuardrailOptions({}, { action_type: 'new_supporting_blog' }).allowedAffiliateProducts).toBeNull();
+    });
+  });
+
   test('spread wrappers hide their CTA (astro parity, Codex #3646 r28)', () => {
     withAffiliateEnv(() => {
       const b = `Intro.\n\n## Sec\n\n<div {...props}>[Quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
@@ -1240,7 +1261,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       'INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT', 'PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW',
       'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'AFFILIATE_PLACEMENT_NOT_ALLOWED',
       'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', 'AFFILIATE_POST_NOT_HUB_ONLY', 'INVALID_INLINECTA_PROPS', 'INVALID_AFFILIATELINK_PROPS', 'INVALID_SPIDERIDBOARD_PROPS', 'AFFILIATE_LINK_REMOVED_ON_REFRESH',
-      'EMPTY_AFFILIATE_LINK_TEXT',
+      'EMPTY_AFFILIATE_LINK_TEXT', 'AFFILIATE_PRODUCT_NOT_IN_BRIEF',
     ]) {
       expect(typeof GATE_RETRY_INSTRUCTIONS[code]).toBe('string');
     }
