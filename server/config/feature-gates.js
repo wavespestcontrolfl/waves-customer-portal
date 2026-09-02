@@ -267,6 +267,17 @@ const gates = {
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
 
+  // Booking stamping contract (Tier 2 consolidation): the shared
+  // field-stamping authority in services/booking/create-scheduled-service.js
+  // that scheduled_services insert sites converge on. Gate OFF = no
+  // behavioral enrichment: the contract only validates and stamps
+  // provenance attribution (source_action/booking_source, caller values
+  // always win), so adopting a call site changes nothing at rest. Gate ON
+  // = enrichment stamps apply (catalog-identity snapshot completion for
+  // rows the caller left snapshot-less).
+  // Fail-closed ==='true' in EVERY environment; kill switch: unset.
+  bookingStampingContract: process.env.GATE_BOOKING_STAMPING_CONTRACT === 'true',
+
   // Two-program combined visits retired (owner 2026-08-31, follow-through
   // on the 08-28 combo ruling "I want to remove all of these"): with visit
   // groups live, a sold pest + termite-bait pair (and lawn + tree & shrub)
