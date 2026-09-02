@@ -12518,10 +12518,13 @@ export function CompletionPanel({
   // as the typed `actionsCompleted`/`observations`/`recommendations` fields. Keep
   // them out of `serviceNotes` so a future-step [Next] recommendation can't get
   // drafted as completed work (the prompt files serviceNotes under COMPLETED WORK).
+  // Same grammar as taggedNoteLines (and the server's taggedCompletionNoteLines):
+  // case-insensitive, whitespace after the tag optional — a "[next]" line the
+  // submit recognises as a recommendation must never survive into serviceNotes.
   function stripChipTagLines(text) {
     return String(text || "")
       .split("\n")
-      .filter((line) => !/^\s*\[(?:Protocol(?: optional)?|Action|Found|Next)\]\s/.test(line))
+      .filter((line) => !/^\s*\[(?:Protocol(?: optional)?|Action|Found|Next)\]\s*/i.test(line))
       .join("\n")
       .trim();
   }
@@ -19827,8 +19830,11 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme, suggestions 
 export const TECH_TIP_MAX = 3;
 const TECH_TIP_SUB_CHARS = 96;
 
+// No lookbehind: Safari before 16.4 fails to PARSE a lookbehind literal and
+// the whole dispatch chunk would not load (see SaveCardConsent.jsx).
 export function techTipSubtext(copy) {
-  const first = String(copy || "").split(/(?<=[.!?])\s/)[0] || "";
+  const text = String(copy || "");
+  const first = (text.match(/^.*?[.!?](?=\s|$)/) || [text])[0] || "";
   return first.length > TECH_TIP_SUB_CHARS ? `${first.slice(0, TECH_TIP_SUB_CHARS - 1).trimEnd()}…` : first;
 }
 

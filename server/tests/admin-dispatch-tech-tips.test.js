@@ -255,6 +255,7 @@ describe('route wiring contracts', () => {
     expect(formBlock).not.toContain('internalRecommendations');
     // "sent" = a report the customer could open: undelivered postures are excluded
     expect(block).toContain("COALESCE(structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'");
+    expect(block).toContain("COALESCE(structured_notes->>'visitOutcome', '') <> 'incomplete'");
     // the 90-day window is an ET calendar day bound from the shared helpers,
     // never the session-zone CURRENT_DATE
     expect(block).not.toMatch(/CURRENT_DATE|now\(\)/i);

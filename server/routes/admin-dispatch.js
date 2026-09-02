@@ -2040,6 +2040,8 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
           // frozen only for non-auto_send postures (review_only /
           // internal_only / disabled), which reports-public 404s.
           .whereRaw("COALESCE(structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'")
+          // an incomplete closeout freezes its picks but delivers no report
+          .whereRaw("COALESCE(structured_notes->>'visitOutcome', '') <> 'incomplete'")
           .where('service_date', '>=', sentSinceDay)
           .orderBy('service_date', 'desc')
           .select('service_date', db.raw("structured_notes->'techTips' AS tech_tips"))

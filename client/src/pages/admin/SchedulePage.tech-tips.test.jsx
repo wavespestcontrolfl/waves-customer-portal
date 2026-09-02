@@ -44,6 +44,11 @@ describe('techTipSubtext', () => {
   test('empty copy is an empty subtext', () => {
     expect(techTipSubtext('')).toBe('');
   });
+  test('decimals and slashes do not end the first sentence (lookbehind-free)', () => {
+    expect(techTipSubtext('Water 1.25 inches a week. Early morning is best.')).toBe('Water 1.25 inches a week.');
+    expect(techTipSubtext('Set the A/C fan to Auto so it settles near 50% humidity. Then relax.')).toBe('Set the A/C fan to Auto so it settles near 50% humidity.');
+    expect(techTipSubtext('No terminator at all')).toBe('No terminator at all');
+  });
 });
 
 describe('techTipSentLabel', () => {
