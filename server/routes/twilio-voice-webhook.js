@@ -177,8 +177,11 @@ function maskSid(sid) {
 //               (claim-fenced, idempotent) processing attempt.
 //   replace   — a DIFFERENT recording on a row nothing has finished on:
 //               last-wins as before (the voicemail recording superseding the
-//               short dial-leg recording is the normal ring-first order), and
-//               the superseded recording is kept in metadata.
+//               short dial-leg recording is the normal ring-first order), the
+//               superseded recording is kept in metadata, and the row's
+//               processing_status is reset to NULL in the same write so the
+//               sweep re-runs it on the new audio (voicemail/spam rows would
+//               otherwise never re-enter the sweep with a transcript present).
 //   park      — a different recording on a row that is being processed or
 //               already finished: never overwrite the recording the transcript
 //               came from. Kept in metadata.additional_recordings and surfaced
@@ -231,6 +234,10 @@ const TERMINAL_CALL_STATUSES = new Set(['completed', 'busy', 'failed', 'no-answe
 
 function nextCallStatus(existingStatus, incomingStatus) {
   if (!incomingStatus) return existingStatus || null;
+  // `completed` is absorbing: a call that connected stays completed however
+  // late a busy/failed/no-answer callback for one of its legs arrives. An
+  // unsuccessful terminal may still advance to completed.
+  if (existingStatus === 'completed') return existingStatus;
   if (TERMINAL_CALL_STATUSES.has(existingStatus) && !TERMINAL_CALL_STATUSES.has(incomingStatus)) {
     return existingStatus;
   }
@@ -1555,6 +1562,13 @@ router.post('/recording-status', async (req, res) => {
         }
         const write = { ...recordingData };
         if (attach.action === 'replace') {
+          // The row's transcript/extraction (if any) describe the OLD
+          // audio. Reset processing_status atomically with the swap so the
+          // restart-safe sweep re-runs the call on the new recording even
+          // if the in-memory timer below is lost to a deploy: the sweep's
+          // fresh branch is `processing_status IS NULL`, and it never
+          // re-enters voicemail/spam rows that still carry a transcript.
+          write.processing_status = null;
           // Last-wins as before, but the superseded recording is kept: the
           // dial-leg recording a voicemail replaced is still evidence.
           write.metadata = db.raw(

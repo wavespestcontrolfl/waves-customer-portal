@@ -266,7 +266,7 @@ function getValidator() {
 
 function buildCommitmentsPrompt({ transcript, callStartedAt }) {
   const when = callStartedAt ? new Date(callStartedAt).toLocaleString('en-US', { timeZone: 'America/New_York' }) : 'unknown';
-  return `You read a phone call transcript between a Waves Pest Control & Lawn Care agent ("Agent:") and a caller ("Caller:") and list the COMMITMENTS made on the call.
+  return `You read a phone call transcript between a Waves Pest Control agent ("Agent:") and a caller ("Caller:") and list the COMMITMENTS made on the call.
 
 A commitment is something one party explicitly said they would do after the call. Two parties:
 - "waves": the agent promised to do something (send an estimate, send an appointment confirmation text, call back, email a report, send WDO/termite paperwork, have the technician follow up, schedule a visit).

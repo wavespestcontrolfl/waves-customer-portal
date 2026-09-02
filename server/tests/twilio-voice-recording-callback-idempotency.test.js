@@ -350,6 +350,19 @@ describe('POST /recording-status', () => {
     expect(tables.call_log[0].metadata.additional_recordings).toHaveLength(1);
   });
 
+  test('a replace on a voicemail row (rejected dial-leg audio) resets processing_status so the sweep re-runs it on the new audio', async () => {
+    tables.call_log.push({
+      id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 12,
+      processing_status: 'voicemail', transcription_status: 'rejected', transcription: '[Recording had no usable speech; an implausible transcription was rejected.]', metadata: null,
+    });
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    const row = tables.call_log[0];
+    expect(row.recording_sid).toBe(REC_2);
+    expect(row.processing_status).toBeNull();
+    expect(row.transcription_status).toBe('pending');
+    expect(row.metadata.superseded_recordings[0]).toMatchObject({ recording_sid: REC_1 });
+  });
+
   test('a different recording on an unprocessed row replaces it (ring-first voicemail after the dial leg) and keeps the superseded one', async () => {
     tables.call_log.push({
       id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 12,
@@ -397,10 +410,17 @@ describe('nextCallStatus (pure) and POST /call-status', () => {
     expect(nextCallStatus('completed', 'in-progress')).toBe('completed');
     expect(nextCallStatus('no-answer', 'initiated')).toBe('no-answer');
   });
-  test('non-terminal → anything, and terminal → terminal, still apply', () => {
+  test('completed is absorbing — a late failed/busy/no-answer leg callback never overwrites it', () => {
+    for (const late of ['failed', 'busy', 'no-answer', 'canceled']) {
+      expect(nextCallStatus('completed', late)).toBe('completed');
+    }
+    // An unsuccessful terminal may still advance to completed.
+    expect(nextCallStatus('no-answer', 'completed')).toBe('completed');
+    expect(nextCallStatus('failed', 'busy')).toBe('busy');
+  });
+  test('non-terminal → anything still applies', () => {
     expect(nextCallStatus('ringing', 'completed')).toBe('completed');
     expect(nextCallStatus('in-progress', 'ringing')).toBe('ringing');
-    expect(nextCallStatus('completed', 'failed')).toBe('failed');
     expect(nextCallStatus(null, 'completed')).toBe('completed');
     expect(nextCallStatus('completed', undefined)).toBe('completed');
   });

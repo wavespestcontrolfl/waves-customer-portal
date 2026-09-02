@@ -121,6 +121,14 @@ Per file, with the proving test.
   row back to NULL status and resolves its review card only when the
   reprocess actually completes (a deferred pass leaves the card open and the
   row queued for the sweep).
+- Pre-push Codex rounds 2–3 (5 P1s, all fixed): a first attach refused by a
+  competing callback is re-decided (two-round loop, park on the second
+  refusal) so no RecordingSid is dropped; fulfillment marks a promise kept
+  only from a record directly linked to the call and stores same-customer
+  matches (14-day window) as hints; a replace resets `processing_status` to
+  NULL in the same write so the sweep re-runs voicemail/spam rows on the new
+  audio; `completed` is absorbing against late busy/failed/no-answer leg
+  callbacks; the commitments prompt names the company as "Waves Pest Control".
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 
