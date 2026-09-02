@@ -43,14 +43,14 @@ function tally(items) {
 // `truncated` = a scan hit SCAN_LIMIT, so counts are a floor, not a total;
 // the tab renders them as "200+". Cheaper and more honest than a second
 // count query per lane on a view that refreshes on demand.
-function finish(items, { truncated = false } = {}) {
+function finish(items, { truncated = false, total = null } = {}) {
   const rank = { failed: 0, parked: 1, pending: 2 };
   const sorted = [...items].sort((a, b) => {
     const r = (rank[a.status] ?? 3) - (rank[b.status] ?? 3);
     if (r !== 0) return r;
     return String(b.at || '').localeCompare(String(a.at || ''));
   });
-  return { ...tally(sorted), total: sorted.length, truncated, items: sorted.slice(0, ITEM_LIMIT) };
+  return { ...tally(sorted), total: total ?? sorted.length, truncated, items: sorted.slice(0, ITEM_LIMIT) };
 }
 
 function hitCap(rows) {
@@ -156,7 +156,11 @@ async function laneContentParks() {
     at: iso(it.run?.completed_at || it.run?.claimed_at || it.updated_at || it.mined_at),
     href: '/admin/blog?tab=autopilot',
   }));
-  return finish(items, { truncated: hitCap(reviews) });
+  // listReviewItems caps its page (100) below SCAN_LIMIT but returns exact
+  // per-status counts alongside — use them for the true total.
+  const exact = Number(result?.counts?.pending_review);
+  const total = Number.isFinite(exact) ? Math.max(exact, items.length) : items.length;
+  return finish(items, { truncated: total > items.length, total });
 }
 
 async function laneEmailApprovals() {

@@ -154,12 +154,14 @@ describe('getOpsQueue scan cap', () => {
   test('a lane that hits the scan cap reports truncated so counts read as a floor', async () => {
     for (const k of Object.keys(fixtures)) delete fixtures[k];
     mockJobHealth.mockResolvedValue({ jobs: [] });
-    mockReviewItems.mockResolvedValue({ items: [] });
+    mockReviewItems.mockResolvedValue({ items: [{ id: 'opp-1', brief: { title: 'x' } }], counts: { pending_review: 150 } });
     fixtures.ib_pending_actions = Array.from({ length: 200 }, (_, i) => ({ id: `pa-${i}`, tool_name: 'send_sms', expires_at: ago(-5), created_at: ago(i) }));
     const q = await getOpsQueue();
     const ib = q.lanes.find((l) => l.key === 'ib');
     expect(ib.truncated).toBe(true);
     expect(ib.total).toBe(200);
+    const content = q.lanes.find((l) => l.key === 'content');
+    expect(content).toMatchObject({ total: 150, parked: 1, truncated: true });
     expect(q.totals.truncated).toBe(true);
   });
 });
