@@ -21,6 +21,7 @@ const crypto = require('crypto');
 const IbThreads = require('../services/intelligence-bar/threads');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
+const { gateEnvValue } = require('../config/feature-gates');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -2178,6 +2179,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const persistedToolCalls = []; // names + field keys only — telemetry never stores argument values
     const toolResults = [];
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
+    // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
+    // lines — label + outcome + duration per tool call, never inputs or
+    // results. Returned only when the gate is on; off = today's payload.
+    const toolActivityOn = gateEnvValue('GATE_IB_TOOL_ACTIVITY');
+    const toolActivity = [];
 
     // Tool-use loop
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -2226,6 +2232,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         let failed = false;
         let circuitOpen = false;
         let errorMessage = null;
+        let proposedCard = false; // a UI-gated write became a confirmation card
         const toolStartedAt = Date.now();
         if ((DASHBOARD_TOOL_NAMES.has(toolUse.name) || INFRA_TOOL_NAMES.has(toolUse.name)) && isNonAdminDashboardRequest(req)) {
           result = { error: 'Admin access required for dashboard intelligence' };
@@ -2269,6 +2276,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               errorMessage = result.error || 'proposal failed';
             } else if (proposed.clientPayload) {
               pendingProposals.push(proposed.clientPayload);
+              proposedCard = true;
             }
           } catch (err) {
             logger.error(`[intelligence-bar] Proposal for ${toolUse.name} threw:`, err);
@@ -2323,6 +2331,15 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         toolCalls.push({ name: toolUse.name, input: loggableInput });
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
         toolResults.push({ name: toolUse.name, result });
+        if (toolActivityOn) {
+          toolActivity.push({
+            tool: toolUse.name,
+            label: AuthorizationContract.activityLabel(toolUse.name),
+            status: failed ? 'error' : proposedCard ? 'proposed' : 'done',
+            durationMs: Date.now() - toolStartedAt,
+            round,
+          });
+        }
       }
 
       currentMessages = [
@@ -2448,6 +2465,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     res.json({
       response: finalResponse,
       toolCalls,
+      // Operator-facing activity lines (GATE_IB_TOOL_ACTIVITY). Absent when
+      // the gate is off so the payload stays byte-identical.
+      ...(toolActivityOn ? { toolActivity } : {}),
       // Return the structured data from the last tool call for UI rendering
       structuredData: toolResults.length > 0 ? toolResults[toolResults.length - 1].result : null,
       // Pending write proposals for the client confirmation card. This is the

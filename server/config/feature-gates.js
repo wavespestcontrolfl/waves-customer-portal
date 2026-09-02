@@ -57,6 +57,7 @@
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
+ *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true (12-month application strip under the lawn price card, arithmetic on visitsPerYear only; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
@@ -2040,6 +2041,16 @@ const gates = {
   // { available: false } and the completion screen keeps today's textareas.
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   techTips: gateEnvValue('GATE_TECH_TIPS'),
+
+  // Intelligence Bar tool activity (2026-09-02): POST /query answers carry a
+  // `toolActivity` list — one operator-facing line per tool call the exchange
+  // ran (label, done / error / proposed, duration, round) — and the ⌘K
+  // palette renders it above the answer so a confirmation card is read next
+  // to what the bar actually checked. Labels only: never tool inputs, never
+  // results, never the model's reasoning. OFF unless set, dev AND prod — off
+  // = the response is byte-identical to today. Kill switch: unset. Read at
+  // CALL time so a flip needs no redeploy.
+  ibToolActivity: gateEnvValue('GATE_IB_TOOL_ACTIVITY'),
 
 };
 
