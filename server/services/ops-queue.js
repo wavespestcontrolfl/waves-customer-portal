@@ -131,15 +131,12 @@ async function laneCallProcessing() {
   // processor's 7-day fence (PAN-quarantined rows keep recording_url null by
   // design and still retry); at the cap it is terminal. Scanned SEPARATELY so
   // a backlog of live rows can never push failures out of the page.
-  const failedRows = await db('call_log')
+  // Same eligibility as the live set: an under-cap retry the processor could
+  // never pick up is not "retry scheduled", and at-cap rows are terminal
+  // either way.
+  const failedRows = await eligible(db('call_log')
     .where('processing_status', 'extraction_failed')
-    .where('created_at', '>', since(RECENT_DAYS))
-    .where(function somethingToProcess() {
-      this.whereRaw("NULLIF(btrim(recording_url), '') IS NOT NULL")
-        .orWhere(function panQuarantined() {
-          this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'").whereNotNull('transcription');
-        });
-    })
+    .where('created_at', '>', since(RECENT_DAYS)))
     .orderBy('updated_at', 'desc')
     .limit(SCAN_LIMIT)
     .select(columns);
