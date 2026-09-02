@@ -184,6 +184,15 @@ describe('requestAutopaySetupLink — ordered checks', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  it('never auto-secures a customer whose latest Auto Pay toggle is a DISABLE — they get a fresh link instead', async () => {
+    mockTableHandlers.autopay_log = { first: () => ({ event_type: 'autopay_disabled' }) };
+    mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7' });
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1' });
+    expect(r.action).toBe('link_created');
+    expect(mockFindConsentedChargeableCard).not.toHaveBeenCalled();
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+  });
+
   it('a refused saved-method enrollment is a retryable skip, not a link', async () => {
     mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7' });
     mockEnrollConsentedMethod.mockResolvedValue({ enrolled: false, reason: 'ach_blocked' });
@@ -515,13 +524,11 @@ describe('completion tail (page POST + webhook)', () => {
     mockTableHandlers.payment_methods = { first: () => ({ id: 'pm-row-old', customer_id: 'cust-1', method_type: 'card' }) };
     const created = new Date('2026-09-01T12:00:00Z');
     mockHasConsentSnapshotForVariant.mockResolvedValue(false);
-    const before = Date.now();
     await completeAutopaySetupCapture({ request: { ...PENDING, created_at: created }, setupIntentId: 'seti_new' });
-    const sinceArg = mockHasConsentSnapshotForVariant.mock.calls[0][2].since;
     // Scoped to this source: a portal consent given meanwhile is its own row.
-    expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_new', expect.objectContaining({ methodType: 'card', source: 'autopay_setup_link' }));
-    // Page path: the POST moment, never the link's mint (which is only the fallback).
-    expect(sinceArg.getTime()).toBeGreaterThanOrEqual(before);
+    // No SetupAttempt on this intent → the link's mint is the dedupe floor
+    // (a page POST never supplies its own time).
+    expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_new', expect.objectContaining({ methodType: 'card', source: 'autopay_setup_link', since: created }));
     expect(mockRecordConsent).toHaveBeenCalledTimes(1);
     mockRecordConsent.mockClear();
     mockHasConsentSnapshotForVariant.mockResolvedValue(true);
@@ -547,27 +554,32 @@ describe('completion tail (page POST + webhook)', () => {
     expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ methodType: 'ach' }));
   });
 
-  it('the AUTHORIZATION moment is the PaymentMethod creation (the submit) — never SetupIntent.created, never the POST time of a replay', async () => {
-    const submitAt = 1756850000; // pm.created (unix)
-    mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_SI, created: 1756800000 });
-    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'card', created: submitAt });
+  it('the AUTHORIZATION moment is the SetupAttempt (the confirm) — never SetupIntent.created, PaymentMethod.created, or a replay POST time', async () => {
+    const confirmAt = 1756850000; // setup attempt created (unix)
+    // The page path retrieves the intent with latest_attempt expanded.
+    mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_SI, created: 1756800000, latest_attempt: { id: 'setatt_1', created: confirmAt } });
+    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'card', created: 1600000000 }); // a years-old re-used method
     mockTableHandlers.payment_methods = { first: () => null };
     await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
-    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(submitAt * 1000) }));
-    expect(mockHasConsentSnapshotForVariant).toHaveBeenLastCalledWith('cust-1', 'pm_new', expect.objectContaining({ since: new Date(submitAt * 1000) }));
+    expect(mockRetrieveSetupIntent).toHaveBeenCalledWith('seti_new', { expand: ['latest_attempt'] });
+    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(confirmAt * 1000) }));
+    expect(mockHasConsentSnapshotForVariant).toHaveBeenLastCalledWith('cust-1', 'pm_new', expect.objectContaining({ since: new Date(confirmAt * 1000) }));
     mockEnrollConsentedMethod.mockClear();
-    // Webhook path: an expanded pm carries created directly.
+    // Webhook path: the event's intent carries latest_attempt as an id — the
+    // tail expands it on the intent.
     mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING }) };
-    await completeAutopaySetupCaptureFromWebhook({ ...GOOD_SI, payment_method: { id: 'pm_new', type: 'card', created: submitAt } }, { eventCreatedAt: new Date('2026-09-02T06:00:00Z') });
-    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(submitAt * 1000) }));
+    mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_SI, latest_attempt: { id: 'setatt_1', created: confirmAt } });
+    await completeAutopaySetupCaptureFromWebhook({ ...GOOD_SI, latest_attempt: 'setatt_1' }, { eventCreatedAt: new Date('2026-09-02T06:00:00Z') });
+    expect(mockRetrieveSetupIntent).toHaveBeenLastCalledWith('seti_new', { expand: ['latest_attempt'] });
+    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(confirmAt * 1000) }));
     mockEnrollConsentedMethod.mockClear();
-    // No pm.created → the caller's fallback (event time) applies; none → guard skipped.
-    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'card' });
+    // No attempt → the webhook's event time applies; page path with no attempt → no authorizedAt (never the POST time).
     const eventAt = new Date('2026-09-02T06:00:00Z');
     await completeAutopaySetupCaptureFromWebhook({ ...GOOD_SI }, { eventCreatedAt: eventAt });
     expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: eventAt }));
     mockEnrollConsentedMethod.mockClear();
-    await completeAutopaySetupCaptureFromWebhook({ ...GOOD_SI });
+    mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_SI });
+    await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
     expect(mockEnrollConsentedMethod.mock.calls[0][0].authorizedAt).toBeUndefined();
   });
 
