@@ -34,13 +34,18 @@ function rowPassesGatedSendAuthority(row = {}) {
   return isProposalAuthoredByEditor(data?.proposal);
 }
 
-// The customer's ONE link renders every viewable sibling of a grouped
-// estimate (estimate-public propertyGroup), so a row is deliverable under
-// the gate only when IT passes and every sibling the link would show passes
-// too — the same sibling set the send claims judge (draft / scheduled /
-// send_failed / sent / viewed, unlocked, unarchived). A sibling read that
-// fails answers "not deliverable": fail closed, never a nudge on a guess.
-async function groupPassesGatedSendAuthority(database, row = {}) {
+// The customer's ONE link renders every CUSTOMER-VIEWABLE sibling of a
+// grouped estimate (estimate-public propertyGroup / isEstimateCustomerViewable:
+// sending, sent or viewed, unarchived, unexpired — drafts, scheduled and
+// send_failed rows are hidden; accepted/declined are terminal), so a row is
+// deliverable under the gate only when IT passes and every sibling the link
+// would actually show passes too (pre-push codex P1 r18: the send claims'
+// broader publishable set — drafts included — is theirs alone; an unsent
+// fallback draft must not block an anchor's follow-up, and a stuck fallback
+// 'sending' sibling must not slip through). A sibling read that fails
+// answers "not deliverable": fail closed, never a nudge on a guess.
+const LINK_VISIBLE_SIBLING_STATUSES = ['sending', 'sent', 'viewed'];
+async function groupPassesGatedSendAuthority(database, row = {}, now = new Date()) {
   if (!row?.estimate_group_id) return true;
   let siblings;
   try {
@@ -48,8 +53,8 @@ async function groupPassesGatedSendAuthority(database, row = {}) {
       .where({ estimate_group_id: row.estimate_group_id })
       .whereNot({ id: row.id })
       .whereNull('archived_at')
-      .whereNull('price_locked_at')
-      .whereIn('status', ['draft', 'scheduled', 'send_failed', 'sent', 'viewed'])
+      .whereIn('status', LINK_VISIBLE_SIBLING_STATUSES)
+      .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now))
       .select('id', 'pricing_authority', 'estimate_data');
   } catch {
     return false;
@@ -73,4 +78,5 @@ module.exports = {
   rowPassesGatedSendAuthority,
   groupPassesGatedSendAuthority,
   estimateDeliverableUnderGate,
+  LINK_VISIBLE_SIBLING_STATUSES,
 };

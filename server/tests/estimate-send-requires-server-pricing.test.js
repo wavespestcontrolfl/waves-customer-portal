@@ -437,9 +437,10 @@ describe('pricing-authority-gate — the one verdict shared by sends, follow-ups
 describe('pricing-authority-gate — group-aware verdict (GH codex P1 r14)', () => {
   const gate = require('../services/pricing-authority-gate');
   function fakeDb(siblings, { throwOnRead = false } = {}) {
-    const calls = { whereIns: [] };
+    const calls = { whereIns: [], whereFns: 0 };
     const chain = {
-      where: () => chain, whereNot: () => chain, whereNull: () => chain,
+      where: (c) => { if (typeof c === 'function') { calls.whereFns += 1; c({ whereNull: () => ({ orWhere: () => chain }) }); } return chain; },
+      whereNot: () => chain, whereNull: () => chain,
       whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return chain; },
       select: async () => { if (throwOnRead) throw new Error('db down'); return siblings; },
     };
@@ -452,7 +453,10 @@ describe('pricing-authority-gate — group-aware verdict (GH codex P1 r14)', () 
     mockGateState.sendRequiresServerPricing = true;
     const bad = fakeDb([{ id: 'est-b', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' }]);
     expect(await gate.estimateDeliverableUnderGate(bad.database, anchor)).toBe(false);
-    expect(bad.calls.whereIns).toEqual([['status', ['draft', 'scheduled', 'send_failed', 'sent', 'viewed']]]);
+    // The CUSTOMER-VIEWABLE set (sending/sent/viewed, unexpired) — not the
+    // send claims' publishable set: an unsent draft never blocks a nudge.
+    expect(bad.calls.whereIns).toEqual([['status', ['sending', 'sent', 'viewed']]]);
+    expect(bad.calls.whereFns).toBe(1);
     const good = fakeDb([
       { id: 'est-b', pricing_authority: 'SERVER', estimate_data: '{}' },
       { id: 'est-c', pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' } } }) },

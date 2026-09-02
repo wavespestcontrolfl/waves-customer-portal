@@ -2091,6 +2091,25 @@ async function createOrReuseAdminEstimate({
       await assertNoFallbackRevisionInScheduledGroup(trx, joining, writeFields);
     }
 
+    // Linked-draft reuse (pre-push codex P1 r18): a create that omits the
+    // grouping fields may still REUSE the lead's existing GROUPED draft and
+    // stamp it unverified — its stored group is judged like a revision's,
+    // in lock order: the draft's group is read unlocked and its advisory
+    // lock taken BEFORE the lead/draft row locks below; the locked draft's
+    // group is re-checked against what was locked, and the scheduled /
+    // mid-send verdict runs on the locked row before the reuse update.
+    let reuseGroupLocked = null;
+    if (linkedLeadId) {
+      const linkedLead = await trx('leads').where({ id: linkedLeadId }).whereNull('deleted_at').first('estimate_id');
+      if (linkedLead?.estimate_id) {
+        const linkedDraft = await trx('estimates').where({ id: linkedLead.estimate_id }).first('estimate_group_id', 'status');
+        if (linkedDraft?.estimate_group_id) {
+          reuseGroupLocked = String(linkedDraft.estimate_group_id);
+          await lockScheduledGroupGuardGroups(trx, { id: linkedLead.estimate_id, estimate_group_id: reuseGroupLocked }, writeFields);
+        }
+      }
+    }
+
     if (linkedLeadId) {
       const lead = await firstForUpdate(trx('leads').where({ id: linkedLeadId }).whereNull('deleted_at'));
       if (!lead) throw errorWithStatus('Lead not found', 404);
@@ -2111,6 +2130,13 @@ async function createOrReuseAdminEstimate({
           if (linkedDraftCarriesProposal(existingEstimate)) {
             throw errorWithStatus('This lead already has a commercial proposal draft — edit it with the Commercial proposal editor instead of saving a new estimate over it.', 409);
           }
+          // The locked draft's group must be the one locked above (a group
+          // change in the gap would need an out-of-order lock — refuse for a
+          // retry); then the scheduled / mid-send verdict on the locked row.
+          if (fallbackRevisionGroupIds(existingEstimate, writeFields).some((groupId) => groupId !== reuseGroupLocked && groupId !== String(writeFields.estimate_group_id || ''))) {
+            throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
+          }
+          await assertNoFallbackRevisionInScheduledGroup(trx, existingEstimate, writeFields);
           const nextEstimate = { ...existingEstimate, ...writeFields, expires_at: expiresAt };
           assertLeadCanAttachEstimate({
             lead,

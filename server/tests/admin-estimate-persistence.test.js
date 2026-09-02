@@ -1314,3 +1314,45 @@ describe('createOrReuseAdminEstimate — a NEW property joining a SCHEDULED grou
     expect(gateOff.inserts.filter((i) => i.table === 'estimates')).toHaveLength(1);
   });
 });
+
+describe('createOrReuseAdminEstimate — reusing a lead\'s GROUPED draft is judged like a revision of it (pre-push codex P1 r18 on #3750)', () => {
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  const GROUP = '2f5e7a10-6c3b-4d9e-9a11-3b7c5d2e8f01';
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('gate on: a plain create (no grouping fields) that would reuse a grouped draft with a scheduled sibling is refused — nothing written', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    const { database, updates, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101', estimate_id: 'estimate-draft' },
+      estimate: { id: 'estimate-draft', status: 'draft', token: 'existing-token', customer_phone: '(941) 555-0101', estimate_group_id: GROUP },
+      scheduledGroupMember: { id: 'est-anchor' },
+    });
+    await expect(createOrReuseAdminEstimate({
+      database,
+      body: { ...baseBody, address: '456 Revised St', monthlyTotal: 145 },
+      technicianId: 'tech-1',
+      recompute: engineError,
+      now: () => new Date('2026-05-15T12:00:00.000Z'),
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/scheduled to send/i) });
+    expect(inserts).toEqual([]);
+    expect(updates.filter((u) => u.table === 'estimates')).toEqual([]);
+  });
+
+  test('control: the same reuse with no scheduled sibling keeps the fail-open save', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    const { database, updates } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101', estimate_id: 'estimate-draft' },
+      estimate: { id: 'estimate-draft', status: 'draft', token: 'existing-token', customer_phone: '(941) 555-0101', estimate_group_id: GROUP },
+      scheduledGroupMember: null,
+    });
+    const result = await createOrReuseAdminEstimate({
+      database,
+      body: { ...baseBody, address: '456 Revised St', monthlyTotal: 145 },
+      technicianId: 'tech-1',
+      recompute: engineError,
+      now: () => new Date('2026-05-15T12:00:00.000Z'),
+    });
+    expect(result.reused).toBe(true);
+    expect(updates.filter((u) => u.table === 'estimates')).toHaveLength(1);
+  });
+});
