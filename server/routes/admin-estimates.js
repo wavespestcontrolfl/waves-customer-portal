@@ -358,7 +358,13 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
     .whereNot({ id: estimate.id })
     .whereNull('archived_at')
     .whereNull('price_locked_at')
-    .whereIn('status', ['draft', 'scheduled', 'send_failed']);
+    // Published siblings (sent/viewed) are INCLUDED in the verdict (GH codex
+    // P1 r6): the customer's one link renders every viewable sibling's price
+    // (estimate-public propertyGroup), so delivering a SERVER anchor beside
+    // a fallback sibling that was published gate-off would still hand over
+    // the unverified price. They are judged, never re-claimed. Accepted /
+    // declined rows are terminal (price locked or refused) and stay out.
+    .whereIn('status', ['draft', 'scheduled', 'send_failed', 'sent', 'viewed']);
   if (forUpdate) query = query.forUpdate();
   const siblings = await query.select('id', 'status', 'category', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
@@ -1467,6 +1473,18 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
     if (midSendSibling) {
       const err = new Error('Another send is publishing this multi-property group — wait a moment and retry.');
       err.statusCode = 409;
+      throw err;
+    }
+    // Group-wide pricing-authority verdict at DELIVERY (GH codex P1 r6):
+    // every viewable sibling — published ones included — must clear the
+    // gate before this send hands the customer the group link. Same verdict
+    // the schedule route applied at request time; here it runs under the
+    // group lock on the rows the claims below will actually publish beside.
+    const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, autoSend });
+    if (blockingSibling) {
+      const err = new Error(`Grouped estimate ${blockingSibling.sibling.id} has no engine-verified price — re-save it from the estimate tool before sending this group (the group link shows every property together).`);
+      err.statusCode = blockingSibling.statusCode;
+      err.code = blockingSibling.code;
       throw err;
     }
     // Claim the ANCHOR here too, under the same lock (codex #3248 r4) —

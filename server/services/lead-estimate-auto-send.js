@@ -460,7 +460,15 @@ async function claimLeadEstimateAutoSend(database, estimate, { now = new Date(),
   return updated || null;
 }
 
-async function updateAutoSendMetadata(database, estimate, patch, status = estimate.status, extraUpdate = {}) {
+// The pricing-authority block is written only while the row is still NOT
+// SERVER (GH codex P2 r6): an operator's engine re-save landing between the
+// eligibility read and the block write must not be stamped already_blocked
+// for good — the guarded UPDATE zero-rows and the next scan re-evaluates.
+const AUTO_SEND_BLOCK_STILL_NOT_SERVER_SQL = "COALESCE(UPPER(pricing_authority), '') <> 'SERVER'";
+
+// `guard`: optional (query) => query refinement applied to the UPDATE's
+// WHERE — a caller-supplied predicate the write must still satisfy.
+async function updateAutoSendMetadata(database, estimate, patch, status = estimate.status, extraUpdate = {}, guard = null) {
   // ATOMIC merge of automation.autoSend into the row's CURRENT JSONB — never
   // a wholesale serialization of the caller's pre-send object. A send can
   // rewrite estimate_data mid-flight (the lead-service park, its
@@ -469,8 +477,9 @@ async function updateAutoSendMetadata(database, estimate, patch, status = estima
   // in the columns (GH codex r5 P1 + pre-push P1 on #3711). Same key shape
   // mergeAutoSendMetadata produces, applied server-side.
   const patchJson = JSON.stringify(parseJsonObject(patch));
-  const [updated] = await database('estimates')
-    .where({ id: estimate.id })
+  let query = database('estimates').where({ id: estimate.id });
+  if (typeof guard === 'function') query = guard(query) || query;
+  const [updated] = await query
     .update({
       status,
       estimate_data: database.raw(
@@ -522,11 +531,18 @@ async function processLeadEstimateAutoSendBatch({
         results.skipped += 1;
         continue;
       }
-      await updateAutoSendMetadata(database, estimate, {
+      const authorityBlock = eligibility.reason === 'pricing_authority_not_server';
+      const blockedRow = await updateAutoSendMetadata(database, estimate, {
         blockedAt: now.toISOString(),
         blockedReason: eligibility.reason,
         blockedReviewReasons: eligibility.review || [],
-      });
+      }, estimate.status, {}, authorityBlock ? (q) => q.whereRaw(AUTO_SEND_BLOCK_STILL_NOT_SERVER_SQL) : null);
+      if (authorityBlock && !blockedRow) {
+        // Re-saved through the engine since the candidate read — not blocked;
+        // the next scan judges the SERVER row afresh.
+        results.skipped += 1;
+        continue;
+      }
       results.blocked += 1;
       continue;
     }
@@ -629,4 +645,6 @@ module.exports = {
   mergeAutoSendMetadata,
   previewLeadEstimateAutoSendAudit,
   processLeadEstimateAutoSendBatch,
+  updateAutoSendMetadata,
+  AUTO_SEND_BLOCK_STILL_NOT_SERVER_SQL,
 };

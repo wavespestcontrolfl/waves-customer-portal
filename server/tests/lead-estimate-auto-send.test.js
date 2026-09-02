@@ -399,3 +399,38 @@ describe('claimLeadEstimateAutoSend — the claim itself re-asserts engine-autho
     ]));
   });
 });
+
+describe('updateAutoSendMetadata — a pricing-authority block is written only while the row is still not SERVER (GH codex P2 r6)', () => {
+  const { updateAutoSendMetadata, AUTO_SEND_BLOCK_STILL_NOT_SERVER_SQL } = require('../services/lead-estimate-auto-send');
+
+  function recordingDatabase({ rowsAfterGuard = null } = {}) {
+    const rawGuards = [];
+    let patch = null;
+    const chain = {
+      where: () => chain,
+      whereNull: () => chain,
+      whereRaw: (sql) => { rawGuards.push(String(sql)); return chain; },
+      update: (p) => { patch = p; return chain; },
+      returning: async () => (rawGuards.length && rowsAfterGuard ? rowsAfterGuard : [{ id: 'estimate-1', status: 'draft', ...(patch || {}) }]),
+    };
+    const database = () => chain;
+    database.fn = { now: () => 'NOW()' };
+    database.raw = (sql) => sql;
+    return { database, rawGuards };
+  }
+
+  test('the guard predicate rides on the UPDATE and a zero-row result reports no block', async () => {
+    const { database, rawGuards } = recordingDatabase({ rowsAfterGuard: [] });
+    const blocked = await updateAutoSendMetadata(database, { id: 'estimate-1', status: 'draft' }, { blockedAt: 'now', blockedReason: 'pricing_authority_not_server' }, 'draft', {}, (q) => q.whereRaw(AUTO_SEND_BLOCK_STILL_NOT_SERVER_SQL));
+    expect(rawGuards).toEqual([AUTO_SEND_BLOCK_STILL_NOT_SERVER_SQL]);
+    expect(AUTO_SEND_BLOCK_STILL_NOT_SERVER_SQL).toContain("<> 'SERVER'");
+    expect(blocked).toBeUndefined();
+  });
+
+  test('without a guard the block write is unconditional, as before', async () => {
+    const { database, rawGuards } = recordingDatabase();
+    const blocked = await updateAutoSendMetadata(database, { id: 'estimate-1', status: 'draft' }, { blockedAt: 'now', blockedReason: 'quote_required' }, 'draft', {});
+    expect(rawGuards).toEqual([]);
+    expect(blocked?.id).toBe('estimate-1');
+  });
+});

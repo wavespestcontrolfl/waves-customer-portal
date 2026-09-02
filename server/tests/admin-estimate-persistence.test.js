@@ -1202,3 +1202,28 @@ describe('admin estimate persistence', () => {
     expect(updates[0].clause).toEqual({ id: 'estimate-draft', status: 'draft' });
   });
 });
+
+describe('createOrReuseAdminEstimate — a linked COMMERCIAL PROPOSAL draft is never reused by the generic save (GH codex P2 r6 on #3750)', () => {
+  test('refuses (409) instead of stripping the server-owned proposal and clobbering its totals', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, updates, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101', estimate_id: 'estimate-proposal' },
+      estimate: {
+        id: 'estimate-proposal',
+        status: 'draft',
+        token: 'existing-token',
+        category: 'COMMERCIAL',
+        customer_phone: '(941) 555-0101',
+        estimate_data: JSON.stringify({ proposal: { enabled: true, buildings: [{ name: 'Tower A', lineItems: [{ description: 'Interior', amount: 240 }] }] } }),
+      },
+    });
+    await expect(createOrReuseAdminEstimate({
+      database,
+      body: { ...baseBody, address: '456 Revised St', monthlyTotal: 145 },
+      technicianId: 'tech-1',
+      now,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/Commercial proposal editor/i) });
+    expect(inserts).toEqual([]);
+    expect(updates.filter((u) => u.table === 'estimates')).toEqual([]);
+  });
+});

@@ -343,7 +343,9 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
     expect(calls.wheres).toEqual([{ estimate_group_id: 'grp-1' }]);
     expect(calls.whereNots).toEqual([{ id: 'est-anchor' }]);
     expect(calls.whereNulls).toEqual(['archived_at', 'price_locked_at']);
-    expect(calls.whereIns).toEqual([['status', ['draft', 'scheduled', 'send_failed']]]);
+    // Published (sent/viewed) siblings are judged too — the group link
+    // renders their price (GH codex P1 r6); accepted/declined stay out.
+    expect(calls.whereIns).toEqual([['status', ['draft', 'scheduled', 'send_failed', 'sent', 'viewed']]]);
     expect(calls.forUpdate).toBe(false);
   });
 
@@ -361,6 +363,15 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
     const nullStamp = { id: 'est-sib-null', status: 'draft', pricing_authority: null, estimate_data: '{}' };
     expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([nullStamp]).database }))
       .toMatchObject({ statusCode: 409, code: 'PRICING_AUTHORITY_NOT_SERVER', sibling: { id: 'est-sib-null' } });
+  });
+
+  test('gate on: a PUBLISHED fallback sibling (sent gate-off) blocks — the group link would deliver its price (GH codex P1 r6)', async () => {
+    const publishedFallback = { id: 'est-sib-sent', status: 'sent', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' };
+    expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([publishedFallback]).database }))
+      .toMatchObject({ statusCode: 409, code: 'CLIENT_FALLBACK_PRICING', sibling: { id: 'est-sib-sent' } });
+    const viewedNull = { id: 'est-sib-viewed', status: 'viewed', pricing_authority: null, estimate_data: '{}' };
+    expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([viewedNull]).database, autoSend: true }))
+      .toMatchObject({ statusCode: 422, code: 'PRICING_AUTHORITY_NOT_SERVER' });
   });
 
   test('gate on: SERVER siblings pass, and an authored-proposal sibling keeps the manual-send exemption', async () => {

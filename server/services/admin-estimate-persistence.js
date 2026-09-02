@@ -2062,6 +2062,15 @@ async function createOrReuseAdminEstimate({
       if (lead.estimate_id) {
         const existingEstimate = await firstForUpdate(trx('estimates').where({ id: lead.estimate_id }));
         if (existingEstimate?.status === 'draft') {
+          // A linked COMMERCIAL PROPOSAL draft is never reused by the generic
+          // save (GH codex P2 r6 on #3750): its proposal is server-owned and
+          // its totals come from the authored line items — the generic
+          // payload would strip the proposal and clobber the totals while
+          // the COMMERCIAL category stayed behind. Same refusal as the
+          // generic revise (estimateReviseBlock).
+          if (require('./estimate-proposal').isCommercialProposalData(existingEstimate.estimate_data)) {
+            throw errorWithStatus('This lead already has a commercial proposal draft — edit it with the Commercial proposal editor instead of saving a new estimate over it.', 409);
+          }
           const nextEstimate = { ...existingEstimate, ...writeFields, expires_at: expiresAt };
           assertLeadCanAttachEstimate({
             lead,
