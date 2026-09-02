@@ -662,8 +662,15 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
       const locked = await trx('customers')
         .where({ id: request.customer_id })
         .forUpdate()
-        .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate');
+        .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'autopay_enabled', 'autopay_paused_until');
       if (!locked || !billingLaneSupported(locked)) return { enrolled: false, reason: 'lane_changed' };
+      // A PAUSE taken since the link went out stands (pre-push Codex P1):
+      // enrollment would report already_enrolled and this completion would
+      // say "set up" while nothing collects. Resuming is the customer's or
+      // the office's explicit action — never this link's side effect.
+      if (locked.autopay_enabled && require('./autopay-eligibility').isPaused(locked)) {
+        return { enrolled: false, reason: 'autopay_paused' };
+      }
       const result = await enrollConsentedMethod({
         customerId: request.customer_id,
         paymentMethodId: saved?.id,
@@ -682,8 +689,8 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
     if (enrollment?.enrolled && deferredEnrollmentEmail) {
       try { deferredEnrollmentEmail(); } catch { /* best-effort */ }
     }
-    if (!enrollment.enrolled && enrollment.reason === 'lane_changed') {
-      logger.info(`[autopay-setup-link] lane moved under the lock for customer ${request.customer_id} — retiring request ${request.id}`);
+    if (!enrollment.enrolled && (enrollment.reason === 'lane_changed' || enrollment.reason === 'autopay_paused')) {
+      logger.info(`[autopay-setup-link] ${enrollment.reason} under the lock for customer ${request.customer_id} — retiring request ${request.id}`);
       await db('appointment_card_requests')
         .where({ id: request.id, status: 'completing', updated_at: claimStamp })
         .update({ status: 'expired', updated_at: new Date() });

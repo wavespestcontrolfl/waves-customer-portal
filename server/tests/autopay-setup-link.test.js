@@ -478,6 +478,12 @@ describe('completion tail (page POST + webhook)', () => {
     expect(lockedRead).toBeTruthy();
     const updates = touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'update').map((c) => c[1]);
     expect(updates[updates.length - 1]).toEqual(expect.objectContaining({ status: 'expired' }));
+    // A pause taken since the link went out closes the link too (never "set up" while nothing collects).
+    mockDbTouches = [];
+    mockEnrollConsentedMethod.mockClear();
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'per_visit', autopay_enabled: true, autopay_paused_until: '2099-01-01' }) };
+    expect((await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).code).toBe('no_longer_needed');
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
     // Lane still supported under the lock → enrollment runs on the trx handle
     // and its deferred confirmation fires after commit.
     mockDbTouches = [];
