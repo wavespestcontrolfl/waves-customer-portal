@@ -143,10 +143,13 @@ async function executeLeadTool(toolName, input) {
           const published = !!(e.sent_at || e.viewed_at) && !e.archived_at;
           const authorityOk = !gatedSendAuthorityPredicateApplies() || await estimateDeliverableUnderGate(db, e);
           const linkable = published && authorityOk && !!e.token;
+          // A row the verdict refuses shows NO price either (uncapped codex P0
+          // r25): the agent quotes what it is given, and an unverified
+          // dollar figure must never reach a customer by any rail.
           return {
             id: e.id,
             status: e.status,
-            total: e.monthly_total || e.total_amount,
+            ...(authorityOk ? { total: e.monthly_total || e.total_amount } : { totalWithheld: 'pricing-authority-not-server' }),
             serviceInterest: e.service_interest,
             sentAt: e.sent_at,
             viewedAt: e.viewed_at,

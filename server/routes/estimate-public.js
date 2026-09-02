@@ -24401,6 +24401,16 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
+    // Engine-authoritative pricing gate (#3750, GH codex P1 r25): this send
+    // re-delivers the estimate link (and a PDF that links back to it), so a
+    // row — or group link — the shared verdict refuses answers the family's
+    // generic 404, before either provider path.
+    {
+      const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
+      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+        return res.status(404).json({ error: 'Estimate not found' });
+      }
+    }
     const serviceKey = String(req.body?.service || '');
     const channel = String(req.body?.channel || '');
     if (!['email', 'sms'].includes(channel)) {

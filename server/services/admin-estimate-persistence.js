@@ -1385,11 +1385,19 @@ async function resolveEstimatePropertyLinkage(database, body) {
 // customer_id when both sides have one; otherwise a matching normalized
 // phone OR email (the builder clones contact info, so a legitimate sibling
 // always matches).
-async function ensureEstimateGroupId(trx, anchorEstimateId, sibling = {}, randomUUID = crypto.randomUUID) {
+async function ensureEstimateGroupId(trx, anchorEstimateId, sibling = {}, randomUUID = crypto.randomUUID, { expectUngrouped = false } = {}) {
   const anchorId = String(anchorEstimateId);
   if (!UUID_RE.test(anchorId)) throw errorWithStatus('groupWithEstimateId must be a UUID', 400);
   const anchor = await firstForUpdate(trx('estimates').where({ id: anchorId }));
   if (!anchor) throw errorWithStatus('Estimate to group with not found', 404);
+  // LOCK ORDER (uncapped codex P1 r26): the caller locks an EXISTING group's
+  // advisory lock before this row lock. An anchor it observed ungrouped that
+  // acquired a group while this FOR UPDATE waited would have its group lock
+  // taken after the row lock — the inverse of the send path — so refuse for
+  // a retry (the retry observes the group and locks it first).
+  if (expectUngrouped && anchor.estimate_group_id) {
+    throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
+  }
   const normPhone = (v) => String(v || '').replace(/\D/g, '').slice(-10);
   const normEmail = (v) => String(v || '').trim().toLowerCase();
   const anchorCustomerId = anchor.customer_id ? String(anchor.customer_id) : null;
@@ -2078,7 +2086,7 @@ async function createOrReuseAdminEstimate({
       if (anchorGroupId) {
         await lockScheduledGroupGuardGroups(trx, joining, { ...writeFields, estimate_group_id: anchorGroupId });
       }
-      writeFields.estimate_group_id = await ensureEstimateGroupId(trx, body.groupWithEstimateId, writeFields);
+      writeFields.estimate_group_id = await ensureEstimateGroupId(trx, body.groupWithEstimateId, writeFields, undefined, { expectUngrouped: !anchorGroupId });
       if (anchorGroupId && String(writeFields.estimate_group_id) !== String(anchorGroupId)) {
         throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
       }

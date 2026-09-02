@@ -231,7 +231,7 @@ describe('extensionDeliverableUnderGate — the siblings an extension would REVI
       const chain = {
         where: (c) => { if (typeof c === 'function') c(chain); return chain; },
         orWhere: (c) => { if (typeof c === 'function') c(chain); return chain; },
-        whereNot: () => chain, whereNull: () => chain, whereRaw: () => chain, whereIn: () => chain, orWhereIn: () => chain, orWhereNotNull: () => chain,
+        whereNot: () => chain, whereNull: () => chain, whereRaw: () => chain, whereIn: () => chain, whereNotIn: () => chain, orWhereIn: () => chain, orWhereNotNull: () => chain,
         select: async () => rows,
       };
       return chain;

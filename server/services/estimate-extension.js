@@ -101,7 +101,12 @@ function revivableSiblingsQuery(database, estimate) {
     .whereNull('archived_at')
     .whereNull('price_locked_at')
     .whereIn('status', ['sent', 'viewed', 'expired', 'send_failed'])
-    .where((b) => b.whereNot('status', 'send_failed').orWhereNotNull('sent_at').orWhereNotNull('viewed_at'));
+    // Only siblings the revive below can actually bring back: expired /
+    // send_failed rows need delivery evidence (sent_at or viewed_at), and a
+    // never-sent expiry (disposition expired_unsent) stays expired by the
+    // revive's own CASE — so it is not judged here either (GH codex P2 r25).
+    .where((b) => b.whereNotIn('status', ['send_failed', 'expired']).orWhereNotNull('sent_at').orWhereNotNull('viewed_at'))
+    .whereRaw("COALESCE(disposition, '') <> 'expired_unsent'");
 }
 
 // The ONE question the public extension-request (generic 404, before the
