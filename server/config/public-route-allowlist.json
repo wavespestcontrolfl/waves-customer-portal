@@ -22,13 +22,13 @@
       "routes": [
         "USE / (inline function#3396049a)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
-        "USE /api/pay/statement (inline function#cf970c43)",
-        "USE /api/public/a2a (inline function#c621253a)",
-        "USE /api/public/careers (inline function#91580da7)",
-        "USE /api/public/lawn-assessment (inline function#8e4982f2)",
-        "USE /api/public/mcp (inline function#6af8a3db)",
+        "USE /api/pay/statement (inline function#1cce2def)",
+        "USE /api/public/a2a (inline function#67cb7a35)",
+        "USE /api/public/careers (inline function#e95e3e0c)",
+        "USE /api/public/lawn-assessment (inline function#ad53c06a)",
+        "USE /api/public/mcp (inline function#860308db)",
         "USE /api/public/pest-forecast (inline function#a972e744)",
-        "USE /api/public/pest-identifier (inline function#14727834)",
+        "USE /api/public/pest-identifier (inline function#92af5fd1)",
         "USE /api/public/secure-card (inline function#8abc12e6)"
       ]
     },
@@ -108,7 +108,7 @@
       "reason": "Public shortlink redirect — code entropy floor + per-route limiter (see public-route-gates.test.js); the limiter's custom over-limit handler serves the same 404 page and is keyed by its body digest",
       "routes": [
         "GET /l/:code",
-        "USE /l (express-rate-limit({ handler#945948f2 }))"
+        "USE /l (express-rate-limit({ handler#650dff47 }))"
       ]
     },
     {
@@ -428,7 +428,7 @@
       "mount": "/api/public/lawn-assessment",
       "reason": "Public AI lawn assessment funnel (rate-limited lead-gen intake per its AGENTS.md contract); the USE entry is the router's 404-when-dark gate (always next() or 404)",
       "routes": [
-        "USE /api/public/lawn-assessment (inline function#a4a09571)",
+        "USE /api/public/lawn-assessment (inline function#08b62dae)",
         "POST /api/public/lawn-assessment/:id/claim",
         "POST /api/public/lawn-assessment/analyze"
       ]
@@ -561,7 +561,7 @@
       "mount": "/api/pay/statement",
       "reason": "Tokenized account-statement payment page from customer comms; the USE entry is the router's 404-when-dark gate (always next() or 404)",
       "routes": [
-        "USE /api/pay/statement (inline function#d7bd2d4a)",
+        "USE /api/pay/statement (inline function#c48acbeb)",
         "GET /api/pay/statement/:token",
         "POST /api/pay/statement/:token/finalize",
         "POST /api/pay/statement/:token/quote",

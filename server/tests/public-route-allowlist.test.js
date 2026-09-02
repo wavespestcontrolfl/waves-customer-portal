@@ -2618,6 +2618,47 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.problems.some((p) => p.includes("'on' on the 'upgrade' event"))).toBe(true);
   });
 
+  test('a DESTRUCTURED or COMPUTED imported predicate binds the definition like the dot form', () => {
+    const mk = (pred, flagsBody) => scanOf({
+      'server/index.js': app([
+        "const flags = require('./flags');",
+        "const { debug } = require('./flags');",
+        `if (${pred}) app.get('/debug', (req, res) => res.json({}));`,
+      ].join('\n')),
+      'server/flags.js': flagsBody,
+    }).publicRoutes.find((r) => r.path === '/debug');
+    expect(mk('debug', 'module.exports = { debug: false };').cond).toBe('debug [with debug=false]');
+    expect(mk('debug', 'module.exports = { debug: true };').cond).toBe('debug [with debug=true]');
+    const computed = scanOf({
+      'server/index.js': app([
+        "const flags = require('./flags');",
+        "if (flags['debug']) app.get('/debug', (req, res) => res.json({}));",
+      ].join('\n')),
+      'server/flags.js': 'module.exports = { debug: false };',
+    }).publicRoutes.find((r) => r.path === '/debug');
+    expect(computed.cond).toBe("flags['debug'] [with flags.debug=false]");
+  });
+
+  test("a module-level VALUE a responder branches on joins its digest; an IMPORTED value stays fail-closed", () => {
+    const local = (v) => scanOf({
+      'server/index.js': app([
+        `const PUBLIC_PATH = '${v}';`,
+        "app.use('/api', (req, res, next) => (req.path === PUBLIC_PATH ? res.json({}) : next()));",
+      ].join('\n')),
+    }).publicRoutes.find((r) => r.path === '/api');
+    expect(local('/safe').extra).not.toBe(local('/leak').extra);
+    // A responder referencing an IMPORTED binding is already rejected as a
+    // possible router delegation — the imported-value case cannot pass silently.
+    const imported = scanOf({
+      'server/index.js': app([
+        "const { PUBLIC_PATH } = require('./paths');",
+        "app.use('/api', (req, res, next) => (req.path === PUBLIC_PATH ? res.json({}) : next()));",
+      ].join('\n')),
+      'server/paths.js': "module.exports = { PUBLIC_PATH: '/safe' };",
+    });
+    expect(imported.problems.some((p) => p.includes('delegating to router PUBLIC_PATH'))).toBe(true);
+  });
+
   test('an UNRESOLVED static root is a problem, never a stable identity', () => {
     const res = scanOf({
       'server/index.js': app([

@@ -1776,6 +1776,28 @@ class ModuleAnalysis {
    * binding resolves to a literal, its value joins the label so flipping
    * `const enabled = false` to `true` breaks the allowlist key.
    */
+  /**
+   * `<label>=<definition>` for an in-repo module's named export: the inline
+   * literal/expression, the named binding's initializer, or a function's
+   * digest. Unresolvable → `<label>=<unresolved>`, which result() turns into
+   * a problem for PUBLIC routes only (a guarded route's predicate is not
+   * allowlist identity).
+   */
+  importedValueFact(label, module, name) {
+    try {
+      const m = this.scanner.peekModule(module);
+      const v = m.exportValue(name);
+      if (v.kind === 'node') return `${label}=${predicateLabel(m.src.slice(v.node.start, v.node.end))}`;
+      if (v.kind === 'ident') {
+        const vb = m.bindings.get(m.canonName(v.name));
+        if (vb && vb.kind === 'function' && vb.node) return `${label}#${m.bodyDigest(vb.node)}`;
+        if (vb && vb.kind === 'string') return `${label}='${vb.value}'`;
+        if (vb && vb.node) return `${label}=${predicateLabel(m.src.slice(vb.node.start, vb.node.end))}`;
+      }
+    } catch { /* fall through */ }
+    return `${label}=<unresolved>`;
+  }
+
   enrichCond(cond) {
     if (!cond) return cond;
     const facts = [];
@@ -1784,31 +1806,27 @@ class ModuleAnalysis {
     // constant in flags.js must break the key exactly like a local literal.
     // Unresolvable definitions fail closed as a scanner problem.
     const members = [...new Set([...cond.matchAll(/([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)/g)].map((m) => `${m[1]}.${m[2]}`))];
+    // `flags['debug']` is the same import as `flags.debug`.
+    for (const m of cond.matchAll(/([A-Za-z_$][\w$]*)\[\s*(?:'([^']+)'|"([^"]+)")\s*\]/g)) {
+      const ref = `${m[1]}.${m[2] || m[3]}`;
+      if (!members.includes(ref)) members.push(ref);
+    }
     for (const ref of members) {
       const [obj, prop] = ref.split('.');
       const ob = this.cleanBinding(this.canonName(obj));
       if (!ob || ob.kind !== 'require' || ob.module === null || !this.scanner.exists(ob.module)) continue;
-      let fact = null;
-      try {
-        const m = this.scanner.peekModule(ob.module);
-        const v = m.exportValue(prop);
-        if (v.kind === 'node') fact = `${ref}=${predicateLabel(m.src.slice(v.node.start, v.node.end))}`;
-        else if (v.kind === 'ident') {
-          const vb = m.bindings.get(m.canonName(v.name));
-          if (vb && vb.kind === 'function' && vb.node) fact = `${ref}#${m.bodyDigest(vb.node)}`;
-          else if (vb && vb.kind === 'string') fact = `${ref}='${vb.value}'`;
-          else if (vb && vb.node) fact = `${ref}=${predicateLabel(m.src.slice(vb.node.start, vb.node.end))}`;
-        }
-      } catch { fact = null; }
-      // Unresolvable → `<unresolved>` in the label; result() turns that into
-      // a problem for PUBLIC routes only (a guarded route's predicate is not
-      // allowlist identity).
-      facts.push(fact || `${ref}=<unresolved>`);
+      facts.push(this.importedValueFact(ref, ob.module, prop));
     }
     const tokens = [...new Set(cond.match(/[A-Za-z_$][\w$]*/g) || [])];
     for (const t of tokens) {
       const b = this.cleanBinding(this.canonName(t));
       if (!b) continue;
+      if (b.kind === 'requireMember' && b.module !== null && this.scanner.exists(b.module)) {
+        // `const { debug } = require('./flags')` — the same binding as
+        // `flags.debug`, resolved through the export map.
+        facts.push(this.importedValueFact(t, b.module, b.name));
+        continue;
+      }
       if (b.kind === 'string') facts.push(`${t}='${b.value}'`);
       else if (b.kind === 'other' && b.node) {
         // ANY resolvable initializer joins the label — a literal, or an
@@ -1871,7 +1889,14 @@ class ModuleAnalysis {
         if (n.type !== 'Identifier') return;
         const b = this.bindings.get(this.canonName(n.name));
         if (b && b.kind === 'function' && b.node) visitFn(b.node);
-        else foldImported(b, null);
+        else if (b && b.kind === 'string') parts.push(`${n.name}='${b.value}'`);
+        else if (b && (b.kind === 'other' || b.kind === 'object') && b.node && b.node.start !== undefined
+          && !seen.has(b.node)) {
+          // A module-level VALUE the responder branches on (`req.path ===
+          // PUBLIC_PATH`) is identity too — its initializer joins the digest.
+          seen.add(b.node);
+          parts.push(`${n.name}=${this.src.slice(b.node.start, b.node.end).replace(/\s+/g, ' ')}`);
+        } else foldImported(b, null);
       }, { topLevel: false, conds: [], src: this.src });
     };
     visitFn(fnNode);
