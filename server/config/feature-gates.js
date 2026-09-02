@@ -135,6 +135,24 @@ const gates = {
   // experience; the select-plan endpoint 404s (unobservable while dark).
   securePlanChoice: process.env.GATE_SECURE_PLAN_CHOICE === 'true',
 
+  // Standalone "set up Auto Pay" link (owner ruling 2026-09-01): an
+  // operator sends an existing customer a tokenized /secure/:token page
+  // with no visit attached (kind='customer' rows in
+  // appointment_card_requests, 30-day expiry) — card, plus bank account
+  // only while GATE_ACCEPT_ACH_CAPTURE is also on (one ACH-capture kill
+  // switch for every tokenized capture, judged at mint AND completion),
+  // instant bank verification only, same save → consent → enroll tail as
+  // every other save surface. Operator-initiated only (Customers page
+  // action: copy link, or text it via the card_request purpose with the
+  // autopay_setup_link template, seeded inactive — and the text ALSO needs
+  // GATE_AUTOPAY_CUSTOMER_SMS, since the message type classifies as an
+  // Auto Pay customer SMS; the action reports autopay_sms_gate_off
+  // otherwise). Gate off: the admin
+  // action reports gate_off and mints nothing; already-minted links keep
+  // working (the gate governs new links). Customer-facing money surface —
+  // fail-closed ==='true' in every environment.
+  autopaySetupLink: process.env.GATE_AUTOPAY_SETUP_LINK === 'true',
+
   // Appointment-card fee rail (owner-approved 2026-08-01): auto-charge the
   // no-show/late-cancel fee the /secure lane DISCLOSES against the card it
   // captured, for visits with frozen fee terms on the appointment_card_

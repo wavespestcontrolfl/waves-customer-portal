@@ -834,12 +834,14 @@ const StripeService = {
         // Financial Connections first (instant verification inside the
         // Payment Element), micro-deposit fallback allowed — 'automatic'
         // is Stripe's default, pinned here so a Stripe default change
-        // can't silently alter how bank accounts verify.
+        // can't silently alter how bank accounts verify. Surfaces with no
+        // pending-verification state (the standalone Auto Pay setup link)
+        // pass opts.verificationMethod 'instant'.
         ...(paymentMethodTypes.includes('us_bank_account') ? {
           payment_method_options: {
             us_bank_account: {
               financial_connections: { permissions: ['payment_method'] },
-              verification_method: 'automatic',
+              verification_method: opts.verificationMethod === 'instant' ? 'instant' : 'automatic',
             },
           },
         } : {}),
@@ -850,13 +852,17 @@ const StripeService = {
           ...(opts.metadata || {}),
           waves_customer_id: customerId,
         },
-      });
+      // Callers with a deterministic surface (the standalone Auto Pay setup
+      // link keys on its request row) pass an idempotency key so concurrent
+      // page loads replay ONE intent instead of minting several.
+      }, opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : undefined);
 
       logger.info(`[stripe] SetupIntent created: ${setupIntent.id} for ${customerId}`);
       return {
         clientSecret: setupIntent.client_secret,
         setupIntentId: setupIntent.id,
         paymentMethodTypes,
+        status: setupIntent.status,
       };
     } catch (err) {
       logger.error(`[stripe] SetupIntent creation failed: ${err.message}`);

@@ -924,7 +924,11 @@ router.post(
           break;
 
         case 'setup_intent.succeeded':
-          await handleSetupIntentSucceeded(event.data.object);
+          // The event's timestamp is the closest thing to the confirmation
+          // moment the backstop can know (SetupIntent.created is the mint).
+          await handleSetupIntentSucceeded(event.data.object, {
+            eventCreatedAt: Number.isFinite(Number(event.created)) && Number(event.created) > 0 ? new Date(Number(event.created) * 1000) : null,
+          });
           break;
 
         case 'setup_intent.setup_failed':
@@ -4550,7 +4554,7 @@ async function handlePaymentMethodDetached(paymentMethod) {
 /**
  * setup_intent.succeeded — Log for auditing
  */
-async function handleSetupIntentSucceeded(setupIntent) {
+async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null } = {}) {
   // One-time card-on-file hold capture (dark until ONE_TIME_CARD_HOLD): record
   // the saved payment method onto the pending hold row so accept can be
   // satisfied even if the client never echoes the setupIntentId back.
@@ -4577,6 +4581,22 @@ async function handleSetupIntentSucceeded(setupIntent) {
     const result = await AppointmentCardRequests.completeSecureCardCaptureFromWebhook(setupIntent);
     if (result?.code === 'completion_failed' || result?.code === 'completion_in_progress') {
       throw new Error(`appointment card capture ${setupIntent.id} ${result.code} — retry`);
+    }
+    return;
+  }
+  // Standalone Auto Pay setup link (kind='customer' rows, GATE_AUTOPAY_SETUP_LINK):
+  // same backstop contract as the visit lane — transient states rethrow so
+  // Stripe retries; permanent states ack and drop.
+  if (setupIntent.metadata?.purpose === 'autopay_setup_link') {
+    const AutopaySetupLink = require('../services/autopay-setup-link');
+    const result = await AutopaySetupLink.completeAutopaySetupCaptureFromWebhook(setupIntent, { eventCreatedAt });
+    // verification_failed is a TRANSIENT lookup failure (Stripe pm read or
+    // the ACH-state read) — this backstop may be the only durable path
+    // when the browser never completes, so it must retry, not ack
+    // (pre-push Codex P1). bank_not_allowed / intent_mismatch /
+    // no_longer_needed are permanent and ack.
+    if (['completion_failed', 'completion_in_progress', 'verification_failed'].includes(result?.code)) {
+      throw new Error(`autopay setup capture ${setupIntent.id} ${result.code} — retry`);
     }
     return;
   }
