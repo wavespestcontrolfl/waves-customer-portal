@@ -2445,6 +2445,43 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(reviewed.problems).toEqual([]);
   });
 
+  test("an EXPRESSION-valued predicate binding's initializer joins the conditional identity", () => {
+    const mk = (init) => scanOf({
+      'server/index.js': app([
+        `const enabled = ${init};`,
+        "if (enabled) app.get('/debug', (req, res) => res.json({}));",
+      ].join('\n')),
+    }).publicRoutes.find((r) => r.path === '/debug');
+    const a = mk("config.nodeEnv !== 'production'");
+    const b = mk("config.nodeEnv === 'production'");
+    expect(a.cond).toBe("enabled [with enabled=config.nodeEnv !== 'production']");
+    expect(a.cond).not.toBe(b.cond);
+  });
+
+  test('a reviewed package factory carrying a custom RESPONDER option (rateLimit({ handler })) is opaque, voiding the guard behind it', () => {
+    const mk = (opts) => new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, passthroughs: [{ name: '*', module: 'express-rate-limit', package: true }] },
+      files: {
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const rateLimit = require('express-rate-limit');",
+        "const { guardA } = require('../middleware/a');",
+        `router.get('/thing', rateLimit({ ${opts} }), guardA, (req, res) => res.json({}));`,
+        'module.exports = router;',
+      ].join('\n'),
+      'server/middleware/a.js': 'function guardA(req, res, next) { next(); }\nmodule.exports = { guardA };',
+      },
+    }).scan();
+    const safe = mk('windowMs: 1000, keyGenerator: (req) => req.ip, skip: () => false');
+    expect(safe.publicRoutes.find((r) => r.path === '/api/x/thing')).toBeUndefined();
+    const custom = mk("windowMs: 1000, handler: (req, res) => res.json({ secret: 1 })");
+    expect(custom.publicRoutes.find((r) => r.path === '/api/x/thing')).toBeDefined();
+    const spread = mk('...shared');
+    expect(spread.publicRoutes.find((r) => r.path === '/api/x/thing')).toBeDefined();
+  });
+
   test('an UNRESOLVED static root is a problem, never a stable identity', () => {
     const res = scanOf({
       'server/index.js': app([

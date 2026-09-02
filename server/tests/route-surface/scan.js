@@ -61,6 +61,23 @@ const crypto = require('crypto');
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const APP_FILE = 'server/index.js';
 const GUARD_REGISTRY_FILE = 'server/config/route-auth-guards.json';
+/**
+ * How many imported-helper hops a responder digest follows. A deliberate
+ * bound, not a gap to close: an inline responder's call graph reaches the
+ * service layer within a few hops (a fail-closed cutoff produced 2,271
+ * problems on the real tree), and an unbounded transitive hash would re-key
+ * allowlist entries on every unrelated service edit, turning the review
+ * signal into noise. The digest exists to catch the responder and its
+ * immediate helpers changing — not to fingerprint the whole service layer.
+ */
+const HELPER_DIGEST_DEPTH = 4;
+/**
+ * Package-factory options that install a custom RESPONDER ahead of any guard
+ * behind the factory (express-rate-limit `handler` serves the over-limit
+ * response). A reviewed package passthrough carrying one of these is opaque
+ * — the response is now repo code the package review never covered.
+ */
+const RESPONDING_FACTORY_OPTIONS = new Set(['handler']);
 // Every HTTP method Express exposes as a router method (router.checkout,
 // router.m-search, ... included) — a route registered under ANY of them is
 // surface.
@@ -1690,6 +1707,26 @@ class ModuleAnalysis {
   }
 
   /**
+   * A reviewed package factory (rateLimit, cors, ...) is a passthrough
+   * because the PACKAGE never serves a response on the normal path. An
+   * option that installs a custom RESPONDER (`rateLimit({ handler })`)
+   * runs before any guard behind it, so the call is no longer the reviewed
+   * package behaviour — returns the offending option name, or null.
+   */
+  respondingFactoryOption(call) {
+    for (const arg of call.arguments || []) {
+      if (!arg || arg.type !== 'ObjectExpression') continue;
+      for (const prop of arg.properties) {
+        if (prop.type === 'SpreadElement') return '...spread';
+        const key = prop.key && (prop.key.type === 'Identifier' ? prop.key.name : prop.key.value);
+        if (prop.computed) return '<computed key>';
+        if (RESPONDING_FACTORY_OPTIONS.has(key)) return key;
+      }
+    }
+    return null;
+  }
+
+  /**
    * A predicate like `if (enabled)` keys on the identifier's NAME; when the
    * binding resolves to a literal, its value joins the label so flipping
    * `const enabled = false` to `true` breaks the allowlist key.
@@ -1702,9 +1739,12 @@ class ModuleAnalysis {
       const b = this.cleanBinding(this.canonName(t));
       if (!b) continue;
       if (b.kind === 'string') facts.push(`${t}='${b.value}'`);
-      else if (b.kind === 'other' && b.node
-        && ['BooleanLiteral', 'NumericLiteral', 'NullLiteral'].includes(b.node.type)) {
-        facts.push(`${t}=${this.src.slice(b.node.start, b.node.end)}`);
+      else if (b.kind === 'other' && b.node) {
+        // ANY resolvable initializer joins the label — a literal, or an
+        // expression such as `config.nodeEnv !== 'production'` whose
+        // operator flip would otherwise reuse the `[conditional: enabled]`
+        // approval unchanged.
+        facts.push(`${t}=${this.src.slice(b.node.start, b.node.end).replace(/\s+/g, ' ')}`);
       }
     }
     return facts.length ? `${cond} [with ${facts.join(', ')}]` : cond;
@@ -1731,7 +1771,7 @@ class ModuleAnalysis {
         if (n.type !== 'Identifier') return;
         const b = this.bindings.get(this.canonName(n.name));
         if (b && b.kind === 'function' && b.node) visitFn(b.node);
-        else if (depth < 4 && b && (b.kind === 'require' || b.kind === 'requireMember')
+        else if (depth < HELPER_DIGEST_DEPTH && b && (b.kind === 'require' || b.kind === 'requireMember')
           && b.module !== null && this.scanner.exists(b.module)) {
           // An IMPORTED helper's body is identity too — fold its digest in
           // (transitively via ITS module; unanalyzable imports poison the
@@ -2031,6 +2071,8 @@ class ModuleAnalysis {
             // A package factory CAN return a router (some packages export
             // router factories) — only registry-reviewed entries count.
             if (registry.lookupPackagePassthrough(b.spec, b.kind === 'requireMember' ? b.name : null)) {
+              const responder = this.respondingFactoryOption(node);
+              if (responder) return [{ type: 'opaque', desc: `${c.name}({ ${responder} }) — package factory with a custom responder option (${b.spec})` }];
               return [{ type: 'passthrough', name: c.name }];
             }
             return [{ type: 'opaque', desc: `${c.name}(...) — unreviewed package factory (${b.spec})` }];
@@ -2043,6 +2085,8 @@ class ModuleAnalysis {
           // express.json(...), bodyParser.raw(...) — node_modules member call.
           const spec = isRequireCall(c.object) ? c.object.arguments[0].value : (this.cleanBinding(c.object.name) || {}).spec;
           if (spec && registry.lookupPackagePassthrough(spec, c.property.name)) {
+            const responder = this.respondingFactoryOption(node);
+            if (responder) return [{ type: 'opaque', desc: `${spec}.${c.property.name}({ ${responder} }) — package factory with a custom responder option` }];
             return [{ type: 'passthrough', name: `${spec}.${c.property.name}` }];
           }
           return [{ type: 'opaque', desc: `${this.src.slice(c.start, c.end)}(...) — unreviewed package factory` }];
