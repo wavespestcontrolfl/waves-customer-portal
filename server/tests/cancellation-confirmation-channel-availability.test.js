@@ -26,12 +26,15 @@ jest.mock('../models/db', () => jest.fn((table) => {
   const conds = [];
   const b = {
     where(c) { Object.entries(c).forEach(([k, v]) => conds.push((r) => r[k] === v)); return b; },
+    whereNotNull() { return b; },
+    whereRaw() { return b; },
     first: async () => (mockTables[table] || []).find((r) => conds.every((c) => c(r))) || null,
   };
   return b;
 }));
 
-const { confirmationChannelAvailability } = require('../services/cancellation-confirmations');
+const { confirmationChannelAvailability, sendCancellationConfirmations } = require('../services/cancellation-confirmations');
+const { sendCancellationReceived: mockSendEmail } = require('../services/account-membership-email');
 
 const customer = { id: 'cust-1', phone: '+19415550100', email: 'pat@example.com' };
 
@@ -74,4 +77,27 @@ test('the earlier gates still stand: landline, active STOP, email prefs off, mal
   expect(await confirmationChannelAvailability({ ...customer, email: 'not-an-address' })).toEqual({ sms: false, email: false });
   // No suppression lookup for an address that never passes syntax.
   expect(mockActiveSuppression).not.toHaveBeenCalled();
+});
+
+test('the SEND honours the portal-wide email opt-out too — never just the preview (codex GH r29 P1)', async () => {
+  mockTables.notification_prefs = [{ customer_id: 'cust-1', email_enabled: false }];
+  mockSendEmail.mockClear();
+  const out = await sendCancellationConfirmations({
+    customer: { ...customer, first_name: 'Pat' }, request: { id: 'req-1', created_at: new Date() },
+    result: { scope: [], remaining: [] }, processed: true, entryPoint: 'admin_cancel_plan', identityTrustLevel: 'admin_operator',
+  });
+  expect(mockSendEmail).not.toHaveBeenCalled();
+  // Definitive recipient state: blocked, not failed — the run closes clean
+  // on the other channel instead of retrying an opt-out forever.
+  expect(out.emailSent).toBe(false);
+  expect(out.emailBlocked).toBe(true);
+  // Prefs on (or absent): the send goes out as before.
+  mockTables.notification_prefs = [];
+  mockSendEmail.mockResolvedValueOnce({ ok: true });
+  const sent = await sendCancellationConfirmations({
+    customer, request: { id: 'req-2', created_at: new Date() },
+    result: { scope: [], remaining: [] }, processed: true, entryPoint: 'admin_cancel_plan', identityTrustLevel: 'admin_operator',
+  });
+  expect(mockSendEmail).toHaveBeenCalledTimes(1);
+  expect(sent.emailSent).toBe(true);
 });

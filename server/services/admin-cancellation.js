@@ -687,6 +687,95 @@ async function adminCoverageBoundaryInForce(customerId) {
   return boundaries.some((r) => new Date(r.created_at).getTime() >= churnedAt - 60 * 60 * 1000);
 }
 
+// The request-scoped history note the processor stamps on every visit this
+// request cancels — the immutable retry marker (never the editable reason).
+const historyNoteFor = (requestId) => `Admin cancellation request ${requestId}`;
+
+// Visit ids a prior attempt of this acceptance already cancelled: a repair
+// retry re-runs the fee rails for them, so the preview and the approved-
+// facts view price them alongside the live pull set. Unreadable = none
+// (the fingerprint then simply excludes them; the processor's own
+// load_prior_cancelled error surfaces a repair-set read failure).
+async function repairVisitFeeKeys(customerId, acceptance) {
+  if (!acceptance) return [];
+  try {
+    const { priorCancelledVisits } = require('./cancellation-processor');
+    const rows = await priorCancelledVisits(customerId, historyNoteFor(acceptance.id));
+    return rows.map((r) => String(r.id));
+  } catch (err) {
+    logger.warn(`[admin-cancellation] repair-visit fee lookup failed for request ${acceptance.id}: ${err.message}`);
+    return [];
+  }
+}
+
+// The instant the FIRST approval judged the fee windows at, persisted on
+// the acceptance — every retry prices the same visits at that instant, so
+// a visit that crossed its cutoff between attempts is never charged on a
+// retry that the original approval showed fee-free.
+function acceptedFeeEvaluationAt(acceptance) {
+  const meta = acceptance ? requestCancelPlanMeta(acceptance) : null;
+  if (!meta || !meta.feeEvaluationAt) return null;
+  const at = new Date(meta.feeEvaluationAt);
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+
+// One-way protective choices a retry makes — waive the fee, silence the
+// customer — ratchet onto the acceptance's durable metadata so a later
+// retry keeps them even if this run's case write fails. Returns the
+// effective metadata. Never loosens: an accepted waiver or opt-out stays.
+async function ratchetAcceptedChoices(requestRow, input, fallbackScope) {
+  const meta = requestCancelPlanMeta(requestRow);
+  const ratchet = {};
+  if (input.waiveLateFee && (!meta || meta.waiveLateFee !== true)) ratchet.waiveLateFee = true;
+  if (input.sendConfirmation === false && (!meta || meta.sendConfirmation !== false)) ratchet.sendConfirmation = false;
+  if (!Object.keys(ratchet).length) return meta;
+  const next = { ...(meta || { scope: fallbackScope }), ...ratchet };
+  try {
+    await db('service_requests').where({ id: requestRow.id }).update({
+      metadata: JSON.stringify({ cancel_plan: next }),
+      updated_at: new Date(),
+    });
+  } catch (metaErr) {
+    logger.warn(`[admin-cancellation] ${Object.keys(ratchet).join('/')} ratchet failed for request ${requestRow.id}: ${metaErr.message}`);
+  }
+  return next;
+}
+
+// A lost-response retry of a run that already RESOLVED its acceptance
+// answers with the recorded case — nothing re-runs. Null when the resolved
+// acceptance left no case to echo.
+async function echoResolvedCase(customerId, resolved) {
+  const priorCase = await db('cancellation_cases')
+    .where({ service_request_id: resolved.id })
+    .orderBy('created_at', 'desc')
+    .first('id', 'status', 'snapshot');
+  if (!priorCase) return null;
+  const snap = typeof priorCase.snapshot === 'string' ? JSON.parse(priorCase.snapshot) : (priorCase.snapshot || {});
+  const outcome = snap.outcome || null;
+  logger.info(`[admin-cancellation] retry after a resolved clean run for ${customerId} — echoing case ${priorCase.id}`);
+  return {
+    requestId: resolved.id,
+    caseId: priorCase.id,
+    duplicate: true,
+    processed: priorCase.status !== 'open',
+    visitsPulled: outcome ? Number(outcome.visitsPulled) || 0 : 0,
+    scope: outcome && Array.isArray(outcome.scope) ? outcome.scope : [],
+    remaining: [],
+    tierBefore: outcome ? outcome.tierBefore ?? null : null,
+    tierAfter: outcome ? outcome.tierAfter ?? null : null,
+    effectiveDate: snap.effectiveOn || etDateString(),
+    keptThrough: snap.effectiveDate === 'end_of_coverage' ? snap.effectiveOn || null : null,
+    lateFeeWaived: outcome ? outcome.lateFeeWaived === true : false,
+    prepayDisposition: snap.prepayDisposition || null,
+    prepayTermOutcome: snap.prepayTermOutcome || null,
+    ...(snap.refund ? { refund: snap.refund } : {}),
+    confirmation: outcome ? outcome.confirmation ?? null : null,
+    confirmationChannels: outcome && Array.isArray(outcome.confirmationChannels) ? outcome.confirmationChannels : [],
+    confirmationRequested: outcome ? outcome.confirmationRequested === true : false,
+    errors: outcome && Array.isArray(outcome.errors) ? outcome.errors : [],
+  };
+}
+
 async function decideTermCancel(term, actorUserId, notes) {
   const { recordDecision } = require('./annual-prepay-renewals');
   const decided = term.renewal_decision === 'cancel'
@@ -755,8 +844,9 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
   // retry, or the dialog's only button stays disabled and the first
   // attempt's failed side effects are stranded. Mirrors the commit gate.
   let repairRetry = false;
+  let acceptance = null;
   try {
-    const acceptance = requestedAcceptance || await findCancelAcceptance(customerId, wholeAccount, scope, 'new');
+    acceptance = requestedAcceptance || await findCancelAcceptance(customerId, wholeAccount, scope, 'new');
     repairRetry = !!acceptance;
     if (acceptance) {
       // The commit inherits the FIRST attempt's accepted choices (sticky
@@ -813,7 +903,16 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
   const refund = term && prepayPlan.prepayDisposition === 'end_now_refund'
     ? await computePrepayRefund({ ...term, customer_id: customerId })
     : null;
-  const visitFees = await previewVisitFees(impact ? impact.pulledVisitKeys : null);
+  // Fee exposure = the live pull set PLUS the visits run 1 already
+  // cancelled under this acceptance (the repair pass re-runs their fee
+  // rails), judged at the FIRST approval's instant when one is recorded —
+  // the commit's approved-facts view prices exactly the same set the same
+  // way, so the fingerprint matches and a retry can never charge a fee the
+  // card showed as absent (codex GH r29 P1).
+  const repairFeeKeys = await repairVisitFeeKeys(customerId, acceptance);
+  const feeNow = acceptedFeeEvaluationAt(acceptance) || new Date();
+  const visitFees = await previewVisitFees(
+    [...new Set([...(impact && Array.isArray(impact.pulledVisitKeys) ? impact.pulledVisitKeys : []), ...repairFeeKeys].map(String))], feeNow);
   // Every open SCOPED acceptance (any scope): the dialog derives its
   // checkboxes from LIVE rows, so a scoped partial run whose family already
   // lost its rows would otherwise be unreachable from the UI — surface the
@@ -997,7 +1096,23 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     // Every OTHER scope refusal (covered prepaid visits, unattributable
     // ledger) stands regardless.
     const retryAcceptance = scopeError === 'scope_not_owned' ? openAcceptance : null;
-    if (!retryAcceptance) throw scopeErrorToHttp(scopeError);
+    if (!retryAcceptance) {
+      // A CLEAN scoped run resolved its acceptance and took the family off
+      // the live rows — a lost-response retry for the same family must
+      // answer with the recorded case, never scope_not_owned for a
+      // cancellation that succeeded (codex GH r29 P2). Keyed on the
+      // caller's canonical requested scope inside the 24h echo window.
+      if (scopeError === 'scope_not_owned' && Array.isArray(input.families) && input.families.length) {
+        try {
+          const resolved = await findCancelAcceptance(customerId, false, [...input.families].sort(), 'resolved');
+          const echo = resolved ? await echoResolvedCase(customerId, resolved) : null;
+          if (echo) return echo;
+        } catch (echoErr) {
+          logger.warn(`[admin-cancellation] resolved scoped-acceptance echo failed for ${customerId}: ${echoErr.message}`);
+        }
+      }
+      throw scopeErrorToHttp(scopeError);
+    }
     logger.info(`[admin-cancellation] scoped repair retry for ${customerId} — open acceptance ${retryAcceptance.id} overrides scope_not_owned`);
   }
   // The accepted family owns no live rows any more: the approved-facts view
@@ -1022,36 +1137,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // cancel has cancellable work and never reaches this branch.
       try {
         const resolved = await findCancelAcceptance(customerId, wholeAccount, scope, 'resolved');
-        const priorCase = resolved ? await db('cancellation_cases')
-          .where({ service_request_id: resolved.id })
-          .orderBy('created_at', 'desc')
-          .first('id', 'status', 'snapshot') : null;
-        if (priorCase) {
-          const snap = typeof priorCase.snapshot === 'string' ? JSON.parse(priorCase.snapshot) : (priorCase.snapshot || {});
-          const outcome = snap.outcome || null;
-          logger.info(`[admin-cancellation] retry after a resolved clean run for ${customerId} — echoing case ${priorCase.id}`);
-          return {
-            requestId: resolved.id,
-            caseId: priorCase.id,
-            duplicate: true,
-            processed: priorCase.status !== 'open',
-            visitsPulled: outcome ? Number(outcome.visitsPulled) || 0 : 0,
-            scope: outcome && Array.isArray(outcome.scope) ? outcome.scope : [],
-            remaining: [],
-            tierBefore: outcome ? outcome.tierBefore ?? null : null,
-            tierAfter: outcome ? outcome.tierAfter ?? null : null,
-            effectiveDate: snap.effectiveOn || etDateString(),
-            keptThrough: snap.effectiveDate === 'end_of_coverage' ? snap.effectiveOn || null : null,
-            lateFeeWaived: outcome ? outcome.lateFeeWaived === true : false,
-            prepayDisposition: snap.prepayDisposition || null,
-            prepayTermOutcome: snap.prepayTermOutcome || null,
-            ...(snap.refund ? { refund: snap.refund } : {}),
-            confirmation: outcome ? outcome.confirmation ?? null : null,
-            confirmationChannels: outcome && Array.isArray(outcome.confirmationChannels) ? outcome.confirmationChannels : [],
-            confirmationRequested: outcome ? outcome.confirmationRequested === true : false,
-            errors: outcome && Array.isArray(outcome.errors) ? outcome.errors : [],
-          };
-        }
+        const echo = resolved ? await echoResolvedCase(customerId, resolved) : null;
+        if (echo) return echo;
       } catch (echoErr) {
         logger.warn(`[admin-cancellation] resolved-acceptance echo failed for ${customerId}: ${echoErr.message}`);
       }
@@ -1076,9 +1163,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // shared by the pre-write preview_changed check and the duplicate latch's
   // refund-task repair, which must never mint a task from numbers nobody
   // approved.
+  // Same fee set and instant as the preview (see repairVisitFeeKeys /
+  // acceptedFeeEvaluationAt): the visits run 1 already cancelled re-enter
+  // the fee rails on a retry, at the FIRST approval's clock.
+  const repairFeeKeys = await repairVisitFeeKeys(customerId, openAcceptance);
+  const acceptedFeeAt = acceptedFeeEvaluationAt(openAcceptance);
   const liveApprovedFacts = async ({ feeNow = new Date() } = {}) => {
     const liveImpact = await buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough, keepVisitIds, keepScoped: scopedRetry });
-    const liveVisitFees = await previewVisitFees(liveImpact ? liveImpact.pulledVisitKeys : null, feeNow);
+    const liveVisitFees = await previewVisitFees(
+      [...new Set([...(liveImpact && Array.isArray(liveImpact.pulledVisitKeys) ? liveImpact.pulledVisitKeys : []), ...repairFeeKeys].map(String))], feeNow);
     return {
       liveImpact,
       fingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact: liveImpact, visitFees: liveVisitFees, scope, wholeAccount }),
@@ -1246,9 +1339,16 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         || (Array.isArray(outcome.errors) && outcome.errors.some(isConfirmErr)))) {
         try {
           const reqRow = prior.service_request_id
-            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at')
+            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at', 'metadata')
             : null;
           if (reqRow && reqRow.status === 'new') {
+            // A repair-time opt-out is honoured HERE too (codex GH r29 P2):
+            // this latch answers before the ratchet on the ordinary path,
+            // so the operator's explicit "do not contact" ratchets onto the
+            // acceptance now and no resend goes out — the outstanding
+            // channel failures are withdrawn, not retried.
+            const silenced = input.sendConfirmation === false;
+            if (silenced) await ratchetAcceptedChoices(reqRow, input, Array.isArray(outcome.scope) ? outcome.scope : []);
             // A freshly repaired refund task answers the stale disposition
             // error the lost task recorded.
             let promotedErrors = (outcome.errors || []).filter((e) => !(refundRepairedNow
@@ -1270,7 +1370,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             }
             let channels = Array.isArray(outcome.confirmationChannels) ? outcome.confirmationChannels : [];
             let errorsNext = promotedErrors;
-            if (outcome.confirmationRequested === true
+            if (silenced) {
+              errorsNext = promotedErrors.filter((e) => !isConfirmErr(e));
+            } else if (outcome.confirmationRequested === true
               && (promotedErrors.some(isConfirmErr) || refundRepairedNow)) {
               // The verdict the copy carries: clean once only channel
               // failures remain — a refund repair promotes the manual
@@ -1303,6 +1405,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             }
             const nextOutcome = {
               ...outcome,
+              ...(silenced ? { confirmationRequested: false } : {}),
               confirmationChannels: channels,
               confirmation: channels.includes('sms') ? 'sms' : (channels.includes('email') ? 'email' : null),
               errors: errorsNext,
@@ -1424,13 +1527,18 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     throw new CancelPlanError(400, 'preview_fingerprint_required',
       'This commit must carry the previewFingerprint from a current preview — re-open the preview and confirm from it.');
   }
+  // A retry of an accepted run keeps the FIRST approval's clock whether or
+  // not it carries a fresh fingerprint: the preview priced the repair set
+  // at that instant, and the processor's rails must judge the same visits
+  // at the same instant (fingerprint-exempt retries included).
+  if (acceptedFeeAt) feeEvaluationAt = acceptedFeeAt;
   if (suppliedFingerprint) {
     // ONE clock for the whole approval: the validation previews judge the
     // fee windows at THIS instant, and the processor's rails reuse it —
     // a visit crossing into its fee window between the preview calls and
     // a later Date.now() could otherwise charge a fee the matching
     // fingerprint approved as absent.
-    feeEvaluationAt = new Date();
+    if (!feeEvaluationAt) feeEvaluationAt = new Date();
     const { liveImpact, fingerprint } = await liveApprovedFacts({ feeNow: feeEvaluationAt });
     if (fingerprint !== suppliedFingerprint) {
       throw new CancelPlanError(409, 'preview_changed',
@@ -1533,19 +1641,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     // run's case write fails — both ratchets are one-way in the protective
     // direction (never charge what was waived, never text who was silenced),
     // the same direction the dialog locks its sticky controls.
-    const ratchet = {};
-    if (input.waiveLateFee && (!requestMeta || requestMeta.waiveLateFee !== true)) ratchet.waiveLateFee = true;
-    if (input.sendConfirmation === false && (!requestMeta || requestMeta.sendConfirmation !== false)) ratchet.sendConfirmation = false;
-    if (Object.keys(ratchet).length) {
-      try {
-        await db('service_requests').where({ id: request.id }).update({
-          metadata: JSON.stringify({ cancel_plan: { ...(requestMeta || { scope: wholeAccount ? [] : [...scope].sort() }), ...ratchet } }),
-          updated_at: new Date(),
-        });
-      } catch (metaErr) {
-        logger.warn(`[admin-cancellation] ${Object.keys(ratchet).join('/')} ratchet failed for request ${request.id}: ${metaErr.message}`);
-      }
-    }
+    await ratchetAcceptedChoices(request, input, wholeAccount ? [] : [...scope].sort());
   } else {
     [request] = await db('service_requests')
       .insert({
@@ -1577,6 +1673,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             effectiveDate: input.effectiveDate,
             prepayDisposition: input.prepayDisposition,
             previewFingerprint: suppliedFingerprint,
+            // The instant the approved fee exposure was judged at — every
+            // retry prices the same visits at this clock.
+            feeEvaluationAt: feeEvaluationAt ? feeEvaluationAt.toISOString() : null,
             ...(approvedPulledKeysForMeta ? { approvedPulledKeys: approvedPulledKeysForMeta } : {}),
           },
         }),

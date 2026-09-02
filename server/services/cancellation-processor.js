@@ -160,6 +160,27 @@ function familyOfServiceRow(row) {
   return families[0] || null;
 }
 
+// The visits a PRIOR attempt of this request already cancelled — identified
+// by the request-scoped job_status_history note the status flip stamps, and
+// re-confirmed STILL cancelled (a visit an admin has since revived is left
+// alone). Shared with the admin preview: those rows re-enter the fee rails
+// on a repair retry, so the approved fee exposure must cover them (codex GH
+// r29 P1).
+async function priorCancelledVisits(customerId, visitNote) {
+  const history = await db('job_status_history')
+    .where({ to_status: 'cancelled', notes: visitNote })
+    .select('job_id');
+  const priorIds = [...new Set(history.map((h) => h.job_id))];
+  if (!priorIds.length) return [];
+  return db('scheduled_services')
+    .whereIn('id', priorIds)
+    // Hard customer scope: job_status_history carries no customer_id, and a
+    // duplicated note string must never let this request re-run side
+    // effects against ANOTHER customer's cancelled visit.
+    .where({ status: 'cancelled', customer_id: customerId })
+    .select('id', 'status');
+}
+
 async function familyScopedServiceIds(customerId, families) {
   const rows = await db('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
@@ -784,19 +805,7 @@ async function processCancellationRequest({
   let repairs = [];
   if (reason) {
     try {
-      const history = await db('job_status_history')
-        .where({ to_status: 'cancelled', notes: visitNote })
-        .select('job_id');
-      const priorIds = [...new Set(history.map((h) => h.job_id))];
-      if (priorIds.length) {
-        repairs = await db('scheduled_services')
-          .whereIn('id', priorIds)
-          // Hard customer scope: job_status_history carries no customer_id,
-          // and a duplicated note string must never let this request re-run
-          // side effects against ANOTHER customer's cancelled visit.
-          .where({ status: 'cancelled', customer_id: customerId })
-          .select('id', 'status');
-      }
+      repairs = await priorCancelledVisits(customerId, visitNote);
     } catch (err) {
       errors.push('load_prior_cancelled');
       logger.error(`[cancellation-processor] failed to load prior-cancelled visits for ${customerId}: ${err.message}`);
@@ -1339,6 +1348,6 @@ async function processCancellationRequest({
 
 module.exports = {
   processCancellationRequest, raiseTermiteRetrievalTask, rentedTermiteStationState,
-  planScopedWindDown, applyScopedWindDown, familyOfServiceRow,
+  planScopedWindDown, applyScopedWindDown, familyOfServiceRow, priorCancelledVisits,
   CHURN_REASON, PORTAL_CANCEL_REASON_PREFIX, CANCELLABLE_STATUSES,
 };

@@ -137,7 +137,25 @@ async function sendCancellationConfirmations({
     logger.error(`Failed to send cancellation confirmation SMS for request ${request.id}: ${smsErr.message}`);
   }
 
-  try {
+  // The portal-wide email opt-out (notification_prefs.email_enabled=false)
+  // is a DEFINITIVE recipient state the shared sender does not read: gate
+  // the send on it here, the same signal confirmationChannelAvailability
+  // shows the operator (codex GH r29 P1). Unreadable prefs fail open — the
+  // send's own skip/blocked handling stays the authority.
+  let emailOptedOut = false;
+  if (customer.email) {
+    try {
+      const db = require('../models/db');
+      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first('email_enabled');
+      emailOptedOut = !!(prefs && prefs.email_enabled === false);
+    } catch (prefsErr) {
+      logger.warn(`Cancellation confirmation: notification prefs read failed for ${customer.id}: ${prefsErr.message}`);
+    }
+  }
+  if (emailOptedOut) {
+    emailBlocked = true;
+    logger.info(`Cancellation confirmation email skipped for customer ${customer.id}: email disabled in notification prefs`);
+  } else try {
     const emailResult = await AccountMembershipEmail.sendCancellationReceived({
       customerId: customer.id,
       request,

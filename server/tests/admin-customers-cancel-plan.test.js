@@ -83,6 +83,12 @@ jest.mock('../services/cancellation-processor', () => ({
   processCancellationRequest: (...args) => mockProcess(...args),
   planScopedWindDown: (...args) => mockPlan(...args),
   raiseTermiteRetrievalTask: (...args) => mockRaiseTermite(...args),
+  // The repair-set lookup the preview shares with the processor: visits a
+  // prior attempt cancelled under this request's history note.
+  priorCancelledVisits: async (customerId, note) => {
+    const ids = new Set((mockState.job_status_history || []).filter((h) => h.to_status === 'cancelled' && h.notes === note).map((h) => h.job_id));
+    return (mockState.scheduled_services || []).filter((r) => ids.has(r.id) && r.status === 'cancelled' && r.customer_id === customerId).map((r) => ({ id: r.id, status: r.status }));
+  },
   familyOfServiceRow: (row) => row.family
     || ({ 'Quarterly Pest Control': 'pest_control', 'Lawn Care Monthly': 'lawn_care' })[row.service_type]
     || null,
@@ -521,6 +527,26 @@ describe('POST /:id/cancel-plan', () => {
     expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(2);
   }));
 
+  test('a lost-response retry of a CLEAN SCOPED run echoes the recorded case — never scope_not_owned for a cancellation that succeeded', () => withServer(async (baseUrl) => {
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: ['pest_control'], cancelledCount: 1, tierBefore: 'Silver', tierAfter: 'Bronze' });
+    const first = await (await postCancel(baseUrl, { families: ['lawn_care'] })).json();
+    expect(first.errors).toEqual([]);
+    expect(mockState.service_requests[0].status).toBe('resolved');
+    // The family is off the live rows now: ownership refuses the scope.
+    mockPlan.mockResolvedValue({ ok: false, error: 'scope_not_owned' });
+    mockProcess.mockClear();
+    const retry = await post(baseUrl, '/cancel-plan', { families: ['lawn_care'], previewFingerprint: 'stale' });
+    expect(retry.status).toBe(200);
+    const echoed = await retry.json();
+    expect(echoed).toEqual(expect.objectContaining({ duplicate: true, requestId: first.requestId, caseId: first.caseId, processed: true, visitsPulled: 1, scope: ['lawn_care'] }));
+    expect(mockProcess).not.toHaveBeenCalled();
+    // A genuinely un-owned family with NO resolved acceptance still refuses.
+    mockState.service_requests = [];
+    const refused = await post(baseUrl, '/cancel-plan', { families: ['lawn_care'], previewFingerprint: 'stale' });
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).code).toBe('scope_not_owned');
+  }));
+
   test('a lost-response retry after a CLEAN run echoes the recorded outcome — never nothing_to_cancel', () => withServer(async (baseUrl) => {
     const first = await (await postCancel(baseUrl)).json();
     expect(first.errors).toEqual([]);
@@ -755,6 +781,40 @@ describe('POST /:id/cancel-plan', () => {
     expect(resolvedCloses).toHaveLength(0);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('outcome_record_failed');
+  }));
+
+  test('a repair-retry preview prices the visits run 1 ALREADY CANCELLED — at the first approval\'s instant — and the commit approves the same exposure', () => withServer(async (baseUrl) => {
+    // Attempt 1: pulled v1 (fee-free at approval), then crashed before its
+    // card-hold fee resolved.
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, cancelledCount: 1, cancelledIds: ['v1'], errors: ['card_hold:v1'] });
+    const first = await (await postCancel(baseUrl)).json();
+    expect(first.errors).toEqual(['card_hold:v1']);
+    const acceptedMeta = JSON.parse(mockState.service_requests[0].metadata).cancel_plan;
+    expect(acceptedMeta.feeEvaluationAt).toEqual(expect.any(String));
+    // v1 is gone from the live rows; only its history note ties it to run 1.
+    mockState.scheduled_services = mockState.scheduled_services.filter((r) => r.id !== 'v1');
+    mockState.job_status_history = [{ job_id: 'v1', to_status: 'cancelled', notes: `Admin cancellation request ${first.requestId}` }];
+    mockState.scheduled_services.push({ id: 'v1', customer_id: 'cust-1', status: 'cancelled', scheduled_date: '2026-09-01' });
+    // By retry time v1 has entered its fee window: the rail would charge if
+    // judged NOW — but the preview prices it at the accepted instant.
+    mockHoldPreview.mockImplementation(async (id, now) => (id === 'v1'
+      ? { held: true, feeApplies: now.toISOString() !== acceptedMeta.feeEvaluationAt, feeAmount: 35 }
+      : { held: false, feeApplies: false }));
+    const preview = await (await post(baseUrl, '/cancel-plan/preview', {})).json();
+    expect(preview.repairRetry).toBe(true);
+    expect(mockHoldPreview).toHaveBeenCalledWith('v1', new Date(acceptedMeta.feeEvaluationAt));
+    expect(preview.visitFees.applies).toBe(false);
+    // The commit approves the same set at the same clock and hands that
+    // clock to the processor's rails.
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 0, repairedCount: 1 });
+    const res = await post(baseUrl, '/cancel-plan', { previewFingerprint: preview.previewFingerprint });
+    expect(res.status).toBe(200);
+    expect(mockProcess).toHaveBeenLastCalledWith(expect.objectContaining({ feeEvaluationAt: new Date(acceptedMeta.feeEvaluationAt) }));
+    // A fingerprint-exempt retry keeps the accepted clock as well.
+    mockState.service_requests[0].status = 'new';
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 0, repairedCount: 1 });
+    await post(baseUrl, '/cancel-plan', {});
+    expect(mockProcess).toHaveBeenLastCalledWith(expect.objectContaining({ feeEvaluationAt: new Date(acceptedMeta.feeEvaluationAt) }));
   }));
 
   test('a repair-retry preview presents the INHERITED accepted choices — the card must not promise a fee and a text the retry will not deliver', () => withServer(async (baseUrl) => {
@@ -1595,6 +1655,39 @@ describe('POST /:id/cancel-plan', () => {
       expect(JSON.parse(mockState.cancellation_cases[0].snapshot).outcome.errors).toEqual([]);
       expect(mockState.service_requests[0].status).toBe('resolved');
       expect(mockProcess).not.toHaveBeenCalled();
+    }));
+
+    test('a decided-term duplicate with FAILED channels honours a repair-time OPT-OUT — no resend, the choice ratchets, the run closes clean', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term',
+          outcome: {
+            visitsPulled: 2, scope: [], confirmationRequested: true, confirmation: null, confirmationChannels: [],
+            errors: ['confirmation_sms_not_sent', 'confirmation_email_not_sent'],
+          },
+        }),
+      }];
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term', sendConfirmation: false })).json();
+      expect(body.duplicate).toBe(true);
+      // Silenced: nothing goes out, the outstanding channel failures are
+      // withdrawn, and the acceptance closes.
+      expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+      expect(body.errors).toEqual([]);
+      expect(body.confirmationRequested).toBe(false);
+      expect(mockState.service_requests[0].status).toBe('resolved');
+      // The opt-out is durable on the acceptance (ratcheted before the latch
+      // answered), so a later retry from a fresh dialog stays silent too.
+      const ratchet = (mockState.updates || []).find((u) => u.table === 'service_requests' && u.patch.metadata);
+      expect(JSON.parse(ratchet.patch.metadata).cancel_plan.sendConfirmation).toBe(false);
     }));
 
     test('a repair close that lands on zero rows while the acceptance is still new is a surfaced failure — never a clean echo over a reusable request', () => withServer(async (baseUrl) => {
