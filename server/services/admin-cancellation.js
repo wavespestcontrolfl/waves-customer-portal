@@ -1228,37 +1228,37 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         let openTie = false;
         try {
           const priorReq = prior.service_request_id
-            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at', 'updated_at')
+            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at', 'resolved_at')
             : null;
           openTie = !!priorReq && priorReq.status === 'new';
           tied = openTie
             || (!!priorReq && priorReq.status === 'resolved'
               && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000);
-          // An end-of-coverage cancel deliberately leaves paid visits on the
+          // An END-OF-COVERAGE cancel deliberately leaves paid visits on the
           // calendar, so the account keeps cancellable work and the always-
           // visible Customer 360 action could process it AGAIN once the 24h
-          // window passes. While the account has stayed churned since that
-          // acceptance, the recorded case is the completed run; the age
-          // cutoff applies only after a genuine win-back. "Stayed churned"
-          // = churned now with NO churn transition stamped after that run
-          // RESOLVED its acceptance (updated_at — the close lands after the
-          // churn inside the same locked run). The processor stamps
+          // window passes. Only that case earns a longer latch (an end-now
+          // term still needs a fresh run to pull a visit created while its
+          // refund task is pending — #3727 r2). While the account has
+          // stayed churned since that run COMPLETED, the recorded case is
+          // the completed run; the age cutoff applies only after a genuine
+          // win-back. "Stayed churned" = churned now with a FINITE churn
+          // stamp at or before the acceptance's resolved_at — the
+          // IMMUTABLE completion marker the close stamps (updated_at moves
+          // on any staff edit, #3727 r2). The processor stamps
           // pipeline_stage_changed_at only on a fresh churn, so an account
           // already churned when this cancel ran keeps its OLDER stamp
           // (wasChurnedStage) and still counts; a stamp after the
-          // resolution can only be a win-back followed by a NEW churn —
-          // a new cancellation, never echoed. Durable ordering, no elapsed-
-          // time tolerance (deferred P2 from #3666 r32; #3727 r1; pre-push).
-          if (!tied && priorReq && priorReq.status === 'resolved') {
+          // completion can only be a win-back followed by a NEW churn — a
+          // new cancellation, never echoed. No usable stamp or no
+          // completion marker proves nothing: fall through and process.
+          if (!tied && priorReq && priorReq.status === 'resolved'
+            && priorSnap && priorSnap.effectiveDate === 'end_of_coverage') {
             const cust = await db('customers').where({ id: customerId }).first('pipeline_stage', 'pipeline_stage_changed_at');
-            const resolvedAt = new Date(priorReq.updated_at || priorReq.created_at).getTime();
+            const resolvedAt = priorReq.resolved_at ? new Date(priorReq.resolved_at).getTime() : NaN;
             const churnedAt = cust && cust.pipeline_stage_changed_at ? new Date(cust.pipeline_stage_changed_at).getTime() : NaN;
-            // A missing/unusable stamp proves nothing — never extend the
-            // latch on it (a won-back-then-churned account with a null
-            // stamp would otherwise echo the old case forever): fall
-            // through and process (pre-push P1 on #3727).
             tied = !!cust && cust.pipeline_stage === 'churned'
-              && Number.isFinite(churnedAt) && churnedAt <= resolvedAt;
+              && Number.isFinite(resolvedAt) && Number.isFinite(churnedAt) && churnedAt <= resolvedAt;
           }
         } catch (tieErr) {
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
@@ -1453,7 +1453,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             if (!outcome.errors.length && !repairErrors.length) {
               try {
                 const closed = await db('service_requests').where({ id: reqRow.id, status: 'new' })
-                  .update({ status: 'resolved', updated_at: new Date() });
+                  .update({ status: 'resolved', resolved_at: new Date(), updated_at: new Date() });
                 if (closed) await resolveReviewBell(reqRow.id);
                 if (!closed) {
                   // Same affected-row check as the commit path: a zero-row
@@ -1494,7 +1494,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             .where({ id: prior.service_request_id }).first('id', 'status');
           if (openReq && openReq.status === 'new') {
             const closed = await db('service_requests').where({ id: openReq.id, status: 'new' })
-              .update({ status: 'resolved', updated_at: new Date() });
+              .update({ status: 'resolved', resolved_at: new Date(), updated_at: new Date() });
             if (closed) await resolveReviewBell(openReq.id);
             else throw new Error('acceptance close updated zero rows');
           }
@@ -2100,7 +2100,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   if (processed && errors.length === 0) {
     try {
       const closed = await db('service_requests').where({ id: request.id })
-        .update({ status: 'resolved', updated_at: new Date() });
+        .update({ status: 'resolved', resolved_at: new Date(), updated_at: new Date() });
       if (!closed) throw new Error('acceptance close updated zero rows');
       await resolveReviewBell(request.id);
     } catch (closeErr) {

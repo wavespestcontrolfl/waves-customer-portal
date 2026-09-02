@@ -723,8 +723,10 @@ describe('POST /:id/cancel-plan', () => {
       id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
       subject: 'Cancel plan (Admin (user admin-1))', description: '',
       metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' } }),
-      // Resolved a minute after acceptance — the close lands after the churn.
-      created_at: acceptedAt, updated_at: new Date(acceptedAt.getTime() + 60 * 1000),
+      // Completed a minute after acceptance — the close lands after the
+      // churn and stamps the immutable resolved_at (updated_at moves on any
+      // later staff edit and must not count).
+      created_at: acceptedAt, resolved_at: new Date(acceptedAt.getTime() + 60 * 1000), updated_at: new Date(),
     }];
     mockState.cancellation_cases = [{
       id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed',
@@ -765,6 +767,46 @@ describe('POST /:id/cancel-plan', () => {
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
     await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
     expect(mockProcess).toHaveBeenCalledTimes(2);
+    // A completed row with NO resolved_at (closed before the marker existed)
+    // proves nothing either.
+    mockState.service_requests = [mockState.service_requests[0]];
+    mockState.service_requests[0].status = 'resolved';
+    mockState.service_requests[0].resolved_at = null;
+    mockState.customers[0].pipeline_stage_changed_at = new Date(acceptedAt.getTime() - 30 * 24 * 60 * 60 * 1000);
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
+    await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
+    expect(mockProcess).toHaveBeenCalledTimes(3);
+  }));
+
+  test('the durable latch is for END-OF-COVERAGE cases only — an end-now term with a pending refund task still runs a fresh cancel for a new visit', () => withServer(async (baseUrl) => {
+    mockState.annual_prepay_terms = [{
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+      status: 'cancelled', renewal_decision: 'cancel',
+    }];
+    // A visit created while the refund task is pending — cancellable work.
+    mockState.scheduled_services = [{ id: 'late', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-10-01' }];
+    const acceptedAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+    mockState.service_requests = [{
+      id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'now', prepayDisposition: 'end_now_refund' } }),
+      created_at: acceptedAt, resolved_at: new Date(acceptedAt.getTime() + 60 * 1000),
+    }];
+    mockState.cancellation_cases = [{
+      id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed', created_at: acceptedAt,
+      snapshot: JSON.stringify({
+        prepayTermId: 'term-1', effectiveDate: 'now', effectiveOn: '2026-08-28', prepayDisposition: 'end_now_refund',
+        refund: { amount: 360, needsManualCalc: false },
+        outcome: { visitsPulled: 3, scope: [], confirmationRequested: false, confirmation: null, confirmationChannels: [], errors: [] },
+      }),
+    }];
+    mockState.customers[0].pipeline_stage = 'churned';
+    mockState.customers[0].pipeline_stage_changed_at = new Date(acceptedAt.getTime() + 20 * 1000);
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 1 });
+    const body = await (await postCancel(baseUrl, { effectiveDate: 'now', prepayDisposition: 'end_now_refund' })).json();
+    expect(body.duplicate).toBeUndefined();
+    expect(mockProcess).toHaveBeenCalledTimes(1);
   }));
 
   test('a HISTORICAL prepaid case never swallows a NEW cancellation — a re-won-back account processes fresh', () => withServer(async (baseUrl) => {
