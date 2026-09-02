@@ -1899,6 +1899,12 @@ router.post('/recording-status', async (req, res) => {
           },
           { source: 'recording_status_post_quarantine' },
         ).catch((e) => logger.error(`[recording-status] raced post-quarantine delete failed: ${e.message}`));
+        // …and the row's own recording plus every parked one, now — the
+        // first call records the row's current SID as owed but deletes only
+        // the just-arrived one; without this mirror of the quarantinedMatch
+        // path the current PAN-bearing audio waited for the recovery sweep.
+        await require('../services/call-recording-processor').quarantineCardRecording(stampedRaceRow, { source: 'recording_status_post_quarantine' })
+          .catch((e) => logger.error(`[recording-status] raced post-quarantine current recording delete failed: ${e.message}`));
         try {
           const rProcessor = require('../services/call-recording-processor');
           void rProcessor.processRecording(stampedRaceRow.twilio_call_sid)

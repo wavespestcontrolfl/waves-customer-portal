@@ -587,6 +587,23 @@ describe('POST /recording-status', () => {
     expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
   });
 
+  test('a row PAN-stamped between the read and the guarded write (the Studio race) deletes the arriving recording AND the row\'s current one now, not at the next sweep', async () => {
+    tables.call_log.push({
+      id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_2, recording_url: `${URL_2}.mp3`, recording_duration_seconds: 30, processing_status: null,
+      transcription: null, transcription_metadata: null, metadata: null,
+    });
+    let raced = false;
+    tables.__afterFirst = (row) => {
+      if (!raced && row.twilio_call_sid === PARENT) { raced = true; row.transcription_metadata = JSON.stringify({ pan_detected: true }); }
+    };
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1, RecordingDuration: '45' }));
+    expect(tables.call_log[0].recording_sid).toBe(REC_2);
+    expect(processor.quarantineCardRecording).toHaveBeenCalledTimes(2);
+    expect(processor.quarantineCardRecording).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: 'c1', recording_sid: REC_1 }), { source: 'recording_status_post_quarantine' });
+    expect(processor.quarantineCardRecording).toHaveBeenNthCalledWith(2, expect.objectContaining({ id: 'c1', recording_sid: REC_2 }), { source: 'recording_status_post_quarantine' });
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
+  });
+
   test('a PAN-quarantined row never re-attaches audio: the new recording is deleted at Twilio and the masked transcript is processed', async () => {
     tables.call_log.push({
       id: 'c1', twilio_call_sid: PARENT, recording_sid: null, recording_url: null, processing_status: null,
