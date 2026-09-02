@@ -300,6 +300,16 @@ function sendRequiresServerPricingFor(estimate = {}) {
 // closed on NULL, unknown or fallback values (pre-push codex P0s — a
 // negative CLIENT_FALLBACK check let unstamped legacy rows through).
 const SERVER_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
+// The gated MANUAL claims (immediate, scheduled, grouped anchor + siblings)
+// re-assert the whole verdict IN SQL on the row as it is at claim time —
+// engine-verified, OR an authored proposal by provenance (category stamp +
+// enabled flag). Evaluating the exemption in JS on the pre-read row let a
+// proposal disabled between the pre-read and the claim ride the stale
+// exemption straight to the customer (pre-push codex P0).
+const GATED_SEND_AUTHORITY_SQL = "(UPPER(pricing_authority) = 'SERVER' OR (UPPER(COALESCE(category, '')) = 'COMMERCIAL' AND COALESCE((estimate_data->'proposal'->>'enabled')::boolean, false)))";
+function gatedSendAuthorityPredicateApplies() {
+  return require('../config/feature-gates').isEnabled('sendRequiresServerPricing');
+}
 
 // Gate-off telemetry for the rollout count: one warn per delivery attempt
 // that actually reached the funnel WITHOUT the SERVER stamp (CLIENT_FALLBACK,
@@ -986,7 +996,7 @@ router.post('/:id/send', async (req, res, next) => {
           // the pre-read check and this UPDATE must lose the race with a 409
           // here, not report "scheduled" and have the cron burn retries.
           .modify((q) => {
-            if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SERVER_PRICING_AUTHORITY_SQL);
+            if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL);
           })
           .update({
             status: 'scheduled',
@@ -1044,7 +1054,7 @@ router.post('/:id/send', async (req, res, next) => {
         // lose the race — a zero-row claim 409s, and the refreshed retry
         // meets the gate's own message.
         .modify((q) => {
-          if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SERVER_PRICING_AUTHORITY_SQL);
+          if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL);
         })
         .update({ status: 'sending', updated_at: db.fn.now() });
       if (!claimed) {
@@ -1500,7 +1510,7 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
         .whereNotIn('status', ['accepted', 'declined', 'expired'])
         // Same pricing-authority re-assertion as the standalone claim.
         .modify((q) => {
-          if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SERVER_PRICING_AUTHORITY_SQL);
+          if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL);
         })
         .update({ status: 'sending', updated_at: trx.fn.now() });
       if (!anchorClaimed) {
@@ -1569,7 +1579,8 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
         // read the sibling before this lock; a fallback stamp landing in
         // between loses the race here.
         .modify((q) => {
-          if (autoSend || sendRequiresServerPricingFor(sibling)) q.whereRaw(SERVER_PRICING_AUTHORITY_SQL);
+          if (autoSend) q.whereRaw(SERVER_PRICING_AUTHORITY_SQL);
+          else if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL);
         })
         .update({ status: 'sending', updated_at: trx.fn.now() });
       if (won) claimed.push(sibling);
@@ -4395,6 +4406,7 @@ router._internals = {
   isAuthoredProposalRow,
   shadowLogFallbackDelivery,
   SERVER_PRICING_AUTHORITY_SQL,
+  GATED_SEND_AUTHORITY_SQL,
   assertAutoSendPricingAuthority,
   findGroupSiblingBlockingSend,
   notifyPricingFallbackAfterCommit,

@@ -481,7 +481,10 @@ async function updateAutoSendMetadata(database, estimate, patch, status = estima
   if (typeof guard === 'function') query = guard(query) || query;
   const [updated] = await query
     .update({
-      status,
+      // A null status writes NO status: a block must never move a row that a
+      // concurrent send has already carried past the candidate's stale
+      // status (pre-push codex P1).
+      ...(status != null ? { status } : {}),
       estimate_data: database.raw(
         "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{automation}', COALESCE(estimate_data->'automation', '{}'::jsonb)), '{automation,autoSend}', COALESCE(estimate_data->'automation'->'autoSend', '{}'::jsonb) || ?::jsonb)",
         [patchJson],
@@ -531,15 +534,24 @@ async function processLeadEstimateAutoSendBatch({
         results.skipped += 1;
         continue;
       }
+      // The block is metadata only — it never writes status — and it lands
+      // only on the row as the candidate read saw it: same status (a
+      // concurrent gate-off manual send may have moved a fallback row to
+      // 'sending'/'sent'; resetting it to draft would re-deliver — pre-push
+      // codex P1) and, for an authority block, still not SERVER (an engine
+      // re-save since the read must not be stamped already_blocked). A
+      // zero-row result is skipped; the next scan judges the row afresh.
       const authorityBlock = eligibility.reason === 'pricing_authority_not_server';
       const blockedRow = await updateAutoSendMetadata(database, estimate, {
         blockedAt: now.toISOString(),
         blockedReason: eligibility.reason,
         blockedReviewReasons: eligibility.review || [],
-      }, estimate.status, {}, authorityBlock ? (q) => q.whereRaw(AUTO_SEND_BLOCK_STILL_NOT_SERVER_SQL) : null);
-      if (authorityBlock && !blockedRow) {
-        // Re-saved through the engine since the candidate read — not blocked;
-        // the next scan judges the SERVER row afresh.
+      }, null, {}, (q) => {
+        q.where({ status: estimate.status });
+        if (authorityBlock) q.whereRaw(AUTO_SEND_BLOCK_STILL_NOT_SERVER_SQL);
+        return q;
+      });
+      if (!blockedRow) {
         results.skipped += 1;
         continue;
       }
