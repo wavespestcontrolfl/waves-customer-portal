@@ -201,6 +201,14 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
     const hasReads = [...src.matchAll(/OAUTH_PUBLIC_PATHS\s*\.\s*has\s*\(/g)].length;
     expect({ occurrences, accountedFor: 1 + hasReads }).toEqual({ occurrences: 1 + hasReads, accountedFor: 1 + hasReads });
     const runtimePaths = [...m[1].matchAll(/'([^']+)'|"([^"]+)"/g)].map((x) => x[1] || x[2]).sort();
+    // The runtime carve-out must be GET-only too — a guard body that drops
+    // the method test (or admits a second verb) would exempt POST/PUT on the
+    // same path while the registry still says GET.
+    const body = src.match(/function\s+adminAuthenticateExceptOauthCallback\s*\([^)]*\)\s*\{([\s\S]*?)\n\}/);
+    expect(body).not.toBeNull();
+    const runtimeMethods = [...body[1].matchAll(/req\.method\s*===\s*'([A-Z]+)'/g)].map((x) => x[1]);
+    expect(runtimeMethods).toEqual(['GET']);
+    expect(body[1]).toMatch(/req\.method\s*===\s*'GET'\s*&&\s*OAUTH_PUBLIC_PATHS\.has\(req\.path\)/);
     const guard = registry.guards.find((g) => g.name === 'adminAuthenticateExceptOauthCallback');
     expect(guard).toBeDefined();
     const exemptPaths = (guard.exempts || []).map((e) => {
@@ -223,41 +231,6 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
           && m.routes.some((r) => r.startsWith(`${method} `) && r.endsWith(rel)));
         expect({ guard: g.name, exempt: e, allowlisted: hit }).toEqual({ guard: g.name, exempt: e, allowlisted: true });
       }
-    }
-  });
-});
-
-describe('guard exemptions — runtime set equals the registry entry', () => {
-  const registry = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, GUARD_REGISTRY_FILE), 'utf8'));
-
-  // A guard with `exempts` has TWO views of the same decision: the runtime
-  // set that actually skips auth, and the registry list the scanner credits.
-  // A path added to one without the other is a public route the allowlist
-  // test would never see, so the two are compared mechanically here. The
-  // runtime shape is fixed by convention — a `new Set([...literals])` named
-  // <NAME>_PUBLIC_PATHS and a single `req.method === '<VERB>'` test inside
-  // the guard body — and anything else fails closed.
-  test('every exempting guard derives its registry exempts from its runtime set', () => {
-    const exempting = registry.guards.filter((g) => Array.isArray(g.exempts) && g.exempts.length);
-    expect(exempting.map((g) => g.name)).toEqual(['adminAuthenticateExceptOauthCallback']);
-    for (const g of exempting) {
-      const src = fs.readFileSync(path.join(REPO_ROOT, g.module), 'utf8');
-      const setDecl = src.match(/const\s+([A-Z_]+_PUBLIC_PATHS)\s*=\s*new\s+Set\(\[([^\]]*)\]\)/);
-      expect({ guard: g.name, runtimeSetFound: Boolean(setDecl) }).toEqual({ guard: g.name, runtimeSetFound: true });
-      const [, setName, inner] = setDecl;
-      const paths = [...inner.matchAll(/'([^']+)'|"([^"]+)"/g)].map((m) => m[1] || m[2]);
-      const nonLiteral = inner.replace(/'[^']+'|"[^"]+"|[\s,]/g, '');
-      expect({ guard: g.name, nonLiteralEntries: nonLiteral }).toEqual({ guard: g.name, nonLiteralEntries: '' });
-      // The set must never be mutated after construction (aliased or not).
-      expect(src.match(new RegExp(`\\b${setName}\\b`, 'g')).length).toBe(2); // declaration + .has()
-      expect(src).not.toMatch(new RegExp(`${setName}\\.(add|delete|clear)\\b`));
-      const body = src.match(new RegExp(`function\\s+${g.name}\\s*\\([^)]*\\)\\s*\\{([\\s\\S]*?)\\n\\}`));
-      expect({ guard: g.name, bodyFound: Boolean(body) }).toEqual({ guard: g.name, bodyFound: true });
-      const methods = [...body[1].matchAll(/req\.method\s*===\s*'([A-Z]+)'/g)].map((m) => m[1]);
-      expect({ guard: g.name, methods }).toEqual({ guard: g.name, methods: ['GET'] });
-      expect(body[1]).toMatch(new RegExp(`${setName}\\.has\\(req\\.path\\)`));
-      const derived = methods.flatMap((m) => paths.map((pth) => `${m} ${pth}`)).sort();
-      expect({ guard: g.name, exempts: [...g.exempts].sort() }).toEqual({ guard: g.name, exempts: derived });
     }
   });
 });

@@ -1716,6 +1716,11 @@ class ModuleAnalysis {
    * edited helper behind an unchanged identity.
    */
   bodyDigest(fnNode, depth = 0) {
+    // Memoized per (function node, remaining depth): shared imported helpers
+    // are reached from many responders and the transitive walk is pure.
+    if (!this.digestCache) this.digestCache = new Map();
+    const cacheKey = `${fnNode.start}:${fnNode.end}:${depth}`;
+    if (this.digestCache.has(cacheKey)) return this.digestCache.get(cacheKey);
     const seen = new Set();
     const parts = [];
     const visitFn = (fn) => {
@@ -1748,7 +1753,9 @@ class ModuleAnalysis {
       }, { topLevel: false, conds: [], src: this.src });
     };
     visitFn(fnNode);
-    return crypto.createHash('sha256').update(parts.join('\u0000')).digest('hex').slice(0, 8);
+    const digest = crypto.createHash('sha256').update(parts.join('\u0000')).digest('hex').slice(0, 8);
+    this.digestCache.set(cacheKey, digest);
+    return digest;
   }
 
   /**
