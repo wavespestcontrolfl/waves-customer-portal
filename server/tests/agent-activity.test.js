@@ -112,10 +112,14 @@ describe('buildActivity', () => {
         { ...RUN_BASE, id: 'ui', outcome: 'completed_pending_review', trust_build_approved_at: '2026-09-02T12:00:00Z' },
         { ...RUN_BASE, id: 'notes', outcome: 'completed_pending_review', reviewer_notes: 'gate summary seeded at park time' },
         { ...RUN_BASE, id: 'unsent', outcome: 'completed_pending_review' },
+        { ...RUN_BASE, id: 'exec', outcome: 'completed_pending_review' },
+        { ...RUN_BASE, id: 'boom', outcome: 'completed_pending_review' },
       ],
       approvals: [
         { run_id: 'old', status: 'awaiting_reply', token: 'EA-old00001', created_at: '2026-09-02T11:30:00Z', email_sent_at: '2026-09-02T11:30:05Z' },
         { run_id: 'unsent', status: 'awaiting_reply', token: 'EA-unsent01', created_at: '2026-09-02T11:40:00Z', email_sent_at: null, last_error: 'SMTP 421' },
+        { run_id: 'exec', status: 'executing', token: 'EA-exec0001', created_at: '2026-09-02T10:00:00Z', decided_at: '2026-09-02T12:30:00Z' },
+        { run_id: 'boom', status: 'failed', token: 'EA-boom0001', created_at: '2026-09-02T10:00:00Z', decided_at: '2026-09-02T12:40:00Z', last_error: 'publish: astro PR 502' },
         { run_id: 'ok', status: 'approved', token: 'EA-ok000001', created_at: '2026-08-30T09:00:00Z', decided_at: '2026-09-02T09:15:00Z' },
         { run_id: 'no', status: 'rejected', token: 'EA-no000001', created_at: '2026-09-02T09:00:00Z' },
       ],
@@ -129,6 +133,8 @@ describe('buildActivity', () => {
     // reviewer_notes alone is not a decision — the runner seeds it at park time
     expect(by['run:notes'].status).toBe('awaiting_review');
     expect(by['run:unsent']).toMatchObject({ status: 'blocked', detail: 'Approval email not delivered yet (EA-unsent01): SMTP 421' });
+    expect(by['run:exec']).toMatchObject({ status: 'running', detail: 'Applying the emailed decision', startedAt: '2026-09-02T12:30:00.000Z' });
+    expect(by['run:boom']).toMatchObject({ status: 'failed', detail: 'Emailed decision failed: publish: astro PR 502' });
   });
 
   it('the newest approval row per run wins regardless of input order', () => {

@@ -111,7 +111,8 @@ function runStatus(run) {
   return 'completed';
 }
 
-const TERMINAL_APPROVAL = { approved: 'completed', rejected: 'skipped', superseded: 'skipped', failed: 'failed' };
+// executing = the poller claimed the owner's reply and is acting on it.
+const TERMINAL_APPROVAL = { approved: 'completed', rejected: 'skipped', superseded: 'skipped', failed: 'failed', executing: 'running' };
 
 function contentRunItem(run, awaitingReplyByRun, decidedByRun = new Map()) {
   // Titles come from the two projected JSON paths (draft_title /
@@ -160,7 +161,13 @@ function contentRunItem(run, awaitingReplyByRun, decidedByRun = new Map()) {
   if (!awaiting && status === 'awaiting_review') {
     if (decided) {
       decidedStatus = TERMINAL_APPROVAL[decided.status] || null;
-      decidedDetail = decidedStatus ? `${humanize(decided.status)} by email reply` : null;
+      decidedDetail = !decidedStatus
+        ? null
+        : decided.status === 'executing'
+          ? 'Applying the emailed decision'
+          : decided.status === 'failed' && decided.last_error
+            ? `Emailed decision failed: ${decided.last_error}`
+            : `${humanize(decided.status)} by email reply`;
     } else if (run.trust_build_approved_at) {
       decidedStatus = 'completed';
       decidedDetail = 'Approved in review';
@@ -386,9 +393,14 @@ async function loadRows(windowHours) {
     safe('job_health', () =>
       db('job_health')
         .select('job_name', 'last_started_at', 'last_finished_at', 'last_status', 'last_error', 'last_duration_ms', 'consecutive_failures')
-        // A job still marked running (a process that died after
-        // recordJobStart) must stay visible however old its start is.
-        .where((q) => q.where('last_started_at', '>=', since).orWhere('last_status', 'running'))
+        // Exceptions stay visible however old their start: a job still
+        // marked running (a process that died after recordJobStart) or one
+        // whose latest run failed and has not succeeded since.
+        .where((q) =>
+          q.where('last_started_at', '>=', since)
+            .orWhere('last_status', 'running')
+            .orWhere('last_status', 'failed')
+            .orWhere('consecutive_failures', '>', 0))
         .orderBy('last_started_at', 'desc')
         .limit(MAX_ITEMS)),
   ]);
