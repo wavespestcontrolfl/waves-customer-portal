@@ -107,15 +107,17 @@ const INCOMPLETE_FOLLOWUP_GRACE_DAYS = 7;
 // completed_at (codex P2 r2).
 const COMPLETED_MARKER_AT = 'GREATEST(canonical.created_at, COALESCE(ss.completed_at, canonical.created_at), COALESCE(canonical.recap_sms_sent_at, canonical.created_at))';
 
-// The CANONICAL completed record OWES the customer a report / a completion
-// notice: not a backfill, delivery not suppressed, not a project close (the
-// project report lane owns those). Evaluated on the canonical sibling only
+// The CANONICAL record OWES the customer a report / a completion notice:
+// completed (an incomplete canonical is closeout-status's not_required), not
+// a backfill, delivery not suppressed, not a project close (the project
+// report lane owns those). Evaluated on the canonical sibling only
 // (codex P2 r7): closeout-status reads backfill / typedReportDelivery from
 // the record that closed the visit, so an older ordinary sibling beside a
 // canonical backfill or internal_only completion must not re-open the visit.
 // Shared by the token and comms predicates.
 const OWES_CUSTOMER_ARTIFACT = `
-      COALESCE(canonical.structured_notes->>'backfill', 'false') <> 'true'
+      canonical.status = 'completed'
+      AND COALESCE(canonical.structured_notes->>'backfill', 'false') <> 'true'
       AND COALESCE(canonical.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
       AND canonical.completion_source IS DISTINCT FROM 'project_completion'`;
 
@@ -131,18 +133,20 @@ const VISIT_NOT_PROJECT_BACKED = `
                AND (pc.completion_source = 'project_completion'
                     OR EXISTS (SELECT 1 FROM projects pj2 WHERE pj2.service_record_id = pc.id)))`;
 
-// The CANONICAL completed sibling, resolved the way closeout-status.js
-// resolves it: the record pinned by the newest SUCCEEDED completion attempt
-// when that record is still a completed sibling, else the newest completed
-// record (codex P2 r5/r6 + pre-push P1). Reading only that row means neither
-// a stale legacy sibling nor a stale sibling that froze "not owed" can
-// out-vote the record that actually closed the visit. One row, aliased
-// `canonical` by its consumers.
-const CANONICAL_COMPLETED_SIBLING = `
-                 SELECT fr.id, fr.created_at, fr.recap_sms_sent_at, fr.completion_source, fr.structured_notes,
+// The CANONICAL sibling, resolved exactly the way closeout-status.js
+// (loadCloseoutInputs) resolves it: the record pinned by the newest
+// SUCCEEDED completion attempt when that record is still a sibling, else
+// the newest sibling — of ANY status (codex P2 r5/r6 + pre-push P1 ×2). The
+// consumers then require it to be `completed` (OWES_CUSTOMER_ARTIFACT): an
+// incomplete canonical record is closeout-status's `record_marked_incomplete`
+// not_required, so pre-filtering to completed rows would let an older
+// completed sibling out-vote the record that actually closed the visit.
+// One row, aliased `canonical` by its consumers.
+const CANONICAL_SIBLING = `
+                 SELECT fr.id, fr.status, fr.created_at, fr.recap_sms_sent_at, fr.completion_source, fr.structured_notes,
                         fr.structured_notes->'closeoutRequirements' AS snap
                    FROM service_records fr
-                  WHERE fr.scheduled_service_id = ss.id AND fr.status = 'completed'
+                  WHERE fr.scheduled_service_id = ss.id
                   ORDER BY (fr.id = (SELECT a.service_record_id
                                        FROM service_completion_attempts a
                                       WHERE a.service_id = ss.id AND a.status = 'succeeded'
@@ -259,7 +263,7 @@ const PREDICATES = Object.freeze({
          WHERE ss.status = 'completed'
            AND ${VISIT_NOT_PROJECT_BACKED}
            AND EXISTS (
-                 SELECT 1 FROM (${CANONICAL_COMPLETED_SIBLING}) canonical
+                 SELECT 1 FROM (${CANONICAL_SIBLING}) canonical
                   WHERE ${OWES_CUSTOMER_ARTIFACT}
                     AND ${COMPLETED_MARKER_AT} >= '${REPORT_TOKEN_SINCE}'::date
                     AND ${COMPLETED_MARKER_AT} < now() - interval '2 hours'
@@ -314,7 +318,7 @@ const PREDICATES = Object.freeze({
          WHERE ss.status = 'completed'
            AND ${VISIT_NOT_PROJECT_BACKED}
            AND EXISTS (
-                 SELECT 1 FROM (${CANONICAL_COMPLETED_SIBLING}) canonical
+                 SELECT 1 FROM (${CANONICAL_SIBLING}) canonical
                   WHERE ${OWES_CUSTOMER_ARTIFACT}
                     AND ${COMPLETED_MARKER_AT} >= '${COMMS_MARKER_SINCE}'::date
                     AND ${COMPLETED_MARKER_AT} < now() - interval '24 hours'
@@ -383,7 +387,7 @@ module.exports = {
   runPredicate,
   _private: {
     SAMPLE, RECORD_FK_SINCE, TRACKING_STAMP_SINCE, REPORT_TOKEN_SINCE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, COMPLETED_TRANSITION_SINCE, TRACKER_STAMP_GRACE,
-    OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES, CANONICAL_COMPLETED_SIBLING, CANONICAL_NOT_OWED, FROZEN_SNAPSHOT_VALID, CATALOG_NOT_OWED,
+    OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES, CANONICAL_SIBLING, CANONICAL_NOT_OWED, FROZEN_SNAPSHOT_VALID, CATALOG_NOT_OWED,
     COMPLETED_MARKER_AT, INCOMPLETE_FOLLOWUP_GRACE_DAYS, aggregate,
   },
 };

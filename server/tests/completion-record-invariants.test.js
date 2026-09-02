@@ -64,8 +64,12 @@ describe('PREDICATES registry', () => {
     // newest completed) is the ONE row eligibility, grace, and the closeout
     // rule are read from: frozen snapshot first, live catalog when the
     // snapshot is absent or malformed — never "absent = owed".
-    const sibling = _private.CANONICAL_COMPLETED_SIBLING;
-    expect(sibling).toMatch(/FROM service_records fr\s+WHERE fr\.scheduled_service_id = ss\.id AND fr\.status = 'completed'/);
+    const sibling = _private.CANONICAL_SIBLING;
+    // Selected from siblings of ANY status (loadCloseoutInputs' selection);
+    // the consumer then requires the canonical row to be completed.
+    expect(sibling).toMatch(/FROM service_records fr\s+WHERE fr\.scheduled_service_id = ss\.id\s+ORDER BY/);
+    expect(sibling).not.toContain("fr.status = 'completed'");
+    expect(_private.OWES_CUSTOMER_ARTIFACT).toMatch(/^\s*canonical\.status = 'completed'\s+AND/);
     expect(sibling).toMatch(/FROM service_completion_attempts a\s+WHERE a\.service_id = ss\.id AND a\.status = 'succeeded'\s+ORDER BY a\.updated_at DESC\s+LIMIT 1\)\) IS TRUE DESC,\s+fr\.created_at DESC\s+LIMIT 1/);
     const notOwed = _private.CANONICAL_NOT_OWED('requiresServiceReport');
     expect(notOwed).toContain(`WHEN ${_private.FROZEN_SNAPSHOT_VALID}`);
@@ -103,7 +107,7 @@ describe('PREDICATES registry', () => {
     expect(comms).toContain("completionSmsStatus' IN ('sent', 'skipped_recap_sms_already_sent', 'blocked')");
     expect(comms).not.toMatch(/'sending'|'deferred'/);
     // Same canonical-sibling read for the notice: eligibility, grace, rule.
-    expect(comms).toContain(`SELECT 1 FROM (${_private.CANONICAL_COMPLETED_SIBLING}) canonical`);
+    expect(comms).toContain(`SELECT 1 FROM (${_private.CANONICAL_SIBLING}) canonical`);
     expect(comms).toContain(`AND (${_private.CANONICAL_NOT_OWED('requiresCustomerNotice')}) IS NOT TRUE)`);
     expect(comms).not.toMatch(/FROM service_records sr\b/);
     // A delivered video recap (provider-confirmed sent_at) is a completion notice.
