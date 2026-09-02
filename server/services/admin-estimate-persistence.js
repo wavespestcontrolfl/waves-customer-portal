@@ -2066,6 +2066,17 @@ async function createOrReuseAdminEstimate({
     } else if (writeFields.estimate_group_id) {
       await assertGroupAssignmentAllowed(trx, writeFields.estimate_group_id, writeFields);
     }
+    // A NEW property joining a group is judged like a revision moving into
+    // it (uncapped codex P1 r13): the group's advisory lock first — the same
+    // order every other path uses, and before the lead/draft row locks below
+    // — then the scheduled / mid-send verdict for an unverified write. A
+    // fallback-priced property added after the anchor was scheduled would
+    // otherwise be refused by the cron's group preflight and fail the anchor.
+    if (writeFields.estimate_group_id) {
+      const joining = { id: null, estimate_group_id: null };
+      await lockScheduledGroupGuardGroups(trx, joining, writeFields);
+      await assertNoFallbackRevisionInScheduledGroup(trx, joining, writeFields);
+    }
 
     if (linkedLeadId) {
       const lead = await firstForUpdate(trx('leads').where({ id: linkedLeadId }).whereNull('deleted_at'));

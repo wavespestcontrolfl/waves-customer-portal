@@ -1,4 +1,14 @@
 jest.mock('../models/db', () => jest.fn());
+// Mutable pricing-authority send gate (#3750): off by default, flipped by
+// the scheduled-group-on-create tests below.
+const mockGateState = { sendRequiresServerPricing: false };
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return {
+    ...actual,
+    isEnabled: (key) => (key === 'sendRequiresServerPricing' ? mockGateState.sendRequiresServerPricing : actual.isEnabled(key)),
+  };
+});
 // Pass-through mock: every test keeps the real qualifying-services lookup;
 // the lookup-failure test below overrides it once.
 jest.mock('../services/waveguard-existing-services', () => {
@@ -21,7 +31,7 @@ const {
 const { generateEstimate } = require('../services/pricing-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 
-function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = false }) {
+function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = false, scheduledGroupMember = null }) {
   const updates = [];
   const inserts = [];
   let storedEstimate = estimate;
@@ -50,8 +60,14 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
         whereNotIn() {
           return this;
         },
+        whereNot() {
+          return this;
+        },
         select: async () => [],
         first: async () => {
+          // The scheduled-group guard's member lookups (#3750).
+          if (table === 'estimates' && clause.estimate_group_id && clause.status === 'scheduled') return scheduledGroupMember;
+          if (table === 'estimates' && clause.estimate_group_id && clause.status === 'sending') return null;
           if (table === 'leads' && clause.id === lead?.id) return lead;
           if (table === 'estimates' && clause.id === storedEstimate?.id) return storedEstimate;
           if (table === 'customers' && customer && clause.id === customer.id) return customer;
@@ -1262,5 +1278,39 @@ describe('createOrReuseAdminEstimate — a DISABLED authored proposal draft is p
     })).rejects.toMatchObject({ statusCode: 409 });
     expect(inserts).toEqual([]);
     expect(updates.filter((u) => u.table === 'estimates')).toEqual([]);
+  });
+});
+
+describe('createOrReuseAdminEstimate — a NEW property joining a SCHEDULED group is judged like a revision moving into it (uncapped codex P1 r13 on #3750)', () => {
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  const GROUP = '2f5e7a10-6c3b-4d9e-9a11-3b7c5d2e8f01';
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('gate on: a fallback-priced property cannot be created into a group whose anchor is scheduled — nothing inserted', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    const { database, inserts } = makeDatabase({ lead: null, estimate: null, scheduledGroupMember: { id: 'est-anchor' } });
+    await expect(createOrReuseAdminEstimate({
+      database,
+      body: { ...baseBody, estimateGroupId: GROUP },
+      technicianId: 'tech-1',
+      recompute: engineError,
+      now: () => new Date('2026-05-15T12:00:00.000Z'),
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/group it would join is scheduled to send/i) });
+    expect(inserts).toEqual([]);
+  });
+
+  test('controls: no scheduled member, or gate off, keeps the fail-open create', async () => {
+    mockGateState.sendRequiresServerPricing = true;
+    const open = makeDatabase({ lead: { id: 'lead-1', status: 'new', phone: '9415550101' }, estimate: null, scheduledGroupMember: null });
+    await createOrReuseAdminEstimate({
+      database: open.database, body: { ...baseBody, estimateGroupId: GROUP }, technicianId: 'tech-1', recompute: engineError, now: () => new Date('2026-05-15T12:00:00.000Z'),
+    });
+    expect(open.inserts.filter((i) => i.table === 'estimates')).toHaveLength(1);
+    mockGateState.sendRequiresServerPricing = false;
+    const gateOff = makeDatabase({ lead: { id: 'lead-1', status: 'new', phone: '9415550101' }, estimate: null, scheduledGroupMember: { id: 'est-anchor' } });
+    await createOrReuseAdminEstimate({
+      database: gateOff.database, body: { ...baseBody, estimateGroupId: GROUP }, technicianId: 'tech-1', recompute: engineError, now: () => new Date('2026-05-15T12:00:00.000Z'),
+    });
+    expect(gateOff.inserts.filter((i) => i.table === 'estimates')).toHaveLength(1);
   });
 });
