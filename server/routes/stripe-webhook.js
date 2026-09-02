@@ -4580,6 +4580,22 @@ async function handleSetupIntentSucceeded(setupIntent) {
     }
     return;
   }
+  // Standalone Auto Pay setup link (kind='customer' rows, GATE_AUTOPAY_SETUP_LINK):
+  // same backstop contract as the visit lane — transient states rethrow so
+  // Stripe retries; permanent states ack and drop.
+  if (setupIntent.metadata?.purpose === 'autopay_setup_link') {
+    const AutopaySetupLink = require('../services/autopay-setup-link');
+    const result = await AutopaySetupLink.completeAutopaySetupCaptureFromWebhook(setupIntent);
+    // verification_failed is a TRANSIENT lookup failure (Stripe pm read or
+    // the ACH-state read) — this backstop may be the only durable path
+    // when the browser never completes, so it must retry, not ack
+    // (pre-push Codex P1). bank_not_allowed / intent_mismatch /
+    // no_longer_needed are permanent and ack.
+    if (['completion_failed', 'completion_in_progress', 'verification_failed'].includes(result?.code)) {
+      throw new Error(`autopay setup capture ${setupIntent.id} ${result.code} — retry`);
+    }
+    return;
+  }
   // Recurring card-on-file capture (dark until RECURRING_CARD_ON_FILE):
   // durability backstop for the accept path's awaited enrollment. The accept
   // handler normally enrolls inline; this re-runs the same idempotent

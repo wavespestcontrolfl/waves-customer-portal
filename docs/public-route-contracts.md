@@ -797,7 +797,18 @@ Any change to this endpoint, its auth, or its frame handling is
 security-critical).
 `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
 "secure your appointment" card-on-file capture page for the
-appointment-card-request funnel — dark until `APPOINTMENT_CARD_REQUEST`
+appointment-card-request funnel — ALSO serves the standalone "set up
+Auto Pay" link (`appointment_card_requests.kind='customer'`, dark behind
+`GATE_AUTOPAY_SETUP_LINK`, operator-minted only from the Customers page):
+same token/format/header/limiter contract; the GET payload carries
+`kind:'customer'`, no visit/fee/plan fields, `paymentMethodTypes`
+(card_or_bank with INSTANT bank verification only, card-only under an
+unhealthy `customers.ach_status`), and renders `closed` once
+`expires_at` (30 days) passes, the customer becomes payer-billed, or Auto
+Pay is already active (row healed to satisfied); the POST runs the same
+live-verify (purpose `autopay_setup_link` + request id) and the same
+save → consent → enroll tail under the same claim/lease; `select-plan`
+is not applicable to these rows. The visit lane below is unchanged — dark until `APPOINTMENT_CARD_REQUEST`
 AND the `secure_appointment_card` SMS template are both enabled, and
 unreachable until the funnel mints links. Bearer token
 (`appointment_card_requests.token` — 22-char base64url / 128-bit since

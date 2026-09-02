@@ -53,7 +53,13 @@ export function describeCardRequestResult(result) {
   if (!result) return { tone: 'bad', text: 'Send failed — try again' };
   if (result.action === 'sent') return { tone: 'good', text: 'Secure card link texted' };
   if (result.action === 'auto_secured') return { tone: 'good', text: 'Card already on file — Auto Pay enrolled, no text needed' };
+  // Standalone Auto Pay setup link (Customers page): inline delivery hands
+  // the link back instead of texting.
+  if (result.action === 'link_created') return { tone: 'good', text: 'Auto Pay setup link ready — copied to clipboard' };
   const reason = String(result.reason || '');
+  if (reason === 'customer_not_found') return { tone: 'bad', text: 'Customer not found' };
+  if (reason.startsWith('enrollment_refused')) return { tone: 'bad', text: 'Saved card could not be enrolled — check the customer\'s payment methods' };
+  if (reason === 'send_blocked' || reason === 'request_failed') return { tone: 'bad', text: 'Send failed — check Communications' };
   if (reason === 'payer_billed' || reason === 'payer_check_uncertain') {
     return { tone: 'muted', text: 'Skipped — this visit bills to a third-party payer' };
   }
