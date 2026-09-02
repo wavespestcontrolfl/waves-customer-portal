@@ -1681,7 +1681,13 @@ violations at the severity noted.
   same rail after the delivery claim is released
   (`revertLeadServiceForSend`); that staff restore alone admits a
   `send_failed` row (the pre-delivery verdict's abort status), every other
-  CAS predicate unchanged. Members (snapshot flag or priors in any carrier) are
+  CAS predicate unchanged. A FAILED compensation is a durable retry state:
+  `estimate_data.leadServiceRevertPending` + an admin bell; the next send
+  retries the restore first and aborts (409) if it still fails, so an
+  undelivered quote is never resent reshaped. Between the park and the
+  delivery claim the public route may still commit a customer change, so
+  once the claim is stamped the row is re-read and every message composes
+  from that row. Members (snapshot flag or priors in any carrier) are
   never parked. Treat the two gates, the customer-only add branch
   (`actor !== 'customer'` → 400), the fail-closed no-new-row check and the
   member exclusion as security-critical.

@@ -20,19 +20,29 @@ jest.mock('../routes/estimate-public', () => ({
 // The db read returns the CLAIMED row (post send-claim version) first, then
 // the parked row after each commit — so the test can prove the rail is
 // handed the claimed version, never the caller's stale object.
-const mockRows = { queue: [] };
+const mockRows = { queue: [], updates: [] };
 jest.mock('../models/db', () => {
-  const dbh = () => ({ where: () => ({ first: async () => (mockRows.queue.length > 1 ? mockRows.queue.shift() : mockRows.queue[0]) }) });
+  const dbh = () => ({
+    where: () => ({
+      first: async () => (mockRows.queue.length > 1 ? mockRows.queue.shift() : mockRows.queue[0]),
+      update: async (payload) => { mockRows.updates.push(payload); return 1; },
+    }),
+  });
   dbh.fn = { now: () => 'now' };
+  dbh.raw = (sql, bindings) => ({ sql, bindings });
   return dbh;
 });
+const mockNotify = { calls: [] };
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async (...args) => { mockNotify.calls.push(args); return { id: 'n-1' }; }),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockPlan = { active: false, throws: false };
 jest.mock('../services/waveguard-existing-services', () => ({
   isActivePlanCustomer: jest.fn(async () => { if (mockPlan.throws) throw new Error('lookup down'); return mockPlan.active; }),
 }));
 
-const { applyLeadServiceForSend, revertLeadServiceForSend } = require('../routes/admin-estimates');
+const { applyLeadServiceForSend, revertLeadServiceForSend, markLeadServiceRevertPending } = require('../routes/admin-estimates');
 
 const newCustomerRow = (overrides = {}) => ({
   id: 'est-1',
@@ -53,6 +63,8 @@ const parkedRow = { id: 'est-1', status: 'viewed', monthly_total: 40, updated_at
 
 beforeEach(() => {
   mockMixCalls.length = 0;
+  mockRows.updates.length = 0;
+  mockNotify.calls.length = 0;
   mockRows.queue = [claimedRowFor(newCustomerRow()), parkedRow];
   mockPlan.active = false;
   mockPlan.throws = false;
@@ -227,4 +239,38 @@ test('the rail never receives the row object itself: each dry run and commit get
   expect(preview.estimate.estimate_data).not.toBe(claimed.estimate_data);
   expect(commit.estimate.estimate_data).not.toBe(preview.estimate.estimate_data);
   expect(commit.estimate.estimate_data).toEqual(claimed.estimate_data);
+});
+
+describe('durable revert-pending state (pre-push codex P1)', () => {
+  test('a failed compensation writes the marker and pages the office', async () => {
+    await markLeadServiceRevertPending({ id: 'est-1', customer_name: 'Pat', customer_id: 'cust-1' }, 'lawn_care');
+    expect(mockRows.updates).toHaveLength(1);
+    expect(mockRows.updates[0].estimate_data.sql).toContain("'{leadServiceRevertPending}'");
+    expect(JSON.parse(mockRows.updates[0].estimate_data.bindings[0])).toMatchObject({ serviceKey: 'lawn_care' });
+    expect(mockNotify.calls).toHaveLength(1);
+    expect(mockNotify.calls[0][0]).toBe('estimate');
+    expect(mockNotify.calls[0][3]).toMatchObject({ bell: true, metadata: { estimateId: 'est-1', serviceKey: 'lawn_care' } });
+  });
+
+  test('the next send retries the restore first: success clears the marker and the full bundle goes out untouched', async () => {
+    const row = newCustomerRow();
+    const claimed = claimedRowFor(row);
+    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), serviceOptOut: { events: [] }, leadServiceRevertPending: { serviceKey: 'lawn_care', at: 't' } });
+    mockRows.queue = [claimed, claimed];
+    const out = await applyLeadServiceForSend(row);
+    expect(out).toEqual({ estimate: row, parkedKey: null });
+    expect(mockMixCalls.map((c) => [c.body.serviceKey, c.body.included, c.body.dryRun === true])).toEqual([['lawn_care', true, true], ['lawn_care', true, false]]);
+    expect(mockRows.updates).toHaveLength(1);
+    expect(mockRows.updates[0].estimate_data.sql).toContain("- 'leadServiceRevertPending'");
+  });
+
+  test('a retry that still fails aborts the send with a 409, nothing parked', async () => {
+    const row = newCustomerRow();
+    const claimed = claimedRowFor(row);
+    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), leadServiceRevertPending: { serviceKey: 'lawn_care', at: 't' } });
+    mockRows.queue = [claimed, claimed];
+    mockMix.responder = () => ({ status: 409, body: { error: 'estimate_changed_since_preview' } });
+    await expect(applyLeadServiceForSend(row)).rejects.toMatchObject({ statusCode: 409, leadServiceAbort: true });
+    expect(mockRows.updates).toHaveLength(0);
+  });
 });

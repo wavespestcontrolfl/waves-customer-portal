@@ -907,6 +907,22 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
     let estData = {};
     try { estData = typeof current.estimate_data === 'string' ? JSON.parse(current.estimate_data) : (current.estimate_data || {}); }
     catch { return untouched; }
+    // A pending revert from an earlier undelivered send is retried BEFORE
+    // anything else; if it still fails the send aborts (the office was
+    // paged when the marker was written). Success clears the marker and the
+    // restored full bundle goes out (pre-push codex P1).
+    if (estData?.leadServiceRevertPending?.serviceKey) {
+      const key = String(estData.leadServiceRevertPending.serviceKey);
+      const restored = await revertLeadServiceForSend(estimate.id, key);
+      if (!restored) {
+        const abort = new Error('This estimate is waiting on a review: an earlier undelivered send left an add-on offer unrestored. Nothing was sent.');
+        abort.statusCode = 409;
+        abort.leadServiceAbort = true;
+        throw abort;
+      }
+      await clearLeadServiceRevertPending(estimate.id);
+      return untouched;
+    }
     if (estData?.serviceOptOut) return untouched; // already shaped once — never re-park on a resend
     const OptOut = require('../services/estimate-service-opt-out');
     // Member exclusion (security-critical, AGENTS.md): the ONE shared
@@ -972,6 +988,7 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
     }
     return parkedKey ? { estimate: current, parkedKey } : untouched;
   } catch (err) {
+    if (err && err.leadServiceAbort) throw err;
     if (parkedKey) {
       // Post-commit failure: abort the send (the wrapper compensates through
       // leadShapeRef, the route releases its claim on the throw).
@@ -1277,10 +1294,50 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // Reverts on ANY exit without a real handoff — sent:false, a throw, or a
   // sent:true built only from suppression sentinels (r2).
   if (leadShapeRef.parkedKey && !leadShapeRef.delivered) {
-    await revertLeadServiceForSend(estimate?.id, leadShapeRef.parkedKey);
+    const restored = await revertLeadServiceForSend(estimate?.id, leadShapeRef.parkedKey);
+    // A failed compensation is a DURABLE retry state, never a silent
+    // reshape: the marker makes the next send retry the restore first (and
+    // abort if it still fails), and the office is paged (pre-push codex P1).
+    if (!restored) await markLeadServiceRevertPending(estimate, leadShapeRef.parkedKey);
   }
   if (thrown) throw thrown;
   return result;
+}
+
+async function markLeadServiceRevertPending(estimate, serviceKey) {
+  try {
+    await db('estimates')
+      .where({ id: estimate.id })
+      .update({
+        estimate_data: db.raw(
+          "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceRevertPending}', ?::jsonb)",
+          [JSON.stringify({ serviceKey, at: new Date().toISOString() })],
+        ),
+        updated_at: db.fn.now(),
+      });
+  } catch (err) {
+    logger.error(`[admin-estimates] lead-service revert-pending marker failed for estimate ${estimate?.id}: ${err.message}`);
+  }
+  try {
+    const NotificationService = require('../services/notification-service');
+    await NotificationService.notifyAdmin(
+      'estimate',
+      `Estimate needs review: ${estimate.customer_name || 'customer'} — add-on offer not restored`,
+      'A send delivered on no channel and the parked service could not be restored automatically. The next send retries; check the estimate before resending.',
+      { link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id || null, serviceKey }, bell: true },
+    );
+  } catch (err) {
+    logger.error(`[admin-estimates] lead-service revert-pending bell failed for estimate ${estimate?.id}: ${err.message}`);
+  }
+}
+
+async function clearLeadServiceRevertPending(estimateId) {
+  await db('estimates')
+    .where({ id: estimateId })
+    .update({
+      estimate_data: db.raw("COALESCE(estimate_data, '{}'::jsonb) - 'leadServiceRevertPending'"),
+      updated_at: db.fn.now(),
+    });
 }
 
 async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaimToken) {
@@ -1391,6 +1448,19 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       err.statusCode = 409;
       throw err;
     }
+  }
+  // Park-to-claim gap (pre-push codex P1): the public service-mix route can
+  // commit a customer change between the park above and the claim just
+  // stamped (the claim blocks it from here on). Compose every message from
+  // the row as it is NOW, never the parked snapshot.
+  if (leadShape.parkedKey) {
+    const postClaim = await db('estimates').where({ id: estimate.id }).first();
+    if (!postClaim) {
+      const err = new Error('Estimate disappeared before delivery. Nothing was sent.');
+      err.statusCode = 409;
+      throw err;
+    }
+    estimate = { ...postClaim, status: estimate.status };
   }
 
   const now = typeof options.now === 'function' ? options.now : () => new Date();
@@ -3829,3 +3899,4 @@ module.exports = router;
 module.exports.buildEstimateSendSnapshot = buildEstimateSendSnapshot;
 module.exports.applyLeadServiceForSend = applyLeadServiceForSend;
 module.exports.revertLeadServiceForSend = revertLeadServiceForSend;
+module.exports.markLeadServiceRevertPending = markLeadServiceRevertPending;
