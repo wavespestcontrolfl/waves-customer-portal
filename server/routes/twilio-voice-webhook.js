@@ -1523,70 +1523,77 @@ router.post('/recording-status', async (req, res) => {
       let updated = 0;
       let matchedSid = null;
       let attach = null;
-      if (targetRow && !isPanQuarantinedRow(targetRow)) {
+      // Decide against what the row holds, write with that decision fenced
+      // in, and if the fence refused (a competing callback attached first,
+      // or a pass claimed the row after the read) re-read and decide AGAIN
+      // against the row as it is now. Two rounds cover one interleaving;
+      // whatever still cannot be written is parked, so a RecordingSid is
+      // never dropped on the floor — Twilio gets a 200 and will not retry.
+      const park = async (row, reason) => {
+        await parkAdditionalRecording(row, {
+          recording_sid: RecordingSid,
+          recording_url: recordingData.recording_url,
+          recording_duration_seconds: recordingData.recording_duration_seconds,
+          reason,
+        });
+        logger.warn(`[recording-status] recording ${maskSid(RecordingSid)} for ${maskSid(row.twilio_call_sid)} parked for review (${reason}) — recording_url kept`);
+      };
+      for (let round = 0; round < 2 && targetRow && !isPanQuarantinedRow(targetRow); round += 1) {
         attach = decideRecordingAttach(targetRow, { recording_sid: RecordingSid });
-        if (attach.action === 'attach' || attach.action === 'replace') {
-          const write = { ...recordingData };
-          if (attach.action === 'replace') {
-            // Last-wins as before, but the superseded recording is kept: the
-            // dial-leg recording a voicemail replaced is still evidence.
-            write.metadata = db.raw(
-              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{superseded_recordings}',"
-              + " COALESCE(metadata -> 'superseded_recordings', '[]'::jsonb) || ?::jsonb, true)",
-              [JSON.stringify([{ ...attach.superseded, superseded_at: new Date().toISOString(), superseded_by: RecordingSid || null }])],
-            );
-          }
-          updated = await db('call_log')
-            .where({ id: targetRow.id })
-            .where(notQuarantined)
-            // Fence on the recording this decision was made against: a
-            // competing delivery that attached first makes this one no-op
-            // and fall through to a fresh decision on the next retry.
-            .where(function recordingUnchanged() {
-              if (targetRow.recording_sid) this.where('recording_sid', targetRow.recording_sid);
-              else this.whereNull('recording_sid');
-            })
-            // A replace is decided on the status the row had when it was
-            // READ. A pass can claim the row between that read and this
-            // write and start transcribing the old audio, so the write
-            // re-checks that nothing is load-bearing — zero rows means the
-            // decision is stale and the recording is parked below instead.
-            .modify((q) => {
-              if (attach.action === 'replace') {
-                q.whereRaw("processing_status IS DISTINCT FROM 'processing' AND processing_status IS DISTINCT FROM 'processed'");
-              }
-            })
-            .update(write);
-          if (updated > 0) {
-            matchedSid = targetRow.twilio_call_sid;
-          } else if (attach.action === 'replace') {
-            const nowRow = await db('call_log').where({ id: targetRow.id }).first(...ATTACH_COLUMNS);
-            if (nowRow && !isPanQuarantinedRow(nowRow) && RECORDING_LOAD_BEARING_STATUSES.has(String(nowRow.processing_status))) {
-              attach = { action: 'park', reason: `processing_status_${nowRow.processing_status}_raced` };
-              await parkAdditionalRecording(nowRow, {
-                recording_sid: RecordingSid,
-                recording_url: recordingData.recording_url,
-                recording_duration_seconds: recordingData.recording_duration_seconds,
-                reason: attach.reason,
-              });
-              logger.warn(`[recording-status] second recording ${maskSid(RecordingSid)} for ${maskSid(nowRow.twilio_call_sid)} raced a claim — parked for review, recording_url kept`);
-            }
-          }
-        } else if (attach.action === 'duplicate') {
+        if (attach.action === 'duplicate') {
           // Exactly-once for the row: nothing to write. The processing
           // attempt below is still scheduled — it is claim-fenced and skips
           // an already-processed row, and it is what recovers a first
           // delivery whose in-memory timers a deploy wiped.
           matchedSid = targetRow.twilio_call_sid;
           logger.info(`[recording-status] duplicate delivery of ${maskSid(RecordingSid)} for ${maskSid(matchedSid)} — row untouched`);
-        } else if (attach.action === 'park') {
-          await parkAdditionalRecording(targetRow, {
-            recording_sid: RecordingSid,
-            recording_url: recordingData.recording_url,
-            recording_duration_seconds: recordingData.recording_duration_seconds,
-            reason: attach.reason,
-          });
-          logger.warn(`[recording-status] second recording ${maskSid(RecordingSid)} for ${maskSid(targetRow.twilio_call_sid)} arrived while the call is ${targetRow.processing_status} — parked for review, recording_url kept`);
+          break;
+        }
+        if (attach.action === 'park') {
+          await park(targetRow, attach.reason);
+          break;
+        }
+        const write = { ...recordingData };
+        if (attach.action === 'replace') {
+          // Last-wins as before, but the superseded recording is kept: the
+          // dial-leg recording a voicemail replaced is still evidence.
+          write.metadata = db.raw(
+            "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{superseded_recordings}',"
+            + " COALESCE(metadata -> 'superseded_recordings', '[]'::jsonb) || ?::jsonb, true)",
+            [JSON.stringify([{ ...attach.superseded, superseded_at: new Date().toISOString(), superseded_by: RecordingSid || null }])],
+          );
+        }
+        const baseline = targetRow;
+        updated = await db('call_log')
+          .where({ id: baseline.id })
+          .where(notQuarantined)
+          // Fence on the recording this decision was made against.
+          .where(function recordingUnchanged() {
+            if (baseline.recording_sid) this.where('recording_sid', baseline.recording_sid);
+            else this.whereNull('recording_sid');
+          })
+          // A replace is decided on the status the row had when it was
+          // READ; a pass can claim it between that read and this write and
+          // start transcribing the old audio. Re-checked in the write.
+          .modify((q) => {
+            if (attach.action === 'replace') {
+              q.whereRaw("processing_status IS DISTINCT FROM 'processing' AND processing_status IS DISTINCT FROM 'processed'");
+            }
+          })
+          .update(write);
+        if (updated > 0) {
+          matchedSid = baseline.twilio_call_sid;
+          break;
+        }
+        // Stale decision. Re-read and go round once more; on the second
+        // refusal, park rather than lose the recording.
+        const nowRow = await db('call_log').where({ id: baseline.id }).first(...ATTACH_COLUMNS);
+        if (!nowRow) break;
+        targetRow = nowRow;
+        if (isPanQuarantinedRow(nowRow)) break;
+        if (round === 1) {
+          attach = { action: 'park', reason: 'write_contended' };
+          await park(nowRow, attach.reason);
         }
       }
 
@@ -1636,6 +1643,10 @@ router.post('/recording-status', async (req, res) => {
         } catch (e) {
           logger.error(`[recording-status] quarantined-transcript processing setup failed: ${e.message}`);
         }
+      } else if (matchedSid) {
+        // Duplicate delivery: the row already carries this recording. No
+        // Studio-recovery insert, no re-attach — only the idempotent
+        // processing attempt below.
       } else if (attach?.action === 'park') {
         // Handled above: the row keeps the recording its transcript came
         // from and the office decides whether to adopt the new one. No

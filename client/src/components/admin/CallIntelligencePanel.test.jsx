@@ -125,6 +125,23 @@ describe("CallIntelligencePanel", () => {
     expect(calls.find((c) => c.method === "PATCH").body).toEqual({ action: "edit", description: "Send the caller an estimate", due_at: "2026-09-05T19:30:00.000Z" });
   });
 
+  it("renders an association-only match as 'possibly kept', never as kept", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const view = intelligence();
+      view.commitments = [{
+        id: "c9", party: "waves", kind: "send_appointment_confirmation", description: "Send the confirmation", status: "open", source: "ai", human_state: null,
+        confidence: 0.7, due_at: null, last_seen_generation: 2, evidence: [],
+        fulfillment: { kind: "sms_sent", strength: "association", basis: "confirmation_text_to_caller_within_14_days", matched_at: "2026-09-02T14:00:00Z" },
+      }];
+      return { ok: true, status: 200, json: async () => ({ intelligence: view }) };
+    }));
+    render(<CallIntelligencePanel callId={CALL_ID} />);
+    fireEvent.click(screen.getByRole("button", { name: /call intelligence/i }));
+    await waitFor(() => expect(screen.getByText(/Possibly kept: sms sent/)).toBeInTheDocument());
+    expect(screen.queryByText(/^Kept:/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mark done" })).toBeInTheDocument();
+  });
+
   it("colours an overdue open commitment as an alert and a kept one as strong", () => {
     expect(commitmentStatusTone({ status: "open", due_at: "2000-01-01T00:00:00Z" })).toBe("alert");
     expect(commitmentStatusTone({ status: "open", due_at: null })).toBe("neutral");

@@ -303,10 +303,44 @@ describe('POST /recording-status', () => {
     expect(row.recording_url).toBe(`${URL_1}.mp3`);
     expect(row.processing_status).toBe('processing');
     expect(row.metadata.superseded_recordings).toBeUndefined();
-    expect(row.metadata.additional_recordings).toEqual([expect.objectContaining({ recording_sid: REC_2, parked_because: 'processing_status_processing_raced' })]);
+    expect(row.metadata.additional_recordings).toEqual([expect.objectContaining({ recording_sid: REC_2, parked_because: 'processing_status_processing' })]);
     expect(tables.triage_items).toHaveLength(1);
     jest.advanceTimersByTime(15 * 60 * 1000);
     expect(processor.processRecording).not.toHaveBeenCalled();
+  });
+
+  test('a first attach that loses to a competing callback is re-decided, never dropped', async () => {
+    // Callback A (REC_1) reads a recording-less row and decides "attach";
+    // callback B (REC_2) attaches first. A's fenced write refuses; A must
+    // re-read and decide again — here a replace, with REC_2 kept as
+    // superseded — so neither recording is lost.
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: null, recording_url: null, processing_status: null, metadata: null });
+    let raced = false;
+    tables.__afterFirst = (row) => {
+      if (!raced && row.twilio_call_sid === PARENT) {
+        raced = true;
+        row.recording_sid = REC_2;
+        row.recording_url = `${URL_2}.mp3`;
+        row.recording_duration_seconds = 80;
+      }
+    };
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1, RecordingDuration: '45' }));
+    const row = tables.call_log[0];
+    expect(row.recording_sid).toBe(REC_1);
+    expect(row.metadata.superseded_recordings).toEqual([expect.objectContaining({ recording_sid: REC_2, superseded_by: REC_1 })]);
+    jest.advanceTimersByTime(2 * 60 * 1000 + 5);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
+  });
+
+  test('a duplicate delivery WITHOUT ParentCallSid (voicemail on the parent) writes nothing and never takes the Studio-recovery insert path', async () => {
+    const before = {
+      id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 45,
+      processing_status: 'processed', transcription_status: 'completed', transcription: 'Agent: fixture line.', metadata: { source: 'voice_webhook' },
+    };
+    tables.call_log.push({ ...before });
+    await post('/recording-status', recordingCallback({ CallSid: PARENT, ParentCallSid: undefined, RecordingSid: REC_1, RecordingUrl: URL_1 }));
+    expect(tables.call_log).toHaveLength(1);
+    expect(tables.call_log[0]).toEqual(before);
   });
 
   test('parking is idempotent per RecordingSid — a retried callback appends once', async () => {

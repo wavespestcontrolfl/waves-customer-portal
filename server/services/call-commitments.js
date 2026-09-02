@@ -19,11 +19,12 @@
  * duplicating. Human-touched rows (human_state set, or source='human') are
  * never rewritten by the AI upsert; they are re-marked as still detected.
  *
- * Fulfillment: a promise is not fulfilled because the summary says so. It is
- * fulfilled when a later record exists — an estimate sent, a confirmation
- * text logged, an outbound call completed, a visit booked, an inbound photo
- * — matched by customer/phone AFTER the call and recorded with the basis
- * of the match, so nobody mistakes an association for proof.
+ * Fulfillment: a promise is not fulfilled because the summary says so. Only
+ * a later record LINKED to this call (a visit booked from it, the estimate
+ * on the lead it minted, the invoice for that visit) marks it kept. A record
+ * that merely belongs to the same customer or phone inside a bounded window
+ * is stored as a hint with the status left open — the office confirms it —
+ * so nobody mistakes an association for proof.
  *
  * Dark behind GATE_CALL_COMMITMENTS (checked by the processor). Reads
  * happen regardless of the gate so already-recorded rows stay visible.
@@ -498,126 +499,186 @@ function normalizeRow(row) {
 }
 
 // ── Fulfillment ────────────────────────────────────────────────────────────
+// Two strengths of proof, and only one of them changes status:
+//   direct      — the later record is LINKED to this call (a visit whose
+//                 source_call_log_id is this call, an estimate on the lead
+//                 this call minted, an invoice for that visit). Marks the
+//                 commitment fulfilled.
+//   association — the later record merely belongs to the same customer or
+//                 phone, inside ASSOCIATION_WINDOW_DAYS of the call. Stored
+//                 as a HINT on the row (fulfillment.strength = "association")
+//                 with the status left open, so the office confirms it with
+//                 "Mark done" instead of the system inventing history.
+const ASSOCIATION_WINDOW_DAYS = 14;
+
 function contactPhoneOf(call) {
-  return String(call?.direction || '').startsWith('outbound') ? call?.to_phone : call?.from_phone;
+  return String(call?.direction || "").startsWith("outbound") ? call?.to_phone : call?.from_phone;
 }
 
 function phoneDigits(value) {
-  const digits = String(value || '').replace(/\D/g, '');
-  return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+  const digits = String(value || "").replace(/\D/g, "");
+  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
 }
 
 function phoneWhere(builder, column, phone) {
   const key = phoneDigits(phone);
-  if (!key) { builder.whereRaw('false'); return; }
+  if (!key) { builder.whereRaw("false"); return; }
   builder.whereRaw(`regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g') IN (?, ?)`, [key, `1${key}`]);
 }
 
-// Where each kind looks for its proof. Every match is AFTER the call and
-// tied to the call's customer or the caller's phone; the basis names the
-// association so a human can judge it.
+function windowEnd(after) {
+  return new Date(after.getTime() + ASSOCIATION_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+}
+
+function leadIdOf(call) {
+  try {
+    const meta = typeof call?.metadata === "string" ? JSON.parse(call.metadata) : (call?.metadata || {});
+    return meta?.lead_id || null;
+  } catch { return null; }
+}
+
+// Where each kind looks for its proof. Every match is AFTER the call; the
+// strength says whether the record is linked to this call or merely to the
+// same customer/phone inside the window.
 async function resolveFulfillment(conn, commitment, call) {
   const after = call?.created_at ? new Date(call.created_at) : null;
-  if (!after) return null;
+  if (!after || Number.isNaN(after.getTime())) return null;
+  const until = windowEnd(after);
   const phone = contactPhoneOf(call);
   const customerId = call?.customer_id || null;
-  const leadId = (() => {
-    try {
-      const meta = typeof call?.metadata === 'string' ? JSON.parse(call.metadata) : (call?.metadata || {});
-      return meta?.lead_id || null;
-    } catch { return null; }
-  })();
+  const leadId = leadIdOf(call);
 
   switch (commitment.kind) {
-    case 'send_estimate': {
-      if (!customerId && !leadId) return null;
-      const q = conn('estimates').where('sent_at', '>', after).whereNotNull('sent_at').orderBy('sent_at', 'asc');
-      q.where(function scope() {
-        if (customerId) this.orWhere('customer_id', customerId);
-        if (leadId) this.orWhereIn('id', conn('leads').select('estimate_id').where({ id: leadId }).whereNotNull('estimate_id'));
-      });
-      const est = await q.first('id', 'sent_at', 'status');
-      return est ? { kind: 'estimate_sent', record_type: 'estimate', record_id: est.id, matched_at: est.sent_at, basis: customerId ? 'estimate_sent_to_customer_after_call' : 'estimate_sent_for_lead_after_call' } : null;
-    }
-    case 'send_appointment_confirmation': {
-      if (!phone) return null;
-      const sms = await conn('sms_log')
-        .where({ direction: 'outbound', message_type: 'confirmation' })
-        .where('created_at', '>', after)
-        .modify((b) => phoneWhere(b, 'to_phone', phone))
-        .orderBy('created_at', 'asc')
-        .first('id', 'created_at', 'status');
-      return sms ? { kind: 'sms_sent', record_type: 'sms_log', record_id: sms.id, matched_at: sms.created_at, basis: 'confirmation_text_to_caller_after_call' } : null;
-    }
-    case 'callback': {
-      if (!phone) return null;
-      const outbound = await conn('call_log')
-        .where('direction', 'like', 'outbound%')
-        .where('created_at', '>', after)
-        .where('status', 'completed')
-        .where('duration_seconds', '>=', 20)
-        .modify((b) => phoneWhere(b, 'to_phone', phone))
-        .orderBy('created_at', 'asc')
-        .first('id', 'created_at');
-      return outbound ? { kind: 'outbound_call', record_type: 'call_log', record_id: outbound.id, matched_at: outbound.created_at, basis: 'completed_outbound_call_to_caller_after_call' } : null;
-    }
-    case 'schedule_visit':
-    case 'technician_follow_up': {
-      if (!customerId && !call?.id) return null;
-      const visit = await conn('scheduled_services')
+    case "send_estimate": {
+      // Direct: the estimate on the lead this call minted (or that carries
+      // this call's SID). Association: any later estimate sent to the
+      // call's customer inside the window.
+      const leadEstimate = await conn("leads")
         .where(function scope() {
-          this.where('source_call_log_id', call.id);
-          if (customerId) this.orWhere(function sameCustomer() { this.where('customer_id', customerId).where('created_at', '>', after); });
+          if (leadId) this.orWhere("id", leadId);
+          if (call.twilio_call_sid) this.orWhere("twilio_call_sid", call.twilio_call_sid);
         })
-        .whereNotIn('status', ['cancelled', 'canceled'])
-        .orderBy('created_at', 'asc')
-        .first('id', 'created_at', 'scheduled_date', 'status', 'source_call_log_id');
-      return visit ? { kind: 'appointment_booked', record_type: 'scheduled_service', record_id: visit.id, matched_at: visit.created_at, basis: visit.source_call_log_id === call.id ? 'visit_booked_from_this_call' : 'visit_booked_for_customer_after_call' } : null;
-    }
-    case 'send_photos': {
-      if (!phone) return null;
-      const msg = await conn('messages as m')
-        .join('conversations as c', 'c.id', 'm.conversation_id')
-        .where('m.direction', 'inbound')
-        .where('m.created_at', '>', after)
-        .whereRaw("m.media IS NOT NULL AND jsonb_typeof(m.media) = 'array' AND jsonb_array_length(m.media) > 0")
-        .modify((b) => phoneWhere(b, 'c.contact_phone', phone))
-        .orderBy('m.created_at', 'asc')
-        .first('m.id', 'm.created_at')
+        .whereNotNull("estimate_id")
+        .first("estimate_id")
         .catch(() => null);
-      return msg ? { kind: 'inbound_media', record_type: 'message', record_id: msg.id, matched_at: msg.created_at, basis: 'inbound_message_with_media_from_caller_after_call' } : null;
-    }
-    case 'make_payment': {
+      if (leadEstimate?.estimate_id) {
+        const est = await conn("estimates").where({ id: leadEstimate.estimate_id }).whereNotNull("sent_at").first("id", "sent_at", "status");
+        if (est) return { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.sent_at, strength: "direct", basis: "estimate_sent_on_the_lead_this_call_created" };
+      }
       if (!customerId) return null;
-      const inv = await conn('invoices').where({ customer_id: customerId }).whereNotNull('paid_at').where('paid_at', '>', after).orderBy('paid_at', 'asc').first('id', 'paid_at');
-      return inv ? { kind: 'invoice_paid', record_type: 'invoice', record_id: inv.id, matched_at: inv.paid_at, basis: 'customer_invoice_paid_after_call' } : null;
+      const est = await conn("estimates")
+        .where("customer_id", customerId)
+        .whereNotNull("sent_at")
+        .where("sent_at", ">", after)
+        .where("sent_at", "<=", until)
+        .orderBy("sent_at", "asc")
+        .first("id", "sent_at", "status");
+      return est ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.sent_at, strength: "association", basis: `estimate_sent_to_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+    }
+    case "send_appointment_confirmation": {
+      if (!phone) return null;
+      const sms = await conn("sms_log")
+        .where({ direction: "outbound", message_type: "confirmation" })
+        .where("created_at", ">", after)
+        .where("created_at", "<=", until)
+        .modify((b) => phoneWhere(b, "to_phone", phone))
+        .orderBy("created_at", "asc")
+        .first("id", "created_at", "status");
+      return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+    }
+    case "callback": {
+      if (!phone) return null;
+      const outbound = await conn("call_log")
+        .where("direction", "like", "outbound%")
+        .where("created_at", ">", after)
+        .where("created_at", "<=", until)
+        .where("status", "completed")
+        .where("duration_seconds", ">=", 20)
+        .modify((b) => phoneWhere(b, "to_phone", phone))
+        .orderBy("created_at", "asc")
+        .first("id", "created_at");
+      return outbound ? { kind: "outbound_call", record_type: "call_log", record_id: outbound.id, matched_at: outbound.created_at, strength: "association", basis: `completed_outbound_call_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+    }
+    case "schedule_visit":
+    case "technician_follow_up": {
+      const direct = await conn("scheduled_services")
+        .where("source_call_log_id", call.id)
+        .whereNotIn("status", ["cancelled", "canceled"])
+        .orderBy("created_at", "asc")
+        .first("id", "created_at", "scheduled_date", "status");
+      if (direct) return { kind: "appointment_booked", record_type: "scheduled_service", record_id: direct.id, matched_at: direct.created_at, strength: "direct", basis: "visit_booked_from_this_call" };
+      if (!customerId) return null;
+      const visit = await conn("scheduled_services")
+        .where("customer_id", customerId)
+        .where("created_at", ">", after)
+        .where("created_at", "<=", until)
+        .whereNotIn("status", ["cancelled", "canceled"])
+        .orderBy("created_at", "asc")
+        .first("id", "created_at", "scheduled_date", "status");
+      return visit ? { kind: "appointment_booked", record_type: "scheduled_service", record_id: visit.id, matched_at: visit.created_at, strength: "association", basis: `visit_booked_for_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+    }
+    case "send_photos": {
+      if (!phone) return null;
+      const msg = await conn("messages as m")
+        .join("conversations as c", "c.id", "m.conversation_id")
+        .where("m.direction", "inbound")
+        .where("m.created_at", ">", after)
+        .where("m.created_at", "<=", until)
+        .whereRaw("m.media IS NOT NULL AND jsonb_typeof(m.media) = 'array' AND jsonb_array_length(m.media) > 0")
+        .modify((b) => phoneWhere(b, "c.contact_phone", phone))
+        .orderBy("m.created_at", "asc")
+        .first("m.id", "m.created_at")
+        .catch(() => null);
+      return msg ? { kind: "inbound_media", record_type: "message", record_id: msg.id, matched_at: msg.created_at, strength: "association", basis: `inbound_message_with_media_from_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+    }
+    case "make_payment": {
+      const direct = await conn("invoices as i")
+        .join("scheduled_services as ss", "ss.id", "i.scheduled_service_id")
+        .where("ss.source_call_log_id", call.id)
+        .whereNotNull("i.paid_at")
+        .orderBy("i.paid_at", "asc")
+        .first("i.id", "i.paid_at")
+        .catch(() => null);
+      if (direct) return { kind: "invoice_paid", record_type: "invoice", record_id: direct.id, matched_at: direct.paid_at, strength: "direct", basis: "invoice_for_the_visit_booked_from_this_call_paid" };
+      if (!customerId) return null;
+      const inv = await conn("invoices").where({ customer_id: customerId }).whereNotNull("paid_at").where("paid_at", ">", after).where("paid_at", "<=", until).orderBy("paid_at", "asc").first("id", "paid_at");
+      return inv ? { kind: "invoice_paid", record_type: "invoice", record_id: inv.id, matched_at: inv.paid_at, strength: "association", basis: `customer_invoice_paid_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     default:
       return null;
   }
 }
 
-// Mark open AI rows fulfilled when a later record proves it. Human-touched
-// rows are left to the human (a dismissed promise stays dismissed; an
-// edited one keeps its status until the human marks it).
+// Direct proof marks an open AI row fulfilled. Association proof is stored
+// as a hint (status stays open, nothing is invented). Human-touched rows are
+// left to the human either way.
 async function refreshFulfillment(conn, callLogId, call = null) {
-  const row = call || await conn('call_log').where({ id: callLogId }).first('id', 'customer_id', 'from_phone', 'to_phone', 'direction', 'created_at', 'metadata');
-  if (!row) return { checked: 0, fulfilled: 0 };
-  const open = await conn('call_commitments').where({ call_log_id: callLogId, status: 'open' }).whereNull('human_state');
+  const row = call || await conn("call_log").where({ id: callLogId }).first("id", "twilio_call_sid", "customer_id", "from_phone", "to_phone", "direction", "created_at", "metadata");
+  if (!row) return { checked: 0, fulfilled: 0, hinted: 0 };
+  const open = await conn("call_commitments").where({ call_log_id: callLogId, status: "open" }).whereNull("human_state");
   let fulfilled = 0;
+  let hinted = 0;
   for (const c of open) {
     const proof = await resolveFulfillment(conn, c, row).catch((err) => {
       logger.warn(`[call-commitments] fulfillment lookup failed for ${c.id}: ${err.message}`);
       return null;
     });
     if (!proof) continue;
-    const updated = await conn('call_commitments')
-      .where({ id: c.id, status: 'open' })
-      .whereNull('human_state')
-      .update({ status: 'fulfilled', fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
-    fulfilled += updated;
+    if (proof.strength === "direct") {
+      fulfilled += await conn("call_commitments")
+        .where({ id: c.id, status: "open" })
+        .whereNull("human_state")
+        .update({ status: "fulfilled", fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
+    } else {
+      // A hint is written once and refreshed only while it is still a hint.
+      hinted += await conn("call_commitments")
+        .where({ id: c.id, status: "open" })
+        .whereNull("human_state")
+        .whereRaw("(fulfillment IS NULL OR fulfillment ->> 'strength' = 'association')")
+        .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
+    }
   }
-  return { checked: open.length, fulfilled };
+  return { checked: open.length, fulfilled, hinted };
 }
 
 // ── Human corrections ──────────────────────────────────────────────────────
@@ -763,6 +824,7 @@ module.exports = {
   CUSTOMER_KINDS,
   CHANNELS,
   EXTRACTOR_VERSION,
+  ASSOCIATION_WINDOW_DAYS,
   MODEL_TIMEOUT_MS,
   MIN_MODEL_CONFIDENCE,
   MODEL_OUTPUT_SCHEMA,

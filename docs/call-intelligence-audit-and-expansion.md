@@ -156,13 +156,16 @@ basis, matched_at), `human_state` (confirmed|dismissed|edited), `human_note`,
    `last_seen_generation` so the UI can say "not detected on the latest pass"
    instead of deleting it.
 
-**Fulfillment** (`refreshFulfillment`, run on read): an open AI row is marked
-fulfilled only by a later record — an estimate with `sent_at` after the call
-for the customer/lead, a `sms_log` `confirmation` to the caller, a completed
-outbound `call_log` to the caller (≥20 s), a `scheduled_services` row from
-this call or for the customer after it, an inbound message with media from
-the caller, a paid invoice — each stored with its `basis` string. Human
-verdicts are never overridden by fulfillment.
+**Fulfillment** (`refreshFulfillment`, run on read): two strengths of proof.
+*Direct* — a later record linked to this call (a `scheduled_services` row
+with `source_call_log_id` = this call, the estimate on the lead this call
+minted, the invoice for that visit) — marks the open AI row fulfilled.
+*Association* — a record that merely belongs to the same customer or phone
+within 14 days (a `confirmation` text to the caller, a completed outbound
+call ≥20 s, an inbound message with media, a customer estimate/visit/invoice)
+— is stored as a hint (`fulfillment.strength = association`) with the status
+left open; the panel shows "Possibly kept … confirm with Mark done". Each
+match carries its `basis` string. Human verdicts are never overridden.
 
 **Admin API** (`admin-call-recordings.js`): `GET /calls/:id/intelligence`
 (staff), `POST /calls/:id/commitments`, `PATCH /commitments/:id`

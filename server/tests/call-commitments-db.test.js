@@ -123,22 +123,22 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     })).rejects.toThrow(/call_commitments_party_check/);
   });
 
-  test('fulfillment comes from later records, is recorded with its basis, and never touches a human verdict', async () => {
+  test('fulfillment: a DIRECTLY linked record marks a promise kept; a same-customer record is only a hint; nothing touches a human verdict', async () => {
     const call = await db('call_log').where({ id: callId }).first();
-    // A completed outbound call to the caller AFTER this call → callback kept
-    // (the callback row is human-dismissed, so it must stay dismissed).
+    // A completed outbound call to the caller AFTER this call: association
+    // only (the callback row is human-dismissed, so it must stay dismissed).
     const [outbound] = await db('call_log').insert({
       twilio_call_sid: 'CA' + '8'.repeat(30) + 'd2', direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE,
       status: 'completed', duration_seconds: 45, created_at: new Date(Date.now() - 10 * 60 * 1000),
     }).returning('id');
     cleanup.callIds.push(outbound.id);
-    // A confirmation text to the caller after the call → confirmation kept.
+    // A confirmation text to the caller after the call: association only.
     const [sms] = await db('sms_log').insert({
       direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, message_type: 'confirmation', status: 'sent',
       created_at: new Date(Date.now() - 5 * 60 * 1000),
     }).returning('id');
     cleanup.smsIds.push(sms.id);
-    // A visit booked from this call → schedule_visit kept, basis = direct.
+    // A visit booked FROM this call: direct linkage.
     const [visit] = await db('scheduled_services').insert({
       scheduled_date: '2026-09-10', service_type: 'General Pest Control', status: 'pending', source_call_log_id: callId,
     }).returning('id');
@@ -150,20 +150,36 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     ], { generation: 4, procToken: 'tok-' + 'a'.repeat(28) });
 
     const refreshed = await cc.refreshFulfillment(db, callId, call);
-    expect(refreshed.fulfilled).toBe(2);
+    expect(refreshed).toMatchObject({ fulfilled: 1, hinted: 1 });
     const rows = await cc.listForCall(db, callId);
-    const conf = rows.find((r) => r.kind === 'send_appointment_confirmation');
-    expect(conf.status).toBe('fulfilled');
-    expect(conf.fulfillment).toMatchObject({ kind: 'sms_sent', record_type: 'sms_log', record_id: sms.id, basis: 'confirmation_text_to_caller_after_call' });
     const booked = rows.find((r) => r.kind === 'schedule_visit');
-    expect(booked.fulfillment).toMatchObject({ kind: 'appointment_booked', record_id: visit.id, basis: 'visit_booked_from_this_call' });
+    expect(booked.status).toBe('fulfilled');
+    expect(booked.fulfillment).toMatchObject({ kind: 'appointment_booked', record_id: visit.id, strength: 'direct', basis: 'visit_booked_from_this_call' });
+    // The confirmation text is not linked to this call: status stays open,
+    // the match is a hint the office confirms.
+    const conf = rows.find((r) => r.kind === 'send_appointment_confirmation');
+    expect(conf.status).toBe('open');
+    expect(conf.fulfillment).toMatchObject({ kind: 'sms_sent', record_id: sms.id, strength: 'association' });
     // The dismissed callback stays dismissed even though an outbound call exists.
     expect(rows.find((r) => r.kind === 'callback').status).toBe('dismissed');
-    // The caller's photo promise has no inbound media → still open, honestly.
-    expect(rows.find((r) => r.kind === 'send_photos').status).toBe('open');
-    // And the outbound-call proof itself resolves for an open callback.
+    // The caller's photo promise has no inbound media → open, no hint.
+    const photos = rows.find((r) => r.kind === 'send_photos');
+    expect(photos.status).toBe('open');
+    expect(photos.fulfillment).toBeNull();
+    // The outbound-call proof resolves as an association for an open callback.
     const proof = await cc.resolveFulfillment(db, { kind: 'callback' }, call);
-    expect(proof).toMatchObject({ kind: 'outbound_call', record_id: outbound.id });
+    expect(proof).toMatchObject({ kind: 'outbound_call', record_id: outbound.id, strength: 'association' });
+  });
+
+  test('an association outside the window is not a hint at all', async () => {
+    const call = await db('call_log').where({ id: callId }).first();
+    const [late] = await db('sms_log').insert({
+      direction: 'outbound', from_phone: OUR_NUMBER, to_phone: '+15555550178', message_type: 'confirmation', status: 'sent',
+      created_at: new Date(Date.now() + (cc.ASSOCIATION_WINDOW_DAYS + 5) * 24 * 60 * 60 * 1000),
+    }).returning('id');
+    cleanup.smsIds.push(late.id);
+    const proof = await cc.resolveFulfillment(db, { kind: 'send_appointment_confirmation' }, { ...call, from_phone: '+15555550178' });
+    expect(proof).toBeNull();
   });
 
   test('deleting the call cascades its commitments', async () => {

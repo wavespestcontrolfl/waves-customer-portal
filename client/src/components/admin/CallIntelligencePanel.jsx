@@ -364,6 +364,12 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
                         <span className="text-ink-tertiary"> · {humanize(c.fulfillment.basis)}</span>
                       </div>
                     )}
+                    {c.status === "open" && c.fulfillment?.strength === "association" && (
+                      <div className="text-13 md:text-12 text-ink-secondary">
+                        Possibly kept: {humanize(c.fulfillment.kind)}{c.fulfillment.matched_at ? ` on ${fmtWhen(c.fulfillment.matched_at)}` : ""}
+                        <span className="text-ink-tertiary"> · {humanize(c.fulfillment.basis)} — same customer, not linked to this call; confirm with Mark done</span>
+                      </div>
+                    )}
                     {c.human_note && <div className="text-13 md:text-12 text-ink-tertiary">Note: {c.human_note}</div>}
                     {Array.isArray(c.evidence) && c.evidence.length > 0 && (
                       <ul className="space-y-0.5">
