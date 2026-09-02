@@ -82,7 +82,7 @@ describe('PREDICATES registry', () => {
 
   test('duplicates are counted within ONE completion rail; cross-rail siblings are supported history', () => {
     const sql = PREDICATES.duplicate_completed_records_per_visit.sql;
-    expect(sql).toContain("completion_source IN ('detailed_form', 'project_completion')");
+    expect(sql).toContain("completion_source IN ('detailed_form', 'one_tap_completion', 'project_completion')");
     expect(sql).toContain('GROUP BY sr.scheduled_service_id, sr.completion_source');
     // One row per VISIT even when both rails duplicated.
     expect(sql).toMatch(/\) g\s+GROUP BY g\.scheduled_service_id/);
@@ -91,10 +91,13 @@ describe('PREDICATES registry', () => {
   test('incomplete visits stay visible after the grace window until a completed sibling or a live follow-up exists', () => {
     const sql = PREDICATES.aged_incomplete_visit_records.sql;
     expect(_private.INCOMPLETE_FOLLOWUP_GRACE_DAYS).toBe(7);
-    expect(sql).toContain(`- ${_private.INCOMPLETE_FOLLOWUP_GRACE_DAYS}`);
-    expect(sql).toMatch(/EXISTS \(SELECT 1 FROM service_records sr WHERE sr\.scheduled_service_id = ss\.id AND sr\.status = 'incomplete'\)/);
+    // Grace from the incomplete RECORD's write time, not the visit date.
+    expect(sql).toContain(`sr.status = 'incomplete'`);
+    expect(sql).toContain(`sr.created_at < now() - interval '${_private.INCOMPLETE_FOLLOWUP_GRACE_DAYS} days'`);
+    expect(sql).not.toMatch(/scheduled_date <.*INCOMPLETE|scheduled_date < \(now\(\)/);
     expect(sql).toMatch(/NOT EXISTS \(SELECT 1 FROM service_records c WHERE c\.scheduled_service_id = ss\.id AND c\.status = 'completed'\)/);
-    expect(sql).toMatch(/f\.followup_source_service_id = ss\.id[\s\S]*f\.status NOT IN \('cancelled', 'skipped', 'no_show'\)/);
+    // Both follow-up lineage columns clear the visit.
+    expect(sql).toMatch(/\(f\.followup_source_service_id = ss\.id OR f\.parent_service_id = ss\.id\)[\s\S]*f\.status NOT IN \('cancelled', 'skipped', 'no_show'\)/);
   });
 });
 
@@ -103,7 +106,9 @@ describe('legacy cutovers and project-backed visits', () => {
     expect(_private.RECORD_FK_SINCE).toBe('2026-04-27');
     expect(_private.TRACKING_STAMP_SINCE).toBe('2026-04-22');
     expect(PREDICATES.completed_visit_without_record.sql).toContain("ss.scheduled_date >= '2026-04-27'::date");
-    expect(PREDICATES.completed_visit_without_completed_at.sql).toContain("ss.scheduled_date >= '2026-04-22'::date");
+    // Keyed on the RECORD's write time so a modern backfill of an old visit is still checked.
+    expect(PREDICATES.completed_visit_without_completed_at.sql).toContain("sr.created_at >= '2026-04-22'::date");
+    expect(PREDICATES.completed_visit_without_completed_at.sql).not.toContain("ss.scheduled_date >= '2026-04-22'");
   });
 
   test('service-report predicates exclude project-backed visits as a whole (project row or project_completion sibling)', () => {

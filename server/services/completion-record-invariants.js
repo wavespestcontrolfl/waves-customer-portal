@@ -126,7 +126,7 @@ const PREDICATES = Object.freeze({
            AND NOT EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id)`),
   },
   // Siblings from DIFFERENT rails are supported history; two completed rows
-  // from the SAME rail (two detailed-form completions, two project closes)
+  // from the SAME rail (two detailed-form / one-tap completions, two project closes)
   // are the corruption the missing unique index cannot prevent. The
   // pest-recap rail (completion_source NULL) updates an existing row rather
   // than inserting, and legacy NULL rows predate the column, so NULL is not
@@ -141,7 +141,7 @@ const PREDICATES = Object.freeze({
               FROM service_records sr
              WHERE sr.scheduled_service_id IS NOT NULL
                AND sr.status = 'completed'
-               AND sr.completion_source IN ('detailed_form', 'project_completion')
+               AND sr.completion_source IN ('detailed_form', 'one_tap_completion', 'project_completion')
              GROUP BY sr.scheduled_service_id, sr.completion_source
             HAVING count(*) > 1
           ) g
@@ -170,16 +170,23 @@ const PREDICATES = Object.freeze({
                     AND tok.report_view_token IS NOT NULL)`),
   },
   completed_visit_without_completed_at: {
-    label: `Completed visits (since the ${TRACKING_STAMP_SINCE} tracker stamp, before today) whose completed_at is NULL`,
+    label: `Completed visits (before today) whose completed_at is NULL although their record was written after the ${TRACKING_STAMP_SINCE} tracker stamp shipped`,
     href: '/admin/dispatch',
+    // The cutover keys on the RECORD's write time, not the visit date: a
+    // modern backfill of a pre-tracking visit runs on today's code and owes
+    // the stamp (codex P2 r3); only records written before the migration
+    // are legacy.
     sql: aggregate(`
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
            AND ss.completed_at IS NULL
-           AND ss.scheduled_date >= '${TRACKING_STAMP_SINCE}'::date
            AND ${BEFORE_TODAY_ET}
-           AND EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND sr.status = 'completed')`),
+           AND EXISTS (
+                 SELECT 1 FROM service_records sr
+                  WHERE sr.scheduled_service_id = ss.id
+                    AND sr.status = 'completed'
+                    AND sr.created_at >= '${TRACKING_STAMP_SINCE}'::date)`),
   },
   // Confirmed notice = a TERMINAL completionSmsStatus on ANY sibling —
   // the closeout-status.js comms vocabulary's done / not_required outcomes
@@ -222,18 +229,26 @@ const PREDICATES = Object.freeze({
   // followup_source_service_id link the completion's own follow-up park
   // uses) — otherwise the not-performed work silently ages out (codex P2).
   aged_incomplete_visit_records: {
-    label: `Visits the tech marked incomplete more than ${INCOMPLETE_FOLLOWUP_GRACE_DAYS} days ago with no completed record and no live follow-up visit`,
+    label: `Visits whose incomplete record is more than ${INCOMPLETE_FOLLOWUP_GRACE_DAYS} days old with no completed record and no live follow-up visit`,
     href: '/admin/dispatch',
+    // Grace runs from when the incomplete outcome was RECORDED (a months-old
+    // visit backfilled today gets its seven days), and a live follow-up on
+    // EITHER lineage column clears it — the completion CTA links by
+    // followup_source_service_id, call-booked replacements by
+    // parent_service_id (review-request.js checks both) (codex P2 r3).
     sql: aggregate(`
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
-           AND ss.scheduled_date < ${TODAY_ET} - ${INCOMPLETE_FOLLOWUP_GRACE_DAYS}
-           AND EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND sr.status = 'incomplete')
+           AND EXISTS (
+                 SELECT 1 FROM service_records sr
+                  WHERE sr.scheduled_service_id = ss.id
+                    AND sr.status = 'incomplete'
+                    AND sr.created_at < now() - interval '${INCOMPLETE_FOLLOWUP_GRACE_DAYS} days')
            AND NOT EXISTS (SELECT 1 FROM service_records c WHERE c.scheduled_service_id = ss.id AND c.status = 'completed')
            AND NOT EXISTS (
                  SELECT 1 FROM scheduled_services f
-                  WHERE f.followup_source_service_id = ss.id
+                  WHERE (f.followup_source_service_id = ss.id OR f.parent_service_id = ss.id)
                     AND f.status NOT IN ('cancelled', 'skipped', 'no_show'))`),
   },
 });
