@@ -571,6 +571,10 @@ function stripCallArgs(text) {
 // list (`mutate(makeOptions(), data)`) can't hide it (r12 P2); the same
 // check runs on a callback's element parameter (`rows.forEach((row) =>
 // stripAttribution(row))` — r14 P2).
+function returnsRef(body, id) {
+  return new RegExp(`\\breturn\\s+(?:await\\s+)?${id}\\b`).test(body);
+}
+
 function isBlockFunction(arg) {
   const a = String(arg || '').trim();
   const arrow = /^(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/.test(a);
@@ -632,7 +636,10 @@ function blankStringContents(source) {
       while (k < literal.length - (literal.endsWith('`') && literal.length > 1 ? 1 : 0)) {
         if (literal.startsWith('${', k)) {
           const exprEnd = endOfExpression(i + k + 2) - i;
-          piece += literal.slice(k, exprEnd);
+          // The expression is code: recurse so a quoted string INSIDE it
+          // (`${format("invalid data")}`) is blanked like any other string
+          // instead of reading as a bare reference (GH codex r2 P2).
+          piece += blankStringContents(literal.slice(k, exprEnd));
           k = exprEnd;
           continue;
         }
@@ -662,7 +669,9 @@ function escapesThroughCall(rawText, id) {
     // by this same loop. An EXPRESSION-bodied arrow (`wrap(() => data)`)
     // returns the value and stays an escape (first adopter: the admin
     // create parent lives inside a transaction callback).
-    const valueArgs = args.filter((a) => !isBlockFunction(a));
+    // …unless that body RETURNS the tracked value (`wrap(() => { return
+    // data; })`) — the wrapper then holds it (GH codex r1 P2).
+    const valueArgs = args.filter((a) => !isBlockFunction(a) || returnsRef(a, id));
     if (!valueArgs.some((a) => bareRef(id).test(a))) continue;
     const callee = cm[1].replace(/\s+/g, '');
     const last = callee.split('.').pop();
@@ -686,7 +695,10 @@ function mutatesIdentifier(text, id) {
     // destructuring ASSIGNMENT onto a property (`({ x: data.x } = raw)`,
     // `[data.x] = arr`) — a write the property-assignment form above
     // cannot see (#3702 deferred P2)
-    + `|[{\\[][^;{}=]*${prop}[^;{}=]*[}\\]]\\s*=(?![=>])`
+    // — nested patterns too (`({ meta: { status: data.status } } = raw)`),
+    // so inner braces are allowed; `;` and `=` still bound the pattern
+    // (GH codex r2 P2)
+    + `|[{\\[][^;=]*${prop}[^;=]*[}\\]]\\s*=(?![=>])`
     + `|\\bObject\\s*\\.\\s*assign\\s*\\(\\s*${id}\\b`,
   ).test(text);
 }
@@ -1282,6 +1294,9 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`stamping \${mutate(data)}\`);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`x \${label('}')} \${mutate(data)}\`);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`x \${\`inner \${mutate(data)}\`}\`);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nwrap(() => { return data; });\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\n({ meta: { status: data.status } } = raw);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlogger.warn(\`x \${format("invalid data")}\`);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
     // …the three #3702 deferred shapes: a NAMED callback is opaque and fails closed…
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach(stripAttribution);\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nconst n = rows.indexOf(first);\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
