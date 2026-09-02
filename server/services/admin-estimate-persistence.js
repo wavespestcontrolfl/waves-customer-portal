@@ -2823,6 +2823,12 @@ async function reviseAdminEstimate({
       .forUpdate()
       .first();
     if (!lockedPrior) return null;
+    // The revise block re-run on the LOCKED row (pre-push codex P0 r14): a
+    // proposal authored by PUT /:id/proposal while this payload resolved
+    // turns the row into a commercial proposal the generic save must not
+    // rewrite — the throw rolls back with nothing written.
+    const lockedBlock = estimateReviseBlock(lockedPrior, undefined, now());
+    if (lockedBlock) throw errorWithStatus(lockedBlock.message, lockedBlock.statusCode);
     // Live-link guard re-asserted on the LOCKED row (pre-push codex P0): a
     // first send finishing between the pre-read and this lock turns the
     // row live, and the fallback revision must lose to it — the throw rolls
@@ -2856,6 +2862,15 @@ async function reviseAdminEstimate({
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
           }
           preserveClickMintMarkersAcrossRevise(pendingData, lockedData);
+          // The server-owned proposal is carried from the LOCKED row, never
+          // from the pre-read copy stripClientProposal restored earlier
+          // (pre-push codex P0 r14): a proposal authored (or disabled) in
+          // the gap would otherwise be replaced by the stale/absent one.
+          if (lockedData.proposal && typeof lockedData.proposal === 'object' && !Array.isArray(lockedData.proposal)) {
+            pendingData.proposal = lockedData.proposal;
+          } else {
+            delete pendingData.proposal;
+          }
           for (const key of REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS) {
             const lockedValue = lockedData?.estimatorEngine?.[key];
             if (lockedValue === undefined) continue;

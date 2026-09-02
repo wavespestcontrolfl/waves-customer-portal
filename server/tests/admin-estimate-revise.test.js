@@ -1205,3 +1205,36 @@ describe('a LIVE row moving into a group has the destination judged and locked, 
     expect(quiet.trx).not.toHaveBeenCalled();
   });
 });
+
+describe('the server-owned proposal is judged and carried from the LOCKED row (pre-push codex P0 r14 on #3750)', () => {
+  const draft = { ...sentEstimate, status: 'draft', sent_at: null, viewed_at: null };
+  const priorData = JSON.parse(sentEstimate.estimate_data);
+
+  test('a proposal authored by the editor while the payload resolved refuses the generic rewrite — nothing written', async () => {
+    const { database, updates } = makeReviseDatabase({
+      estimate: draft,
+      lockedEstimate: {
+        ...draft,
+        category: 'COMMERCIAL',
+        estimate_data: JSON.stringify({ ...priorData, proposal: { enabled: true, provenance: { source: 'proposal-editor' }, buildings: [{ name: 'Tower A', lineItems: [] }] } }),
+      },
+    });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: noRecompute, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/Commercial proposal editor/i) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('a proposal disabled in the gap (not a revise block) is carried from the locked row, not the pre-read copy', async () => {
+    const lockedProposal = { enabled: false, provenance: { source: 'proposal-editor' }, buildings: [{ name: 'Tower A', lineItems: [{ description: 'Interior', amount: 240 }] }] };
+    const { database, updates } = makeReviseDatabase({
+      estimate: draft,
+      lockedEstimate: { ...draft, estimate_data: JSON.stringify({ ...priorData, proposal: lockedProposal }) },
+    });
+    await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: noRecompute, now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(JSON.parse(updates[0].estimate_data).proposal).toEqual(lockedProposal);
+  });
+});
