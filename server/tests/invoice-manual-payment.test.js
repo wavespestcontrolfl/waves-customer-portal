@@ -294,13 +294,26 @@ describe('recordManualPayment — settlement', () => {
       trx.fn = { now: () => 'NOW()' };
       return fn(trx);
     });
-    const fence = jest.fn(async (trx) => { seenTrx = trx; return false; });
+    // First call = pre-lock (passes), second = under the lock on the payment trx.
+    let fenceCalls = 0;
+    const fence = jest.fn(async (conn) => { if (fenceCalls++ === 0) return true; seenTrx = conn; return false; });
     const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', settlementFence: fence }));
     expect(err.statusCode).toBe(409);
     expect(err.message).toMatch(/settlement claim was lost/);
-    expect(typeof seenTrx).toBe('function'); // the payment connection, not a third one
+    expect(fence).toHaveBeenCalledTimes(2);
+    expect(fence.mock.calls[0][0]).toBe(db); // pre-lock: the plain connection
+    expect(typeof seenTrx).toBe('function'); // under the lock: the payment connection, not a third one
     expect(paymentsInsert).toBeNull();
     expect(sendReceiptEmail).not.toHaveBeenCalled();
+  });
+
+  test('a lost claim refuses on the PRE-LOCK fence before the Stripe session is retired', async () => {
+    StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_live', status: 'requires_payment_method' });
+    db.mockImplementation(() => recorder({ first: openInvoice({ stripe_payment_intent_id: 'pi_live' }) }));
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', settlementFence: async () => false }));
+    expect(err.statusCode).toBe(409);
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 
   test('sendReceipt:false records the payment and sends nothing', async () => {

@@ -36,11 +36,14 @@
  * payment or not at all. `receipt` then reads { queued: true }. Operator
  * paths leave it false and send inline.
  *
- * settlementFence (optional, both Zelle paths): async (trx) => boolean, run
- * under the invoice row lock right before the paid flip. The Zelle callers
- * verify their notice claim (id + status + claim_token) on the payment
- * connection so a worker whose claim was swept and RECLAIMED can never
- * commit a second invoice for one transfer. false → 409, nothing written.
+ * settlementFence (optional, both Zelle paths): async (db|trx) => boolean.
+ * Run TWICE: on the pre-lock read before any Stripe session is retired (a
+ * worker that no longer owns its claim must not destroy the customer's
+ * checkout), and under the invoice row lock right before the paid flip on
+ * the payment connection — there the callers SELECT … FOR UPDATE their
+ * notice claim (id + status + claim_token) so the row stays locked through
+ * the commit and a swept-and-RECLAIMED worker can never commit a second
+ * invoice for one transfer. false → 409, nothing written.
  *
  * Refusals throw an Error carrying `statusCode` (400 / 404 / 409) and
  * `isOperational`; the lost-race 409 also carries `currentStatus`. Anything
@@ -170,6 +173,9 @@ async function recordManualPayment(id, {
     if (invoice.payer_id || invoice.payer_statement_id || !(await rowIsSelfPayDue(invoice.customer_id, invoice))) {
       throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');
     }
+  }
+  if (settlementFence && !(await settlementFence(db))) {
+    throw refusal(409, 'The settlement claim was lost before the payment could be recorded (the notice was reclaimed) — nothing was recorded');
   }
   const triagedPiId = invoice.stripe_payment_intent_id || null;
   const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'recording a manual payment' });

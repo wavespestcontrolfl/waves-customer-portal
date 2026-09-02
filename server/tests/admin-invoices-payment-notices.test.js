@@ -132,7 +132,7 @@ describe('POST /payment-notices/:id/apply', () => {
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', {
       method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: 'Adam', sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true, settlementFence: expect.any(Function),
     });
-    const fenceTrx = jest.fn(() => ({ where: jest.fn((w) => { fenceTrx.where = w; return { first: jest.fn(async () => null) }; }) }));
+    const fenceTrx = jest.fn(() => ({ where: jest.fn((w) => { fenceTrx.where = w; return { forUpdate: jest.fn(() => ({ first: jest.fn(async () => null) })) }; }) }));
     expect(await recordManualPayment.mock.calls[0][1].settlementFence(fenceTrx)).toBe(false);
     expect(fenceTrx.where).toEqual({ id: 'notice-1', status: 'processing', claim_token: updates[0].claim_token });
     expect(tables.emails.calls.find(([m]) => m === 'update')[1]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500' });

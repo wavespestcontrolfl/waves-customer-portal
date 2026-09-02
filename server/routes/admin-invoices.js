@@ -759,10 +759,12 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
         // locked invoice so a payer assigned meanwhile refuses.
         requireSelfPay: true,
         // The OPERATOR tapped Apply: the receipt is operator-initiated,
-        // exactly like Add payment (automated stays false). Under the
-        // invoice lock: our claim must still be ours.
-        settlementFence: (trx) => trx('inbound_payment_notices')
+        // exactly like Add payment (automated stays false). Pre-lock and
+        // under the invoice lock (FOR UPDATE through the paid flip): our
+        // claim must still be ours.
+        settlementFence: (conn) => conn('inbound_payment_notices')
           .where({ id, status: 'processing', claim_token: claimToken })
+          .forUpdate()
           .first('id')
           .then(Boolean),
       });

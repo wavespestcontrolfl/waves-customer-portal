@@ -338,11 +338,14 @@ async function reofferMarkedEmails() {
   return handled;
 }
 
-// Cadence entry point for the email sync (every run): gate-aware, cheap
-// (two indexed reads when nothing is stale or marked).
+// Cadence entry point for the email sync (every run), cheap (two indexed
+// reads when nothing is stale or marked). Stale-claim RECOVERY runs even
+// with the gate off: a kill must never strand a processing claim (Apply /
+// Ignore require `parked`, and a committed settlement must still close).
+// The gate suppresses only NEW decisions — the marked-email re-offer.
 async function sweepStaleClaims() {
-  if (!isZelleReconcileEnabled()) return 0;
   const recovered = await recoverStaleClaims();
+  if (!isZelleReconcileEnabled()) return recovered;
   const reoffered = await reofferMarkedEmails().catch((err) => { logger.warn(`[zelle-notice] marked-email re-offer failed: ${err.message}`); return 0; });
   return recovered + reoffered;
 }
@@ -551,10 +554,12 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
       // Nobody is tapping a button: the receipt rides the automatic receipt
       // queue (opt-outs, send window, retries).
       automated: true,
-      // Under the invoice lock, on the payment connection: our claim must
-      // still be ours — a swept-and-reclaimed claim never commits.
-      settlementFence: (trx) => trx('inbound_payment_notices')
+      // Pre-lock (before the Stripe retire) and under the invoice lock on
+      // the payment connection, where FOR UPDATE holds our claim row
+      // through the paid flip: a swept-and-reclaimed claim never commits.
+      settlementFence: (conn) => conn('inbound_payment_notices')
         .where({ id: notice.id, status: 'processing', claim_token: notice.claim_token })
+        .forUpdate()
         .first('id')
         .then(Boolean),
     });

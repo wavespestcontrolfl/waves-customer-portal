@@ -171,10 +171,11 @@ describe('auto-apply', () => {
       method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: RECORDED_BY, sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true, automated: true, settlementFence: expect.any(Function),
     });
     // The fence checks OUR claim (id + processing + token) on the payment connection.
-    const fenceTrx = jest.fn(() => ({ where: jest.fn((w) => { fenceTrx.where = w; return { first: jest.fn(async () => ({ id: 'notice-1' })) }; }) }));
+    const fenceTrx = jest.fn(() => ({ where: jest.fn((w) => { fenceTrx.where = w; return { forUpdate: jest.fn(() => { fenceTrx.locked = true; return { first: jest.fn(async () => ({ id: 'notice-1' })) }; }) }; }) }));
     expect(await recordManualPayment.mock.calls[0][1].settlementFence(fenceTrx)).toBe(true);
     expect(fenceTrx).toHaveBeenCalledWith('inbound_payment_notices');
     expect(fenceTrx.where).toEqual({ id: 'notice-1', status: 'processing', claim_token: 'tok-1' });
+    expect(fenceTrx.locked).toBe(true); // FOR UPDATE — the claim row stays locked through the paid flip
     expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', match_method: 'amount_name', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: RECORDED_BY });
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500', classification: 'other' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('receipt: queued on the receipt queue'), expect.anything());
@@ -500,10 +501,11 @@ describe('stale claim recovery', () => {
     expect(emailCalls).toContainEqual(['where', { id: 'email-marked', auto_action: ZELLE_RETRY_MARK }]);
   });
 
-  test('the sync-cadence sweep is gate-aware: off ⇒ no reads', async () => {
+  test('the sync-cadence sweep keeps stale-claim RECOVERY running with the gate off (a kill never strands a processing claim); only the marked re-offer is gated', async () => {
     process.env.GATE_ZELLE_NOTICE_RECONCILE = 'false';
     expect(await sweepStaleClaims()).toBe(0);
-    expect(db).not.toHaveBeenCalled();
+    expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { status: 'processing' }]); // recovery read
+    expect((tables.emails?.calls || []).some(([m, a]) => m === 'where' && a && a.auto_action)).toBe(false); // no marked re-offer
   });
 
   test('nothing stale ⇒ no writes', async () => {
