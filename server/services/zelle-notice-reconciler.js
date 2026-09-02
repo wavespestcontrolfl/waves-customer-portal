@@ -144,7 +144,7 @@ async function notifyOwner(title, body, noticeId, { needsReview = false } = {}) 
 }
 
 async function finishParked(notice, email, reason, { candidates = null, applyError = null, matchedInvoice = null } = {}) {
-  await db('inbound_payment_notices').where({ id: notice.id, status: 'processing', claim_token: notice.claim_token }).update({
+  const moved = await db('inbound_payment_notices').where({ id: notice.id, status: 'processing', claim_token: notice.claim_token }).update({
     status: 'parked',
     park_reason: reason,
     candidates: candidates ? JSON.stringify(candidates) : null,
@@ -154,6 +154,13 @@ async function finishParked(notice, email, reason, { candidates = null, applyErr
     applied_by: null,
     updated_at: new Date(),
   });
+  if (!moved) {
+    // Our claim is gone (swept, or reclaimed and decided by someone else):
+    // the row's current owner wrote the outcome — never overwrite their
+    // email stamp or raise a false review bell.
+    logger.warn(`[zelle-notice] notice ${notice.id}: park (${reason}) skipped — the claim is no longer ours`);
+    return { status: 'lost_claim', reason };
+  }
   await stampEmail(email.id, `zelle_notice_parked:${reason}`);
   const amount = notice.amount_cents != null ? ` $${(notice.amount_cents / 100).toFixed(2)}` : '';
   await notifyOwner(

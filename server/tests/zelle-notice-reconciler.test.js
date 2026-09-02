@@ -280,6 +280,16 @@ describe('settlement without a held transaction (pool floor is 2)', () => {
     expect(calls[forcedAt - 1]).toEqual(['where', { id: 'notice-1', claim_token: 'tok-1' }]);
   });
 
+  test('a park whose token-fenced CAS moves nothing (claim swept or reclaimed) stamps nothing and raises no bell', async () => {
+    claimed();
+    oneExact();
+    recordManualPayment.mockRejectedValueOnce(Object.assign(new Error('A payment is already in flight'), { statusCode: 409 }));
+    tables.inbound_payment_notices.updates = [1, 0]; // stamp ok, the park CAS lost
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    expect(updatesOf('emails')).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('a lost close with a DIFFERENT token (the operator reclaimed the notice) never consumes the new claim — surfaced for review instead', async () => {
     claimed();
     oneExact();
