@@ -42,8 +42,17 @@ describe('treatment-area scope vocabulary', () => {
     expect(scopeOf(label)).toMatchObject({ hasInterior: false, hasExterior: true, hasLocationSignal: true });
   });
 
-  test.each(AREA_SCOPES.unscoped)('%s alone leaves scope undetermined', (label) => {
-    expect(scopeOf(label)).toMatchObject({ hasInterior: false, hasExterior: false, hasLocationSignal: false });
+  test.each(AREA_SCOPES.unscoped)('%s alone leaves scope undetermined on a mixed line and never counts as explicit scope', (label) => {
+    expect(scopeOf(label)).toMatchObject({ hasInterior: false, hasExterior: false, hasLocationSignal: false, hasExplicitScope: false });
+    expect(treatmentScope({ service: { service_type: 'Termite Treatment', areas_serviced: JSON.stringify([label]) } }))
+      .toMatchObject({ hasInterior: false, hasExterior: false, hasExplicitScope: false });
+  });
+
+  test.each(AREA_SCOPES.unscoped)('%s is exterior on outdoor-only lines', (label) => {
+    for (const serviceType of ['One-Time Lawn Treatment', 'Mosquito Event Treatment', 'Tree & Shrub Care', 'Palm Injection']) {
+      expect(treatmentScope({ service: { service_type: serviceType, areas_serviced: JSON.stringify([label]) } }))
+        .toMatchObject({ hasInterior: false, hasExterior: true, hasExplicitScope: true });
+    }
   });
 
   test('explicit scope wins over heuristics for labels that mention both sides', () => {

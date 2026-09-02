@@ -7281,6 +7281,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 p?.applicationMethod || p?.method || p?.application_method,
               )))
               || reportProtocolActionScopes.some((s) => s.treatmentApplied)
+              // Typed work fields record applications too (codex P1 r12 #3701).
+              || ActivityIndicators.typedTreatmentEvidence(typedFindingsType, typedFindings?.values).applied
               // Catalog identity: a non-bait pesticide product is evidence even
               // under the client's defaulted station_check (codex inline r9).
               || await productIdentityEvidence(trx, products || []);

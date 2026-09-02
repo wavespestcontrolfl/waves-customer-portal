@@ -536,17 +536,31 @@ const INTERIOR_SCOPE_RE = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseb
 // one-time lawn chips (codex P1 r7 #3701).
 const EXTERIOR_SCOPE_RE = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash|screened|enclosure|standing water|deck|stations?|crawlspace|slab edge|wood contact|turf|weed breakthrough|insect activity areas|disease affected)\b/;
 
-function classifyScopeValue(value) {
+// Lines whose work is outdoors by definition: an unscoped area choice
+// ("Other", "Localized activity area") on them is exterior treatment, so the
+// required dry-down guidance survives. On mixed indoor/outdoor lines the
+// same choice says nothing about scope and is left out of the classification
+// entirely — never "explicit scope with no side" (codex P1 r12 #3701).
+const EXTERIOR_ONLY_SERVICE_LINES = new Set(['lawn', 'mosquito', 'tree_shrub', 'palm']);
+
+function classifyScopeValue(value, serviceLine) {
   const text = normalizeScopeText(value);
   const known = AREA_SCOPE_BY_LABEL.get(text);
-  if (known) return { interior: known === 'interior', exterior: known === 'exterior' };
-  return { interior: INTERIOR_SCOPE_RE.test(text), exterior: EXTERIOR_SCOPE_RE.test(text) };
+  if (known === 'unscoped') {
+    return EXTERIOR_ONLY_SERVICE_LINES.has(serviceLine)
+      ? { interior: false, exterior: true, text }
+      : null;
+  }
+  if (known) return { interior: known === 'interior', exterior: known === 'exterior', text };
+  return { interior: INTERIOR_SCOPE_RE.test(text), exterior: EXTERIOR_SCOPE_RE.test(text), text };
 }
 
 function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
-  const values = scopeTextValues({ service, applications, zones });
-  const text = values.map(normalizeScopeText).join(' ');
-  const classified = values.map(classifyScopeValue);
+  const serviceLine = service.service_line || detectServiceLine(service.service_type);
+  const classified = scopeTextValues({ service, applications, zones })
+    .map((value) => classifyScopeValue(value, serviceLine))
+    .filter(Boolean);
+  const text = classified.map((entry) => entry.text).join(' ');
   const textInterior = classified.some((entry) => entry.interior);
   const textExterior = classified.some((entry) => entry.exterior);
   // Structured action scope is additive: an interior treatment fires interior
@@ -3997,11 +4011,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       productType: app.product?.product_type,
       epaReg: app.product?.epa_reg,
     });
+  // Typed lanes record their work in the frozen snapshot's values (products
+  // and protocol actions are optional there) — an application-bearing typed
+  // option is treatment evidence too (codex P1 r12 #3701).
+  const typedEvidence = require('./activity-indicators').typedTreatmentEvidence(typedSnapshot?.type, typedSnapshot?.values);
   const readTimeSprayEvidence = applications.some((app) => isSprayApplicationMethod(app.method) || isInferredPesticideApplication(app))
-    || structuredActionScope(service).hasTreatment;
+    || structuredActionScope(service).hasTreatment
+    || typedEvidence.applied;
   // Treatment occurred, chemical or not — the aftercare/precaution gate for
   // the PDF; applicationMade stays the pesticide-application verdict.
-  const treatmentPerformed = readTimeSprayEvidence || structuredActionScope(service).hasNonChemicalTreatment;
+  const treatmentPerformed = readTimeSprayEvidence || structuredActionScope(service).hasNonChemicalTreatment || typedEvidence.performed;
   // Published verdicts: true when evidence exists, false only when the product
   // load succeeded and nothing was recorded, null when the load failed —
   // clients keep the fail-closed treatment presentation on null (codex P1 r11).

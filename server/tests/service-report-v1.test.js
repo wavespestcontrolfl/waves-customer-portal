@@ -559,6 +559,14 @@ describe('service report v1', () => {
       })).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
     });
 
+    test('an "Other" area on a lawn application keeps the exterior dry-down target', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { service_type: 'One-Time Lawn Treatment', areas_serviced: JSON.stringify(['Other']) },
+        applications: [{ application_method: 'broadcast_spray' }],
+      });
+      expect(normalized).toMatchObject({ exterior_reentry_min: 30 });
+    });
+
     test('pet-resting area chips retain interior scope beside lawn treatment', () => {
       const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
         service: { areas_serviced: JSON.stringify(['Pet resting areas', 'Front lawn']) },

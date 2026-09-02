@@ -1054,6 +1054,82 @@ function requiredFindingsFieldsFor(type, { companion = false } = {}) {
 
 const LEGACY_COMPLETION_AREAS = require('../../../shared/legacy-completion-areas.json');
 
+// Typed work fields whose options record treatment. `applied` = a pesticide /
+// product application (the report's applicationMade verdict, re-entry
+// evidence); `performed` = non-chemical treatment (heat, steam, mechanical)
+// that keeps aftercare without claiming an application. Products and protocol
+// actions are optional on these lanes, so a valid productless closeout still
+// carries its treatment here (codex P1 r12 #3701). Every label is asserted to
+// exist in its field's options by the typed-treatment-evidence test.
+const TYPED_TREATMENT_OPTIONS = Object.freeze({
+  flea: { treatment_completed: { applied: [
+    'Exterior flea treatment', 'Interior flea treatment', 'Growth regulator', 'Crack / crevice treatment',
+    'Lawn treatment', 'Pet resting area treatment', 'Limited treatment',
+  ] } },
+  cockroach: { work_completed: { applied: [
+    'Bait placement', 'Insect growth regulator', 'Crack & crevice treatment', 'Dust application',
+    'Flush-out treatment', 'Exterior perimeter treatment',
+  ] } },
+  german_roach_knockdown: { treatment_completed: {
+    applied: ['Gel bait', 'Insect growth regulator', 'Crack & crevice treatment', 'Dust application',
+      'Appliance-area treatment', 'Cabinet hinge treatment', 'Plumbing penetration treatment'],
+    performed: ['Vacuum / flush-out'],
+  } },
+  palmetto_roach_knockdown: { treatment_completed: { applied: [
+    'Interior crack & crevice', 'Exterior perimeter treatment', 'Garage treatment', 'Attic / void treatment',
+    'Drain / moisture area treatment', 'Bait placement', 'Dust application',
+  ] } },
+  one_time_pest_treatment: { work_completed: {
+    applied: ['Exterior perimeter application', 'Interior crack & crevice application', 'Targeted spot treatment',
+      'Bait placement', 'Insect growth regulator applied', 'Dust applied to labeled voids', 'Nest treated',
+      'Individual mound treatment', 'Broadcast lawn application', 'Treatment limited by site conditions'],
+    performed: ['Accessible nest removed', 'Mechanical removal / vacuuming'],
+  } },
+  one_time_lawn_treatment: { work_completed: { applied: [
+    'Fertilizer applied', 'Weed control applied', 'Insect control applied', 'Disease control applied',
+    'Iron / micronutrients applied', 'Biostimulant applied', 'Soil amendment applied', 'Wetting agent applied',
+    'Spot treatment completed',
+  ] } },
+  mosquito_event: { treatment_completed: { applied: [
+    'Barrier treatment', 'Adulticide treatment', 'Larvicide applied', 'Resting-site treatment',
+  ] } },
+  palm_injection: { work_completed: { applied: [
+    'Palm fertilizer applied', 'Liquid micronutrient treatment', 'Soil drench', 'Insect treatment',
+    'Disease treatment', 'Palm injection completed', 'Soil acidifier applied',
+  ] } },
+  tree_shrub: { treatments_completed: { applied: [
+    'Fertilizer', 'Palm fertilizer', 'Micronutrients', 'Insect treatment', 'Disease / fungicide treatment',
+    'Horticultural oil', 'Soil drench', 'Foliar treatment', 'Pre-emergent bed treatment', 'Weed spot treatment',
+    'Soil amendment / acidifier',
+  ] } },
+  termite_treatment: { treatment_method: { applied: TERMITE_LIQUID_DILUTION_METHODS } },
+  bed_bug: {
+    treatment_method: {
+      applied: ['Hybrid heat + chemical treatment', 'Chemical / IPM treatment', 'Targeted follow-up treatment',
+        'Chemical only', 'Chemical + heat', 'Steam + chemical'],
+      performed: ['Heat treatment', 'Heat only'],
+    },
+    work_completed: {
+      applied: ['Crack & crevice treatment', 'Mattress / box spring treatment', 'Bed frame treatment',
+        'Baseboard treatment', 'Furniture treatment', 'Dust application'],
+      performed: ['Steam treatment'],
+    },
+  },
+});
+
+function typedTreatmentEvidence(type, values) {
+  const fields = TYPED_TREATMENT_OPTIONS[type];
+  const result = { applied: false, performed: false };
+  if (!fields || !values || typeof values !== 'object') return result;
+  for (const [key, lists] of Object.entries(fields)) {
+    const selected = String(values[key] ?? '').split(',').map((part) => part.trim()).filter(Boolean);
+    if (selected.some((part) => (lists.applied || []).includes(part))) result.applied = true;
+    if (selected.some((part) => (lists.performed || []).includes(part))) result.performed = true;
+  }
+  result.performed = result.performed || result.applied;
+  return result;
+}
+
 const TREATMENT_AREA_FIELD_KEYS = ['areas_treated', 'spot_treatment_areas', 'treatment_zones'];
 function legacyAreasForFindingsType(type) {
   return new Set(LEGACY_COMPLETION_AREAS.categories[LEGACY_COMPLETION_AREAS.byFindingsType[type]] || []);
@@ -4366,6 +4442,8 @@ function findBannedCustomerCopy(text) {
 }
 
 module.exports = {
+  TYPED_TREATMENT_OPTIONS,
+  typedTreatmentEvidence,
   SCHEMA_VERSION,
   BANNED_CUSTOMER_COPY,
   findBannedCustomerCopy,
