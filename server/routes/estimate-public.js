@@ -12186,8 +12186,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           (appt) => !(appt?.estimated_price != null && Number(appt.estimated_price) > 0),
         );
         if (unpriced.length) {
-          const custRow = await db('customers').where({ id: customerId }).first('per_application_fee');
-          if (!(custRow?.per_application_fee != null && Number(custRow.per_application_fee) > 0)) {
+          const custRow = await db('customers').where({ id: customerId }).first('per_application_fee', 'billing_mode');
+          // A monthly-membership customer's dues cover the visit (a preserved
+          // legacy lane, or a monthly add-on kept on it): no per-application
+          // fee is expected there, and the alert would invite a manual
+          // invoice on top of the monthly charge (GH codex P1 r5).
+          const duesCovered = String(custRow?.billing_mode || '').toLowerCase() === 'monthly_membership';
+          if (!duesCovered && !(custRow?.per_application_fee != null && Number(custRow.per_application_fee) > 0)) {
             // The flag suppresses the converter's own unpriced-per-application
             // bell below, so it must reflect a PERSISTED alert: notifyAdmin
             // resolves null (no throw) when creation fails, and a failed

@@ -2404,7 +2404,13 @@ function assertLegacyMonthlyTermiteConvertible({
   suppressRecurringConversion = false,
   pinnedLegacyRodentOnlyPlan = false,
   billingTerm = 'standard',
+  // Pre-migration deploy window (GH codex P2 r5): without the billing
+  // columns the customer update writes neither billing_mode nor a fee, the
+  // row lands on the legacy monthly-dues lane and the monthly cron honours
+  // the quote's installments — nothing to refuse there.
+  billingModeColumnsExist = true,
 } = {}) {
+  if (!billingModeColumnsExist) return;
   if (preservesExistingMembership || suppressRecurringConversion || pinnedLegacyRodentOnlyPlan) return;
   if (billingTerm === 'prepay_annual') return;
   if (!legacyFlatMonthlyTermiteUnit(recurringServices, monthlyRate)) return;
@@ -4457,6 +4463,7 @@ const EstimateConverter = {
       suppressRecurringConversion,
       pinnedLegacyRodentOnlyPlan,
       billingTerm,
+      billingModeColumnsExist,
     });
     const stampedPerApplicationFee = resolveConvertedPerApplicationFee({
       pinnedLegacyRodentOnlyPlan,

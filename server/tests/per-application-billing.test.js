@@ -1025,5 +1025,7 @@ describe('legacy count-less termite units — refused before acceptance, never c
     expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, suppressRecurringConversion: true })).not.toThrow();
     expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, pinnedLegacyRodentOnlyPlan: true })).not.toThrow();
     expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, billingTerm: 'prepay_annual' })).not.toThrow();
+    // Pre-migration window: the legacy monthly-dues lane honours the quote.
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, billingModeColumnsExist: false })).not.toThrow();
   });
 });
