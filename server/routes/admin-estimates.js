@@ -903,9 +903,18 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
         && !(parkedEvent.parkId ? witnessedParkId === parkedEvent.parkId : Boolean(pendingData?.leadServiceHandoffAt))
         ? parkedEvent.serviceKey
         : null;
-      const pendingKey = pendingData?.leadServiceRevertPending?.serviceKey
-        ? String(pendingData.leadServiceRevertPending.serviceKey)
-        : structuralPending;
+      // The marker is bound to its park: a customer who restored the offer
+      // from the delivered link and then deliberately removed the same
+      // service has superseded the park, and the retry must not restore
+      // over that choice (GH codex r7 P2). A superseded marker is cleared.
+      const marker = pendingData?.leadServiceRevertPending || null;
+      let markerKey = marker?.serviceKey ? String(marker.serviceKey) : null;
+      if (markerKey && marker.parkId
+        && !(parkedEvent && parkedEvent.serviceKey === markerKey && parkedEvent.parkId === marker.parkId)) {
+        await clearLeadServiceRevertPending(estimate.id);
+        markerKey = null;
+      }
+      const pendingKey = markerKey || structuralPending;
       if (pendingKey) {
         const restored = await revertLeadServiceForSend(estimate.id, pendingKey);
         if (!restored) {
@@ -1381,13 +1390,13 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     // A failed compensation is a DURABLE retry state, never a silent
     // reshape: the marker makes the next send retry the restore first (and
     // abort if it still fails), and the office is paged (pre-push codex P1).
-    if (!restored) await markLeadServiceRevertPending(estimate, leadShapeRef.parkedKey);
+    if (!restored) await markLeadServiceRevertPending(estimate, leadShapeRef.parkedKey, leadShapeRef.parkId || null);
   }
   if (thrown) throw thrown;
   return result;
 }
 
-async function markLeadServiceRevertPending(estimate, serviceKey) {
+async function markLeadServiceRevertPending(estimate, serviceKey, parkId = null) {
   let markerWritten = false;
   let markerError = null;
   try {
@@ -1396,7 +1405,7 @@ async function markLeadServiceRevertPending(estimate, serviceKey) {
       .update({
         estimate_data: db.raw(
           "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{leadServiceRevertPending}', ?::jsonb)",
-          [JSON.stringify({ serviceKey, at: new Date().toISOString() })],
+          [JSON.stringify({ serviceKey, ...(parkId ? { parkId } : {}), at: new Date().toISOString() })],
         ),
         updated_at: db.fn.now(),
       });

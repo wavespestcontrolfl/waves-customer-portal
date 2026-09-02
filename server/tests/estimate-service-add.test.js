@@ -212,6 +212,9 @@ describe('addedLineReviewOnly — an add the engine could only price for review 
     expect(addedLineReviewOnly({ lineItems: [{ service: 'pest_control', requiresManualReview: true }] }, 'pest_control')).toBe(true);
     expect(addedLineReviewOnly({ lineItems: [{ service: 'pest_control', pricingConfidence: 'low' }] }, 'pest_control')).toBe(true);
     expect(addedLineReviewOnly({ lineItems: [{ service: 'pest_control', confidence: 'high' }] }, 'pest_control')).toBe(false);
+    // Oversize measured lawn: priced-but-custom (GH codex r7 P1) via the shared draft-builder predicate.
+    expect(addedLineReviewOnly({ lineItems: [{ service: 'lawn_care', customQuoteFlag: true }] }, 'lawn_care')).toBe(true);
+    expect(addedLineReviewOnly({ lineItems: [{ service: 'lawn_care', manualReviewReasons: ['x'] }] }, 'lawn_care')).toBe(true);
     expect(addedLineReviewOnly({ lineItems: [{ service: 'mosquito' }] }, 'mosquito')).toBe(false);
   });
   it('fails closed without a raw result or without the line', () => {

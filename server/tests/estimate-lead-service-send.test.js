@@ -322,6 +322,23 @@ describe('fail-closed marker handling (GH codex r4 P1 x2)', () => {
     expect(mockMixCalls).toHaveLength(0);
   });
 
+  test('a marker superseded by a newer customer event is cleared and NOT retried (GH codex r7 P2)', async () => {
+    const row = newCustomerRow();
+    const claimed = claimedRowFor(row);
+    // Staff park p1 → customer restored → customer removed deliberately (no parkId, actor customer).
+    claimed.estimate_data = JSON.stringify({ ...JSON.parse(claimed.estimate_data), leadServiceRevertPending: { serviceKey: 'lawn_care', parkId: 'p1', at: 't' }, serviceOptOut: { events: [
+      { serviceKey: 'lawn_care', included: false, actor: 'staff', parkId: 'p1', at: 't1' },
+      { serviceKey: 'lawn_care', included: true, actor: 'customer', at: 't2' },
+      { serviceKey: 'lawn_care', included: false, actor: 'customer', at: 't3' },
+    ] } });
+    mockRows.queue = [claimed, claimed, claimed];
+    const out = await applyLeadServiceForSend(row);
+    expect(mockMixCalls).toHaveLength(0);
+    expect(mockRows.updates).toHaveLength(1);
+    expect(mockRows.updates[0].estimate_data.sql).toContain("- 'leadServiceRevertPending'");
+    expect(out.parkedKey).toBeNull();
+  });
+
   test('a marker-clear failure after a successful restore aborts the send', async () => {
     const row = newCustomerRow();
     const claimed = claimedRowFor(row);

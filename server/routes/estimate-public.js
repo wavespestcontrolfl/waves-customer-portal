@@ -14488,12 +14488,11 @@ function addedLineReviewOnly(rawEngineResult, serviceKey) {
   if (!items) return true;
   const rows = items.filter((li) => li && typeof li === 'object' && recurringServiceKey({ service: li.service, name: li.name }) === serviceKey);
   if (!rows.length) return true;
-  return rows.some((li) => li.quoteRequired === true
-    || li.requiresCustomQuote === true
-    || li.requiresMeasurement === true
-    // Pest pricing records its low-confidence review state separately from
-    // the custom-quote trio (GH codex r6 P1).
-    || li.requiresManualReview === true
+  // ONE review predicate, shared with the draft builder (customQuoteFlag on an
+  // oversize measured lawn, manualReviewReasons, the custom-quote trio) plus
+  // pest's separately recorded low-confidence grade (GH codex r6/r7 P1).
+  const { lineRequiresReview } = require('../services/estimator-engine/draft-builder');
+  return rows.some((li) => lineRequiresReview(li)
     || String(li.pricingConfidence || li.confidence || '').toLowerCase() === 'low');
 }
 
