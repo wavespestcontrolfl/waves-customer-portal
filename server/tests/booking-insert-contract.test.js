@@ -769,7 +769,8 @@ function collectInsertSites(source) {
     // trx.table('scheduled_services').insert(data) — GH Codex r8 P2): the
     // forward chain does. Neither → an alias may have been captured.
     const before = source.slice(Math.max(0, m.index - 12), m.index);
-    const link = /\.(into|table)\s*\($/.exec(before);
+    // .from() is a table link too (pre-push Codex r20 P1).
+    const link = /\.(into|table|from)\s*\($/.exec(before);
     if (link) {
       const linkAt = m.index - link[0].length;
       const stmt = source.slice(statementStart(source, linkAt), m.index).replace(/\s+/g, ' ').trim();
@@ -891,6 +892,11 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach((row) => logger.info('row', row));\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
     // …unless a completed row is mutated in place afterwards (r10 P2).
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows[0].source_action = null;\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
+    // .from() is a table link like .table()/.into() (pre-push r20 P1)…
+    expect(collectInsertSites("await trx.from('scheduled_services').insert(data);")).toEqual(["await trx.from( scheduled_services').insert(data"]);
+    expect(collectInsertSites("const v = trx.from('scheduled_services');\nawait v.insert(data);")).toEqual(["await alias:v.insert(data"]);
+    expect(collectInsertSites("await trx.insert(data).from('scheduled_services');")).toHaveLength(1);
+    expect(collectInsertSites("await trx.from('scheduled_services').where({ id }).first();")).toEqual([]);
     // Table-FIRST fluent forms are sites (GH Codex r8 P2)…
     expect(collectInsertSites("await trx.table('scheduled_services').insert(data);")).toEqual(["await trx.table( scheduled_services').insert(data"]);
     expect(collectInsertSites("const [row] = await trx\n  .into('scheduled_services')\n  .insert(data)\n  .returning('*');")).toEqual(["const [row] = await trx .into( scheduled_services').insert(data"]);
