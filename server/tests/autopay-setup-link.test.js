@@ -199,6 +199,18 @@ describe('requestAutopaySetupLink — ordered checks', () => {
     expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
   });
 
+  it('Auto Pay activated elsewhere between GET and POST closes the link under the lock (no_longer_needed, nothing enrolled)', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_new', status: 'succeeded', payment_method: 'pm_new', metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockTableHandlers.payment_methods = { first: () => null };
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'per_visit' }) };
+    // Unlocked request-time checks passed earlier; under the lock the customer is now on Auto Pay.
+    mockCustomerOnAutopay.mockResolvedValue(true);
+    expect((await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).code).toBe('no_longer_needed');
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+    const updates = touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'update').map((c) => c[1]);
+    expect(updates[updates.length - 1]).toEqual(expect.objectContaining({ status: 'expired' }));
+  });
+
   it('office auto-enroll judges archive / lane / pause under the lock (skips, never enrolls)', async () => {
     mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7', stripe_payment_method_id: 'pm_7' });
     mockTableHandlers.payment_method_consents = { first: () => ({ created_at: new Date('2026-08-15T10:00:00Z') }) };
@@ -367,11 +379,14 @@ describe('requestAutopaySetupLink — link minting and delivery', () => {
 });
 
 describe('loadAutopaySetupPageData — state machine', () => {
-  it('renders secured for a completed row and "saving" (never secured) for a mid-completion row', async () => {
-    for (const status of ['completed']) {
-      const d = await loadAutopaySetupPageData({ ...PENDING, status });
-      expect(d).toEqual(expect.objectContaining({ state: 'secured', kind: 'customer', firstName: 'Pat', cancelFeeNote: null }));
-    }
+  it('renders secured for a completed row only while the enrollment is live; "saving" (never secured) for a mid-completion row', async () => {
+    mockCustomerOnAutopay.mockResolvedValue(true);
+    const d = await loadAutopaySetupPageData({ ...PENDING, status: 'completed' });
+    expect(d).toEqual(expect.objectContaining({ state: 'secured', kind: 'customer', firstName: 'Pat', cancelFeeNote: null }));
+    // Disabled / paused / method removed since → the stale link closes.
+    mockCustomerOnAutopay.mockResolvedValue(false);
+    expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completed' })).state).toBe('closed');
+    mockCustomerOnAutopay.mockResolvedValue(false);
     expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completing' })).state).toBe('saving');
     // Expiry wins over the claim state — AND over terminal success (GH r5 P0):
     // a completed bearer link closes after its 30 days or when its customer is gone.
@@ -500,6 +515,8 @@ describe('loadAutopaySetupPageData — state machine', () => {
       first: () => ({ ...PENDING, status: 'completed' }),
       update: (chain, patch) => (patch.stripe_setup_intent_id ? 0 : 1),
     };
+    // The re-read row completed and the enrollment is live → secured.
+    mockCustomerOnAutopay.mockResolvedValueOnce(false).mockResolvedValue(true);
     const d = await loadAutopaySetupPageData({ ...PENDING });
     expect(d.state).toBe('secured');
     const chains = touches('appointment_card_requests');

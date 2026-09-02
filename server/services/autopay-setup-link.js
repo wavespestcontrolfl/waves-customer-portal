@@ -107,6 +107,16 @@ async function enrollUnderCustomerLock({ customerId, paymentMethodId, details, a
     if (locked.autopay_enabled && require('./autopay-eligibility').isPaused(locked)) {
       return { enrolled: false, reason: 'autopay_paused' };
     }
+    // Activated elsewhere between the GET and this POST (GH Codex P0):
+    // enrollment would keep the healthy incumbent and report
+    // already_enrolled, and the link would then tell the customer THEIR
+    // submitted method is in charge. Judge it under the lock and close.
+    {
+      const full = await trx('customers').where({ id: customerId }).first();
+      if (full && await require('./autopay-eligibility').customerOnAutopay(full, { db: trx })) {
+        return { enrolled: false, reason: 'autopay_already_active' };
+      }
+    }
     const result = await enrollConsentedMethod({
       customerId,
       paymentMethodId,
@@ -251,6 +261,7 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
       // Locked eligibility refusals are the same skips the unlocked checks
       // would have produced.
       if (enrollment?.reason === 'customer_deleted') return skip('customer_not_found');
+      if (enrollment?.reason === 'autopay_already_active') return skip('autopay_already_active');
       if (enrollment?.reason === 'lane_changed') return skip('unsupported_billing_lane');
       if (enrollment?.reason === 'autopay_paused') return skip('autopay_paused');
       // An opt-out that won the race, or no readable consent moment: fall
@@ -492,10 +503,21 @@ async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
   // a customer moved to third-party billing after completing must not keep
   // seeing "Auto Pay is set up" for invoices that now route to the payer.
   if (await payerExemption(request.customer_id)) return { state: 'closed', ...base };
-  // Only a capture COMPLETED through this link earns the secured copy; a
-  // standalone row never becomes 'satisfied' (external activation retires
-  // it), so anything else terminal is closed.
-  if (request.status === 'completed') return { state: 'secured', ...base };
+  // Only a capture COMPLETED through this link earns the secured copy — and
+  // only while the enrollment is still LIVE and chargeable (GH Codex P1: a
+  // customer who later disabled/paused Auto Pay or removed the method must
+  // not keep reading "paid automatically"); otherwise the stale link is
+  // closed. A standalone row never becomes 'satisfied' (external activation
+  // retires it), so anything else terminal is closed too.
+  if (request.status === 'completed') {
+    try {
+      const { customerOnAutopay } = require('./autopay-eligibility');
+      return { state: (await customerOnAutopay(customer)) ? 'secured' : 'closed', ...base };
+    } catch (err) {
+      logger.warn(`[autopay-setup-link] live enrollment probe failed for request ${request.id} — closing: ${err.message}`);
+      return { state: 'closed', ...base };
+    }
+  }
   // Mid-completion (page POST or webhook holds the claim): the intent
   // succeeded, but the tail can still revert the row — say "finishing up",
   // never "set up" (pre-push Codex P1). The card form is not re-shown
@@ -794,6 +816,7 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
     // permanent code instead of a retry loop with repeated alerts.
     const permanentUnderLock = {
       customer_deleted: 'not_found',
+      autopay_already_active: 'no_longer_needed',
       lane_changed: 'no_longer_needed',
       autopay_paused: 'no_longer_needed',
       payer_billed: 'no_longer_needed',
