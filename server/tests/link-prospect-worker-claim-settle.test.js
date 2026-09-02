@@ -62,6 +62,8 @@ jest.mock('../models/db', () => {
   return db;
 });
 
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
+const { isEnabled } = require('../config/feature-gates');
 const worker = require('../services/seo/link-prospect-worker');
 
 beforeEach(() => { mockStore.seo_link_prospects.length = 0; mockStore.seo_link_acquisition_paths.length = 0; mockStore.seo_link_domains.length = 0; });
@@ -193,7 +195,7 @@ test('a placement under a domain the owner parked (Watch) or refused (Reject) is
   expect(claimed.map((r) => r.id).sort()).toEqual(['r-q']); // owner rulings hold at the chokepoint; an un-backfilled row (no path yet) is not leased until the catch-up links it (r4)
 });
 
-test('a placement under a domain still being investigated, or ruled not reproducible, is never leased; `new` stays claimable until the investigator ships (Codex #3720 r7 P1)', async () => {
+test('a placement under a domain still being investigated, or ruled not reproducible, is never leased; `new` stays claimable while the investigator is dark and waits once it is on (Codex #3720 r7 P1)', async () => {
   mockStore.seo_link_domains.push({ id: 'dI', agent_state: 'investigating' }, { id: 'dN', agent_state: 'not_reproducible' }, { id: 'dNew', agent_state: 'new' });
   const live = (id, host) => ({ id, domain_id: 'x', submission_url: `https://${host}/add`, superseded_by: null, link_type: 'directory', confidence: 0.7, revision: 1 });
   mockStore.seo_link_acquisition_paths.push(live('p-i', 'i.example'), live('p-n', 'n.example'), live('p-new', 'new.example'));
@@ -204,6 +206,10 @@ test('a placement under a domain still being investigated, or ruled not reproduc
     { ...base, id: 'r-new', domain_id: 'dNew', target_domain: 'new.example', path_id: 'p-new', target_url: 'https://new.example/add' },
   );
   expect((await worker.claim({ n: 5, type: 'signup' })).map((r) => r.id)).toEqual(['r-new']);
+  // …the same board with GATE_LINK_INVESTIGATOR on: an uninvestigated domain is not claimable either (plan §7)
+  mockStore.seo_link_prospects.forEach((r) => { r.claimed_at = null; r.claimed_by = null; r.leased_path_revision = null; });
+  isEnabled.mockReturnValue(true);
+  try { expect(await worker.claim({ n: 5, type: 'signup' })).toEqual([]); } finally { isEnabled.mockReturnValue(false); }
 });
 
 test('a placement whose lane drifted from its path\'s while unleased is re-laned by the claim and not handed to the old lane\'s worker (Codex #3720 r7 P1)', async () => {

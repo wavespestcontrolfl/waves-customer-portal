@@ -385,6 +385,7 @@ module.exports = {
   SIGNUP_INTENTS,
   CLAIMABLE_LINK_TYPES,
   HARO_PLATFORMS,
+  WAVES_CONTEXT,
   WEIGHTS,
   _internals: { parseJsonArray, tierFor, contactScoreOf, mapPool },
 };

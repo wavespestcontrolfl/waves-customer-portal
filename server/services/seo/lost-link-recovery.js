@@ -50,8 +50,13 @@ async function claimableOutreachPath(trx, row, linkType) {
   if (row.domain_id) {
     const dom = await trx('seo_link_domains').where({ id: row.domain_id }).first('agent_state');
     const state = dom && dom.agent_state;
-    if (state === 'investigating') return { defer: `registry domain is ${state} — deferred until the investigation settles` };
-    if (worker.NON_CLAIMABLE_DOMAIN_STATES.includes(state)) return { refuse: `registry domain is ${state} — no worker may claim it, not reopened` };
+    if (worker.nonClaimableDomainStates().includes(state)) {
+      // an investigation in flight — or, with the investigator on, a domain
+      // it has not reached yet — is TRANSIENT: the monitor must not stamp
+      // this loss as handled, so the sweep retries once the verdict lands
+      if (state === 'investigating' || state === 'new') return { defer: `registry domain is ${state} — deferred until the investigator settles it` };
+      return { refuse: `registry domain is ${state} — no worker may claim it, not reopened` };
+    }
   }
   const cur = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first(...PATH_STANDING_COLUMNS) : null;
   if (stands(cur)) return {};
