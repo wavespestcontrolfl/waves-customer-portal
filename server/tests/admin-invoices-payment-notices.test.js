@@ -123,7 +123,7 @@ describe('POST /payment-notices/:id/apply', () => {
     // The claim is the FIRST update and precedes the lock (it commits on its own).
     expect(calls.map(([m]) => m).indexOf('update')).toBeLessThan(calls.map(([m]) => m).indexOf('forUpdate'));
     expect(calls[calls.findIndex(([m]) => m === 'update') - 1]).toEqual(['where', { id: 'notice-1', status: 'parked' }]);
-    expect(updates[0]).toMatchObject({ status: 'processing', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: 'Adam' });
+    expect(updates[0]).toMatchObject({ status: 'processing', match_method: 'manual', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: 'Adam' });
     expect(updates[1]).toMatchObject({ status: 'applied', match_method: 'manual', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: 'Adam' });
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', {
       method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: 'Adam', sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true,

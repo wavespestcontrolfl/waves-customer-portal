@@ -48,6 +48,12 @@ const { openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, MAX_AMOUNT_CANDIDATES }
 const { invoiceAmountDue } = require('./invoice-helpers');
 
 const RECORDED_BY = 'zelle-notice-reconciler';
+// emails.auto_action value the sync hook writes when the reconciler threw
+// before its claim row existed — the durable retry record (see
+// reofferMarkedEmails). Overwritten by the reconciler's own stamp.
+const ZELLE_RETRY_MARK = 'zelle_notice_retry';
+const RETRY_WINDOW_DAYS = 7;
+const RETRY_BATCH = 25;
 const DUPLICATE_WINDOW_DAYS = 14;
 const NEAR_AMOUNT_TOLERANCE_CENTS = 500;
 
@@ -265,11 +271,41 @@ async function closeIfSettled(row) {
   return true;
 }
 
+// Re-offer the emails the sync hook marked after a pre-claim failure
+// (received_at-bounded so the read is an index range, never a table scan;
+// small batch). maybeHandleZelleNotice re-runs the full decision — claim
+// (at-most-once), trust, match. When the claim already exists (a prior
+// pass got that far before throwing, or the hook's own re-offer won) the
+// mark is cleared only if it is still the mark, so a concurrent owner's
+// outcome stamp is never nulled.
+async function reofferMarkedEmails() {
+  const since = new Date(Date.now() - RETRY_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const rows = await db('emails')
+    .where({ auto_action: ZELLE_RETRY_MARK })
+    .where('received_at', '>', since)
+    .orderBy('received_at', 'asc')
+    .limit(RETRY_BATCH)
+    .select('*');
+  let handled = 0;
+  for (const email of rows) {
+    try {
+      await maybeHandleZelleNotice(email);
+      await db('emails').where({ id: email.id, auto_action: ZELLE_RETRY_MARK }).update({ auto_action: null, updated_at: new Date() });
+      handled += 1;
+    } catch (err) {
+      logger.error(`[zelle-notice] re-offer of marked email ${email.id} failed again: ${err.message}`);
+    }
+  }
+  return handled;
+}
+
 // Cadence entry point for the email sync (every run): gate-aware, cheap
-// (one indexed read when nothing is stale).
+// (two indexed reads when nothing is stale or marked).
 async function sweepStaleClaims() {
   if (!isZelleReconcileEnabled()) return 0;
-  return recoverStaleClaims();
+  const recovered = await recoverStaleClaims();
+  const reoffered = await reofferMarkedEmails().catch((err) => { logger.warn(`[zelle-notice] marked-email re-offer failed: ${err.message}`); return 0; });
+  return recovered + reoffered;
 }
 
 // The window starts when the MONEY WAS RECORDED (applied_at — both the
@@ -478,7 +514,9 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
 
 module.exports = {
   RECORDED_BY,
+  ZELLE_RETRY_MARK,
   STALE_CLAIM_MS,
+  reofferMarkedEmails,
   recoverStaleClaims,
   sweepStaleClaims,
   closeIfSettled,

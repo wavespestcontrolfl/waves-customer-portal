@@ -713,7 +713,7 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
     let claimed;
     try {
       claimed = await db('inbound_payment_notices').where({ id, status: 'parked' }).update({
-        status: 'processing', matched_invoice_id: invoiceId, matched_customer_id: exact.customer_id, applied_by: recordedBy, updated_at: db.fn.now(),
+        status: 'processing', match_method: 'manual', matched_invoice_id: invoiceId, matched_customer_id: exact.customer_id, applied_by: recordedBy, updated_at: db.fn.now(),
       });
     } catch (err) {
       if (err.code !== '23505') throw err;

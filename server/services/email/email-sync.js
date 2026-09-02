@@ -228,20 +228,28 @@ async function incrementalSync(state) {
 // matched and settled (or parked) BEFORE any AI classification, awaited so
 // the sync cursor never advances past a notice whose ledger write / receipt
 // has not finished. Gated + fail-closed inside the handler
-// (GATE_ZELLE_NOTICE_RECONCILE); a throw must never break the sync loop —
-// the email row is marked for a targeted re-offer on the next sync instead
-// (the reconciler's own stamp overwrites the mark once it decides).
-// `true` = the reconciler owns the email (skip classification); `false` =
-// not a trusted notice, flow exactly as today.
-const ZELLE_RETRY_MARK = 'zelle_notice_retry';
+// (GATE_ZELLE_NOTICE_RECONCILE). A throw before the claim row exists marks
+// the email row ZELLE_RETRY_MARK — the durable retry record the
+// reconciler's per-sync sweep re-offers (reofferMarkedEmails), independent
+// of the Gmail cursor; the reconciler's own stamp overwrites the mark once
+// it decides. If the mark itself cannot be written (the same outage) the
+// error PROPAGATES: the message counts as failed, classification never
+// runs, and the full sync withholds its cursor. `true` = the reconciler
+// owns the email (skip classification); `false` = not a trusted notice,
+// flow exactly as today.
+const { ZELLE_RETRY_MARK } = require('../zelle-notice-reconciler');
 async function offerZelleNotice(email, { backfill }) {
   try {
     const { maybeHandleZelleNotice } = require('../zelle-notice-reconciler');
     return await maybeHandleZelleNotice(email, { backfill });
   } catch (err) {
     logger.error(`[email-sync] Zelle notice check failed for ${email.id}: ${err?.message || err}`);
-    await db('emails').where({ id: email.id }).whereNull('auto_action').update({ auto_action: ZELLE_RETRY_MARK, updated_at: new Date() })
-      .catch((e) => logger.warn(`[email-sync] could not mark ${email.id} for Zelle retry: ${e.message}`));
+    try {
+      await db('emails').where({ id: email.id }).whereNull('auto_action').update({ auto_action: ZELLE_RETRY_MARK, updated_at: new Date() });
+    } catch (markErr) {
+      logger.error(`[email-sync] could not mark ${email.id} for Zelle retry (${markErr.message}) — failing the message so the sync retries it`);
+      throw err;
+    }
     return false;
   }
 }
@@ -312,10 +320,11 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
     // fired is re-seen here. Ring at most once (idempotent on emailId).
     await recoverLostCustomerEmailBell(existing, { customerId, parsed, backfill }).catch(() => {});
     // A Zelle notice whose first pass threw BEFORE its claim row existed is
-    // re-offered here (GH codex r1 P1) — only rows the hook marked
-    // zelle_notice_retry, so the gate flipping on later never re-plays old
-    // notices against today's invoices. The claim is at-most-once
-    // (email_id UNIQUE): an already-claimed notice decides nothing.
+    // re-offered here when Gmail re-lists it (GH codex r1 P1) — only rows
+    // the hook marked zelle_notice_retry, so the gate flipping on later
+    // never re-plays old notices against today's invoices. The reconciler's
+    // sweep re-offers the same rows on every sync regardless; the claim is
+    // at-most-once (email_id UNIQUE), so neither path can decide twice.
     if (existing.auto_action === ZELLE_RETRY_MARK) {
       await offerZelleNotice({ ...existing, authentication_results: parsed.authentication_results || existing.authentication_results }, { backfill });
     }

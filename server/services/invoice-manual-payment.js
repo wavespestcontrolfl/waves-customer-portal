@@ -189,10 +189,13 @@ async function recordManualPayment(id, {
     }
     // Self-pay fence under the same lock: the row's own payer columns plus
     // the live payer re-resolution (rowIsSelfPayDue, fail-closed). A payer
-    // assigned after the caller's eligibility check makes this refuse.
+    // assigned after the caller's eligibility check makes this refuse. The
+    // resolution rides THIS trx: the Zelle callers hold their notice trx on
+    // one connection and this trx on the other (DB_POOL_MAX floor is 2), so
+    // a third acquire here would wait on itself.
     if (requireSelfPay) {
       const { rowIsSelfPayDue } = require('./open-balance');
-      const selfPay = !locked.payer_id && !locked.payer_statement_id && await rowIsSelfPayDue(locked.customer_id, locked);
+      const selfPay = !locked.payer_id && !locked.payer_statement_id && await rowIsSelfPayDue(locked.customer_id, locked, { database: trx });
       if (!selfPay) return { notSelfPay: true };
     }
     const [row] = await trx('invoices')

@@ -180,6 +180,8 @@ describe('recordManualPayment — refusal contract', () => {
     const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 11700, requireSelfPay: true }));
     expect(err.statusCode).toBe(409);
     expect(err.message).toMatch(/no longer an open self-pay invoice/);
+    // The live resolution rides the payment trx (pool floor is 2: notice trx + this one).
+    if (!resolvesSelfPay) expect(rowIsSelfPayDue).toHaveBeenCalledWith('cust-1', expect.objectContaining({ id: 'inv-1' }), expect.objectContaining({ database: expect.any(Function) }));
     expect(paymentsInsert).toBeNull();
     expect(sendReceiptEmail).not.toHaveBeenCalled();
   });

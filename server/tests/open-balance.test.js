@@ -102,7 +102,7 @@ describe('open-balance selection', () => {
     ];
     mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-default' });
     expect(await openBalanceInvoices('cust-1')).toEqual([]);
-    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-1', throwOnError: true });
+    expect(mockResolveForInvoice).toHaveBeenCalledWith({ database: expect.any(Function), customerId: 'cust-1', throwOnError: true });
   });
 
   test('drops rows whose cents-safe remainder is zero even when SQL admitted them', async () => {

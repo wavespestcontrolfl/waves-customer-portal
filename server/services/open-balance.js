@@ -109,11 +109,12 @@ async function openSelfPayInvoicesByAmountDue(amountCents, { toleranceCents = 0,
 // balance line) must be able to tell "smaller balance" from "incomplete
 // balance" and suppress instead. Existing callers that render the invoices
 // individually (email note, sweep) are unchanged.
-async function rowIsSelfPayDue(customerId, row, { onResolveFailure = null } = {}) {
+async function rowIsSelfPayDue(customerId, row, { onResolveFailure = null, database = db } = {}) {
   if (!(invoiceAmountDue(row) > 0)) return false;
   const PayerService = require('./payer');
   try {
     const resolved = await PayerService.resolveForInvoice({
+      database,
       customerId: String(customerId),
       ...(row.scheduled_service_id ? { scheduledServiceId: String(row.scheduled_service_id) } : {}),
       throwOnError: true,

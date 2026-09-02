@@ -50,7 +50,7 @@ const db = require('../models/db');
 const OpenBalance = require('../services/open-balance');
 const { recordManualPayment } = require('../services/invoice-manual-payment');
 const NotificationService = require('../services/notification-service');
-const { maybeHandleZelleNotice, isZelleReconcileEnabled, recoverStaleClaims, sweepStaleClaims, RECORDED_BY } = require('../services/zelle-notice-reconciler');
+const { maybeHandleZelleNotice, isZelleReconcileEnabled, recoverStaleClaims, sweepStaleClaims, reofferMarkedEmails, RECORDED_BY, ZELLE_RETRY_MARK } = require('../services/zelle-notice-reconciler');
 
 const TEXT = fs.readFileSync(path.join(__dirname, 'fixtures', 'zelle-notice-capitalone.txt'), 'utf8');
 const FORWARDED_AUTH = 'mx.google.com; dkim=pass header.i=@notification.capitalone.com header.s=k1; '
@@ -399,6 +399,24 @@ describe('stale claim recovery', () => {
     expect(closesOf('inbound_payment_notices')).toEqual([expect.objectContaining({ status: 'parked', park_reason: 'apply_failed' })]);
   });
 
+  test('the sweep re-offers hook-marked emails (received_at-bounded, small batch) and clears a mark only while it is still the mark', async () => {
+    const marked = { ...notice({ id: 'email-marked' }), auto_action: ZELLE_RETRY_MARK };
+    tables.emails.selects = [[marked]];
+    const orig = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = orig(table); if (table === 'emails') { const q = tables[table].selects; b.select = jest.fn(async () => (q.length ? q.shift() : [])); } return b; });
+    claimed({ id: 'notice-m', payer_name: 'Pat Doe', amount_cents: 11700 });
+    expect(await reofferMarkedEmails()).toBe(1);
+    const emailCalls = tables.emails.calls;
+    expect(emailCalls).toContainEqual(['where', { auto_action: ZELLE_RETRY_MARK }]);
+    expect(emailCalls.find(([m, col, op]) => m === 'where' && col === 'received_at' && op === '>')).toBeTruthy();
+    expect(emailCalls).toContainEqual(['limit', 25]);
+    // The full decision ran: a claim was inserted for the marked email, then parked (no open invoice) …
+    expect(insertsOf('inbound_payment_notices')[0]).toMatchObject({ email_id: 'email-marked', status: 'processing' });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'no_match' });
+    // … and the mark is cleared conditionally (never a concurrent owner's stamp).
+    expect(emailCalls).toContainEqual(['where', { id: 'email-marked', auto_action: ZELLE_RETRY_MARK }]);
+  });
+
   test('the sync-cadence sweep is gate-aware: off ⇒ no reads', async () => {
     process.env.GATE_ZELLE_NOTICE_RECONCILE = 'false';
     expect(await sweepStaleClaims()).toBe(0);
@@ -424,6 +442,8 @@ describe('sync wiring', () => {
     // A hook throw marks the row for a targeted re-offer; the existing-email
     // branch re-offers ONLY marked rows (never a gate-flip replay of history).
     expect(src).toMatch(/whereNull\('auto_action'\)\.update\(\{ auto_action: ZELLE_RETRY_MARK/);
+    // A failed mark write PROPAGATES the original error (the message counts as failed; classification never runs).
+    expect(src).toMatch(/catch \(markErr\) \{[\s\S]{0,300}throw err;/);
     expect(src).toMatch(/if \(existing\.auto_action === ZELLE_RETRY_MARK\) \{\s*await offerZelleNotice\(/);
     expect(src).toMatch(/\(proofHandled \|\| approvalControl \|\| zelleHandled\) && await bellClaimColumnExists\(\)/);
     // The stale-claim sweep runs on every sync beside the bell sweep.
