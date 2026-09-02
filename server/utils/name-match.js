@@ -220,6 +220,9 @@ function sameFirstName(a, b) {
 // the line ("Pat & Robert Doe"). Initials never satisfy the first-name leg;
 // a missing customer name part never corroborates (amount alone is not
 // identity).
+// Surname particles: a run that starts right after one of these is a fragment
+// of a compound surname, never the whole surname.
+const SURNAME_PARTICLES = new Set(['de', 'del', 'della', 'di', 'da', 'do', 'dos', 'das', 'la', 'le', 'van', 'von', 'der', 'den', 'du', 'st', 'san', 'santa', 'mac', 'mc', 'al', 'el', 'bin', 'ibn']);
 // Generational suffixes are never part of a surname on the customer record.
 const NAME_SUFFIXES = new Set(['jr', 'sr', 'ii', 'iii', 'iv']);
 function tokensOf(text) {
@@ -266,8 +269,12 @@ function personCorroborates(person, customerFirst, customerLast) {
   }
   const tokens = person.all || [];
   // The surname is a trailing run; the given name lives in what precedes it.
+  // A run whose preceding token is a surname particle ("de la Cruz", "van
+  // Dyke") is not a surname by itself — "Cruz" must not corroborate a Maria
+  // Cruz when the bank says Maria De La Cruz.
   for (let k = tokens.length - 1; k >= 1; k -= 1) {
     if (tokens.slice(k).join('') === customerLast) {
+      if (SURNAME_PARTICLES.has(tokens[k - 1])) continue;
       if (givenNameRuns(tokens.slice(0, k)).some((r) => payerFirstNameCompatible(r, customerFirst))) return true;
     }
   }
