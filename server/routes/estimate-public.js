@@ -14977,6 +14977,11 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       serviceKey,
       label,
       included,
+      // Provenance is persisted at the source: this route is the customer's
+      // own tap. The returning-visitor strip announces only non-customer
+      // events (a customer's own click was made from an open page), so an
+      // authoritative actor must exist on every event (pre-push codex P1).
+      actor: 'customer',
       at: new Date().toISOString(),
       removedInputs: included === false ? applied.removedInputs : null,
       provenance: provenance && Object.keys(provenance).length ? provenance : null,

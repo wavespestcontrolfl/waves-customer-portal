@@ -48,7 +48,12 @@ function serviceOptOutChanges(estimateData, since, until = null) {
   const out = [];
   for (const [serviceKey, { event, at }] of latestByKey) {
     if (until && at >= until) continue;
-    // Customer-authored: it happened from an already-open page — seen.
+    // Customer-authored: it happened from an already-open page — seen. The
+    // public opt-out route stamps actor:'customer' at the source; events
+    // written before that stamp existed carry none and read as customer.
+    // Staff-authored events (actor:'staff' — the send-time lead-service
+    // park / revert, PR #3711) are the ones this line exists for; until
+    // that writer lands, the extension grant is the only announced stamp.
     if (String(event.actor || 'customer') !== 'staff') continue;
     const label = event.label || serviceOptOutLabel(serviceKey);
     out.push({
