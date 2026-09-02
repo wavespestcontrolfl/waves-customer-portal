@@ -1,0 +1,8 @@
+{
+  "TERMITE_PERIMETER_METHODS": ["Liquid perimeter", "Trenching", "Rodding"],
+  "TERMITE_LIQUID_DILUTION_METHODS": [
+    "Spot treatment", "Liquid perimeter", "Trenching", "Rodding",
+    "Foam / void injection", "Drill-and-inject", "Wood treatment"
+  ],
+  "TERMITE_NON_DILUTION_METHODS": ["Bait station setup", "Cartridge replacement", "Other"]
+}

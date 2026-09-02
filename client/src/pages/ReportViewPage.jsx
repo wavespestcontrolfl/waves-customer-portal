@@ -784,7 +784,13 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   const context = data.dynamicContext || {};
   const reentry = context.reentry || {};
   const targets = Array.isArray(reentry.targets) ? reentry.targets : [];
-  const pendingTarget = latestPendingReentryTarget(targets, nowMs);
+  // Server verdict for any visit (specialty inspection-only closeouts
+  // included): treatmentPerformed === false means nothing was treated —
+  // chemical or not — so no branch may claim "we treated" or a drying
+  // countdown (codex P1 r11 #3701). null (product load failed) and legacy
+  // payloads without the field keep the treatment presentation.
+  const noTreatmentVisit = data.treatmentPerformed === false;
+  const pendingTarget = noTreatmentVisit ? null : latestPendingReentryTarget(targets, nowMs);
   const pendingReadyText = pendingTarget
     ? (mode === 'live'
       ? `Ready in ${formatDuration(Date.parse(pendingTarget.readyAt) - nowMs)}`
@@ -839,7 +845,9 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
         : `${primaryFinding.title || 'Activity was noted'}${primaryFinding.recommendation ? ` ${primaryFinding.recommendation}` : ''}`,
       completedLine: completedAreas
         ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}`
-        : (reserviceNotPerformed ? (reservice.completedFallback || 'No application was made today.') : 'Service areas completed today.'),
+        : (reserviceNotPerformed
+          ? (reservice.completedFallback || 'No application was made today.')
+          : (noTreatmentVisit ? 'No application was made today.' : 'Service areas completed today.')),
       detail: pendingText
         ? 'Keep pets and people away from treated zones until they are ready. We also included the recommended next step below.'
         : (reserviceNotPerformed
@@ -848,7 +856,9 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
           ? (reservice.outcome === 'incomplete'
             ? 'The visit could not be completed — we documented what we found and included the recommended next step below.'
             : 'No application was made on this visit — we documented what we found and included the recommended next step below.')
-          : 'We treated the documented area today and included the recommended next step below.'),
+          : (noTreatmentVisit
+            ? 'No application was made on this visit — we documented what we found and included the recommended next step below.'
+            : 'We treated the documented area today and included the recommended next step below.')),
     };
   }
 
@@ -908,7 +918,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
     };
   }
 
-  if (context.pressureTrend?.direction === 'down') {
+  if (context.pressureTrend?.direction === 'down' && !noTreatmentVisit) {
     return {
       heading: 'pest pressure is trending down!',
       status: allReady ? 'Ready now' : 'Service complete',
@@ -1587,7 +1597,8 @@ function groupApplicationsByPurpose(applications = [], data = {}) {
   return Array.from(groups.values());
 }
 
-function conditionInterpretation(conditions = {}) {
+function conditionInterpretation(conditions = {}, { applicationMade = true } = {}) {
+  if (!applicationMade) return 'Weather conditions were documented for this service visit.';
   const wind = Number(conditions.wind_mph ?? conditions.wind);
   const rain = Number(conditions.rain_24h_in);
   const hasWind = Number.isFinite(wind);
@@ -2494,6 +2505,12 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <HeroConditions
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
+          applicationMade={data.applicationMade === true
+            // null = product load failed: keep the application presentation.
+            || data.applicationMade === null
+            // The server verdict is authoritative; row inference only backs
+            // up payloads that carry no verdict at all (local audit P1).
+            || (data.applicationMade === undefined && (data.applications || []).some(isProductApplication))}
           live={mode === 'live'}
           weeklyRainIn={data.serviceLine === 'lawn'
             // Legacy lawn payloads (no reportV2) still carry the weekly
@@ -2668,19 +2685,22 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null }) {
+function HeroConditions({ conditions, weatherCall, applicationMade = true, live = false, weeklyRainIn = null }) {
   const rows = conditionRows(conditions, { weeklyRainIn });
-  const copy = weatherCall
-    ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
-    : conditionInterpretation(conditions);
-  const { label, kind } = weatherIconInfo(conditions, weatherCall);
+  const effectiveWeatherCall = applicationMade ? weatherCall : null;
+  const copy = effectiveWeatherCall
+    ? [effectiveWeatherCall.headline, effectiveWeatherCall.body].filter(Boolean).join(' ')
+    : conditionInterpretation(conditions, { applicationMade });
+  const weatherInfo = weatherIconInfo(conditions, effectiveWeatherCall);
+  const label = applicationMade ? weatherInfo.label : 'Visit weather';
+  const { kind } = weatherInfo;
   return (
     <div className="hero-conditions">
       <div className="hero-conditions-copy">
         <div className="weather-call-title">
           <span className="weather-call-icon weather-call-icon-animated" aria-hidden="true"><AnimatedWeatherIcon kind={kind} live={live} /></span>
           <div>
-            <div className="section-eyebrow">{weatherCall ? 'Weather call' : 'Conditions at application'}</div>
+            <div className="section-eyebrow">{effectiveWeatherCall ? 'Weather call' : applicationMade ? 'Conditions at application' : 'Conditions at visit'}</div>
             <div className="weather-call-icon-label">{label}</div>
           </div>
         </div>
