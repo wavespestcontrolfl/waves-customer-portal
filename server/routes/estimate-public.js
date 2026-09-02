@@ -60,7 +60,7 @@ const {
   markLinkedLeadEstimateViewed,
 } = require('../services/lead-estimate-link');
 const { buildEstimateMembershipContext, publicMembershipView } = require('../services/estimate-membership-context');
-const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
+const { isActivePlanCustomer, isMembershipCustomerRow } = require('../services/waveguard-existing-services');
 const {
   resolveDepositPolicyForEstimate,
   linkedScheduledServiceId,
@@ -14469,6 +14469,18 @@ function optOutPrepayRate(result, estData) {
   } catch (_) { return null; }
 }
 
+// Whether the pay-in-full option is actually OFFERED on a mix — the same two
+// gates the accept path enforces: the service-mix predicate (members, termite
+// bond, seasonal mosquito) AND exactly one recurring unit, the converter's
+// ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED guard that /deposit-intent mirrors.
+function optOutPrepayOffered(result, estData) {
+  try {
+    const data = { ...(estData || {}), result };
+    return annualPrepayEligibleForEstimateData(data)
+      && require('../services/estimate-converter').annualPrepayRecurringUnitCount(data) === 1;
+  } catch (_) { return false; }
+}
+
 // Before-state resolution for the opt-out impact check. Engine-backed
 // estimates can store their original pricing ONLY in the raw engineResult (no
 // mapped result row), and a null before-state would blind the bundled-charge
@@ -14579,15 +14591,28 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
     });
   }
 
+  // The discount RATE alone is not the offer: annual prepay supports exactly
+  // one recurring unit, so a solo pest line that gains a second recurring
+  // line moves from 0% to 5% on paper while the option itself disappears
+  // (stamped ineligible on the page, 422 at the converter). A confirmation
+  // that announced the 5% would promise a discount the customer can never
+  // take (GH codex r9 P1). Disclose off post-change ELIGIBILITY; a rate move
+  // is only worth saying while the option stays on the table.
+  const beforePrepay = optOutPrepayOffered(beforeResult, beforeData);
+  const afterPrepay = optOutPrepayOffered(afterResult, afterData);
   const beforeRate = optOutPrepayRate(beforeResult, beforeData);
   const afterRate = optOutPrepayRate(afterResult, afterData);
-  if (beforeRate != null && afterRate != null && afterRate !== beforeRate
+  if (beforePrepay && !afterPrepay) {
+    disclosures.push({
+      code: 'annual_prepay_unavailable',
+      message: 'The pay-in-full-for-the-year option is only offered on single-service plans, so it no longer applies.',
+    });
+  } else if (beforePrepay && afterPrepay
+    && beforeRate != null && afterRate != null && afterRate !== beforeRate
     && (restoring ? afterRate > beforeRate : afterRate < beforeRate)) {
     disclosures.push({
       code: 'annual_prepay_rate',
-      message: afterRate > 0
-        ? `The pay-in-full discount changes from ${Math.round(beforeRate * 100)}% to ${Math.round(afterRate * 100)}%.`
-        : 'The 5% pay-in-full-for-the-year discount does not apply to a single-service plan.',
+      message: `The pay-in-full discount changes from ${Math.round(beforeRate * 100)}% to ${Math.round(afterRate * 100)}%.`,
     });
   }
 
@@ -15124,7 +15149,24 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // failed insert rolls the whole write back; the customer retries against
     // unchanged state.
     let updateCount = 0;
+    let memberActivatedMidWrite = false;
     await db.transaction(async (trx) => {
+      // Member exclusion is re-verified INSIDE the write, on a LOCKED customer
+      // row. The strict live check above ran before this transaction, and a
+      // plan activated in the gap would still commit new-customer terms onto
+      // a member plan: the CAS below guards the estimate row only, and a
+      // membership change never touches estimates.updated_at (GH codex r9
+      // P1). FOR UPDATE serializes against the activation write; a customer
+      // who is a member NOW is refused with the same 409 the pre-check uses.
+      // Customer-driven line additions only — a staff compensation restore
+      // returns the estimate to the shape it was sent in.
+      if (actor === 'customer' && mode !== 'remove' && estimate.customer_id) {
+        const customerRow = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
+        if (customerRow && customerRow.active !== false && isMembershipCustomerRow(customerRow)) {
+          memberActivatedMidWrite = true;
+          return;
+        }
+      }
       updateCount = await trx('estimates')
         .where({ id: estimate.id })
         // The staff REVERT of a send-time park runs after the pre-delivery
@@ -15190,6 +15232,9 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         metadata: JSON.stringify({ serviceKey, label, mode, actor, previous, next }),
       });
     });
+    if (memberActivatedMidWrite) {
+      return { status: 409, body: ({ error: 'reprice_unavailable' }) };
+    }
     if (!updateCount) {
       return { status: 409, body: ({ error: 'Estimate is no longer active' }) };
     }

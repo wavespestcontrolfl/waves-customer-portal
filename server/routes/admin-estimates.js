@@ -934,7 +934,7 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
       }
       const pendingKey = markerKey || structuralPending;
       if (pendingKey) {
-        const restored = await revertLeadServiceForSend(estimate.id, pendingKey);
+        const restored = await revertLeadServiceForSend(estimate.id, pendingKey, marker?.parkId || parkedEvent?.parkId || null);
         if (!restored) {
           const abort = new Error('This estimate is waiting on a review: an earlier undelivered send left an add-on offer unrestored. Nothing was sent.');
           abort.statusCode = 409;
@@ -1019,12 +1019,17 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
     // a partial mix — neither the full bundle nor the single-service quote
     // (pre-push codex P0). Those go out as the full bundle, as today.
     if (recurringKeys.length !== 2) return untouched;
-    // Lead: first selected recurring token in the estimator's own order.
+    // Lead: first selected recurring token in the estimator's own order —
+    // the ONLY lead provenance. v1 estimator shapes (engineInputs, no
+    // engineRequest) carry no selection order, and the renderer's section
+    // order is not a substitute: the legacy mapper lists Lawn before Pest,
+    // so falling back to it sent a pest-led Pest + Lawn quote as Lawn-only
+    // (GH codex r9 P1). No provable lead = the full bundle goes out.
     const tokenToKey = Object.fromEntries(Object.entries(OptOut.SERVICE_OPT_OUT_KEYS)
       .flatMap(([key, spec]) => spec.selected.map((t) => [t, key])));
     const selectedOrder = (Array.isArray(estData.engineRequest?.selectedServices) ? estData.engineRequest.selectedServices : [])
       .map((t) => tokenToKey[String(t).toUpperCase()]).filter(Boolean);
-    const leadKey = [...selectedOrder, ...recurringKeys].find((k) => recurringKeys.includes(k));
+    const leadKey = selectedOrder.find((k) => recurringKeys.includes(k));
     if (!leadKey) return untouched;
     const toPark = recurringKeys.filter((k) => k !== leadKey && removable.has(k));
     if (toPark.length !== 1) return untouched;
@@ -1155,7 +1160,7 @@ async function stampLeadHandoffWitness(estimate, options) {
 // Compensation for a send that delivered on NO channel: the parked line is
 // restored through the same rail (actor 'staff', dry run → commit), against
 // the row as it is now. Runs after the delivery claim is released.
-async function revertLeadServiceForSend(estimateId, serviceKey) {
+async function revertLeadServiceForSend(estimateId, serviceKey, parkId = null) {
   try {
     const row = await db('estimates').where({ id: estimateId }).first();
     if (!row || row.archived_at || row.price_locked_at) return false;
@@ -1166,10 +1171,22 @@ async function revertLeadServiceForSend(estimateId, serviceKey) {
     let parsed = {};
     try { parsed = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {}); }
     catch { parsed = {}; }
-    const { currentlyOptedOutKeys } = require('../services/estimate-service-opt-out');
+    const { currentlyOptedOutKeys, staffOfferedEvents } = require('../services/estimate-service-opt-out');
     if (!currentlyOptedOutKeys(parsed).includes(serviceKey)) {
       logger.info(`[admin-estimates] lead-service revert: ${serviceKey} already on estimate ${estimateId}; nothing to restore`);
       return true;
+    }
+    // Bound to the park it compensates, on the row as it is NOW: a customer
+    // who restored the offer from the delivered link and then removed the
+    // same service deliberately has superseded the park, and the line being
+    // opted out is no longer ours to restore (GH codex r9 P2 — the deferred
+    // marker retry already binds this way; the immediate path must too).
+    if (parkId) {
+      const latestStaffPark = staffOfferedEvents(parsed).find((e) => e.serviceKey === serviceKey);
+      if (!latestStaffPark || latestStaffPark.parkId !== parkId) {
+        logger.info(`[admin-estimates] lead-service revert: park ${parkId} for ${serviceKey} on estimate ${estimateId} was superseded by a later change; nothing to restore`);
+        return true;
+      }
     }
     const estimatePublic = require('./estimate-public');
     const preview = await estimatePublic.applyServiceMixChange({
@@ -1453,7 +1470,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
         });
       } catch (err) { logger.warn(`[admin-estimates] attempt-stamp clear failed for estimate ${estimate?.id}: ${err.message}`); }
     }
-    const restored = await revertLeadServiceForSend(estimate?.id, leadShapeRef.parkedKey);
+    const restored = await revertLeadServiceForSend(estimate?.id, leadShapeRef.parkedKey, leadShapeRef.parkId || null);
     // A failed compensation is a DURABLE retry state, never a silent
     // reshape: the marker makes the next send retry the restore first (and
     // abort if it still fails), and the office is paged (pre-push codex P1).
@@ -1554,7 +1571,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     } catch (_) { shapedSendable = false; }
     if (!shapedSendable) {
       logger.warn(`[admin-estimates] lead-service send: parked quote not sendable on estimate ${estimate.id}; restoring the full bundle`);
-      const restored = await revertLeadServiceForSend(estimate.id, leadShape.parkedKey);
+      const restored = await revertLeadServiceForSend(estimate.id, leadShape.parkedKey, options.leadShapeRef?.parkId || null);
       if (!restored) {
         const abort = new Error('The single-service quote needs a review and the full bundle could not be restored. Nothing was sent.');
         abort.statusCode = 409;

@@ -100,6 +100,13 @@ test('lead follows the estimator\'s selection order', async () => {
   expect(mockMixCalls[0].body.serviceKey).toBe('pest_control');
 });
 
+test('no selection order (v1 engineInputs shape) → no provable lead → untouched, never the renderer\'s section order (GH codex r9 P1)', async () => {
+  const row = newCustomerRow({ estimate_data: JSON.stringify({ engineInputs: { services: { pest: {}, lawn: {} } } }) });
+  mockRows.queue = [claimedRowFor(row), claimedRowFor(row), parkedRow];
+  expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
+  expect(mockMixCalls).toHaveLength(0);
+});
+
 test('gate off → untouched, no rail call', async () => {
   mockGates.estimateLeadServiceSend = false;
   const row = newCustomerRow();
@@ -186,6 +193,24 @@ test('an undelivered send is compensated: the parked line is restored through th
   ]);
   // Deep copies of the row (GH codex r3 P1), never the row object itself.
   for (const call of mockMixCalls) { expect(call.estimate).toEqual(parkedRowWithEvent); expect(call.estimate).not.toBe(parkedRowWithEvent); }
+});
+
+test('immediate compensation is bound to its park: a customer who restored the offer and then removed the service is not overwritten (GH codex r9 P2)', async () => {
+  const superseded = { ...parkedRow, estimate_data: JSON.stringify({ serviceOptOut: { events: [
+    { serviceKey: 'lawn_care', included: false, actor: 'staff', parkId: 'p1', at: 't1' },
+    { serviceKey: 'lawn_care', included: true, actor: 'customer', at: 't2' },
+    { serviceKey: 'lawn_care', included: false, actor: 'customer', at: 't3' },
+  ] } }) };
+  mockRows.queue = [superseded];
+  expect(await revertLeadServiceForSend('est-1', 'lawn_care', 'p1')).toBe(true);
+  expect(mockMixCalls).toHaveLength(0);
+  // The park still standing under its own id is restored as before.
+  const standing = { ...parkedRow, estimate_data: JSON.stringify({ serviceOptOut: { events: [
+    { serviceKey: 'lawn_care', included: false, actor: 'staff', parkId: 'p1', at: 't1' },
+  ] } }) };
+  mockRows.queue = [standing];
+  expect(await revertLeadServiceForSend('est-1', 'lawn_care', 'p1')).toBe(true);
+  expect(mockMixCalls.map((c) => c.body.included)).toEqual([true, true]);
 });
 
 test('revert is idempotent: a line already back on the estimate is successful compensation with no rail call (pre-push codex P1)', async () => {

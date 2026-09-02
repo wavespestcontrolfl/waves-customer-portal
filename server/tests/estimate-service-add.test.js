@@ -162,6 +162,26 @@ describe('optOutImpact in add mode', () => {
   const mk = (tier, services) => ({ recurring: { waveGuardTier: tier, services } });
   const pest = (pa) => ({ service: 'pest_control', name: 'Pest Control', annualAfterDiscount: pa * 4, visitsPerYear: 4 });
   const mosquito = (pa) => ({ service: 'mosquito', name: 'Mosquito', annualAfterDiscount: pa * 12, visitsPerYear: 12 });
+  const lawn = (pa) => ({ service: 'lawn_care', name: 'Lawn Care', frequency: 'bimonthly', annualAfterDiscount: pa * 6, visitsPerYear: 6 });
+
+  it('never promises the pay-in-full discount on a mix that cannot prepay: solo → two recurring lines discloses the option leaving, not a 0% → 5% rate (GH codex r9 P1)', () => {
+    const impact = optOutImpact({
+      beforeResult: mk('Bronze', [pest(100)]),
+      afterResult: mk('Silver', [pest(95), lawn(60)]),
+      beforeData: {}, afterData: {}, label: 'Lawn Care', mode: 'add',
+    });
+    const codes = impact.disclosures.map((d) => d.code);
+    expect(codes).toContain('annual_prepay_unavailable');
+    expect(codes).not.toContain('annual_prepay_rate');
+    // The reverse move (two lines → solo) has no prepay to lose: the option was
+    // never offered on the two-unit mix, so nothing is disclosed either way.
+    const back = optOutImpact({
+      beforeResult: mk('Silver', [pest(95), lawn(60)]),
+      afterResult: mk('Bronze', [pest(100)]),
+      beforeData: {}, afterData: {}, label: 'Lawn Care', mode: 'remove',
+    });
+    expect(back.disclosures.map((d) => d.code)).toEqual(expect.not.arrayContaining(['annual_prepay_unavailable', 'annual_prepay_rate']));
+  });
 
   it('words a tier move as "Adding X" (not "back") and prices the new line', () => {
     const impact = optOutImpact({
