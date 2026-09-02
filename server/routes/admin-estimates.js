@@ -284,6 +284,19 @@ function sendRequiresServerPricingFor(estimate = {}) {
 }
 const SEND_CLAIM_PRICING_AUTHORITY_SQL = "COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'";
 
+// Automation never publishes a price the engine did not verify — gate or no
+// gate (AGENTS.md estimator-engine authority; pre-push codex P0). The lead
+// auto-send lane claims its anchor with the SQL predicate above; this is the
+// same verdict for every grouped SIBLING that lane would publish, applied in
+// the group preflight when the caller declares options.autoSend.
+function assertAutoSendPricingAuthority(row = {}) {
+  if (String(row.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return;
+  const err = new Error('This estimate\'s price was saved from the browser preview because the pricing engine could not verify it — it is never auto-sent. Re-save it from the estimate tool and send it by hand.');
+  err.statusCode = 422;
+  err.code = 'CLIENT_FALLBACK_PRICING';
+  throw err;
+}
+
 function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } = {}) {
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
@@ -1304,7 +1317,7 @@ async function revertLeadServiceForSend(estimateId, serviceKey, parkId = null) {
 // row a concurrent send already claimed is never stolen or released by this
 // one) — two concurrent sends of different group members serialize, the loser
 // aborts pre-delivery. Returns the claimed rows for later publish/release.
-async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false } = {}) {
+async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false, autoSend = false } = {}) {
   // Mid-send check, sibling enumeration, and the claims run in ONE
   // transaction under a group-scoped advisory xact lock (codex #3244 r8):
   // without it, two overlapping immediate sends of different members could
@@ -1384,6 +1397,10 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       assertEstimateSendable(sibling, {
         engineReviewAcknowledged: ['scheduled', 'sending'].includes(String(sibling.status || '')),
       });
+      // Automation policy (pre-push codex P0): the gate-dependent check
+      // above lets a CLIENT_FALLBACK sibling through while the gate is off;
+      // an auto-send never publishes one.
+      if (autoSend) assertAutoSendPricingAuthority(sibling);
     } catch (e) {
       const err = new Error(`Grouped property "${sibling.address || sibling.id}" is not sendable: ${e.message}`);
       err.statusCode = e.statusCode || 422;
@@ -1404,6 +1421,12 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       const won = await trx('estimates')
         .where({ id: sibling.id, status: sibling.status, updated_at: sibling.updated_at })
         .whereNull('price_locked_at')
+        // Same atomic re-assertion as the anchor claims: the preflight above
+        // read the sibling before this lock; a fallback stamp landing in
+        // between loses the race here.
+        .modify((q) => {
+          if (autoSend || sendRequiresServerPricingFor(sibling)) q.whereRaw(SEND_CLAIM_PRICING_AUTHORITY_SQL);
+        })
         .update({ status: 'sending', updated_at: trx.fn.now() });
       if (won) claimed.push(sibling);
     }
@@ -1680,6 +1703,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   if (estimate.estimate_group_id) {
     const groupClaim = await claimGroupSiblingsForPublish(estimate, {
       callerPreClaimed: options.callerPreClaimed === true,
+      autoSend: options.autoSend === true,
     });
     claimedGroupSiblings = groupClaim.claimed;
     // Signal claim ownership to the caller AFTER the claim transaction
@@ -4212,6 +4236,7 @@ router._internals = {
   assertEstimateSendable,
   sendRequiresServerPricingFor,
   SEND_CLAIM_PRICING_AUTHORITY_SQL,
+  assertAutoSendPricingAuthority,
   notifyPricingFallbackAfterCommit,
   assertEstimateManagerApprovalResolved,
   leadEstimateAutomationSummary,

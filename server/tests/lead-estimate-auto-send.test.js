@@ -365,3 +365,31 @@ describe('lead estimate auto-send policy', () => {
     });
   });
 });
+
+describe('claimLeadEstimateAutoSend — the claim itself re-asserts engine-authoritative pricing', () => {
+  const { claimLeadEstimateAutoSend } = require('../services/lead-estimate-auto-send');
+
+  function recordingDatabase() {
+    const rawGuards = [];
+    let patch = null;
+    const chain = {
+      where: () => chain,
+      whereNull: () => chain,
+      whereRaw: (sql) => { rawGuards.push(String(sql)); return chain; },
+      update: (p) => { patch = p; return chain; },
+      returning: async () => [{ id: 'estimate-1', status: 'sending', ...(patch || {}) }],
+    };
+    const database = () => chain;
+    database.fn = { now: () => 'NOW()' };
+    return { database, rawGuards, patchRef: () => patch };
+  }
+
+  test('the UPDATE excludes CLIENT_FALLBACK rows atomically, regardless of the send gate', async () => {
+    const { database, rawGuards } = recordingDatabase();
+    const claimed = await claimLeadEstimateAutoSend(database, generatedEstimate(), { now: new Date('2026-05-26T12:10:00.000Z') });
+    expect(claimed?.status).toBe('sending');
+    expect(rawGuards).toEqual(expect.arrayContaining([
+      expect.stringContaining("COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'"),
+    ]));
+  });
+});

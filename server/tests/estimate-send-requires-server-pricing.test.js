@@ -71,6 +71,7 @@ const {
   assertEstimateSendable,
   sendRequiresServerPricingFor,
   SEND_CLAIM_PRICING_AUTHORITY_SQL,
+  assertAutoSendPricingAuthority,
   notifyPricingFallbackAfterCommit,
 } = adminEstimatesRouter._internals;
 const { createOrReuseAdminEstimate, reviseAdminEstimate } = require('../services/admin-estimate-persistence');
@@ -231,5 +232,24 @@ describe('post-commit pricing-fallback bell (SEC-002 / pre-push codex P1)', () =
     notifyPricingFallbackAfterCommit({ id: 'x' }, 'NO_INPUTS');
     notifyPricingFallbackAfterCommit({ id: 'x' }, null);
     expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+});
+
+describe('assertAutoSendPricingAuthority — automation never publishes a fallback price, gate or no gate', () => {
+  it('refuses a CLIENT_FALLBACK row even with the gate off (422 + code)', () => {
+    mockGateState.sendRequiresServerPricing = false;
+    let caught = null;
+    try { assertAutoSendPricingAuthority(fallbackDraft()); } catch (e) { caught = e; }
+    expect(caught?.statusCode).toBe(422);
+    expect(caught?.code).toBe('CLIENT_FALLBACK_PRICING');
+    expect(caught?.message).toMatch(/never auto-sent/i);
+    expect(() => assertAutoSendPricingAuthority({ pricing_authority: 'client_fallback' })).toThrow();
+  });
+
+  it('lets engine-priced, locked and unstamped rows through', () => {
+    expect(() => assertAutoSendPricingAuthority({ pricing_authority: 'SERVER' })).not.toThrow();
+    expect(() => assertAutoSendPricingAuthority({ pricing_authority: 'LOCKED' })).not.toThrow();
+    expect(() => assertAutoSendPricingAuthority({ pricing_authority: null })).not.toThrow();
+    expect(() => assertAutoSendPricingAuthority({})).not.toThrow();
   });
 });

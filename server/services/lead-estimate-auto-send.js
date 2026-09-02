@@ -443,6 +443,11 @@ async function claimLeadEstimateAutoSend(database, estimate, { now = new Date(),
         AND estimate_data->'automation'->'autoSend'->>'blocked_at' IS NULL
       )
     )`)
+    // Engine-authoritative pricing re-asserted ON the claim, gate or no gate
+    // (pre-push codex P0): eligibility rejected CLIENT_FALLBACK on a
+    // pre-read, and a revision stamping it between that read and this
+    // UPDATE must lose the race — an unverified price is never auto-sent.
+    .whereRaw("COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'")
     .update({
       status: 'sending',
       send_method: sendMethod,
@@ -564,6 +569,10 @@ async function processLeadEstimateAutoSendBatch({
         now: () => now,
         // This path claims the row before calling (codex #3248 r6 contract).
         callerPreClaimed: true,
+        // Automation policy for the group preflight: every published
+        // sibling must carry engine-authoritative pricing regardless of
+        // GATE_SEND_REQUIRES_SERVER_PRICING (pre-push codex P0).
+        autoSend: true,
       });
       if (sendResult.sent) {
         const sentEstimate = await database('estimates').where({ id: claimed.id }).first();
