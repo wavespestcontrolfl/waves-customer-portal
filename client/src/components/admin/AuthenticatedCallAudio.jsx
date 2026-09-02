@@ -18,9 +18,13 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
  *
  * Optional playback hooks for a synced transcript:
  * - `onTimeUpdate(seconds)` fires on the audio element's timeupdate.
- * - the forwarded ref exposes `seekTo(seconds)`. Seeking before the
- *   recording is loaded triggers the same user-initiated load (the caller's
- *   click IS the intent) and applies the seek once the audio is ready.
+ * - the forwarded ref exposes `seekTo(seconds)`. On a loaded recording it
+ *   seeks and plays (inside the click's user activation). Before the
+ *   recording is loaded it triggers the same user-initiated load (the
+ *   caller's click IS the intent) and POSITIONS the playhead once the audio
+ *   mounts — it does not try to play then: that would run after the fetch,
+ *   outside any user gesture, and browsers reject audible autoplay there.
+ *   The controls are visible at the seeked position; one press plays.
  */
 const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
   {
@@ -57,12 +61,14 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
     setRequest({ id, number: requestNumberRef.current });
   }, [current.status, id]);
 
-  const applySeek = useCallback((seconds) => {
+  const applySeek = useCallback((seconds, { play } = { play: true }) => {
     const el = audioRef.current;
     if (!el) return false;
     el.currentTime = Math.max(0, seconds);
-    const played = el.play?.();
-    if (played && typeof played.catch === "function") played.catch(() => {});
+    if (play) {
+      const played = el.play?.();
+      if (played && typeof played.catch === "function") played.catch(() => {});
+    }
     return true;
   }, []);
 
@@ -76,12 +82,14 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
     },
   }), [applySeek, current.status, loadRecording]);
 
-  // A seek requested before the audio existed is applied once it mounts.
+  // A seek requested before the audio existed positions the playhead once
+  // it mounts. No play() here — this runs after the fetch, outside the
+  // click's user activation, where autoplay is commonly rejected.
   useEffect(() => {
     if (current.status !== "ready" || pendingSeekRef.current == null) return;
     const target = pendingSeekRef.current;
     pendingSeekRef.current = null;
-    applySeek(target);
+    applySeek(target, { play: false });
   }, [applySeek, current.status]);
 
   useEffect(() => {

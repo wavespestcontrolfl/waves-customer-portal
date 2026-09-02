@@ -108,7 +108,7 @@ describe("AuthenticatedCallAudio", () => {
 });
 
 describe("AuthenticatedCallAudio playback handle", () => {
-  it("seekTo before load triggers the authenticated load, then seeks and plays; timeupdate reports seconds", async () => {
+  it("seekTo before load triggers the authenticated load and positions (no autoplay); a loaded seek plays; timeupdate reports seconds", async () => {
     localStorage.setItem("waves_admin_token", "staff-jwt");
     const blob = new Blob(["audio-bytes"], { type: "audio/mpeg" });
     fetch.mockResolvedValue({ ok: true, status: 200, blob: vi.fn().mockResolvedValue(blob) });
@@ -123,13 +123,16 @@ describe("AuthenticatedCallAudio playback handle", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Loading recording");
 
     const player = await screen.findByLabelText("Call recording");
-    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(player.currentTime).toBe(12.5));
+    // The deferred seek runs after the fetch, outside the click's user
+    // activation — it must not claim autoplay there.
+    expect(play).not.toHaveBeenCalled();
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(player.currentTime).toBe(12.5);
 
     act(() => ref.current.seekTo(3));
     expect(player.currentTime).toBe(3);
-    expect(play).toHaveBeenCalledTimes(2);
+    expect(play).toHaveBeenCalledTimes(1);
 
     player.currentTime = 7;
     fireEvent.timeUpdate(player);
