@@ -1004,6 +1004,17 @@ function sanitizeClientIdentityFields(obj) {
   return obj;
 }
 
+// A linked draft that must never be reused by the generic create: the
+// COMMERCIAL category (stamped only by the proposal editor) or ANY stored
+// proposal object — enabled, disabled or scaffold alike.
+function linkedDraftCarriesProposal(row = {}) {
+  if (String(row.category || '').toUpperCase() === 'COMMERCIAL') return true;
+  let data = row.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  const proposal = data && typeof data === 'object' ? data.proposal : null;
+  return !!(proposal && typeof proposal === 'object' && !Array.isArray(proposal));
+}
+
 // estimate_data.proposal is SERVER-OWNED. PUT /:id/proposal is the only
 // authoring path (it validates the proposal and stamps category=COMMERCIAL
 // in the same UPDATE) and the commercial-proposal lane seeds scaffolds; the
@@ -2068,7 +2079,11 @@ async function createOrReuseAdminEstimate({
           // payload would strip the proposal and clobber the totals while
           // the COMMERCIAL category stayed behind. Same refusal as the
           // generic revise (estimateReviseBlock).
-          if (require('./estimate-proposal').isCommercialProposalData(existingEstimate.estimate_data)) {
+          // Guarded on the COMMERCIAL category OR any stored proposal object —
+          // not only the editor-routing flags (enabled/scaffold): an authored
+          // proposal later saved DISABLED carries neither, and losing it is
+          // data loss all the same (pre-push codex P0).
+          if (linkedDraftCarriesProposal(existingEstimate)) {
             throw errorWithStatus('This lead already has a commercial proposal draft — edit it with the Commercial proposal editor instead of saving a new estimate over it.', 409);
           }
           const nextEstimate = { ...existingEstimate, ...writeFields, expires_at: expiresAt };
@@ -2177,15 +2192,23 @@ function assertNoFallbackRevisionOfLiveLink(row, writeFields) {
 // link's. Runs on the LOCKED row inside the write transaction; the schedule
 // route locks the sibling rows FOR UPDATE inside its own scheduling
 // transaction, so the two serialize and this read is never stale.
-// The groups a fallback revision under the gate must be judged against:
-// the row's CURRENT group and the revision's DESTINATION group (GH codex P2
-// r7 — a fallback move into a group whose anchor is scheduled would be
-// refused by the cron's group preflight later and fail that anchor).
+// The groups a FALLBACK revision must be judged against: the row's CURRENT
+// group and the revision's DESTINATION group (GH codex P2 r7 — a fallback
+// move into a group whose anchor is scheduled would be refused by the
+// cron's group preflight later and fail that anchor). Gate-independent:
+// the mid-send verdict below applies with the rollout gate off too.
 // Sorted, so every path takes the groups' advisory locks in one order.
-function scheduledGroupGuardGroupIds(row, writeFields) {
+function fallbackRevisionGroupIds(row, writeFields) {
   if (String(writeFields?.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return [];
-  if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return [];
   return [...new Set([row?.estimate_group_id, writeFields?.estimate_group_id].filter(Boolean).map(String))].sort();
+}
+
+// The scheduled-group verdict applies only while the rollout gate is on —
+// with it off, a scheduled group's members deliver fallback pricing by design
+// (shadow mode) and the cron's claim refuses nothing.
+function scheduledGroupGuardGroupIds(row, writeFields) {
+  if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return [];
+  return fallbackRevisionGroupIds(row, writeFields);
 }
 
 // LOCK ORDER (pre-push codex P1): group advisory xact lock(s) FIRST, then
@@ -2196,7 +2219,7 @@ function scheduledGroupGuardGroupIds(row, writeFields) {
 // deadlocking (row held + waiting for the group lock vs group lock held +
 // waiting for the row).
 async function lockScheduledGroupGuardGroups(trx, row, writeFields) {
-  const groupIds = scheduledGroupGuardGroupIds(row, writeFields);
+  const groupIds = fallbackRevisionGroupIds(row, writeFields);
   for (const groupId of groupIds) {
     await trx.raw(
       'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -2206,11 +2229,38 @@ async function lockScheduledGroupGuardGroups(trx, row, writeFields) {
   return groupIds;
 }
 
+// A grouped send in flight (any member 'sending' — manual, cron or lead
+// auto-send) holds the group's viewable siblings for the customer's link
+// through the provider handoff, and the auto-send lane publishes only
+// engine-verified prices GATE OR NO GATE (AGENTS.md estimator-engine
+// authority). A fallback revision of any member — or a fallback move into
+// the group — during that window would hand over an unverified sibling
+// price (pre-push codex P0), so it is refused, gate-independent, under the
+// group lock: the send's claim (group lock, then anchor 'sending') either
+// committed first (refused here) or runs after this revision commits and
+// judges the new stamp in its own preflight.
+async function assertNoFallbackRevisionDuringGroupSend(trx, row, writeFields) {
+  const groupIds = fallbackRevisionGroupIds(row, writeFields);
+  for (const groupId of groupIds) {
+    const sendingMember = await trx('estimates')
+      .where({ estimate_group_id: groupId, status: 'sending' })
+      .whereNot({ id: row?.id })
+      .whereNull('archived_at')
+      .first('id');
+    if (!sendingMember) continue;
+    throw errorWithStatus(
+      'The pricing engine could not verify this revision and this multi-property group is being sent right now — nothing was saved. Wait a moment and try again.',
+      409,
+    );
+  }
+}
+
 // The verdict itself never locks: the write path holds the group locks from
 // lockScheduledGroupGuardGroups (taken before the row lock), and the dryRun
 // preflight reads unlocked, best-effort — the locked recheck in the write is
 // authoritative.
 async function assertNoFallbackRevisionInScheduledGroup(trx, row, writeFields) {
+  await assertNoFallbackRevisionDuringGroupSend(trx, row, writeFields);
   const groupIds = scheduledGroupGuardGroupIds(row, writeFields);
   for (const groupId of groupIds) {
     const scheduledMember = await trx('estimates')
@@ -2707,7 +2757,7 @@ async function reviseAdminEstimate({
     // The locked row's group must be one we already hold the lock for — a
     // concurrent group change between the pre-read and the row lock would
     // otherwise need an out-of-order lock; refuse and let the operator retry.
-    if (scheduledGroupGuardGroupIds(lockedPrior, writeFields).some((groupId) => !lockedGuardGroups.includes(groupId))) {
+    if (fallbackRevisionGroupIds(lockedPrior, writeFields).some((groupId) => !lockedGuardGroups.includes(groupId))) {
       throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
     }
     await assertNoFallbackRevisionInScheduledGroup(trx, lockedPrior, writeFields);
@@ -2832,3 +2882,6 @@ module.exports.stripClientProposal = stripClientProposal;
 module.exports.assertNoFallbackRevisionInScheduledGroup = assertNoFallbackRevisionInScheduledGroup;
 module.exports.lockScheduledGroupGuardGroups = lockScheduledGroupGuardGroups;
 module.exports.scheduledGroupGuardGroupIds = scheduledGroupGuardGroupIds;
+module.exports.assertNoFallbackRevisionDuringGroupSend = assertNoFallbackRevisionDuringGroupSend;
+module.exports.fallbackRevisionGroupIds = fallbackRevisionGroupIds;
+module.exports.linkedDraftCarriesProposal = linkedDraftCarriesProposal;

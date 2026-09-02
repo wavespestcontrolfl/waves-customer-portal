@@ -1227,3 +1227,38 @@ describe('createOrReuseAdminEstimate — a linked COMMERCIAL PROPOSAL draft is n
     expect(updates.filter((u) => u.table === 'estimates')).toEqual([]);
   });
 });
+
+describe('createOrReuseAdminEstimate — a DISABLED authored proposal draft is protected too (pre-push codex P0)', () => {
+  const { linkedDraftCarriesProposal } = require('../services/admin-estimate-persistence');
+
+  test('the guard keys on the COMMERCIAL category or any stored proposal object, not only enabled/scaffold', () => {
+    expect(linkedDraftCarriesProposal({ category: 'COMMERCIAL', estimate_data: '{}' })).toBe(true);
+    expect(linkedDraftCarriesProposal({ category: 'RESIDENTIAL', estimate_data: JSON.stringify({ proposal: { enabled: false, buildings: [] } }) })).toBe(true);
+    expect(linkedDraftCarriesProposal({ category: 'RESIDENTIAL', estimate_data: { proposal: { scaffold: true } } })).toBe(true);
+    expect(linkedDraftCarriesProposal({ category: 'RESIDENTIAL', estimate_data: '{}' })).toBe(false);
+    expect(linkedDraftCarriesProposal({ category: null, estimate_data: 'not json' })).toBe(false);
+  });
+
+  test('a linked draft whose authored proposal was saved disabled is refused (409) instead of overwritten', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, updates, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101', estimate_id: 'estimate-proposal' },
+      estimate: {
+        id: 'estimate-proposal',
+        status: 'draft',
+        token: 'existing-token',
+        category: 'COMMERCIAL',
+        customer_phone: '(941) 555-0101',
+        estimate_data: JSON.stringify({ proposal: { enabled: false, buildings: [{ name: 'Tower A', lineItems: [{ description: 'Interior', amount: 240 }] }] } }),
+      },
+    });
+    await expect(createOrReuseAdminEstimate({
+      database,
+      body: { ...baseBody, address: '456 Revised St', monthlyTotal: 145 },
+      technicianId: 'tech-1',
+      now,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(inserts).toEqual([]);
+    expect(updates.filter((u) => u.table === 'estimates')).toEqual([]);
+  });
+});

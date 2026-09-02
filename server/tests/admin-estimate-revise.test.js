@@ -47,6 +47,8 @@ function makeReviseDatabase({
   // What the scheduled-group guard's sibling lookup returns (a scheduled
   // member of this row's group), if anything.
   scheduledGroupMember = null,
+  // What the mid-send guard's lookup returns (a member currently 'sending').
+  sendingGroupMember = null,
 }) {
   const updates = [];
   const rawGuards = [];
@@ -117,7 +119,7 @@ function makeReviseDatabase({
       // predicate without a real query builder.
       where: (clause) => {
         if (typeof clause === 'function') groupedWheres.push(clause);
-        if (clause && typeof clause === 'object' && 'estimate_group_id' in clause) chain.__groupQuery = true;
+        if (clause && typeof clause === 'object' && 'estimate_group_id' in clause) { chain.__groupQuery = true; chain.__groupStatus = clause.status; }
         return chain;
       },
       whereNot: () => chain,
@@ -129,7 +131,7 @@ function makeReviseDatabase({
       },
       forUpdate: () => { chain.__locked = true; return chain; },
       first: async () => {
-        if (chain.__groupQuery) return scheduledGroupMember;
+        if (chain.__groupQuery) return chain.__groupStatus === 'sending' ? sendingGroupMember : scheduledGroupMember;
         return chain.__locked && lockedEstimate ? lockedEstimate : estimate;
       },
       update: (patch) => {
@@ -1037,13 +1039,17 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
     expect(database.raw).not.toHaveBeenCalled();
   });
 
-  function fakeTrx({ scheduledGroups = [] } = {}) {
+  function fakeTrx({ scheduledGroups = [], sendingGroups = [] } = {}) {
     const queried = [];
     const chain = {
-      where: (c) => { chain.__group = c?.estimate_group_id; return chain; },
+      where: (c) => { chain.__group = c?.estimate_group_id; chain.__status = c?.status; return chain; },
       whereNot: () => chain,
       whereNull: () => chain,
-      first: async () => { queried.push(chain.__group); return scheduledGroups.includes(chain.__group) ? { id: 'est-anchor' } : null; },
+      first: async () => {
+        queried.push(`${chain.__status}:${chain.__group}`);
+        if (chain.__status === 'sending') return sendingGroups.includes(chain.__group) ? { id: 'est-anchor' } : null;
+        return scheduledGroups.includes(chain.__group) ? { id: 'est-anchor' } : null;
+      },
     };
     const trx = () => chain;
     trx.raw = jest.fn(async () => ({}));
@@ -1057,11 +1063,43 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
       { id: 'est-1', estimate_group_id: null },
       { pricing_authority: 'CLIENT_FALLBACK', estimate_group_id: 'grp-dest' },
     )).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/group it would join is scheduled/i) });
-    expect(queried).toEqual(['grp-dest']);
+    expect(queried).toEqual(['sending:grp-dest', 'scheduled:grp-dest']);
     expect(trx.raw).not.toHaveBeenCalled();
   });
 
-  test('lockScheduledGroupGuardGroups takes the advisory locks in SORTED order, only for a gated fallback save', async () => {
+  test('a fallback revision while any group member is SENDING is refused — gate OFF too (pre-push codex P0: grouped auto-send exposure)', async () => {
+    mockGateState.sendRequiresServerPricing = false;
+    const { assertNoFallbackRevisionDuringGroupSend } = require('../services/admin-estimate-persistence');
+    const { trx, queried } = fakeTrx({ sendingGroups: ['grp-live'] });
+    await expect(assertNoFallbackRevisionDuringGroupSend(
+      trx,
+      { id: 'est-1', estimate_group_id: 'grp-live' },
+      { pricing_authority: 'CLIENT_FALLBACK' },
+    )).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/being sent right now/i) });
+    expect(queried).toEqual(['sending:grp-live']);
+    // The combined verdict runs the mid-send check with the gate off (and
+    // skips the scheduled-group one, which is gate-scoped).
+    const combined = fakeTrx({ sendingGroups: [], scheduledGroups: ['grp-live'] });
+    await expect(assertNoFallbackRevisionInScheduledGroup(combined.trx, { id: 'est-1', estimate_group_id: 'grp-live' }, { pricing_authority: 'CLIENT_FALLBACK' })).resolves.toBeUndefined();
+    expect(combined.queried).toEqual(['sending:grp-live']);
+    // A SERVER revision never queries, gate or no gate.
+    const server = fakeTrx({ sendingGroups: ['grp-live'] });
+    await assertNoFallbackRevisionDuringGroupSend(server.trx, { id: 'est-1', estimate_group_id: 'grp-live' }, { pricing_authority: 'SERVER' });
+    expect(server.queried).toEqual([]);
+  });
+
+  test('through the revise: a fallback save of a grouped draft is refused while a sibling anchor is sending, gate off, nothing written', async () => {
+    mockGateState.sendRequiresServerPricing = false;
+    const { database, updates } = makeReviseDatabase({ estimate: groupedDraft, sendingGroupMember: { id: 'est-anchor' } });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/being sent right now/i) });
+    expect(updates).toHaveLength(0);
+    // The group lock was taken before the row lock even with the gate off.
+    expect(database.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['estimate-group-send', groupedDraft.estimate_group_id]);
+  });
+
+  test('lockScheduledGroupGuardGroups takes the advisory locks in SORTED order for every grouped fallback save (gate-independent)', async () => {
     const { trx } = fakeTrx();
     await expect(lockScheduledGroupGuardGroups(trx, { id: 'est-1', estimate_group_id: 'grp-z' }, { pricing_authority: 'CLIENT_FALLBACK', estimate_group_id: 'grp-a' })).resolves.toEqual(['grp-a', 'grp-z']);
     expect(trx.raw.mock.calls.map((c) => c[1][1])).toEqual(['grp-a', 'grp-z']);
@@ -1069,6 +1107,10 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
     await expect(lockScheduledGroupGuardGroups(server.trx, { id: 'est-1', estimate_group_id: 'grp-z' }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-a' })).resolves.toEqual([]);
     expect(server.trx.raw).not.toHaveBeenCalled();
     expect(scheduledGroupGuardGroupIds({ estimate_group_id: null }, { pricing_authority: 'CLIENT_FALLBACK' })).toEqual([]);
+    mockGateState.sendRequiresServerPricing = false;
+    const gateOff = fakeTrx();
+    await expect(lockScheduledGroupGuardGroups(gateOff.trx, { id: 'est-1', estimate_group_id: 'grp-z' }, { pricing_authority: 'CLIENT_FALLBACK' })).resolves.toEqual(['grp-z']);
+    expect(scheduledGroupGuardGroupIds({ estimate_group_id: 'grp-z' }, { pricing_authority: 'CLIENT_FALLBACK' })).toEqual([]);
   });
 
   test('a move between groups judges BOTH the current and the destination group', async () => {
@@ -1078,7 +1120,7 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
       { id: 'est-1', estimate_group_id: 'grp-old' },
       { pricing_authority: 'CLIENT_FALLBACK', estimate_group_id: 'grp-new' },
     )).resolves.toBeUndefined();
-    expect(queried).toEqual(['grp-new', 'grp-old']);
+    expect(queried).toEqual(['sending:grp-new', 'sending:grp-old', 'scheduled:grp-new', 'scheduled:grp-old']);
     expect(trx.raw).not.toHaveBeenCalled();
     // A SERVER revision, or an ungrouped row going nowhere, never queries.
     const quiet = fakeTrx({ scheduledGroups: ['grp-old'] });
