@@ -270,6 +270,15 @@ function buildTriageItem({
     // call has NO extraction, so nothing downstream (lead/customer/route
     // decision) exists; this card is the only surface it gets.
     extraction_failed_permanent: 'service_unknown',
+    // A second Twilio recording arrived while the row's recording was
+    // load-bearing (a pass was reading it, or the call had finished) — the
+    // office listens and adopts it deliberately (twilio-voice-webhook
+    // parkAdditionalRecording; admin adopt-recording action).
+    additional_recording: 'service_unknown',
+    // The pass expected to mint a customer (named caller, phone, real
+    // prospect) and the insert did not land — same lane as its lead twin,
+    // and this card is the only surface the failure gets.
+    customer_creation_failed: 'customer_field_conflict',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;

@@ -5,9 +5,18 @@ const logger = require('../services/logger');
 const {
   adminAuthenticate,
   requireTechOrAdmin,
+  requireAdmin,
 } = require('../middleware/admin-auth');
 const CallRecordingProcessor = require('../services/call-recording-processor');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function maskSid(sid) {
+  if (!sid) return 'none';
+  const value = String(sid);
+  return value.length <= 8 ? `${value.slice(0, 2)}…` : `${value.slice(0, 2)}…${value.slice(-6)}`;
+}
 
 function rejectQueryString(req, res, next) {
   if (req.originalUrl.includes('?')) {
@@ -177,6 +186,249 @@ router.post('/synopsis/:callSid', async (req, res, next) => {
   try {
     const result = await CallRecordingProcessor.generateSynopsis(req.params.callSid);
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// OPERATOR CORRECTIONS — customer relink, recording adoption (admin-only)
+// ═══════════════════════════════════════════════════════════════════
+
+// PUT /calls/:id/customer — repoint (or unlink) the call's customer. The
+// override is stamped in metadata so a reprocess keeps the human's link
+// instead of re-resolving it from the transcript, and the unified voice
+// message is re-homed so Customer 360 shows the call under the right person.
+router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
+    // An unlink is an explicit JSON null, never a missing field: a body
+    // that merely parses as {} must not stamp a permanent override and
+    // drop the call's timeline entry.
+    if (!req.body || !Object.prototype.hasOwnProperty.call(req.body, 'customer_id')) return res.status(400).json({ error: 'customer_id is required (a UUID to link, or null to unlink)' });
+    const customerId = req.body.customer_id ?? null;
+    if (customerId !== null && !UUID_RE.test(String(customerId))) return res.status(400).json({ error: 'customer_id must be a UUID or null' });
+    const call = await db('call_log').where({ id: req.params.id }).first('id', 'customer_id', 'twilio_call_sid');
+    if (!call) return res.status(404).json({ error: 'Call not found' });
+    if (customerId) {
+      const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id');
+      if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    }
+    const override = {
+      customer_id: customerId,
+      previous_customer_id: call.customer_id || null,
+      by: req.technicianId || null,
+      at: new Date().toISOString(),
+    };
+    // Not while a pass holds the claim: the running pass keeps its own
+    // resolved customer for the leads, contacts and texts it is about to
+    // write, so a mid-pass relink would leave those on the old customer.
+    // The office retries once the pass finishes (a few minutes at most).
+    // The link and the call's own timeline entry (customer_interactions,
+    // keyed on metadata.call_log_id and unique per call) change in ONE
+    // transaction: the row is derived from the call, a reprocess cannot
+    // re-mint it under the new customer while it sits under the old one,
+    // and a relink that commits without it would report success on a
+    // half-applied correction. Any failure rolls both back and surfaces.
+    const moved = await db.transaction(async (trx) => {
+      const relinked = await trx('call_log').where({ id: call.id })
+        .whereRaw("processing_status IS DISTINCT FROM 'processing'")
+        .update({
+          customer_id: customerId,
+          metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_link_override}', ?::jsonb, true)", [JSON.stringify(override)]),
+          updated_at: new Date(),
+        });
+      if (!relinked) return null;
+      const timeline = trx('customer_interactions')
+        .where({ interaction_type: 'call' })
+        .whereRaw("metadata ->> 'call_log_id' = ?", [String(call.id)]);
+      const rows = customerId
+        ? await timeline.update({ customer_id: customerId })
+        : await timeline.del();
+      return { timelineRows: rows };
+    });
+    if (!moved) {
+      return res.status(409).json({ error: 'A pass is still working this call. Change the customer once it finishes.', reason: 'already_processing' });
+    }
+    const timelineMoved = moved.timelineRows;
+    const warnings = [];
+    if (call.twilio_call_sid) {
+      // Best-effort here; the hourly call-log relink sweep re-homes any
+      // linked call whose thread still sits under another customer, so a
+      // failure is reported, not silently swallowed.
+      await require('../services/conversations').syncVoiceMessageForCall(call.twilio_call_sid)
+        .catch((e) => {
+          logger.warn(`[call-recordings] voice message re-home after relink failed for ${maskSid(call.twilio_call_sid)}: ${e.message}`);
+          warnings.push('voice_message_rehome_failed: the hourly relink sweep will retry it');
+        });
+    }
+    logger.info(`[call-recordings] call ${call.id} customer link set by operator (${customerId ? 'linked' : 'unlinked'}; timeline rows moved: ${timelineMoved})`);
+    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, warnings });
+  } catch (err) { next(err); }
+});
+
+// POST /calls/:id/adopt-recording — swap in a recording that arrived after
+// the call had finished processing (parked by the recording-status webhook)
+// and reprocess. The recording being replaced is kept in the parked list.
+router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
+    const wanted = String(req.body?.recording_sid || '');
+    if (!/^RE[0-9a-f]{32}$/i.test(wanted)) return res.status(400).json({ error: 'recording_sid must be a Twilio RecordingSid' });
+    const call = await db('call_log').where({ id: req.params.id }).first('id', 'twilio_call_sid', 'recording_sid', 'recording_url', 'recording_duration_seconds', 'metadata', 'processing_status', 'transcription_metadata');
+    if (!call) return res.status(404).json({ error: 'Call not found' });
+    // A PAN-quarantined call never gets audio re-attached — the webhook
+    // deletes a recording that arrives for one instead of storing it, and
+    // adoption must keep that invariant: a call quarantined AFTER the
+    // recording was parked would otherwise have card audio restored.
+    const panQuarantined = (() => {
+      try {
+        const raw = call.transcription_metadata;
+        const meta = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+        return String(meta?.pan_detected) === 'true';
+      } catch { return false; }
+    })();
+    if (call.processing_status === 'processing') {
+      return res.status(409).json({ error: 'A pass is still working this call. Try again after it finishes.', reason: 'already_processing' });
+    }
+    let meta = {};
+    try { meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {}); } catch { meta = {}; }
+    const parked = Array.isArray(meta.additional_recordings) ? meta.additional_recordings : [];
+    const chosen = parked.find((r) => r && r.recording_sid === wanted);
+    if (!chosen) return res.status(404).json({ error: 'That recording is not parked on this call' });
+    // A quarantined call keeps no audio: the call's CURRENT recording (the
+    // one the card may have been heard on) is the helper's primary, and
+    // the helper sweeps every parked recording — the chosen one included.
+    // Each delete tombstones its entry (URL gone now; delete_pending while
+    // a failed Twilio delete is owed to the recovery sweep), so a swallowed
+    // failure can never leave card audio reachable.
+    const quarantineParked = async () => {
+      const q = await CallRecordingProcessor.quarantineCardRecording(
+        call,
+        { source: 'adopt_recording_post_quarantine' },
+      ).catch((e) => {
+        logger.error(`[call-recordings] quarantine delete failed for call ${call.id}: ${e.message}`);
+        return null;
+      });
+      if (!q) return { deleted: 0, delete_pending: parked.length + (call.recording_sid ? 1 : 0) };
+      const current = call.recording_sid ? (q.twilioDeleted ? { deleted: 1, delete_pending: 0 } : { deleted: 0, delete_pending: 1 }) : { deleted: 0, delete_pending: 0 };
+      return { deleted: current.deleted + (q.parked?.deleted ?? 0), delete_pending: current.delete_pending + (q.parked?.pending ?? 0) };
+    };
+    const quarantinedResponse = (res, outcome, prefix) => res.status(409).json({
+      error: outcome.delete_pending
+        ? `${prefix} Its parked audio is no longer reachable here; a Twilio delete that did not complete is retried by the recovery sweep.`
+        : `${prefix} Its parked audio has been deleted.`,
+      reason: 'pan_quarantined',
+      ...outcome,
+    });
+    if (panQuarantined) {
+      return quarantinedResponse(res, await quarantineParked(), 'This call is PAN-quarantined; recordings are never re-attached.');
+    }
+    const remaining = parked.filter((r) => r.recording_sid !== wanted);
+    if (call.recording_sid) {
+      remaining.push({
+        recording_sid: call.recording_sid,
+        recording_url: call.recording_url,
+        recording_duration_seconds: call.recording_duration_seconds ?? null,
+        received_at: null,
+        parked_because: 'replaced_by_operator',
+      });
+    }
+    const swapped = await db('call_log')
+      .where({ id: call.id })
+      .whereRaw("processing_status IS DISTINCT FROM 'processing'")
+      // Re-checked IN the write: a quarantine stamp landing between the
+      // read above and this update makes the swap refuse.
+      .whereRaw("(transcription_metadata IS NULL OR (transcription_metadata::jsonb ->> 'pan_detected') IS DISTINCT FROM 'true')")
+      // Fenced to the row this request READ: the recording it is replacing
+      // and the parked entry it is adopting must both still be there — a
+      // second operator or a fresh callback that changed either makes this
+      // swap refuse instead of reporting a recording it did not process.
+      .where(function baselineRecording() {
+        if (call.recording_sid) this.where('recording_sid', call.recording_sid);
+        else this.whereNull('recording_sid');
+      })
+      .whereRaw("COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> ?::jsonb", [JSON.stringify([{ recording_sid: chosen.recording_sid }])])
+      .update({
+        recording_sid: chosen.recording_sid,
+        recording_url: chosen.recording_url,
+        recording_duration_seconds: chosen.recording_duration_seconds ?? null,
+        transcription_status: 'pending',
+        // The row is no longer "processed": its transcript and extraction
+        // describe the previous recording. NULL puts it back in the sweep,
+        // so even if the immediate pass below defers (CDN not ready) or
+        // fails, the adopted audio is processed and the stale derived
+        // fields are replaced — never a processed row whose audio does not
+        // match its intelligence.
+        processing_status: null,
+        metadata: db.raw(
+          "jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}', ?::jsonb, true), '{adopted_recording}', ?::jsonb, true)",
+          [JSON.stringify(remaining), JSON.stringify({ recording_sid: chosen.recording_sid, by: req.technicianId || null, at: new Date().toISOString(), previous_recording_sid: call.recording_sid || null })],
+        ),
+        updated_at: new Date(),
+      });
+    if (!swapped) {
+      // Distinguish the quarantine race from an ordinary contention: the
+      // former must also delete the parked audio at Twilio.
+      const now = await db('call_log').where({ id: call.id }).first('transcription_metadata').catch(() => null);
+      let racedQuarantine = false;
+      try {
+        const raw = now?.transcription_metadata;
+        const meta = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+        racedQuarantine = String(meta?.pan_detected) === 'true';
+      } catch { racedQuarantine = false; }
+      if (racedQuarantine) {
+        return quarantinedResponse(res, await quarantineParked(), 'This call was PAN-quarantined while the swap was being made; recordings are never re-attached.');
+      }
+      return res.status(409).json({ error: 'This call changed while the swap was being made (a pass claimed it, or its recordings changed). Reload and try again.', reason: 'call_changed' });
+    }
+    logger.info(`[call-recordings] operator adopted recording ${maskSid(chosen.recording_sid)} on call ${call.id}; reprocessing`);
+    const result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true });
+    if (result?.success === true) {
+      // Only a completed pass closes the review card; a deferred or failed
+      // one leaves it open with the row queued for the sweep. And it closes
+      // only when no other parked recording still awaits a decision — the
+      // recording this adoption replaced stays in the list as evidence, not
+      // as a review item; any other callback-parked entry keeps the card
+      // open, retargeted to it, so it does not vanish from the inbox with no
+      // operator decision recorded.
+      const stillForReview = remaining.filter((r) => r.parked_because !== 'replaced_by_operator');
+      const openCard = db('triage_items')
+        .where({ call_log_id: call.id, reason_code: 'additional_recording' })
+        .whereIn('status', ['open', 'in_progress']);
+      // The adoption and reprocess are done either way; a card update that
+      // fails is reported, not swallowed, so a stale card never hides
+      // behind a plain success.
+      let warning = null;
+      try {
+        if (stillForReview.length === 0) {
+          await openCard.update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Adopted ${chosen.recording_sid}` });
+        } else {
+          const next = stillForReview[0];
+          await openCard.update({
+            payload: db.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+              recording_sid: next.recording_sid,
+              recording_duration_seconds: next.recording_duration_seconds ?? null,
+              parked_because: next.parked_because,
+              kept_recording_sid: chosen.recording_sid,
+              remaining_for_review: stillForReview.length,
+            })]),
+          });
+        }
+      } catch (cardErr) {
+        logger.warn(`[call-recordings] additional-recording review card not updated for call ${call.id}: ${cardErr.message}`);
+        warning = 'The recording was adopted and processed, but its review card could not be updated; resolve it from the Triage inbox.';
+      }
+      return res.json({ success: true, adopted: chosen.recording_sid, remaining_for_review: stillForReview.length, ...(warning ? { warning } : {}), result });
+    }
+    if (result?.skipped && result?.reason === 'already_processing') {
+      return res.status(409).json({ ...result, adopted: chosen.recording_sid, error: 'The recording was adopted but another pass is still working this call; the sweep will process the adopted audio once it goes quiet.' });
+    }
+    res.json({
+      success: false,
+      adopted: chosen.recording_sid,
+      queued: true,
+      result,
+      error: 'The recording was adopted and queued; the immediate pass did not complete, so the next sweep will process it. The review card stays open until it does.',
+    });
   } catch (err) { next(err); }
 });
 

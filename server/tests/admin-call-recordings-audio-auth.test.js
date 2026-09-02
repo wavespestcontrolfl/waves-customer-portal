@@ -21,6 +21,11 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (req, res, next) => (
     req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Staff access required' })
   ),
+  // The correction endpoints (commitments, relink, adopt-recording) mount
+  // with requireAdmin; the router needs it defined to load.
+  requireAdmin: (req, res, next) => (
+    req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })
+  ),
 }));
 
 const http = require('http');
