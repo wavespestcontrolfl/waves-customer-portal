@@ -23,6 +23,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
+const { deliverOpsDigest } = require('./ops-digest');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
@@ -761,15 +762,22 @@ async function runUnworkedCommsWatcher(opts = {}) {
   }
 
   try {
-    await mailer.sendOne({
-      to,
-      fromEmail: fromEmail(),
-      fromName: FROM_NAME,
+    await deliverOpsDigest({
+      key: 'unworked-comms',
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
-      categories: ['ops', 'unworked-comms'],
-      suppressErrorLog: true,
+      link: '/admin/communications',
+      sendEmail: () => mailer.sendOne({
+        to,
+        fromEmail: fromEmail(),
+        fromName: FROM_NAME,
+        subject: composed.subject,
+        html: composed.html,
+        text: composed.text,
+        categories: ['ops', 'unworked-comms'],
+        suppressErrorLog: true,
+      }),
     });
   } catch (err) {
     logger.error(`[unworked-comms] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);

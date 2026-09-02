@@ -24,6 +24,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
+const { deliverOpsDigest } = require('./ops-digest');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { MONTHLY_LANE_SQL } = require('./billing-lane');
@@ -268,15 +269,22 @@ async function runAutopaySmsDigest(opts = {}) {
   }
 
   try {
-    await mailer.sendOne({
-      to,
-      fromEmail: fromEmail(),
-      fromName: FROM_NAME,
+    await deliverOpsDigest({
+      key: 'autopay-sms-digest',
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
-      categories: ['ops', 'autopay-sms-digest'],
-      suppressErrorLog: true,
+      link: '/admin/invoices',
+      sendEmail: () => mailer.sendOne({
+        to,
+        fromEmail: fromEmail(),
+        fromName: FROM_NAME,
+        subject: composed.subject,
+        html: composed.html,
+        text: composed.text,
+        categories: ['ops', 'autopay-sms-digest'],
+        suppressErrorLog: true,
+      }),
     });
   } catch (err) {
     logger.error(`[autopay-sms-digest] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);

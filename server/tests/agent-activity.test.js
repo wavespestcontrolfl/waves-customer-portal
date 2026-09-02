@@ -232,6 +232,29 @@ describe('buildActivity', () => {
   });
 });
 
+describe('buildActivity digests', () => {
+  it('maps ops_digest bell rows by subject prefix and read state', () => {
+    const { items } = buildActivity({
+      digests: [
+        { id: 'n1', title: 'ACT: 3 promised quotes never went out — oldest 4d', body: 'Line one\nLine two', link: '/admin/pipeline', metadata: { opsKey: 'promised-estimate' }, read_at: null, created_at: '2026-09-02T07:11:00Z' },
+        { id: 'n2', title: 'FIX: lead-to-cash invariants — 2 violations', body: 'x', link: '/admin/invoices', metadata: JSON.stringify({ opsKey: 'lead-to-cash-invariants' }), read_at: null, created_at: '2026-09-02T06:55:00Z' },
+        { id: 'n3', title: 'ACT: brain review — 1 blocked', body: 'y', link: '/admin/knowledge', metadata: null, read_at: '2026-09-02T09:00:00Z', created_at: '2026-09-02T06:00:00Z' },
+        { id: 'n4', title: 'FIRST: autopay charge on a card hold', body: 'z', link: null, metadata: {}, read_at: null, created_at: '2026-09-02T05:00:00Z' },
+      ],
+    });
+    expect(items.map((i) => [i.id, i.status, i.title, i.agent])).toEqual([
+      ['digest:n1', 'awaiting_review', '3 promised quotes never went out — oldest 4d', 'Waves Ops'],
+      ['digest:n2', 'failed', 'lead-to-cash invariants — 2 violations', 'Waves Ops'],
+      ['digest:n3', 'completed', 'brain review — 1 blocked', 'Waves Ops'],
+      ['digest:n4', 'completed', 'autopay charge on a card hold', 'Waves Ops'],
+    ]);
+    expect(items[0].subtitle).toBe('promised estimate · needs you');
+    expect(items[1].subtitle).toBe('lead to cash invariants · needs a fix');
+    expect(items[0].link).toBe('/admin/pipeline');
+    expect(items[0].detail).toBe('Line one\nLine two');
+  });
+});
+
 describe('getActivity gate', () => {
   it('answers available:false without touching the database while GATE_AGENT_ACTIVITY is off', async () => {
     const feed = await getActivity({ windowHours: 24 });
