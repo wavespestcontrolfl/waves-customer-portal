@@ -373,8 +373,10 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
     // The same holds for a SAME-path revision that landed during the lease
     // (working URL, gate, lane): the route the attempts were spent on is
     // materially different now. A confidence-only disproof is not — a
-    // route declared gone stays closed.
-    if (settled && outcome === 'failed') {
+    // route declared gone stays closed. `skipped` is a route-specific
+    // decision too (no emailable contact on the OLD route, a duplicate on
+    // the OLD page): it reopens the same way when the route changed.
+    if (settled && (outcome === 'failed' || outcome === 'skipped')) {
       const after = await trx('seo_link_prospects').where({ id: prospect_id }).first('path_id');
       let reopen = false;
       if (after && after.path_id && after.path_id !== prospect.path_id) reopen = true;
@@ -402,7 +404,7 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
     return { ok: false, code: 'path_moved', error: 'the placement\'s acquisition path changed while drafting; the draft was discarded — re-draft against the current path' };
   }
   if (reopened) {
-    logger.info(`[link-worker] report ${prospect_id} outcome=failed on a superseded path — reopened on its successor with a fresh retry count`);
+    logger.info(`[link-worker] report ${prospect_id} outcome=${outcome} on a superseded/revised path — reopened on its successor with a fresh retry count`);
     return { ok: true, status: 'prospect', attempts: 0, reopened_on_successor: true };
   }
   logger.info(`[link-worker] report ${prospect_id} outcome=${outcome} attempts=${attempts} -> ${patch.status || prospect.status}`);

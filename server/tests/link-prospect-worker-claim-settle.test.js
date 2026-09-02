@@ -340,3 +340,16 @@ test('a terminal failure released after a same-path REVISION reopens with a fres
   expect(onDead).toMatchObject({ status: 'rejected', attempts: worker.MAX_ATTEMPTS, automation_policy: null }); // closed for good; the transition still unclassified it
 });
 
+test('a skipped report on a path that changed during the lease reopens the placement on the new route (Codex #3720 r3 P1)', async () => {
+  const old = { id: 'p-old', domain_id: 'd1', submission_url: null, superseded_by: null, link_type: 'editorial', confidence: 0.7, revision: 1 };
+  const next = { id: 'p-new', domain_id: 'd1', submission_url: null, superseded_by: null, link_type: 'editorial', confidence: 0.7, revision: 1 };
+  mockStore.seo_link_acquisition_paths.push(old, next);
+  const row = { id: 'r1', status: 'prospect', link_type: 'editorial', claimed_at: null, claimed_by: null, attempts: 0, automation_policy: null, priority: 'high', domain_rating: 40, target_domain: 'example.com', path_id: 'p-old', target_url: null, contact_email: 'ed@example.com', outreach_status: null, outreach_sent_at: null, quality_signals: null };
+  mockStore.seo_link_prospects.push(row);
+  const [claimed] = await worker.claim({ n: 5, type: 'outreach' });
+  old.superseded_by = 'p-new'; // the route changed while the drafter decided to skip the OLD one
+  const rep = await worker.report({ prospect_id: 'r1', outcome: 'skipped', lease_token: claimed.lease_token });
+  expect(rep).toMatchObject({ ok: true, status: 'prospect', attempts: 0, reopened_on_successor: true });
+  expect(row).toMatchObject({ path_id: 'p-new', status: 'prospect', attempts: 0, claimed_at: null });
+});
+
