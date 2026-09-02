@@ -772,7 +772,11 @@ function boundOfferCurrency(html, cents) {
   if (cents == null) return null;
   const priced = jsonLdOffers(html).filter((o) => o.priceCents != null);
   if (!priced.length || priced.some((o) => o.priceCents !== cents)) return null;
-  const currencies = new Set(priced.map((o) => o.priceCurrency).filter(Boolean));
+  // every offer must DECLARE its currency — an undeclared one at the same
+  // amount could be the quoted item itself, and silently dropping it would
+  // let the declared neighbour lend it a currency
+  if (priced.some((o) => !o.priceCurrency)) return null;
+  const currencies = new Set(priced.map((o) => o.priceCurrency));
   return currencies.size === 1 ? [...currencies][0] : null;
 }
 

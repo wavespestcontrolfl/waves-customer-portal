@@ -383,21 +383,18 @@ const SUCCESSOR_COLUMNS = ['id', 'superseded_by', 'submission_url', 'link_type']
  *     then no runner may lease it (claim() filters on the policy). Fail
  *     closed — never a synthesized policy from an incomplete signal.
  */
-const OUTREACH_LANES = new Set(['editorial', 'resource', 'guest_post', 'haro']);
 // Outreach state that is IN FLIGHT or AMBIGUOUS: a placement carrying it
-// never changes lanes (a send may still be executing, or needs human
+// never moves (a send may still be executing, or needs human
 // reconciliation) — it keeps the retired path, which nothing can claim.
 const OUTREACH_LOCKED = new Set(['sending', 'sent', 'send_error']);
 const PLACEMENT_MOVE_COLUMNS = ['id', 'path_id', 'link_type', 'outreach_status', 'outreach_sent_at'];
 
 /**
  * The patch that moves ONE placement onto `target`, or null when the move
- * must be refused. Lane change rules: a placement leaving the outreach lane
- * resets SAFE outreach state — an unsent draft (`drafted`) is cleared with
- * its token, so the approval queue never surfaces a draft for a route that
- * no longer exists and the worker's lane-independent outreach filter never
- * strands the row; a locked state (sending / sent / send_error, or a sent
- * stamp) refuses the move outright.
+ * must be refused: a locked state (sending / sent / send_error, or a sent
+ * stamp) refuses any move; an unsent draft (`drafted`) is cleared with its
+ * token on every move, so the approval queue never sends a message composed
+ * for a route that no longer exists; the lane follows the successor.
  */
 function movePatch(row, target, now) {
   // locked outreach never moves AT ALL — same lane, other outreach lane, or
@@ -407,13 +404,14 @@ function movePatch(row, target, now) {
   if (OUTREACH_LOCKED.has(row.outreach_status) || row.outreach_sent_at) return null;
   const patch = { path_id: target.id, updated_at: now, automation_policy: null, last_classified_at: null };
   if (target.submission_url) patch.target_url = target.submission_url;
-  const nextLane = target.link_type && CLAIMABLE_LINK_TYPES.has(target.link_type) ? target.link_type : null;
-  if (nextLane && nextLane !== row.link_type) {
-    if (OUTREACH_LANES.has(row.link_type) && !OUTREACH_LANES.has(nextLane) && row.outreach_status === 'drafted') {
-      Object.assign(patch, { outreach_status: 'none', outreach_to_email: null, outreach_subject: null, outreach_body: null, outreach_send_token: null });
-    }
-    patch.link_type = nextLane;
+  // an UNSENT draft was written for the path it is leaving — on EVERY move
+  // (same lane included) it is cleared with its token, so the approval
+  // endpoint can never send a message composed for a retired route
+  if (row.outreach_status === 'drafted') {
+    Object.assign(patch, { outreach_status: 'none', outreach_to_email: null, outreach_subject: null, outreach_body: null, outreach_send_token: null });
   }
+  const nextLane = target.link_type && CLAIMABLE_LINK_TYPES.has(target.link_type) ? target.link_type : null;
+  if (nextLane && nextLane !== row.link_type) patch.link_type = nextLane;
   return patch;
 }
 

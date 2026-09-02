@@ -15,14 +15,31 @@ jest.mock('../models/db', () => {
     let limitN = null;
     const get = (row, col) => row[String(col).includes('.') ? String(col).split('.')[1] : col];
     const rows = () => { const r = mockStore[table].filter((row) => preds.every((p) => p(row))); return limitN == null ? r : r.slice(0, limitN); };
+    const cmp = (op, l, r) => (op === '<' ? l < r : op === '<=' ? l <= r : l === r);
+    const vals = (arr) => (arr && typeof arr._rows === 'function' ? arr._rows().map((r) => r[(arr._select || ['id'])[0]]) : arr); // a sub-builder resolves lazily as a sub-select
     const q = {
       where(a, b, c) {
+        if (typeof a === 'function') {
+          // grouped where: OR-combined like knex's callback builder
+          const sub = [];
+          const g = {
+            whereNull(col) { sub.push((row) => get(row, col) == null); return g; },
+            whereNotNull(col) { sub.push((row) => get(row, col) != null); return g; },
+            orWhere(col, op, v) { sub.push((row) => cmp(op, get(row, col), v)); return g; },
+            orWhereNotIn(col, arr) { sub.push((row) => !vals(arr).includes(get(row, col))); return g; },
+          };
+          a(g);
+          preds.push((row) => sub.some((p) => p(row)));
+          return q;
+        }
         if (typeof a === 'object') preds.push((row) => Object.entries(a).every(([k, v]) => get(row, k) === v));
-        else if (c !== undefined) preds.push((row) => (b === '<' ? get(row, a) < c : get(row, a) === c));
+        else if (c !== undefined) preds.push((row) => cmp(b, get(row, a), c));
         else preds.push((row) => get(row, a) === b);
         return q;
       },
-      whereIn(col, arr) { preds.push((row) => arr.includes(get(row, col))); return q; },
+      whereIn(col, arr) { preds.push((row) => vals(arr).includes(get(row, col))); return q; },
+      whereNotIn(col, arr) { preds.push((row) => !vals(arr).includes(get(row, col))); return q; },
+      _rows: rows,
       whereNull(col) { preds.push((row) => get(row, col) == null); return q; },
       whereNotNull(col) { preds.push((row) => get(row, col) != null); return q; },
       whereRaw() { return q; },
@@ -31,7 +48,7 @@ jest.mock('../models/db', () => {
       limit(n) { limitN = n; return q; },
       forUpdate() { return q; },
       skipLocked() { return q; },
-      select() { return q; },
+      select(...cols) { q._select = cols; return q; },
       async first() { return rows()[0] ? { ...rows()[0] } : undefined; },
       async update(patch) { const hit = rows(); for (const row of hit) Object.assign(row, patch); return hit.length; },
       then(res, rej) { return Promise.resolve(rows().map((r) => ({ ...r }))).then(res, rej); },
@@ -125,5 +142,22 @@ test('a placement on a DISPROVEN path (confidence 0, not superseded) is never le
   expect(claimed.map((r) => r.id)).toEqual(['r-live']);
   expect(onGone.claimed_at).toBeNull();
   expect(onUnverified.claimed_at).toBeNull();
+});
+
+test('disproven and retired paths are filtered BEFORE the claim limit — a dead prefix never starves valid prospects (Codex PR r24 P1)', async () => {
+  const dead = { id: 'p-dead', domain_id: 'd1', submission_url: 'https://dead.example/join', superseded_by: null, link_type: 'directory', confidence: 0 };
+  const retired = { id: 'p-ret', domain_id: 'd2', submission_url: 'https://ret.example/old', superseded_by: 'p-ret-live', link_type: 'directory', confidence: 0.7 };
+  const retLive = { id: 'p-ret-live', domain_id: 'd2', submission_url: 'https://ret.example/new', superseded_by: null, link_type: 'directory', confidence: 0.7 };
+  const live = { id: 'p-live', domain_id: 'd3', submission_url: 'https://live.example/add', superseded_by: null, link_type: 'directory', confidence: 0.7 };
+  mockStore.seo_link_acquisition_paths.push(dead, retired, retLive, live);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, automation_policy: 'submit_free', priority: 'high' };
+  // the dead-route rows outrank the valid one and would fill a limit of 1 every claim
+  mockStore.seo_link_prospects.push(
+    { ...base, id: 'r-dead', target_domain: 'dead.example', path_id: 'p-dead', target_url: 'https://dead.example/join', domain_rating: 90 },
+    { ...base, id: 'r-ret', target_domain: 'ret.example', path_id: 'p-ret', target_url: 'https://ret.example/old', domain_rating: 80, claimed_at: null },
+    { ...base, id: 'r-live', target_domain: 'live.example', path_id: 'p-live', target_url: 'https://live.example/add', domain_rating: 10 },
+  );
+  const claimed = await worker.claim({ n: 1, type: 'signup' });
+  expect(claimed.map((r) => r.id)).toEqual(['r-live']); // the valid prospect below the dead prefix is served
 });
 

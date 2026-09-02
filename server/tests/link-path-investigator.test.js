@@ -2601,7 +2601,7 @@ describe('full run', () => {
     db._tables.seo_link_acquisition_paths.push(old2, resource); db._tables.seo_link_prospects.push(locked, draftedSameLane);
     expect(await settleRetiredPlacements(db, { pathIds: [old2.id], successor: resource, now: NOW })).toBe(1);
     expect(locked).toMatchObject({ path_id: old2.id, link_type: 'editorial' });
-    expect(draftedSameLane).toMatchObject({ path_id: resource.id, link_type: 'resource', outreach_status: 'drafted', outreach_send_token: 'tok-2' }); // an unsent draft survives an outreach→outreach move
+    expect(draftedSameLane).toMatchObject({ path_id: resource.id, link_type: 'resource', outreach_status: 'none', outreach_send_token: null, outreach_to_email: null }); // an unsent draft is cleared on EVERY move — it was composed for the retired route (r24)
   });
 
   test('supersession uses the RECONCILED disproof set — an apex 404 answered by www never retires the live predecessor (Codex PR r22 P2)', async () => {
@@ -2624,5 +2624,19 @@ describe('full run', () => {
     expect(placement.path_id).toBe(pred.id);
     const written = db._tables.seo_link_acquisition_paths.find((p) => p.id !== pred.id);
     expect(JSON.parse(written.investigation).replaces_rejected).toMatchObject({ id: pred.id, reason: 'no_deterministic_predecessor_evidence' });
+  });
+
+  // ---- Codex PR round 24 -------------------------------------------------
+
+  test('an undeclared-currency offer at the quoted amount blocks the binding — a declared neighbour never lends it USD (Codex PR r24 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const text = `Directory listing page with membership details. Join for $95 / year. ${'Copy. '.repeat(10)}`;
+    // the membership offer declares NO currency; an unrelated USD offer sits at the same amount
+    const html = `<html><script type="application/ld+json">[{"@type":"Offer","name":"Membership","price":"95"},{"@type":"Offer","name":"Guide","price":"95","priceCurrency":"USD"}]</script><body>${text}</body></html>`;
+    const claim = modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null });
+    const v = verifyPriceEvidence([{ url: 'https://example.com/join', excerpt: text, text, html }], claim);
+    expect(v.currency_evidence).toBeNull();
+    const cited = modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: { marker: 'USD', kind: 'jsonld_price_currency', page_url: 'https://example.com/join' } });
+    expect(verifyPriceEvidence([{ url: 'https://example.com/join', excerpt: text, text, html }], cited).currency_evidence).toBeNull();
   });
 });
