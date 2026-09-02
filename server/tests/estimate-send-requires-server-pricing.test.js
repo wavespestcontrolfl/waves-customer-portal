@@ -282,3 +282,73 @@ describe('assertAutoSendPricingAuthority — automation publishes only an engine
     expect(SERVER_PRICING_AUTHORITY_SQL).toBe("UPPER(pricing_authority) = 'SERVER'");
   });
 });
+
+describe('shadowLogFallbackDelivery — only a REAL provider handoff counts (GH codex P2 on #3750)', () => {
+  test('a suppressed-only attempt (SMS gate / template policy / owner kill: ok but real:false) logs nothing', () => {
+    mockGateState.sendRequiresServerPricing = false;
+    if (jest.isMockFunction(logger.warn)) logger.warn.mockClear();
+    expect(shadowLogFallbackDelivery(fallbackDraft(), { handoff: false })).toBe(false);
+    if (jest.isMockFunction(logger.warn)) expect(logger.warn).not.toHaveBeenCalled();
+    expect(shadowLogFallbackDelivery(fallbackDraft(), { handoff: true })).toBe(true);
+  });
+});
+
+describe('findGroupSiblingBlockingSend — grouped schedules preflight every sibling (GH codex P2 on #3750)', () => {
+  const { findGroupSiblingBlockingSend } = adminEstimatesRouter._internals;
+  const anchor = { id: 'est-anchor', estimate_group_id: 'grp-1', pricing_authority: 'SERVER', estimate_data: '{}' };
+  function fakeDatabase(rows) {
+    const calls = { wheres: [], whereNots: [], whereNulls: [], whereIns: [] };
+    const builder = {
+      where: (c) => { calls.wheres.push(c); return builder; },
+      whereNot: (c) => { calls.whereNots.push(c); return builder; },
+      whereNull: (c) => { calls.whereNulls.push(c); return builder; },
+      whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return builder; },
+      select: async () => rows,
+    };
+    const database = jest.fn(() => builder);
+    return { database, calls };
+  }
+
+  beforeEach(() => { mockGateState.sendRequiresServerPricing = true; });
+  afterAll(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('an ungrouped estimate never touches the database', async () => {
+    const { database } = fakeDatabase([]);
+    expect(await findGroupSiblingBlockingSend({ ...anchor, estimate_group_id: null }, { database })).toBeNull();
+    expect(database).not.toHaveBeenCalled();
+  });
+
+  test('enumerates siblings exactly like the group claim: same group, not self, unarchived, unlocked, active statuses', async () => {
+    const { database, calls } = fakeDatabase([]);
+    expect(await findGroupSiblingBlockingSend(anchor, { database })).toBeNull();
+    expect(calls.wheres).toEqual([{ estimate_group_id: 'grp-1' }]);
+    expect(calls.whereNots).toEqual([{ id: 'est-anchor' }]);
+    expect(calls.whereNulls).toEqual(['archived_at', 'price_locked_at']);
+    expect(calls.whereIns).toEqual([['status', ['draft', 'scheduled', 'send_failed']]]);
+  });
+
+  test('gate on: a CLIENT_FALLBACK sibling blocks with the claim\'s code (409); a NULL stamp blocks as NOT_SERVER', async () => {
+    const fallback = { id: 'est-sib-cf', status: 'draft', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' };
+    const server = { id: 'est-sib-ok', status: 'scheduled', pricing_authority: 'SERVER', estimate_data: '{}' };
+    const blocked = await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([server, fallback]).database });
+    expect(blocked).toMatchObject({ statusCode: 409, code: 'CLIENT_FALLBACK_PRICING', sibling: { id: 'est-sib-cf' } });
+    const nullStamp = { id: 'est-sib-null', status: 'draft', pricing_authority: null, estimate_data: '{}' };
+    expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([nullStamp]).database }))
+      .toMatchObject({ statusCode: 409, code: 'PRICING_AUTHORITY_NOT_SERVER', sibling: { id: 'est-sib-null' } });
+  });
+
+  test('gate on: SERVER siblings pass, and an authored-proposal sibling keeps the manual-send exemption', async () => {
+    const server = { id: 'est-sib-ok', status: 'draft', pricing_authority: 'SERVER', estimate_data: '{}' };
+    expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([server]).database })).toBeNull();
+    const proposal = { id: 'est-sib-prop', status: 'draft', pricing_authority: 'CLIENT_FALLBACK', estimate_data: JSON.stringify({ proposal: { enabled: true, buildings: [] } }) };
+    expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([proposal]).database })).toBeNull();
+  });
+
+  test('gate off: manual schedules pass; automation still refuses a non-SERVER sibling (422)', async () => {
+    mockGateState.sendRequiresServerPricing = false;
+    const fallback = { id: 'est-sib-cf', status: 'draft', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' };
+    expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([fallback]).database })).toBeNull();
+    expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([fallback]).database, autoSend: true }))
+      .toMatchObject({ statusCode: 422, code: 'PRICING_AUTHORITY_NOT_SERVER' });
+  });
+});

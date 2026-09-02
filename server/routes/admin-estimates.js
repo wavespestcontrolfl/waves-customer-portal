@@ -295,7 +295,13 @@ const SERVER_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
 // rejection never counts) and only from that one site (the pre-read assert
 // used to log too and double-counted; GH codex P2 on #3750). Silent while
 // the gate is on — the assert refuses the send instead.
-function shadowLogFallbackDelivery(estimate = {}) {
+// `handoff`: whether a REAL provider handoff happened for this delivery —
+// the funnel's stampChannels distinction (an SMS suppressed by the SMS gate,
+// template policy or owner kill reports ok with real:false and reaches no
+// customer). Rollout counts must reflect actual customer exposure (GH codex
+// P2 on #3750), so a suppressed-only attempt logs nothing.
+function shadowLogFallbackDelivery(estimate = {}, { handoff = true } = {}) {
+  if (!handoff) return false;
   const authority = String(estimate.pricing_authority || '').toUpperCase();
   if (authority === 'SERVER') return false;
   if (parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true) return false;
@@ -317,6 +323,40 @@ function assertAutoSendPricingAuthority(row = {}) {
   err.statusCode = 422;
   err.code = 'PRICING_AUTHORITY_NOT_SERVER';
   throw err;
+}
+
+// Schedule-time preflight for grouped sends (GH codex P2 on #3750). The
+// scheduled cron publishes every active sibling under one claim, and
+// claimGroupSiblingsForPublish refuses a sibling whose pricing authority
+// fails the gate — by then the operator is gone, the anchor lands in
+// send_failed (a gate refusal is never retried) and the customer never gets
+// the group link. The same per-sibling verdict is applied HERE, at request
+// time, so the schedule is refused while someone can still fix the sibling.
+// Sibling enumeration mirrors the claim exactly (active, unlocked,
+// unarchived). Returns the first blocking sibling with the code the claim
+// would have raised, or null.
+async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false } = {}) {
+  if (!estimate?.estimate_group_id) return null;
+  const siblings = await database('estimates')
+    .where({ estimate_group_id: estimate.estimate_group_id })
+    .whereNot({ id: estimate.id })
+    .whereNull('archived_at')
+    .whereNull('price_locked_at')
+    .whereIn('status', ['draft', 'scheduled', 'send_failed'])
+    .select('id', 'status', 'pricing_authority', 'estimate_data');
+  for (const sibling of siblings) {
+    const authority = String(sibling.pricing_authority || '').toUpperCase();
+    if (authority === 'SERVER') continue;
+    if (autoSend) return { sibling, statusCode: 422, code: 'PRICING_AUTHORITY_NOT_SERVER' };
+    if (sendRequiresServerPricingFor(sibling)) {
+      return {
+        sibling,
+        statusCode: 409,
+        code: authority === 'CLIENT_FALLBACK' ? 'CLIENT_FALLBACK_PRICING' : 'PRICING_AUTHORITY_NOT_SERVER',
+      };
+    }
+  }
+  return null;
 }
 
 function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } = {}) {
@@ -883,6 +923,17 @@ router.post('/:id/send', async (req, res, next) => {
       }
       if (scheduledTime <= new Date()) {
         return res.status(400).json({ error: 'scheduledAt must be in the future' });
+      }
+      // Grouped schedule: every active sibling must clear the pricing-
+      // authority gate NOW, not when the cron's group claim refuses it
+      // hours later with nobody watching (GH codex P2 on #3750).
+      const blockingSibling = await findGroupSiblingBlockingSend(estimate);
+      if (blockingSibling) {
+        return res.status(blockingSibling.statusCode).json({
+          error: `Grouped estimate ${blockingSibling.sibling.id} has no engine-verified price — re-save it from the estimate tool before scheduling this group (the scheduled send publishes every property together).`,
+          code: blockingSibling.code,
+          siblingEstimateId: blockingSibling.sibling.id,
+        });
       }
       // Atomic claim, mirroring the immediate-send path below. The
       // assertEstimateSendable check above ran on a stale read: writing
@@ -2076,7 +2127,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // check (GH codex P2 on #3750: counting earlier labelled aborted or
   // repriced attempts as fallback deliveries). Published siblings log
   // themselves below.
-  shadowLogFallbackDelivery(estimate);
+  shadowLogFallbackDelivery(estimate, { handoff: stampChannels.length > 0 });
 
   const updatePayload = {
     // Finalize the claim. The row is held as `sending` for the whole send (a
@@ -2386,7 +2437,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             // A published sibling is a delivered row of its own — same
             // telemetry as the anchor (a fallback sibling behind a SERVER
             // anchor was invisible before; GH codex P2 on #3750).
-            shadowLogFallbackDelivery(sibling);
+            shadowLogFallbackDelivery(sibling, { handoff: stampChannels.length > 0 });
             // Send-time pricing snapshot for the SIBLING too (estimator
             // audit M4): only the anchor wrote one, so grouped properties
             // had no frozen quote provenance. Fail-soft like the anchor's —
@@ -4287,6 +4338,7 @@ router._internals = {
   shadowLogFallbackDelivery,
   SERVER_PRICING_AUTHORITY_SQL,
   assertAutoSendPricingAuthority,
+  findGroupSiblingBlockingSend,
   notifyPricingFallbackAfterCommit,
   assertEstimateManagerApprovalResolved,
   leadEstimateAutomationSummary,
