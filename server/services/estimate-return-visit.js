@@ -18,54 +18,13 @@ function toDate(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-// Estimate-level wording, never "you": the public token is one link that a
-// spouse or bookkeeper may open after the share action, and estimate_views
-// carries no viewer identity — the strip describes what happened to the
-// ESTIMATE, not what the current reader did (GH codex P2 on #3708). Multiple
-// events for one service collapse to the service's FINAL state after the
-// boundary, so a removal that was later restored is never described as
-// reflected in the current price (GH codex P2).
-function serviceOptOutChanges(estimateData, since, until = null) {
-  const events = estimateData?.serviceOptOut?.events;
-  if (!Array.isArray(events)) return [];
-  let serviceOptOutLabel = (key) => key;
-  try {
-    ({ serviceOptOutLabel } = require('./estimate-service-opt-out'));
-  } catch (_) { /* label fallback is the key */ }
-  // Final state per service is decided by EVERY event after the boundary —
-  // current-sitting events included — so a between-visits change that the
-  // customer has since reversed during this sitting is never announced as
-  // still reflected in the price. Then: a service whose latest event fell in
-  // the current sitting is not announced at all (the page re-fetched after
-  // that click; the reader just saw it) — pre-push codex P1 + GH codex r3 P2.
-  const latestByKey = new Map();
-  for (const e of events) {
-    const at = toDate(e?.at);
-    if (!at || !e?.serviceKey || at <= since) continue;
-    const prev = latestByKey.get(e.serviceKey);
-    if (!prev || at > prev.at) latestByKey.set(e.serviceKey, { event: e, at });
-  }
-  const out = [];
-  for (const [serviceKey, { event, at }] of latestByKey) {
-    if (until && at >= until) continue;
-    // Customer-authored: it happened from an already-open page — seen. The
-    // public opt-out route stamps actor:'customer' at the source; events
-    // written before that stamp existed carry none and read as customer.
-    // Staff-authored events (actor:'staff' — the send-time lead-service
-    // park / revert, PR #3711) are the ones this line exists for; until
-    // that writer lands, the extension grant is the only announced stamp.
-    if (String(event.actor || 'customer') !== 'staff') continue;
-    const label = event.label || serviceOptOutLabel(serviceKey);
-    out.push({
-      kind: event.included === false ? 'service_removed' : 'service_restored',
-      label: event.included === false
-        ? `${label} was removed from this estimate; the price below reflects that.`
-        : `${label} was added back to this estimate; the price below reflects that.`,
-      at: at.toISOString(),
-    });
-  }
-  return out;
-}
+// Service opt-out events are deliberately NOT a change source here: every
+// production writer today is the customer's own tap (actor:'customer'), and a
+// customer action between two counted visits can only come from a page that
+// was already open — it is never "since your last visit". A staff-authored
+// writer (the send-time lead-service park, PR #3711) adds its own projection
+// when it lands; shipping that branch ahead of its writer was dead code (GH
+// codex r6 P2). The extension grant is the one durable stamp announced.
 
 function extensionChange(extensionAutoGrantedAt, since) {
   const at = toDate(extensionAutoGrantedAt);
@@ -92,22 +51,12 @@ function buildReturnVisitPayload({
   // it as "changed since your last visit" would re-announce their own click
   // (GH codex P2 on #3708). Anything inside the gap window belongs to the
   // sitting it happened in.
-  // Service events between the previous visit's end and this visit's start
-  // can only come from a page that was ALREADY open (a real return inserts a
-  // view row and starts a new session), so a customer's own between-visits
-  // click is never "since your last visit" — no matter how long the tab sat
-  // idle (GH codex P2 rounds 2–5 on #3708: the fixed 30-minute gap was the
-  // wrong model). Staff-authored events (a lead-service park or revert at
-  // send time) are the ones worth announcing in that window. An extension
-  // grant is independently durable and compares against the previous
-  // visit's end itself.
-  const current = list[list.length - 1];
-  const currentStart = toDate(current.startedAt);
-  const changes = [
-    ...serviceOptOutChanges(estimateData, previousEnd, currentStart),
-    ...extensionChange(extensionAutoGrantedAt, previousEnd),
-  ].sort((a, b) => a.at.localeCompare(b.at));
+  // The extension grant is independently durable and compares against the
+  // previous visit's end itself.
+  const changes = extensionChange(extensionAutoGrantedAt, previousEnd)
+    .sort((a, b) => a.at.localeCompare(b.at));
   void sessionGapMinutes;
+  void estimateData;
   return {
     visitNumber: list.length,
     lastVisitAt: previousEnd.toISOString(),

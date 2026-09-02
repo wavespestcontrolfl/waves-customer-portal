@@ -25,41 +25,15 @@ describe('buildReturnVisitPayload', () => {
     expect(out).toEqual({ visitNumber: 3, lastVisitAt: '2026-08-31T09:05:00.000Z', changes: [] });
   });
 
-  test('a removal after the previous visit is named; one before it is not', () => {
-    const out = buildReturnVisitPayload({
-      sessions: [s('2026-08-30T10:00:00Z', '2026-08-30T10:20:00Z'), s('2026-09-01T12:00:00Z')],
-      estimateData: {
-        serviceOptOut: {
-          events: [
-            { serviceKey: 'mosquito', label: 'Mosquito', included: false, at: '2026-08-30T10:10:00Z' },
-            { serviceKey: 'lawn_care', label: 'Lawn Care', included: false, actor: 'staff', at: '2026-08-31T08:00:00Z' },
-            { serviceKey: 'lawn_care', label: 'Lawn Care', included: true, actor: 'staff', at: '2026-08-31T08:30:00Z' },
-          ],
-        },
-      },
-    });
-    // Lawn Care was removed then restored after the boundary: only its FINAL
-    // state is described (never "removed; the price reflects that" for a line
-    // that is back on the plan).
-    expect(out.changes.map((c) => c.kind)).toEqual(['service_restored']);
-    expect(out.changes[0].label).toBe('Lawn Care was added back to this estimate; the price below reflects that.');
-  });
-
-  test('labels fall back to the opt-out label map when the event carries none', () => {
-    const out = buildReturnVisitPayload({
-      sessions: [s('2026-08-30T10:00:00Z'), s('2026-09-01T12:00:00Z')],
-      estimateData: { serviceOptOut: { events: [{ serviceKey: 'pest_control', included: false, actor: 'staff', at: '2026-08-31T08:00:00Z' }] } },
-    });
-    expect(out.changes[0].label).toContain('Pest Control');
-  });
-
   test('an extension granted after the previous visit is named, ordered by time', () => {
     const out = buildReturnVisitPayload({
       sessions: [s('2026-08-30T10:00:00Z'), s('2026-09-01T12:00:00Z')],
-      estimateData: { serviceOptOut: { events: [{ serviceKey: 'mosquito', label: 'Mosquito', included: false, actor: 'staff', at: '2026-08-31T09:00:00Z' }] } },
+      estimateData: { serviceOptOut: { events: [{ serviceKey: 'mosquito', label: 'Mosquito', included: false, actor: 'customer', at: '2026-08-31T09:00:00Z' }] } },
       extensionAutoGrantedAt: '2026-08-31T08:00:00Z',
     });
-    expect(out.changes.map((c) => c.kind)).toEqual(['extension_granted', 'service_removed']);
+    // Opt-out events are not a change source in this PR (customer taps only);
+    // the extension grant is.
+    expect(out.changes.map((c) => c.kind)).toEqual(['extension_granted']);
     expect(out.changes[0].label).toBe('The expiration date was extended.');
   });
 
@@ -80,26 +54,6 @@ describe('buildReturnVisitPayload', () => {
     expect(out.changes).toEqual([]);
   });
 
-  test("the customer's own between-visits click is never announced, however long the tab sat idle (GH codex r2–r5)", () => {
-    // A customer action needs a page: between two counted visits it can only
-    // have come from the page that was already open — 10 minutes or 3 hours
-    // after the last counted open alike.
-    for (const at of ['2026-08-30T10:30:00Z', '2026-08-30T13:51:00Z']) {
-      const out = buildReturnVisitPayload({
-        sessions: [s('2026-08-30T10:00:00Z', '2026-08-30T10:20:00Z'), s('2026-09-01T12:00:00Z')],
-        estimateData: { serviceOptOut: { events: [{ serviceKey: 'mosquito', label: 'Mosquito', included: false, actor: 'customer', at }] } },
-      });
-      expect(out.changes).toEqual([]);
-      expect(out.lastVisitAt).toBe('2026-08-30T10:20:00.000Z');
-    }
-    // A STAFF park in the same window (send-time lead service) is announced.
-    const staff = buildReturnVisitPayload({
-      sessions: [s('2026-08-30T10:00:00Z', '2026-08-30T10:20:00Z'), s('2026-09-01T12:00:00Z')],
-      estimateData: { serviceOptOut: { events: [{ serviceKey: 'mosquito', label: 'Mosquito', included: false, actor: 'staff', at: '2026-08-30T13:51:00Z' }] } },
-    });
-    expect(staff.changes).toHaveLength(1);
-  });
-
   test('an extension granted inside the post-visit gap is still named (it is not a sitting mutation)', () => {
     const out = buildReturnVisitPayload({
       sessions: [s('2026-08-30T10:00:00Z', '2026-08-30T10:20:00Z'), s('2026-09-01T12:00:00Z')],
@@ -107,38 +61,6 @@ describe('buildReturnVisitPayload', () => {
       extensionAutoGrantedAt: '2026-08-30T10:30:00Z',
     });
     expect(out.changes.map((c) => c.kind)).toEqual(['extension_granted']);
-  });
-
-  test('a removal that stands after the boundary reads estimate-level, never "you"', () => {
-    const out = buildReturnVisitPayload({
-      sessions: [s('2026-08-30T10:00:00Z'), s('2026-09-01T12:00:00Z')],
-      estimateData: { serviceOptOut: { events: [{ serviceKey: 'mosquito', label: 'Mosquito', included: false, actor: 'staff', at: '2026-08-31T09:00:00Z' }] } },
-    });
-    expect(out.changes[0].label).toBe('Mosquito was removed from this estimate; the price below reflects that.');
-    expect(out.changes[0].label).not.toMatch(/\byou\b/i);
-  });
-
-  test('a mutation made during the CURRENT sitting (then refreshed) is not announced either (pre-push codex P1)', () => {
-    const out = buildReturnVisitPayload({
-      sessions: [s('2026-08-30T10:00:00Z', '2026-08-30T10:20:00Z'), s('2026-09-01T12:00:00Z', '2026-09-01T12:00:00Z')],
-      estimateData: { serviceOptOut: { events: [
-        { serviceKey: 'mosquito', label: 'Mosquito', included: false, actor: 'staff', at: '2026-08-31T09:00:00Z' },
-        { serviceKey: 'lawn_care', label: 'Lawn Care', included: false, actor: 'staff', at: '2026-09-01T12:04:00Z' },
-      ] } },
-    });
-    expect(out.changes.map((c) => c.kind)).toEqual(['service_removed']);
-    expect(out.changes[0].label).toMatch(/^Mosquito/);
-  });
-
-  test('a between-visits change reversed during the CURRENT sitting is not announced as reflected in the price (GH codex r3 P2)', () => {
-    const out = buildReturnVisitPayload({
-      sessions: [s('2026-08-30T10:00:00Z', '2026-08-30T10:20:00Z'), s('2026-09-01T12:00:00Z', '2026-09-01T12:00:00Z')],
-      estimateData: { serviceOptOut: { events: [
-        { serviceKey: 'mosquito', label: 'Mosquito', included: false, actor: 'staff', at: '2026-08-31T09:00:00Z' },
-        { serviceKey: 'mosquito', label: 'Mosquito', included: true, actor: 'customer', at: '2026-09-01T12:03:00Z' },
-      ] } },
-    });
-    expect(out.changes).toEqual([]);
   });
 
   test('malformed sessions and events are dropped, not thrown', () => {

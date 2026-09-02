@@ -25041,6 +25041,19 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         const { sessionsForEstimate } = require('../services/estimate-engagement-sessions');
         const { buildReturnVisitPayload } = require('../services/estimate-return-visit');
         const sessions = await sessionsForEstimate(estimate.id);
+        // An internal refresh must belong to a RECORDED sitting: if the
+        // initial open's view row never landed, a later preference/booking
+        // refresh would otherwise project from the last historical session
+        // as though it were current (GH codex r6 P2). Proof = the latest
+        // session is still inside the session gap right now.
+        if (isInternalRefresh) {
+          const { SESSION_GAP_MINUTES } = require('../services/estimate-engagement-sessions');
+          const latest = sessions[sessions.length - 1];
+          const latestEnd = latest?.endedAt ? new Date(latest.endedAt).getTime() : 0;
+          if (!latestEnd || Date.now() - latestEnd > SESSION_GAP_MINUTES * 60000) {
+            throw Object.assign(new Error('refresh outside a recorded sitting'), { skipReturnVisit: true });
+          }
+        }
         const returnVisit = buildReturnVisitPayload({
           sessions,
           estimateData: parseEstimateDataSafe(estimate),
@@ -25048,7 +25061,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         });
         if (returnVisit) returnVisitBlock = { returnVisit };
       } catch (e) {
-        logger.warn(`[estimate-data] return-visit projection skipped: ${e.message}`);
+        if (!e?.skipReturnVisit) logger.warn(`[estimate-data] return-visit projection skipped: ${e.message}`);
       }
     }
 
