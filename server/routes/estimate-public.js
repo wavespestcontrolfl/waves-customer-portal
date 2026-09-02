@@ -12179,13 +12179,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         if (unpriced.length) {
           const custRow = await db('customers').where({ id: customerId }).first('per_application_fee');
           if (!(custRow?.per_application_fee != null && Number(custRow.per_application_fee) > 0)) {
-            perVisitCompletenessAlertFired = true;
-            await require('../services/notification-service').notifyAdmin(
+            // The flag suppresses the converter's own unpriced-per-application
+            // bell below, so it must reflect a PERSISTED alert: notifyAdmin
+            // resolves null (no throw) when creation fails, and a failed
+            // alert here must not also swallow the deferred one (pre-push P1
+            // on #3751).
+            const completenessAlert = await require('../services/notification-service').notifyAdmin(
               'billing',
               'Recurring accept booked with no per-application amount',
               'A recurring accept committed without a visit price or per-application fee on file — stamp the amount before the first visit or its completion falls back to manual invoicing.',
               { link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, scheduledServiceIds: unpriced.map((a) => a.id) } },
             );
+            perVisitCompletenessAlertFired = !!completenessAlert;
           }
         }
       } catch (e) {
