@@ -65,10 +65,13 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   const lastEmitRef = useRef(null);
   useEffect(() => {
     const last = lastEmitRef.current;
-    if (last && last.ready === ready && last.agreed === agreed && last.loadFailed === loadFailed) return;
-    lastEmitRef.current = { ready, agreed, loadFailed };
-    onStateChange?.({ ready, agreed, loadFailed });
-  }, [ready, agreed, loadFailed, onStateChange]);
+    if (last && last.ready === ready && last.agreed === agreed && last.loadFailed === loadFailed && last.methodType === methodType) return;
+    lastEmitRef.current = { ready, agreed, loadFailed, methodType };
+    // methodType rides the emit so the parent's surrounding summary and
+    // confirm label can follow the tender (a "your card is charged" line
+    // next to a bank authorization is contradictory consent copy).
+    onStateChange?.({ ready, agreed, loadFailed, methodType });
+  }, [ready, agreed, loadFailed, methodType, onStateChange]);
 
   // Keyed on the intent's VALUES, never the object's identity: a parent that
   // passes an inline `{clientSecret, publishableKey}` literal re-creates the

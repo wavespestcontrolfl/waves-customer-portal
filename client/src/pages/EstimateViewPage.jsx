@@ -4955,7 +4955,7 @@ function EstimateViewPageInner() {
   // SetupIntent; the ref drives confirmSetup from the combined CTA. The modal
   // stays as the fallback (inline mint failure, stale-402 force path).
   const [inlineCardIntent, setInlineCardIntent] = useState(null);
-  const [inlineCardState, setInlineCardState] = useState({ ready: false, agreed: false });
+  const [inlineCardState, setInlineCardState] = useState({ ready: false, agreed: false, methodType: 'card' });
   const inlineCaptureRef = useRef(null);
   const inlineIntentMintRef = useRef(false);
   // Inline confirmSetup in flight: drives the CTA's submitting state WITHOUT
@@ -6170,6 +6170,7 @@ function EstimateViewPageInner() {
   const handleInlineCardState = useCallback((st) => {
     setInlineCardState((prev) => (
       prev.ready === st.ready && prev.agreed === st.agreed && !!prev.loadFailed === !!st.loadFailed
+        && (prev.methodType || 'card') === (st.methodType || 'card')
         ? prev
         : st
     ));
@@ -7454,10 +7455,17 @@ function EstimateViewPageInner() {
                     // In-lane prepay (GATE_PREPAY_CARD_AND_CHARGE): the card
                     // IS charged at confirm — never show the "$0 today" story.
                     ? (inlineAutoPayActive && inlineCardIntent
-                      ? `Your card is charged the 12-month prepay total when you confirm. ${CARD_SURCHARGE_DISCLOSURE}`
+                      // Tender-aware (GATE_ACCEPT_ACH_CAPTURE): the inline
+                      // capture reports the selected method — a bank pick
+                      // must not sit under a "your card is charged" line.
+                      ? (inlineCardState.methodType === 'us_bank_account'
+                        ? 'Your bank account is debited the 12-month prepay total when you confirm. Bank transfers have no added card surcharge.'
+                        : `Your card is charged the 12-month prepay total when you confirm. ${CARD_SURCHARGE_DISCLOSURE}`)
                       : `A card on file is required to book. It is charged the 12-month prepay total when you confirm. ${CARD_SURCHARGE_DISCLOSURE}`)
                     : (inlineAutoPayActive && inlineCardIntent
-                      ? CARD_SURCHARGE_DISCLOSURE
+                      ? (inlineCardState.methodType === 'us_bank_account'
+                        ? 'Bank transfers have no added card surcharge.'
+                        : CARD_SURCHARGE_DISCLOSURE)
                       : `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`))
                   : null))}
             autoPaySlot={inlineAutoPayActive && inlineCardIntent ? (
@@ -7475,7 +7483,9 @@ function EstimateViewPageInner() {
               <AcceptanceTermsLine terms={data.acceptanceTerms} />
             ) : null}
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent
-              ? (paymentPreference === 'prepay_annual' ? 'Confirm & pay the 12-month plan' : 'Confirm booking & save card')
+              ? (paymentPreference === 'prepay_annual'
+                ? 'Confirm & pay the 12-month plan'
+                : (inlineCardState.methodType === 'us_bank_account' ? 'Confirm booking & save bank account' : 'Confirm booking & save card'))
               : null}
             confirmDisabled={!!prepayChargeQuote
               // While the exact-total quote card is up, ITS button is the

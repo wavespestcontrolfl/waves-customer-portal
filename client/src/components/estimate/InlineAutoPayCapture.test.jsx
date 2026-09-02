@@ -104,10 +104,12 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
   it('switches to the ACH authorization when the Payment Element reports us_bank_account', async () => {
     const { StripeCtor, handlers } = makeTenderStub();
     const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const onStateChange = vi.fn();
     const { getByText, getByRole, queryByText } = render(
       <InlineAutoPayCapture
         intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'] }}
         loadStripeSdk={loadStripeSdk}
+        onStateChange={onStateChange}
       />,
     );
     await flush();
@@ -121,6 +123,8 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
     expect(getByText(/debit this bank account after each completed service/)).toBeInTheDocument();
     expect(queryByText(/charge this card after each completed service/)).toBeNull();
     expect(checkbox).not.toBeChecked();
+    // The parent's summary + confirm label follow the tender via the emit.
+    expect(onStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ methodType: 'us_bank_account', agreed: false }));
 
     await act(async () => { getByText('View full terms').click(); });
     expect(getByText(/initiate electronic ACH debits/)).toBeInTheDocument();
