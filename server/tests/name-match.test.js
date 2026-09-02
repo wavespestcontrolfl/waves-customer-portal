@@ -13,6 +13,11 @@ const {
 } = require('../utils/name-match');
 
 describe('normalizeNamePart', () => {
+  test('folds diacritics instead of deleting the letters', () => {
+    expect(normalizeNamePart('JOSÉ NUÑEZ')).toBe('josenunez');
+    expect(normalizeNamePart('José')).not.toBe(normalizeNamePart('Jos'));
+  });
+
   test('lowercases and strips everything but alphanumerics', () => {
     expect(normalizeNamePart("  O'Brien-Smith ")).toBe('obriensmith');
     expect(normalizeNamePart(null)).toBe('');
@@ -52,12 +57,29 @@ describe('payerNameCorroborates', () => {
     const delacruz = { first_name: 'Maria', last_name: 'De La Cruz' };
     expect(payerNameCorroborates('MARIA DE LA CRUZ', delacruz)).toBe(true);
     expect(payerNameCorroborates('Maria Delacruz', delacruz)).toBe(true);
-    expect(payerNameCorroborates('De La Cruz Maria', delacruz)).toBe(true);
+    // Surname-first without a comma is not a bank form — the surname is the trailing run.
+    expect(payerNameCorroborates('De La Cruz Maria', delacruz)).toBe(false);
     expect(payerNameCorroborates('Jose De La Cruz', delacruz)).toBe(false);
     const maryAnn = { first_name: 'Mary Ann', last_name: 'Smith' };
     expect(payerNameCorroborates('MARY ANN SMITH', maryAnn)).toBe(true);
     expect(payerNameCorroborates('MaryAnn Smith', maryAnn)).toBe(true);
     expect(payerNameCorroborates('Ann Smith', maryAnn)).toBe(false);
+  });
+
+  test('both name parts must belong to the same person — joint lines and middle names cannot cross-match', () => {
+    // Alice Jones and Robert Doe are two people; neither is "Alice Doe".
+    expect(payerNameCorroborates('ALICE JONES & ROBERT DOE', { first_name: 'Alice', last_name: 'Doe' })).toBe(false);
+    expect(payerNameCorroborates('ALICE JONES & ROBERT DOE', { first_name: 'Alice', last_name: 'Jones' })).toBe(true);
+    expect(payerNameCorroborates('ALICE JONES & ROBERT DOE', customer)).toBe(true);
+    // The surname is the trailing run: "Robert James Doe" is not "James Robert".
+    expect(payerNameCorroborates('ROBERT JAMES DOE', { first_name: 'James', last_name: 'Robert' })).toBe(false);
+    // A single-token person shares the line's final surname.
+    expect(payerNameCorroborates('ALICE & ROBERT DOE', { first_name: 'Alice', last_name: 'Doe' })).toBe(true);
+  });
+
+  test('accented bank names corroborate ASCII customer records', () => {
+    expect(payerNameCorroborates('JOSÉ NUÑEZ', { first_name: 'Jose', last_name: 'Nunez' })).toBe(true);
+    expect(payerNameCorroborates('Jose Nunez', { first_name: 'José', last_name: 'Nuñez' })).toBe(true);
   });
 
   test('last name must appear as a whole token — typo variants never match', () => {
