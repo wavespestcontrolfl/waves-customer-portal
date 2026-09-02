@@ -232,12 +232,16 @@ async function sendOutreach({ prospectId, approvedBy = 'admin' }) {
     // an UNLINKED prospect (the registry catch-up has not linked it yet) has
     // passed no standing check at all — it is not sent until it has a path
     if (!current || !current.path_id) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
-    const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).first('id', 'superseded_by', 'confidence', 'agent_completable');
+    // …read FOR UPDATE, held through the drafted→sending CAS below (as
+    // worker.claim() holds its path locks through the lease): an investigation
+    // superseding or revising the path waits for this commit instead of
+    // slipping in between the standing read and the CAS
+    const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'agent_completable');
     const standing = onPath && !onPath.superseded_by && !(onPath.confidence != null && !(Number(onPath.confidence) > 0)) && onPath.agent_completable !== false;
     if (!standing) return { ok: false, code: 'path_moved' };
     const attemptAt = new Date();
     const claimedRows = await trx('seo_link_prospects')
-      .where({ id: prospectId, outreach_status: 'drafted', status: 'prospect' })
+      .where({ id: prospectId, outreach_status: 'drafted', status: 'prospect', path_id: current.path_id }) // the CAS is bound to the path whose standing was just verified
       .whereNull('outreach_sent_at')
       // Stamp the attempt (counts toward the cap regardless of outcome) and release any
       // Hermes lease as we take the row in-flight, so a stale worker report (optimistic
