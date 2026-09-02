@@ -1,15 +1,18 @@
 # Public route contracts
 
-Security contract for every route the portal serves without staff auth:
-token-gated customer surfaces, machine-to-machine webhooks, and the
-anonymous public API. This is the list `AGENTS.md` refers to — **a new
+Security contract for every route the portal serves with NO session auth
+at all: token-gated customer surfaces, machine-to-machine webhooks, and
+the anonymous public API. Routes behind the customer JWT (`authenticate`,
+e.g. `/api/services`, `/api/schedule`) or the staff bearer are NOT public
+and do not belong here. This is the list `AGENTS.md` refers to — **a new
 public route outside this document is a P0**, and any change to a listed
 route's auth, gate, rate limit, payload, or headers is security-critical
 and must be reflected here in the same PR.
 
-Read this when a diff touches `server/routes/*` mounted without
-`adminAuthenticate`, `server/index.js` mounts, or anything under
-`server/services` that a listed route calls. It is deliberately verbose:
+Read this when a diff touches a `server/routes/*` handler that runs with
+neither `adminAuthenticate` nor customer `authenticate` in front of it, a
+`server/index.js` mount, or anything under `server/services` that a
+listed route calls. It is deliberately verbose:
 each entry records the owner rulings and the exact guards that were argued
 out in review, so a reviewer can check a diff against the contract instead
 of re-deriving it.

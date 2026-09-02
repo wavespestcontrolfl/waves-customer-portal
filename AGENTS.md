@@ -101,9 +101,10 @@ duplicate them here; point at them.
   check; each `/api/integrations/*-worker` mount authenticates via its own
   HMAC check inside the router. An unauthenticated one is P0.
 - **Public route surface.** `docs/public-route-contracts.md` lists every
-  route served without staff auth and the guards each one carries. A new
-  public (unauthenticated or token-only) route not added to that document
-  in the same PR is P0. Every token route keeps a token format gate before
+  route served with no session auth (unauthenticated or token-only;
+  customer-JWT `authenticate` routes are not public) and the guards each
+  one carries. A new public route not added to that document in the same
+  PR is P0. Every token route keeps a token format gate before
   any DB read, a generic 404 (unknown, malformed, dark-gated, and
   ineligible rows indistinguishable), a rate limit, and privacy headers;
   a dark `GATE_*` route skips its limiter so a probe never sees a
@@ -286,8 +287,10 @@ duplicate them here; point at them.
   'confirmed'` becomes an appointment; extraction schema changes are
   additive-only (both schema JSONs + normalizer + persisted enum +
   `SCHEMA_VERSION` bump, never added to `required`, new fields join the
-  replay `FIELD_GROUPS`; downstream composers read v2 + raw transcript,
-  never v1); address validation counts only `hasReplacedComponents` as a
+  replay `FIELD_GROUPS`; a prompt/schema/catalog change bumps the
+  `ai_extraction_prompt_version` hash, which resets the promotion cohort
+  so shadow rows from an older contract never count as evidence;
+  downstream composers read v2 + raw transcript, never v1); address validation counts only `hasReplacedComponents` as a
   correction, never accepts unless `inServiceArea === true`, holds for
   review when AV is unreachable, and treats a `PREMISE` verdict missing
   only `subpremise` as a resolved building without its unit
