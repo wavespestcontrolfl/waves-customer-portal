@@ -136,7 +136,17 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     const mimeType = preferred.find(
       (t) => typeof window.MediaRecorder.isTypeSupported === "function" && window.MediaRecorder.isTypeSupported(t),
     );
-    const rec = new window.MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    let rec;
+    try {
+      rec = new window.MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    } catch (e) {
+      // Recorder construction can throw (unsupported options, device gone):
+      // release the live mic and let the tech type.
+      stream.getTracks().forEach((t) => t.stop());
+      startingRef.current = false;
+      alert(`Dictation error: ${e?.message || "recorder unavailable"}`);
+      return;
+    }
     const chunks = [];
     const startedAt = Date.now();
     rec.ondataavailable = (ev) => {
