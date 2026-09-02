@@ -847,6 +847,13 @@ router.post('/:id/send', async (req, res, next) => {
         // must not restore status='scheduled' on the archived draft.
         .whereNull('archived_at')
         .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
+        // Same pricing-authority re-assertion as the immediate-send claim
+        // (pre-push codex P1): a revision stamping CLIENT_FALLBACK between
+        // the pre-read check and this UPDATE must lose the race with a 409
+        // here, not report "scheduled" and have the cron burn retries.
+        .modify((q) => {
+          if (sendRequiresServerPricingFor(estimate)) q.whereRaw(SEND_CLAIM_PRICING_AUTHORITY_SQL);
+        })
         .update({
           status: 'scheduled',
           scheduled_at: scheduledTime,
