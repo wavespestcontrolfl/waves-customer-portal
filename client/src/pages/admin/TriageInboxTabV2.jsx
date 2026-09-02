@@ -37,6 +37,9 @@ const WRONG_FIELD_OPTIONS = [
 
 // Human-readable labels for the deterministic + model triage reasons.
 const REASON_LABELS = {
+  additional_recording: "Second recording arrived — listen and adopt",
+  customer_creation_failed: "Customer record failed to save",
+  lead_creation_failed: "Lead failed to save",
   out_of_service_area: "Out of service area",
   missing_service_address: "Missing address",
   address_unverifiable: "Address unverifiable",
