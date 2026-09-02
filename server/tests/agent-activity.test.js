@@ -131,6 +131,19 @@ describe('buildActivity', () => {
     expect(by['run:unsent']).toMatchObject({ status: 'blocked', detail: 'Approval email not delivered yet (EA-unsent01): SMTP 421' });
   });
 
+  it('the newest approval row per run wins regardless of input order', () => {
+    const rows = [
+      { run_id: 'run-1', status: 'awaiting_reply', token: 'EA-newest01', created_at: '2026-09-02T12:00:00Z', email_sent_at: '2026-09-02T12:00:05Z' },
+      { run_id: 'run-1', status: 'awaiting_reply', token: 'EA-older001', created_at: '2026-09-02T08:00:00Z', email_sent_at: null, last_error: 'SMTP 421' },
+      { run_id: 'run-1', status: 'failed', token: 'EA-failed01', created_at: '2026-09-01T08:00:00Z' },
+    ];
+    for (const approvals of [rows, [...rows].reverse()]) {
+      const { items } = buildActivity({ runs: [{ ...RUN_BASE, outcome: 'completed_pending_review' }], approvals });
+      expect(items[0].status).toBe('awaiting_review');
+      expect(items[0].detail).toBe('Awaiting emailed reply (EA-newest01)');
+    }
+  });
+
   it('an open approval outranks the skip reason in the detail line', () => {
     const { items } = buildActivity({
       runs: [{ ...RUN_BASE, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review' }],

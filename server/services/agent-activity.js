@@ -291,12 +291,19 @@ function jobIsException(job) {
 
 // Pure: rows in → feed out. The route loads the rows; tests feed fixtures.
 function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [] }) {
+  // Newest approval per run wins in each class (a run can be re-requested:
+  // an older approved/failed row must not mask the current awaiting one and
+  // vice versa) — compare created_at rather than trusting input order.
   const awaitingReplyByRun = new Map();
   const decidedByRun = new Map();
+  const keepNewest = (map, key, row) => {
+    const current = map.get(key);
+    if (!current || String(row.created_at || '') > String(current.created_at || '')) map.set(key, row);
+  };
   for (const a of approvals) {
     if (!a.run_id) continue;
-    if (a.status === 'awaiting_reply') awaitingReplyByRun.set(String(a.run_id), a);
-    else if (TERMINAL_APPROVAL[a.status]) decidedByRun.set(String(a.run_id), a);
+    if (a.status === 'awaiting_reply') keepNewest(awaitingReplyByRun, String(a.run_id), a);
+    else if (TERMINAL_APPROVAL[a.status]) keepNewest(decidedByRun, String(a.run_id), a);
   }
   const exceptionJobs = jobs.filter(jobIsException);
   const items = []
