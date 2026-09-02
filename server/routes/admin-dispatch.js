@@ -36,7 +36,8 @@ const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispat
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
-const { buildCompletionAdvisory } = require('../services/service-report/report-data');
+const { buildCompletionAdvisory, approvedReportProductFacts } = require('../services/service-report/report-data');
+const { buildReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 const { tipsForVisit, freezeTechTips } = require('../services/service-report/tip-library');
 const { gateEnvValue } = require('../config/feature-gates');
 const {
@@ -4681,6 +4682,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
         'customers.city', 'customers.property_type',
+        // Primary-address mirror for the report identity snapshot (the
+        // frozen report address falls back to these when the visit is
+        // unstamped, exactly like the /:token routes' COALESCE).
+        'customers.address_line1 as cust_address_line1',
+        'customers.address_line2 as cust_address_line2',
+        'customers.state as cust_state',
+        'customers.zip as cust_zip',
         // Report application-conditions (weather) capture at the TREATED
         // parcel: stamped visit coords first, the primary home only for
         // non-divergent stamps (codex round-10 P2).
@@ -7051,7 +7059,45 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // (service-closeout-requirements.js frozenCloseoutRequirements).
             ...(closeoutRequirementsSnapshot ? { closeoutRequirements: closeoutRequirementsSnapshot } : {}),
           };
+          // Report identity snapshot (report-identity-snapshot.js): the
+          // customer name, visit address, technician name, linked service
+          // title, and each applied product's approved report facts are
+          // frozen INSIDE the transaction so later customer / schedule /
+          // technician / catalog edits cannot rewrite this visit's report.
+          // Product facts come from the catalog rows the product loop below
+          // re-validates; a failed read leaves productFacts undefined so the
+          // renderer keeps its live fallback for this record only.
+          let reportProductFactsSnapshot;
+          try {
+            const snapshotProductIds = [...new Set((products || []).map((p) => p?.productId).filter(Boolean))];
+            const snapshotCatalogRows = snapshotProductIds.length
+              ? await trx('products_catalog').whereIn('id', snapshotProductIds).select('*')
+              : [];
+            const byId = new Map(snapshotCatalogRows.map((row) => [String(row.id), row]));
+            reportProductFactsSnapshot = {};
+            for (const productId of snapshotProductIds) {
+              reportProductFactsSnapshot[String(productId)] = approvedReportProductFacts(byId.get(String(productId)) || null);
+            }
+          } catch (snapshotErr) {
+            reportProductFactsSnapshot = undefined;
+            logger.warn(`[completion] report product facts snapshot skipped: ${snapshotErr.message}`);
+          }
+          const reportIdentitySnapshot = buildReportIdentitySnapshot({
+            visit: lockedSvcRow || svc,
+            customer: {
+              first_name: svc.first_name,
+              last_name: svc.last_name,
+              address_line1: svc.cust_address_line1,
+              address_line2: svc.cust_address_line2,
+              city: svc.city,
+              state: svc.cust_state,
+              zip: svc.cust_zip,
+            },
+            technicianName: svc.tech_name,
+            productFacts: reportProductFactsSnapshot,
+          });
           const serviceData = {
+            reportIdentitySnapshot,
             protocol: {
               visitOutcome,
               actions: reportProtocolActions,
