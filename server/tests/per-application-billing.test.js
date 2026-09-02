@@ -985,3 +985,26 @@ describe('assertPerApplicationAddOnPriced — an established per-application cus
     expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, pinnedLegacyRodentOnlyPlan: true })).not.toThrow();
   });
 });
+
+describe('legacyFlatMonthlyTermiteUnit — the converter synthesizes the cadence the grandfather needs (GH codex P0)', () => {
+  const { legacyFlatMonthlyTermiteUnit } = EstimateConverter;
+  const legacy = { name: 'Termite Bait', service: 'termite_bait', mo: 34, monthly: 34 };
+  const current = { name: 'Termite Bait', service: 'termite_bait', mo: 34, monthly: 34, perTreatment: 102, visitsPerYear: 4 };
+
+  test('true for exactly one count-less termite line with a monthly figure', () => {
+    expect(legacyFlatMonthlyTermiteUnit([legacy], 34)).toBe(true);
+  });
+
+  test('false for a current termite row (it infers its own cadence), other families, multi-line mixes, or no monthly figure', () => {
+    expect(legacyFlatMonthlyTermiteUnit([current], 34)).toBe(false);
+    expect(legacyFlatMonthlyTermiteUnit([{ name: 'Pest Control', service: 'pest_control', mo: 37.33 }], 37.33)).toBe(false);
+    expect(legacyFlatMonthlyTermiteUnit([legacy, { name: 'Pest Control', service: 'pest_control', mo: 37.33 }], 71.33)).toBe(false);
+    expect(legacyFlatMonthlyTermiteUnit([legacy], 0)).toBe(false);
+    expect(legacyFlatMonthlyTermiteUnit([], 34)).toBe(false);
+  });
+
+  test('end to end: the synthesized monthly cadence + the grandfather price the legacy unit at plan annual ÷ 4', () => {
+    const cadence = resolveBillingCadence({ monthlyRate: 34, annualRate: 408, frequencyKey: 'monthly' });
+    expect(perApplicationChargeAmount({ billingCadence: cadence, annualRate: 408, monthlyRate: 34, visitsPerYear: null, serviceKey: 'termite_bait' })).toBe(102);
+  });
+});

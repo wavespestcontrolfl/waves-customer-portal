@@ -2371,6 +2371,22 @@ function assertPerApplicationAddOnPriced({
   throw err;
 }
 
+// A legacy flat-monthly termite-monitoring unit: the ONE recurring line is
+// termite bait with no visit count (pre-split payloads carry the flat
+// monthly only), so nothing infers a billing cadence for it and the
+// per-application grandfather in perApplicationChargeAmount (plan annual ÷
+// 4 station checks — the figure the customer card derives its "$X/mo →
+// $3X/check" from) would never run (GH codex P0 on #3751). The converter
+// synthesizes the monthly cadence for exactly this shape.
+function legacyFlatMonthlyTermiteUnit(recurringServices = [], monthlyRate = 0) {
+  const rows = Array.isArray(recurringServices) ? recurringServices : [];
+  if (rows.length !== 1) return false;
+  const unit = rows[0];
+  if (recurringServiceKey(unit) !== 'termite_bait') return false;
+  if (visitsPerYearForRecurringService(unit)) return false;
+  return Number(monthlyRate) > 0;
+}
+
 function estimateOperatorSetupFeeWaived(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
   return data?.operatorPriceAdjustment?.waiveSetupFee === true;
@@ -4102,7 +4118,10 @@ const EstimateConverter = {
         ? { tier: 'none', discount: 0 } // written as the non-member 'Commercial' sentinel below
         : determineTier(combinedServiceCount, recurringServicesForConversion.length > 0);
     const inferredFrequencyKey = estimateData.customerSelection?.frequency
-      || inferFrequencyKeyFromEstimateData(estimateData);
+      || inferFrequencyKeyFromEstimateData(estimateData)
+      // Legacy count-less termite monitoring: synthesize the flat monthly
+      // cadence so the grandfathered per-application amount is reachable.
+      || (legacyFlatMonthlyTermiteUnit(recurringServicesForConversion, monthlyRate) ? 'monthly' : null);
     // Combined routing only trusts the customer's REAL accepted selection —
     // inferFrequencyKeyFromEstimateData is a guess that can derive from a
     // companion or unrelated line, and must never be treated as the pest
@@ -7147,3 +7166,4 @@ module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmoun
 module.exports.applyFrozenExistingServiceExtension = applyFrozenExistingServiceExtension;
 module.exports.resolveConvertedPerApplicationFee = resolveConvertedPerApplicationFee;
 module.exports.assertPerApplicationAddOnPriced = assertPerApplicationAddOnPriced;
+module.exports.legacyFlatMonthlyTermiteUnit = legacyFlatMonthlyTermiteUnit;
