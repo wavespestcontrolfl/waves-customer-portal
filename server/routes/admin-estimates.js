@@ -283,6 +283,20 @@ function sendRequiresServerPricingFor(estimate = {}) {
   return parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled !== true;
 }
 const SEND_CLAIM_PRICING_AUTHORITY_SQL = "COALESCE(UPPER(pricing_authority), '') <> 'CLIENT_FALLBACK'";
+
+// Gate-off telemetry for the rollout count: one warn per delivery attempt
+// that actually reached the funnel with CLIENT_FALLBACK pricing, emitted
+// AFTER the funnel's own sendability check passed (so a later rejection
+// never counts) and only from that one site (the pre-read assert used to
+// log too and double-counted; GH codex P2 on #3750). Silent while the gate
+// is on — the assert refuses the send instead.
+function shadowLogFallbackDelivery(estimate = {}) {
+  if (String(estimate.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return false;
+  if (parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true) return false;
+  if (require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return false;
+  logger.warn(`[pricing-authority] shadow: estimate ${estimate.id} is being delivered with CLIENT_FALLBACK pricing (GATE_SEND_REQUIRES_SERVER_PRICING off)`);
+  return true;
+}
 // Automation claims require the explicit SERVER stamp (fail closed on null /
 // unknown values — pre-push codex P0); the manual gate above only refuses
 // the known fallback stamp.
@@ -389,15 +403,18 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   // Historical delivered rows are the data audit's job; a revision of a
   // delivered row that falls back is refused at save time while the gate
   // is on (reviseAdminEstimate).
+  // The gate-off would-block telemetry lives in the delivery funnel
+  // (shadowLogFallbackDelivery), not here: this assert runs on the pre-read
+  // in the route AND again inside sendEstimateNowInner, and may run before
+  // a later gate rejects the request — logging here double-counted exposure
+  // (GH codex P2 on #3750).
   if (!isAuthoredProposal
-    && String(estimate.pricing_authority || '').toUpperCase() === 'CLIENT_FALLBACK') {
-    if (sendRequiresServerPricingFor(estimate)) {
-      const err = new Error('This estimate\'s price was saved from the browser preview because the pricing engine could not verify it. Open it in the estimate tool and save again so the engine prices it, then send.');
-      err.statusCode = 409;
-      err.code = 'CLIENT_FALLBACK_PRICING';
-      throw err;
-    }
-    logger.warn(`[pricing-authority] shadow: estimate ${estimate.id} is being sent with CLIENT_FALLBACK pricing (GATE_SEND_REQUIRES_SERVER_PRICING off)`);
+    && String(estimate.pricing_authority || '').toUpperCase() === 'CLIENT_FALLBACK'
+    && sendRequiresServerPricingFor(estimate)) {
+    const err = new Error('This estimate\'s price was saved from the browser preview because the pricing engine could not verify it. Open it in the estimate tool and save again so the engine prices it, then send.');
+    err.statusCode = 409;
+    err.code = 'CLIENT_FALLBACK_PRICING';
+    throw err;
   }
   assertEstimateManagerApprovalResolved(estimate);
   if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
@@ -600,7 +617,9 @@ function notifyPricingFallbackAfterCommit(estimate, reason) {
         // bell carries).
         bell: true,
         dedupeKey: `estimate-pricing-fallback:${estimate.id}`,
-        metadata: { estimateId: estimate.id, pricingAuthority: 'CLIENT_FALLBACK', reason },
+        // customerId lets NotificationService apply its internal-test
+        // suppression (GH codex P2 on #3750), like the neighbouring alerts.
+        metadata: { estimateId: estimate.id, customerId: estimate.customer_id || null, pricingAuthority: 'CLIENT_FALLBACK', reason },
       },
     ).catch((err) => logger.warn(`[pricing-authority] fallback admin notify failed for estimate ${estimate.id}: ${err.message}`));
   } catch (err) {
@@ -1660,6 +1679,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   assertEstimateSendable(estimate, {
     engineReviewAcknowledged: engineReviewAcknowledgedResolved,
   });
+  shadowLogFallbackDelivery(estimate);
 
   // Send-time lead-with-one-service (GATE_ESTIMATE_LEAD_SERVICE_SEND): parks
   // the non-lead recurring lines as staff opt-out events BEFORE any delivery
@@ -4242,6 +4262,7 @@ router._internals = {
   clearStaleProposalDelivery,
   assertEstimateSendable,
   sendRequiresServerPricingFor,
+  shadowLogFallbackDelivery,
   SEND_CLAIM_PRICING_AUTHORITY_SQL,
   AUTO_SEND_PRICING_AUTHORITY_SQL,
   assertAutoSendPricingAuthority,

@@ -74,6 +74,7 @@ const {
   AUTO_SEND_PRICING_AUTHORITY_SQL,
   assertAutoSendPricingAuthority,
   notifyPricingFallbackAfterCommit,
+  shadowLogFallbackDelivery,
 } = adminEstimatesRouter._internals;
 const { createOrReuseAdminEstimate, reviseAdminEstimate } = require('../services/admin-estimate-persistence');
 const { notifyAdmin } = require('../services/notification-service');
@@ -146,15 +147,29 @@ describe('assertEstimateSendable — engine-authoritative pricing gate', () => {
     }))).toBeNull();
   });
 
-  it('with the gate off the send proceeds and the would-block is logged for the shadow count', () => {
+  it('with the gate off the send proceeds and the pre-read assert itself logs nothing (the funnel counts)', () => {
     mockGateState.sendRequiresServerPricing = false;
     expect(caughtBy(fallbackDraft())).toBeNull();
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringMatching(/shadow/));
+  });
+});
+
+describe('shadowLogFallbackDelivery — one would-block per delivery attempt, gate off only', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  it('logs exactly once for a CLIENT_FALLBACK delivery while the gate is off', () => {
+    mockGateState.sendRequiresServerPricing = false;
+    expect(shadowLogFallbackDelivery(fallbackDraft())).toBe(true);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/shadow.*est-client-fallback-1.*CLIENT_FALLBACK/));
   });
 
-  it('with the gate off an engine-priced row logs nothing', () => {
+  it('stays silent for engine-priced rows, authored proposals, and while the gate is on (the assert refuses instead)', () => {
     mockGateState.sendRequiresServerPricing = false;
-    expect(caughtBy(fallbackDraft({ pricing_authority: 'SERVER' }))).toBeNull();
+    expect(shadowLogFallbackDelivery(fallbackDraft({ pricing_authority: 'SERVER' }))).toBe(false);
+    expect(shadowLogFallbackDelivery(fallbackDraft({ estimate_data: { proposal: { enabled: true, buildings: [] } } }))).toBe(false);
+    mockGateState.sendRequiresServerPricing = true;
+    expect(shadowLogFallbackDelivery(fallbackDraft())).toBe(false);
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringMatching(/shadow/));
   });
 });
@@ -194,7 +209,7 @@ describe('post-commit pricing-fallback bell (SEC-002 / pre-push codex P1)', () =
 
   it('rings once per estimate after a committed create whose recompute failed, keyed for dedupe', async () => {
     createOrReuseAdminEstimate.mockResolvedValue({
-      estimate: { id: 'est-cf-9', token: 'tok-cf-9', customer_name: 'Pat Tester', pricing_authority: 'CLIENT_FALLBACK' },
+      estimate: { id: 'est-cf-9', token: 'tok-cf-9', customer_id: 'cust-cf-9', customer_name: 'Pat Tester', pricing_authority: 'CLIENT_FALLBACK' },
       reused: false, memberLinkageWarning: null, pricingFallbackReason: 'ENGINE_ERROR',
     });
     const res = makeRes();
@@ -205,7 +220,7 @@ describe('post-commit pricing-fallback bell (SEC-002 / pre-push codex P1)', () =
       'estimate',
       expect.stringContaining('Estimate saved without engine pricing'),
       expect.stringContaining('client fallback'),
-      expect.objectContaining({ bell: true, dedupeKey: 'estimate-pricing-fallback:est-cf-9', metadata: expect.objectContaining({ estimateId: 'est-cf-9', reason: 'ENGINE_ERROR' }) }),
+      expect.objectContaining({ bell: true, dedupeKey: 'estimate-pricing-fallback:est-cf-9', metadata: expect.objectContaining({ estimateId: 'est-cf-9', customerId: 'cust-cf-9', reason: 'ENGINE_ERROR' }) }),
     );
   });
 

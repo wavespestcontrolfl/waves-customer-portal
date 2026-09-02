@@ -1138,6 +1138,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
                 monthly_total: triageDraftEstimate?.monthly || null,
                 annual_total: triageDraftEstimate?.annual || null,
                 onetime_total: triageDraftEstimate?.oneTimeTotal || null,
+                // Same stamp as the initial insert (GH codex P1 on #3750): a
+                // triage-generated engine price is SERVER, else unstamped —
+                // the auto-send lane fails closed on anything else.
+                pricing_authority: triageDraftEstimate?.automation?.status === 'generated' ? 'SERVER' : null,
                 estimate_data: JSON.stringify(triageDraftEstimate?.estimateData || {
                   automation: {
                     leadEstimateAutomation: triageReadiness,
