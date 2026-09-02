@@ -52,7 +52,6 @@ const RECORDED_BY = 'zelle-notice-reconciler';
 // before its claim row existed — the durable retry record (see
 // reofferMarkedEmails). Overwritten by the reconciler's own stamp.
 const ZELLE_RETRY_MARK = 'zelle_notice_retry';
-const RETRY_WINDOW_DAYS = 7;
 const RETRY_BATCH = 25;
 const DUPLICATE_WINDOW_DAYS = 14;
 const NEAR_AMOUNT_TOLERANCE_CENTS = 500;
@@ -85,19 +84,23 @@ function candidateEntry(row, { exactAmount, nameMatch }) {
 
 // Exact-cent rows first (in their query order), then near-amount rows the
 // exact list did not already contain — the operator's dropdown, capped by
-// the query's own limit.
+// the query's own limit. Near rows pass the SAME fail-closed self-pay
+// predicate as the exact rows (live payer re-resolution): the dropdown
+// must never offer third-party debt as a Zelle candidate.
 async function buildCandidates(parsed, exactRows) {
   const seen = new Set(exactRows.map((r) => r.id));
   const exact = exactRows.map((r) => candidateEntry(r, {
     exactAmount: true,
     nameMatch: payerNameCorroborates(parsed.payerName, { first_name: r.customer_first_name, last_name: r.customer_last_name }),
   }));
-  const near = (await openSelfPayInvoicesByAmountDue(parsed.amountCents, { toleranceCents: NEAR_AMOUNT_TOLERANCE_CENTS }))
-    .filter((r) => !seen.has(r.id))
-    .map((r) => candidateEntry(r, {
+  const near = [];
+  for (const r of await openSelfPayInvoicesByAmountDue(parsed.amountCents, { toleranceCents: NEAR_AMOUNT_TOLERANCE_CENTS })) {
+    if (seen.has(r.id) || !(await rowIsSelfPayDue(r.customer_id, r))) continue;
+    near.push(candidateEntry(r, {
       exactAmount: false,
       nameMatch: payerNameCorroborates(parsed.payerName, { first_name: r.customer_first_name, last_name: r.customer_last_name }),
     }));
+  }
   return [...exact, ...near];
 }
 
@@ -271,18 +274,19 @@ async function closeIfSettled(row) {
   return true;
 }
 
-// Re-offer the emails the sync hook marked after a pre-claim failure
-// (received_at-bounded so the read is an index range, never a table scan;
-// small batch). maybeHandleZelleNotice re-runs the full decision — claim
+// Re-offer the emails the sync hook marked after a pre-claim failure —
+// oldest first, small batch, NO age cap: a mark stays actionable until it
+// is handled (a week of gate-off or sync outage must not silently drop a
+// payment). The partial index emails_zelle_notice_retry_idx (same
+// migration) makes the read a handful of rows, never an emails scan.
+// maybeHandleZelleNotice re-runs the full decision — claim
 // (at-most-once), trust, match. When the claim already exists (a prior
 // pass got that far before throwing, or the hook's own re-offer won) the
 // mark is cleared only if it is still the mark, so a concurrent owner's
 // outcome stamp is never nulled.
 async function reofferMarkedEmails() {
-  const since = new Date(Date.now() - RETRY_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const rows = await db('emails')
     .where({ auto_action: ZELLE_RETRY_MARK })
-    .where('received_at', '>', since)
     .orderBy('received_at', 'asc')
     .limit(RETRY_BATCH)
     .select('*');

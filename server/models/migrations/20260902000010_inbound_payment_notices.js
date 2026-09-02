@@ -58,9 +58,19 @@ exports.up = async function up(knex) {
     CREATE UNIQUE INDEX inbound_payment_notices_matched_invoice_uniq
       ON inbound_payment_notices (matched_invoice_id) WHERE matched_invoice_id IS NOT NULL
   `);
+  // The sync hook marks an email auto_action = 'zelle_notice_retry' when the
+  // reconciler threw before its claim row existed; the reconciler's per-sync
+  // sweep re-offers marked rows until they are handled — NO age cap (a
+  // week-long outage must not silently drop a payment). Partial index so
+  // that read is a handful of rows, never an emails scan.
+  await knex.raw(`
+    CREATE INDEX IF NOT EXISTS emails_zelle_notice_retry_idx
+      ON emails (received_at) WHERE auto_action = 'zelle_notice_retry'
+  `);
 };
 
 exports.down = async function down(knex) {
+  await knex.raw('DROP INDEX IF EXISTS emails_zelle_notice_retry_idx');
   if (await knex.schema.hasTable('inbound_payment_notices')) {
     await knex.schema.dropTable('inbound_payment_notices');
   }

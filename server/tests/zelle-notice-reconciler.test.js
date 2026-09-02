@@ -286,6 +286,19 @@ describe('park reasons', () => {
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
+  test('a near-amount candidate that fails the live self-pay predicate is dropped from the dropdown (never third-party debt)', async () => {
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents
+      ? [openRow({ id: 'inv-9', invoice_number: 'WPC-2026-0509', total: '120.00' }), openRow({ id: 'inv-8', invoice_number: 'WPC-2026-0508', total: '115.00', customer_id: 'cust-8' })]
+      : []));
+    OpenBalance.rowIsSelfPayDue.mockImplementation(async (customerId) => customerId !== 'cust-8');
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    const patch = closesOf('inbound_payment_notices')[0];
+    expect(patch).toMatchObject({ status: 'parked', park_reason: 'no_match' });
+    expect(JSON.parse(patch.candidates).map((c) => c.invoice_id)).toEqual(['inv-9']);
+    expect(OpenBalance.rowIsSelfPayDue).toHaveBeenCalledWith('cust-8', expect.objectContaining({ id: 'inv-8' }));
+  });
+
   test('exact amount but the customer name does not corroborate ⇒ name_mismatch', async () => {
     claimed();
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow({ customer_first_name: 'Sam', customer_last_name: 'Roe' })]));
@@ -399,7 +412,7 @@ describe('stale claim recovery', () => {
     expect(closesOf('inbound_payment_notices')).toEqual([expect.objectContaining({ status: 'parked', park_reason: 'apply_failed' })]);
   });
 
-  test('the sweep re-offers hook-marked emails (received_at-bounded, small batch) and clears a mark only while it is still the mark', async () => {
+  test('the sweep re-offers hook-marked emails (oldest first, small batch, no age cap) and clears a mark only while it is still the mark', async () => {
     const marked = { ...notice({ id: 'email-marked' }), auto_action: ZELLE_RETRY_MARK };
     tables.emails.selects = [[marked]];
     const orig = db.getMockImplementation();
@@ -408,7 +421,8 @@ describe('stale claim recovery', () => {
     expect(await reofferMarkedEmails()).toBe(1);
     const emailCalls = tables.emails.calls;
     expect(emailCalls).toContainEqual(['where', { auto_action: ZELLE_RETRY_MARK }]);
-    expect(emailCalls.find(([m, col, op]) => m === 'where' && col === 'received_at' && op === '>')).toBeTruthy();
+    expect(emailCalls.find(([m, col, op]) => m === 'where' && col === 'received_at' && op === '>')).toBeUndefined(); // a mark stays actionable until handled
+    expect(emailCalls).toContainEqual(['orderBy', 'received_at', 'asc']);
     expect(emailCalls).toContainEqual(['limit', 25]);
     // The full decision ran: a claim was inserted for the marked email, then parked (no open invoice) …
     expect(insertsOf('inbound_payment_notices')[0]).toMatchObject({ email_id: 'email-marked', status: 'processing' });
