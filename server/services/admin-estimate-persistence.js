@@ -2117,15 +2117,23 @@ async function createOrReuseAdminEstimate({
 // is not persisted while GATE_SEND_REQUIRES_SERVER_PRICING is on — nothing
 // is saved (dryRun preflights surface the same refusal), the operator fixes
 // the inputs and retries. Drafts keep the fail-open save; the send gate
-// holds them. Called on the pre-read row (fast refusal, preflight-visible)
-// AND on the locked row inside the write transaction (the send-versus-revise
-// race), so the verdict can never depend on a stale read.
+// holds them. A SCHEDULED row is protected too (GH codex P1 on #3750): it
+// stays editable, and a fallback revision that kept status='scheduled'
+// would be claimed by the cron, rejected by assertEstimateSendable, and
+// burn its retries into send_failed. Called on the pre-read row (fast
+// refusal, preflight-visible) AND on the locked row inside the write
+// transaction (the send-versus-revise race), so the verdict can never
+// depend on a stale read.
 function assertNoFallbackRevisionOfLiveLink(row, writeFields) {
-  if (!row || !(row.sent_at || row.viewed_at)) return;
+  if (!row) return;
+  const live = row.sent_at || row.viewed_at || String(row.status || '') === 'scheduled';
+  if (!live) return;
   if (String(writeFields?.pricing_authority || '').toUpperCase() !== 'CLIENT_FALLBACK') return;
   if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return;
   throw errorWithStatus(
-    'The pricing engine could not verify this revision and the estimate is already with the customer — nothing was saved. Fix the inputs and try again.',
+    String(row.status || '') === 'scheduled' && !(row.sent_at || row.viewed_at)
+      ? 'The pricing engine could not verify this revision and the estimate is scheduled to send — nothing was saved. Fix the inputs and try again, or unschedule it first.'
+      : 'The pricing engine could not verify this revision and the estimate is already with the customer — nothing was saved. Fix the inputs and try again.',
     409,
   );
 }

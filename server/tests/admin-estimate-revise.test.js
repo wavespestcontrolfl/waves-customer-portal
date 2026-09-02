@@ -891,3 +891,30 @@ describe('reviseAdminEstimate — send-versus-revise race on the live-link guard
     expect(out.pricingFallbackReason).toBe('ENGINE_ERROR');
   });
 });
+
+describe('reviseAdminEstimate — a scheduled row is protected from a fallback revision (GH codex P1 on #3750)', () => {
+  const engineError = async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('engine down') });
+  const scheduledEstimate = { ...sentEstimate, status: 'scheduled', sent_at: null, viewed_at: null, scheduled_at: '2026-07-11T14:00:00Z' };
+  beforeEach(() => {
+    clearAllEstimatePricingCache();
+    mockGateState.sendRequiresServerPricing = true;
+  });
+  afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
+
+  test('refuses (409) so the cron never claims a fallback-priced scheduled row', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: scheduledEstimate });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: engineError, now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/scheduled to send/i) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('a server-priced revision of a scheduled row still saves', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: scheduledEstimate });
+    await reviseAdminEstimate({
+      database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', now: fixedNow,
+      recompute: async () => ({ recomputed: true, source: 'engineInputs', serverResult: { recurring: { services: [], monthlyTotal: 60, annualTotal: 720 }, oneTime: { items: [] } }, serverTotals: { monthlyTotal: 60, annualTotal: 720, onetimeTotal: 0 } }),
+    });
+    expect(updates).toHaveLength(1);
+  });
+});
