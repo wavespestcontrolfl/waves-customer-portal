@@ -2169,6 +2169,12 @@ describe('POST /:id/cancel-plan', () => {
       const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
       expect(body.duplicate).toBe(true);
       expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', 'req-9', expect.objectContaining({ retrieveAfter: '2027-02-28', termId: 'term-1' }));
+      // The repair's identity follows the SNAPSHOT's boundary (the date the
+      // resend renders), not a term_end corrected since.
+      if (sendCancellationConfirmations.mock.calls.length) {
+        const sent = sendCancellationConfirmations.mock.calls[0][0];
+        if (sent.termEpisodeKey) expect(sent.termEpisodeKey).toMatch(/:2027-02-28$/);
+      }
       expect(body.errors).toEqual([]);
       // Clean after the repair: the acceptance closes.
       expect(mockState.service_requests[0].status).toBe('resolved');

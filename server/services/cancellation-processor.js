@@ -749,10 +749,12 @@ async function processCancellationRequest({
         update.waveguard_tier = null;
         update.waveguard_tier_source = null;
         update.monthly_rate = null;
-        // Repeat churn (admin stage-flip residue): the first churn may never
-        // have stamped churn_mrr — snapshot the rate before clearing it, or
-        // the reporting dollars are gone for good.
-        if (wasChurnedStage && customer.churn_mrr == null && Number(customer.monthly_rate) > 0) {
+        // Repeat churn (admin stage-flip residue, or a pre-taxonomy churn
+        // relabelled dormant / past_customer / lost that kept its
+        // churned_at): the first churn may never have stamped churn_mrr —
+        // snapshot the rate before clearing it, or the reporting dollars
+        // (the dashboard's monthly_rate fallback) are gone for good.
+        if (!firstChurn && customer.churn_mrr == null && Number(customer.monthly_rate) > 0) {
           update.churn_mrr = Number(customer.monthly_rate);
         }
         // Per-application lane fields (billing_mode + per_application_fee)

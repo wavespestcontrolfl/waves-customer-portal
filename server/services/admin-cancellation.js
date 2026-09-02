@@ -722,14 +722,19 @@ async function adminCoverageBoundaryInForce(customerId) {
 // outcome as a retry. Beyond 24h the churn dates differ.
 // Not churned / no stamp / unreadable → null episode, and every consumer
 // falls back to its request key (at-most-twice beats never telling anyone).
-async function resolveTermEpisode(customerId, term, currentRequestId = null) {
+// `boundary` overrides the term's current end for a REPAIR of an open
+// acceptance: the resend renders the snapshot's effectiveOn, so its
+// identity (key + compat set) must be that boundary, not a term_end an
+// admin corrected since — or the repair would consume the corrected
+// date's key while texting the old one.
+async function resolveTermEpisode(customerId, term, currentRequestId = null, { boundary: boundaryOverride = null } = {}) {
   if (!term) return null;
   const none = { termId: term.id, episodeKey: null, boundary: null, priorRequestIds: [], priorEndNowRequestIds: [] };
   try {
     const row = await db('customers').where({ id: customerId }).first('pipeline_stage', 'churned_at');
     if (!row || row.pipeline_stage !== 'churned' || !row.churned_at) return none;
     const churnDate = dateOnly(row.churned_at);
-    const boundary = dateOnly(term.term_end);
+    const boundary = dateOnly(boundaryOverride) || dateOnly(term.term_end);
     if (!churnDate || !boundary) return none;
     const { parseETDateTime } = require('../utils/datetime-et');
     const episodeStart = parseETDateTime(`${churnDate}T00:00`);
@@ -1446,7 +1451,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             // this the stale error echoes forever and the office never
             // gets its pull instruction.
             const datedTermite = priorSnap.effectiveDate === 'end_of_coverage';
-            const repairEpisode = await resolveTermEpisode(customerId, term, reqRow.id);
+            const repairEpisode = await resolveTermEpisode(customerId, term, reqRow.id,
+              { boundary: datedTermite ? priorSnap.effectiveOn : null });
             if (hasTermiteErr && (!datedTermite || priorSnap.effectiveOn)) {
               try {
                 const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
