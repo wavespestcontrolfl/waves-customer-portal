@@ -119,13 +119,21 @@ const VISIT_NOT_PROJECT_BACKED = `
                AND (pc.completion_source = 'project_completion'
                     OR EXISTS (SELECT 1 FROM projects pj2 WHERE pj2.service_record_id = pc.id)))`;
 
-// Any sibling record whose frozen closeout requirements say the named
-// obligation is NOT owed. Used as NOT EXISTS: one frozen "false" exempts the
-// visit, mirroring closeout-status's canonical-sibling read conservatively.
-const SIBLING_FROZE_FALSE = (requirement) => `
-                 SELECT 1 FROM service_records fr
-                  WHERE fr.scheduled_service_id = ss.id
-                    AND fr.structured_notes->'closeoutRequirements'->>'${requirement}' = 'false'`;
+// The CANONICAL sibling's frozen closeout requirement — the newest
+// completed record for the visit, closeout-status.js's own fallback when no
+// attempt pins a record. Reading only that row means neither a stale
+// legacy sibling without a snapshot (defaulting to "owed") nor a stale
+// sibling that froze "not owed" can out-vote the record that actually
+// closed the visit (codex P2 r5 + pre-push P1). Absent = owed.
+const CANONICAL_SIBLING_FROZE_FALSE = (requirement) => `
+                 SELECT 1 FROM (
+                   SELECT fr.structured_notes->'closeoutRequirements'->>'${requirement}' AS owed_flag
+                     FROM service_records fr
+                    WHERE fr.scheduled_service_id = ss.id AND fr.status = 'completed'
+                    ORDER BY fr.created_at DESC
+                    LIMIT 1
+                 ) canonical
+                  WHERE canonical.owed_flag = 'false'`;
 
 // matchSql must SELECT `id` (text-castable) and `ord` (sort key, newest
 // first). The CTE is scanned once for the count and once for a LIMIT-bounded
@@ -173,9 +181,9 @@ const PREDICATES = Object.freeze({
          GROUP BY g.scheduled_service_id`),
   },
   // A frozen catalog rule saying the service owes no report
-  // (closeoutRequirements.requiresServiceReport=false) on ANY sibling
-  // exempts the visit (conservative twin of closeout-status's canonical
-  // sibling read — codex P2 r5); absent everywhere = owed.
+  // (closeoutRequirements.requiresServiceReport=false) on the CANONICAL
+  // sibling (newest completed record, closeout-status's fallback) exempts
+  // the visit (codex P2 r5); absent = owed.
   completed_record_without_report_token: {
     label: 'Completed non-project visits (>2h) that owe a customer report and have no sibling record with a report token',
     href: '/admin/dispatch',
@@ -190,7 +198,7 @@ const PREDICATES = Object.freeze({
                     AND ${OWES_CUSTOMER_ARTIFACT}
                     AND sr.created_at >= '${REPORT_TOKEN_SINCE}'::date
                     AND ${COMPLETED_MARKER_AT} < now() - interval '2 hours')
-           AND NOT EXISTS (${SIBLING_FROZE_FALSE('requiresServiceReport')})
+           AND NOT EXISTS (${CANONICAL_SIBLING_FROZE_FALSE('requiresServiceReport')})
            AND NOT EXISTS (
                  SELECT 1 FROM service_records tok
                   WHERE tok.scheduled_service_id = ss.id
@@ -225,10 +233,9 @@ const PREDICATES = Object.freeze({
   // artifact record. 'sending' and 'deferred' are pending there and stay
   // findings once 24h old; NULL and 'failed' are findings. A frozen catalog
   // rule saying the service owes no notice
-  // (closeoutRequirements.requiresCustomerNotice=false) on ANY sibling
-  // exempts the visit (closeout-status reads the canonical sibling's
-  // snapshot; treating a frozen "not owed" on any sibling as authoritative
-  // is the conservative SQL twin — codex P2 r5). A delivered video recap
+  // (closeoutRequirements.requiresCustomerNotice=false) on the CANONICAL
+  // sibling (newest completed record, closeout-status's fallback) exempts
+  // the visit (codex P2 r5). A delivered video recap
   // (service_recaps.sent_at — set only on provider confirmation,
   // recap-delivery.js) is a completion notice too (codex P2 r5).
   completed_record_without_comms_marker: {
@@ -245,7 +252,7 @@ const PREDICATES = Object.freeze({
                     AND ${OWES_CUSTOMER_ARTIFACT}
                     AND ${COMPLETED_MARKER_AT} >= '${COMMS_MARKER_SINCE}'::date
                     AND ${COMPLETED_MARKER_AT} < now() - interval '24 hours')
-           AND NOT EXISTS (${SIBLING_FROZE_FALSE('requiresCustomerNotice')})
+           AND NOT EXISTS (${CANONICAL_SIBLING_FROZE_FALSE('requiresCustomerNotice')})
            AND NOT EXISTS (
                  SELECT 1 FROM service_records sib
                   WHERE sib.scheduled_service_id = ss.id
@@ -310,7 +317,7 @@ module.exports = {
   runPredicate,
   _private: {
     SAMPLE, RECORD_FK_SINCE, TRACKING_STAMP_SINCE, REPORT_TOKEN_SINCE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, COMPLETED_TRANSITION_SINCE,
-    OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES, SIBLING_FROZE_FALSE,
+    OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES, CANONICAL_SIBLING_FROZE_FALSE,
     COMPLETED_MARKER_AT, INCOMPLETE_FOLLOWUP_GRACE_DAYS, aggregate,
   },
 };

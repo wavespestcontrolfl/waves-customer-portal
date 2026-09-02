@@ -60,8 +60,9 @@ describe('PREDICATES registry', () => {
     expect(token).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM service_records tok[\s\S]*report_view_token IS NOT NULL/);
     // A stamped report_generated_at never hides a missing token.
     expect(token).not.toContain('report_generated_at');
-    // A frozen "no report owed" catalog rule on ANY sibling exempts the visit; absent = owed.
-    expect(token).toContain(`NOT EXISTS (${_private.SIBLING_FROZE_FALSE('requiresServiceReport')})`);
+    // The CANONICAL (newest completed) sibling's frozen "no report owed" exempts the visit; absent = owed.
+    expect(_private.CANONICAL_SIBLING_FROZE_FALSE('requiresServiceReport')).toMatch(/ORDER BY fr\.created_at DESC\s+LIMIT 1/);
+    expect(token).toContain(`NOT EXISTS (${_private.CANONICAL_SIBLING_FROZE_FALSE('requiresServiceReport')})`);
     expect(token).not.toContain("requiresServiceReport', 'true') <> 'false'");
     const comms = PREDICATES.completed_record_without_comms_marker.sql;
     expect(comms).toMatch(/FROM scheduled_services ss/);
@@ -73,8 +74,8 @@ describe('PREDICATES registry', () => {
     expect(_private.TERMINAL_SMS_STATUSES).toEqual(['sent', 'skipped_recap_sms_already_sent', 'blocked']);
     expect(comms).toContain("completionSmsStatus' IN ('sent', 'skipped_recap_sms_already_sent', 'blocked')");
     expect(comms).not.toMatch(/'sending'|'deferred'/);
-    // A frozen "no customer notice owed" catalog rule on ANY sibling exempts the visit.
-    expect(comms).toContain(`NOT EXISTS (${_private.SIBLING_FROZE_FALSE('requiresCustomerNotice')})`);
+    // The CANONICAL sibling's frozen "no customer notice owed" exempts the visit.
+    expect(comms).toContain(`NOT EXISTS (${_private.CANONICAL_SIBLING_FROZE_FALSE('requiresCustomerNotice')})`);
     // A delivered video recap (provider-confirmed sent_at) is a completion notice.
     expect(comms).toMatch(/service_recaps rc\s+WHERE rc\.scheduled_service_id = ss\.id AND rc\.sent_at IS NOT NULL/);
     // An unconfirmed recap claim is not delivery evidence: it may only appear
