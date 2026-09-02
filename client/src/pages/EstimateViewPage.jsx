@@ -4357,12 +4357,15 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
 // customer-facing seasonal context the lawn health widget already uses
 // (server/services/fawn-weather.js getSeasonalContext): spring green-up
 // Mar–Apr, summer peak May–Sep, fall transition Oct–Nov, winter dormancy
-// Dec–Feb. No product, step, or fertilizer names — the per-visit program is
+// Dec–Feb. The summer note stays jurisdiction-neutral on purpose: the
+// fertilizer restriction window differs by county and city (pre-push Codex
+// P1), so the row says we work around it rather than naming dates.
+// No product, step, or fertilizer names — the per-visit program is
 // owner-owned business logic; this block only says what each season is
 // FOR and how many of the program's visits the cadence puts in it.
 const LAWN_SEASONS = [
   { key: 'spring', label: 'Spring', range: 'Mar – Apr', months: [2, 3], focus: 'Green-up as the lawn comes out of dormancy and the soil warms.' },
-  { key: 'summer', label: 'Summer', range: 'May – Sep', months: [4, 5, 6, 7, 8], focus: 'Peak growth, with the year’s heaviest insect and fungus pressure.', note: 'County fertilizer blackout runs Jun – Sep.' },
+  { key: 'summer', label: 'Summer', range: 'May – Sep', months: [4, 5, 6, 7, 8], focus: 'Peak growth, with the year’s heaviest insect and fungus pressure.', note: 'We work around the summer fertilizer restrictions in your county.' },
   { key: 'fall', label: 'Fall', range: 'Oct – Nov', months: [9, 10], focus: 'Weed prevention while growth slows.' },
   { key: 'winter', label: 'Winter', range: 'Dec – Feb', months: [11, 0, 1], focus: 'Root strength while the lawn rests.' },
 ];

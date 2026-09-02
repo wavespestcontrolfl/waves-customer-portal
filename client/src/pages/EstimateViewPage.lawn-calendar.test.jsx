@@ -90,7 +90,8 @@ describe('LawnProgramCalendar', () => {
     expect(rows[0]).toHaveTextContent('now');
     expect(rows[3]).toHaveAttribute('data-season', 'spring');
     expect(rows[3]).toHaveTextContent('1 application');
-    expect(screen.getByText(/County fertilizer blackout/)).toBeInTheDocument();
+    expect(screen.getByText(/summer fertilizer restrictions in your county/)).toBeInTheDocument();
+    expect(screen.queryByText(/Jun – Sep|blackout/)).not.toBeInTheDocument();
     expect(screen.getByText('Timing shifts a little with weather and turf condition.')).toBeInTheDocument();
     expect(screen.queryByText(/fertilizer blend|granular|pre-emergent/i)).not.toBeInTheDocument();
   });
