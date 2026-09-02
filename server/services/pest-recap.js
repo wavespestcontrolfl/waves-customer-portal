@@ -632,9 +632,11 @@ async function submitRecap({
         // Only when THIS recap is the completion (the existing row is not
         // yet 'completed'): a resend/retry against a record completed
         // long ago must not freeze today's customer / technician as if
-        // they were the completion-time identity (pre-push codex P1).
-        if (!Object.prototype.hasOwnProperty.call(existingData, 'reportIdentitySnapshot')
-          && existing.status !== COMPLETED_STATUS) {
+        // they were the completion-time identity (pre-push codex P1). A
+        // record the tech marked incomplete carries the identity of THAT
+        // moment; the recap that actually completes the visit owns the
+        // completion-time identity and replaces it (pre-push codex P1).
+        if (existing.status !== COMPLETED_STATUS) {
           missing.reportIdentitySnapshot = reportIdentitySnapshot;
         }
         if (Object.keys(missing).length) {
