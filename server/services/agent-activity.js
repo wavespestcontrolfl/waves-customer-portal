@@ -294,12 +294,18 @@ function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [] }) {
   // ONE newest approval per run (by created_at, never input order), then
   // classify that row: a run can be re-requested, and only its latest
   // request says whether the owner still owes a reply or already decided.
+  // created_at arrives as a Date from pg (String(date) is not sortable) —
+  // compare epoch millis; an unparsable value sorts oldest.
+  const at = (row) => {
+    const t = new Date(row.created_at).getTime();
+    return Number.isNaN(t) ? 0 : t;
+  };
   const newestByRun = new Map();
   for (const a of approvals) {
     if (!a.run_id) continue;
     const key = String(a.run_id);
     const current = newestByRun.get(key);
-    if (!current || String(a.created_at || '') > String(current.created_at || '')) newestByRun.set(key, a);
+    if (!current || at(a) > at(current)) newestByRun.set(key, a);
   }
   const awaitingReplyByRun = new Map();
   const decidedByRun = new Map();

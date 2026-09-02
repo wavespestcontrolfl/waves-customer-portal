@@ -151,6 +151,14 @@ describe('buildActivity', () => {
       const { items } = buildActivity({ runs: [{ ...RUN_BASE, outcome: 'completed_pending_review' }], approvals });
       expect(items[0]).toMatchObject({ status: 'completed', detail: 'approved by email reply' });
     }
+    // pg returns Date instances — String(Date) starts with the weekday and
+    // must not be what decides "newest"
+    const asDates = [
+      { run_id: 'run-1', status: 'awaiting_reply', token: 'EA-sun00001', created_at: new Date('2026-09-06T08:00:00Z'), email_sent_at: '2026-09-06T08:00:05Z' },
+      { run_id: 'run-1', status: 'approved', token: 'EA-tue00001', created_at: new Date('2026-09-08T09:00:00Z') },
+    ];
+    const { items: dated } = buildActivity({ runs: [{ ...RUN_BASE, outcome: 'completed_pending_review' }], approvals: asDates });
+    expect(dated[0]).toMatchObject({ status: 'completed', detail: 'approved by email reply' });
   });
 
   it('an open approval outranks the skip reason in the detail line', () => {
