@@ -24453,6 +24453,13 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // ?mode=pdf by hand still counts as the view it is (unlike the refresh
     // param above, no public input can dodge first-view tracking).
     const verifiedPdfRenderPass = isPdfRenderPass && docRenderPin !== null;
+    // Whether THIS request is represented in estimate_views: an internal
+    // refresh belongs to the sitting that was already counted; a fresh open
+    // counts only once its row actually lands. The returning-visitor
+    // projection below refuses to run otherwise — it would treat the last
+    // stored session as current and report a visit number one too low (GH
+    // codex P2 on #3708).
+    let currentViewRecorded = isInternalRefresh;
     if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && shouldCountView(req, ip, estimate)) {
       // ONE transaction for the aggregate counter + the per-open row: written
       // separately, a failure of either half leaves view_count permanently
@@ -24474,6 +24481,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
             user_agent: ua || null,
           });
         });
+        currentViewRecorded = true;
       } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
 
       // Engagement-engine hook — same contract as the legacy HTML view
@@ -24915,7 +24923,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // failure never breaks the customer-facing endpoint.
     let returnVisitBlock = {};
     if (featureGates.isEnabled('estimateReturnVisit') && !adminDraftPreview && !isPdfRenderPass
-      && isEstimateAcceptActive(estimate)) {
+      && currentViewRecorded && isEstimateAcceptActive(estimate)) {
       try {
         const { sessionsForEstimate } = require('../services/estimate-engagement-sessions');
         const { buildReturnVisitPayload } = require('../services/estimate-return-visit');
