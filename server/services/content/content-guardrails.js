@@ -252,7 +252,7 @@ function hasTrueOpenAttr(attrs) {
   const afterEnd = valueStart >= 0 ? valueStart + (value ? value.length : 0) : last.index + last[0].length;
   if (hasAttrSpreadAfter(a, afterEnd)) return true; // later attribute spread may override
   if (value === undefined) return true; // bare `open`
-  return !FALSY_EXPR_RE.test(value.trim());
+  return !FALSY_EXPR_RE.test(stripJsTrivia(value).trim());
 }
 
 // `hidden` follows ASTRO attribute-rendering semantics (astro
@@ -271,7 +271,12 @@ function hiddenAttrRendersHidden(attrs) {
   const valueStart = /=/.test(last[1] || '') ? last.index + last[0].length : -1;
   const value = valueStart >= 0 ? attrValueAt(a, valueStart) : undefined;
   if (value === undefined) return true; // bare `hidden`
-  return !/^\{\s*(?:false|null|undefined)\s*\}$/.test(value.trim());
+  return !/^\{\s*(?:false|null|undefined)\s*\}$/.test(stripJsTrivia(value).trim());
+}
+// Comment trivia inside a static boolean expression ({false /* note */})
+// is not part of the value (astro parity, Codex #508 r8).
+function stripJsTrivia(expr) {
+  return String(expr || '').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*\n/g, ' ');
 }
 
 function opensDefinitelyHidden(tag) {
@@ -313,7 +318,9 @@ function hiddenStyleValue(attrs) {
   const val = (ch === '"' || ch === "'" || ch === '`' || ch === '{') ? rawValue.slice(1, -1) : rawValue;
   // CSS applies the LAST declaration of a property (astro parity, Codex
   // #508 r6): "display:none; display:inline" is visible.
-  return lastStyleValue(val, 'display') === 'none' || lastStyleValue(val, 'visibility') === 'hidden';
+  // A declaration inside a CSS comment is not a declaration (Codex #508 r8).
+  const live = val.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  return lastStyleValue(live, 'display') === 'none' || lastStyleValue(live, 'visibility') === 'hidden';
 }
 // Final value of a CSS property in a style string or JSX style-object
 // spelling (token-bounded; the value may be quoted).
@@ -1935,11 +1942,12 @@ function isExactTagAt(text, start, name) {
 // {true}; Codex #3646 r36).
 // A child expression that renders NOTHING: an empty string or a boolean/
 // nullish literal, with optional comment trivia around it.
+const WHITESPACE_ENTITY_RE = /&(?:nbsp|ensp|emsp|thinsp|#0*(?:32|160|8194|8195|8201)|#x0*(?:20|a0|2002|2003|2009));?/gi;
 // An ARRAY whose slots are all non-rendering (or elided) renders nothing
 // either ({[]}, {[null]}, {[false, '']}; Codex #3646 r39).
 const NON_RENDERING_CHILD_RE = (() => {
   const trivia = '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*';
-  const lit = "(?:''|\"\"|``|true|false|null|undefined)"; // no backreference — the array branch repeats the group
+  const lit = "(?:'\\s*'|\"\\s*\"|`\\s*`|true|false|null|undefined)"; // whitespace-only strings render nothing visible; no backreference — the array branch repeats the group
   const arr = '\\[' + trivia + '(?:' + lit + '?' + trivia + ',' + trivia + ')*' + '(?:' + lit + trivia + ')?' + '\\]';
   return new RegExp('\\{' + trivia + '(?:' + lit + '|' + arr + ')' + trivia + '\\}', 'g');
 })();
@@ -1973,7 +1981,9 @@ function affiliateLinkTextIsEmpty(masked, strView, start, attrs) {
         text += visible.slice(last);
         // Comment trivia around the literal ({false /* note */}) and
         // fragment delimiters (<></>) render nothing either (Codex #508 r5/r6).
-        return !text.replace(/<>|<\/>/g, '').replace(NON_RENDERING_CHILD_RE, '').trim();
+        // Whitespace character references (&nbsp; &#32; …) decode to
+        // whitespace the anchor cannot show either (Codex #508 r8).
+        return !text.replace(/<>|<\/>/g, '').replace(NON_RENDERING_CHILD_RE, '').replace(WHITESPACE_ENTITY_RE, ' ').trim();
       }
     } else {
       const a = tagAttrsAt(masked, t.index);
@@ -2077,13 +2087,21 @@ function staticallyHiddenAttrs(attrs) {
 // Codex #508 r5/r6): `hidden` (display) ↔ md:block/flex/…; `invisible`
 // (visibility) ↔ md:visible; `sr-only` ↔ md:not-sr-only. Only VIEWPORT
 // breakpoints prove responsive visibility.
+// An IMPORTANT hide (Tailwind 4 `hidden!`, Tailwind 3 `!hidden`) is
+// undone only by an important reset (Codex #508 r8).
 const HIDING_UTILITY_RESETS = [
-  [/(?:^|\s)hidden(?=\s|$)/, /\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/],
-  [/(?:^|\s)invisible(?=\s|$)/, /\b(?:sm|md|lg|xl|2xl):visible\b/],
-  [/(?:^|\s)sr-only(?=\s|$)/, /\b(?:sm|md|lg|xl|2xl):not-sr-only\b/],
+  ['hidden', 'block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item'],
+  ['invisible', 'visible'],
+  ['sr-only', 'not-sr-only'],
 ];
 function classListStaticallyHidden(cls) {
-  return HIDING_UTILITY_RESETS.some(([hide, reset]) => hide.test(cls) && !reset.test(cls));
+  return HIDING_UTILITY_RESETS.some(([hide, resets]) => {
+    const h = new RegExp(`(?:^|\\s)(!?)${hide}(!?)(?=\\s|$)`).exec(cls);
+    if (!h) return false;
+    const reset = new RegExp(`(?:^|\\s)(?:sm|md|lg|xl|2xl):(!?)(?:${resets})(!?)(?=\\s|$)`).exec(cls);
+    if (!reset) return true;
+    return Boolean(h[1] || h[2]) && !(reset[1] || reset[2]);
+  });
 }
 function blankStaticHiddenClassElements(text) {
   const s = String(text || '');
@@ -2867,9 +2885,12 @@ function containsAffiliateMaterial(text) {
     affiliateRegistryModule().registryUrls().map(affiliateUrlIdentity).filter(Boolean),
   );
   for (const scan of decoded && decoded !== raw ? [raw, decoded] : [raw]) {
-    for (const tag of eachTag(scan)) {
-      if (!tag.isClose && tag.name === 'affiliatelink') return true;
-    }
+    // DIRECT position scan, not eachTag: a link nested in another
+    // component's prop expression (<InlineCTA description={<AffiliateLink
+    // …/>} />) renders and must be caught — eachTag consumes the outer tag
+    // whole (Codex #3646 r41). Egress is fail-closed, so even attr-quoted
+    // or string-spelled occurrences count.
+    if (/<AffiliateLink(?=[\s/>])/i.test(scan)) return true;
     const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
     let m;
     while ((m = urlRe.exec(scan)) !== null) {

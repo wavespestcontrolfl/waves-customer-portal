@@ -972,6 +972,27 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     }
   });
 
+  test('supporting-blog runs are blog targets; nested links reach channel egress; whitespace/entity children; CSS comments; important hides; trivia in static booleans (Codex #3646 r41, #508 r8)', () => {
+    const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+    expect(deriveSyncGuardrailOptions({}, { action_type: 'new_supporting_blog' }).targetIsBlog).toBe(true);
+    expect(deriveSyncGuardrailOptions({}, { action_type: 'x', page_type: 'supporting-blog' }).targetIsBlog).toBe(true);
+    expect(deriveSyncGuardrailOptions({}, { action_type: 'refresh_existing_page' }).targetIsBlog).toBe(false);
+    expect(guardrails.containsAffiliateMaterial('<InlineCTA description={<AffiliateLink product="x" placement="p">Buy</AffiliateLink>} />')).toBe(true);
+    withAffiliateEnv(() => {
+      const at = (tag) => `Intro.\n\n## Sec\n\n[quote](/quote/) ${tag}`;
+      for (const kids of ["{'   '}", '{"\t"}', "{[' ', null]}", '&nbsp;', '&#32;&#160;', '<span style="display:none; /* display:inline */">Buy</span>', '<span class="hidden!">Buy</span>', '<span class="!hidden">Buy</span>', '<span class="hidden! md:block">Buy</span>', '<span class="sr-only! md:not-sr-only">Buy</span>']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      for (const kids of ["{' Buy '}", '<span class="hidden! md:block!">Buy</span>', '<span class="!hidden md:!block">Buy</span>', '<span hidden={false /* intentionally visible */}>Buy</span>', '<span style="/* display:none */ display:inline">Buy</span>']) {
+        expect(affiliateCodes(guardrails.evaluate({ body: at(`<AffiliateLink product="rain-gauge" placement="primary-rec">${kids}</AffiliateLink>`), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      }
+      // Trivia in a static open={} value reads the same way in the CTA view.
+      const missing = (before) => affiliateCodes(guardrails.evaluate({ body: `Intro.\n\n${before}\n\n## Sec\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">it</AffiliateLink> here.`, frontmatter: fm() }, { targetIsBlog: true })).includes('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      expect(missing('<details open={false /* closed */}>[quote](/quote/)</details>')).toBe(true);
+      expect(missing('<div hidden={false /* visible */}>[quote](/quote/)</div>')).toBe(false);
+    });
+  });
+
   test('spread wrappers hide their CTA (astro parity, Codex #3646 r28)', () => {
     withAffiliateEnv(() => {
       const b = `Intro.\n\n## Sec\n\n<div {...props}>[Quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;

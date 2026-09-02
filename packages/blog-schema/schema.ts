@@ -30,6 +30,20 @@ function getAffiliateProduct(id: string): AffiliateRegistryRow | null {
 }
 // Mirrors PROTECTED_POST_TYPES in ../affiliate-registry/index.ts (pinned by test).
 const AFFILIATE_PROTECTED_POST_TYPES = ['location', 'cost', 'decision', 'comparison', 'case-study'] as const;
+// Waves' own dialable lines (schema-local: this file is vendored into the
+// portal and cannot import src/data/waves-offices.ts — the test pins this
+// set to WAVES_HUB_CITY_PHONES). An <InlineCTA tel> may only dial one of
+// these; the portal mirror consults its full owned-number config.
+export const WAVES_OWNED_PHONES: ReadonlySet<string> = new Set([
+  '9413187612', '9412975749', '9412972817', '9412972606', '9412973337', '9412402066',
+]);
+function isWavesTel(v: string): boolean {
+  const digits = String(v || '').replace(/^tel:/i, '').replace(/\D/g, '');
+  // Dialable shape first: the dialer places the WHOLE string, so a padded
+  // number that merely ENDS in an owned line must not pass.
+  if (!(digits.length === 10 || (digits.length === 11 && digits[0] === '1'))) return false;
+  return WAVES_OWNED_PHONES.has(digits.slice(-10));
+}
 import { SERVICE_AREAS } from './service-areas.ts';
 
 // ─────────────────────────────────────────────────────────────
@@ -360,7 +374,12 @@ export const componentPropSchemas = {
       }, 'ctaHref must be a well-formed root-relative path (no dot segments) or an https URL')
       .optional(),
     phone: z.string().optional(),
-    tel: z.string().regex(/^(?:tel:)?\+?(?=(?:\D*\d){7})[\d\-().\s]{7,20}$/, 'tel must be a phone number with at least 7 digits (optionally tel:-prefixed)').optional(),
+    tel: z.string()
+      .regex(/^(?:tel:)?\+?(?=(?:\D*\d){7})[\d\-().\s]{7,20}$/, 'tel must be a phone number with at least 7 digits (optionally tel:-prefixed)')
+      // The prop renders a tap-to-call target — only a Waves line may be
+      // dialed, with or without the tel: prefix (Codex #3646 r41).
+      .refine((v) => isWavesTel(v), 'tel must dial a Waves line (the hub office/GBP numbers) — never a third-party number')
+      .optional(),
     eyebrow: z.string().optional(),
   }),
   BottomLineBox: z.object({
@@ -1180,11 +1199,12 @@ function tagsNamed(src: string, name: string): Array<{ start: number; attrs: str
 
 // A child expression that renders NOTHING: an empty string or a boolean/
 // nullish literal, with optional comment trivia around it.
+const WHITESPACE_ENTITY_RE = /&(?:nbsp|ensp|emsp|thinsp|#0*(?:32|160|8194|8195|8201)|#x0*(?:20|a0|2002|2003|2009));?/gi;
 // An ARRAY whose slots are all non-rendering (or elided) renders nothing
 // either ({[]}, {[null]}, {[false, '']}; Codex #3646 r39).
 const NON_RENDERING_CHILD_RE = (() => {
   const trivia = '(?:\\s|\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*\\n)*';
-  const lit = "(?:''|\"\"|``|true|false|null|undefined)"; // no backreference — the array branch repeats the group
+  const lit = "(?:'\\s*'|\"\\s*\"|`\\s*`|true|false|null|undefined)"; // whitespace-only strings render nothing visible; no backreference — the array branch repeats the group
   const arr = '\\[' + trivia + '(?:' + lit + '?' + trivia + ',' + trivia + ')*' + '(?:' + lit + trivia + ')?' + '\\]';
   return new RegExp('\\{' + trivia + '(?:' + lit + '|' + arr + ')' + trivia + '\\}', 'g');
 })();
@@ -1195,13 +1215,21 @@ const NON_RENDERING_CHILD_RE = (() => {
 // md:visible; `sr-only` ↔ md:not-sr-only. Only VIEWPORT breakpoints
 // prove responsive visibility — print:/hover:/focus: variants leave the
 // element hidden in ordinary viewing.
-const HIDING_UTILITY_RESETS: Array<[RegExp, RegExp]> = [
-  [/(?:^|\s)hidden(?=\s|$)/, /\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/],
-  [/(?:^|\s)invisible(?=\s|$)/, /\b(?:sm|md|lg|xl|2xl):visible\b/],
-  [/(?:^|\s)sr-only(?=\s|$)/, /\b(?:sm|md|lg|xl|2xl):not-sr-only\b/],
+// An IMPORTANT hide (Tailwind 4 `hidden!`, Tailwind 3 `!hidden`) is
+// undone only by an important reset (Codex #508 r8).
+const HIDING_UTILITY_RESETS: Array<[string, string]> = [
+  ['hidden', 'block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item'],
+  ['invisible', 'visible'],
+  ['sr-only', 'not-sr-only'],
 ];
 function classListStaticallyHidden(cls: string): boolean {
-  return HIDING_UTILITY_RESETS.some(([hide, reset]) => hide.test(cls) && !reset.test(cls));
+  return HIDING_UTILITY_RESETS.some(([hide, resets]) => {
+    const h = new RegExp(`(?:^|\\s)(!?)${hide}(!?)(?=\\s|$)`).exec(cls);
+    if (!h) return false;
+    const reset = new RegExp(`(?:^|\\s)(?:sm|md|lg|xl|2xl):(!?)(?:${resets})(!?)(?=\\s|$)`).exec(cls);
+    if (!reset) return true;
+    return Boolean(h[1] || h[2]) && !(reset[1] || reset[2]);
+  });
 }
 
 // Definitely-hidden element predicates, shared by the structural view and
@@ -1282,7 +1310,9 @@ function affiliateLinkTextIsEmpty(src: string, strView: string, start: number, a
         text += visible.slice(last);
         // Comment trivia around the literal ({false /* note */}) and
         // fragment delimiters (<></>) render nothing either (Codex #508 r5/r6).
-        return !text.replace(/<>|<\/>/g, '').replace(NON_RENDERING_CHILD_RE, '').trim();
+        // Whitespace character references (&nbsp; &#32; …) decode to
+        // whitespace the anchor cannot show either (Codex #508 r8).
+        return !text.replace(/<>|<\/>/g, '').replace(NON_RENDERING_CHILD_RE, '').replace(WHITESPACE_ENTITY_RE, ' ').trim();
       }
     } else {
       const a = tagAttrsAt(src, t.index);
@@ -1518,13 +1548,21 @@ function styleHidesElement(attrs: string): boolean {
   // CSS applies the LAST declaration of a property (Codex #508 r6):
   // "display:none; display:inline" is visible. Read the final value of
   // each property (CSS string or JSX style-object spelling).
+  // A declaration inside a CSS comment is not a declaration (Codex #508 r8).
+  const liveStyle = styleValue.replace(/\/\*[\s\S]*?\*\//g, ' ');
   const lastValue = (prop: string): string | null => {
     const re = new RegExp(`(?:^|[^a-z0-9_-])${prop}\\s*['"]?\\s*:\\s*['"\`]?\\s*([a-z-]+)`, 'gi');
     let m: RegExpExecArray | null; let last: string | null = null;
-    while ((m = re.exec(styleValue)) !== null) last = m[1].toLowerCase();
+    while ((m = re.exec(liveStyle)) !== null) last = m[1].toLowerCase();
     return last;
   };
   return lastValue('display') === 'none' || lastValue('visibility') === 'hidden';
+}
+
+// Comment trivia inside a static boolean expression ({false /* note */})
+// is not part of the value (Codex #508 r8).
+function stripJsTrivia(expr: string): string {
+  return expr.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*\n/g, ' ');
 }
 
 // True when the element's `hidden` attribute renders it hidden (last-wins;
@@ -1538,7 +1576,7 @@ function hiddenAttrRendersHidden(attrs: string): boolean {
     // ASTRO rendering semantics (Codex #3646 r31): only false/null/
     // undefined omit the attribute — hidden="" and hidden={''}/{0} render
     // it PRESENT, and a present boolean attribute hides.
-    if (a.expr !== null) hidden = !/^\{\s*(?:false|null|undefined)\s*\}$/.test(a.expr);
+    if (a.expr !== null) hidden = !/^\{\s*(?:false|null|undefined)\s*\}$/.test(stripJsTrivia(a.expr));
     else hidden = true; // any literal (even ""), bare, or unquoted value
   }
   return hidden;
@@ -1556,7 +1594,7 @@ function detailsRendersOpen(attrs: string): boolean {
     // strings — "" included) leaves the attribute PRESENT → open; only
     // false/null/undefined omit it; a dynamic expression stays closed
     // (fail closed — a CTA behind an expandable is no CTA).
-    if (a.expr !== null) open = /^\{\s*(?:true|-?\d|['"`])/.test(a.expr);
+    if (a.expr !== null) open = /^\{\s*(?:true|-?\d|['"`])/.test(stripJsTrivia(a.expr));
     else open = true; // any literal (even ""), bare, or unquoted value
   }
   return open;
