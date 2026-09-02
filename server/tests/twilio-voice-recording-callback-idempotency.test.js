@@ -670,6 +670,16 @@ describe('builtinTranscriptMayReplace (pure) and POST /transcription', () => {
     expect(tables.call_log[0].transcription).toBe('words from the current audio');
   });
 
+  test('a PAN-bearing late transcript for a replaced recording quarantines that recording AND the row\'s current one', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_2, recording_url: `${URL_2}.mp3`, transcription: null, transcription_provider: null, transcription_metadata: null });
+    await post('/transcription', { CallSid: PARENT, RecordingSid: REC_1, TranscriptionText: 'my card is 4242 4242 4242 4242', TranscriptionStatus: 'completed' });
+    // Stale text kept out of the row; the stamp still lands and both recordings go.
+    expect(tables.call_log[0].transcription).toBeNull();
+    expect(processor.quarantineCardRecording).toHaveBeenCalledTimes(2);
+    expect(processor.quarantineCardRecording).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: 'c1', recording_sid: REC_1, recording_url: null }), { source: 'twilio_transcription_webhook' });
+    expect(processor.quarantineCardRecording).toHaveBeenNthCalledWith(2, expect.objectContaining({ id: 'c1', recording_sid: REC_2 }), { source: 'twilio_transcription_webhook' });
+  });
+
   test('the built-in transcription fills a row that has no transcript yet', async () => {
     tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, transcription: null, transcription_provider: null });
     await post('/transcription', { CallSid: PARENT, RecordingSid: REC_1, TranscriptionText: 'rough builtin text', TranscriptionStatus: 'completed' });

@@ -2090,15 +2090,21 @@ router.post('/transcription', async (req, res) => {
               // row — carry its own RecordingSid so the Twilio delete can
               // still identify the audio (Codex #2676 round-5 P1). The
               // /recording-status guard covers the reverse ordering.
-              await require('../services/call-recording-processor')
-                .quarantineCardRecording(
-                  // The audio that produced THIS PAN transcript is the
-                  // callback's RecordingSid — prefer it over a stale row SID
-                  // so a second recording is the one deleted immediately
-                  // (round-12 P1; mirrors the recording-status path).
-                  { ...callRow, recording_sid: RecordingSid || callRow.recording_sid || null },
+              const qProcessor = require('../services/call-recording-processor');
+              // The audio that produced THIS PAN transcript is the
+              // callback's RecordingSid — deleted first (round-12 P1) — and
+              // then the row AS IT IS: its current recording and every parked
+              // or superseded one (the same two steps as /recording-status).
+              // Overriding the row's SID alone deleted the callback's audio,
+              // cleared the current recording's URL and left that audio at
+              // Twilio with nothing owed.
+              if (RecordingSid && RecordingSid !== callRow.recording_sid) {
+                await qProcessor.quarantineCardRecording(
+                  { ...callRow, recording_sid: RecordingSid, recording_url: null },
                   { source: 'twilio_transcription_webhook' },
                 );
+              }
+              await qProcessor.quarantineCardRecording(callRow, { source: 'twilio_transcription_webhook' });
             }
           } catch (qErr) {
             logger.error(`[transcription] PAN quarantine failed for ${maskSid(matchedSid)}: ${qErr.message}`);
