@@ -4359,7 +4359,7 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
 // Mar–Apr, summer peak May–Sep, fall transition Oct–Nov, winter dormancy
 // Dec–Feb. No product, step, or fertilizer names — the per-visit program is
 // owner-owned business logic; this block only says what each season is
-// FOR and how many of the year's visits fall in it.
+// FOR and how many of the program's visits the cadence puts in it.
 const LAWN_SEASONS = [
   { key: 'spring', label: 'Spring', range: 'Mar – Apr', months: [2, 3], focus: 'Green-up as the lawn comes out of dormancy and the soil warms.' },
   { key: 'summer', label: 'Summer', range: 'May – Sep', months: [4, 5, 6, 7, 8], focus: 'Peak growth, with the year’s heaviest insect and fungus pressure.', note: 'County fertilizer blackout runs Jun – Sep.' },
@@ -4367,49 +4367,56 @@ const LAWN_SEASONS = [
   { key: 'winter', label: 'Winter', range: 'Dec – Feb', months: [11, 0, 1], focus: 'Root strength while the lawn rests.' },
 ];
 
-// Returns the four seasons starting with the one containing startMonthIndex
-// (0 = January), each stamped { ...season, current, applications }.
-// Applications are proportional to season length with largest-remainder
-// rounding, so the four counts always sum to visitsPerYear; remainder ties
-// go to the earlier season in display order. Cadence arithmetic only.
-export function lawnProgramSeasons(visitsPerYear, startMonthIndex) {
-  const n = Math.max(0, Math.round(Number(visitsPerYear) || 0));
-  const start = ((Number(startMonthIndex) || 0) % 12 + 12) % 12;
-  const first = Math.max(0, LAWN_SEASONS.findIndex((s) => s.months.includes(start)));
-  const ordered = LAWN_SEASONS.map((_, i) => LAWN_SEASONS[(first + i) % LAWN_SEASONS.length]);
-  const exact = ordered.map((s) => (n * s.months.length) / 12);
-  const counts = exact.map((x) => Math.floor(x));
-  let left = n - counts.reduce((a, b) => a + b, 0);
-  const byRemainder = exact
-    .map((x, i) => ({ i, r: x - Math.floor(x) }))
-    .sort((a, b) => b.r - a.r || a.i - b.i);
-  for (const { i } of byRemainder) {
-    if (left <= 0) break;
-    counts[i] += 1;
-    left -= 1;
-  }
-  return ordered.map((s, i) => ({ ...s, current: i === 0, applications: counts[i] }));
+// The program cadence is the interval the plan catalog schedules
+// (server/services/self-booking-plan-sync.js: 12 = monthly, 9 = the 42-day
+// "every 6 weeks" program, 6 = bimonthly, 4 = quarterly); any other count
+// falls back to the even split of the year. The headline and the per-season
+// counts both read from this one table so they can never disagree.
+const LAWN_CADENCE = {
+  12: { months: 1, label: 'about once a month' },
+  9: { days: 42, label: 'about every 42 days' },
+  6: { months: 2, label: 'about every 2 months' },
+  4: { months: 3, label: 'about every 3 months' },
+};
+function lawnCadence(n) {
+  if (LAWN_CADENCE[n]) return LAWN_CADENCE[n];
+  const days = n > 0 ? Math.max(1, Math.round(365 / n)) : 365;
+  return { days, label: `about every ${days} days` };
+}
+export function lawnCadenceLabel(visitsPerYear) {
+  return lawnCadence(Math.round(Number(visitsPerYear) || 0)).label;
 }
 
-// Cadence line under the headline. The intervals are the ones the plan
-// catalog schedules (server/services/self-booking-plan-sync.js: 12 = monthly,
-// 9 = the 42-day "every 6 weeks" program, 6 = bimonthly, 4 = quarterly); any
-// other count falls back to the even split of the year.
-export function lawnCadenceLabel(visitsPerYear) {
-  const n = Math.round(Number(visitsPerYear) || 0);
-  if (n === 12) return 'about once a month';
-  if (n === 9) return 'about every 42 days';
-  if (n === 6) return 'about every 2 months';
-  if (n === 4) return 'about every 3 months';
-  return `about every ${Math.max(1, Math.round(365 / n))} days`;
+// Returns the four seasons starting with the one containing `now`'s ET
+// month, each stamped { ...season, current, applications }. The count is a
+// projection: the first application in the current month, then N-1 more at
+// the program's cadence (whole months for the monthly / bimonthly /
+// quarterly plans, the 42-day step for the 6-week program), each counted
+// against the season its ET month falls in. Cadence arithmetic only — the
+// scheduler still sets the real dates.
+export function lawnProgramSeasons(visitsPerYear, now) {
+  const n = Math.max(0, Math.round(Number(visitsPerYear) || 0));
+  const at = now instanceof Date && !Number.isNaN(now.getTime()) ? now : new Date();
+  const start = etParts(at).month - 1;
+  const cadence = lawnCadence(n);
+  const hits = Array.from({ length: n }, (_, i) => (
+    cadence.months
+      ? (start + i * cadence.months) % 12
+      : etParts(new Date(at.getTime() + i * cadence.days * 86400000)).month - 1
+  ));
+  const first = Math.max(0, LAWN_SEASONS.findIndex((s) => s.months.includes(start)));
+  return LAWN_SEASONS.map((_, i) => LAWN_SEASONS[(first + i) % LAWN_SEASONS.length]).map((s, i) => ({
+    ...s,
+    current: i === 0,
+    applications: hits.filter((m) => s.months.includes(m)).length,
+  }));
 }
 
 export function LawnProgramCalendar({ visitsPerYear, now = null }) {
   const [open, setOpen] = useState(false);
   const n = Math.round(Number(visitsPerYear) || 0);
   if (!(n > 0)) return null;
-  const startMonthIndex = etParts(now || new Date()).month - 1;
-  const seasons = lawnProgramSeasons(n, startMonthIndex);
+  const seasons = lawnProgramSeasons(n, now || new Date());
   return (
     <div aria-label="Your lawn program calendar" style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em' }}>

@@ -59,7 +59,7 @@
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
- *   GATE_ESTIMATE_LAWN_CALENDAR=true (season timeline under the lawn price card — four SWFL turf seasons from the current month, one-line focus each, applications split proportionally from visitsPerYear; dev-open, prod dark)
+ *   GATE_ESTIMATE_LAWN_CALENDAR=true (season timeline under the lawn price card — four SWFL turf seasons from the current month, one-line focus each, the selected frequency's applications projected at its catalog cadence; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
@@ -1545,8 +1545,8 @@ const gates = {
   sendRequiresServerPricing: process.env.GATE_SEND_REQUIRES_SERVER_PRICING === 'true',
   // Lawn program seasons on the estimate page: under the lawn price card,
   // the four SWFL turf seasons in order from the current month, each with a
-  // one-line focus and its proportional share of the selected frequency's
-  // visitsPerYear. Cadence arithmetic plus the seasonal copy the lawn health
+  // one-line focus and the number of the selected frequency's applications
+  // its catalog cadence puts there. Cadence arithmetic plus the seasonal copy the lawn health
   // widget already shows — no product, step, or fertilizer names (owner-owned
   // business logic). Gates only the /data `lawnCalendar` flag. Dev-open,
   // prod dark.
