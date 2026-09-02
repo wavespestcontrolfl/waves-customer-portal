@@ -291,8 +291,13 @@ describe('event provenance', () => {
     expect(txStart).toBeGreaterThan(0);
     const block = src.slice(txStart, txStart + 1600);
     expect(block).toMatch(/await db\.transaction\(async \(trx\) => \{/);
-    expect(block).toMatch(/actor === 'customer' && mode !== 'remove' && estimate\.customer_id/);
-    expect(block).toMatch(/trx\('customers'\)\.where\(\{ id: estimate\.customer_id \}\)\.forUpdate\(\)\.first\(\)/);
+    // Every new-customer-priced write, the staff park included; the staff compensation restore excepted (GH codex r10 P1).
+    expect(block).toMatch(/!memberEvidence && !\(actor === 'staff' && mode === 'restore'\) && estimate\.customer_id/);
+    // Lock order: estimate row BEFORE the customer row, matching the accept path (GH codex r10 P2).
+    const estimateLock = block.indexOf("trx('estimates').where({ id: estimate.id }).forUpdate().first('id')");
+    const customerLock = block.indexOf("trx('customers').where({ id: estimate.customer_id }).forUpdate().first()");
+    expect(estimateLock).toBeGreaterThan(0);
+    expect(customerLock).toBeGreaterThan(estimateLock);
     expect(block).toMatch(/isMembershipCustomerRow\(customerRow\)/);
     const after = src.slice(txStart);
     expect(after.indexOf("if (memberActivatedMidWrite) {\n      return { status: 409, body: ({ error: 'reprice_unavailable' }) };")).toBeGreaterThan(0);

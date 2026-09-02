@@ -356,19 +356,34 @@ function replayableCarrier(estData) {
 }
 
 // Whether the engine can price `serviceKey` from what the estimate already
-// stores. Lawn needs a turf basis; the v2 profile derives treatable turf from
-// lot/home footprint (or a measured figure), the v1 inputs need lawnSqFt or
-// lotSqFt top-level (same rule addRequestedServiceToInputs applies).
+// stores WITHOUT review. Lawn needs a supplied turf basis (measured, lawn
+// sqft, or the wizard's estimated turf): a lot-only profile prices turf off
+// the lot-minus-footprint heuristic, which the engine grades LOW / field-
+// verify (property-calculator turfBasis lotFallback, draft-builder
+// HEURISTIC_TURF_BASES), so every preview would refuse as review-only and
+// the customer would hold a button that can only fail where the office
+// inquiry card used to be (GH codex r10 P2). That mix keeps the inquiry.
 function serviceAddBuildable(estData, serviceKey) {
   const carrier = replayableCarrier(estData);
   if (!carrier) return false;
   if (serviceKey !== 'lawn_care') return true;
   if (carrier === 'engineRequest') {
     const p = estData.engineRequest.profile;
-    return Number(p.measuredTurfSf) > 0 || Number(p.lawnSqFt) > 0 || Number(p.lotSqFt) > 0;
+    return Number(p.measuredTurfSf) > 0 || Number(p.lawnSqFt) > 0 || Number(p.estimatedTurfSf) > 0;
   }
-  const ei = estData.engineInputs;
-  return Number(ei.lawnSqFt) > 0 || Number(ei.lotSqFt) > 0;
+  return Number(estData.engineInputs.lawnSqFt) > 0;
+}
+
+// ONE review predicate for a priced engine line: the draft builder's own
+// (customQuoteFlag, manualReviewReasons, heuristic turf, the custom-quote
+// trio) plus the separately recorded low pricing-confidence grade. Shared by
+// the add rail (addedLineReviewOnly) and the send-time shaped-quote check so
+// the two can never disagree about what is sendable (GH codex r10 P1).
+function lineReviewOnly(line) {
+  if (!line || typeof line !== 'object') return true;
+  const { lineRequiresReview } = require('./estimator-engine/draft-builder');
+  return lineRequiresReview(line)
+    || String(line.pricingConfidence || line.confidence || '').toLowerCase() === 'low';
 }
 
 // EVERY member-evidence carrier the rail and reconcileFrozenMembershipSnapshot
@@ -528,5 +543,6 @@ module.exports = {
   staffOfferedKeys,
   staffOfferedEvents,
   latestOptOutEventIsStaff,
+  lineReviewOnly,
   memberEvidenceInEstimateData,
 };

@@ -1563,11 +1563,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     let shapedSendable = true;
     try {
       assertEstimateSendable(estimate, { engineReviewAcknowledged: engineReviewAcknowledgedResolved });
-      const { lineRequiresReview } = require('../services/estimator-engine/draft-builder');
       let shapedData = {};
       try { shapedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); } catch { shapedData = {}; }
       const lines = Array.isArray(shapedData?.engineResult?.lineItems) ? shapedData.engineResult.lineItems : [];
-      if (lines.some((li) => li && typeof li === 'object' && lineRequiresReview(li))) shapedSendable = false;
+      // The rail's own predicate — the draft builder's flags PLUS the low
+      // pricing-confidence grade it records separately (GH codex r10 P1).
+      const { lineReviewOnly } = require('../services/estimate-service-opt-out');
+      if (lines.some((li) => li && typeof li === 'object' && lineReviewOnly(li))) shapedSendable = false;
     } catch (_) { shapedSendable = false; }
     if (!shapedSendable) {
       logger.warn(`[admin-estimates] lead-service send: parked quote not sendable on estimate ${estimate.id}; restoring the full bundle`);

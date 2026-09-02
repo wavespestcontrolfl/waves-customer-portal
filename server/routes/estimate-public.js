@@ -14500,12 +14500,11 @@ function addedLineReviewOnly(rawEngineResult, serviceKey) {
   if (!items) return true;
   const rows = items.filter((li) => li && typeof li === 'object' && recurringServiceKey({ service: li.service, name: li.name }) === serviceKey);
   if (!rows.length) return true;
-  // ONE review predicate, shared with the draft builder (customQuoteFlag on an
-  // oversize measured lawn, manualReviewReasons, the custom-quote trio) plus
-  // pest's separately recorded low-confidence grade (GH codex r6/r7 P1).
-  const { lineRequiresReview } = require('../services/estimator-engine/draft-builder');
-  return rows.some((li) => lineRequiresReview(li)
-    || String(li.pricingConfidence || li.confidence || '').toLowerCase() === 'low');
+  // ONE review predicate (OptOut.lineReviewOnly): the draft builder's own
+  // plus the separately recorded low-confidence grade (GH codex r6/r7 P1),
+  // shared with the send-time shaped-quote check.
+  const { lineReviewOnly } = require('../services/estimate-service-opt-out');
+  return rows.some((li) => lineReviewOnly(li));
 }
 
 // Normalized section keys of a result's recurring rows — the add rail's
@@ -15158,9 +15157,15 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       // membership change never touches estimates.updated_at (GH codex r9
       // P1). FOR UPDATE serializes against the activation write; a customer
       // who is a member NOW is refused with the same 409 the pre-check uses.
-      // Customer-driven line additions only — a staff compensation restore
-      // returns the estimate to the shape it was sent in.
-      if (actor === 'customer' && mode !== 'remove' && estimate.customer_id) {
+      // Every write priced on NEW-customer terms — a customer add/restore/
+      // removal and the send-time staff park alike (GH codex r10 P1) — except
+      // the staff compensation restore, which returns the estimate to the
+      // shape it was sent in. Verified member evidence never re-checks.
+      // Lock ORDER matches the accept path (estimate row first, customer row
+      // later inside the converter) so an add racing an acceptance can never
+      // deadlock (GH codex r10 P2); the CAS below still decides the write.
+      await trx('estimates').where({ id: estimate.id }).forUpdate().first('id');
+      if (!memberEvidence && !(actor === 'staff' && mode === 'restore') && estimate.customer_id) {
         const customerRow = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
         if (customerRow && customerRow.active !== false && isMembershipCustomerRow(customerRow)) {
           memberActivatedMidWrite = true;

@@ -22,14 +22,14 @@ const { optOutImpact, recurringServiceKeysOf, addedLineReviewOnly } = require('.
 
 const requestOnly = () => ({
   engineRequest: {
-    profile: { homeSqFt: 2000, lotSqFt: 8000 },
+    profile: { homeSqFt: 2000, lotSqFt: 8000, lawnSqFt: 4000 },
     selectedServices: ['PEST'],
     options: { pestFreq: 4 },
   },
 });
 const inputsOnly = () => ({
-  engineInputs: { lotSqFt: 8000, services: { pest: { frequency: 'quarterly' } } },
-  inputs: { lotSqFt: 8000, services: { pest: { frequency: 'quarterly' } } },
+  engineInputs: { lotSqFt: 8000, lawnSqFt: 4000, services: { pest: { frequency: 'quarterly' } } },
+  inputs: { lotSqFt: 8000, lawnSqFt: 4000, services: { pest: { frequency: 'quarterly' } } },
   result: { property: { lotSqFt: 8000 } },
 });
 const pestSection = [{ key: 'pest_control', isRecurring: true }];
@@ -51,17 +51,22 @@ describe('serviceOptOutAddableKeys', () => {
     expect(serviceOptOutAddableKeys(removed, pestSection, null, RES).has('lawn_care')).toBe(false);
   });
 
-  it('requires a turf basis before offering lawn', () => {
+  it('requires a SUPPLIED turf basis before offering lawn — a lot-only profile prices review-only and keeps the inquiry card (GH codex r10 P2)', () => {
     const noLot = requestOnly();
     noLot.engineRequest.profile = { homeSqFt: 2000 };
     expect(serviceOptOutAddableKeys(noLot, pestSection, null, RES).has('lawn_care')).toBe(false);
     expect(serviceOptOutAddableKeys(noLot, pestSection, null, RES).has('mosquito')).toBe(true);
-    const measured = requestOnly();
-    measured.engineRequest.profile = { homeSqFt: 2000, measuredTurfSf: 3000 };
-    expect(serviceOptOutAddableKeys(measured, pestSection, null, RES).has('lawn_care')).toBe(true);
-    const v1NoLot = inputsOnly();
-    delete v1NoLot.engineInputs.lotSqFt;
-    expect(serviceOptOutAddableKeys(v1NoLot, pestSection, null, RES).has('lawn_care')).toBe(false);
+    const lotOnly = requestOnly();
+    lotOnly.engineRequest.profile = { homeSqFt: 2000, lotSqFt: 8000 };
+    expect(serviceOptOutAddableKeys(lotOnly, pestSection, null, RES).has('lawn_care')).toBe(false);
+    for (const basis of [{ measuredTurfSf: 3000 }, { lawnSqFt: 3000 }, { estimatedTurfSf: 3000 }]) {
+      const supplied = requestOnly();
+      supplied.engineRequest.profile = { homeSqFt: 2000, lotSqFt: 8000, ...basis };
+      expect(serviceOptOutAddableKeys(supplied, pestSection, null, RES).has('lawn_care')).toBe(true);
+    }
+    const v1LotOnly = inputsOnly();
+    delete v1LotOnly.engineInputs.lawnSqFt;
+    expect(serviceOptOutAddableKeys(v1LotOnly, pestSection, null, RES).has('lawn_care')).toBe(false);
   });
 
   it('fails closed on a non-residential or missing category, and never offers a member a priced add', () => {
@@ -155,6 +160,16 @@ describe('staffOfferedKeys', () => {
     expect(staffOfferedKeys(data)).toEqual([]);
     expect(latestOptOutEventIsStaff(data, 'lawn_care')).toBe(false);
     expect(staffOfferedKeys({})).toEqual([]);
+  });
+});
+
+describe('lineReviewOnly', () => {
+  it('is the draft builder\'s review predicate plus the low pricing-confidence grade, fail-closed on a non-line', () => {
+    const { lineReviewOnly } = require('../services/estimate-service-opt-out');
+    expect(lineReviewOnly({ service: 'pest_control', pricingConfidence: 'low' })).toBe(true);
+    expect(lineReviewOnly({ service: 'lawn_care', manualReviewReasons: ['turf area is a heuristic estimate'] })).toBe(true);
+    expect(lineReviewOnly({ service: 'pest_control', pricingConfidence: 'high' })).toBe(false);
+    expect(lineReviewOnly(null)).toBe(true);
   });
 });
 
