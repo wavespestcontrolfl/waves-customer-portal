@@ -101,8 +101,8 @@ Per file, with the proving test.
 - `server/services/call-routing-gates.js` — `additional_recording` and
   `customer_creation_failed` flags; `client/src/pages/admin/TriageInboxTabV2.jsx`
   labels for both plus `lead_creation_failed`.
-- `server/utils/claim-ceiling.js` — counts the commitments leg (7 extraction
-  legs).
+- `server/utils/claim-ceiling.js` — unchanged in effect (the commitments leg
+  runs after finalization and is not counted).
 - `server/services/call-commitments.js`, `server/services/call-intelligence.js`,
   `server/models/migrations/20260901000010_call_commitments.js`,
   `server/config/feature-gates.js` (`callCommitments`), `server/routes/admin-call-recordings.js`
@@ -191,6 +191,9 @@ Per file, with the proving test.
   only and only where V2 pinned a transcript quote for the field — V1
   flags and the routing disposition never seed a commitment; flags without
   a quote are left to the model pass, which grounds every item verbatim.
+- Pre-push Codex round 22 (1 P1, fixed): the commitments model pass runs
+  after finalization, so it is no longer counted in the claim ceiling (six
+  extraction legs again) — counting it only delayed stale-claim takeover.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 
@@ -218,7 +221,7 @@ basis, matched_at), `human_state` (confirmed|dismissed|edited), `human_note`,
    every quote is re-grounded against the transcript text and a commitment
    with no verbatim evidence is dropped, never stored; confidence < 0.5 is
    dropped. Timeout = `CALL_PROC_EXTRACT_TIMEOUT_MS`, `maxRetries: 0`,
-   counted in the claim ceiling.
+   run after finalization (not under the claim, so not in the claim ceiling).
 3. Upsert under the claim: the write takes a SHARE lock on the call_log row
    with the token fence, so a superseded pass writes nothing and a claim
    cannot move mid-write. `ON CONFLICT DO UPDATE` rewrites a row only while

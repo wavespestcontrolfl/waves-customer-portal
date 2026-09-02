@@ -47,10 +47,11 @@ function providerBudgetMs() {
   // aggregate deadline on the same budget — plus the single address
   // validation that deadline can already have in flight when it expires.
   const addressValidation = envMs('GOOGLE_ADDRESS_TIMEOUT_MS', 30000);
-  // + the commitments model pass (services/call-commitments.js): one more
-  // extraction-budget leg awaited under the claim when GATE_CALL_COMMITMENTS
-  // is on. Counted unconditionally — the ceiling has to cover the gate-on case.
-  return download + (3 * transcription) + (2 * label) + (7 * extraction) + addressValidation + DEFAULT_FALLBACK_BUDGET_MS;
+  // NOT counted: the commitments model pass (services/call-commitments.js).
+  // It runs after finalization has cleared processing_token, so it cannot
+  // extend a held claim — counting it would only delay stale-claim takeover
+  // and the stall bell. Only work done while the claim is held belongs here.
+  return download + (3 * transcription) + (2 * label) + (6 * extraction) + addressValidation + DEFAULT_FALLBACK_BUDGET_MS;
 }
 
 // TWO ceilings, because alerting and stealing carry opposite risks.
