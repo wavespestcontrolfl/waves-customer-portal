@@ -48,6 +48,8 @@ function serviceOptOutChanges(estimateData, since, until = null) {
   const out = [];
   for (const [serviceKey, { event, at }] of latestByKey) {
     if (until && at >= until) continue;
+    // Customer-authored: it happened from an already-open page — seen.
+    if (String(event.actor || 'customer') !== 'staff') continue;
     const label = event.label || serviceOptOutLabel(serviceKey);
     out.push({
       kind: event.included === false ? 'service_removed' : 'service_restored',
@@ -85,17 +87,22 @@ function buildReturnVisitPayload({
   // it as "changed since your last visit" would re-announce their own click
   // (GH codex P2 on #3708). Anything inside the gap window belongs to the
   // sitting it happened in.
-  // The gap applies to MUTATIONS attributable to the prior sitting only. An
-  // extension grant is independently durable (the expired-screen tap ten
-  // minutes after the last open is exactly the case) and compares against
-  // the previous visit's end itself (GH codex P2 on #3708).
-  const sinceMutation = new Date(previousEnd.getTime() + sessionGapMinutes * 60000);
+  // Service events between the previous visit's end and this visit's start
+  // can only come from a page that was ALREADY open (a real return inserts a
+  // view row and starts a new session), so a customer's own between-visits
+  // click is never "since your last visit" — no matter how long the tab sat
+  // idle (GH codex P2 rounds 2–5 on #3708: the fixed 30-minute gap was the
+  // wrong model). Staff-authored events (a lead-service park or revert at
+  // send time) are the ones worth announcing in that window. An extension
+  // grant is independently durable and compares against the previous
+  // visit's end itself.
   const current = list[list.length - 1];
   const currentStart = toDate(current.startedAt);
   const changes = [
-    ...serviceOptOutChanges(estimateData, sinceMutation, currentStart),
+    ...serviceOptOutChanges(estimateData, previousEnd, currentStart),
     ...extensionChange(extensionAutoGrantedAt, previousEnd),
   ].sort((a, b) => a.at.localeCompare(b.at));
+  void sessionGapMinutes;
   return {
     visitNumber: list.length,
     lastVisitAt: previousEnd.toISOString(),
