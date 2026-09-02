@@ -236,7 +236,11 @@ async function findCancelAcceptance(customerId, wholeAccount, scope, status) {
     .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status })
     .orderBy('created_at', 'desc');
   if (status !== 'new') {
-    query = query.where('created_at', '>=', new Date(Date.now() - 24 * 60 * 60 * 1000));
+    // The echo window starts when the run RESOLVED the acceptance (its
+    // close stamps updated_at), not when it was accepted — an acceptance
+    // repaired after more than a day open must still echo on the retry
+    // that lost the repair's response (codex GH r33 P2).
+    query = query.where('updated_at', '>=', new Date(Date.now() - 24 * 60 * 60 * 1000));
   }
   const candidates = await query.select('*');
   for (const row of candidates || []) {

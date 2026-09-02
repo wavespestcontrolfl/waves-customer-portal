@@ -392,6 +392,23 @@ async function applyScopedWindDown(customerId, plan, { requestId, actorLabel = '
     const update = { updated_at: new Date(), waveguard_tier: plan.tierAfter, waveguard_tier_source: 'cancellation_scoped' };
     if (plan.monthlyLane) update.monthly_rate = plan.scalarAfter;
     await trx('customers').where({ id: customerId }).update(update);
+    // Durable, REQUEST-scoped proof that this wind-down committed, written
+    // in the same transaction as the demote/reprice: the repair-only retry
+    // reads it (per-application accounts have no ledger components, and
+    // the customer-wide waveguard_tier_source stamp is reusable — a prior
+    // scoped cancel leaves it set, so it cannot prove THIS request's
+    // wind-down landed; codex GH r33 P1). Read-modify-write is safe here:
+    // the commit holds the customer cancel lock and this is the only
+    // writer of cancel_plan metadata inside it.
+    if (requestId) {
+      const reqRow = await trx('service_requests').where({ id: requestId }).first('metadata');
+      let meta = {};
+      try { meta = (typeof reqRow?.metadata === 'string' ? JSON.parse(reqRow.metadata) : reqRow?.metadata) || {}; } catch { meta = {}; }
+      await trx('service_requests').where({ id: requestId }).update({
+        metadata: JSON.stringify({ ...meta, cancel_plan: { ...(meta.cancel_plan || {}), scopedWindDownCommitted: true } }),
+        updated_at: new Date(),
+      });
+    }
   });
   try {
     const rateLine = plan.monthlyLane
@@ -1175,16 +1192,18 @@ async function processCancellationRequest({
       scopedWoundDown = residual.length === 0;
       if (scopedWoundDown) {
         // Per-application accounts carry NO monthly components, so the
-        // ledger check proves nothing there — the wind-down's one
-        // transaction stamps waveguard_tier_source='cancellation_scoped'
-        // on the customer, which is the signal that the tier demote and
-        // row repricing committed. A later tier writer can overwrite the
-        // stamp; that false negative stays partial + belled (safe side).
-        const custRow = await db('customers').where({ id: customerId })
-          .first('billing_mode', 'waveguard_tier_source');
-        if (custRow && String(custRow.billing_mode || '') === 'per_application'
-          && custRow.waveguard_tier_source !== 'cancellation_scoped') {
-          scopedWoundDown = false;
+        // ledger check proves nothing there. The proof is the REQUEST-
+        // scoped stamp applyScopedWindDown writes in its transaction
+        // (service_requests.metadata.cancel_plan.scopedWindDownCommitted)
+        // — never the customer-wide waveguard_tier_source, which a prior
+        // scoped cancel leaves set (codex GH r33 P1). Missing/unreadable
+        // = not proven: partial + belled (safe side), the office repairs.
+        const custRow = await db('customers').where({ id: customerId }).first('billing_mode');
+        if (custRow && String(custRow.billing_mode || '') === 'per_application') {
+          const reqRow = requestId ? await db('service_requests').where({ id: requestId }).first('metadata') : null;
+          let meta = null;
+          try { meta = reqRow ? (typeof reqRow.metadata === 'string' ? JSON.parse(reqRow.metadata) : reqRow.metadata) : null; } catch { meta = null; }
+          if (!(meta && meta.cancel_plan && meta.cancel_plan.scopedWindDownCommitted === true)) scopedWoundDown = false;
         }
       }
     } catch (verifyErr) {

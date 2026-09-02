@@ -205,6 +205,26 @@ test('a monthly component repriced mid-run aborts the wind-down — stale planne
   expect(db.__tables.customers[0].waveguard_tier).toBe('Bronze');
 });
 
+test('a committed wind-down stamps scopedWindDownCommitted on the REQUEST row in the same transaction — the repair retry\'s proof', async () => {
+  db.__tables.invoices = [];
+  db.__tables.service_requests = [{ id: 'req-1', metadata: JSON.stringify({ cancel_plan: { scope: ['lawn_care'], waiveLateFee: true } }) }];
+  seedCustomer();
+  await applyScopedWindDown('c1', {
+    ok: true, inScope: ['lawn_care'], remaining: ['pest_control'], tierBefore: 'Silver', tierAfter: 'Bronze',
+    monthlyLane: false, perApplicationLane: true, remainingRates: [], perAppRows: [],
+  }, { requestId: 'req-1', actorLabel: 'Admin' });
+  const meta = JSON.parse(db.__tables.service_requests[0].metadata);
+  // Existing accepted choices survive; the proof is added.
+  expect(meta.cancel_plan).toEqual(expect.objectContaining({ scope: ['lawn_care'], waiveLateFee: true, scopedWindDownCommitted: true }));
+  // A portal request (no cancel_plan metadata) gets the proof too.
+  db.__tables.service_requests = [{ id: 'req-portal', metadata: null }];
+  await applyScopedWindDown('c1', {
+    ok: true, inScope: ['lawn_care'], remaining: ['pest_control'], tierBefore: 'Silver', tierAfter: 'Bronze',
+    monthlyLane: false, perApplicationLane: true, remainingRates: [], perAppRows: [],
+  }, { requestId: 'req-portal', actorLabel: 'Portal' });
+  expect(JSON.parse(db.__tables.service_requests[0].metadata).cancel_plan.scopedWindDownCommitted).toBe(true);
+});
+
 test('a per-application reprice whose CAS lands on zero rows aborts the wind-down — tier demote rolls back, never a silently kept old price', async () => {
   db.__tables.invoices = [];
   // The live price drifted after the preview (plan said 90 → 96).

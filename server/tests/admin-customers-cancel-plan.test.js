@@ -551,6 +551,32 @@ describe('POST /:id/cancel-plan', () => {
     expect((await refused.json()).code).toBe('scope_not_owned');
   }));
 
+  test('the resolved-echo window starts when the repair RESOLVED the acceptance — an acceptance open for days still echoes on a lost-response retry', () => withServer(async (baseUrl) => {
+    // Accepted three days ago, repaired (resolved) an hour ago, nothing
+    // cancellable left: the retry that lost the repair's response echoes.
+    mockState.service_requests = [{
+      id: 'req-late', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'now', prepayDisposition: null } }),
+      created_at: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+      updated_at: new Date(Date.now() - 60 * 60 * 1000),
+    }];
+    mockState.cancellation_cases = [{
+      id: 'case-late', customer_id: 'cust-1', service_request_id: 'req-late', status: 'committed',
+      snapshot: JSON.stringify({ effectiveDate: 'now', effectiveOn: '2026-08-31', outcome: { visitsPulled: 2, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'], errors: [] } }),
+    }];
+    mockState.annual_prepay_terms = [];
+    hasCancellableWork.mockResolvedValue(false);
+    const retry = await (await postCancel(baseUrl)).json();
+    expect(retry).toEqual(expect.objectContaining({ duplicate: true, requestId: 'req-late', caseId: 'case-late', visitsPulled: 2 }));
+    expect(mockProcess).not.toHaveBeenCalled();
+    // Resolved more than a day ago: history, not an echo.
+    mockState.service_requests[0].updated_at = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    const res = await postCancel(baseUrl);
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('nothing_to_cancel');
+  }));
+
   test('a lost-response retry after a CLEAN run echoes the recorded outcome — never nothing_to_cancel', () => withServer(async (baseUrl) => {
     const first = await (await postCancel(baseUrl)).json();
     expect(first.errors).toEqual([]);

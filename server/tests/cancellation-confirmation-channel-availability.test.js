@@ -35,6 +35,7 @@ jest.mock('../models/db', () => jest.fn((table) => {
 
 const { confirmationChannelAvailability, sendCancellationConfirmations } = require('../services/cancellation-confirmations');
 const { sendCancellationReceived: mockSendEmail } = require('../services/account-membership-email');
+const { sendCustomerMessage: mockSendSms } = require('../services/messaging/send-customer-message');
 
 const customer = { id: 'cust-1', phone: '+19415550100', email: 'pat@example.com' };
 
@@ -100,4 +101,22 @@ test('the SEND honours the portal-wide email opt-out too — never just the prev
   });
   expect(mockSendEmail).toHaveBeenCalledTimes(1);
   expect(sent.emailSent).toBe(true);
+});
+
+test('only a DEFINITIVE SMS policy block reads as blocked — a transient consent-lookup failure stays a repairable not-sent (codex GH r33 P2)', async () => {
+  const args = { customer: { ...customer, first_name: 'Pat' }, request: { id: 'req-3', created_at: new Date() }, result: { scope: [], remaining: [] }, processed: true, entryPoint: 'admin_cancel_plan', identityTrustLevel: 'admin_operator' };
+  mockSendEmail.mockResolvedValue({ ok: true });
+  // Transient: the validator could not read consent state — retry later.
+  mockSendSms.mockResolvedValueOnce({ sent: false, blocked: true, code: 'CONSENT_LOOKUP_FAILED', reason: 'DB error during lookup' });
+  let out = await sendCancellationConfirmations(args);
+  expect(out.smsSent).toBe(false);
+  expect(out.smsBlocked).toBe(false);
+  // Marked retryable by the policy chain: same.
+  mockSendSms.mockResolvedValueOnce({ sent: false, blocked: true, code: 'PROVIDER_FAILURE', retryable: true });
+  out = await sendCancellationConfirmations({ ...args, request: { id: 'req-4', created_at: new Date() } });
+  expect(out.smsBlocked).toBe(false);
+  // Definitive: an opt-out is unfixable by retrying.
+  mockSendSms.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SUPPRESSED_OPT_OUT' });
+  out = await sendCancellationConfirmations({ ...args, request: { id: 'req-5', created_at: new Date() } });
+  expect(out.smsBlocked).toBe(true);
 });

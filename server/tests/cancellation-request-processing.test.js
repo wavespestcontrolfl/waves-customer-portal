@@ -1108,14 +1108,17 @@ describe('processCancellationRequest', () => {
       const reworded = await processCancellationRequest({ customerId: 'c1', reason: 'price — customer called back', historyNote: 'Admin cancellation request r1', requestId: 'r1', families: ['lawn_care'] });
       expect(reworded).toEqual(expect.objectContaining({ ok: true, scopedWoundDown: true }));
 
-      // Per-application account: components prove nothing — the wind-down's
-      // own tier-source stamp is the committed-transaction signal.
+      // Per-application account: components prove nothing — the proof is
+      // the REQUEST-scoped stamp the wind-down transaction writes on the
+      // acceptance row, never the customer-wide waveguard_tier_source
+      // (a PRIOR scoped cancel leaves that set; codex GH r33 P1).
       db.__tables.customers[0].billing_mode = 'per_application';
-      db.__tables.customers[0].waveguard_tier_source = 'self_booking';
+      db.__tables.customers[0].waveguard_tier_source = 'cancellation_scoped';
+      db.__tables.service_requests = [{ id: 'r1', customer_id: 'c1', metadata: JSON.stringify({ cancel_plan: { scope: ['lawn_care'] } }) }];
       const perAppUnverified = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r1', requestId: 'r1', families: ['lawn_care'] });
       expect(perAppUnverified.scopedWoundDown).toBe(false);
       expect(perAppUnverified.errors).toContain('scoped_wind_down');
-      db.__tables.customers[0].waveguard_tier_source = 'cancellation_scoped';
+      db.__tables.service_requests[0].metadata = JSON.stringify({ cancel_plan: { scope: ['lawn_care'], scopedWindDownCommitted: true } });
       const perAppVerified = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r1', requestId: 'r1', families: ['lawn_care'] });
       expect(perAppVerified.scopedWoundDown).toBe(true);
 

@@ -129,7 +129,18 @@ async function sendCancellationConfirmations({
       },
     });
     smsSent = !!smsResult.sent;
-    if (!smsResult.sent && smsResult.blocked === true) smsBlocked = true;
+    // BLOCKED means a DEFINITIVE policy verdict (opt-out, suppression,
+    // non-mobile line): the run closes clean on the other channel instead
+    // of retrying an unfixable contact forever. A TRANSIENT block —
+    // CONSENT_LOOKUP_FAILED (a DB blip inside the consent validator, the
+    // code review-request already re-queues on), or anything the policy
+    // chain marks retryable/deferred — is NOT definitive: it stays a
+    // not-sent failure so the repair retry re-sends (codex GH r33 P2).
+    if (!smsResult.sent && smsResult.blocked === true
+      && smsResult.code !== 'CONSENT_LOOKUP_FAILED'
+      && smsResult.retryable !== true && !smsResult.deferred) {
+      smsBlocked = true;
+    }
     if (!smsResult.sent) {
       logger.warn(`Cancellation confirmation SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
     }
