@@ -1,0 +1,655 @@
+{
+  "_comment": [
+    "Every router mount / route that is INTENTIONALLY reachable without",
+    "authentication. AGENTS.md: \"New public routes outside this list are P0.\"",
+    "server/tests/public-route-allowlist.test.js recomputes the real public",
+    "surface from server/index.js and fails on any difference, in either",
+    "direction. To add a legitimate public route: get owner review, then add it",
+    "here with a reason. Identity is router file + mount path (never line",
+    "numbers); route entries are METHOD + full path as the scanner prints them",
+    "(node server/tests/route-surface/scan.js diffs the live surface).",
+    "A '[conditional: <predicate>]' suffix is part of the identity: the",
+    "registration sits inside an if/loop/function, and the suffix carries the",
+    "enclosing predicate chain. Moving it to unconditional top level OR",
+    "changing the predicate (=== flipped to !==) changes the key and forces",
+    "re-review."
+  ],
+  "mounts": [
+    {
+      "router": "server/index.js",
+      "mount": "/",
+      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A) — each either sets headers and next()s or 404s while its GATE_* is off",
+      "routes": [
+        "USE / (inline function#3396049a)",
+        "USE /api/ai/chat/report (inline function#6b8b71c2)",
+        "USE /api/pay/statement (inline function#cf970c43)",
+        "USE /api/public/a2a (inline function#c621253a)",
+        "USE /api/public/careers (inline function#91580da7)",
+        "USE /api/public/lawn-assessment (inline function#8e4982f2)",
+        "USE /api/public/mcp (inline function#6af8a3db)",
+        "USE /api/public/pest-forecast (inline function#a972e744)",
+        "USE /api/public/pest-identifier (inline function#14727834)",
+        "USE /api/public/secure-card (inline function#8abc12e6)"
+      ]
+    },
+    {
+      "router": "server/routes/stripe-webhook.js",
+      "mount": "/api/stripe/webhook",
+      "reason": "Stripe webhook — signature-verified in-handler (stripe.webhooks.constructEvent over the raw body; rejects when STRIPE_WEBHOOK_SECRET is unset)",
+      "routes": [
+        "POST /api/stripe/webhook"
+      ]
+    },
+    {
+      "router": "server/routes/webhooks-sendgrid.js",
+      "mount": "/api/webhooks/sendgrid",
+      "reason": "SendGrid event webhook — ECDSA signature over the raw body verified in-handler (x-twilio-email-event-webhook-signature)",
+      "routes": [
+        "POST /api/webhooks/sendgrid/events"
+      ]
+    },
+    {
+      "router": "server/routes/webhooks-resend.js",
+      "mount": "/api/webhooks/resend",
+      "reason": "Resend event webhook — Svix HMAC signature verified in-handler with a 5-minute replay window (RESEND_WEBHOOK_SECRET; fails closed when unset)",
+      "routes": [
+        "POST /api/webhooks/resend/events"
+      ]
+    },
+    {
+      "router": "server/index.js",
+      "mount": "/",
+      "reason": "App shell: SPA entry + catch-all, service worker, /api/health liveness, public /report + /recap + /estimate + /quote HTML pages, client static assets; /debug-sentry only registers when NODE_ENV !== production",
+      "routes": [
+        "GET / [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
+        "GET /* [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
+        "GET /api/health",
+        "GET /debug-sentry [conditional: config.nodeEnv !== 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
+        "GET /estimate",
+        "GET /estimate/:token",
+        "GET /quote",
+        "GET /sw.js [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
+        "GET <re:^\\/recap\\/[a-f0-9]{32}\\/?$/i> [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
+        "GET <re:^\\/report\\/[a-f0-9]{32}\\/?$/i> [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
+        "STATIC / (clientBuild = path.join(__dirname, '..', 'client', 'dist'), { maxAge: '1y', // Cache hashed assets (/assets/*) for 1 year immutable: true, s…#fe82cc51) [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
+        "STATIC / (path.join(__dirname, '..', 'client', 'public'), { index: false, maxAge: config.nodeEnv === 'production' ? '1h' : 0, })"
+      ]
+    },
+    {
+      "router": "server/routes/auth.js",
+      "mount": "/api/auth",
+      "reason": "Customer login flow — send-code/verify-code/refresh/logout mint or clear the credential and cannot require one",
+      "routes": [
+        "POST /api/auth/logout",
+        "POST /api/auth/refresh",
+        "POST /api/auth/send-code",
+        "POST /api/auth/verify-code"
+      ]
+    },
+    {
+      "router": "server/routes/bouncie.js",
+      "mount": "/api/bouncie",
+      "reason": "Bouncie OAuth redirect target — one-time state nonce (staff-oauth-state) verified in-handler; starting the flow requires admin auth",
+      "routes": [
+        "GET /api/bouncie/callback"
+      ]
+    },
+    {
+      "router": "server/routes/referral-links.js",
+      "mount": "/r",
+      "reason": "Public referral shortlink redirect — unguessable code is the capability",
+      "routes": [
+        "GET /r/:code"
+      ]
+    },
+    {
+      "router": "server/routes/public-shortlinks.js",
+      "mount": "/l",
+      "reason": "Public shortlink redirect — code entropy floor + per-route limiter (see public-route-gates.test.js); the limiter's custom over-limit handler serves the same 404 page and is keyed by its body digest",
+      "routes": [
+        "GET /l/:code",
+        "USE /l (express-rate-limit({ handler#945948f2 }))"
+      ]
+    },
+    {
+      "router": "server/routes/card-public.js",
+      "mount": "/api/card",
+      "reason": "Digital business card / vCard / wallet pass by unguessable token",
+      "routes": [
+        "GET /api/card/:token",
+        "GET /api/card/:token/contact.vcf",
+        "GET /api/card/:token/wallet.pkpass"
+      ]
+    },
+    {
+      "router": "server/routes/well-known.js",
+      "mount": "/.well-known",
+      "reason": "Apple app-site-association + Android assetlinks — the platforms fetch these anonymously by contract",
+      "routes": [
+        "GET /.well-known/apple-app-site-association",
+        "GET /.well-known/assetlinks.json"
+      ]
+    },
+    {
+      "router": "server/routes/documents.js",
+      "mount": "/api/documents",
+      "reason": "Shared-document viewer by unguessable token; every other route on this router is guarded per-route",
+      "routes": [
+        "GET /api/documents/shared/:token"
+      ]
+    },
+    {
+      "router": "server/routes/client-errors.js",
+      "mount": "/api/client-errors",
+      "reason": "Browser error beacon from the SPA — must work on pre-auth pages",
+      "routes": [
+        "POST /api/client-errors"
+      ]
+    },
+    {
+      "router": "server/routes/admin-auth.js",
+      "mount": "/api/admin/auth",
+      "reason": "Staff login / forgot-password / reset-password — the routes that mint staff credentials cannot require them",
+      "routes": [
+        "POST /api/admin/auth/forgot-password",
+        "POST /api/admin/auth/login",
+        "POST /api/admin/auth/reset-password"
+      ]
+    },
+    {
+      "router": "server/routes/admin-push.js",
+      "mount": "/api/admin/push",
+      "reason": "Web-push VAPID public key — public by definition, needed before a subscription exists",
+      "routes": [
+        "GET /api/admin/push/vapid-key"
+      ]
+    },
+    {
+      "router": "server/routes/estimate-public.js",
+      "mount": "/api/estimates",
+      "reason": "Public estimate viewer + accept/decline flow by unguessable token (format-gated, rate-limited; the AGENTS.md estimate-public contract). change-request (#3706), referral-link (#3710) and service-opt-out (#3684) are the same token contract, each rate-limited and dark behind its own GATE_ESTIMATE_* flag",
+      "routes": [
+        "GET /api/estimates/:token",
+        "GET /api/estimates/:token/data",
+        "GET /api/estimates/:token/pdf",
+        "GET /api/estimates/:token/service-details/:serviceKey/pdf",
+        "GET /api/estimates/:token/warranty-comparison/pdf",
+        "POST /api/estimates/:token/bundle-inquiry",
+        "POST /api/estimates/:token/change-request",
+        "POST /api/estimates/:token/extension-request",
+        "POST /api/estimates/:token/measurement-review",
+        "POST /api/estimates/:token/referral-link",
+        "POST /api/estimates/:token/service-details/send",
+        "PUT /api/estimates/:token/accept",
+        "PUT /api/estimates/:token/bond",
+        "PUT /api/estimates/:token/decline",
+        "PUT /api/estimates/:token/interior-service",
+        "PUT /api/estimates/:token/preferences",
+        "PUT /api/estimates/:token/select-tier",
+        "PUT /api/estimates/:token/service-opt-out"
+      ]
+    },
+    {
+      "router": "server/routes/service-outlines-public.js",
+      "mount": "/api/service-outlines",
+      "reason": "Tokenized service-outline viewer linked from customer comms",
+      "routes": [
+        "GET /api/service-outlines/:token",
+        "POST /api/service-outlines/:token/cta-click"
+      ]
+    },
+    {
+      "router": "server/routes/public-quote.js",
+      "mount": "/api/public/quote",
+      "reason": "Quote wizard calculator — the public lead-generation funnel",
+      "routes": [
+        "POST /api/public/quote/calculate",
+        "POST /api/public/quote/upsell"
+      ]
+    },
+    {
+      "router": "server/routes/public-property-lookup.js",
+      "mount": "/api/public/estimator",
+      "reason": "Quote wizard property lookup / lead prefill (rate-limited, signed prefill token)",
+      "routes": [
+        "POST /api/public/estimator/lead-prefill",
+        "POST /api/public/estimator/property-lookup"
+      ]
+    },
+    {
+      "router": "server/routes/admin-settings.js",
+      "mount": "/api/admin/settings",
+      "reason": "Google + LinkedIn OAuth redirect targets — one-time state nonce verified in-handler; every other settings route is admin-guarded",
+      "routes": [
+        "GET /api/admin/settings/google/callback",
+        "GET /api/admin/settings/linkedin/callback"
+      ]
+    },
+    {
+      "router": "server/routes/reviews-public.js",
+      "mount": "/api/reviews",
+      "reason": "Featured reviews feed for the marketing site — public data",
+      "routes": [
+        "GET /api/reviews/featured"
+      ]
+    },
+    {
+      "router": "server/routes/stripe-terminal.js",
+      "mount": "/api/stripe/terminal",
+      "reason": "Terminal handoff validation — burns a short-lived HS256-signed one-time JWT (aud/iss pinned, jti atomically burned) verified in-handler; all other terminal routes use terminalAuthenticate",
+      "routes": [
+        "POST /api/stripe/terminal/validate-handoff"
+      ]
+    },
+    {
+      "router": "server/routes/public-newsletter.js",
+      "mount": "/api/public/newsletter",
+      "reason": "Newsletter subscribe/confirm/unsubscribe, RSS/posts, and tokenized engagement links from emails",
+      "routes": [
+        "GET /api/public/newsletter/confirm/:token",
+        "GET /api/public/newsletter/e/:token/:eventId",
+        "GET /api/public/newsletter/feedback/:token/:reaction",
+        "GET /api/public/newsletter/posts",
+        "GET /api/public/newsletter/posts/:id",
+        "GET /api/public/newsletter/posts/by-slug/:slug",
+        "GET /api/public/newsletter/quiz/:token/:quizId/:answer",
+        "GET /api/public/newsletter/rss",
+        "GET /api/public/newsletter/unsubscribe/:token",
+        "POST /api/public/newsletter/confirm/:token",
+        "POST /api/public/newsletter/feedback/:token/:reaction",
+        "POST /api/public/newsletter/quiz/:token/:quizId/:answer",
+        "POST /api/public/newsletter/subscribe",
+        "POST /api/public/newsletter/unsubscribe/:token"
+      ]
+    },
+    {
+      "router": "server/routes/public-ui-flags.js",
+      "mount": "/api/public/ui-flags",
+      "reason": "Public UI flag read for pre-auth surfaces",
+      "routes": [
+        "GET /api/public/ui-flags"
+      ]
+    },
+    {
+      "router": "server/routes/social-feed-public.js",
+      "mount": "/api/public/social-feed",
+      "reason": "Public social feed consumed by the marketing sites",
+      "routes": [
+        "GET /api/public/social-feed"
+      ]
+    },
+    {
+      "router": "server/routes/public-automation-preview.js",
+      "mount": "/api/public/automation-preview",
+      "reason": "Tokenized automation preview (owner email-approval flow)",
+      "routes": [
+        "GET /api/public/automation-preview/:stepId/:token"
+      ]
+    },
+    {
+      "router": "server/routes/public-service-areas.js",
+      "mount": "/api/public/service-areas",
+      "reason": "Service-area data for the marketing sites — public data",
+      "routes": [
+        "GET /api/public/service-areas"
+      ]
+    },
+    {
+      "router": "server/routes/public-pricing-ranges.js",
+      "mount": "/api/public/pricing-ranges",
+      "reason": "Published pricing ranges for the marketing sites — public data",
+      "routes": [
+        "GET /api/public/pricing-ranges"
+      ]
+    },
+    {
+      "router": "server/routes/public-services-menu.js",
+      "mount": "/api/public/services",
+      "reason": "Services menu for the marketing sites — public data",
+      "routes": [
+        "GET /api/public/services/menu"
+      ]
+    },
+    {
+      "router": "server/routes/public-mcp.js",
+      "mount": "/api/public/mcp",
+      "reason": "Public MCP surface — dark behind GATE_MCP_PUBLIC (404 when off), read-only when lit",
+      "routes": [
+        "GET /api/public/mcp",
+        "POST /api/public/mcp"
+      ]
+    },
+    {
+      "router": "server/routes/public-a2a.js",
+      "mount": "/api/public/a2a",
+      "reason": "Public A2A surface — dark behind GATE_A2A_PUBLIC (404 when off)",
+      "routes": [
+        "GET /api/public/a2a",
+        "POST /api/public/a2a"
+      ]
+    },
+    {
+      "router": "server/routes/public-credentials.js",
+      "mount": "/api/public/credentials",
+      "reason": "License/credential display pages — public data",
+      "routes": [
+        "GET /api/public/credentials",
+        "GET /api/public/credentials/:slug"
+      ]
+    },
+    {
+      "router": "server/routes/track-public.js",
+      "mount": "/api/public/track",
+      "reason": "Tokenized live technician-tracking map linked from appointment SMS",
+      "routes": [
+        "GET /api/public/track/:token",
+        "POST /api/public/track/:token/stops-ahead"
+      ]
+    },
+    {
+      "router": "server/routes/experiments-public.js",
+      "mount": "/api/public/experiments",
+      "reason": "Anonymous experiment status read + exposure logging for public pages",
+      "routes": [
+        "GET /api/public/experiments/status",
+        "POST /api/public/experiments/exposure"
+      ]
+    },
+    {
+      "router": "server/routes/reschedule-public.js",
+      "mount": "/api/public/reschedule",
+      "reason": "Tokenized customer self-service reschedule links from SMS/email",
+      "routes": [
+        "GET /api/public/reschedule/:token",
+        "POST /api/public/reschedule/:token",
+        "POST /api/public/reschedule/:token/find-slots"
+      ]
+    },
+    {
+      "router": "server/routes/reservice-public.js",
+      "mount": "/api/public/reservice",
+      "reason": "Tokenized customer re-service request links from SMS/email",
+      "routes": [
+        "GET /api/public/reservice/:token",
+        "POST /api/public/reservice/:token",
+        "POST /api/public/reservice/:token/find-slots"
+      ]
+    },
+    {
+      "router": "server/routes/appointment-public.js",
+      "mount": "/api/public/appointment",
+      "reason": "Tokenized appointment confirm / calendar links from SMS/email; the USE entry is the router's 404-when-dark gate (always next() or 404)",
+      "routes": [
+        "USE /api/public/appointment (inline function#43251846)",
+        "GET /api/public/appointment/:token",
+        "GET /api/public/appointment/:token/calendar.ics",
+        "POST /api/public/appointment/:token/confirm"
+      ]
+    },
+    {
+      "router": "server/routes/secure-card-public.js",
+      "mount": "/api/public/secure-card",
+      "reason": "Tokenized secure card-capture links (Stripe Payment Element) from SMS/email; the USE entry is the router's privacy-header stamp (always next())",
+      "routes": [
+        "USE /api/public/secure-card (inline function#8abc12e6)",
+        "GET /api/public/secure-card/:token",
+        "POST /api/public/secure-card/:token/complete",
+        "POST /api/public/secure-card/:token/select-plan"
+      ]
+    },
+    {
+      "router": "server/routes/prep-public.js",
+      "mount": "/api/public/prep",
+      "reason": "Tokenized service-prep sheet viewer + PDF from customer comms",
+      "routes": [
+        "GET /api/public/prep/:token",
+        "GET /api/public/prep/:token/pdf"
+      ]
+    },
+    {
+      "router": "server/routes/price-change-public.js",
+      "mount": "/api/public/price-change",
+      "reason": "Tokenized price-change notice viewer from customer comms",
+      "routes": [
+        "GET /api/public/price-change/:token"
+      ]
+    },
+    {
+      "router": "server/routes/public-lawn-diagnostic.js",
+      "mount": "/api/public/lawn-diagnostic",
+      "reason": "Tokenized lawn diagnostic viewer + quote-request intake",
+      "routes": [
+        "GET /api/public/lawn-diagnostic/:token",
+        "POST /api/public/lawn-diagnostic/:token/quote-request"
+      ]
+    },
+    {
+      "router": "server/routes/public-lawn-assessment.js",
+      "mount": "/api/public/lawn-assessment",
+      "reason": "Public AI lawn assessment funnel (rate-limited lead-gen intake per its AGENTS.md contract); the USE entry is the router's 404-when-dark gate (always next() or 404)",
+      "routes": [
+        "USE /api/public/lawn-assessment (inline function#a4a09571)",
+        "POST /api/public/lawn-assessment/:id/claim",
+        "POST /api/public/lawn-assessment/analyze"
+      ]
+    },
+    {
+      "router": "server/routes/public-pest-identifier.js",
+      "mount": "/api/public/pest-identifier",
+      "reason": "Public AI pest identifier funnel (rate-limited lead-gen intake per its AGENTS.md contract)",
+      "routes": [
+        "GET /api/public/pest-identifier/:token",
+        "POST /api/public/pest-identifier/:id/claim",
+        "POST /api/public/pest-identifier/analyze"
+      ]
+    },
+    {
+      "router": "server/routes/public-careers.js",
+      "mount": "/api/public/careers",
+      "reason": "Job-application intake — GATE_JOB_APPLICATIONS dark-404, IP + per-phone limiters, honeypot, Turnstile (the AGENTS.md careers contract)",
+      "routes": [
+        "POST /api/public/careers/apply"
+      ]
+    },
+    {
+      "router": "server/routes/estimate-slots-public.js",
+      "mount": "/api/public/estimates",
+      "reason": "Estimate scheduling/deposit flow by unguessable estimate token (ask/find-slots carry the signed askToken contract from AGENTS.md); the USE entry is the router's no-cache header stamp (always next())",
+      "routes": [
+        "USE /api/public/estimates (inline function#d652afe9)",
+        "DELETE /api/public/estimates/:token/reserve/:scheduledServiceId",
+        "GET /api/public/estimates/:token/available-slots",
+        "POST /api/public/estimates/:token/ask",
+        "POST /api/public/estimates/:token/card-hold-intent",
+        "POST /api/public/estimates/:token/deposit-finalize [conditional: loop over ['deposit-intent', 'deposit-quote', 'deposit-finalize', 'deposit-reset']]",
+        "POST /api/public/estimates/:token/deposit-intent [conditional: loop over ['deposit-intent', 'deposit-quote', 'deposit-finalize', 'deposit-reset']]",
+        "POST /api/public/estimates/:token/deposit-quote [conditional: loop over ['deposit-intent', 'deposit-quote', 'deposit-finalize', 'deposit-reset']]",
+        "POST /api/public/estimates/:token/deposit-reset [conditional: loop over ['deposit-intent', 'deposit-quote', 'deposit-finalize', 'deposit-reset']]",
+        "POST /api/public/estimates/:token/find-slots",
+        "POST /api/public/estimates/:token/recurring-card-intent",
+        "POST /api/public/estimates/:token/reserve"
+      ]
+    },
+    {
+      "router": "server/routes/public-products.js",
+      "mount": "/api/public/products",
+      "reason": "Affiliate product registry read for blog surfaces — public data, dark behind GATE_AFFILIATE_LINKS upstream",
+      "routes": [
+        "GET /api/public/products"
+      ]
+    },
+    {
+      "router": "server/routes/public-pest-forecast.js",
+      "mount": "/api/public/pest-forecast",
+      "reason": "Pest forecast content for the marketing sites — public data",
+      "routes": [
+        "GET /api/public/pest-forecast",
+        "GET /api/public/pest-forecast/locations"
+      ]
+    },
+    {
+      "router": "server/routes/public-ai-intake.js",
+      "mount": "/api/public/ai-intake",
+      "reason": "Public AI intake chat — gated + rate-limited lead funnel",
+      "routes": [
+        "GET /api/public/ai-intake/status",
+        "POST /api/public/ai-intake/message"
+      ]
+    },
+    {
+      "router": "server/routes/lead-webhook.js",
+      "mount": "/api/webhooks/lead",
+      "reason": "Public lead intake from the Astro spoke-fleet forms — Turnstile verify, IP/phone limiters, honeypot (the AGENTS.md lead-webhook contract)",
+      "routes": [
+        "POST /api/webhooks/lead"
+      ]
+    },
+    {
+      "router": "server/routes/lead-webhook.js",
+      "mount": "/api/leads",
+      "reason": "Legacy alias of the public lead intake — same handler and abuse protections as /api/webhooks/lead",
+      "routes": [
+        "POST /api/leads"
+      ]
+    },
+    {
+      "router": "server/routes/webhooks-voice-agent.js",
+      "mount": "/api/webhooks/voice-agent",
+      "reason": "ElevenLabs voice-agent webhook — fail-closed bearer/X-Voice-Agent-Token constant-time check in-handler, dark behind GATE_VOICE_AI_AGENT",
+      "routes": [
+        "POST /api/webhooks/voice-agent/lead"
+      ]
+    },
+    {
+      "router": "server/routes/reports-public.js",
+      "mount": "/api/reports",
+      "reason": "Public service-report viewer by unguessable token (report pages, recap video, tokenized ask)",
+      "routes": [
+        "GET /api/reports/:token",
+        "GET /api/reports/:token/data",
+        "GET /api/reports/:token/map.svg",
+        "GET /api/reports/:token/preview.jpg",
+        "GET /api/reports/:token/recap",
+        "GET /api/reports/:token/recap/video",
+        "GET /api/reports/project/:token/data",
+        "GET /api/reports/project/:token/fdacs-pdf",
+        "POST /api/reports/:token/ask",
+        "POST /api/reports/:token/events",
+        "POST /api/reports/:token/pest-pressure/client-rating",
+        "POST /api/reports/:token/referral-link",
+        "POST /api/reports/project/:token/ask"
+      ]
+    },
+    {
+      "router": "server/routes/booking.js",
+      "mount": "/api/booking",
+      "reason": "Public booking funnel — availability/config/confirm; customer-lookup discloses PII only on phone+address match and id-only on address match (in-file security contract)",
+      "routes": [
+        "GET /api/booking/availability",
+        "GET /api/booking/config",
+        "GET /api/booking/customer-lookup",
+        "GET /api/booking/embed-snippet",
+        "GET /api/booking/sources",
+        "GET /api/booking/status/:code",
+        "POST /api/booking/capture-intent",
+        "POST /api/booking/confirm",
+        "POST /api/booking/find-slots"
+      ]
+    },
+    {
+      "router": "server/routes/pay-statement.js",
+      "mount": "/api/pay/statement",
+      "reason": "Tokenized account-statement payment page from customer comms; the USE entry is the router's 404-when-dark gate (always next() or 404)",
+      "routes": [
+        "USE /api/pay/statement (inline function#d7bd2d4a)",
+        "GET /api/pay/statement/:token",
+        "POST /api/pay/statement/:token/finalize",
+        "POST /api/pay/statement/:token/quote",
+        "POST /api/pay/statement/:token/setup"
+      ]
+    },
+    {
+      "router": "server/routes/pay-v2.js",
+      "mount": "/api/pay",
+      "reason": "Tokenized invoice payment page (format-gated tokens; the /pay contract)",
+      "routes": [
+        "GET /api/pay/:token",
+        "GET /api/pay/:token/attachments/:attachmentId",
+        "GET /api/pay/:token/invoice.pdf",
+        "POST /api/pay/:token/capture-setup",
+        "POST /api/pay/:token/confirm",
+        "POST /api/pay/:token/consent",
+        "POST /api/pay/:token/error",
+        "POST /api/pay/:token/finalize",
+        "POST /api/pay/:token/quote",
+        "POST /api/pay/:token/setup",
+        "POST /api/pay/:token/setup-complete",
+        "POST /api/pay/:token/update-amount"
+      ]
+    },
+    {
+      "router": "server/routes/receipt-v2.js",
+      "mount": "/api/receipt",
+      "reason": "Tokenized receipt viewer + PDF from customer comms",
+      "routes": [
+        "GET /api/receipt/:token",
+        "GET /api/receipt/:token/pdf"
+      ]
+    },
+    {
+      "router": "server/routes/contracts-public.js",
+      "mount": "/api/contracts",
+      "reason": "Tokenized contract viewer + e-sign from customer comms",
+      "routes": [
+        "GET /api/contracts/:token",
+        "POST /api/contracts/:token/sign"
+      ]
+    },
+    {
+      "router": "server/routes/review-gate.js",
+      "mount": "/api/rate",
+      "reason": "Tokenized review-request funnel from post-service SMS (format-gated, limited)",
+      "routes": [
+        "GET /api/rate/:token",
+        "GET /api/rate/:token/go",
+        "POST /api/rate/:token/generate-review",
+        "POST /api/rate/:token/score",
+        "POST /api/rate/:token/submit"
+      ]
+    },
+    {
+      "router": "server/routes/review-public.js",
+      "mount": "/api/review",
+      "reason": "Tokenized review capture page from customer comms",
+      "routes": [
+        "GET /api/review/:token",
+        "POST /api/review/:token"
+      ]
+    },
+    {
+      "router": "server/routes/admin-email.js",
+      "mount": "/api/admin/email",
+      "reason": "Google OAuth redirect target for the Gmail integration — exempted from the router's staff guard; one-time state verified in-handler",
+      "routes": [
+        "GET /api/admin/email/oauth/callback"
+      ]
+    },
+    {
+      "router": "server/routes/bouncie-webhook.js",
+      "mount": "/api/bouncie",
+      "reason": "Bouncie telemetry webhook (legacy mount) — shared secret verified in-handler (Authorization / X-Bouncie-Authorization)",
+      "routes": [
+        "POST /api/bouncie"
+      ]
+    },
+    {
+      "router": "server/routes/webhooks-bouncie.js",
+      "mount": "/api/webhooks/bouncie",
+      "reason": "Bouncie mileage/geofence webhook — shared secret verified in-handler; ping requires the secret too",
+      "routes": [
+        "GET /api/webhooks/bouncie/ping",
+        "POST /api/webhooks/bouncie"
+      ]
+    }
+  ]
+}

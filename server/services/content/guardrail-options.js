@@ -78,8 +78,14 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
   // was unreachable (Codex #3646 r41). The refresh lane overrides it from
   // the live page's source path.
   const targetIsBlog = brief.action_type === 'new_supporting_blog' || brief.page_type === 'supporting-blog';
+  // An affiliate pilot brief binds the ONLY products the draft may link
+  // (operator_brief.affiliate_products, verbatim from the seed manifest);
+  // the affiliate gate enforces product + placement + anchor against it.
+  const briefProducts = brief?.voice_constraints?.operator_brief?.affiliate_products;
+  const allowedAffiliateProducts = Array.isArray(briefProducts) && briefProducts.length ? briefProducts : null;
   return {
     targetIsBlog,
+    allowedAffiliateProducts,
     service: (faqBlockedTopic || specialtyTopic)
       ? [baseService, faqBlockedTopic, specialtyTopic].filter(Boolean)
       : baseService,

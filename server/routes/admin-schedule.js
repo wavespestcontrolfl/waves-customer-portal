@@ -8,6 +8,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
+const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
@@ -5511,7 +5512,19 @@ router.post('/', requireAdmin, async (req, res, next) => {
         }
       }
 
-      [svc] = await trx('scheduled_services').insert(insertData).returning('*');
+      // Booking stamping contract (B-track adoption of the admin create
+      // parent — the writer that was still creating unlinked recurring
+      // parents from legacy labels). Gate OFF: attribution only, the
+      // payload above inserts byte-identical. Gate ON: a MISSING catalog
+      // identity (service_id / snapshots null because the request carried
+      // no service_id) is resolved through the contract's bridge
+      // (legacyCatalogName cadence map → serviceNameCandidates → unique
+      // live row); a stamped identity is never overridden. Pricing, locks,
+      // comms and children stay here.
+      const adminCreateInsert = await completeScheduledServiceInsert(insertData, {
+        trx, cols, source: { sourceAction: 'admin_manual' },
+      });
+      [svc] = await trx('scheduled_services').insert(adminCreateInsert).returning('*');
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
       // Visit groups (visit-group-scope.md §2): stamp at scheduling —
       // gate-checked + best-effort + self-refusing inside maybeGroupRow.

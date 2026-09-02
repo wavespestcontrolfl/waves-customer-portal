@@ -91,12 +91,15 @@ export default function DashboardJumpNav({
   // pills). isMobile cutoff is 768px, i.e. Tailwind's md:.
   return (
     <div className="md:sticky md:top-0 z-20 -mx-3 sm:-mx-6 px-3 sm:px-6 pt-1.5 md:pt-2 pb-0 mb-3 md:mb-4 bg-surface-page border-b border-hairline border-zinc-200">
-      <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-1.5 md:gap-3">
+      {/* Section tabs and the period strip share a row only from xl up —
+          below that the two together are wider than the content column
+          (the strip spilled past the viewport at 768/1024), so they stack. */}
+      <div className="flex flex-col xl:flex-row xl:items-end xl:justify-between gap-1.5 md:gap-2 xl:gap-3">
         {/* Section tabs — a full-width 5-up segmented row on mobile (every tab
             always visible, no scroll), inline pills on desktop. */}
         <nav
           aria-label="Dashboard sections"
-          className="grid grid-cols-5 md:flex md:items-center md:gap-1 md:overflow-x-auto"
+          className="grid grid-cols-5 md:flex md:items-center md:gap-1 md:min-w-0 md:overflow-x-auto"
         >
           {sections.map((s) => (
             <button
@@ -119,7 +122,7 @@ export default function DashboardJumpNav({
         {/* Period selector — drives the KPI tiles + attribution panels.
             Mobile: one compact native select (the 9-pill strip overflowed a
             390px viewport). Desktop: the original pill strip. */}
-        <div className="relative flex items-center gap-2 pb-1.5">
+        <div className="relative flex items-center gap-2 pb-1.5 min-w-0">
           {periodLabel && (
             <span className="hidden lg:inline text-12 text-ink-tertiary whitespace-nowrap">
               {periodLabel}

@@ -55,6 +55,32 @@ router.get('/customers/:id/autopay-state', async (req, res, next) => {
 });
 
 /**
+ * POST /api/admin/customers/:id/autopay-setup-link
+ * Body: { delivery?: 'inline' | 'sms' } (default inline — hands the link
+ * back for copy/paste, no comm; 'sms' texts it, operator-initiated).
+ * All policy lives in requestAutopaySetupLink (gate, payer exemption,
+ * already-on-Auto-Pay, saved-method auto-secure, dedup, template lever) —
+ * the outcome is reported verbatim so the Customers page can say WHY.
+ */
+router.post('/customers/:id/autopay-setup-link', async (req, res, next) => {
+  try {
+    const { requestAutopaySetupLink } = require('../services/autopay-setup-link');
+    const result = await requestAutopaySetupLink({
+      customerId: req.params.id,
+      delivery: req.body?.delivery === 'sms' ? 'sms' : 'inline',
+      trigger: 'admin',
+    });
+    res.json({
+      requested: result.requested,
+      action: result.action,
+      reason: result.reason,
+      secureUrl: result.secureUrl || null,
+      expiresAt: result.expiresAt || null,
+    });
+  } catch (err) { next(err); }
+});
+
+/**
  * POST /api/admin/customers/:id/charge-now
  * Body: { amount?: number, description?: string }
  * If amount omitted, charges customer.monthly_rate — ONLY for a customer the

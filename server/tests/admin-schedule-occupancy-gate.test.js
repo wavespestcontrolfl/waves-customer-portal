@@ -103,7 +103,10 @@ function chain(row) {
   builder.insert = jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ ...SVC, id: 'new-1' }]), onConflict: jest.fn(() => ({ ignore: jest.fn().mockResolvedValue([]) })) }));
   builder.del = jest.fn().mockResolvedValue(0);
   builder.delete = jest.fn().mockResolvedValue(0);
-  builder.columnInfo = jest.fn().mockResolvedValue({});
+  // The create parent now runs the booking stamping contract, which
+  // refuses a column map without source_action (attribution must land
+  // somewhere) — model the real table's provenance column.
+  builder.columnInfo = jest.fn().mockResolvedValue({ source_action: {} });
   builder.then = (resolve, reject) => Promise.resolve(row === undefined ? [] : [row]).then(resolve, reject);
   return builder;
 }

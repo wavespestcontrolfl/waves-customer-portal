@@ -220,7 +220,10 @@ the token cannot be used to spray documents at arbitrary addresses; same
 gate-404 + token format gate + customer-viewable + service-on-estimate
 checks as the GET, 6 req/hour limit, email sends idempotent per
 estimate+service+day, suppression-blocked addresses return 409 with no
-send, generic errors — no PII in responses or logs).
+send, generic errors — no PII in responses or logs; while
+GATE_SEND_REQUIRES_SERVER_PRICING is on, a row or group link that fails
+the engine-pricing-authority verdict (#3750) answers the same generic 404
+before either provider path).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes
@@ -244,7 +247,10 @@ quoted).)
 expired, I still want this" from the React estimate page's expired/
 not-found screen. Estimate token format gate (same slug-or-64-hex regex as
 the slots router), generic 404 — unknown token, malformed token, ineligible
-row, and gate-off are indistinguishable — 5 req/hr per-IP limit, dark
+row, gate-off, and (while GATE_SEND_REQUIRES_SERVER_PRICING is on) a row or
+group link that fails the engine-pricing-authority verdict (#3750; judged
+before the auto-grant claim, nothing burned) are indistinguishable — 5
+req/hr per-IP limit, dark
 behind GATE_ESTIMATE_EXTENSION_REQUEST (the rate limiter `skip`s while the
 gate is off so a dark probe sees only generic 404s, never a revealing 429,
 and keys via the shared /64-collapsing `rateLimitKey`). Eligibility
@@ -501,6 +507,28 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+`/accept` fails CLOSED when the accepted plan's money cannot be resolved
+(#3751): 409 `{ error, code }` with nothing booked and call-the-office copy
+— `PER_APPLICATION_ADD_ON_UNPRICED` (an established per-application
+customer adding a unit whose per-application price cannot be derived),
+`LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE` (an in-flight count-less termite
+quote whose card discloses monthly installments — re-issued by the
+office, never converted against its card), and
+`INVOICE_MODE_PER_APPLICATION_UNRESOLVED` (an invoice-mode recurring
+accept with no resolved per-application amount — never the monthly
+display rate). Same contract via the admin manual-acceptance path, which
+preserves these 4xx verbatim.
+`/select-tier` refuses any tier above the tier the ENGINE wrote for the
+estimate's qualifying services (400 `tier_not_available_for_current_services`
++ `maxTier`; downgrades stay allowed): the ceiling is the last opt-out
+commit's `serviceOptOut.engineTier` stamp, else the stored `result` /
+`engineResult` tier (every carrier shape the portal's readers accept), else
+Bronze — fail closed, never a re-count of the stored rows under today's
+qualifying policy, and never the row's own `waveguard_tier`, which holds the
+customer's last selection once the route writes it back (validation audit
+SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
+estimates). A membership reconcile that reprices the mix refreshes the
+opt-out stamp with the row tier.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,
@@ -797,7 +825,21 @@ Any change to this endpoint, its auth, or its frame handling is
 security-critical).
 `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
 "secure your appointment" card-on-file capture page for the
-appointment-card-request funnel — dark until `APPOINTMENT_CARD_REQUEST`
+appointment-card-request funnel — ALSO serves the standalone "set up
+Auto Pay" link (`appointment_card_requests.kind='customer'`, dark behind
+`GATE_AUTOPAY_SETUP_LINK`, operator-minted only from the Customers page):
+same token/format/header/limiter contract; the GET payload carries
+`kind:'customer'`, no visit/fee/plan fields, `paymentMethodTypes`
+(card_or_bank with INSTANT bank verification only, card-only under an
+unhealthy `customers.ach_status`), and renders `closed` once
+`expires_at` (30 days) passes, the customer is archived or becomes
+payer-billed, or Auto Pay is already active (the pending row is RETIRED to
+`expired` so every later GET stays closed — never healed to satisfied); a
+`completed` row renders `secured` only while the enrollment is still live
+and chargeable; the POST runs the same
+live-verify (purpose `autopay_setup_link` + request id) and the same
+save → consent → enroll tail under the same claim/lease; `select-plan`
+is not applicable to these rows. The visit lane below is unchanged — dark until `APPOINTMENT_CARD_REQUEST`
 AND the `secure_appointment_card` SMS template are both enabled, and
 unreachable until the funnel mints links. Bearer token
 (`appointment_card_requests.token` — 22-char base64url / 128-bit since

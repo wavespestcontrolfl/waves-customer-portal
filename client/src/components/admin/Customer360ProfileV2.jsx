@@ -91,6 +91,7 @@ import CancelPlanDialog from "./CancelPlanDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import { describeAutopaySetupLinkResult } from "../schedule/cardLinkStatus";
 import {
   CONSENT_TEXT,
   CONSENT_VERSION,
@@ -844,6 +845,10 @@ function ElectronicAuthorizationContractV2({
   const [contractAction, setContractAction] = useState("");
   const [contractErr, setContractErr] = useState("");
   const [signingUrl, setSigningUrl] = useState("");
+  // Standalone Auto Pay setup link (GATE_AUTOPAY_SETUP_LINK): copy the
+  // tokenized /secure link or text it — outcome reported verbatim.
+  const [setupLinkBusy, setSetupLinkBusy] = useState(false);
+  const [setupLinkResult, setSetupLinkResult] = useState(null);
   const [contractDeliveryActionKey, setContractDeliveryActionKey] = useState("");
   const [documentTemplates, setDocumentTemplates] = useState([]);
   const [documentTemplatesLoading, setDocumentTemplatesLoading] = useState(false);
@@ -913,6 +918,31 @@ function ElectronicAuthorizationContractV2({
       });
     return () => { cancelled = true; };
   }, []);
+
+  const requestAutopaySetupLink = async (delivery) => {
+    if (setupLinkBusy) return;
+    if (delivery === "sms" && !window.confirm("Text this customer an Auto Pay setup link now?")) return;
+    setSetupLinkBusy(true);
+    setSetupLinkResult(null);
+    try {
+      const result = await adminFetch(
+        `/admin/customers/${customer.id}/autopay-setup-link`,
+        { method: "POST", body: JSON.stringify({ delivery }) },
+      );
+      let copied = false;
+      if (result?.action === "link_created" && result.secureUrl) {
+        try { await navigator.clipboard.writeText(result.secureUrl); copied = true; } catch { copied = false; }
+      }
+      // Never claim "copied" when the clipboard write failed — the URL is
+      // rendered below either way.
+      setSetupLinkResult({ ...result, copied });
+      if (result?.action === "auto_secured") await onRefresh?.();
+    } catch (err) {
+      setSetupLinkResult({ action: "skipped", reason: err.message || "request_failed" });
+    } finally {
+      setSetupLinkBusy(false);
+    }
+  };
 
   const createContract = async () => {
     if (!canCreateContract || creatingContract) return;
@@ -1147,21 +1177,57 @@ function ElectronicAuthorizationContractV2({
               contracts.
             </div>{" "}
           </div>{" "}
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={
-              activeContract
-                ? () => regenerateLink(activeContract)
-                : createContract
-            }
-            disabled={creatingContract || !canCreateContract}
-          >
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {" "}
-            <Link2 size={13} className="mr-1" />
-            {activeContract ? "New Link" : "Create Link"}
-          </Button>{" "}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => requestAutopaySetupLink("inline")}
+              disabled={setupLinkBusy}
+              title="Copy a 30-day Auto Pay setup link (card or bank account) for this customer"
+            >
+              Copy Auto Pay link
+            </Button>{" "}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => requestAutopaySetupLink("sms")}
+              disabled={setupLinkBusy}
+              title="Text this customer an Auto Pay setup link"
+            >
+              Text Auto Pay link
+            </Button>{" "}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={
+                activeContract
+                  ? () => regenerateLink(activeContract)
+                  : createContract
+              }
+              disabled={creatingContract || !canCreateContract}
+            >
+              {" "}
+              <Link2 size={13} className="mr-1" />
+              {activeContract ? "New Link" : "Create Link"}
+            </Button>{" "}
+          </div>{" "}
         </div>{" "}
+        {setupLinkResult ? (
+          <div
+            className={cn(
+              "px-4 py-2 text-12 border-b border-hairline border-zinc-200",
+              describeAutopaySetupLinkResult(setupLinkResult).tone === "bad"
+                ? "text-alert-fg"
+                : "text-ink-secondary",
+            )}
+          >
+            {describeAutopaySetupLinkResult(setupLinkResult).text}
+            {setupLinkResult.secureUrl ? (
+              <span className="ml-2 break-all u-nums text-zinc-900">{setupLinkResult.secureUrl}</span>
+            ) : null}
+          </div>
+        ) : null}
         <div className="grid grid-cols-1 md:grid-cols-3 border-b border-hairline border-zinc-200">
           {[
             ["Details", "Recipient, name, payment, attachments"],

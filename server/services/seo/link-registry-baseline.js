@@ -32,7 +32,7 @@
  * writes and no transaction. Nothing here fetches, sends, or spends.
  */
 
-const { ensureDomain, isNeverTargetHost, pathKey, pathLinkTypeFor, acquisitionTypeForLinkType, touchKey } = require('./link-registry');
+const { ensureDomain, isNeverTargetHost, pathKey, pathLinkTypeFor, acquisitionTypeForLinkType, touchKey, settleRetiredPlacements } = require('./link-registry');
 const { canonicalProspectDomain, findPlacementRow, lockProspectDomain, targetPageOf, locationKeyOf } = require('./prospect-domain-lock');
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 
@@ -183,7 +183,12 @@ async function reconcilePlacement(q, placement, rep, now, { domainId = null, pat
     if (typeof rep.is_dofollow === 'boolean') patch.is_dofollow = rep.is_dofollow;
     if (!placement.first_live_at) patch.first_live_at = rep.first_seen || now;
   }
-  return (await u.update(patch)) ? 1 : 0;
+  const n = await u.update(patch);
+  // a promotion from `prospect` released the lease into a non-claimable
+  // state: the placement follows a superseded / changed path now, in the
+  // same transaction (q) — claim-time settlement never sees a live row
+  if (n && !isLive && placement.status === 'prospect') await settleRetiredPlacements(q, { prospectIds: [placement.id], now });
+  return n ? 1 : 0;
 }
 
 // The baseline path's identity is DOMAIN-LEVEL (baseline = true), not its

@@ -132,7 +132,16 @@ function makeDb(estimate, claimedOverrides = null) {
           && (this.nullColumns || []).some((column) => estimate[column] != null);
         // claimedOverrides simulates the row mutating between the pre-claim SELECT
         // and this guarded UPDATE (e.g. a concurrent proposal-mode toggle).
-        const updated = { ...estimate, ...patch, ...(claimedOverrides || {}) };
+        // The at-lock authority stamp (#3750) rides as a raw jsonb_set on
+        // estimate_data — simulate it: prior blob + pricingAuthorityAtLock
+        // from the row's column, exactly what Postgres would write.
+        const applied = { ...patch };
+        if (applied.estimate_data && applied.estimate_data.__raw) {
+          let prior = {};
+          try { prior = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data || '{}') : (estimate.estimate_data || {}); } catch { prior = {}; }
+          applied.estimate_data = JSON.stringify({ ...prior, pricingAuthorityAtLock: String(estimate.pricing_authority || 'NULL').toUpperCase() });
+        }
+        const updated = { ...estimate, ...applied, ...(claimedOverrides || {}) };
         return {
           returning: async () => (guardBlocked ? [] : [updated]),
         };
@@ -147,7 +156,9 @@ function makeDb(estimate, claimedOverrides = null) {
   database.fn = { now: () => 'NOW' };
   // The claim transaction takes the customer-comms advisory lock before
   // the estimate row lock (Codex #3109 r32) — raw serves that acquire.
-  database.raw = jest.fn(async () => ({ rows: [] }));
+  // Synchronous like knex's Raw builder (a raw stamp inside an UPDATE
+  // payload must not be a Promise); awaiting it for the lock acquire works.
+  database.raw = jest.fn((sql) => ({ rows: [], __raw: String(sql) }));
   database.transaction = jest.fn(async (callback) => callback(database));
   return { database, updates, inserts };
 }
@@ -1674,5 +1685,57 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     const r = await prepayBookingEligibility({ ...base, onetime_total: '99.00' });
     expect(r.eligible).toBe(false);
     expect(r.reason).toBe('one_time_items');
+  });
+});
+
+describe('markEstimateManuallyAccepted — converter operational 4xx refusals keep their status and code (GH codex P1 on #3751)', () => {
+  test('an unpriced per-application add-on refusal surfaces as the converter\'s 409, not a generic 500', async () => {
+    const estimate = {
+      id: 'estimate-409',
+      status: 'viewed',
+      customer_id: 'customer-1',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '51.75',
+      onetime_total: null,
+      waveguard_tier: 'Bronze',
+    };
+    const { database } = makeDb(estimate);
+    const refusal = new Error('This add-on\'s per-visit price could not be derived — nothing was booked.');
+    refusal.code = 'PER_APPLICATION_ADD_ON_UNPRICED';
+    refusal.isOperational = true;
+    refusal.status = 409;
+    refusal.statusCode = 409;
+    const estimateConverter = { convertEstimate: jest.fn().mockRejectedValue(refusal) };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    })).rejects.toMatchObject({ statusCode: 409, code: 'PER_APPLICATION_ADD_ON_UNPRICED', message: expect.stringMatching(/nothing was booked/i) });
+  });
+
+  test('a non-operational converter failure still collapses to the generic 500', async () => {
+    const estimate = {
+      id: 'estimate-500',
+      status: 'viewed',
+      customer_id: 'customer-1',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '51.75',
+      onetime_total: null,
+      waveguard_tier: 'Bronze',
+    };
+    const { database } = makeDb(estimate);
+    const estimateConverter = { convertEstimate: jest.fn().mockRejectedValue(new Error('db down')) };
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    })).rejects.toMatchObject({ statusCode: 500 });
   });
 });

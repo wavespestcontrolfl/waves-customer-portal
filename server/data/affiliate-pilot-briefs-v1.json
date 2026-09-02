@@ -1,0 +1,227 @@
+{
+  "version": 1,
+  "set": "affiliate-pilot-v1",
+  "owner": "adam",
+  "notes": "Affiliate pilot — six hub-only informational posts (owner monetization pilot 2026-08-31; playbook docs/affiliate-links-pilot.md): 2 nonchemical prevention, 2 lawn/irrigation measurement, 2 field-tool/equipment. GLOBAL RULES, all briefs: (1) informational lane only — no near-me or transactional phrasing anywhere; (2) every pest/agronomic claim must be verified against the cited UF/IFAS or manufacturer source at draft time — if a claim cannot be verified, OMIT it; (3) never state prices or dollar amounts, for Waves services OR for products — say 'view current price' near a product link; (4) never describe any pesticide or product as 'safe' — this set recommends NO pesticides at all (tools, gauges, exclusion materials only); (5) the ONLY way to link a product is the <AffiliateLink> component with the exact ids in affiliate_products — never a retailer URL; (6) frontmatter disclosure.type must be 'affiliate'; (7) the Waves service CTA comes before the first product link and every post keeps Waves service as the primary answer — the product is the homeowner's measuring/prevention step, not a substitute for treatment.",
+  "cta_codes": {
+    "QUOTE": "quote form /pest-control-quote/ (relative on-site link)",
+    "CONTACT": "contact page /contact/ (relative on-site link) — lawn and tree-shrub have no calculator flow"
+  },
+  "briefs": [
+    {
+      "id": "AP01",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/door-sweep-stops-ants-roaches-bradenton-fl/",
+      "city": "Bradenton",
+      "working_title": "The Gap Under Your Door Is How Ants and Roaches Get Into Bradenton Homes — A 20-Minute Fix",
+      "primary_kw": "door sweep pest control bradenton",
+      "secondary_kws": ["seal gap under exterior door bugs", "how do ants get in under the door"],
+      "intent": "informational",
+      "window": "immediate",
+      "byline": "adam-augusta",
+      "cta": ["QUOTE"],
+      "schema_types": ["Article"],
+      "thesis": "A daylight gap under an exterior door is the single most common entry point a technician finds on a Bradenton pest inspection, and a homeowner can close it with an adjustable door sweep in an afternoon — which reduces pressure but does not replace treatment for an active colony.",
+      "outline": [
+        "The flashlight test: why you can see daylight under the door and what walks through that gap (ants, roaches, silverfish, anoles)",
+        "Why Bradenton homes get it worse: slab foundations, sun-warped garage-side doors, and year-round insect pressure (per UF/IFAS)",
+        "Measure the gap first: thresholds, uneven slabs, and why the cheap flat sweeps fail on Florida doors",
+        "Installing an adjustable double-bubble door sweep step by step (this is where the product recommendation belongs — the adjustable sweep is the tool for uneven gaps)",
+        "What a door sweep will NOT fix: an established ant colony, roaches already inside the wall voids, and the other entry points a professional inspection checks",
+        "When to call Waves: signs the problem is bigger than the gap"
+      ],
+      "affiliate_products": [
+        { "product_id": "ks-adjustable-door-sweep", "placement": "primary-rec", "anchor": "an adjustable double-bubble door sweep", "section": "the installation step-by-step section" }
+      ],
+      "sources": [
+        "https://edis.ifas.ufl.edu/",
+        "UF/IFAS EDIS for the exclusion and household-pest entry claims (search 'exclusion' and the specific pest); cite the publication you actually used."
+      ],
+      "verify_notes": [
+        "Verify every pest-behavior claim (which pests enter under doors, why) against a UF/IFAS EDIS publication; omit any claim you cannot source.",
+        "Do not claim the sweep 'keeps pests out' — it reduces one entry point; say so plainly.",
+        "No pesticide is recommended in this post; do not add one."
+      ],
+      "internal_links": []
+    },
+    {
+      "id": "AP02",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/copper-mesh-weep-holes-exclusion-sarasota-fl/",
+      "city": "Sarasota",
+      "working_title": "Weep Holes, Pipe Gaps and Roof-Line Openings: Copper Mesh Exclusion for Sarasota Homes",
+      "primary_kw": "copper mesh weep holes sarasota",
+      "secondary_kws": ["seal pipe penetrations pests", "copper mesh vs steel wool"],
+      "intent": "informational",
+      "window": "immediate",
+      "byline": "adam-augusta",
+      "cta": ["QUOTE"],
+      "schema_types": ["Article"],
+      "thesis": "Sarasota block-and-stucco homes are full of small openings that must stay open for drainage (weep holes) or were never sealed (pipe and cable penetrations), and copper mesh is the exclusion material that closes them to rodents and roaches without trapping moisture or rusting.",
+      "outline": [
+        "Where the openings are: block weep holes, A/C line sets, hose bibs, cable and gas penetrations, soffit and fascia gaps",
+        "Why weep holes must NOT be caulked shut (moisture and drainage in Sarasota's stucco-over-block construction) — exclusion has to breathe",
+        "Copper mesh vs steel wool vs foam: why steel wool rusts and stains and foam gets chewed (per UF/IFAS exclusion guidance)",
+        "How to stuff and seat copper mesh in a weep hole and around a pipe (this is where the product recommendation belongs)",
+        "The walk-around inspection order: ground level, then knee height, then the roof line",
+        "What exclusion does not solve: rodents already nesting in the attic, and roaches established indoors — when to call Waves"
+      ],
+      "affiliate_products": [
+        { "product_id": "stuff-it-copper-mesh", "placement": "primary-rec", "anchor": "a roll of copper exclusion mesh", "section": "the how-to-stuff-and-seat section" }
+      ],
+      "sources": [
+        "https://edis.ifas.ufl.edu/",
+        "UF/IFAS EDIS for rodent/roach exclusion guidance and the weep-hole drainage function; cite the publication you actually used."
+      ],
+      "verify_notes": [
+        "Verify the weep-hole drainage claim and the exclusion-material comparison against UF/IFAS before writing; omit anything unsourced.",
+        "Rodent is a FAQ-blocked topic: no FAQ section and no FAQPage schema.",
+        "No rodenticide, bait, or pesticide of any kind is recommended in this post."
+      ],
+      "internal_links": []
+    },
+    {
+      "id": "AP03",
+      "action": "new_supporting_blog",
+      "slug": "/lawn-care/rain-gauge-irrigation-schedule-venice-fl/",
+      "city": "Venice",
+      "working_title": "Stop Guessing: A Rain Gauge Is the First Tool a Venice Lawn Needs Before You Touch the Irrigation Timer",
+      "primary_kw": "rain gauge irrigation schedule venice",
+      "secondary_kws": ["how much rain did my lawn get", "overwatering st augustine grass fungus"],
+      "intent": "informational",
+      "window": "immediate",
+      "byline": "adam-augusta",
+      "cta": ["CONTACT"],
+      "schema_types": ["Article"],
+      "thesis": "Most Venice lawn problems the crew diagnoses in the wet season trace back to irrigation running on top of rain, and the cheapest correction is knowing the actual rainfall at the house — a glass rain gauge, read after each storm, before deciding whether the zones run.",
+      "outline": [
+        "The wet-season trap: afternoon storms plus a timer that never adjusts, and what that does to St. Augustine and zoysia turf (fungus, shallow roots, chinch-bug stress) per UF/IFAS",
+        "Why the phone weather app is wrong for your yard: Venice storms are hyper-local",
+        "Reading rainfall at the house: where to mount a rain gauge, how to read it, and the weekly total UF/IFAS recommends for established turf",
+        "The simple rule: when the gauge shows the week's water, skip the zones (this is where the product recommendation belongs)",
+        "Sarasota County and Venice watering-day rules and rain-sensor requirements — verify current rules before stating them",
+        "When the lawn is already showing disease: what a Waves lawn program does that a schedule change cannot"
+      ],
+      "affiliate_products": [
+        { "product_id": "acurite-glass-rain-gauge", "placement": "primary-rec", "anchor": "a glass rain gauge", "section": "the reading-rainfall-at-the-house section" }
+      ],
+      "sources": [
+        "https://edis.ifas.ufl.edu/",
+        "UF/IFAS EDIS for turf irrigation frequency/volume and wet-season disease claims; the Sarasota County utilities watering-restriction page for the current watering-day rules (verify and cite the live page)."
+      ],
+      "verify_notes": [
+        "Verify the weekly-water figure and the disease claims against UF/IFAS; verify watering-day rules against the county's live page and date them; omit anything unsourced.",
+        "Never state a price for the gauge or for Waves service; lawn has no calculator flow — direct cost questions to /contact/."
+      ],
+      "internal_links": []
+    },
+    {
+      "id": "AP04",
+      "action": "new_supporting_blog",
+      "slug": "/lawn-care/soil-moisture-meter-overwatering-lawn-lakewood-ranch-fl/",
+      "city": "Lakewood Ranch",
+      "working_title": "Is Your Lakewood Ranch Lawn Overwatered? A Soil Moisture Meter Answers in Ten Seconds",
+      "primary_kw": "soil moisture meter lawn lakewood ranch",
+      "secondary_kws": ["overwatered lawn symptoms florida", "dollar spot overwatering"],
+      "intent": "informational",
+      "window": "immediate",
+      "byline": "adam-augusta",
+      "cta": ["CONTACT"],
+      "schema_types": ["Article"],
+      "thesis": "Overwatering causes more Lakewood Ranch lawn problems than drought does — fungus, shallow roots, and grub-friendly turf — and a battery-free soil moisture probe read at root depth is the fastest way a homeowner can tell whether the problem is water before assuming it is pests.",
+      "outline": [
+        "Overwatered vs underwatered: why the symptoms look alike (yellowing, thin patches, footprints that stay) and why guessing costs a season",
+        "What root-depth moisture actually tells you in Lakewood Ranch's sandy, fast-draining soils (per UF/IFAS)",
+        "How to probe: depth, how many spots per zone, and reading the scale before and after an irrigation cycle (this is where the product recommendation belongs)",
+        "Turning readings into a schedule: watering deeper and less often, and matching the timer to the readings, not the calendar",
+        "The diseases and pests that ride on overwatering — dollar spot, brown patch, grubs — and the point where a schedule fix is no longer enough",
+        "When to call Waves for a lawn program"
+      ],
+      "affiliate_products": [
+        { "product_id": "xlux-soil-moisture-meter", "placement": "primary-rec", "anchor": "a battery-free soil moisture meter", "section": "the how-to-probe section" }
+      ],
+      "sources": [
+        "https://edis.ifas.ufl.edu/",
+        "UF/IFAS EDIS for turf watering depth/frequency, overwatering symptoms, and the disease/pest claims; cite the publication you actually used."
+      ],
+      "verify_notes": [
+        "Verify every disease, pest, and soil claim against UF/IFAS; omit anything unsourced.",
+        "Do not attribute a specific moisture-scale number to 'correct' — describe the reading relative to the meter's own scale and root depth.",
+        "No fungicide or pesticide is recommended in this post."
+      ],
+      "internal_links": []
+    },
+    {
+      "id": "AP05",
+      "action": "new_supporting_blog",
+      "slug": "/lawn-care/sprinkler-catch-cup-audit-dry-spots-parrish-fl/",
+      "city": "Parrish",
+      "working_title": "Dry Spots in a Parrish Lawn: Run a Catch-Cup Sprinkler Audit Before Blaming Pests",
+      "primary_kw": "sprinkler catch cup audit parrish",
+      "secondary_kws": ["irrigation audit dry spots lawn", "sprinkler coverage test"],
+      "intent": "informational",
+      "window": "immediate",
+      "byline": "adam-augusta",
+      "cta": ["CONTACT"],
+      "schema_types": ["Article"],
+      "thesis": "A recurring dry patch in a Parrish lawn is more often an irrigation coverage gap than a pest problem, and a 30-minute catch-cup audit — the same test a licensed irrigation auditor runs — shows exactly which zone and head is short before anyone reaches for a treatment.",
+      "outline": [
+        "Dry spot or chinch bug? The look-alike problem in Parrish's newer subdivisions with builder-grade irrigation",
+        "What a catch-cup audit measures: application rate and distribution uniformity (per UF/IFAS)",
+        "Setting up the audit: cup grid spacing per zone, run time, and reading the cups (this is where the product recommendation belongs)",
+        "Reading the results: low-cup clusters mean a blocked or tilted head, mismatched nozzles, or pressure loss — the fixes in order of cost",
+        "Setting run times from the measured rate instead of the timer default, and Manatee County watering-day rules (verify the live page)",
+        "When the dry spot is not water: the signs that point to chinch bugs or grubs, and what a Waves lawn program does next"
+      ],
+      "affiliate_products": [
+        { "product_id": "orbit-sprinkler-catch-cups", "placement": "primary-rec", "anchor": "a set of sprinkler catch cups", "section": "the setting-up-the-audit section" }
+      ],
+      "sources": [
+        "https://edis.ifas.ufl.edu/",
+        "UF/IFAS EDIS for the catch-can / distribution-uniformity method and turf irrigation rates; the Manatee County watering-restriction page for current rules (verify and cite the live page)."
+      ],
+      "verify_notes": [
+        "Verify the audit method and any uniformity figure against UF/IFAS; verify watering rules against the county's live page and date them; omit anything unsourced.",
+        "Never state prices; lawn has no calculator flow — direct cost questions to /contact/."
+      ],
+      "internal_links": []
+    },
+    {
+      "id": "AP06",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/home-pest-inspection-walkthrough-flashlight-north-port-fl/",
+      "city": "North Port",
+      "working_title": "The 15-Minute Flashlight Walkthrough: How to Inspect Your North Port Home for Pest Entry Points Like a Technician",
+      "primary_kw": "home pest inspection checklist north port",
+      "secondary_kws": ["how to inspect house for pest entry points", "pest inspection flashlight"],
+      "intent": "informational",
+      "window": "immediate",
+      "byline": "adam-augusta",
+      "cta": ["QUOTE"],
+      "schema_types": ["Article"],
+      "thesis": "Most of what a technician finds on a first North Port inspection is visible to a homeowner with a bright, narrow-beam pocket light and a set order to walk — and knowing what you found before you call makes the professional visit faster and better targeted.",
+      "outline": [
+        "Why a pocket inspection light beats a phone flashlight: beam width, cabinet voids, and low-angle light for frass and trails",
+        "The walk order technicians use: exterior perimeter at ground level, utility penetrations, garage, then interior wet rooms (per UF/IFAS inspection guidance)",
+        "What you are looking for by zone: frass, rub marks, shed skins, ant trails, mud tubes, moisture staining — and what each one usually means in North Port's slab-on-grade homes",
+        "Using the light in cabinet voids, under sinks and along baseboards (this is where the product recommendation belongs)",
+        "Recording what you find: a simple zone list to hand the technician",
+        "The findings that mean call now: mud tubes, live termite swarmers, rodent droppings, and German cockroach signs — what a Waves inspection does from there"
+      ],
+      "affiliate_products": [
+        { "product_id": "police-security-inspector-penlight", "placement": "primary-rec", "anchor": "a pocket LED inspection light", "section": "the using-the-light-in-cabinet-voids section" },
+        { "product_id": "ks-adjustable-door-sweep", "placement": "alt-rec", "anchor": "an adjustable door sweep", "section": "the exterior-perimeter zone, as the fix for a daylight gap under a door" }
+      ],
+      "sources": [
+        "https://edis.ifas.ufl.edu/",
+        "UF/IFAS EDIS for pest-sign identification (termite tubes, cockroach signs, rodent evidence) and inspection guidance; cite the publication you actually used."
+      ],
+      "verify_notes": [
+        "Verify each pest-sign description against UF/IFAS; omit anything unsourced.",
+        "Termite, rodent, and cockroach are FAQ-blocked topics: no FAQ section and no FAQPage schema anywhere in the post.",
+        "No pesticide or bait is recommended in this post; the post is inspection and recording only."
+      ],
+      "internal_links": []
+    }
+  ]
+}

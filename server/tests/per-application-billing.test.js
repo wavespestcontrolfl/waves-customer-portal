@@ -58,19 +58,62 @@ describe('perApplicationChargeAmount', () => {
     expect(amount).toBe(98);
   });
 
-  test('unknown visit count falls back to the cadence amount', () => {
+  test('unknown visit count on a MONTHLY tier cadence is unknown, never the display rate (DATA-001)', () => {
+    // The monthly figure is a tier plan's display rate; with no visit count
+    // it is NOT a per-visit price — stamping it repeated the 2026-07-18 bug.
     expect(perApplicationChargeAmount({
       billingCadence: tsStandardCadence,
       annualRate: 621,
       monthlyRate: 51.75,
       visitsPerYear: null,
-    })).toBe(51.75);
+      serviceKey: 'tree_shrub',
+    })).toBeNull();
     expect(perApplicationChargeAmount({
       billingCadence: tsStandardCadence,
       annualRate: 621,
       monthlyRate: 51.75,
       visitsPerYear: 0,
-    })).toBe(51.75);
+      serviceKey: 'lawn_care',
+    })).toBeNull();
+    // No family evidence at all is treated as a tier plan (fail closed).
+    expect(perApplicationChargeAmount({
+      billingCadence: tsStandardCadence,
+      annualRate: 621,
+      monthlyRate: 51.75,
+      visitsPerYear: null,
+    })).toBeNull();
+  });
+
+  test('a legacy count-less termite-monitoring row is UNRESOLVED — its card discloses monthly installments, never $3X per check (GH codex P0 r2)', () => {
+    const flatMonthlyTermite = resolveBillingCadence({ monthlyRate: 34, annualRate: 408, frequencyKey: 'monthly' });
+    expect(perApplicationChargeAmount({
+      billingCadence: flatMonthlyTermite,
+      annualRate: 408,
+      monthlyRate: 34,
+      visitsPerYear: null,
+      serviceKey: 'termite_bait',
+    })).toBeNull();
+  });
+
+  test('monthly residential pest with no visit count still bills the cadence amount — the plan IS twelve visits', () => {
+    const monthlyPest = resolveBillingCadence({ monthlyRate: 87.36, annualRate: 1048.32, frequencyKey: 'monthly' });
+    expect(perApplicationChargeAmount({
+      billingCadence: monthlyPest,
+      annualRate: 1048.32,
+      monthlyRate: 87.36,
+      visitsPerYear: null,
+      serviceKey: 'pest_control',
+    })).toBe(monthlyPest.amount);
+  });
+
+  test('unknown visit count on a per-visit cadence still bills the cadence amount', () => {
+    const quarterly = resolveBillingCadence({ monthlyRate: 37.33, annualRate: 448, frequencyKey: 'quarterly' });
+    expect(perApplicationChargeAmount({
+      billingCadence: quarterly,
+      annualRate: 448,
+      monthlyRate: 37.33,
+      visitsPerYear: null,
+    })).toBe(quarterly.amount);
   });
 
   test('an annual that diverges from monthly x 12 is not the plan annual — derives from the monthly', () => {
@@ -792,5 +835,221 @@ describe('annualPrepayCoverageVisits — prepay coverage inherits the accepted-s
   test('count-less lines map from cadence; underivable shapes return null', () => {
     expect(annualPrepayCoverageVisits({ name: 'Pest Control', service: 'pest_control' }, 'quarterly', null)).toBe(4);
     expect(annualPrepayCoverageVisits({ name: 'Pest Control', service: 'pest_control' }, null, null)).toBeNull();
+  });
+});
+
+describe('resolveConvertedPerApplicationFee — customer-level stamp at conversion (DATA-001)', () => {
+  const { resolveConvertedPerApplicationFee } = EstimateConverter;
+
+  test('a single recurring unit with a derived per-visit charge stamps that charge', () => {
+    expect(resolveConvertedPerApplicationFee({
+      customer: {}, recurringUnitCount: 1, perApplicationAmount: 112,
+    })).toBe(112);
+  });
+
+  test('an unresolved per-visit charge stamps NULL — never the monthly figure', () => {
+    expect(resolveConvertedPerApplicationFee({
+      customer: {}, recurringUnitCount: 1, perApplicationAmount: null,
+    })).toBeNull();
+    expect(resolveConvertedPerApplicationFee({
+      customer: {}, recurringUnitCount: 1, perApplicationAmount: 0,
+    })).toBeNull();
+  });
+
+  test('multi-unit plans leave the customer-level fee NULL (per-row precedence)', () => {
+    expect(resolveConvertedPerApplicationFee({
+      customer: {}, recurringUnitCount: 2, perApplicationAmount: 112,
+    })).toBeNull();
+  });
+
+  test('an established per-application customer keeps their fee on an add-on accept', () => {
+    expect(resolveConvertedPerApplicationFee({
+      customer: { billing_mode: 'per_application', per_application_fee: 98 },
+      recurringUnitCount: 1,
+      perApplicationAmount: 112,
+    })).toBe(98);
+  });
+
+  test('a current monthly member keeps their existing (possibly null) fee', () => {
+    expect(resolveConvertedPerApplicationFee({
+      preservesExistingMembership: true,
+      customer: { per_application_fee: 45 },
+      recurringUnitCount: 1,
+      perApplicationAmount: 112,
+    })).toBe(45);
+    expect(resolveConvertedPerApplicationFee({
+      preservesExistingMembership: true,
+      customer: {},
+      recurringUnitCount: 1,
+      perApplicationAmount: 112,
+    })).toBeNull();
+  });
+
+  test('a pinned legacy rodent-only plan (monthly dues lane) has no per-application fee', () => {
+    expect(resolveConvertedPerApplicationFee({
+      pinnedLegacyRodentOnlyPlan: true,
+      customer: {},
+      recurringUnitCount: 1,
+      perApplicationAmount: 59,
+    })).toBeNull();
+  });
+});
+
+describe('acceptVisitEstimatedPrice — the reserved visit row never carries a monthly display rate (DATA-001)', () => {
+  const { acceptVisitEstimatedPrice } = require('../routes/estimate-public');
+
+  test('one-time and annual prepay keep their rules', () => {
+    expect(acceptVisitEstimatedPrice({ treatAsOneTime: true, oneTimeTotal: 246 })).toBe(246);
+    expect(acceptVisitEstimatedPrice({ billingTerm: 'prepay_annual', cadenceAmount: 112 })).toBeNull();
+  });
+
+  test('the first-application invoice amount wins, then the tier per-application price', () => {
+    expect(acceptVisitEstimatedPrice({ firstApplicationInvoiceAmount: 103.5, tierBillsMonthly: true, tierPerApplicationPrice: 103.5, cadenceAmount: 51.75 })).toBe(103.5);
+    expect(acceptVisitEstimatedPrice({ tierBillsMonthly: true, tierPerApplicationPrice: 103.5, cadenceAmount: 51.75 })).toBe(103.5);
+  });
+
+  test('a monthly-billed tier plan with no derivable per-application price stays UNPRICED — never the cadence amount', () => {
+    expect(acceptVisitEstimatedPrice({ tierBillsMonthly: true, tierPerApplicationPrice: null, cadenceAmount: 51.75 })).toBeNull();
+    expect(acceptVisitEstimatedPrice({ tierBillsMonthly: true, tierPerApplicationPrice: 0, cadenceAmount: 51.75 })).toBeNull();
+  });
+
+  test('a per-visit cadence plan still bills its cadence amount — when the cadence was inferred', () => {
+    expect(acceptVisitEstimatedPrice({ tierBillsMonthly: false, cadenceAmount: 112, cadenceInferred: true })).toBe(112);
+    expect(acceptVisitEstimatedPrice({ tierBillsMonthly: false, cadenceAmount: 112 })).toBe(112);
+  });
+
+  test('a fallback-only cadence (nothing inferred from the selection or the estimate) stamps no row price', () => {
+    expect(acceptVisitEstimatedPrice({ tierBillsMonthly: false, cadenceAmount: 112, cadenceInferred: false })).toBeNull();
+  });
+
+  test('resolveBillingCadence reports whether the cadence was inferred or fell back', () => {
+    expect(resolveBillingCadence({ monthlyRate: 37.33, annualRate: 448, frequencyKey: 'quarterly' }).inferred).toBe(true);
+    expect(resolveBillingCadence({
+      monthlyRate: 37.33, annualRate: 448, frequencyKey: null,
+      estimateData: { result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] } } },
+    }).inferred).toBe(true);
+    const fallback = resolveBillingCadence({ monthlyRate: 37.33, annualRate: 448, frequencyKey: null, estimateData: {}, fallbackFrequencyKey: 'quarterly' });
+    expect(fallback.frequencyKey).toBe('quarterly');
+    expect(fallback.inferred).toBe(false);
+  });
+});
+
+describe('resolveFirstApplicationAmount — an unresolved per-application charge blocks the cadence fallback', () => {
+  const { resolveFirstApplicationAmount } = EstimateConverter;
+  test('the converter passes allowFallback:false for an unresolved monthly tier — explicit amount or nothing', () => {
+    expect(resolveFirstApplicationAmount({ billingCadence: { amount: 51.75 }, perApplicationAmount: null, monthlyRate: 51.75, allowFallback: false })).toBe(0);
+    expect(resolveFirstApplicationAmount({ firstApplicationAmount: 103.5, billingCadence: { amount: 51.75 }, perApplicationAmount: null, allowFallback: false })).toBe(103.5);
+  });
+});
+
+describe('emailPerApplicationAmountForConversion — the welcome email never quotes the monthly figure per application (DATA-001)', () => {
+  const { emailPerApplicationAmountForConversion } = EstimateConverter;
+
+  test('quotes the derived per-visit charge of a single recurring unit', () => {
+    expect(emailPerApplicationAmountForConversion({ recurringUnitCount: 1, perApplicationAmount: 112 })).toBe(112);
+  });
+
+  test('an unresolved charge (no cadence, or a monthly tier with unknown visits) quotes nothing — never monthlyRate', () => {
+    expect(emailPerApplicationAmountForConversion({ recurringUnitCount: 1, perApplicationAmount: null, monthlyRate: 37.33, billingCadence: null })).toBeNull();
+    expect(emailPerApplicationAmountForConversion({ recurringUnitCount: 1, perApplicationAmount: 0, monthlyRate: 51.75 })).toBeNull();
+  });
+
+  test('multi-unit plans quote no single per-application figure', () => {
+    expect(emailPerApplicationAmountForConversion({ recurringUnitCount: 2, perApplicationAmount: 112 })).toBeNull();
+  });
+});
+
+describe('assertPerApplicationAddOnPriced — an established per-application customer never bills an unpriced add-on at the old fee (GH codex P1)', () => {
+  const { assertPerApplicationAddOnPriced } = EstimateConverter;
+  const perAppCustomer = { billing_mode: 'per_application', per_application_fee: 98 };
+
+  test('refuses the conversion (409 + code) when the single monthly unit is unresolved', () => {
+    let caught = null;
+    try {
+      assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer });
+    } catch (e) { caught = e; }
+    expect(caught?.statusCode).toBe(409);
+    expect(caught?.status).toBe(409);
+    expect(caught?.isOperational).toBe(true);
+    expect(caught?.code).toBe('PER_APPLICATION_ADD_ON_UNPRICED');
+    expect(caught?.message).toMatch(/nothing was booked/i);
+  });
+
+  test('never fires when the charge resolved, for new customers (they park instead), members, one-time or prepay accepts', () => {
+    expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: false, customer: perAppCustomer })).not.toThrow();
+    expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: {} })).not.toThrow();
+    expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, preservesExistingMembership: true })).not.toThrow();
+    expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, suppressRecurringConversion: true })).not.toThrow();
+    expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, billingTerm: 'prepay_annual' })).not.toThrow();
+    // Pinned legacy rodent-only plans live on the monthly dues lane — no fee to refuse.
+    expect(() => assertPerApplicationAddOnPriced({ perApplicationUnresolved: true, customer: perAppCustomer, pinnedLegacyRodentOnlyPlan: true })).not.toThrow();
+  });
+});
+
+describe('legacy count-less termite units — refused before acceptance, never converted against their "$X/mo" card (GH codex P0 r2/r3)', () => {
+  const { legacyFlatMonthlyTermiteUnit, assertLegacyMonthlyTermiteConvertible } = EstimateConverter;
+  const legacy = { name: 'Termite Bait', service: 'termite_bait', mo: 34, monthly: 34 };
+  const current = { name: 'Termite Bait', service: 'termite_bait', mo: 34, monthly: 34, perTreatment: 102, visitsPerYear: 4 };
+
+  test('the predicate: ANY count-less termite line with a monthly figure — singleton or bundled; billing riders (bond, station rental) are not components', () => {
+    expect(legacyFlatMonthlyTermiteUnit([legacy], 34)).toBe(true);
+    // Bundled with pest (pre-push codex P0 r8): the termite card still
+    // promises monthly installments — refuse, never a combined cadence.
+    expect(legacyFlatMonthlyTermiteUnit([legacy, { name: 'Pest Control', service: 'pest_control', mo: 37.33, visitsPerYear: 12 }], 71.33)).toBe(true);
+    expect(legacyFlatMonthlyTermiteUnit([{ name: 'Mosquito', service: 'mosquito', mo: 60, visitsPerYear: 8 }, legacy], 94)).toBe(true);
+    // bait + bond rider is still ONE legacy bait unit (GH codex P0 r4): the
+    // rider's own visit count must not turn this into a per-application plan.
+    expect(legacyFlatMonthlyTermiteUnit([legacy, { name: 'Termite Bond', service: 'termite_bond', mo: 8, visitsPerYear: 4 }], 42)).toBe(true);
+    expect(legacyFlatMonthlyTermiteUnit([legacy, { name: 'Station Rental', service: 'termite_station_rental', mo: 5 }], 39)).toBe(true);
+    expect(legacyFlatMonthlyTermiteUnit([current], 34)).toBe(false);
+    expect(legacyFlatMonthlyTermiteUnit([{ name: 'Pest Control', service: 'pest_control', mo: 37.33 }], 37.33)).toBe(false);
+    // A current termite row bundled with pest is fine — it carries its count.
+    expect(legacyFlatMonthlyTermiteUnit([current, { name: 'Pest Control', service: 'pest_control', mo: 37.33 }], 71.33)).toBe(false);
+    // No monthly figure anywhere: not the legacy flat-monthly shape.
+    expect(legacyFlatMonthlyTermiteUnit([{ name: 'Termite Bait', service: 'termite_bait' }], 0)).toBe(false);
+    expect(legacyFlatMonthlyTermiteUnit([], 34)).toBe(false);
+  });
+
+  test('refuses the conversion (409, operational, code) with call-the-office copy — nothing booked, no billing state written', () => {
+    let caught = null;
+    try {
+      assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34 });
+    } catch (e) { caught = e; }
+    expect(caught?.statusCode).toBe(409);
+    expect(caught?.status).toBe(409);
+    expect(caught?.isOperational).toBe(true);
+    expect(caught?.code).toBe('LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE');
+    expect(caught?.message).toMatch(/nothing was booked/i);
+    expect(caught?.message).toMatch(/call the office/i);
+    expect(caught?.message).not.toMatch(/per visit/i);
+  });
+
+  test('never fires for current termite rows, other families, preserved memberships, suppressed recurring, pinned rodent, or annual prepay', () => {
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [current], monthlyRate: 34 })).not.toThrow();
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [{ name: 'Pest Control', service: 'pest_control', mo: 37.33 }], monthlyRate: 37.33 })).not.toThrow();
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, preservesExistingMembership: true })).not.toThrow();
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, suppressRecurringConversion: true })).not.toThrow();
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, pinnedLegacyRodentOnlyPlan: true })).not.toThrow();
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, billingTerm: 'prepay_annual' })).not.toThrow();
+    // Pre-migration window: the legacy monthly-dues lane honours the quote.
+    expect(() => assertLegacyMonthlyTermiteConvertible({ recurringServices: [legacy], monthlyRate: 34, billingModeColumnsExist: false })).not.toThrow();
+  });
+});
+
+describe('perApplicationFeeUnresolvedBody — one copy for the bell, aware of a first-application invoice (GH codex P1 r7)', () => {
+  const { perApplicationFeeUnresolvedBody } = EstimateConverter;
+
+  test('no first invoice: staff invoice the first application by hand and set the price', () => {
+    const body = perApplicationFeeUnresolvedBody('est-9');
+    expect(body).toMatch(/Estimate #est-9 converted to per-application billing/);
+    expect(body).toMatch(/No first-application invoice was created/);
+    expect(body).toMatch(/invoice the first application by hand/);
+  });
+
+  test('a first application invoiced by the acceptance: named with a currency symbol; staff set the price for LATER applications only', () => {
+    const body = perApplicationFeeUnresolvedBody('est-9', 102);
+    expect(body).toMatch(/The first application \(\$102\.00\) is invoiced by this acceptance/);
+    expect(body).not.toMatch(/by hand/);
+    expect(perApplicationFeeUnresolvedBody('est-9', 0)).toMatch(/No first-application invoice/);
   });
 });

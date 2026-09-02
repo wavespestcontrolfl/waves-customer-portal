@@ -58,6 +58,7 @@
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
  *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
+ *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true (12-month application strip under the lawn price card, arithmetic on visitsPerYear only; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
@@ -134,6 +135,24 @@ const gates = {
   // carries no planContext and /secure renders exactly the card-only
   // experience; the select-plan endpoint 404s (unobservable while dark).
   securePlanChoice: process.env.GATE_SECURE_PLAN_CHOICE === 'true',
+
+  // Standalone "set up Auto Pay" link (owner ruling 2026-09-01): an
+  // operator sends an existing customer a tokenized /secure/:token page
+  // with no visit attached (kind='customer' rows in
+  // appointment_card_requests, 30-day expiry) — card, plus bank account
+  // only while GATE_ACCEPT_ACH_CAPTURE is also on (one ACH-capture kill
+  // switch for every tokenized capture, judged at mint AND completion),
+  // instant bank verification only, same save → consent → enroll tail as
+  // every other save surface. Operator-initiated only (Customers page
+  // action: copy link, or text it via the card_request purpose with the
+  // autopay_setup_link template, seeded inactive — and the text ALSO needs
+  // GATE_AUTOPAY_CUSTOMER_SMS, since the message type classifies as an
+  // Auto Pay customer SMS; the action reports autopay_sms_gate_off
+  // otherwise). Gate off: the admin
+  // action reports gate_off and mints nothing; already-minted links keep
+  // working (the gate governs new links). Customer-facing money surface —
+  // fail-closed ==='true' in every environment.
+  autopaySetupLink: process.env.GATE_AUTOPAY_SETUP_LINK === 'true',
 
   // Appointment-card fee rail (owner-approved 2026-08-01): auto-charge the
   // no-show/late-cancel fee the /secure lane DISCLOSES against the card it
@@ -1513,6 +1532,18 @@ const gates = {
   // STRICT opt-in: this changes what gets sent and billed.
   // Enable with GATE_ESTIMATE_LEAD_SERVICE_SEND=true (needs opt-out + add on).
   estimateLeadServiceSend: process.env.GATE_ESTIMATE_LEAD_SERVICE_SEND === 'true',
+  // Send requires engine-authoritative pricing (validation audit SEC-002,
+  // 2026-09-02). An admin save whose server recompute failed or had no
+  // replayable inputs persists the BROWSER preview as a NON-authoritative
+  // price (estimates.pricing_authority = CLIENT_FALLBACK — deliberately
+  // fail-open so a broken engine never blocks the save). With this gate on,
+  // every send of such a row is refused (409 CLIENT_FALLBACK_PRICING) until
+  // it is re-saved through the engine, and a revision of a DELIVERED row
+  // whose recompute falls back is refused at save time; off, the send goes
+  // out and the would-block is logged so the count can be read before the
+  // flip. The lead auto-send lane skips these rows regardless of the gate.
+  // Enable with GATE_SEND_REQUIRES_SERVER_PRICING=true; unset = revoke.
+  sendRequiresServerPricing: process.env.GATE_SEND_REQUIRES_SERVER_PRICING === 'true',
   // Lawn program calendar on the estimate page: a 12-month strip under the
   // lawn price card marking N evenly spaced application months, where N is
   // the selected frequency's visitsPerYear. Pure arithmetic on data already
@@ -2064,6 +2095,14 @@ const gates = {
   // { available: false }, /queue is 404, and the tab is not rendered.
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   adminOpsQueue: gateEnvValue('GATE_ADMIN_OPS_QUEUE'),
+  // Audio-synced call transcript (admin call log). When on, calls whose
+  // call_log.transcript_structured carries diarized segments render them as
+  // a clickable list that follows recording playback; click a line to seek.
+  // OFF unless set, dev AND prod — GET /api/ai/admin/calls reports
+  // transcript_sync_enabled:false and the tab keeps the plain-text
+  // transcript. Read-only, no comms, no writes. Kill switch: unset. Read at
+  // CALL time so a flip needs no redeploy.
+  callTranscriptSync: gateEnvValue('GATE_CALL_TRANSCRIPT_SYNC'),
   // Field dictation upload (2026-09-02): the completion-notes mic falls back
   // to MediaRecorder + server transcription (OpenAI, same transcriber and
   // PAN scrub as call recordings) when SpeechRecognition is unavailable.

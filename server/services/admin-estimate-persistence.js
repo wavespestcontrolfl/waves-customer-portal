@@ -1004,6 +1004,36 @@ function sanitizeClientIdentityFields(obj) {
   return obj;
 }
 
+// A linked draft that must never be reused by the generic create: one that
+// carries ANY stored proposal object — enabled, disabled or scaffold alike.
+// The COMMERCIAL category alone is NOT the signal (GH codex P2 r9): the
+// estimator engine and Agent Estimate stamp it on ordinary engine-priced
+// commercial drafts that carry no proposal and must keep being reusable.
+function linkedDraftCarriesProposal(row = {}) {
+  let data = row.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  const proposal = data && typeof data === 'object' ? data.proposal : null;
+  return !!(proposal && typeof proposal === 'object' && !Array.isArray(proposal));
+}
+
+// estimate_data.proposal is SERVER-OWNED. PUT /:id/proposal is the only
+// authoring path (it validates the proposal and stamps category=COMMERCIAL
+// in the same UPDATE) and the commercial-proposal lane seeds scaffolds; the
+// generic create/revise save must never accept one from the browser —
+// `proposal.enabled` exempts a row from the pricing-authority send gate
+// (admin-estimates sendRequiresServerPricingFor) and from its rollout
+// telemetry, so a forged flag on a CLIENT_FALLBACK draft would deliver
+// un-audited browser pricing (pre-push P0 on #3750). A revision carries the
+// ROW's stored proposal forward verbatim instead of the client's copy.
+function stripClientProposal(estimateData, storedProposal = null) {
+  if (!estimateData || typeof estimateData !== 'object' || Array.isArray(estimateData)) return estimateData;
+  delete estimateData.proposal;
+  if (storedProposal && typeof storedProposal === 'object' && !Array.isArray(storedProposal)) {
+    estimateData.proposal = storedProposal;
+  }
+  return estimateData;
+}
+
 async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   const generateEstimate = deps.generateEstimate || pricingEngine.generateEstimate;
   const needsSync = deps.needsSync || pricingEngine.needsSync;
@@ -1235,7 +1265,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   // Quote-required / manager-approval estimates carry no billable price yet —
   // leave them exactly as today (authority null, no recompute).
   if (quoteRequired) {
-    return { totals: clientPreview, audit };
+    return { totals: clientPreview, audit, fallbackReason: null };
   }
 
   let result;
@@ -1290,7 +1320,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
     if (drift.hasDrift) {
       logger.warn(`[pricing-authority] server recompute corrected client preview annualDelta=${drift.annualDelta} pctAnnual=${drift.pctAnnual}`);
     }
-    return { totals: result.serverTotals, audit };
+    return { totals: result.serverTotals, audit, fallbackReason: null };
   }
 
   audit.pricing_authority = 'CLIENT_FALLBACK';
@@ -1302,7 +1332,10 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
     // pricing_authority column; warn rather than page.
     logger.warn(`[pricing-authority] CLIENT_FALLBACK reason=${result.reason} — no replayable engine input; persisted client preview`);
   }
-  return { totals: clientPreview, audit };
+  // fallbackReason rides OUTSIDE audit (audit spreads into the row): the
+  // route rings the admin bell for ENGINE_ERROR only after the save's
+  // transaction committed, never from a dryRun preflight (pre-push codex P1).
+  return { totals: clientPreview, audit, fallbackReason: result.reason || 'UNKNOWN' };
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1352,11 +1385,19 @@ async function resolveEstimatePropertyLinkage(database, body) {
 // customer_id when both sides have one; otherwise a matching normalized
 // phone OR email (the builder clones contact info, so a legitimate sibling
 // always matches).
-async function ensureEstimateGroupId(trx, anchorEstimateId, sibling = {}, randomUUID = crypto.randomUUID) {
+async function ensureEstimateGroupId(trx, anchorEstimateId, sibling = {}, randomUUID = crypto.randomUUID, { expectUngrouped = false } = {}) {
   const anchorId = String(anchorEstimateId);
   if (!UUID_RE.test(anchorId)) throw errorWithStatus('groupWithEstimateId must be a UUID', 400);
   const anchor = await firstForUpdate(trx('estimates').where({ id: anchorId }));
   if (!anchor) throw errorWithStatus('Estimate to group with not found', 404);
+  // LOCK ORDER (uncapped codex P1 r26): the caller locks an EXISTING group's
+  // advisory lock before this row lock. An anchor it observed ungrouped that
+  // acquired a group while this FOR UPDATE waited would have its group lock
+  // taken after the row lock — the inverse of the send path — so refuse for
+  // a retry (the retry observes the group and locks it first).
+  if (expectUngrouped && anchor.estimate_group_id) {
+    throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
+  }
   const normPhone = (v) => String(v || '').replace(/\D/g, '').slice(-10);
   const normEmail = (v) => String(v || '').trim().toLowerCase();
   const anchorCustomerId = anchor.customer_id ? String(anchor.customer_id) : null;
@@ -1692,6 +1733,8 @@ async function resolveEstimateWritePayload({
   technician,
   now = () => new Date(),
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
+  pricingOut = null, // optional side-channel: { fallbackReason } for post-commit alerts
+  storedProposal = null, // revise only: the ROW's estimate_data.proposal (server-owned, see stripClientProposal)
 }) {
   const {
     showOneTimeOption,
@@ -1703,6 +1746,10 @@ async function resolveEstimateWritePayload({
     technicianId,
     now,
   });
+  // Before anything downstream derives from the payload (quoteRequired reads
+  // proposal.enabled through buildPricingBundle): the browser's proposal is
+  // discarded, the row's own is restored.
+  stripClientProposal(trustedEstimateData, storedProposal);
   // Server-authoritative pest program floor: normalize client-stamped floor
   // metadata AND the client-baked lift in the totals BEFORE resolving the
   // billable preview, so CLIENT_FALLBACK persists collect per the live
@@ -1788,6 +1835,7 @@ async function resolveEstimateWritePayload({
     setupWaiverPriorQualifyingServices,
     recurringCustomer,
   });
+  if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
   const totals = pricing.totals;
   applyResolvedTotalsToEstimateData(trustedEstimateData, totals, quoteRequired);
   // The combined-tier reprice only landed in the persisted/charged totals when
@@ -2001,6 +2049,7 @@ async function createOrReuseAdminEstimate({
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
 }) {
   const linkedLeadId = normalizeLinkedLeadId(body.leadId);
+  const pricingOut = {};
   const writeFields = await resolveEstimateWritePayload({
     database,
     body,
@@ -2008,6 +2057,7 @@ async function createOrReuseAdminEstimate({
     technician,
     now,
     recompute,
+    pricingOut,
   });
   const expiresAt = estimateExpiresAt(now);
   const memberLinkageWarning = await detectUnlinkedMemberAddress(database, body);
@@ -2019,10 +2069,53 @@ async function createOrReuseAdminEstimate({
     // the new sibling joins (or starts) its group. Resolved inside the
     // transaction so the anchor's minted group id and the sibling's insert
     // commit together.
+    // A NEW property joining a group is judged like a revision moving into
+    // it (uncapped codex P1 r13), in the ONE lock order every send/schedule
+    // path uses — the group's advisory lock BEFORE any estimate row lock
+    // (pre-push codex P1 r15: ensureEstimateGroupId FOR UPDATEs the anchor,
+    // so the anchor's current group is read and locked first; a group minted
+    // for a still-ungrouped anchor has no sends to race and is locked once
+    // its id exists). Then the scheduled / mid-send verdict for an
+    // unverified write: a fallback-priced property added after the anchor
+    // was scheduled would otherwise be refused by the cron's group preflight
+    // and fail the anchor. Re-acquiring a held advisory xact lock is a no-op.
+    const joining = { id: null, estimate_group_id: null };
     if (body.groupWithEstimateId) {
-      writeFields.estimate_group_id = await ensureEstimateGroupId(trx, body.groupWithEstimateId, writeFields);
+      const anchorRow = await trx('estimates').where({ id: body.groupWithEstimateId }).first('estimate_group_id');
+      const anchorGroupId = anchorRow?.estimate_group_id || null;
+      if (anchorGroupId) {
+        await lockScheduledGroupGuardGroups(trx, joining, { ...writeFields, estimate_group_id: anchorGroupId });
+      }
+      writeFields.estimate_group_id = await ensureEstimateGroupId(trx, body.groupWithEstimateId, writeFields, undefined, { expectUngrouped: !anchorGroupId });
+      if (anchorGroupId && String(writeFields.estimate_group_id) !== String(anchorGroupId)) {
+        throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
+      }
     } else if (writeFields.estimate_group_id) {
+      await lockScheduledGroupGuardGroups(trx, joining, writeFields);
       await assertGroupAssignmentAllowed(trx, writeFields.estimate_group_id, writeFields);
+    }
+    if (writeFields.estimate_group_id) {
+      await lockScheduledGroupGuardGroups(trx, joining, writeFields);
+      await assertNoFallbackRevisionInScheduledGroup(trx, joining, writeFields);
+    }
+
+    // Linked-draft reuse (pre-push codex P1 r18): a create that omits the
+    // grouping fields may still REUSE the lead's existing GROUPED draft and
+    // stamp it unverified — its stored group is judged like a revision's,
+    // in lock order: the draft's group is read unlocked and its advisory
+    // lock taken BEFORE the lead/draft row locks below; the locked draft's
+    // group is re-checked against what was locked, and the scheduled /
+    // mid-send verdict runs on the locked row before the reuse update.
+    let reuseGroupLocked = null;
+    if (linkedLeadId) {
+      const linkedLead = await trx('leads').where({ id: linkedLeadId }).whereNull('deleted_at').first('estimate_id');
+      if (linkedLead?.estimate_id) {
+        const linkedDraft = await trx('estimates').where({ id: linkedLead.estimate_id }).first('estimate_group_id', 'status');
+        if (linkedDraft?.estimate_group_id) {
+          reuseGroupLocked = String(linkedDraft.estimate_group_id);
+          await lockScheduledGroupGuardGroups(trx, { id: linkedLead.estimate_id, estimate_group_id: reuseGroupLocked }, writeFields);
+        }
+      }
     }
 
     if (linkedLeadId) {
@@ -2032,6 +2125,26 @@ async function createOrReuseAdminEstimate({
       if (lead.estimate_id) {
         const existingEstimate = await firstForUpdate(trx('estimates').where({ id: lead.estimate_id }));
         if (existingEstimate?.status === 'draft') {
+          // A linked COMMERCIAL PROPOSAL draft is never reused by the generic
+          // save (GH codex P2 r6 on #3750): its proposal is server-owned and
+          // its totals come from the authored line items — the generic
+          // payload would strip the proposal and clobber the totals while
+          // the COMMERCIAL category stayed behind. Same refusal as the
+          // generic revise (estimateReviseBlock).
+          // Guarded on the COMMERCIAL category OR any stored proposal object —
+          // not only the editor-routing flags (enabled/scaffold): an authored
+          // proposal later saved DISABLED carries neither, and losing it is
+          // data loss all the same (pre-push codex P0).
+          if (linkedDraftCarriesProposal(existingEstimate)) {
+            throw errorWithStatus('This lead already has a commercial proposal draft — edit it with the Commercial proposal editor instead of saving a new estimate over it.', 409);
+          }
+          // The locked draft's group must be the one locked above (a group
+          // change in the gap would need an out-of-order lock — refuse for a
+          // retry); then the scheduled / mid-send verdict on the locked row.
+          if (fallbackRevisionGroupIds(existingEstimate, writeFields).some((groupId) => groupId !== reuseGroupLocked && groupId !== String(writeFields.estimate_group_id || ''))) {
+            throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
+          }
+          await assertNoFallbackRevisionInScheduledGroup(trx, existingEstimate, writeFields);
           const nextEstimate = { ...existingEstimate, ...writeFields, expires_at: expiresAt };
           assertLeadCanAttachEstimate({
             lead,
@@ -2061,6 +2174,7 @@ async function createOrReuseAdminEstimate({
             estimate: updated,
             reused: true,
             memberLinkageWarning,
+            pricingFallbackReason: pricingOut.fallbackReason || null,
           };
         }
 
@@ -2098,8 +2212,194 @@ async function createOrReuseAdminEstimate({
       estimate: created,
       reused: false,
       memberLinkageWarning,
+      pricingFallbackReason: pricingOut.fallbackReason || null,
     };
   });
+}
+
+// Engine-authoritative pricing on a LIVE link (validation audit SEC-002,
+// pre-push codex P0s): a delivered estimate's bearer link renders whatever
+// is stored, so a revision whose recompute fell back to the browser preview
+// is not persisted while GATE_SEND_REQUIRES_SERVER_PRICING is on — nothing
+// is saved (dryRun preflights surface the same refusal), the operator fixes
+// the inputs and retries. Drafts keep the fail-open save; the send gate
+// holds them. A SCHEDULED row is protected too (GH codex P1 on #3750): it
+// stays editable, and a fallback revision that kept status='scheduled'
+// would be claimed by the cron, rejected by assertEstimateSendable, and
+// burn its retries into send_failed. Called on the pre-read row (fast
+// refusal, preflight-visible) AND on the locked row inside the write
+// transaction (the send-versus-revise race), so the verdict can never
+// depend on a stale read.
+// "Unverified" = the write stamps ANY authority other than SERVER — the
+// engine-error CLIENT_FALLBACK, and the NULL a quote-required revision is
+// deliberately stamped with (pre-push codex P1): with the gate on neither
+// can be sent, and a grouped send must not deliver either beside a SERVER
+// anchor. A write that carries no pricing_authority at all is not a
+// pricing write and is never judged here.
+function writeStampsUnverifiedPricing(writeFields) {
+  if (!writeFields || !Object.prototype.hasOwnProperty.call(writeFields, 'pricing_authority')) return false;
+  return String(writeFields.pricing_authority || '').toUpperCase() !== 'SERVER';
+}
+
+function assertNoFallbackRevisionOfLiveLink(row, writeFields) {
+  if (!row) return;
+  const live = row.sent_at || row.viewed_at || String(row.status || '') === 'scheduled';
+  if (!live) return;
+  if (!writeStampsUnverifiedPricing(writeFields)) return;
+  if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return;
+  throw errorWithStatus(
+    String(row.status || '') === 'scheduled' && !(row.sent_at || row.viewed_at)
+      ? 'The pricing engine could not verify this revision and the estimate is scheduled to send — nothing was saved. Fix the inputs and try again, or unschedule it first.'
+      : 'The pricing engine could not verify this revision and the estimate is already with the customer — nothing was saved. Fix the inputs and try again.',
+    409,
+  );
+}
+
+// A DRAFT member of a group whose anchor is SCHEDULED is a live link in
+// waiting (GH codex P2 r5 on #3750): the cron's group claim publishes every
+// active sibling and refuses a fallback one, failing the anchor without a
+// retry. So a fallback revision of such a member is refused like a live
+// link's. Runs on the LOCKED row inside the write transaction; the schedule
+// route locks the sibling rows FOR UPDATE inside its own scheduling
+// transaction, so the two serialize and this read is never stale.
+// The groups a FALLBACK revision must be judged against: the row's CURRENT
+// group and the revision's DESTINATION group (GH codex P2 r7 — a fallback
+// move into a group whose anchor is scheduled would be refused by the
+// cron's group preflight later and fail that anchor). Gate-independent:
+// the mid-send verdict below applies with the rollout gate off too.
+// Sorted, so every path takes the groups' advisory locks in one order.
+function fallbackRevisionGroupIds(row, writeFields) {
+  if (!writeStampsUnverifiedPricing(writeFields)) return [];
+  return [...new Set([row?.estimate_group_id, writeFields?.estimate_group_id].filter(Boolean).map(String))].sort();
+}
+
+// A LIVE row moving into another group exposes that group's viewable
+// siblings through its link the moment the revision commits, with no send
+// preflight in between (GH codex P1 r10): even a SERVER-priced revision
+// must therefore have the DESTINATION group judged and locked. "Live" is
+// the same set assertNoFallbackRevisionOfLiveLink uses — sent, viewed, OR
+// scheduled (GH codex P2 r11: a scheduled first-send row keeps its schedule
+// while joining the group, and the cron's group preflight would fail the
+// anchor later instead of this save refusing now). Gate-scoped like the
+// delivery verdict it mirrors.
+function liveGroupMoveDestinationIds(row, writeFields) {
+  if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return [];
+  const live = !!(row?.sent_at || row?.viewed_at || String(row?.status || '') === 'scheduled');
+  const destination = writeFields?.estimate_group_id ? String(writeFields.estimate_group_id) : null;
+  if (!live || !destination || destination === String(row?.estimate_group_id || '')) return [];
+  return [destination];
+}
+
+// Every group a revision must lock before its row lock: the fallback set
+// plus a live row's move destination. Sorted — one lock order everywhere.
+function revisionGroupLockIds(row, writeFields) {
+  return [...new Set([...fallbackRevisionGroupIds(row, writeFields), ...liveGroupMoveDestinationIds(row, writeFields)])].sort();
+}
+
+// The destination group's viewable siblings must each be engine-verified
+// (or an editor-authored proposal by provenance) before a live row joins
+// them — the same verdict the send claims apply, mirrored here because the
+// join itself publishes them (GH codex P1 r10).
+async function assertLiveRowMayJoinGroup(trx, row, writeFields) {
+  const { applyLinkVisibleSiblingScope, rowPassesGatedSendAuthority } = require('./pricing-authority-gate');
+  for (const groupId of liveGroupMoveDestinationIds(row, writeFields)) {
+    // The siblings the joined link will actually render — the shared
+    // link-visible scope (uncapped codex P1 r19), terminal rows included.
+    const siblings = await applyLinkVisibleSiblingScope(
+      trx('estimates')
+        .where({ estimate_group_id: groupId })
+        .whereNot({ id: row?.id }),
+    ).select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
+    for (const sibling of siblings) {
+      // The ONE shared row verdict (uncapped codex P1 r21).
+      if (rowPassesGatedSendAuthority(sibling)) continue;
+      throw errorWithStatus(
+        'That multi-property group has a property without an engine-verified price — re-save it from the estimate tool before moving this estimate into the group (the group link shows every property together). Nothing was saved.',
+        409,
+      );
+    }
+  }
+}
+
+// The scheduled-group verdict applies only while the rollout gate is on —
+// with it off, a scheduled group's members deliver fallback pricing by design
+// (shadow mode) and the cron's claim refuses nothing.
+function scheduledGroupGuardGroupIds(row, writeFields) {
+  if (!require('../config/feature-gates').isEnabled('sendRequiresServerPricing')) return [];
+  return fallbackRevisionGroupIds(row, writeFields);
+}
+
+// LOCK ORDER (pre-push codex P1): group advisory xact lock(s) FIRST, then
+// the estimate row FOR UPDATE — the order the schedule route (group lock,
+// then the siblings FOR UPDATE) and the group send claim (group lock, then
+// the anchor claim) already use. The revise calls this BEFORE its row lock,
+// so a revision racing a schedule of the same group waits instead of
+// deadlocking (row held + waiting for the group lock vs group lock held +
+// waiting for the row).
+async function lockScheduledGroupGuardGroups(trx, row, writeFields) {
+  const groupIds = revisionGroupLockIds(row, writeFields);
+  for (const groupId of groupIds) {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['estimate-group-send', groupId],
+    );
+  }
+  return groupIds;
+}
+
+// A grouped send in flight (any member 'sending' — manual, cron or lead
+// auto-send) holds the group's viewable siblings for the customer's link
+// through the provider handoff, and the auto-send lane publishes only
+// engine-verified prices GATE OR NO GATE (AGENTS.md estimator-engine
+// authority). A fallback revision of any member — or a fallback move into
+// the group — during that window would hand over an unverified sibling
+// price (pre-push codex P0), so it is refused, gate-independent, under the
+// group lock: the send's claim (group lock, then anchor 'sending') either
+// committed first (refused here) or runs after this revision commits and
+// judges the new stamp in its own preflight.
+// "In flight" is a member that is 'sending' OR still holds a fresh delivery
+// claim (uncapped codex P0 r35): an anchor accepted or declined mid-handoff
+// leaves 'sending' while the automated group link is still being delivered
+// under its claim — the same verdict the proposal editor applies.
+async function assertNoFallbackRevisionDuringGroupSend(trx, row, writeFields) {
+  const groupIds = fallbackRevisionGroupIds(row, writeFields);
+  for (const groupId of groupIds) {
+    const sendingMember = await trx('estimates')
+      .where({ estimate_group_id: groupId })
+      .whereNot({ id: row?.id })
+      .whereNull('archived_at')
+      .where((q) => q.where({ status: 'sending' }).orWhereRaw(`NOT (${DELIVERY_CLAIM_NOT_LIVE_SQL})`))
+      .first('id');
+    if (!sendingMember) continue;
+    throw errorWithStatus(
+      'The pricing engine could not verify this revision and this multi-property group is being sent right now — nothing was saved. Wait a moment and try again.',
+      409,
+    );
+  }
+}
+
+// The verdict itself never locks: the write path holds the group locks from
+// lockScheduledGroupGuardGroups (taken before the row lock), and the dryRun
+// preflight reads unlocked, best-effort — the locked recheck in the write is
+// authoritative.
+async function assertNoFallbackRevisionInScheduledGroup(trx, row, writeFields) {
+  await assertNoFallbackRevisionDuringGroupSend(trx, row, writeFields);
+  const groupIds = scheduledGroupGuardGroupIds(row, writeFields);
+  for (const groupId of groupIds) {
+    const scheduledMember = await trx('estimates')
+      .where({ estimate_group_id: groupId, status: 'scheduled' })
+      .whereNot({ id: row?.id })
+      .whereNull('archived_at')
+      .first('id');
+    if (!scheduledMember) continue;
+    const destination = String(row?.estimate_group_id || '') !== groupId;
+    throw errorWithStatus(
+      destination
+        ? 'The pricing engine could not verify this revision and the multi-property group it would join is scheduled to send — nothing was saved. Fix the inputs and try again, or unschedule that group first.'
+        : 'The pricing engine could not verify this revision and this property\'s multi-property group is scheduled to send — nothing was saved. Fix the inputs and try again, or unschedule the group first.',
+      409,
+    );
+  }
 }
 
 // Statuses a revise can never touch. Acceptance locks the price and spins up
@@ -2113,10 +2413,23 @@ const REVISE_BLOCKED_STATUSES = ['accepted', 'declined', 'expired', 'sending'];
 // consumed by the revise write below and by GET /:id/edit-source so the
 // builder can explain a non-editable row instead of failing on save.
 // Returns null when editable, otherwise { message, statusCode }.
+// An EXPIRED row the pricing-authority gate refuses has no other way back
+// (GH codex P1 r30 on #3750): extension is refused until the row is
+// engine-verified, and the expiry rule refuses the revise until extended.
+// While the gate is on, such a row may be revised — the write leaves it
+// expired, and only an engine-verified reprice can land on it (a fallback
+// or NULL write is refused by the live-link guard) — so the operator
+// re-saves it through the engine and then extends it.
+function expiredRowRecoverableUnderGate(row) {
+  const gate = require('./pricing-authority-gate');
+  return gate.gatedSendAuthorityPredicateApplies() && !gate.rowPassesGatedSendAuthority(row || {});
+}
+
 function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   const parsed = estimateData === undefined
     ? parseStoredEstimateData(estimate?.estimate_data)
     : estimateData;
+  const expiredRecovery = expiredRowRecoverableUnderGate(estimate);
   if (estimate?.archived_at) {
     return { message: 'Estimate is archived. Unarchive it before editing.', statusCode: 400 };
   }
@@ -2143,7 +2456,7 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   if (status === 'sending') {
     return { message: 'This estimate is being sent right now. Wait for the send to finish, then retry.', statusCode: 409 };
   }
-  if (REVISE_BLOCKED_STATUSES.includes(status)) {
+  if (REVISE_BLOCKED_STATUSES.includes(status) && !(status === 'expired' && expiredRecovery)) {
     return { message: `A ${status} estimate can no longer be edited.`, statusCode: 409 };
   }
   // Date-expired rows the daily expiration worker hasn't flipped yet are
@@ -2151,7 +2464,7 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   // timestamp, so a revise would report saved while the customer's link keeps
   // showing nothing new. Same verdict as status='expired'.
   const expiresAt = estimate?.expires_at ? new Date(estimate.expires_at) : null;
-  if (expiresAt && !Number.isNaN(expiresAt.getTime()) && expiresAt <= now) {
+  if (expiresAt && !Number.isNaN(expiresAt.getTime()) && expiresAt <= now && !expiredRecovery) {
     return { message: 'This estimate has passed its expiration date and can no longer be edited. Extend it first, then edit.', statusCode: 409 };
   }
   return null;
@@ -2299,8 +2612,21 @@ async function reviseAdminEstimate({
     customerId: body.customerId || estimate.customer_id || null,
     address: body.address,
   });
+  const pricingOut = {};
+  // The ROW's proposal survives a generic revision (an enabled or scaffold
+  // proposal is refused above by estimateReviseBlock; a disabled authored one
+  // stays exactly as PUT /:id/proposal left it). The browser's copy is never
+  // written — see stripClientProposal.
+  let storedProposal = null;
+  try {
+    const parsedPrior = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
+    storedProposal = parsedPrior?.proposal ?? null;
+  } catch {
+    storedProposal = null;
+  }
   const writeFields = await resolveEstimateWritePayload({
     database,
+    storedProposal,
     body: {
       ...body,
       customerId: body.customerId || estimate.customer_id || null,
@@ -2315,7 +2641,16 @@ async function reviseAdminEstimate({
     technician,
     now,
     recompute,
+    pricingOut,
   });
+  // Engine-authoritative pricing on a LIVE link (validation audit SEC-002,
+  // pre-push codex P0): a delivered estimate's bearer link renders whatever
+  // is stored, so a revision whose recompute fell back to the browser
+  // preview is not persisted while GATE_SEND_REQUIRES_SERVER_PRICING is on
+  // — nothing is saved (dryRun preflights surface the same refusal), the
+  // operator fixes the inputs and retries. Drafts keep the fail-open save;
+  // the send gate holds them.
+  assertNoFallbackRevisionOfLiveLink(estimate, writeFields);
 
   // A revision that changes or introduces a group id — OR changes the
   // estimate's contact identity while grouped (codex #3244 r5: a lead-only
@@ -2480,6 +2815,12 @@ async function reviseAdminEstimate({
   // confirm, only for the identical real save to 400. Best-effort unlocked
   // read — the serialized in-transaction recheck below stays authoritative.
   if (dryRun) {
+    // Scheduled-group guard at preflight too (GH codex P2 r7): an unlocked
+    // best-effort read, so the builder never walks the operator through a
+    // reprice confirm the identical real save would refuse; the locked
+    // recheck inside the write transaction stays authoritative.
+    await assertNoFallbackRevisionInScheduledGroup(database, estimate, writeFields);
+    await assertLiveRowMayJoinGroup(database, estimate, writeFields);
     if (groupDuplicateRecheckNeeded) {
       const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
       const revisedKey = normalizedEstimatePropertyKey(writeFields.address);
@@ -2496,7 +2837,7 @@ async function reviseAdminEstimate({
         }
       }
     }
-    return { estimate: { ...estimate, ...writeFields }, dryRun: true, memberLinkageWarning };
+    return { estimate: { ...estimate, ...writeFields }, dryRun: true, memberLinkageWarning, pricingFallbackReason: pricingOut.fallbackReason || null };
   }
 
   // Atomic revise guard: the editability check above ran on a pre-read, so
@@ -2537,11 +2878,33 @@ async function reviseAdminEstimate({
     // and resets its baseline. The baseline must snapshot the composition
     // this UPDATE actually replaces, so the locked row — not the pre-read —
     // feeds the capture below.
+    // Group advisory lock(s) BEFORE the row lock — see
+    // lockScheduledGroupGuardGroups for the deadlock this order prevents.
+    const lockedGuardGroups = await lockScheduledGroupGuardGroups(trx, estimate, writeFields);
     const lockedPrior = await trx('estimates')
       .where({ id: estimate.id })
       .forUpdate()
       .first();
     if (!lockedPrior) return null;
+    // The revise block re-run on the LOCKED row (pre-push codex P0 r14): a
+    // proposal authored by PUT /:id/proposal while this payload resolved
+    // turns the row into a commercial proposal the generic save must not
+    // rewrite — the throw rolls back with nothing written.
+    const lockedBlock = estimateReviseBlock(lockedPrior, undefined, now());
+    if (lockedBlock) throw errorWithStatus(lockedBlock.message, lockedBlock.statusCode);
+    // Live-link guard re-asserted on the LOCKED row (pre-push codex P0): a
+    // first send finishing between the pre-read and this lock turns the
+    // row live, and the fallback revision must lose to it — the throw rolls
+    // this transaction back with nothing written.
+    assertNoFallbackRevisionOfLiveLink(lockedPrior, writeFields);
+    // The locked row's group must be one we already hold the lock for — a
+    // concurrent group change between the pre-read and the row lock would
+    // otherwise need an out-of-order lock; refuse and let the operator retry.
+    if (revisionGroupLockIds(lockedPrior, writeFields).some((groupId) => !lockedGuardGroups.includes(groupId))) {
+      throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
+    }
+    await assertNoFallbackRevisionInScheduledGroup(trx, lockedPrior, writeFields);
+    await assertLiveRowMayJoinGroup(trx, lockedPrior, writeFields);
     // Protocol keys re-applied from the LOCKED row (codex P0, PR #3304 GH
     // r8c): writeFields.estimate_data was built from the pre-read
     // snapshot, so a delivery claim or an invalidation marker recorded
@@ -2562,6 +2925,15 @@ async function reviseAdminEstimate({
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
           }
           preserveClickMintMarkersAcrossRevise(pendingData, lockedData);
+          // The server-owned proposal is carried from the LOCKED row, never
+          // from the pre-read copy stripClientProposal restored earlier
+          // (pre-push codex P0 r14): a proposal authored (or disabled) in
+          // the gap would otherwise be replaced by the stale/absent one.
+          if (lockedData.proposal && typeof lockedData.proposal === 'object' && !Array.isArray(lockedData.proposal)) {
+            pendingData.proposal = lockedData.proposal;
+          } else {
+            delete pendingData.proposal;
+          }
           for (const key of REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS) {
             const lockedValue = lockedData?.estimatorEngine?.[key];
             if (lockedValue === undefined) continue;
@@ -2585,13 +2957,19 @@ async function reviseAdminEstimate({
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
-      .whereNotIn('status', REVISE_BLOCKED_STATUSES)
+      // The expired-row recovery (expiredRowRecoverableUnderGate) relaxes
+      // the two expiry predicates for the LOCKED row's verdict only.
+      .whereNotIn('status', expiredRowRecoverableUnderGate(lockedPrior)
+        ? REVISE_BLOCKED_STATUSES.filter((s) => s !== 'expired')
+        : REVISE_BLOCKED_STATUSES)
       .whereRaw("COALESCE(category, '') <> 'COMMERCIAL'")
       // Mirrors the pre-read's date-expiry verdict: the payload resolution
       // above (pricing recompute, DB lookups) leaves a window in which the
       // row can pass its expires_at, and a commit after that would report
       // saved while the public link already serves the expired page.
-      .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now()))
+      .modify((qb) => {
+        if (!expiredRowRecoverableUnderGate(lockedPrior)) qb.where((q) => q.whereNull('expires_at').orWhere('expires_at', '>', now()));
+      })
       .update({
         ...revisedFields,
         updated_at: now(),
@@ -2619,7 +2997,7 @@ async function reviseAdminEstimate({
   try {
     require('./estimate-slot-availability').invalidateEstimate(estimate.id);
   } catch { /* best-effort */ }
-  return { estimate: updated, memberLinkageWarning };
+  return { estimate: updated, memberLinkageWarning, pricingFallbackReason: pricingOut.fallbackReason || null };
 }
 
 module.exports = {
@@ -2659,3 +3037,16 @@ module.exports = {
   // the newer witness must always win.
   preserveClickMintMarkersAcrossRevise,
 };
+module.exports.stripClientProposal = stripClientProposal;
+module.exports.assertNoFallbackRevisionInScheduledGroup = assertNoFallbackRevisionInScheduledGroup;
+module.exports.lockScheduledGroupGuardGroups = lockScheduledGroupGuardGroups;
+module.exports.scheduledGroupGuardGroupIds = scheduledGroupGuardGroupIds;
+module.exports.assertNoFallbackRevisionDuringGroupSend = assertNoFallbackRevisionDuringGroupSend;
+module.exports.fallbackRevisionGroupIds = fallbackRevisionGroupIds;
+module.exports.linkedDraftCarriesProposal = linkedDraftCarriesProposal;
+module.exports.writeStampsUnverifiedPricing = writeStampsUnverifiedPricing;
+module.exports.assertNoFallbackRevisionOfLiveLink = assertNoFallbackRevisionOfLiveLink;
+module.exports.assertLiveRowMayJoinGroup = assertLiveRowMayJoinGroup;
+module.exports.liveGroupMoveDestinationIds = liveGroupMoveDestinationIds;
+module.exports.revisionGroupLockIds = revisionGroupLockIds;
+module.exports.expiredRowRecoverableUnderGate = expiredRowRecoverableUnderGate;
