@@ -63,7 +63,22 @@ already on it (no homeowner PII/links); settlement happens via the webhook,
 not the route,
 `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
-`/api/public/estimates/:token/find-slots`, `/api/reports/:token/*`,
+`/api/public/estimates/:token/find-slots`, `/api/reports/:token/*` (the
+service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and
+the queued PDF / report-email renders that share `buildReportV1Data` —
+renders the report's IDENTITY facts from the completion-time snapshot on
+`service_records.service_data.reportIdentitySnapshot` when the record
+carries one: `customerName`, `serviceAddress` / `propertyAddress` /
+`cityState` and the `mapCenter` those resolved to, `technicianName`, the
+`serviceDisplayName` title, and each application's approved product facts
+(EPA number, precaution / re-entry / summary copy, approval). Records
+completed before the snapshot shipped carry none and keep the live
+customers / scheduled_services / technicians / products_catalog joins; a
+snapshot leg that could not be frozen (missing customer or technician row)
+is omitted and that leg stays live. The PDF filename and the canonical lawn
+pin read the same overlaid row. Presentation (technician photo URL, copy
+config) and the deliberately live sections (next visit, review CTA,
+cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),

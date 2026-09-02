@@ -7077,11 +7077,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // so the frozen name can never disagree with the FK the report
           // routes join for the photo (pre-push codex P1).
           const snapshotVisitRow = lockedSvcRow || svc;
+          // FOR SHARE (after the visit row's FOR UPDATE, always in this
+          // order: visit → customer → technician → catalog) so a concurrent
+          // rename / reassignment / catalog edit cannot commit between these
+          // reads and the completion commit — the frozen values are the
+          // rows as they stand at commit (pre-push codex P1).
           const snapshotCustomerRow = await trx('customers')
             .where({ id: svc.customer_id })
+            .forShare()
             .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
           const snapshotTechnicianRow = svc.technician_id
-            ? await trx('technicians').where({ id: svc.technician_id }).first('name')
+            ? await trx('technicians').where({ id: svc.technician_id }).forShare().first('name')
             : null;
           // ONE catalog read set inside the trx serves both the frozen report
           // facts and the product loop's validation below, so the facts the
@@ -7091,7 +7097,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const snapshotProductIds = [...new Set((products || []).map((p) => canonicalProductId(p?.productId)).filter(Boolean))];
           const completionCatalogRowsById = new Map(
             (snapshotProductIds.length
-              ? await trx('products_catalog').whereIn('id', snapshotProductIds).select('*')
+              ? await trx('products_catalog').whereIn('id', snapshotProductIds).forShare().select('*')
               : []
             ).map((row) => [canonicalProductId(row.id), row]),
           );
