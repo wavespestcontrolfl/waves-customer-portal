@@ -34,6 +34,7 @@ import {
   cn,
 } from "../../components/ui";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
+import CallIntelligencePanel from "../../components/admin/CallIntelligencePanel";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import { describeProcessResult } from "../../lib/callProcessResult";
 
@@ -54,6 +55,23 @@ const PROCESS_RESULT_CLASS = {
   failed: "text-alert-fg",
 };
 const ADMIN_BRIDGE_PHONE_KEYS = new Set(["9415993489"]);
+
+// Wrap the first case-insensitive occurrence of `quote` in a <mark> so the
+// evidence jump lands on the words. Plain text when there is no match.
+export function renderTranscriptWithHighlight(text, quote, id) {
+  if (!quote || !text) return text;
+  const at = String(text).toLowerCase().indexOf(String(quote).toLowerCase());
+  if (at < 0) return text;
+  return (
+    <>
+      {text.slice(0, at)}
+      <mark id={`call-transcript-mark-${id}`} className="not-italic bg-zinc-200 text-ink-primary rounded-xs px-0.5">
+        {text.slice(at, at + quote.length)}
+      </mark>
+      {text.slice(at + quote.length)}
+    </>
+  );
+}
 
 function phoneKey(value) {
   const digits = String(value || "").replace(/\D/g, "");
@@ -321,6 +339,17 @@ export default function CallLogTabV2() {
       else next.add(id);
       return next;
     });
+  // Evidence "Jump": the intelligence panel hands a verbatim quote to the
+  // transcript, which opens and marks it so the office can check a promise
+  // against the words in seconds instead of replaying the audio.
+  const [transcriptHighlights, setTranscriptHighlights] = useState(() => new Map());
+  const jumpToQuote = (id, quote) => {
+    setTranscriptHighlights((prev) => new Map(prev).set(id, quote));
+    setExpandedTranscripts((prev) => new Set(prev).add(id));
+    setTimeout(() => {
+      document.getElementById(`call-transcript-mark-${id}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 0);
+  };
 
   const loadCalls = (search = "") => {
     const q = search
@@ -1429,11 +1458,15 @@ export default function CallLogTabV2() {
                               </span>{" "}
                             </button>{" "}
                             <div className="px-2 pb-2 text-14 md:text-12 text-ink-secondary italic leading-relaxed">
-                              "{open ? shown : preview}"
+                              "{renderTranscriptWithHighlight(open ? shown : preview, open ? transcriptHighlights.get(c.id) : null, c.id)}"
                             </div>{" "}
                           </div>
                         );
                       })()}
+                    <CallIntelligencePanel
+                      callId={c.id}
+                      onJumpToQuote={c.transcription ? (quote) => jumpToQuote(c.id, quote) : null}
+                    />
                   </div>
                 );
               })}

@@ -1054,6 +1054,13 @@ const gates = {
   // outage) ring an admin bell instead of silently costing leads — the
   // 2026-08-31 wedge and a row stuck since 07-10 both went unnoticed.
   callProcessingStallWatchdog: process.env.GATE_CALL_PROCESSING_STALL_WATCHDOG === 'true',
+  // Call commitments: every processed call records what Waves promised and
+  // what the caller agreed to as evidence-linked rows (call_commitments),
+  // seeded from the V2 extraction plus one bounded model pass over the
+  // transcript, and links each promise to the later record that fulfils it.
+  // Off → nothing is written; the Calls tab still renders rows already
+  // recorded. Kill switch: unset. See services/call-commitments.js.
+  callCommitments: process.env.GATE_CALL_COMMITMENTS === 'true',
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered

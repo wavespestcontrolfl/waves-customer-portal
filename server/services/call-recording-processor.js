@@ -14630,6 +14630,34 @@ const CallRecordingProcessor = {
       }
     }
 
+    // Step 7c: Commitments — what Waves promised and what the caller agreed
+    // to, as evidence-linked rows (services/call-commitments.js). Seeded
+    // from the V2 extraction plus one bounded model pass; the upsert takes
+    // the claim fence itself (SHARE lock on the token), so a superseded pass
+    // writes nothing and a human-touched row is never rewritten. Dark behind
+    // GATE_CALL_COMMITMENTS; never blocks the call.
+    if (transcription && !extracted.is_spam && isEnabled('callCommitments')) {
+      if (!(await stillOwnsClaim())) return abandonToPeer('the commitments write');
+      try {
+        const commitmentsStartedAt = Date.now();
+        const commitmentSummary = await require('./call-commitments').recordCallCommitments({
+          conn: db,
+          call: { ...call, transcript_structured: (await db('call_log').where({ id: call.id }).first('transcript_structured'))?.transcript_structured ?? call.transcript_structured },
+          transcript: transcription,
+          v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
+          v1: extracted,
+          disposition: null,
+          procToken,
+          procGeneration,
+        });
+        stageTimings.commitments_ms = Date.now() - commitmentsStartedAt;
+        logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' ownership_lost' : ''}`);
+        if (commitmentSummary.ownershipLost) return abandonToPeer('the commitments write');
+      } catch (err) {
+        logger.warn(`[call-proc] commitments step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
+      }
+    }
+
     // Step 8: CSR Coach scoring — auto-score every transcribed call.
     // The inbound <Dial> simul-rings distinct per-person numbers; the staff leg
     // that pressed 1 is recorded in metadata.forward_acceptance by the

@@ -5,9 +5,18 @@ const logger = require('../services/logger');
 const {
   adminAuthenticate,
   requireTechOrAdmin,
+  requireAdmin,
 } = require('../middleware/admin-auth');
 const CallRecordingProcessor = require('../services/call-recording-processor');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function maskSid(sid) {
+  if (!sid) return 'none';
+  const value = String(sid);
+  return value.length <= 8 ? `${value.slice(0, 2)}…` : `${value.slice(0, 2)}…${value.slice(-6)}`;
+}
 
 function rejectQueryString(req, res, next) {
   if (req.originalUrl.includes('?')) {
@@ -177,6 +186,159 @@ router.post('/synopsis/:callSid', async (req, res, next) => {
   try {
     const result = await CallRecordingProcessor.generateSynopsis(req.params.callSid);
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// CALL INTELLIGENCE — the review-ready view, commitments, corrections
+// ═══════════════════════════════════════════════════════════════════
+
+// GET /calls/:id/intelligence — one normalized object: outcome, intent,
+// appointment, prices, objections, evidence-linked commitments with their
+// fulfillment, later outcomes, honest processing state, and which values a
+// person overrode. Read-only apart from the fulfillment refresh (open AI
+// rows are marked fulfilled when a later record proves it).
+router.get('/calls/:id/intelligence', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
+    const { loadCallIntelligence } = require('../services/call-intelligence');
+    const intelligence = await loadCallIntelligence(db, req.params.id);
+    if (!intelligence) return res.status(404).json({ error: 'Call not found' });
+    res.json({ intelligence });
+  } catch (err) { next(err); }
+});
+
+// POST /calls/:id/commitments — the office records a promise the AI missed.
+router.post('/calls/:id/commitments', requireAdmin, async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
+    const call = await db('call_log').where({ id: req.params.id }).first('id');
+    if (!call) return res.status(404).json({ error: 'Call not found' });
+    const { addHumanCommitment } = require('../services/call-commitments');
+    const row = await addHumanCommitment(db, call.id, {
+      party: req.body?.party,
+      kind: req.body?.kind,
+      description: req.body?.description,
+      due_at: req.body?.due_at ?? null,
+      channel: req.body?.channel ?? null,
+      reviewedBy: req.technicianId || null,
+    });
+    res.status(201).json({ commitment: row });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+// PATCH /commitments/:id — confirm / dismiss / fulfill / reopen / edit. A
+// human verdict is recorded on the row and survives every reprocess.
+router.patch('/commitments/:id', requireAdmin, async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Commitment id must be a UUID' });
+    const { applyHumanUpdate } = require('../services/call-commitments');
+    const row = await applyHumanUpdate(db, req.params.id, {
+      action: req.body?.action,
+      description: req.body?.description,
+      due_at: req.body?.due_at,
+      note: req.body?.note,
+      reviewedBy: req.technicianId || null,
+    });
+    res.json({ commitment: row });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+// PUT /calls/:id/customer — repoint (or unlink) the call's customer. The
+// override is stamped in metadata so a reprocess keeps the human's link
+// instead of re-resolving it from the transcript, and the unified voice
+// message is re-homed so Customer 360 shows the call under the right person.
+router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
+    const customerId = req.body?.customer_id ?? null;
+    if (customerId !== null && !UUID_RE.test(String(customerId))) return res.status(400).json({ error: 'customer_id must be a UUID or null' });
+    const call = await db('call_log').where({ id: req.params.id }).first('id', 'customer_id', 'twilio_call_sid');
+    if (!call) return res.status(404).json({ error: 'Call not found' });
+    if (customerId) {
+      const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id');
+      if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    }
+    const override = {
+      customer_id: customerId,
+      previous_customer_id: call.customer_id || null,
+      by: req.technicianId || null,
+      at: new Date().toISOString(),
+    };
+    await db('call_log').where({ id: call.id }).update({
+      customer_id: customerId,
+      metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_link_override}', ?::jsonb, true)", [JSON.stringify(override)]),
+      updated_at: new Date(),
+    });
+    if (call.twilio_call_sid) {
+      await require('../services/conversations').syncVoiceMessageForCall(call.twilio_call_sid)
+        .catch((e) => logger.warn(`[call-recordings] voice message re-home after relink failed for ${maskSid(call.twilio_call_sid)}: ${e.message}`));
+    }
+    logger.info(`[call-recordings] call ${call.id} customer link set by operator (${customerId ? 'linked' : 'unlinked'})`);
+    res.json({ success: true, customer_id: customerId, override });
+  } catch (err) { next(err); }
+});
+
+// POST /calls/:id/adopt-recording — swap in a recording that arrived after
+// the call had finished processing (parked by the recording-status webhook)
+// and reprocess. The recording being replaced is kept in the parked list.
+router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
+    const wanted = String(req.body?.recording_sid || '');
+    if (!/^RE[0-9a-f]{32}$/i.test(wanted)) return res.status(400).json({ error: 'recording_sid must be a Twilio RecordingSid' });
+    const call = await db('call_log').where({ id: req.params.id }).first('id', 'twilio_call_sid', 'recording_sid', 'recording_url', 'recording_duration_seconds', 'metadata', 'processing_status');
+    if (!call) return res.status(404).json({ error: 'Call not found' });
+    if (call.processing_status === 'processing') {
+      return res.status(409).json({ error: 'A pass is still working this call. Try again after it finishes.', reason: 'already_processing' });
+    }
+    let meta = {};
+    try { meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {}); } catch { meta = {}; }
+    const parked = Array.isArray(meta.additional_recordings) ? meta.additional_recordings : [];
+    const chosen = parked.find((r) => r && r.recording_sid === wanted);
+    if (!chosen) return res.status(404).json({ error: 'That recording is not parked on this call' });
+    const remaining = parked.filter((r) => r.recording_sid !== wanted);
+    if (call.recording_sid) {
+      remaining.push({
+        recording_sid: call.recording_sid,
+        recording_url: call.recording_url,
+        recording_duration_seconds: call.recording_duration_seconds ?? null,
+        received_at: null,
+        parked_because: 'replaced_by_operator',
+      });
+    }
+    const swapped = await db('call_log')
+      .where({ id: call.id })
+      .whereRaw("processing_status IS DISTINCT FROM 'processing'")
+      .update({
+        recording_sid: chosen.recording_sid,
+        recording_url: chosen.recording_url,
+        recording_duration_seconds: chosen.recording_duration_seconds ?? null,
+        transcription_status: 'pending',
+        metadata: db.raw(
+          "jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}', ?::jsonb, true), '{adopted_recording}', ?::jsonb, true)",
+          [JSON.stringify(remaining), JSON.stringify({ recording_sid: chosen.recording_sid, by: req.technicianId || null, at: new Date().toISOString() })],
+        ),
+        updated_at: new Date(),
+      });
+    if (!swapped) return res.status(409).json({ error: 'A pass claimed this call while the swap was being made. Try again.', reason: 'already_processing' });
+    await db('triage_items')
+      .where({ call_log_id: call.id, reason_code: 'additional_recording' })
+      .whereIn('status', ['open', 'in_progress'])
+      .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Adopted ${chosen.recording_sid}` })
+      .catch(() => {});
+    logger.info(`[call-recordings] operator adopted recording ${maskSid(chosen.recording_sid)} on call ${call.id}; reprocessing`);
+    const result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true });
+    if (result?.skipped && result?.reason === 'already_processing') {
+      return res.status(409).json({ ...result, error: 'The recording was adopted but another pass is still working this call; Reprocess once it goes quiet.' });
+    }
+    res.json({ success: true, adopted: chosen.recording_sid, result });
   } catch (err) { next(err); }
 });
 
