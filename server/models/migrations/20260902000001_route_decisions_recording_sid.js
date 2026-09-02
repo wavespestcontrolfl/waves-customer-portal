@@ -11,9 +11,13 @@
  * The recording joins the key so every recording's decision is its own
  * immutable row; readers already take the newest enforce row per call.
  *
- * Existing rows are backfilled from the call's current recording ('' when
- * the call has none), which is the recording they were derived from for
- * every call processed before replacement existed.
+ * Existing rows keep the '' legacy sentinel — "recording not recorded" —
+ * deliberately NOT backfilled from the call's current recording: the
+ * pre-migration webhook could replace a call's recording after its decision
+ * was derived, and labelling that decision with the replacement would make
+ * the replacement's own pass collide with it (the bug this fixes). A pass
+ * after the migration inserts one recording-keyed row per call, then
+ * no-ops on that key as before.
  */
 
 exports.up = async function up(knex) {
@@ -22,12 +26,6 @@ exports.up = async function up(knex) {
     await knex.schema.alterTable('route_decisions', (t) => {
       t.string('recording_sid', 64).notNullable().defaultTo('');
     });
-    await knex.raw(`
-      UPDATE route_decisions rd
-         SET recording_sid = COALESCE(cl.recording_sid, '')
-        FROM call_log cl
-       WHERE cl.id = rd.call_log_id AND rd.recording_sid = ''
-    `);
   }
   await knex.schema.alterTable('route_decisions', (t) => {
     t.dropUnique(['call_log_id', 'decision_version', 'mode']);
