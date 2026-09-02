@@ -15287,10 +15287,19 @@ const CallRecordingProcessor = {
             const waiting = (Array.isArray(m.additional_recordings) ? m.additional_recordings : [])
               .some((r) => r && r.recording_sid !== adopted && r.parked_because !== 'replaced_by_operator' && (r.recording_url != null || r.delete_pending === true));
             if (!waiting) {
-              await trx('triage_items')
+              const settled = await trx('triage_items')
                 .where({ call_log_id: call.id, reason_code: 'additional_recording' })
                 .whereIn('status', ['open', 'in_progress'])
                 .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Adopted ${adopted} processed` });
+              // The review flag follows the cards here as on the synchronous
+              // settle path: with the last card resolved and nothing else
+              // open, the call must not stay counted as review-open.
+              if (settled > 0) {
+                await trx('call_log')
+                  .where({ id: call.id })
+                  .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
+                  .update({ review_status: null });
+              }
             }
           }
         }

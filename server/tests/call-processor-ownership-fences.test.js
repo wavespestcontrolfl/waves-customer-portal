@@ -103,6 +103,11 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(site).toContain("adopted === call.recording_sid");
     expect(site).toContain("r.parked_because !== 'replaced_by_operator'");
     expect(site).toContain("reason_code: 'additional_recording'");
+    // …and clears the call's review flag when that was the last open card
+    // (hook P1 on #3764 d9ee6ba35): the deferred path mirrors the route's settle.
+    const after = body.slice(at, at + 2600);
+    expect(after).toContain("resolution_note: `Adopted ${adopted} processed` });");
+    expect(after.indexOf(".update({ review_status: null });")).toBeGreaterThan(after.indexOf("resolution_note: `Adopted ${adopted} processed` });"));
   });
 
   test('a processed pass resolves an earlier lead_creation_failed card the same way (codex #3736 gh-r13)', () => {
