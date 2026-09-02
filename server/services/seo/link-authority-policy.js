@@ -66,6 +66,7 @@ const POLICY_FIELDS = Object.freeze({
 const POLICY_FIELD_NAMES = Object.freeze(Object.keys(POLICY_FIELDS));
 
 const configured = (x) => typeof x === 'number' && Number.isFinite(x);
+const PG_INT_MAX = 2147483647; // every `int` policy column is a PostgreSQL integer
 
 // pg returns NUMERIC/DECIMAL as strings — normalize once, here.
 function normalizePolicyRow(row) {
@@ -133,6 +134,7 @@ function parseField(name, value, current) {
   if (spec.scale !== undefined && Math.round(n * 10 ** spec.scale) / 10 ** spec.scale !== n) return { error: `${name} allows at most ${spec.scale} decimal places` };
   if (spec.min !== undefined && n < spec.min) return { error: `${name} must be ≥ ${spec.min}` };
   if (spec.max !== undefined && n > spec.max) return { error: `${name} must be ≤ ${spec.max}` };
+  if (spec.type === 'int' && n > PG_INT_MAX) return { error: `${name} must be ≤ ${PG_INT_MAX}` };
   if (spec.raiseOnly && current !== null && current !== undefined && n < current) {
     return { error: `${name} may only be raised (currently ${current})` };
   }
@@ -341,7 +343,7 @@ function decideAuthority({ path, domain, policy, score, d30Confidence = null, mo
 }
 
 module.exports = {
-  POLICY_FIELDS, POLICY_FIELD_NAMES, LEVELS, MEMBERSHIP_TYPES, BOOLEAN_FLAGS,
+  POLICY_FIELDS, POLICY_FIELD_NAMES, LEVELS, PG_INT_MAX, MEMBERSHIP_TYPES, BOOLEAN_FLAGS,
   normalizePolicyRow, applyEnvTightening, loadPolicy, updatePolicy, parseField,
   requiredInstances, validityFailure, isValidMerchantBinding, validLegalTermsHash, decideAuthority,
 };
