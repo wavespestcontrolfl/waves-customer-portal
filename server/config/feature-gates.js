@@ -824,6 +824,16 @@ const gates = {
   // worker reads this gate for that rule.
   linkInvestigator: process.env.GATE_LINK_INVESTIGATOR === 'true',
 
+  // GATE_LINK_AUTHORITY — Backlink Manager v2 step 4: the acquisition-authority
+  // policy engine may grant AUTO_* levels, and every automated claim and every
+  // irreversible step re-checks it. OFF ⇒ no automated lease of ANY level is
+  // granted (owner-approved rows included), in-flight work stops before its
+  // next irreversible action; nothing's lifecycle status changes (plan §12).
+  // Step 4a (PR 1) only declares it and shows it on the Policy panel — the
+  // shipped policy defaults route every row to the owner regardless. Opt-in in
+  // EVERY env.
+  linkAuthority: process.env.GATE_LINK_AUTHORITY === 'true',
+
   // Backlink profile → astro sameAs sync — weekly job that opens a PR adding
   // verifier-confirmed (status live/indexed) directory/citation/social profile
   // URLs from seo_link_prospects to the marketing site's entity-profiles.auto.json

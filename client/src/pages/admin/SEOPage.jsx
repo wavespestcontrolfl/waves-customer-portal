@@ -3349,6 +3349,239 @@ function BacklinkRegistryCard() {
   );
 }
 
+// §3.8 / §6.2 / §11 item 4 — the ONLY place authority/spend thresholds change
+// (step 4a). Every save is audited server-side; env may only tighten.
+const POLICY_GROUPS = [
+  { title: "Floors (any action, auto or owner-routed)", fields: ["min_score", "min_path_confidence", "max_spam_score"] },
+  { title: "Automatic acquisition", fields: ["auto_free_acquisition", "auto_account_creation", "auto_submission_daily_cap", "membership_requires_owner", "legal_attestation_requires_owner"] },
+  { title: "Automatic outreach", fields: ["auto_outreach_min_score", "auto_outreach_daily_cap"] },
+  { title: "Automatic spend", fields: ["monthly_paid_budget_cents", "max_auto_purchase_cents", "auto_paid_min_score", "auto_paid_min_d30_confidence"] },
+  { title: "Owner-approved spend", fields: ["owner_monthly_budget_cents", "owner_price_tolerance_cents", "presentment_window_days"] },
+  { title: "Provider", fields: ["preferred_provider"] },
+];
+const POLICY_LABELS = {
+  min_score: "Minimum score", min_path_confidence: "Minimum path confidence (0–1)", max_spam_score: "Maximum spam score",
+  auto_free_acquisition: "Auto free acquisition", auto_account_creation: "Auto account creation",
+  auto_submission_daily_cap: "Auto submissions / day (0 = none)", membership_requires_owner: "Memberships need the owner",
+  legal_attestation_requires_owner: "Signed terms need the owner",
+  auto_outreach_min_score: "Auto outreach min score (blank = never)", auto_outreach_daily_cap: "Auto outreach / day (0 = none)",
+  monthly_paid_budget_cents: "Auto monthly budget (¢)", max_auto_purchase_cents: "Max auto purchase (¢)",
+  auto_paid_min_score: "Auto paid min score (blank = never)", auto_paid_min_d30_confidence: "Auto paid min D30 confidence (blank = never)",
+  owner_monthly_budget_cents: "Owner monthly budget (¢, blank = no cap)", owner_price_tolerance_cents: "Owner price tolerance (¢)",
+  presentment_window_days: "Presentment window (days, raise only)", preferred_provider: "Preferred provider",
+};
+
+function LinkPolicyPanel() {
+  const [data, setData] = useState(null);
+  const [draft, setDraft] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [saved, setSaved] = useState(null);
+  const loadGen = useRef(0);
+
+  const load = async () => {
+    const gen = ++loadGen.current;
+    setError(null);
+    try {
+      const r = await adminFetch("/admin/backlink-agent/policy");
+      if (gen !== loadGen.current) return;
+      setData(r);
+      setDraft({});
+    } catch (e) {
+      if (gen !== loadGen.current) return;
+      setError(e?.message || "Policy load failed");
+    }
+  };
+  useEffect(() => {
+    load();
+  }, []);
+
+  const stored = data?.stored || {};
+  const fields = data?.fields || {};
+  const dirty = Object.keys(draft).filter((k) => draft[k] !== undefined && String(draft[k] ?? "") !== String(stored[k] ?? ""));
+  const overrideFor = (name) => (data?.overrides || []).find((o) => o.field === name);
+
+  const save = async () => {
+    if (!dirty.length) return;
+    setSaving(true);
+    setError(null);
+    setSaved(null);
+    const patch = {};
+    dirty.forEach((k) => {
+      patch[k] = draft[k];
+    });
+    try {
+      const r = await adminFetch("/admin/backlink-agent/policy", { method: "PATCH", body: patch });
+      setSaved(r?.changed?.length ? `${r.changed.length} field${r.changed.length === 1 ? "" : "s"} changed` : "No changes");
+      await load();
+    } catch (e) {
+      setError(e?.message || "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputStyle = {
+    width: "100%",
+    padding: "8px 10px",
+    borderRadius: 8,
+    border: `1px solid ${D.inputBorder}`,
+    background: "#fff",
+    color: D.text,
+    fontSize: 13,
+    fontFamily: MONO,
+  };
+  const btn = (disabled) => ({
+    padding: "6px 12px",
+    minHeight: 32,
+    borderRadius: 8,
+    border: `1px solid ${D.border}`,
+    background: "#fff",
+    color: D.text,
+    fontSize: 12,
+    cursor: "pointer",
+    opacity: disabled ? 0.5 : 1,
+  });
+
+  const renderField = (name) => {
+    const spec = fields[name];
+    if (!spec) return null;
+    const value = draft[name] !== undefined ? draft[name] : stored[name];
+    const override = overrideFor(name);
+    const label = (
+      <div style={{ fontSize: 12, color: D.muted, marginBottom: 4 }}>
+        {POLICY_LABELS[name] || name}
+        {override && (
+          <span style={{ color: D.amber }}>{` · env ${override.env} tightens to ${override.applied}`}</span>
+        )}
+      </div>
+    );
+    if (spec.type === "boolean") {
+      return (
+        <label key={name} style={{ display: "block", fontSize: 13, color: D.text }}>
+          {label}
+          <input
+            type="checkbox"
+            checked={value === true}
+            onChange={(e) => setDraft({ ...draft, [name]: e.target.checked })}
+            style={{ width: 18, height: 18 }}
+          />
+        </label>
+      );
+    }
+    if (spec.type === "enum") {
+      return (
+        <div key={name}>
+          {label}
+          <select value={value ?? ""} onChange={(e) => setDraft({ ...draft, [name]: e.target.value })} style={inputStyle}>
+            {spec.values.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+        </div>
+      );
+    }
+    return (
+      <div key={name}>
+        {label}
+        <input
+          type="number"
+          step={spec.type === "int" ? 1 : 0.01}
+          min={spec.min}
+          max={spec.max}
+          value={value === null || value === undefined ? "" : value}
+          placeholder={spec.nullable ? "blank = off" : ""}
+          onChange={(e) => setDraft({ ...draft, [name]: e.target.value === "" ? null : e.target.value })}
+          style={inputStyle}
+        />
+      </div>
+    );
+  };
+
+  return (
+    <Card style={{ marginBottom: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>Acquisition authority policy</div>
+        <div style={{ fontSize: 12, color: D.muted, fontFamily: MONO }}>
+          {data ? (data.gateOn ? "GATE_LINK_AUTHORITY on" : "GATE_LINK_AUTHORITY off — every row routes to you") : "…"}
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: D.muted, marginBottom: 14 }}>
+        The only place thresholds change. Shipped defaults grant nothing automatically; every save is logged. Environment limits can only tighten a value.
+      </div>
+      {error && <div style={{ marginBottom: 8, fontSize: 12, color: D.red }}>{error}</div>}
+      {!data && !error && <div style={{ fontSize: 13, color: D.muted }}>Loading…</div>}
+      {data && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 16 }}>
+            {POLICY_GROUPS.map((g) => (
+              <div key={g.title} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>{g.title}</div>
+                {g.fields.map(renderField)}
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 16, flexWrap: "wrap" }}>
+            <button onClick={save} disabled={saving || !dirty.length} style={btn(saving || !dirty.length)}>
+              {saving ? "Saving…" : dirty.length ? `Save ${dirty.length} change${dirty.length === 1 ? "" : "s"}` : "No changes"}
+            </button>
+            {dirty.length > 0 && (
+              <button
+                onClick={() => {
+                  setDraft({});
+                  setError(null);
+                }}
+                disabled={saving}
+                style={btn(saving)}
+              >
+                Discard
+              </button>
+            )}
+            {saved && <span style={{ fontSize: 12, color: D.green }}>{saved}</span>}
+            {data.updated_at && (
+              <span style={{ fontSize: 12, color: D.muted }}>
+                Last change {formatETDate(data.updated_at)}
+                {data.updated_by ? ` by ${data.updated_by}` : ""}
+              </span>
+            )}
+          </div>
+          {data.audit?.length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}>Recent changes</div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      <th style={thStyle}>When</th>
+                      <th style={thStyle}>Who</th>
+                      <th style={thStyle}>Field</th>
+                      <th style={thStyle}>From</th>
+                      <th style={thStyle}>To</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.audit.map((a) => (
+                      <tr key={a.id}>
+                        <td style={tdStyle}>{formatETDate(a.changed_at)}</td>
+                        <td style={{ ...tdStyle, fontFamily: "inherit" }}>{a.changed_by || "—"}</td>
+                        <td style={tdStyle}>{a.field}</td>
+                        <td style={tdStyle}>{a.old_value ?? "null"}</td>
+                        <td style={tdStyle}>{a.new_value ?? "null"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
 function BacklinkAgentPanel() {
   const [stats, setStats] = useState(null);
   const [queue, setQueue] = useState([]);
@@ -3818,6 +4051,8 @@ function BacklinkAgentPanel() {
         </Card>
         {/* Registry view + investigator (plan v2 step 3) */}
         <BacklinkRegistryCard />
+        {/* Acquisition authority policy (plan v2 step 4a) */}
+        <LinkPolicyPanel />
         {/* Manual URL Input */}
         <Card>
           {" "}
