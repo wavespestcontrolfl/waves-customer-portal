@@ -5,11 +5,11 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const nativeShare = { can: false, native: false, share: vi.fn(async () => true) };
 vi.mock('../native/nativeFile', async (importOriginal) => {
   const actual = await importOriginal();
-  return { ...actual, canShareNative: () => nativeShare.can, shareUrlNative: (...a) => nativeShare.share(...a) };
+  return { ...actual, canShareNative: () => nativeShare.can, isNativeApp: () => nativeShare.native, shareUrlNative: (...a) => nativeShare.share(...a) };
 });
 // The page reads the shell flag from native/platform, not nativeFile.
 vi.mock('../native/platform', async (importOriginal) => {
@@ -19,6 +19,7 @@ vi.mock('../native/platform', async (importOriginal) => {
 import { ReturnVisitStrip } from './EstimateViewPage';
 
 afterEach(() => cleanup());
+beforeEach(() => { nativeShare.share.mockClear(); nativeShare.can = false; nativeShare.native = false; });
 
 describe('ReturnVisitStrip', () => {
   it('renders nothing without a payload or on a first visit', () => {
@@ -53,7 +54,8 @@ describe('ReturnVisitStrip', () => {
   it('shares through the customer’s own sms: draft when navigator.share is absent', () => {
     render(<ReturnVisitStrip returnVisit={{ visitNumber: 2, lastVisitAt: '2026-08-30T14:00:00.000Z', changes: [] }} />);
     const link = screen.getByRole('link', { name: 'Text this to someone' });
-    expect(link.getAttribute('href')).toBe(`sms:?&body=${encodeURIComponent(window.location.href)}`);
+    // Canonical origin + pathname — never the query string (GH codex r6 P1).
+    expect(link.getAttribute('href')).toBe(`sms:?&body=${encodeURIComponent(`${window.location.origin}${window.location.pathname}`)}`);
   });
 
   it('prefers navigator.share when the device offers it', async () => {
@@ -97,9 +99,9 @@ describe('ReturnVisitStrip', () => {
     vi.stubGlobal('navigator', { ...navigator, share: webShare });
     render(<ReturnVisitStrip returnVisit={{ visitNumber: 2, lastVisitAt: '2026-08-30T14:00:00.000Z', changes: [] }} />);
     const link = screen.getByRole('link', { name: 'Text this to someone' });
-    const evt = fireEvent.click(link);
+    fireEvent.click(link);
     expect(webShare).not.toHaveBeenCalled();
-    expect(evt).toBe(true); // default sms: navigation not prevented
+    expect(nativeShare.share).not.toHaveBeenCalled();
     nativeShare.native = false;
     vi.unstubAllGlobals();
   });

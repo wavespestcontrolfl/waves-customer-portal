@@ -78,7 +78,7 @@ import {
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
 import useModalFocus from '../hooks/useModalFocus';
-import { canShareNative, shareUrlNative } from '../native/nativeFile';
+import { canonicalShareUrl, shareDocumentLink } from '../components/DocumentActionBar';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { etParts, formatETDate, formatETDateTime } from '../lib/timezone';
@@ -1132,29 +1132,15 @@ export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, show
     : null;
   const changes = Array.isArray(returnVisit.changes) ? returnVisit.changes.filter((c) => c && c.label) : [];
   const since = lastDisplay ? ` since ${lastDisplay}` : '';
-  const pageUrl = typeof window !== 'undefined' ? window.location.href : '';
-  // Capacitor shell first (Web Share is unreliable in the webview and a
-  // swallowed rejection would make the tap do nothing), then Web Share, else
-  // the sms: href proceeds untouched (GH codex r3 P1). Mirrors
-  // DocumentActionBar.
+  // The page's ONE share mechanism (DocumentActionBar's), with the sms:
+  // draft as this control's fallback: canonical origin + pathname, so an
+  // ?intent=accept or staff-preview marker never rides the shared link (GH
+  // codex r6 P1). The href is the same canonical sms: draft for a plain tap.
+  const pageUrl = typeof window !== 'undefined' ? canonicalShareUrl() : '';
   const smsHref = `sms:?&body=${encodeURIComponent(pageUrl)}`;
   const share = async (e) => {
-    // Native shell WITHOUT the Share plugin (an older installed binary
-    // running this bundle): Web Share is the unreliable path there, so the
-    // sms: link proceeds untouched (GH codex r4 P1).
-    if (isNativeApp() && !canShareNative()) return;
-    if (canShareNative()) {
-      e.preventDefault();
-      try { await shareUrlNative(pageUrl, 'My Waves estimate'); } catch { window.location.href = smsHref; }
-      return;
-    }
-    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
-      e.preventDefault();
-      try { await navigator.share({ title: 'My Waves estimate', url: pageUrl }); } catch (err) {
-        // A dismissed sheet is an AbortError; anything else falls back to sms.
-        if (!err || err.name !== 'AbortError') window.location.href = smsHref;
-      }
-    }
+    e.preventDefault();
+    await shareDocumentLink({ title: 'My Waves estimate', fallback: 'sms' });
   };
   const actionStyle = {
     background: 'none', border: 'none', padding: '6px 10px', fontSize: 14, fontWeight: 600,
@@ -5194,7 +5180,12 @@ function EstimateViewPageInner() {
     // same ordering rule — before setData) so the commercial copy pack and
     // the residential fallback can never render torn on one paint.
     setCommercialGlass(body?.cta?.commercialGlass === true);
-    setData(body);
+    // A refresh belongs to the sitting already on screen: the server withholds
+    // returnVisit on a refresh it cannot prove is inside a recorded sitting
+    // (a tab left open past the session gap), and the strip must not vanish
+    // mid-session for that — carry the loaded projection forward (GH codex
+    // r6 P2). A fresh open always takes the server's word.
+    setData((prev) => (isRefresh && prev?.returnVisit && !body.returnVisit ? { ...body, returnVisit: prev.returnVisit } : body));
     setLoading(false);
     const defaultServiceMode = body?.estimate?.defaultServiceMode || body?.pricing?.defaultServiceMode;
     const isOneTimeOnly = body?.estimate?.isOneTimeOnly === true || defaultServiceMode === 'one_time';

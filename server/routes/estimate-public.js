@@ -25056,7 +25056,6 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         }
         const returnVisit = buildReturnVisitPayload({
           sessions,
-          estimateData: parseEstimateDataSafe(estimate),
           extensionAutoGrantedAt: estimate.extension_auto_granted_at || null,
         });
         if (returnVisit) returnVisitBlock = { returnVisit };

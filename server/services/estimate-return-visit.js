@@ -10,8 +10,6 @@
 // recognized stamp fired, never that the price or plan are unchanged — the
 // page's empty-state copy must not claim equality (pre-push codex P1).
 
-const { SESSION_GAP_MINUTES } = require('./estimate-engagement-sessions');
-
 function toDate(value) {
   if (!value) return null;
   const d = value instanceof Date ? value : new Date(value);
@@ -33,13 +31,11 @@ function extensionChange(extensionAutoGrantedAt, since) {
 }
 
 /**
- * @param {{ sessions: Array<{startedAt: Date, endedAt: Date}>, estimateData: object,
+ * @param {{ sessions: Array<{startedAt: Date, endedAt: Date}>,
  *           extensionAutoGrantedAt?: string|Date|null }} args
  * @returns {{ visitNumber: number, lastVisitAt: string, changes: Array } | null}
  */
-function buildReturnVisitPayload({
-  sessions, estimateData = {}, extensionAutoGrantedAt = null, sessionGapMinutes = SESSION_GAP_MINUTES,
-} = {}) {
+function buildReturnVisitPayload({ sessions, extensionAutoGrantedAt = null } = {}) {
   const list = Array.isArray(sessions) ? sessions.filter((s) => s && toDate(s.endedAt)) : [];
   if (list.length < 2) return null;
   const previous = list[list.length - 2];
@@ -53,10 +49,7 @@ function buildReturnVisitPayload({
   // sitting it happened in.
   // The extension grant is independently durable and compares against the
   // previous visit's end itself.
-  const changes = extensionChange(extensionAutoGrantedAt, previousEnd)
-    .sort((a, b) => a.at.localeCompare(b.at));
-  void sessionGapMinutes;
-  void estimateData;
+  const changes = extensionChange(extensionAutoGrantedAt, previousEnd);
   return {
     visitNumber: list.length,
     lastVisitAt: previousEnd.toISOString(),
