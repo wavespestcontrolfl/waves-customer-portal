@@ -18,6 +18,20 @@ function maskSid(sid) {
   return value.length <= 8 ? `${value.slice(0, 2)}…` : `${value.slice(0, 2)}…${value.slice(-6)}`;
 }
 
+// GATE_CALL_COMMITMENTS off means NOTHING is written to call_commitments —
+// including by a person. Fail closed on the mutations; reads stay open so
+// rows recorded while the gate was on remain visible.
+function requireCommitmentsEnabled(req, res, next) {
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('callCommitments')) {
+    return res.status(409).json({
+      error: 'Call commitments are off (GATE_CALL_COMMITMENTS); nothing is written while the gate is off.',
+      code: 'COMMITMENTS_DISABLED',
+    });
+  }
+  return next();
+}
+
 function rejectQueryString(req, res, next) {
   if (req.originalUrl.includes('?')) {
     return res.status(400).json({
@@ -204,12 +218,16 @@ router.get('/calls/:id/intelligence', async (req, res, next) => {
     const { loadCallIntelligence } = require('../services/call-intelligence');
     const intelligence = await loadCallIntelligence(db, req.params.id);
     if (!intelligence) return res.status(404).json({ error: 'Call not found' });
-    res.json({ intelligence });
+    const { isEnabled } = require('../config/feature-gates');
+    // The panel hides its write controls when the gate is off, instead of
+    // offering buttons that can only 409.
+    res.json({ intelligence, features: { commitments: isEnabled('callCommitments') } });
   } catch (err) { next(err); }
 });
 
 // POST /calls/:id/commitments — the office records a promise the AI missed.
-router.post('/calls/:id/commitments', requireAdmin, async (req, res, next) => {
+// Staff-wide (router-level requireTechOrAdmin), like tagging a disposition.
+router.post('/calls/:id/commitments', requireCommitmentsEnabled, async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
     const call = await db('call_log').where({ id: req.params.id }).first('id');
@@ -232,7 +250,8 @@ router.post('/calls/:id/commitments', requireAdmin, async (req, res, next) => {
 
 // PATCH /commitments/:id — confirm / dismiss / fulfill / reopen / edit. A
 // human verdict is recorded on the row and survives every reprocess.
-router.patch('/commitments/:id', requireAdmin, async (req, res, next) => {
+// Staff-wide: settling a promise is the office's daily work.
+router.patch('/commitments/:id', requireCommitmentsEnabled, async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Commitment id must be a UUID' });
     const { applyHumanUpdate } = require('../services/call-commitments');

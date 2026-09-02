@@ -142,6 +142,17 @@ describe("CallIntelligencePanel", () => {
     expect(screen.getByRole("button", { name: "Mark done" })).toBeInTheDocument();
   });
 
+  it("hides every write control when the gate is off and says why", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ intelligence: intelligence(), features: { commitments: false } }) })));
+    render(<CallIntelligencePanel callId={CALL_ID} />);
+    fireEvent.click(screen.getByRole("button", { name: /call intelligence/i }));
+    await waitFor(() => expect(screen.getByText(/GATE_CALL_COMMITMENTS is on/)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Confirm" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add" })).not.toBeInTheDocument();
+    // Rows still render read-only.
+    expect(screen.getAllByText("Send the caller an estimate", { selector: "div" }).length).toBeGreaterThan(0);
+  });
+
   it("colours an overdue open commitment as an alert and a kept one as strong", () => {
     expect(commitmentStatusTone({ status: "open", due_at: "2000-01-01T00:00:00Z" })).toBe("alert");
     expect(commitmentStatusTone({ status: "open", due_at: null })).toBe("neutral");

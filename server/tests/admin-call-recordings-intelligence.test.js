@@ -6,6 +6,7 @@ jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'aut
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/call-recording-processor', () => ({ processRecording: jest.fn() }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(() => Promise.resolve(true)) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.fn() }));
 jest.mock('../services/call-commitments', () => ({
   applyHumanUpdate: jest.fn(),
@@ -25,6 +26,7 @@ const express = require('express');
 const db = require('../models/db');
 const processor = require('../services/call-recording-processor');
 const intelligence = require('../services/call-intelligence');
+const { isEnabled } = require('../config/feature-gates');
 const commitments = require('../services/call-commitments');
 const router = require('../routes/admin-call-recordings');
 
@@ -70,6 +72,7 @@ function mockDb(firstResults) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockRole = 'admin';
+  isEnabled.mockReturnValue(true);
 });
 
 describe('GET /calls/:id/intelligence', () => {
@@ -86,7 +89,15 @@ describe('GET /calls/:id/intelligence', () => {
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`);
       expect(res.status).toBe(200);
-      expect((await res.json()).intelligence.call_id).toBe(CALL_ID);
+      const body = await res.json();
+      expect(body.intelligence.call_id).toBe(CALL_ID);
+      // The panel hides its write controls on this flag.
+      expect(body.features).toEqual({ commitments: true });
+    });
+    isEnabled.mockReturnValue(false);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`);
+      expect((await res.json()).features).toEqual({ commitments: false });
     });
   });
   test('404s when the call does not exist', async () => {
@@ -98,10 +109,34 @@ describe('GET /calls/:id/intelligence', () => {
   });
 });
 
-describe('corrections are admin-only', () => {
+describe('commitment writes are staff-wide but fail closed when the gate is off', () => {
   test.each([
     ['PATCH', `/commitments/${COMMIT_ID}`, { action: 'confirm' }],
     ['POST', `/calls/${CALL_ID}/commitments`, { party: 'waves', kind: 'callback', description: 'x' }],
+  ])('%s %s → 409 COMMITMENTS_DISABLED with the gate off, no service call', async (method, path, body) => {
+    isEnabled.mockReturnValue(false);
+    mockDb([]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings${path}`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('COMMITMENTS_DISABLED');
+    });
+    expect(commitments.applyHumanUpdate).not.toHaveBeenCalled();
+    expect(commitments.addHumanCommitment).not.toHaveBeenCalled();
+  });
+
+  test('a technician can settle a promise (staff-wide, like tagging a disposition)', async () => {
+    mockRole = 'tech';
+    commitments.applyHumanUpdate.mockResolvedValue({ id: COMMIT_ID, human_state: 'confirmed' });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
+      expect(res.status).toBe(200);
+    });
+  });
+});
+
+describe('customer relink and recording adoption stay admin-only', () => {
+  test.each([
     ['PUT', `/calls/${CALL_ID}/customer`, { customer_id: CUSTOMER_ID }],
     ['POST', `/calls/${CALL_ID}/adopt-recording`, { recording_sid: 'RE' + '1'.repeat(32) }],
   ])('%s %s → 403 for a technician', async (method, path, body) => {

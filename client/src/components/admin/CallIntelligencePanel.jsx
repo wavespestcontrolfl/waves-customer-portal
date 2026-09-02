@@ -91,7 +91,7 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
     setState((s) => ({ ...s, status: "loading", error: null }));
     try {
       const body = await adminFetch(`/admin/call-recordings/calls/${encodeURIComponent(callId)}/intelligence`);
-      setState({ status: "ready", data: body.intelligence, error: null });
+      setState({ status: "ready", data: body.intelligence, error: null, canEdit: body.features?.commitments !== false });
     } catch (err) {
       setState({ status: "error", data: null, error: err.message || "Could not load call intelligence." });
     }
@@ -121,6 +121,8 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
     adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) });
 
   const view = state.data;
+  // Off gate: reads still render what was recorded; writes are not offered.
+  const canEdit = state.canEdit !== false;
 
   return (
     <div className="mt-1.5 ml-8 bg-zinc-50 border-hairline rounded-md">
@@ -278,10 +280,15 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
           <div>
             <div className="flex items-center justify-between gap-2">
               <span className="text-13 md:text-11 text-ink-tertiary font-medium uppercase tracking-label">Commitments</span>
-              <Button size="sm" variant="ghost" onClick={() => setAdding(adding ? null : { party: "waves", kind: "callback", description: "", due_at: "" })}>
-                {adding ? "Cancel" : "Add"}
-              </Button>
+              {canEdit && (
+                <Button size="sm" variant="ghost" onClick={() => setAdding(adding ? null : { party: "waves", kind: "callback", description: "", due_at: "" })}>
+                  {adding ? "Cancel" : "Add"}
+                </Button>
+              )}
             </div>
+            {!canEdit && (
+              <div className="mt-1 text-13 md:text-12 text-ink-tertiary">Commitments are recorded and edited only while GATE_CALL_COMMITMENTS is on; rows already recorded stay visible.</div>
+            )}
             {adding && (
               <form
                 className="mt-1.5 space-y-1.5"
@@ -389,7 +396,7 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote }) {
                         ))}
                       </ul>
                     )}
-                    {!isEditing && (
+                    {!isEditing && canEdit && (
                       <div className="flex flex-wrap gap-1.5">
                         {c.status === "open" && c.human_state !== "confirmed" && (
                           <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => act("confirm", () => patchCommitment(c.id, { action: "confirm" }))}>Confirm</Button>
