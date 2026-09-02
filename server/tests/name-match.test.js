@@ -91,10 +91,16 @@ describe('payerNameCorroborates', () => {
   });
 
   test('every common joint separator splits people, so a second person can never lend a surname', () => {
-    for (const line of ['ALICE JONES / ROBERT DOE', 'ALICE JONES + ROBERT DOE', 'ALICE JONES; ROBERT DOE', 'Alice Jones AND Robert Doe']) {
+    for (const line of ['ALICE JONES / ROBERT DOE', 'ALICE JONES + ROBERT DOE', 'ALICE JONES; ROBERT DOE', 'Alice Jones AND Robert Doe', 'ALICE JONES OR ROBERT DOE']) {
       expect(payerNameCorroborates(line, { first_name: 'Alice', last_name: 'Doe' })).toBe(false);
       expect(payerNameCorroborates(line, customer)).toBe(true);
     }
+  });
+
+  test('a final person with a middle name lends no surname — Pat parks rather than becoming Pat James Doe', () => {
+    expect(payerNameCorroborates('PAT & ROBERT JAMES DOE', { first_name: 'Pat', last_name: 'Doe' })).toBe(false);
+    expect(payerNameCorroborates('PAT & ROBERT JAMES DOE', { first_name: 'Pat', last_name: 'James Doe' })).toBe(false);
+    expect(payerNameCorroborates('PAT & ROBERT JAMES DOE', customer)).toBe(true);
   });
 
   test('a multi-token earlier person on a joint line never borrows the final surname (ambiguous → human)', () => {
