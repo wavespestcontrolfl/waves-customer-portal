@@ -22,13 +22,14 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 ## Codex gate (all, on the FINAL commit)
 - [ ] Codex completed on the final HEAD: either the clean issue comment (Reviewed-commit SHA == final HEAD) or a review whose findings anchor to the final HEAD
 - [ ] PR reviews + inline comments polled with `--paginate`; count stable for 15 min after the wrapper (inline findings have lagged it by up to ~12 min — #3669 r4)
-- [ ] Zero unresolved P0/P1 on the current head (`original_commit_id` checked for staleness): each one fixed or rebutted inline with file:line evidence
-- [ ] Every P2 on the current head is fixed, rebutted inline, or listed under `Deferred P2s` in the PR body with file:line + reason — nothing silently unaddressed
+- [ ] Severity read on the GitHub P0–P3 badge scale (the pre-push schema's P0–P2 is a different scale; its P2 = GitHub P2+P3)
+- [ ] Zero unresolved P0/P1 on the current head (`original_commit_id` checked for staleness): each one FIXED, or rebutted inline with file:line evidence AND that rebuttal accepted — by Adam in-session, or by a later Codex round on this same head that did not re-dispute it. A rebuttal Codex has not yet evaluated is unresolved (post `@codex review` and wait); one Codex re-disputed is unresolved and listed under `Open for Adam` in the PR body — it blocks every merge path until Adam decides
+- [ ] Every P2 on the current head is fixed, rebutted inline, or listed under `Deferred P2s` in the PR body with file:line + reason — nothing silently unaddressed. P3s are advisory and need nothing.
 - [ ] Round history checked: if round 5 or later produced a NEW P0/P1, this PR is a split proposal for Adam, not a merge
 
 ## Merge authorization
-- [ ] Blast-radius diff (AGENTS.md P0 domains / CLAUDE.md rule-18 contracts: money, customer comms, schema/CHECK values, public token routes, webhooks, admin auth, native-app endpoints)? → Adam's in-session authorization is REQUIRED; standing "merge when clean" does not apply
-- [ ] Otherwise: Adam authorized this merge in-session, OR a standing "merge when clean" applies AND the Codex gate above passed (a rebutted round qualifies)
+- [ ] Blast-radius diff? Check the diff against the FULL CLAUDE.md rule-18 list (money, customer comms, schema/CHECK values, public token routes, every webhook payload, admin auth, iOS/Android-consumed endpoints, astro spoke-fleet form posts and feeds, retained V1 exports, persisted identifiers) plus AGENTS.md P0 domains → Adam's in-session authorization is REQUIRED; standing "merge when clean" does not apply
+- [ ] Otherwise: Adam authorized this merge in-session, OR a standing "merge when clean" applies AND the Codex gate above passed (a rebutted round qualifies only once its P0/P1 rebuttals are confirmed or Adam-accepted; an unevaluated or re-disputed P0/P1 rebuttal does not)
 - [ ] If the PR was just un-drafted: the deeper un-draft review has completed on the final HEAD
 - [ ] Squash commit message checked — it comes from the commit message (written from a file), not the PR title
 
