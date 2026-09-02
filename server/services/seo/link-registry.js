@@ -150,6 +150,18 @@ function pathLinkTypeFor(linkType) {
   return CLAIMABLE_LINK_TYPES.has(linkType) ? linkType : 'resource';
 }
 
+/**
+ * STANDING confidence — the ONE predicate every worker-facing check shares
+ * (claim, send valve, release-time reconcile, lost-link relink): a path a
+ * worker may act on has a POSITIVE, finite confidence. NULL (schema-permitted,
+ * never assessed), 0 (disproven) and anything non-numeric are all refused,
+ * fail closed. The SQL twin lives in worker.claim()'s candidate pre-filter.
+ */
+function isStandingConfidence(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0;
+}
+
 /** Submission-URL normalization for path identity: lower host, no fragment, no trailing slash. */
 function normalizeSubmissionUrl(url) {
   const raw = String(url || '').trim();
@@ -341,12 +353,202 @@ async function ensureDomain(q, { domain, source, sourceDetail = null, sourceRef 
   return { id: row.id, domain: key, created, touched, touchId: (touchRow && touchRow.id) || null };
 }
 
+
+/**
+ * Placements follow path supersession (§3.2) — ONE mechanism, two callers:
+ *
+ *   settleRetiredPlacements(q, { pathIds, successor })   — the investigator,
+ *     right after it superseded `pathIds` into `successor` ({ id, submission_url }).
+ *   settleRetiredPlacements(q, { prospectIds })          — the worker, right
+ *     after a lease is released (report / release / expired-claim sweep):
+ *     each placement's linked path is followed along `superseded_by` to the
+ *     live successor.
+ *
+ * Only UN-LEASED placements move (`claimed_at IS NULL`): a leased one is
+ * mid-submission through the path it was claimed on and its attempt ledger
+ * names that path — it is settled when its lease clears, which is why the
+ * worker calls this at every lease release rather than waiting for a future
+ * re-investigation. The placement's EXECUTION URL (`target_url`) moves with
+ * it whenever the successor has one (the runner submits at target_url, and
+ * the board catch-up keys legacy placements on it); a URL-less successor
+ * (outreach) leaves target_url alone. Returns the number of rows moved.
+ */
+const SUCCESSOR_COLUMNS = ['id', 'superseded_by', 'submission_url', 'link_type', 'revision', 'confidence'];
+
+/**
+ * A moved placement takes the successor's LANE and is left UNCLASSIFIED:
+ *   - `link_type` follows the successor's path lane (the worker claims by
+ *     the placement's link_type — a directory placement superseded by an
+ *     outreach path must leave the signup lane, or the runner would execute
+ *     the retired route while the ledger names the outreach successor);
+ *   - `automation_policy` / `last_classified_at` are cleared. The policy was
+ *     classified for the OLD path; the successor's CAPTCHA / category /
+ *     account gates are only known once the weekly classifier has fetched
+ *     ITS page (a null last_classified_at puts it first in line), and until
+ *     then no runner may lease it (claim() filters on the policy). Fail
+ *     closed — never a synthesized policy from an incomplete signal.
+ */
+// Outreach state that is IN FLIGHT or AMBIGUOUS: a placement carrying it
+// never moves (a send may still be executing, or needs human
+// reconciliation) — it keeps the retired path, which nothing can claim.
+const OUTREACH_LOCKED = new Set(['sending', 'sent', 'send_error']);
+const PLACEMENT_MOVE_COLUMNS = ['id', 'path_id', 'link_type', 'outreach_status', 'outreach_sent_at', 'outreach_send_token', 'leased_path_revision'];
+
+/**
+ * The move UPDATE is OPTIMISTIC on everything the decision read: the path,
+ * the lease, and the outreach state (status, sent stamp, send token). The
+ * send path flips a draft to `sending` WITHOUT taking the lease, so a
+ * snapshot taken just before it must miss — otherwise the stale
+ * draft-clearing patch would erase the token the finalizer is about to
+ * match, leaving a sent message with no sent marker (a later duplicate).
+ */
+function observedWhere(q, row) {
+  let w = q('seo_link_prospects').where({ id: row.id }).whereNull('claimed_at');
+  for (const col of ['path_id', 'outreach_status', 'outreach_sent_at', 'outreach_send_token']) {
+    w = row[col] == null ? w.whereNull(col) : w.where(col, row[col]);
+  }
+  return w;
+}
+
+/**
+ * The patch that moves ONE placement onto `target`, or null when the move
+ * must be refused: a locked state (sending / sent / send_error, or a sent
+ * stamp) refuses any move; an unsent draft (`drafted`) is cleared with its
+ * token on every move, so the approval queue never sends a message composed
+ * for a route that no longer exists; the lane follows the successor.
+ */
+function movePatch(row, target, now, { syncUrl = false } = {}) {
+  // locked outreach never moves AT ALL — same lane, other outreach lane, or
+  // signup lane: a send may be executing against the path it was claimed
+  // on, or the row awaits human reconciliation; the retired path stays
+  // (nothing can claim it) and the attempt/send stays attributed to it
+  if (OUTREACH_LOCKED.has(row.outreach_status) || row.outreach_sent_at) return null;
+  // The transition CONSUMES the lease stamp: a same-path reconcile at release
+  // fires once per lease, never again on every later release or operator
+  // draft of the same (now settled) row.
+  const patch = { path_id: target.id, updated_at: now, automation_policy: null, last_classified_at: null, leased_path_revision: null };
+  // The execution URL follows the successor; a URL-less successor (outreach)
+  // CLEARS it — the retired route must not survive as the page the outreach
+  // drafter fetches and cites. A release-time reconcile of the SAME path
+  // (syncUrl) syncs it to the path's own URL even when that is now null; an
+  // investigator same-path refresh leaves an outreach row's pitch page alone.
+  if (target.submission_url) patch.target_url = target.submission_url;
+  else if (target.id !== row.path_id || syncUrl) patch.target_url = null;
+  // an UNSENT draft was written for the path it is leaving — on EVERY move
+  // (same lane included) it is cleared with its token, so the approval
+  // endpoint can never send a message composed for a retired route
+  if (row.outreach_status === 'drafted') {
+    Object.assign(patch, { outreach_status: 'none', outreach_to_email: null, outreach_subject: null, outreach_body: null, outreach_send_token: null });
+  }
+  const nextLane = target.link_type && CLAIMABLE_LINK_TYPES.has(target.link_type) ? target.link_type : null;
+  if (nextLane && nextLane !== row.link_type) patch.link_type = nextLane;
+  return patch;
+}
+
+async function settleRetiredPlacements(q, { pathIds = null, successor = null, prospectIds = null, now = new Date() } = {}) {
+  const moveRows = async (rows, target, opts) => {
+    let moved = 0;
+    for (const row of rows) {
+      const patch = movePatch(row, target, now, opts);
+      if (!patch) continue;
+      moved += await observedWhere(q, row).update(patch);
+    }
+    return moved;
+  };
+  if (successor && successor.id && Array.isArray(pathIds)) {
+    if (!pathIds.length) return 0;
+    const rows = await q('seo_link_prospects').whereIn('path_id', pathIds).whereNull('claimed_at').select(...PLACEMENT_MOVE_COLUMNS);
+    return moveRows(rows || [], successor);
+  }
+  if (!Array.isArray(prospectIds) || !prospectIds.length) return 0;
+  // Lock order everywhere is prospect → path: the placement rows are locked
+  // FIRST (callers that already hold them re-lock harmlessly), then the
+  // path rows below — a save holding a prospect and a send holding a path
+  // can no longer wait on each other.
+  const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').whereNotNull('path_id').forUpdate().select(...PLACEMENT_MOVE_COLUMNS);
+  const linked = (rows || []).filter((r) => r.path_id); // an un-backfilled legacy row has no path to follow
+  if (!linked.length) return 0;
+  // Pass 1 — resolve every chain WITHOUT locks, collecting the path ids
+  // involved. Cycle-safe rather than hop-capped: a chain is followed to its
+  // end however long it is, and a cycle (data corruption — supersession
+  // requires an active predecessor) throws, so no caller can ever mistake
+  // an unresolved chain for a clean no-op.
+  const involved = new Set();
+  const walk = async (startId, read) => {
+    const seen = new Set();
+    let id = startId;
+    let last = null;
+    while (id) {
+      if (seen.has(id)) throw new Error(`link-registry: supersession cycle at path ${id}`);
+      seen.add(id);
+      const p = await read(id);
+      if (!p) return null;
+      last = p;
+      id = p.superseded_by;
+    }
+    return last;
+  };
+  for (const r of linked) {
+    await walk(r.path_id, async (id) => { involved.add(id); return q('seo_link_acquisition_paths').where({ id }).first('id', 'superseded_by'); });
+  }
+  // Pass 2 — lock the involved path rows in ONE deterministic order (sorted
+  // ids), held until the caller's transaction commits: two parallel claims /
+  // sweeps touching the same paths in opposite row order can no longer
+  // deadlock each other. Every worker-mode caller runs inside a transaction.
+  const locked = new Map();
+  if (involved.size) {
+    for (const p of await q('seo_link_acquisition_paths').whereIn('id', [...involved].sort()).orderBy('id').forUpdate().select(...SUCCESSOR_COLUMNS)) locked.set(p.id, p);
+  }
+  // Pass 3 — re-walk under the locks (a successor appended between passes is
+  // fetched and locked on demand) and apply the moves.
+  let moved = 0;
+  for (const r of linked) {
+    const cur = await walk(r.path_id, async (id) => {
+      if (!locked.has(id)) { const p = await q('seo_link_acquisition_paths').where({ id }).forUpdate().first(...SUCCESSOR_COLUMNS); if (p) locked.set(id, p); }
+      return locked.get(id) || null;
+    });
+    if (!cur || cur.superseded_by) continue; // the chain led nowhere (path deleted)
+    if (cur.id === r.path_id) {
+      // same path, still live — but did it CHANGE while this placement was
+      // leased? The lease stamped the path revision it was taken on; a
+      // higher revision now (a gate change, a working-origin move, a lane
+      // shift) is a same-path transition the immediate write skipped
+      // because the row was leased: apply it at release.
+      // …and a DISPROOF during the lease (confidence dropped to 0) never
+      // bumps the revision (plan §3.2: confidence is not an input), yet a
+      // draft produced on a route just declared gone must not stay
+      // sendable — the transition runs for that too.
+      // …and a LANE that drifted from the path's while the row was UNLEASED
+      // (an in-place `link_type` change lands on the path without touching
+      // its placements, and an unleased row carries no revision stamp to
+      // compare) is reconciled here regardless of the stamp: the placement
+      // is claimed by ITS lane, so a directory row on a path that is now
+      // editorial would hand the signup runner an outreach route.
+      const leasedRev = r.leased_path_revision == null ? null : Number(r.leased_path_revision);
+      const pathLane = cur.link_type && CLAIMABLE_LINK_TYPES.has(cur.link_type) ? cur.link_type : null;
+      const laneDrift = !!pathLane && pathLane !== r.link_type;
+      if (leasedRev == null && !laneDrift) continue; // not released from a lease on this path, lane intact — nothing to reconcile
+      const revised = leasedRev != null && cur.revision != null && Number(cur.revision) > leasedRev;
+      // a NULL confidence (unassessed) counts as a disproof exactly as the
+      // claim and the send valve refuse it — a draft on such a path must not
+      // stay sendable until a later positive confidence lets it through
+      const disproven = leasedRev != null && !isStandingConfidence(cur.confidence);
+      if (!revised && !disproven && !laneDrift) continue;
+      moved += await moveRows([r], cur, { syncUrl: true }); // the path itself changed: its URL (even null) is the execution truth
+      continue;
+    }
+    moved += await moveRows([r], cur);
+  }
+  return moved;
+}
+
 module.exports = {
   LINK_SOURCES, AGENT_STATES, DISCOVERY_PRIORITIES, ACQUISITION_TYPES, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES,
   EXPECTED_REL, EXPECTED_INDEXABILITY, EXPECTED_PERSISTENCE, RENEWAL_PERIODS, PATH_LINK_TYPES,
   ATTEMPT_PROVIDERS, ATTEMPT_ACTIONS, ATTEMPT_OUTCOMES, AUTHORITY_DIMENSIONS, AUTHORITY_LEVELS,
   INTAKE_ITEM_STATES, INTAKE_DROP_REASONS, normalizeRawUrl, intakeItemKey,
   NEVER_TARGET_HOSTS, isNeverTargetHost,
-  mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, normalizeSubmissionUrl, pathKey,
+  mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, isStandingConfidence, normalizeSubmissionUrl, pathKey,
   acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain,
+  settleRetiredPlacements,
 };

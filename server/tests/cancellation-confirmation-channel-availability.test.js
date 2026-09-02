@@ -14,7 +14,9 @@ jest.mock('../services/messaging/compliance-contact-checks', () => ({
   latestContactCheck: jest.fn(async () => null),
   isSmsMobileLineType: (t) => t === 'mobile',
 }));
-const mockLoadTemplate = jest.fn(async () => ({ id: 't1', template_key: 'account.cancellation_received', send_stream: 'transactional' }));
+// loadTemplateByKey's real shape: { template, activeVersion } — the check
+// must unwrap it (deferred P2 from #3666 r34).
+const mockLoadTemplate = jest.fn(async () => ({ template: { id: 't1', template_key: 'account.cancellation_received', send_stream: 'transactional' }, activeVersion: null }));
 const mockActiveSuppression = jest.fn(async () => null);
 jest.mock('../services/email-template-library', () => ({
   loadTemplateByKey: (...a) => mockLoadTemplate(...a),
@@ -26,6 +28,7 @@ jest.mock('../models/db', () => jest.fn((table) => {
   const conds = [];
   const b = {
     where(c) { Object.entries(c).forEach(([k, v]) => conds.push((r) => r[k] === v)); return b; },
+    whereIn(k, vals) { conds.push((r) => vals.includes(r[k])); return b; },
     whereNotNull() { return b; },
     whereRaw() { return b; },
     first: async () => (mockTables[table] || []).find((r) => conds.every((c) => c(r))) || null,
@@ -53,7 +56,9 @@ test('an active email suppression (bounce / complaint / do-not-email) makes emai
   mockActiveSuppression.mockResolvedValueOnce({ id: 's1', suppression_type: 'bounce' });
   expect(await confirmationChannelAvailability(customer)).toEqual({ sms: true, email: false });
   expect(mockLoadTemplate).toHaveBeenCalledWith('account.cancellation_received');
-  expect(mockActiveSuppression).toHaveBeenCalledWith(expect.objectContaining({ template_key: 'account.cancellation_received' }), 'pat@example.com', null);
+  // The INNER template reaches the suppression check, never the wrapper.
+  expect(mockActiveSuppression).toHaveBeenCalledWith(expect.objectContaining({ template_key: 'account.cancellation_received', send_stream: 'transactional' }), 'pat@example.com', null);
+  expect(mockActiveSuppression.mock.calls[0][0].template).toBeUndefined();
 });
 
 test('an unseeded template still consults the global suppression types', async () => {
@@ -119,4 +124,12 @@ test('only a DEFINITIVE SMS policy block reads as blocked — a transient consen
   mockSendSms.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SUPPRESSED_OPT_OUT' });
   out = await sendCancellationConfirmations({ ...args, request: { id: 'req-5', created_at: new Date() } });
   expect(out.smsBlocked).toBe(true);
+});
+
+test('an active STOP stored in E.164 blocks a customer whose phone is stored FORMATTED — the same candidate lookup the sender uses (deferred P2 from #3666 r34)', async () => {
+  mockTables.messaging_suppression = [{ id: 'm1', phone: '+19415550100', active: true }];
+  expect(await confirmationChannelAvailability({ ...customer, phone: '(941) 555-0100' })).toEqual({ sms: false, email: true });
+  // An inactive (cleared) row does not block.
+  mockTables.messaging_suppression = [{ id: 'm1', phone: '+19415550100', active: false }];
+  expect(await confirmationChannelAvailability({ ...customer, phone: '(941) 555-0100' })).toEqual({ sms: true, email: true });
 });

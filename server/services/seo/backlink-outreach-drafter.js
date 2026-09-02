@@ -112,7 +112,10 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
     return { claimed: 0, drafted: 0, skipped: 0, failed: 0, note: 'no_anthropic' };
   }
 
-  const claimed = await worker.claim({ n: batchSize, type: 'outreach', requireContactEmail: true });
+  // A dry run uses the READ-ONLY preview: a live claim settles its candidates
+  // (repoints, draft clears, unclassify) before leasing, and none of that may
+  // happen on a preview — nothing is leased, so nothing is released either.
+  const claimed = await worker.claim({ n: batchSize, type: 'outreach', requireContactEmail: true, ...(dryRun ? { preview: true } : {}) });
   if (!claimed.length) {
     logger.info('[outreach-drafter] no claimable outreach prospects with a contact email');
     return { claimed: 0, drafted: 0, skipped: 0, failed: 0 };
@@ -152,10 +155,7 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
     }
   }
 
-  // Dry-run claimed leases but never reported (which is what releases a lease), so
-  // release them now — keeps a preview side-effect-free. Pass {id, lease_token} so
-  // we only clear OUR exact lease (never a newer one from a reclaim).
-  if (dryRun) await worker.releaseClaims(claimed.map((p) => ({ id: p.id, lease_token: p.lease_token }))).catch(() => {});
+  // (a dry run previewed without leasing — there is nothing to release)
 
   logger.info(`[outreach-drafter] claimed=${claimed.length} drafted=${drafted} skipped=${skipped} failed=${failed}${dryRun ? ' (DRY-RUN)' : ''}`);
   return { claimed: claimed.length, drafted, skipped, failed, ...(dryRun ? { samples } : {}) };

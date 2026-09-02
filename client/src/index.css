@@ -228,6 +228,16 @@ html.admin-app pre *,
   }
 }
 
+/* While the iOS keyboard is open (useAdminViewport sets data-keyboard-open
+   once --keyboard-inset reaches a keyboard-sized value), slide the fixed
+   mobile tab bar off-screen. Left in place it rides up on --keyboard-inset
+   and sits on top of the keyboard, covering the field being typed in. */
+html[data-keyboard-open] .admin-mobile-tabbar {
+  transform: translateY(150%);
+  visibility: hidden; /* also drops it from the tab order and the AT tree */
+  pointer-events: none;
+}
+
 /* Horizontal-scroll affordance for wide admin tables. Overlay scrollbars on
    macOS/iOS give no hint that a table continues to the right (Inventory hides
    ~45% of its columns, Pricing Reality Check ~60%). Pure-CSS scroll shadows:

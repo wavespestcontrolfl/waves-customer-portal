@@ -19,10 +19,13 @@ function wireDb() {
   claimAffected = 1;
   updates = [];
   db.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  db.transaction = jest.fn(async (cb) => cb(db)); // markLive releases + settles in one transaction
   db.mockImplementation(() => {
     const b = {};
     b.where = jest.fn(() => b);
     b.whereRaw = jest.fn(() => b);
+    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'forUpdate']) b[m] = jest.fn(() => b);
+    b.select = jest.fn(() => Promise.resolve([])); // release-side settlement's row read → nothing to move here
     b.update = jest.fn((patch) => {
       updates.push(patch);
       const qs = patch.quality_signals;

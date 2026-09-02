@@ -605,6 +605,7 @@ export default function AdminLayoutV2() {
       {isMobile && (
         <nav
           aria-label="Primary"
+          className="admin-mobile-tabbar"
           style={{
             position: "fixed",
             bottom: "var(--keyboard-inset, 0px)",
