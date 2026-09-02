@@ -5291,7 +5291,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const formRecommendations = normalizeCompletionTextArray(
       Array.isArray(recommendations) ? recommendations : [],
     );
-    const resolvedSpecialtyServiceKey = specialtyServiceKey({
+    // Typed lanes (mosquito_event, one-time pest, …) record their work in the
+    // typed findings schema, never through the specialty presets, even when
+    // their profile key aliases onto a specialty lane (mosquito_one_time →
+    // mosquito). The preset checks below apply only to preset closeouts
+    // (local audit P1 on #3701).
+    const resolvedSpecialtyServiceKey = typedFindingsType ? null : specialtyServiceKey({
       serviceKey: completionProfile?.serviceKey,
       serviceType: svc.service_type,
     });

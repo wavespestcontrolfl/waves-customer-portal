@@ -258,4 +258,14 @@ describe('specialty service closeout vocabulary', () => {
     expect(specialtyActionScopeForAreas(['Other'], 'exterior')).toBe('exterior');
     expect(specialtyActionScopeForAreas([], 'interior')).toBe('interior');
   });
+
+  test('the completion route skips specialty preset checks on typed lanes', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+    // mosquito_one_time aliases onto the mosquito preset while its typed
+    // mosquito_event schema owns the areas — the preset area/action checks
+    // must not run for typed closeouts.
+    expect(source).toMatch(/const resolvedSpecialtyServiceKey = typedFindingsType \? null : specialtyServiceKey\(/);
+  });
 });
