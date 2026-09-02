@@ -1288,6 +1288,38 @@ describe('POST /:id/cancel-plan', () => {
       expect(mockState.notifications[0].read_at).not.toBeNull();
     }));
 
+    test('a repair retry after the refunded term LEFT coverage carries the recorded prepay facts — the financial record is never blanked', () => withServer(async (baseUrl) => {
+      mockState.scheduled_services = [
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+      ];
+      // Attempt 1: term decided, refund recorded, confirmation failed —
+      // the acceptance stays open for a repair.
+      sendCancellationConfirmations.mockResolvedValueOnce({ smsSent: false, emailSent: false, channels: [] });
+      const first = await (await postCancel(baseUrl, { effectiveDate: 'now', prepayDisposition: 'end_now_refund' })).json();
+      expect(first.prepayTermOutcome).toBe('ended_now');
+      expect(first.refund).toEqual(expect.objectContaining({ amount: 360 }));
+      expect(first.errors).toEqual(['confirmation_sms_not_sent', 'confirmation_email_not_sent']);
+      expect(mockState.service_requests[0].status).toBe('new');
+      // The office issues the refund: the term is fully refunded and no
+      // longer covered — resolveLiveTerm finds nothing.
+      mockState.annual_prepay_terms = [];
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 0 });
+      const retry = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
+      expect(retry.requestId).toBe(first.requestId);
+      expect(retry.errors).toEqual([]);
+      // Nothing re-decided, no second refund task.
+      expect(mockRecordDecision).toHaveBeenCalledTimes(1);
+      // The record — and the response — keep attempt 1's terminal facts.
+      const latest = JSON.parse(mockState.cancellation_cases[mockState.cancellation_cases.length - 1].snapshot);
+      expect(latest).toEqual(expect.objectContaining({
+        prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', prepayTermOutcome: 'ended_now',
+        refund: expect.objectContaining({ amount: 360 }),
+      }));
+      expect(retry.prepayDisposition).toBe('end_now_refund');
+      expect(retry.prepayTermOutcome).toBe('ended_now');
+      expect(retry.refund).toEqual(expect.objectContaining({ amount: 360 }));
+    }));
+
     test('now + refund: coverage cancelled, refund RECORDED on the case + office task — nothing refunded automatically', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
         { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
@@ -1962,6 +1994,34 @@ describe('POST /:id/cancel-plan', () => {
       expect(body.duplicate).toBe(true);
       expect(mockProcess).not.toHaveBeenCalled();
       expect(mockState.service_requests[0].status).toBe('resolved');
+    }));
+
+    test('a FAILED latch close repair is surfaced on the echo — never a clean success over a request that stays reusable', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term',
+          outcome: { visitsPulled: 2, scope: [], confirmationRequested: false, confirmation: null, confirmationChannels: [], errors: [] },
+        }),
+      }];
+      db.mockImplementation((table) => {
+        const b = builderFor(table);
+        if (table === 'service_requests') { b.update = async () => { throw new Error('requests table down'); }; }
+        return b;
+      });
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      expect(body.duplicate).toBe(true);
+      expect(body.errors).toEqual(['acceptance_close_failed']);
+      expect(mockState.service_requests[0].status).toBe('new');
+      // The stored outcome stays clean so the next echo re-attempts the close.
+      expect(JSON.parse(mockState.cancellation_cases[0].snapshot).outcome.errors).toEqual([]);
     }));
 
     test('a decided-term OPEN acceptance with NO recorded outcome (lost stamp) runs the repair retry instead of echoing — the pull count is reconstructed and the acceptance resolves', () => withServer(async (baseUrl) => {

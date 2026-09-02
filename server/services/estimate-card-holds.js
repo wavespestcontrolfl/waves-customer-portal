@@ -1739,6 +1739,12 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
   const hold = await heldCardForScheduledService(scheduledServiceId);
   if (!hold) return { held: false, feeApplies: false };
   const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
+  // Rail OFF (ONE_TIME_CARD_HOLD kill switch) with a historical held row:
+  // no fee can be collected, so nothing below may report one — including
+  // the fee-may-apply posture of a FAILED time lookup, which would make the
+  // cancel card warn of, fingerprint, and invite a waiver for a charge the
+  // disabled rail never makes (codex GH r31 P2).
+  if (!isCardHoldEnabled()) return { held: true, feeApplies: false, feeAmount };
   let start = null;
   try {
     const { scheduledServiceApptTime } = require('./appointment-reminders');

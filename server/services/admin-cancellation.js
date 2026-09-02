@@ -1469,7 +1469,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             else throw new Error('acceptance close updated zero rows');
           }
         } catch (closeErr) {
-          // Still 'new' — the next echo retries; resends stay deduped.
+          // Still 'new' — the next echo retries; resends stay deduped. On
+          // the RESPONSE only (codex GH r31 P2): the stored outcome stays
+          // clean so the next echo re-attempts this close, but the operator
+          // must not read a clean success over a still-reusable request.
+          repairErrors.push('acceptance_close_failed');
           logger.warn(`[admin-cancellation] latch close repair failed for request ${prior.service_request_id}: ${closeErr.message}`);
         }
       }
@@ -1575,6 +1579,12 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // forever (and per-request dedupe keys would double-bell).
   let request = openAcceptance;
   let priorOutcome = null;
+  // The FIRST attempt's recorded prepay facts (term id, disposition,
+  // decision outcome, recorded/proposed refund): a repair retry after the
+  // office issued the recorded refund finds NO live term (coveredTermsAsOf
+  // omits a fully-refunded one), derives no prepay plan, and must not
+  // overwrite the financial record with nulls (codex GH r31 P1).
+  let priorPrepayFacts = null;
   // The date the cancellation TOOK EFFECT: on a repair retry the account was
   // churned and its visits pulled by the first attempt, so the case record
   // and the response keep that day — the prior snapshot's, or the accepted
@@ -1625,6 +1635,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         : null;
       priorOutcome = snap && snap.outcome ? snap.outcome : null;
       priorProposedRefund = snap && !snap.refund && snap.proposedRefund ? snap.proposedRefund : null;
+      if (snap && snap.prepayTermId) {
+        priorPrepayFacts = {
+          prepayTermId: snap.prepayTermId,
+          prepayDisposition: snap.prepayDisposition || null,
+          prepayTermOutcome: snap.prepayTermOutcome || null,
+          refund: snap.refund || null,
+          ...(snap.proposedRefund ? { proposedRefund: snap.proposedRefund } : {}),
+        };
+      }
       if (snap && /^\d{4}-\d{2}-\d{2}$/.test(String(snap.effectiveOn || ''))) priorEffectiveOn = snap.effectiveOn;
       if (snap && snap.waiveLateFee === true && !input.waiveLateFee) {
         input.waiveLateFee = true;
@@ -1901,19 +1920,25 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
 
   // The durable case (after the wind-down, like the portal path).
   const effectiveOn = prepayPlan.keepThrough || priorEffectiveOn || etDateString();
+  // No live term on this run but the first attempt recorded one: the term
+  // has since left coverage (refund issued, term cancelled) — its terminal
+  // facts are carried, never blanked.
+  const carriedPrepay = !term && priorPrepayFacts ? priorPrepayFacts : null;
   const caseSnapshotBody = {
     actor: { type: actorType, userId: actorUserId },
     effectiveDate: prepayPlan.effectiveDate,
     effectiveOn,
     waiveLateFee: input.waiveLateFee,
-    prepayDisposition: prepayPlan.prepayDisposition,
-    prepayTermId: term ? term.id : null,
-    prepayTermOutcome: termOutcome,
+    prepayDisposition: carriedPrepay ? carriedPrepay.prepayDisposition : prepayPlan.prepayDisposition,
+    prepayTermId: carriedPrepay ? carriedPrepay.prepayTermId : (term ? term.id : null),
+    prepayTermOutcome: carriedPrepay ? carriedPrepay.prepayTermOutcome : termOutcome,
     // A recorded refund is one whose cancel decision verified AND whose
     // office task persisted; anything else stays PROPOSED-only metadata so
     // the case never claims money that was not promised.
-    refund: refundRecorded ? refundFacts : null,
-    ...(refundFacts && !refundRecorded ? { proposedRefund: refundFacts } : {}),
+    refund: carriedPrepay ? carriedPrepay.refund : (refundRecorded ? refundFacts : null),
+    ...(carriedPrepay
+      ? (carriedPrepay.proposedRefund && !carriedPrepay.refund ? { proposedRefund: carriedPrepay.proposedRefund } : {})
+      : (refundFacts && !refundRecorded ? { proposedRefund: refundFacts } : {})),
     sendConfirmation: input.sendConfirmation,
     tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
     monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
@@ -2136,9 +2161,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     keptThrough: prepayPlan.keepThrough,
     // The processor's CONFIRMED waiver, never the raw request.
     lateFeeWaived: result ? result.lateFeeWaived === true : false,
-    prepayDisposition: prepayPlan.prepayDisposition,
-    prepayTermOutcome: termOutcome,
-    ...(refundRecorded && refundFacts ? { refund: refundFacts } : {}),
+    prepayDisposition: caseSnapshotBody.prepayDisposition,
+    prepayTermOutcome: caseSnapshotBody.prepayTermOutcome,
+    ...(caseSnapshotBody.refund ? { refund: caseSnapshotBody.refund } : {}),
     confirmation: confirmations.smsSent ? 'sms' : (confirmations.emailSent ? 'email' : null),
     confirmationChannels: confirmations.channels,
     confirmationRequested: input.sendConfirmation,
