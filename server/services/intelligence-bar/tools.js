@@ -1737,6 +1737,21 @@ async function cancelPlan(input, actionContext = {}) {
       if (err && err.code) return { error: err.message, code: err.code };
       throw err;
     }
+    // An UNEXECUTABLE preview is a tool failure, not a card: proposePendingWrite
+    // only treats `error` as failure, so a card for an ineligible account or
+    // an unsupported scope would deterministically fail on Confirm and
+    // consume a pending action (deferred P2 from #3666 r32).
+    if (!preview.eligible) {
+      return { error: 'There is no active plan, recurring service, or upcoming visit on this account to cancel.', code: 'nothing_to_cancel' };
+    }
+    if (preview.scopedSupported === false) {
+      const why = preview.scopeError === 'scope_not_owned'
+        ? 'That service is not on the plan any more.'
+        : preview.scopeError === 'scoped_covers_prepaid'
+          ? 'Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan, or leave the covered service in place.'
+          : 'The services that would stay cannot be priced from the plan-rate ledger — cancel the whole plan, or repair the ledger first.';
+      return { error: why, code: preview.scopeError || 'scoped_unsupported' };
+    }
     const impact = preview.impact || {};
     return {
       preview: true,

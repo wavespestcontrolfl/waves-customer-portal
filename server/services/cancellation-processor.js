@@ -99,7 +99,14 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
         .update({ read_at: new Date() });
       supersededDated = Number(stamped) > 0;
     } catch (supersedeErr) {
-      logger.warn(`[cancellation-processor] dated-retrieval supersede failed for ${customerId}: ${supersedeErr.message}`);
+      // NOT swallowed: raising the immediate task while the dated one may
+      // still stand would leave staff two contradictory instructions with
+      // no review error naming the stale one. Throwing lands as
+      // termite_retrieval_task on the run, and the latch's lost-task repair
+      // retries this whole raise (supersede + task) (deferred P2 from
+      // #3666 r32).
+      logger.error(`[cancellation-processor] dated-retrieval supersede failed for ${customerId}: ${supersedeErr.message}`);
+      throw new Error(`dated retrieval task could not be superseded: ${supersedeErr.message}`);
     }
   }
   // retrieveAfter (C3 end_of_coverage): paid termite visits stay on the

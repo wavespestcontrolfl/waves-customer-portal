@@ -57,6 +57,7 @@
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
+ *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true (12-month application strip under the lawn price card, arithmetic on visitsPerYear only; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
@@ -91,9 +92,23 @@ const gates = {
   // Payment Element minted card_or_bank unconditionally, letting a bank
   // account be saved while the customer saw the CARD consent copy; with the
   // gate off the portal setup-intent route now mints card-only. Kill
-  // switch: unset or any non-'true' value. Booking/estimate flows stay
-  // card-only regardless (owner ruling 2026-07-13).
+  // switch: unset or any non-'true' value. Booking flows stay card-only
+  // regardless (owner ruling 2026-07-13); the estimate accept capture has
+  // its own gate below (acceptAchCapture, owner ruling 2026-09-01).
   portalAchAutopay: process.env.GATE_PORTAL_ACH_AUTOPAY === 'true',
+
+  // Bank account on the estimate-accept Auto Pay capture (owner ruling
+  // 2026-09-01): the recurring per-application and in-lane prepay
+  // SetupIntent mints card_or_bank with INSTANT verification only
+  // (Financial Connections) — the accept trust boundary stays a live
+  // succeeded intent, so a bank that cannot instant-verify falls back to a
+  // card in the same session; no micro-deposit pending state at accept.
+  // An existing customer whose ach_status is set and not 'active' mints
+  // card-only (same precheck as the pay page's capture-setup). The one-time
+  // card hold and the /secure appointment-card link stay card-only. Gate
+  // off = byte-identical card-only mint and card copy. Customer-facing
+  // money surface — fail-closed ==='true' in every environment.
+  acceptAchCapture: process.env.GATE_ACCEPT_ACH_CAPTURE === 'true',
 
   // Portal payment-method removal guard (owner ruling 2026-08-27): the
   // method Auto Pay is using (getAutopaySelectedMethodIds — the charge
@@ -2040,6 +2055,16 @@ const gates = {
   // { available: false } and the completion screen keeps today's textareas.
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   techTips: gateEnvValue('GATE_TECH_TIPS'),
+
+  // Field dictation upload (2026-09-02): the completion-notes mic falls back
+  // to MediaRecorder + server transcription (OpenAI, same transcriber and
+  // PAN scrub as call recordings) when SpeechRecognition is unavailable.
+  // OFF unless set, dev AND prod — GET /api/tech/services/:id/dictation/
+  // availability answers { available: false } and the client keeps today's
+  // behavior (no mic without SpeechRecognition). Nothing is persisted: the
+  // transcript goes straight into the tech's notes box. Kill switch: unset.
+  // Read at CALL time so a flip needs no redeploy.
+  techDictationUpload: gateEnvValue('GATE_TECH_DICTATION_UPLOAD'),
 
 };
 

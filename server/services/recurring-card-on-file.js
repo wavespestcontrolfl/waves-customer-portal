@@ -82,7 +82,7 @@ function isPrepayCardAndChargeEnabled() {
 // sibling pick (same query shape, minus the advisory lock); the trx
 // re-resolves authoritatively under its lock. Lookup failure returns null
 // — callers fall through to the phone match, exactly like the trx.
-async function resolveGroupedEstimateOwnerId(estimate, database = db) {
+async function resolveGroupedEstimateOwnerId(estimate, database = db, { throwOnError = false } = {}) {
   if (!estimate?.estimate_group_id) return null;
   try {
     const sibling = await database('estimates')
@@ -98,6 +98,10 @@ async function resolveGroupedEstimateOwnerId(estimate, database = db) {
       .first('id');
     return live?.id || null;
   } catch (err) {
+    // throwOnError: callers that must fail CLOSED on an unreadable owner
+    // (the bank tender gate) get the error; the policy resolver keeps the
+    // fall-through-to-phone-match posture.
+    if (throwOnError) throw err;
     logger.warn('[recurring-cof] grouped-sibling owner lookup failed — falling through to the phone match', { error: err.message });
     return null;
   }
@@ -117,6 +121,43 @@ async function resolveGroupedEstimateOwnerId(estimate, database = db) {
 //    inbox; auto-charging the HOMEOWNER's card would collect from the wrong
 //    party),
 //  - customers already on Auto Pay with a chargeable method (nothing to add).
+
+// The customer the accept transaction will actually land on. Sent estimates
+// often carry only customer_phone — the accept phone-matches an existing
+// profile — so every read-only policy decision runs the SAME unambiguous
+// match (Codex #2680 r3), grouped sibling BEFORE the phone match to mirror
+// the transaction's resolution order (see resolveGroupedEstimateOwnerId).
+// `lookupFailed` lets fail-closed callers refuse rather than assume "new
+// customer" when the match itself errored.
+async function resolveProspectiveAcceptCustomer(estimate) {
+  let customerId = estimate?.customer_id || null;
+  let lookupFailed = false;
+  if (!customerId) {
+    // A failed sibling lookup is a FAILED lookup (Codex #3723 r2 P1) —
+    // the phone match still runs (unchanged policy posture), but the
+    // fail-closed tender gate sees the signal and offers card only.
+    try {
+      customerId = await resolveGroupedEstimateOwnerId(estimate, db, { throwOnError: true });
+    } catch (err) {
+      lookupFailed = true;
+      logger.warn('[recurring-cof] grouped-sibling owner lookup failed — falling through to the phone match', { error: err.message });
+    }
+  }
+  if (!customerId && estimate?.customer_phone) {
+    try {
+      const gates = require('../routes/estimate-public');
+      if (typeof gates.matchAcceptCustomerByPhone === 'function') {
+        const { match } = await gates.matchAcceptCustomerByPhone(estimate);
+        customerId = match?.id || null;
+      }
+    } catch (err) {
+      lookupFailed = true;
+      logger.warn('[recurring-cof] phone-match customer lookup failed — card stays required', { error: err.message });
+    }
+  }
+  return { customerId, lookupFailed };
+}
+
 async function resolveRecurringCardPolicyForEstimate({
   estimate,
   membership = null,
@@ -150,23 +191,7 @@ async function resolveRecurringCardPolicyForEstimate({
   // enrollment-qualified saved card or active Auto Pay must not be forced
   // through a fresh SetupIntent (auto-satisfy contract, spec §3.2). A
   // failed lookup keeps the card required (fail toward protection).
-  let resolvedCustomerId = estimate?.customer_id || null;
-  // Grouped sibling BEFORE the phone match — mirrors the accept
-  // transaction's resolution order (see resolveGroupedEstimateOwnerId).
-  if (!resolvedCustomerId) {
-    resolvedCustomerId = await resolveGroupedEstimateOwnerId(estimate);
-  }
-  if (!resolvedCustomerId && estimate?.customer_phone) {
-    try {
-      const gates = require('../routes/estimate-public');
-      if (typeof gates.matchAcceptCustomerByPhone === 'function') {
-        const { match } = await gates.matchAcceptCustomerByPhone(estimate);
-        resolvedCustomerId = match?.id || null;
-      }
-    } catch (err) {
-      logger.warn('[recurring-cof] phone-match customer lookup failed — card stays required', { error: err.message });
-    }
-  }
+  const { customerId: resolvedCustomerId } = await resolveProspectiveAcceptCustomer(estimate);
 
   // Existing plan customer — snapshot first, then the LIVE fallback the
   // deposit resolver uses (legacy customer-linked estimates have no
@@ -289,12 +314,66 @@ async function resolveRecurringCardPolicyForEstimate({
 // key would replay the dead intent for the whole idempotency window). Returns
 // { clientSecret, setupIntentId } or null when Stripe isn't configured.
 const MAX_SETUP_INTENT_GENERATIONS = 5;
+
+// Tender family for the accept capture (GATE_ACCEPT_ACH_CAPTURE, owner ruling
+// 2026-09-01). card_or_bank only while the gate is on AND the estimate's
+// customer (if any) has no unhealthy ACH state — the same precheck the pay
+// page's capture-setup runs: enrollConsentedMethod refuses a bank target
+// while customers.ach_status is needs_verification/suspended, so offering the
+// bank tab there would capture a method the enrollment then rejects. A
+// lookup failure fails toward card (the tender the accept gate always
+// accepts). The customer is the one the accept will LAND on — an unlinked
+// estimate is phone-matched exactly like the accept transaction (pre-push
+// Codex P1: judging only estimate.customer_id let an existing customer with
+// a suspended bank slip through as "new"). Genuinely new customer →
+// card_or_bank.
+async function resolveRecurringCaptureTender(estimate) {
+  if (require('../config/feature-gates').gates.acceptAchCapture !== true) return 'card';
+  const { customerId, lookupFailed } = await resolveProspectiveAcceptCustomer(estimate);
+  if (lookupFailed) return 'card';
+  if (!customerId) return 'card_or_bank';
+  try {
+    const row = await db('customers').where({ id: customerId }).first('ach_status');
+    if (row?.ach_status && row.ach_status !== 'active') return 'card';
+    return 'card_or_bank';
+  } catch (err) {
+    logger.warn(`[recurring-cof] ach_status precheck failed for customer ${customerId} — card-only capture: ${err.message}`);
+    return 'card';
+  }
+}
+
 async function createRecurringCardSetupIntentForEstimate(estimate) {
+  const paymentMethodType = await resolveRecurringCaptureTender(estimate);
   for (let generation = 0; generation < MAX_SETUP_INTENT_GENERATIONS; generation += 1) {
-    const setupIntent = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, generation });
+    const setupIntent = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, generation, paymentMethodType });
     if (!setupIntent) return null;
     if (setupIntent.status === 'canceled') continue;
-    return { clientSecret: setupIntent.client_secret, setupIntentId: setupIntent.id };
+    // A SUCCEEDED replay already holds a payment method the customer will
+    // not re-enter — the capture UI must render the consent for THAT
+    // tender (Codex #3723 r1 P1: a bank captured earlier must not sit under
+    // a card authorization). Resolve its type here, where the secret key
+    // can; the client cannot read a pm's type with a publishable key.
+    let capturedMethodType = null;
+    if (setupIntent.status === 'succeeded' && setupIntent.payment_method) {
+      const pm = setupIntent.payment_method;
+      try {
+        capturedMethodType = typeof pm === 'object' && pm?.type
+          ? pm.type
+          : (await StripeService.retrievePaymentMethod(typeof pm === 'string' ? pm : pm.id))?.type || null;
+      } catch (err) {
+        logger.warn(`[recurring-cof] captured method type lookup failed for replayed intent ${setupIntent.id}: ${err.message}`);
+      }
+    }
+    return {
+      clientSecret: setupIntent.client_secret,
+      setupIntentId: setupIntent.id,
+      // The capture UI keys its heading/consent copy on this — the Payment
+      // Element only shows a bank tab when the intent allows it.
+      paymentMethodTypes: paymentMethodType === 'card_or_bank' ? ['card', 'us_bank_account'] : ['card'],
+      // Non-null only for a succeeded replay: the tender already on the
+      // intent, so the UI initializes its consent to it.
+      capturedMethodType,
+    };
   }
   logger.error(`[recurring-cof] exhausted SetupIntent generations for estimate ${estimate.id} — all replays terminal`);
   return null;
@@ -330,11 +409,67 @@ async function verifyRecurringCardIntent({ estimate, setupIntentId }) {
     return { ok: false, reason: 'intent_mismatch' };
   }
   const pm = setupIntent.payment_method;
+  const paymentMethodId = typeof pm === 'string' ? pm : pm.id;
+  // Kill-switch at the trust boundary (pre-push Codex P1): an intent minted
+  // card_or_bank while GATE_ACCEPT_ACH_CAPTURE was on stays confirmable
+  // after the gate flips off, and a customer's ACH state can turn unhealthy
+  // between mint and accept. Re-resolve the tender NOW and refuse a bank
+  // method the current policy would not have offered — the accept then 402s
+  // RECURRING_CARD_REQUIRED and the client re-mints a card-only intent.
+  const bankPossible = Array.isArray(setupIntent.payment_method_types)
+    && setupIntent.payment_method_types.includes('us_bank_account');
+  // The captured tender rides the verification result so the accept
+  // transaction can re-judge a bank under its customer lock (Codex #3723
+  // r3 P1). Card-only intents can only hold a card.
+  let methodType = 'card';
+  if (bankPossible) {
+    methodType = typeof pm === 'string' ? null : pm.type;
+    if (!methodType) {
+      try {
+        methodType = (await StripeService.retrievePaymentMethod(paymentMethodId))?.type || null;
+      } catch (err) {
+        logger.warn('[recurring-cof] captured payment method lookup failed', { error: err.message });
+        return { ok: false, reason: 'verification_failed' };
+      }
+    }
+    // Unknown type on a bank-capable intent fails closed too.
+    if (methodType !== 'card' && (await resolveRecurringCaptureTender(estimate)) !== 'card_or_bank') {
+      logger.warn(`[recurring-cof] bank method refused at accept for estimate ${estimate.id} — tender no longer offered`);
+      return { ok: false, reason: 'bank_not_allowed' };
+    }
+  }
   return {
     ok: true,
-    paymentMethodId: typeof pm === 'string' ? pm : pm.id,
+    paymentMethodId,
     setupIntentId: setupIntent.id,
+    methodType: methodType || 'unknown',
   };
+}
+
+// In-transaction re-judgement of a captured BANK tender against the customer
+// the accept actually landed on, under that customer's lock (Codex #3723 r3
+// P1): the pre-transaction verify judged a prospective customer, and the
+// ACH state (or the resolved customer itself, via a grouped sibling) can
+// move before commit. Returns true when the bank may proceed; a lookup
+// failure fails closed (false). Card tenders are always allowed.
+async function bankTenderAllowedUnderLock(trx, { customerId, methodType }) {
+  if (methodType === 'card') return true;
+  // Anything that is not provably a card (a bank, or an unresolved type on a
+  // bank-capable intent) is judged as a bank — fail closed.
+  if (methodType !== 'us_bank_account') return false;
+  if (require('../config/feature-gates').gates.acceptAchCapture !== true) return false;
+  if (!customerId) return false;
+  try {
+    // FOR UPDATE (Codex #3723 r4 P1): the ACH-failure webhook writes
+    // ach_status in its own transaction — a plain read could see the
+    // pre-failure value and commit a bank the post-commit enrollment then
+    // refuses. The row lock serializes this judgement behind that write.
+    const row = await trx('customers').where({ id: customerId }).forUpdate().first('ach_status');
+    return !(row?.ach_status && row.ach_status !== 'active');
+  } catch (err) {
+    logger.warn(`[recurring-cof] in-lock ach_status recheck failed for customer ${customerId} — refusing bank: ${err.message}`);
+    return false;
+  }
 }
 
 // Post-commit: attach the captured card + record consent + enroll in Auto Pay.
@@ -484,7 +619,9 @@ async function resolvePrepayChargeMethod({ policy = {}, verification = null, cus
           paymentMethodRowId: null, // saved at enrollment, post-commit
           methodType: pm.type || 'card',
           funding: pm.card?.funding || null,
-          last4: pm.card?.last4 || null,
+          // A bank capture (GATE_ACCEPT_ACH_CAPTURE) carries its last4 on
+          // us_bank_account — the quote copy names the debited account.
+          last4: pm.card?.last4 || pm.us_bank_account?.last4 || null,
           // The quoted method IS the one this accept just captured (Codex
           // r30 P1): only then may the client reuse the capture checkbox
           // as the prepay authorization — a saved-method quote must render
@@ -1228,7 +1365,9 @@ module.exports = {
   prepayChargeMethodKey,
   sweepStrandedPrepayAutoCharges,
   createRecurringCardSetupIntentForEstimate,
+  resolveRecurringCaptureTender,
   verifyRecurringCardIntent,
+  bankTenderAllowedUnderLock,
   completeRecurringCardEnrollment,
   _private: {
     recurringCardIntentMatchesEstimate,
