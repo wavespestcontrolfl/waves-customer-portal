@@ -316,6 +316,14 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(complete.quarantine_lists_unread).toBeUndefined();
   });
 
+  test('a provenance write that carries owed SIDs forward keeps the quarantine INCOMPLETE — the primary\'s delete alone never completes it (codex #3736 gh-r13)', async () => {
+    const processor = require('../services/call-recording-processor');
+    db.__state.call = { transcription_metadata: { pan_detected: true, pan_notified: true, recording_quarantined: false, quarantine_owed_sids: ['REparked000000000000000000000001'] } };
+    const out = await processor.withPanStamps('c-owed', { provider: 'openai', recording_quarantined: true });
+    expect(out.quarantine_owed_sids).toEqual(['REparked000000000000000000000001']);
+    expect(out.recording_quarantined).toBe(false);
+  });
+
   test('a transcript-only PAN call with no recording anywhere completes on the first pass instead of being reselected forever (codex #3736 gh-r11)', async () => {
     const processor = require('../services/call-recording-processor');
     db.raw.mockClear();

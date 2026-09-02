@@ -732,6 +732,12 @@ async function withPanStamps(callId, metadata) {
       // against, and dropping pan_notified re-fires the office alert.
       if (prior.quarantine_recording_sid && !out.quarantine_recording_sid) out.quarantine_recording_sid = prior.quarantine_recording_sid;
       if (Array.isArray(prior.quarantine_owed_sids) && prior.quarantine_owed_sids.length && !out.quarantine_owed_sids) out.quarantine_owed_sids = prior.quarantine_owed_sids;
+      // An owed SID IS incomplete work (Codex #3736 r13 P1): a listed
+      // recording whose Twilio delete and tombstone both failed is still at
+      // Twilio, and a provenance write that only saw the primary's delete
+      // succeed would otherwise present the quarantine as complete. Only the
+      // helper's own sweep clears the array, on a successful delete.
+      if (Array.isArray(out.quarantine_owed_sids) && out.quarantine_owed_sids.length) out.recording_quarantined = false;
       if (prior.pan_notified === true) out.pan_notified = true;
       // The unread-lists flag is the INCOMPLETE marker recovery selects on
       // (Codex #3736 r5 P1): a provenance write landing right after a
@@ -6701,10 +6707,12 @@ const CallRecordingProcessor = {
       'metadata', 'recording_url', 'recording_sid', 'recording_duration_seconds',
       'transcription', 'transcription_provider', 'transcript_structured', 'transcription_metadata',
     );
+    let recordingChangedBeforeClaim = false;
     if (claimedRow) {
       const before = call.recording_sid || null;
       Object.assign(call, claimedRow);
       if ((call.recording_sid || null) !== before) {
+        recordingChangedBeforeClaim = true;
         logger.warn(`[call-proc] ${maskSid(callSid)}: recording changed between load and claim (${maskSid(before)} → ${maskSid(call.recording_sid)}) — processing the current one`);
       }
     }
@@ -6911,7 +6919,12 @@ const CallRecordingProcessor = {
     // another stale window. Skips the Twilio-builtin fallback on purpose:
     // real audio a few minutes from now beats Twilio's rough transcript.
     if (!transcription && recordingNotReady) {
-      const preClaimStatus = call.processing_status === 'processing' ? null : (call.processing_status || null);
+      // A recording that was replaced between the load and the claim makes
+      // the pre-claim snapshot's status the DISCARDED recording's: restoring
+      // a terminal 'voicemail' / 'spam' there would strand the replacement
+      // (processAllPending skips both), so it goes back to pending instead
+      // (Codex #3736 r13 P2).
+      const preClaimStatus = (call.processing_status === 'processing' || recordingChangedBeforeClaim) ? null : (call.processing_status || null);
       await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
         processing_status: preClaimStatus,
         processing_token: null,
@@ -15297,6 +15310,22 @@ const CallRecordingProcessor = {
             .update({ review_status: null });
         }
       }
+      if (written > 0 && finalStatus === 'processed') {
+        // The same repair for an earlier lead_creation_failed (Codex #3736
+        // r13 P2): a pass that finishes 'processed' met the lead requirement
+        // (the lead persisted, or the call no longer needs one), so the
+        // failure card is stale; unrelated open cards keep the review flag.
+        const repaired = await trx('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'lead_creation_failed' })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({ status: 'resolved', resolved_at: new Date(), resolution_note: 'Lead landed on a later pass' });
+        if (repaired > 0) {
+          await trx('call_log')
+            .where({ id: call.id })
+            .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
+            .update({ review_status: null });
+        }
+      }
       if (written > 0 && finalStatus === 'customer_creation_failed') {
         await trx('triage_items').insert(buildTriageItem({
           callLogId: call.id,
@@ -15904,7 +15933,9 @@ const CallRecordingProcessor = {
           // A parked or superseded recording whose Twilio delete failed is owed too.
           + " OR COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> '[{\"delete_pending\": true}]'::jsonb"
           + " OR COALESCE(metadata -> 'superseded_recordings', '[]'::jsonb) @> '[{\"delete_pending\": true}]'::jsonb"
-          + " OR COALESCE(transcription_metadata::jsonb ->> 'quarantine_lists_unread', 'false') = 'true')")
+          + " OR COALESCE(transcription_metadata::jsonb ->> 'quarantine_lists_unread', 'false') = 'true'"
+          // …and a listed recording whose delete is still owed by SID (r13 P1).
+          + " OR COALESCE(jsonb_array_length(transcription_metadata::jsonb -> 'quarantine_owed_sids'), 0) > 0)")
         .orderBy('created_at', 'desc')
         .limit(10);
     } catch (qErr) {

@@ -105,6 +105,21 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(site).toContain("reason_code: 'additional_recording'");
   });
 
+  test('a processed pass resolves an earlier lead_creation_failed card the same way (codex #3736 gh-r13)', () => {
+    const at = body.indexOf("if (written > 0 && finalStatus === 'processed') {\n        // The same repair for an earlier lead_creation_failed");
+    expect(at).toBeGreaterThan(-1);
+    const site = body.slice(at, at + 1400);
+    expect(site).toContain("reason_code: 'lead_creation_failed'");
+    expect(site).toContain("resolution_note: 'Lead landed on a later pass'");
+    expect(site).toContain(".update({ review_status: null })");
+  });
+
+  test('the recovery sweep selects a quarantine with owed SIDs, and a not-ready deferral after a pre-claim recording change restores pending, not the discarded recording\'s status (codex #3736 gh-r13)', () => {
+    expect(source).toContain("OR COALESCE(jsonb_array_length(transcription_metadata::jsonb -> 'quarantine_owed_sids'), 0) > 0)");
+    expect(body).toContain("const preClaimStatus = (call.processing_status === 'processing' || recordingChangedBeforeClaim) ? null : (call.processing_status || null);");
+    expect(body).toContain("recordingChangedBeforeClaim = true;");
+  });
+
   test('a customer that lands on a later pass resolves the customer_creation_failed card and clears review only when nothing else is open', () => {
     const at = body.indexOf("if (written > 0 && finalStatus === 'processed' && customerLanded) {");
     expect(at).toBeGreaterThan(-1);
