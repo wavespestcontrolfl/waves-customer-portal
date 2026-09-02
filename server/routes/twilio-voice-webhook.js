@@ -336,6 +336,12 @@ async function parkAdditionalRecording(row, extra) {
         "NOT COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> ?::jsonb",
         [JSON.stringify([{ recording_sid: entry.recording_sid }])],
       )
+      // …and never when it is the row's CURRENT recording: a retry decided
+      // "already parked" on a read an operator's adoption (or a later
+      // callback's replace) has since overtaken would otherwise re-park the
+      // active recording and file a spurious adoption card for it (Codex
+      // #3736 r12 P2). The fence is in the write, where the race is.
+      .whereRaw('recording_sid IS DISTINCT FROM ?', [entry.recording_sid])
       .update({
         metadata: trx.raw(
           "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}',"
@@ -371,7 +377,7 @@ async function parkAdditionalRecording(row, extra) {
     // exists. A plain retry files nothing either — the card was filed with
     // the first delivery, and re-filing would reopen one the office already
     // resolved by adopting or dismissing the recording.
-    const now = await db('call_log').where({ id: row.id }).first('transcription_metadata');
+    const now = await db('call_log').where({ id: row.id }).first('transcription_metadata', 'recording_sid');
     if (isPanQuarantinedRow(now)) {
       logger.warn(`[recording-status] recording ${maskSid(entry.recording_sid)} for ${maskSid(row.twilio_call_sid)} arrived as the call was PAN-quarantined — deleting instead of parking`);
       const processor = require('../services/call-recording-processor');
@@ -385,6 +391,12 @@ async function parkAdditionalRecording(row, extra) {
       await processor.quarantineCardRecording(row, { source: 'recording_status_post_quarantine_park' })
         .catch((e) => logger.error(`[recording-status] post-quarantine current recording delete failed: ${e.message}`));
       return { parked: false, quarantined: true };
+    }
+    // The SID became the row's current recording between the read and the
+    // write (adopted, or made current by a competing callback): it is not
+    // parked and must not get a card — the row already carries it.
+    if (now?.recording_sid && now.recording_sid === entry.recording_sid) {
+      return { parked: false, quarantined: false, duplicate: true, reason: 'now_current' };
     }
     // A retry of an already-parked SID files nothing — UNLESS the first
     // delivery's card insert failed after the park landed: with no card in

@@ -67,6 +67,7 @@ function makeDb(tables) {
           const wanted = JSON.parse(clause.bindings[0])[0].recording_sid;
           return !(metaOf(row).additional_recordings || []).some((r) => r.recording_sid === wanted);
         }
+        if (sql === 'recording_sid IS DISTINCT FROM ?') return row.recording_sid !== clause.bindings[0];
         if (sql.startsWith("(processing_status IS NULL OR processing_status NOT IN (")) {
           const names = [...sql.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
           return row.processing_status == null || !names.includes(String(row.processing_status));
@@ -334,6 +335,34 @@ describe('POST /recording-status', () => {
     // Nothing is auto-processed against a recording the row does not carry.
     jest.advanceTimersByTime(15 * 60 * 1000);
     expect(processor.processRecording).not.toHaveBeenCalled();
+  });
+
+  test('a retry of a parked SID that an operator adopted between the read and the write is not re-parked and files no card (codex #3736 gh-r12)', async () => {
+    tables.call_log.push({
+      id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 45,
+      processing_status: 'processed', transcription: 'Agent: fixture line.',
+      metadata: { additional_recordings: [{ recording_sid: REC_2, recording_url: `${URL_2}.mp3`, parked_because: 'processing_status_processed' }] },
+    });
+    tables.triage_items.push({ id: 't1', call_log_id: 'c1', reason_code: 'additional_recording', status: 'resolved', payload: JSON.stringify({ recording_sid: REC_2 }) });
+    // The handler reads REC_2 as parked and decides "already parked" (a
+    // retry). Before the park write runs, the operator adopts REC_2: it
+    // becomes the current recording and leaves the parked list.
+    let adopted = false;
+    tables.__afterFirst = (row) => {
+      if (!adopted && row.twilio_call_sid === PARENT) {
+        adopted = true;
+        row.recording_sid = REC_2; row.recording_url = `${URL_2}.mp3`;
+        row.metadata = { additional_recordings: [{ recording_sid: REC_1, recording_url: `${URL_1}.mp3`, parked_because: 'replaced_by_operator' }] };
+      }
+    };
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    const row = tables.call_log[0];
+    // The active recording is never duplicated into the parked list…
+    expect(row.recording_sid).toBe(REC_2);
+    expect(row.metadata.additional_recordings.map((r) => r.recording_sid)).toEqual([REC_1]);
+    // …and no spurious adoption card is filed for it (the resolved card stays as it was).
+    expect(tables.triage_items).toHaveLength(1);
+    expect(tables.triage_items[0].status).toBe('resolved');
   });
 
   test('a replace decided on a stale read is parked when a pass claims the row before the write', async () => {
