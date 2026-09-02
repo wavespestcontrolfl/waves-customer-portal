@@ -220,7 +220,9 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
     // `archived_at` rides along for the viewability predicate below.
     .select('id', 'status', 'service_type', 'created_at', 'sent_at', 'expires_at', 'archived_at',
       'monthly_total', 'annual_total', 'onetime_total', 'estimate_data',
-      'customer_id', 'customer_phone', 'show_one_time_option', 'waveguard_tier');
+      'customer_id', 'customer_phone', 'show_one_time_option', 'waveguard_tier',
+      // The pricing-authority verdict reads these (uncapped codex P1 r28).
+      'pricing_authority', 'price_locked_at', 'estimate_group_id');
   // ⭐ STATUS IS NOT THE SAME QUESTION AS "CAN THE CUSTOMER SEE THIS?".
   // `sent`/`viewed` is a status the expiry sweep has to come along and change;
   // until it does — or if it fails — the row still reads as open while
