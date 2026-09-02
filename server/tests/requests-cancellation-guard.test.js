@@ -178,6 +178,20 @@ describe('POST /api/requests cancellation guard', () => {
     expect(processCancellationRequest).not.toHaveBeenCalled();
   }));
 
+  test('a FRESH portal submission re-validates the admin coverage boundary INSIDE the lock — a decision landing after authentication still parks it', () => withServer(async (baseUrl) => {
+    const { acquireCancelCommitLock, adminCoverageBoundaryInForce } = require('../services/admin-cancellation');
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+    adminCoverageBoundaryInForce.mockResolvedValueOnce(true);
+    const res = await postCancellation(baseUrl);
+    // The durable request row + alert remain; the sweep does not run over
+    // the paid visits the admin end-of-coverage run retained.
+    expect(res.status).toBe(201);
+    expect(processCancellationRequest).not.toHaveBeenCalled();
+    expect(mockState.service_requests_inserted).toHaveLength(1);
+    expect(acquireCancelCommitLock).toHaveBeenCalledTimes(1);
+    expect(acquireCancelCommitLock.mock.invocationCallOrder[0]).toBeLessThan(adminCoverageBoundaryInForce.mock.invocationCallOrder[0]);
+  }));
+
   test('a deduped portal retry PARKS while an admin end-of-coverage decision governs the account — never a boundary-less sweep of the retained paid visits', () => withServer(async (baseUrl) => {
     const { adminCoverageBoundaryInForce } = require('../services/admin-cancellation');
     mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
@@ -196,6 +210,10 @@ describe('POST /api/requests cancellation guard', () => {
     expect(parkedBody.deduped).toBe(true);
     expect(parkedBody.cancellation.processed).toBe(false);
     expect(processCancellationRequest).not.toHaveBeenCalled();
+    // The guard runs INSIDE the lock — a decision landing between this
+    // request's reads and the lock is still caught (codex GH r27 P1).
+    const { acquireCancelCommitLock } = require('../services/admin-cancellation');
+    expect(acquireCancelCommitLock.mock.invocationCallOrder[0]).toBeLessThan(adminCoverageBoundaryInForce.mock.invocationCallOrder[0]);
     // No admin boundary: the ordinary idempotent re-run.
     const rerun = await (await postCancellation(baseUrl)).json();
     expect(rerun.deduped).toBe(true);
@@ -215,6 +233,8 @@ describe('POST /api/requests cancellation guard', () => {
     const parked = await postCancellation(baseUrl);
     expect(parked.status).toBe(200);
     expect(processCancellationRequest).not.toHaveBeenCalled();
+    const { acquireCancelCommitLock } = require('../services/admin-cancellation');
+    expect(acquireCancelCommitLock.mock.invocationCallOrder[0]).toBeLessThan(adminCoverageBoundaryInForce.mock.invocationCallOrder[0]);
     // Boundary gone (coverage lapsed / decision superseded): the repair
     // re-runs against the customer's own request, as before.
     const rerun = await postCancellation(baseUrl);

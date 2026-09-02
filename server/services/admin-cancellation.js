@@ -524,7 +524,7 @@ async function scopedCoverageConflict(customerId, scope) {
     // Catalog identity improves family classification when present.
     const serviceIds = [...new Set(upcoming.map((r) => r.service_id).filter(Boolean))];
     const services = serviceIds.length
-      ? await db('services').whereIn('id', serviceIds).select('id', 'service_key', 'service_name')
+      ? await db('services').whereIn('id', serviceIds).select('id', 'service_key', 'name as service_name')
       : [];
     const byId = new Map(services.map((s) => [s.id, s]));
     if (upcoming.some((r) => scope.includes(familyOfServiceRow({ ...r, ...(byId.get(r.service_id) || {}) })))) {

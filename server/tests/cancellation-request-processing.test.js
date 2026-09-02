@@ -1094,6 +1094,14 @@ describe('processCancellationRequest', () => {
       expect(unwound.scopedWoundDown).toBe(false);
       expect(unwound.ok).toBe(false);
       expect(unwound.errors).toContain('scoped_wind_down');
+      // A HELD family's parked component is legitimately $0 — but the
+      // wind-down deletes every in-scope component in the same transaction
+      // as the tier demote, so ANY surviving row means that transaction
+      // rolled back (codex GH r27 P1): never "done" on a $0 residual.
+      mockLoadComponents.mockResolvedValueOnce([{ family_key: 'lawn_care', monthly_rate: '0.00' }]);
+      const parkedResidual = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r1', requestId: 'r1', families: ['lawn_care'] });
+      expect(parkedResidual.scopedWoundDown).toBe(false);
+      expect(parkedResidual.errors).toContain('scoped_wind_down');
 
       // The retry marker is the IMMUTABLE historyNote, never the editable
       // reason: a reworded note still finds run 1's rows.

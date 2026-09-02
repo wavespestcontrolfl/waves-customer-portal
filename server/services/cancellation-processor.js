@@ -1149,16 +1149,20 @@ async function processCancellationRequest({
   // and with the families gone from the live rows no new plan can be built —
   // reporting wound-down anyway would close the retry clean while the
   // tier/rate/ledger still bill the cancelled family. Monthly-lane proof =
-  // no live component left for a scoped family (applyScopedWindDown deletes
-  // them; a held family's parked component is 0). Residual or unverifiable →
-  // 'scoped_wind_down' stays on the run and the office repairs the rate by
-  // hand — the same bell run 1 raised, never a silent overcharge.
+  // NO component left for a scoped family at all: applyScopedWindDown
+  // deletes every in-scope row in the same transaction as the tier demote
+  // and the remaining-family reprice, so ANY surviving row — including a
+  // held family's legitimately-$0 parked component — means that transaction
+  // never landed (codex GH r27 P1: a $0 residual is not "done"). Residual
+  // or unverifiable → 'scoped_wind_down' stays on the run and the office
+  // repairs the rate by hand — the same bell run 1 raised, never a silent
+  // overcharge.
   let scopedWoundDown = false;
   if (scopedRepairOnly) {
     try {
       const { loadComponents } = require('./plan-rate-ledger');
       const components = await loadComponents(db, customerId);
-      const residual = (components || []).filter((c) => scopedFamilies.includes(c.family_key) && Number(c.monthly_rate) > 0);
+      const residual = (components || []).filter((c) => scopedFamilies.includes(c.family_key));
       scopedWoundDown = residual.length === 0;
       if (scopedWoundDown) {
         // Per-application accounts carry NO monthly components, so the
@@ -1237,7 +1241,7 @@ async function processCancellationRequest({
           .select('id', 'scheduled_date', 'status', 'service_id', 'service_type');
         const serviceIds = [...new Set(keptRows.map((r) => r.service_id).filter(Boolean))];
         const services = serviceIds.length
-          ? await db('services').whereIn('id', serviceIds).select('id', 'service_key', 'service_name')
+          ? await db('services').whereIn('id', serviceIds).select('id', 'service_key', 'name as service_name')
           : [];
         const byId = new Map(services.map((s) => [s.id, s]));
         const keptTermite = keptRows.some((r) => {
