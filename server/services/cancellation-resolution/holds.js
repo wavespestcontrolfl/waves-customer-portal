@@ -57,10 +57,10 @@ function displayDate(dateStr) {
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
 
-async function familyUpcomingVisits(customerId, familyKey) {
+async function familyUpcomingVisits(customerId, familyKey, dbh = db) {
   const { familyOfServiceRow } = require('../cancellation-processor');
   const today = etDateString();
-  const rows = await db('scheduled_services as s')
+  const rows = await dbh('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
     .whereIn('s.status', CANCELLABLE_STATUSES)
@@ -178,6 +178,17 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
       // component in the gap fails the hold (rolled back, visits
       // compensated) instead of suspending billing it can no longer prove.
       await lockCustomerComms(trx, customerId);
+      // Eligibility is re-validated under the lock too: a concurrent hold
+      // on the same family (both passed the cooldown read above) or a
+      // scoped wind-down that cancelled the family's visits in the gap
+      // must not leave an active hold — and tier protection — on a family
+      // the customer no longer owns.
+      const priorUnderLock = await trx('plan_holds').where({ customer_id: customerId, family_key: familyKey }).where('created_at', '>=', floor).first('id');
+      if (priorUnderLock) throw new Error('a hold for this family was written concurrently');
+      if (moved.length) {
+        const liveVisits = await familyUpcomingVisits(customerId, familyKey, trx);
+        if (liveVisits.length < moved.length) throw new Error(`${familyKey} visits were cancelled before the hold could be written`);
+      }
       const live = await trx('customers').where({ id: customerId }).first('monthly_rate', 'billing_mode', 'waveguard_tier', 'tier_protected_until');
       if (!live) throw new Error('customer vanished before the hold could be written');
       if (resolveBillingLane(live).mode === 'monthly_membership') {

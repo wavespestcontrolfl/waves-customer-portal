@@ -397,3 +397,27 @@ describe('scoped wind-down under the rung-6 writer lock (#3666 r34 — the prici
     expect(Number(mockState.tables.customers[0].monthly_rate)).toBe(60);
   });
 });
+
+test('a hold is refused under the lock when the family was cancelled in the gap (moved visits gone) or a concurrent hold landed', async () => {
+  const db = require('../models/db');
+  const visit = (id, date) => ({ id, customer_id: 'c1', status: 'confirmed', scheduled_date: date, service_type: 'Lawn Care Service' });
+  seed({
+    customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true, tier_protected_until: null }],
+    visits: [visit('l1', daysOut(5))],
+  });
+  const openTrx = db.transaction;
+  // A scoped wind-down cancelled the lawn visits between the move and the hold write.
+  db.transaction = async (cb) => { mockState.tables.scheduled_services[0].status = 'cancelled'; return openTrx(cb); };
+  try {
+    await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) })).rejects.toMatchObject({ code: 'hold_setup_failed' });
+  } finally { db.transaction = openTrx; }
+  expect(mockState.tables.plan_holds || []).toHaveLength(0);
+  expect(mockState.tables.customers[0].tier_protected_until).toBeNull();
+  // A concurrent hold for the same family committed first.
+  seed({ customers: [{ id: 'c1', monthly_rate: null, billing_mode: 'per_application', active: true, tier_protected_until: null }] });
+  db.transaction = async (cb) => { mockState.tables.plan_holds = [{ id: 'h-race', customer_id: 'c1', family_key: 'lawn_care', created_at: new Date() }]; return openTrx(cb); };
+  try {
+    await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) })).rejects.toMatchObject({ code: 'hold_setup_failed' });
+  } finally { db.transaction = openTrx; }
+  expect(mockState.tables.plan_holds).toHaveLength(1);
+});
