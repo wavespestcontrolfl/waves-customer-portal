@@ -338,7 +338,14 @@ export default function CallLogTabV2() {
   // in any order, and a stale success must never re-enable the gate after
   // a newer failure reset it.
   const loadSeqRef = useRef(0);
-  const playerRefFor = (id) => (handle) => {
+  // One stable callback ref per call id: a fresh closure each render would
+  // make React detach (null) and re-attach the player on every update,
+  // wiping the playback position on each timeupdate.
+  const playerRefCallbacks = useRef(new Map());
+  const playerRefFor = (id) => {
+    const cached = playerRefCallbacks.current.get(id);
+    if (cached) return cached;
+    const cb = (handle) => {
     if (handle) playerRefs.current.set(id, handle);
     else {
       // The player unmounted (row filtered out): a remount starts unloaded,
@@ -351,6 +358,9 @@ export default function CallLogTabV2() {
         return next;
       });
     }
+    };
+    playerRefCallbacks.current.set(id, cb);
+    return cb;
   };
   // Parsed once per fetch, not per playback tick: every timeupdate rerenders
   // the list, and parsing 200 structured transcripts on each tick would
