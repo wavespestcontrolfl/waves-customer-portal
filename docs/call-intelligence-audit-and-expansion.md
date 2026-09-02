@@ -141,6 +141,9 @@ Per file, with the proving test.
 - Pre-push Codex round 6 (1 P1, fixed): the kinds a call can carry more than
   once (send_report, send_paperwork, provide_info, other) key on a
   description slug as well, so two distinct promises keep their own rows.
+- Pre-push Codex round 7 (1 P1, fixed): the late built-in transcription's
+  PAN stamp merges into the row's CURRENT `transcription_metadata` in SQL
+  (jsonb concatenation) instead of serializing the snapshot it read.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 

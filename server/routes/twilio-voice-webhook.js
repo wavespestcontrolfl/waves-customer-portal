@@ -1916,19 +1916,15 @@ router.post('/transcription', async (req, res) => {
           // detection stamp and quarantine the audio.
           logger.info(`[transcription] built-in transcript for ${maskSid(targetRow.twilio_call_sid)} kept out — a provider transcript is already on the row`);
           if (panScrub.count > 0) {
-            // Merge onto the provider's provenance — this write must not
-            // erase it, only add the detection stamp.
-            let providerMeta = {};
-            try {
-              const raw = targetRow.transcription_metadata;
-              providerMeta = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
-            } catch { providerMeta = {}; }
+            // Merge the detection stamp INTO the row's current metadata in
+            // SQL — never serialize the snapshot read above: the processor
+            // can write newer provider provenance between that read and
+            // this write, and a rebuilt blob would replace it (codex P1).
             await db('call_log').where({ id: targetRow.id }).update({
-              transcription_metadata: JSON.stringify(await CallProc.withPanStamps(targetRow.id, {
-                ...providerMeta,
-                ...panStamp,
-                builtin_pan_detected_after_provider_transcript: true,
-              })),
+              transcription_metadata: db.raw(
+                "COALESCE(transcription_metadata, '{}'::jsonb) || ?::jsonb",
+                [JSON.stringify({ ...panStamp, builtin_pan_detected_after_provider_transcript: true })],
+              ),
               updated_at: new Date(),
             });
             matchedSid = targetRow.twilio_call_sid;

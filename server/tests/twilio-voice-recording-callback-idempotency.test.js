@@ -111,6 +111,13 @@ function makeDb(tables) {
           meta.superseded_recordings = [...(meta.superseded_recordings || []), ...appended];
         } else if (v.sql.includes("'{additional_recordings}'")) {
           meta.additional_recordings = [...(meta.additional_recordings || []), ...appended];
+        } else if (v.sql.includes("COALESCE(transcription_metadata, '{}'::jsonb) || ?::jsonb")) {
+          // Atomic jsonb merge onto the CURRENT row value.
+          const raw = row.transcription_metadata;
+          let current = {};
+          try { current = typeof raw === 'string' ? JSON.parse(raw) : (raw || {}); } catch { current = {}; }
+          row.transcription_metadata = JSON.stringify({ ...current, ...JSON.parse(v.bindings[0]) });
+          continue;
         } else {
           throw new Error(`fake db: unsupported raw update ${v.sql}`);
         }
@@ -470,16 +477,22 @@ describe('builtinTranscriptMayReplace (pure) and POST /transcription', () => {
     expect(row.transcription_status).toBe('completed');
   });
 
-  test('a card number in the late built-in text still stamps detection and quarantines the audio, keeping the provider provenance', async () => {
+  test('a card number in the late built-in text still stamps detection and quarantines the audio, merging onto the CURRENT provenance', async () => {
     tables.call_log.push({
       id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, transcription: 'Agent: fixture provider line.', transcription_provider: 'openai',
       transcription_metadata: JSON.stringify({ provider: 'openai', transcript_chars: 28 }),
     });
+    // The processor rewrites provenance between the webhook's read and its
+    // write; the stamp must land on THAT, not on the snapshot.
+    let raced = false;
+    tables.__afterFirst = (row) => {
+      if (!raced && row.twilio_call_sid === PARENT) { raced = true; row.transcription_metadata = JSON.stringify({ provider: 'openai', transcript_chars: 28, contact_pass_chars: 900 }); }
+    };
     await post('/transcription', { CallSid: PARENT, RecordingSid: REC_1, TranscriptionText: 'card 4111 1111 1111 1111 please', TranscriptionStatus: 'completed' });
     const row = tables.call_log[0];
     expect(row.transcription).toBe('Agent: fixture provider line.');
     const meta = JSON.parse(row.transcription_metadata);
-    expect(meta).toMatchObject({ provider: 'openai', transcript_chars: 28, pan_detected: true, builtin_pan_detected_after_provider_transcript: true });
+    expect(meta).toMatchObject({ provider: 'openai', transcript_chars: 28, contact_pass_chars: 900, pan_detected: true, builtin_pan_detected_after_provider_transcript: true });
     expect(processor.quarantineCardRecording).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'c1', recording_sid: REC_1 }),
       { source: 'twilio_transcription_webhook' },
