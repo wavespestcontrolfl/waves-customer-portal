@@ -12,7 +12,9 @@ import React from "react";
 
 const STATUS = {
   done: { glyph: "✓", label: "done" },
-  proposed: { glyph: "→", label: "awaiting your confirmation" },
+  // Past tense: the card below owns the live state (confirmed / cancelled /
+  // expired); this line is the historical record of what the bar did.
+  proposed: { glyph: "→", label: "proposed on the card below" },
   error: { glyph: "!", label: "could not complete" },
 };
 

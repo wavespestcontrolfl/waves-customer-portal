@@ -25,7 +25,7 @@ describe("ToolActivityList", () => {
     expect(items).toHaveLength(3);
     expect(items[0]).toHaveTextContent("Search customers · done");
     expect(items[0]).toHaveTextContent("412 ms");
-    expect(items[1]).toHaveTextContent("Send a text message · awaiting your confirmation");
+    expect(items[1]).toHaveTextContent("Send a text message · proposed on the card below");
     expect(items[1]).toHaveAttribute("data-status", "proposed");
     expect(items[2]).toHaveTextContent("Get invoice · could not complete");
     expect(items[2]).toHaveTextContent("12 s");
