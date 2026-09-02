@@ -396,7 +396,15 @@ function inRawContext(code, idx) {
   // literal's own statement is the evidence, the callee invocation the
   // execution.
   const producer = sqlProducer(code, bare, idx);
-  if (producer && new RegExp(String.raw`${RAW_CALLEE}\s*${escapeRe(producer)}\s*(?:\?\.)?\(`).test(bare)) return true;
+  if (producer) {
+    const call = String.raw`${escapeRe(producer)}\s*(?:\?\.)?\(`;
+    // Direct argument, the `text` of an inline QueryConfig, or the `text`
+    // of a stored QueryConfig later handed whole to raw/query.
+    if (new RegExp(String.raw`${RAW_CALLEE}\s*(?:${call}|\{[^{}]*\btext\s*:\s*${call})`).test(bare)) return true;
+    const wrapRe = new RegExp(String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\{[^{}]*\btext\s*:\s*${call}`, 'g');
+    let wr;
+    while ((wr = wrapRe.exec(bare))) if (new RegExp(String.raw`${RAW_CALLEE}\s*${escapeRe(wr[1])}\b(?![.\[])`).test(bare)) return true;
+  }
   const decl = sqlDeclaration(code, idx);
   if (!decl) return false;
   const { member } = decl;
@@ -1097,7 +1105,7 @@ function aliasInsertPatterns(src, token, filePath, imports = 'all') {
   // builder head — `writeRow((db('leads')), row)` included.
   const headInArgs = new RegExp(String.raw`[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(\s*${token}${TABLE_OPTS}\)`);
   for (const helper of helperNames) {
-    const re = new RegExp(String.raw`${helperCallee(helper)}\s*(?=\()`, 'g');
+    const re = new RegExp(String.raw`${helperCallee(helper)}\s*(?:\?\.\s*)?(?=\()`, 'g');
     re.helperArgs = (m, bareView) => {
       const end = afterBalanced(bareView, m.index + m[0].length);
       if (end === -1 || !headInArgs.test(src.slice(m.index + m[0].length, end))) return -1;
@@ -1341,6 +1349,37 @@ function cachedLex(code, keepStrings) {
   if (!(key in entry)) entry[key] = lexBlank(code, { keepStrings });
   return entry[key];
 }
+// A same-length VIEW for the head regexes in which the interior of a call
+// that is itself immediately invoked — the callable-factory idiom
+// `getDb(loadConfig(kind))('leads')` — is blanked, so the factory segment
+// `\([^()]*\)` matches at any argument depth while the table call and the
+// chain after it stay intact. Only calls on an identifier are flattened
+// (an IIFE's body is not), and never one whose arguments hold an insert.
+const flatCache = new Map();
+function flattenFactoryCalls(code, bare) {
+  if (flatCache.has(code)) return flatCache.get(code);
+  const out = code.split('');
+  const stack = [];
+  for (let k = 0; k < bare.length; k += 1) {
+    const ch = bare[k];
+    if (ch === '(') stack.push(k);
+    else if (ch === ')' && stack.length) {
+      const open = stack.pop();
+      let b = open - 1;
+      while (b >= 0 && /\s/.test(bare[b])) b -= 1;
+      if (b < 0 || !/[\w$]/.test(bare[b])) continue;
+      let a = k + 1;
+      while (a < bare.length && /\s/.test(bare[a])) a += 1;
+      if (bare.startsWith('?.', a)) { a += 2; while (a < bare.length && /\s/.test(bare[a])) a += 1; }
+      if (bare[a] !== '(') continue;
+      if (/insert/i.test(code.slice(open, k))) continue;
+      for (let j = open + 1; j < k; j += 1) if (out[j] !== '\n') out[j] = ' ';
+    }
+  }
+  const view = out.join('');
+  flatCache.set(code, view);
+  return view;
+}
 // Full blanking (strings + comments gone) — the dynamic scan's view.
 const blankCommentsAndStrings = (code) => cachedLex(code, false);
 // Comments-only blanking (strings preserved) — the LITERAL scan's view, so
@@ -1400,6 +1439,7 @@ const DYNAMIC_INSERT_PATTERNS = [
 function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
   const lines = src.split('\n');
   const code = blankCommentsAndStrings(src); // patterns run on CODE only …
+  const view = flattenFactoryCalls(code, code); // …flattened for the head regexes
   const endsByLine = new Map();
   const exprByLine = new Map();
   // … but constant resolution reads the ORIGINAL source (the literal lives
@@ -1455,7 +1495,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
   for (const pattern of hasInsert ? DYNAMIC_INSERT_PATTERNS : []) {
     pattern.lastIndex = 0;
     let m;
-    while ((m = pattern.exec(code))) {
+    while ((m = pattern.exec(view))) {
       const arg = argOf(m, { multi: Boolean(pattern.multi) });
       if (!arg) continue;
       if (pattern.chain) recordChain(m, arg.expr, arg.end);
@@ -1470,10 +1510,10 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     ...(imports === 'skip' ? [] : importedInsertingHelpers(src, filePath)),
   ]);
   for (const helper of dynHelpers) {
-    const useRe = new RegExp(String.raw`${helperCallee(helper)}\s*(?=\()`, 'g');
+    const useRe = new RegExp(String.raw`${helperCallee(helper)}\s*(?:\?\.\s*)?(?=\()`, 'g');
     const headRe = /[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?\s*(?:\?\.)?\(/g;
     let use;
-    while ((use = useRe.exec(code))) {
+    while ((use = useRe.exec(view))) {
       // Walk the argument list balanced, then try each builder head inside
       // it for a dynamic table argument.
       const open = use.index + use[0].length;
@@ -1502,7 +1542,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     dynDecls.get(name).add(m.index);
   };
   let decl;
-  while (hasInsert && (decl = dynDeclRe.exec(code))) {
+  while (hasInsert && (decl = dynDeclRe.exec(view))) {
     const arg = argOf(decl);
     if (!arg || !arg.expr.trim() || isResolved(arg.expr)) continue;
     dynBuilders.set(decl[1], arg.expr);
@@ -1515,7 +1555,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     'g'
   );
   let cnd;
-  while (hasInsert && (cnd = dynCondDeclRe.exec(code))) {
+  while (hasInsert && (cnd = dynCondDeclRe.exec(view))) {
     const arg = argOf(cnd);
     if (!arg || !arg.expr.trim() || isResolved(arg.expr)) continue;
     if (!dynBuilders.has(cnd[1])) dynBuilders.set(cnd[1], arg.expr);
@@ -1542,7 +1582,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
   );
   const dynProps = new Map(); // prop -> { expr, owners: Set | null }
   let pdd;
-  while (hasInsert && (pdd = dynPropDeclRe.exec(code))) {
+  while (hasInsert && (pdd = dynPropDeclRe.exec(view))) {
     const arg = argOf(pdd);
     if (!arg || !arg.expr.trim() || isResolved(arg.expr)) continue;
     const owner = objectOwner(code, code, pdd.index);
@@ -1559,7 +1599,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     const alt = [...dynProps.keys()].map(escapeRe).join('|');
     const useRe = new RegExp(String.raw`\b([A-Za-z_$][\w$]*)\s*(?:\.\s*(${alt})|(?:\?\.)?\[\s*['"\x60](${alt})['"\x60]\s*\])`, 'g');
     let use;
-    while ((use = useRe.exec(code))) {
+    while ((use = useRe.exec(view))) {
       const { expr, owners } = dynProps.get(use[2] || use[3]);
       if (owners && !owners.has(use[1])) continue;
       recordChain(use, expr, use.index + use[0].length);
@@ -1583,7 +1623,7 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
   if (dynBuilders.size) {
     const useRe = new RegExp(String.raw`\b(${[...dynBuilders.keys()].map(escapeRe).join('|')})\b`, 'g');
     let use;
-    while ((use = useRe.exec(code))) {
+    while ((use = useRe.exec(view))) {
       const n = use[1];
       const hit = walkChain(code, use.index + use[0].length, HEAD_STOPS);
       if (!hit || hit.name !== 'insert') continue;
@@ -1603,12 +1643,12 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     'g'
   );
   let fac;
-  while ((fac = dynFactoryRe.exec(code))) {
+  while ((fac = dynFactoryRe.exec(view))) {
     const arg = argOf(fac);
     if (!arg || !arg.expr.trim() || isResolved(arg.expr)) continue;
     const useRe = new RegExp(String.raw`\b${escapeRe(fac[1])}\s*(?=\()`, 'g');
     let use;
-    while ((use = useRe.exec(code))) {
+    while ((use = useRe.exec(view))) {
       const from = afterBalanced(code, use.index + use[0].length);
       if (from !== -1) recordChain(use, arg.expr, from);
     }
@@ -1616,11 +1656,11 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
   // Function/block-arrow factories over a dynamic table, balanced bodies.
   const dynReturnRe = new RegExp(String.raw`\breturn\b[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*(?:\?\.)?\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|(?:\?\.)?\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*(?:\?\.)?\(`);
   const exprOf = (m) => { const a = argOf(m); return a && a.expr.trim() ? a.expr : null; };
-  for (const f of hasInsert ? balancedBodyFactories(code, dynReturnRe, [dynDeclRe, dynCondDeclRe], exprOf) : []) {
+  for (const f of hasInsert ? balancedBodyFactories(view, dynReturnRe, [dynDeclRe, dynCondDeclRe], exprOf) : []) {
     if (!f.capture || isResolved(f.capture)) continue;
     const useRe = new RegExp(String.raw`(?<!function )\b${escapeRe(f.name)}\s*(?=\()`, 'g');
     let use;
-    while ((use = useRe.exec(code))) {
+    while ((use = useRe.exec(view))) {
       const from = afterBalanced(code, use.index + use[0].length);
       if (from !== -1) recordChain(use, f.capture, from);
     }
@@ -1696,6 +1736,7 @@ function scanSourceForLeadInserts(src, filePath, imports = 'all') {
   // and a comment merely SAYING "insert into leads" is not a site.
   const code = blankComments(src);
   const bare = blankCommentsAndStrings(code);
+  const view = flattenFactoryCalls(code, bare);
   const endsByLine = new Map();
   // Every in-file form — builder token, table constant, raw SQL — contains
   // the word `leads`; a file without it can only be a writer through an
@@ -1709,8 +1750,8 @@ function scanSourceForLeadInserts(src, filePath, imports = 'all') {
   };
   for (const { token, name } of /leads/i.test(code) ? leadsTableTokens(code) : []) {
     const group = imports === 'only'
-      ? aliasInsertPatterns(code, token, filePath, 'only')
-      : [...knexInsertPatterns(token), ...aliasInsertPatterns(code, token, filePath, imports)];
+      ? aliasInsertPatterns(view, token, filePath, 'only')
+      : [...knexInsertPatterns(token), ...aliasInsertPatterns(view, token, filePath, imports)];
     if (name) for (const p of group) constOf.set(p, name);
     patterns.push(...group);
     if (imports === 'only') continue;
@@ -1739,7 +1780,7 @@ function scanSourceForLeadInserts(src, filePath, imports = 'all') {
   for (const pattern of patterns) {
     pattern.lastIndex = 0;
     let m;
-    while ((m = pattern.exec(code))) {
+    while ((m = pattern.exec(view))) {
       // The chain walk first — it is cheap and rejects most head matches —
       // then the scope checks, which scan the file.
       let len = m[0].length;
@@ -1788,10 +1829,10 @@ function repoScan() {
     // What THIS module exports to importers — for every file (a lead-builder
     // factory module has no insert of its own), prechecked inside.
     moduleFactsCache.set(abs, computeModuleFacts(src));
-    if (!/insert|merge/i.test(src)) { lexCache.delete(src); functionBodiesCache.delete(src); continue; }
+    if (!/insert|merge/i.test(src)) { lexCache.delete(src); functionBodiesCache.delete(src); flatCache.delete(src); continue; }
     for (const site of scanSourceForLeadInserts(src, abs, 'skip')) sites.push({ file: rel, ...site });
     for (const site of scanSourceForDynamicTableInserts(src, abs, 'skip')) dynamic.push({ file: rel, ...site });
-    for (const cache of [lexCache, functionBodiesCache]) {
+    for (const cache of [lexCache, functionBodiesCache, flatCache]) {
       cache.delete(src);
       for (const view of cache.keys()) if (view.length === src.length) cache.delete(view);
     }
@@ -1807,7 +1848,7 @@ function repoScan() {
     if (!imports.some((imp) => { const f = moduleFacts(imp.resolved); return f.helpers.size || f.callableDefault || f.sqlConstants.size || f.factories.size || f.builders.size || f.defaultFactory; })) continue;
     for (const site of scanSourceForLeadInserts(src, abs, 'only')) sites.push({ file: rel, ...site });
     for (const site of scanSourceForDynamicTableInserts(src, abs, 'only')) dynamic.push({ file: rel, ...site });
-    for (const cache of [lexCache, functionBodiesCache]) for (const view of cache.keys()) if (view.length === src.length) cache.delete(view);
+    for (const cache of [lexCache, functionBodiesCache, flatCache]) for (const view of cache.keys()) if (view.length === src.length) cache.delete(view);
   }
   sites.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
   dynamic.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
@@ -1871,6 +1912,10 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['triple-nested chain arguments', "await db('leads').modify(qb => qb.whereIn('id', ids.map(id => normalize(id)))).insert(row);"],
     ['deeply nested insert payload before .into', "await db.insert(rows.map(row => normalize(row, opts.get('k')))).into('leads');"],
     ['insert payload before .table', "await db.insert(rows.map(row => normalize(row))).table('leads');"],
+    ['callable factory with nested call arguments', "await getDb(loadConfig(kind))('leads').insert(row);"],
+    ['optional invocation of an insertion helper', "function writeRow(builder, row) { return builder.insert(row); }\nawait writeRow?.(db('leads'), row);"],
+    ['SQL producer as the text of an inline pg query config', "function buildInsert() {\n  return 'INSERT INTO leads (a) VALUES ($1)';\n}\nawait client.query({ text: buildInsert(), values: [a] });"],
+    ['SQL producer inside a stored pg query config', "function buildInsert() {\n  return 'INSERT INTO leads (a) VALUES ($1)';\n}\nconst cfg = { text: buildInsert(), values: [a] };\nawait client.query(cfg);"],
     ['destructured array stored builder', "const [query] = [db('leads')];\nawait query.insert(row);"],
     ['destructured object stored builder', "const { q: query } = { q: db('leads'), n: 1 };\nawait query.insert(row);"],
     ['computed table-options argument', "await db('leads', getTableOptions()).insert(row);"],
@@ -2123,6 +2168,11 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(deepPayload[0].expr).toBe('table');
     const defaultParam = scanSourceForDynamicTableInserts("const TABLE = 'audit';\nfunction write(TABLE = resolveTable(kind), row) {\n  return db(TABLE).insert(row);\n}");
     expect(defaultParam).toHaveLength(1);
+    const nestedFactory = scanSourceForDynamicTableInserts('await getDb(loadConfig(kind))(table).insert(row);');
+    expect(nestedFactory).toHaveLength(1);
+    expect(nestedFactory[0].expr).toBe('table');
+    const optionalHelper = scanSourceForDynamicTableInserts('function writeRow(builder, row) { return builder.insert(row); }\nawait writeRow?.(db(table), row);');
+    expect(optionalHelper).toHaveLength(1);
     const destructuredDyn = scanSourceForDynamicTableInserts('const [query] = [db(table)];\nawait query.insert(row);');
     expect(destructuredDyn).toHaveLength(1);
     expect(destructuredDyn[0].expr).toBe('table');
@@ -2448,6 +2498,14 @@ describe('lead-writer registry (#3137 groundwork)', () => {
           let bm;
           while ((bm = bindRe.exec(bare))) governed.add(bm[1]);
         }
+        // The allowlisted expression's ROOT (`config` in `config.table`) must
+        // itself be governed after propagation — `const config =
+        // req.body.config` would keep the anchor and expression intact while
+        // detaching the insert from the validated literals.
+        const site = repoScan().dynamic.find((d) => key(d) === key(w));
+        const root = site && site.expr ? site.expr.trim().split(/[.\[?(\s]/)[0] : null;
+        expect({ file: w.file, expr: site && site.expr, root, governed: root !== null && governed.has(root) })
+          .toEqual({ file: w.file, expr: site && site.expr, root, governed: true });
         // A CLONE of a governed value (`{ ...TYPES[type], table: 'leads' }`)
         // can override the table inside the literal, where no property
         // write exists to catch — so a governed value may not be spread
