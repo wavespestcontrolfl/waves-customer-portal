@@ -1006,6 +1006,14 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(codes('<AffiliateLink product="xlux-soil-moisture-meter" placement="primary-rec">a moisture meter</AffiliateLink>')).toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
       expect(codes('<AffiliateLink product="acurite-glass-rain-gauge" placement="alt-rec">a glass rain gauge</AffiliateLink>')).toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
       expect(codes('<AffiliateLink product="acurite-glass-rain-gauge" placement="primary-rec">this cheap gauge</AffiliateLink>')).toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
+      // Every listed product exactly once: an omitted product, a link-free draft, or a repeat blocks.
+      const two = [...allowed, { product_id: 'ks-adjustable-door-sweep', placement: 'alt-rec', anchor: 'an adjustable door sweep' }];
+      const link = (id, pl, a) => `<AffiliateLink product="${id}" placement="${pl}">${a}</AffiliateLink>`;
+      const both = `${link('acurite-glass-rain-gauge', 'primary-rec', 'a glass rain gauge')} and ${link('ks-adjustable-door-sweep', 'alt-rec', 'an adjustable door sweep')}`;
+      expect(codes(both, { allowedAffiliateProducts: two })).not.toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
+      expect(codes(link('acurite-glass-rain-gauge', 'primary-rec', 'a glass rain gauge'), { allowedAffiliateProducts: two })).toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
+      expect(affiliateCodes(guardrails.evaluate({ body: 'Intro.\n\n[quote](/quote/)\n\n## Sec\n\nNo links here.', frontmatter: fm() }, { targetIsBlog: true, allowedAffiliateProducts: allowed }))).toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
+      expect(codes(`${link('acurite-glass-rain-gauge', 'primary-rec', 'a glass rain gauge')} twice ${link('acurite-glass-rain-gauge', 'primary-rec', 'a glass rain gauge')}`)).toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
       // No allowlist on the brief → the registry rules alone apply.
       expect(codes('<AffiliateLink product="xlux-soil-moisture-meter" placement="primary-rec">a moisture meter</AffiliateLink>', { allowedAffiliateProducts: null })).not.toContain('P0:AFFILIATE_PRODUCT_NOT_IN_BRIEF');
       // The shared brief-derived options carry the operator brief's list (run-level gate AND writer self-lint).

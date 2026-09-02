@@ -442,8 +442,10 @@ tel: markdown links per the rule above.)
 AFFILIATE PRODUCT LINKS — binding whenever the brief lists affiliate_products
 (a deterministic gate P0-blocks violations, and every affiliate post is held
 for the owner's approval; a violation wastes the run):
-- Use ONLY the product ids, placements and anchor text the brief lists, each
-  at most once, at most 3 per post. A product the brief did not name is a P0.
+- Use EVERY product the brief lists and ONLY those, each EXACTLY once, with
+  the product id, placement and anchor text exactly as given (at most 3 per
+  post). A product the brief did not name, a repeated link, or an omitted
+  listed product is a P0.
 - Syntax: valid JSX, not in a code fence, e.g.
   <AffiliateLink product="acurite-glass-rain-gauge" placement="primary-rec">a glass rain gauge</AffiliateLink>
   The anchor is the plain product name as the brief gives it — never

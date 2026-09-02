@@ -2647,6 +2647,21 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
     push('P0', 'AFFILIATE_LINK_IN_META', '', 'Draft carries an <AffiliateLink> in an editable meta field — affiliate links are body-only; metas stay informational.');
   }
   const tags = collectAffiliateLinkTags(body);
+  // A brief that binds affiliate_products binds EACH listed product exactly
+  // once — an omitted product (or a link-free draft) silently ships an
+  // incomplete pilot post and a repeated one pads the density cap
+  // (pre-push Codex P1 on #3752). Checked before the zero-link early return.
+  if (Array.isArray(allowedProducts) && allowedProducts.length) {
+    const counts = new Map();
+    for (const t of tags) if (t.productId) counts.set(t.productId, (counts.get(t.productId) || 0) + 1);
+    for (const p of allowedProducts) {
+      const id = p && p.product_id;
+      if (!id) continue;
+      const n = counts.get(id) || 0;
+      if (n === 0) push('P0', 'AFFILIATE_PRODUCT_NOT_IN_BRIEF', `${id}:missing`, `Draft omits affiliate product "${id}" which the brief binds — every listed product must be linked exactly once, in the section the brief names.`);
+      else if (n > 1) push('P0', 'AFFILIATE_PRODUCT_NOT_IN_BRIEF', `${id}:duplicate`, `Draft links affiliate product "${id}" ${n} times — the brief binds exactly one link per product.`);
+    }
+  }
   // Disclosure is a BICONDITIONAL, exact-compare on both sides (astro
   // validateAffiliateUsage parity — Codex #3646 r10 P1): the renderer keys
   // the FTC block off disclosure.type === 'affiliate' EXACTLY, and a
