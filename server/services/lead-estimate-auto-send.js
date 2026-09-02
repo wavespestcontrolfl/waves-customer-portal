@@ -447,24 +447,22 @@ async function claimLeadEstimateAutoSend(database, estimate, { now = new Date(),
 }
 
 async function updateAutoSendMetadata(database, estimate, patch, status = estimate.status, extraUpdate = {}) {
-  // Merge into the row as it is NOW, never the caller's pre-send object: a
-  // send can rewrite estimate_data mid-flight (the lead-service park, its
-  // revert-pending marker, the delivery claim), and serializing a stale
-  // snapshot would erase those while the parked totals stay in the columns
-  // (GH codex r5 P1 on #3711). Falls back to the caller's object only when
-  // no fresh row can be read.
-  let base = estimate.estimate_data || estimate.estimateData;
-  try {
-    const q = database('estimates').where({ id: estimate.id });
-    const fresh = typeof q.first === 'function' ? await q.first() : null;
-    if (fresh && fresh.estimate_data !== undefined && fresh.estimate_data !== null) base = fresh.estimate_data;
-  } catch (_) { /* keep the caller's snapshot */ }
-  const nextData = mergeAutoSendMetadata(base, patch);
+  // ATOMIC merge of automation.autoSend into the row's CURRENT JSONB — never
+  // a wholesale serialization of the caller's pre-send object. A send can
+  // rewrite estimate_data mid-flight (the lead-service park, its
+  // revert-pending marker, the handoff witness, the delivery claim), and
+  // writing a stale snapshot would erase those while the parked totals stay
+  // in the columns (GH codex r5 P1 + pre-push P1 on #3711). Same key shape
+  // mergeAutoSendMetadata produces, applied server-side.
+  const patchJson = JSON.stringify(parseJsonObject(patch));
   const [updated] = await database('estimates')
     .where({ id: estimate.id })
     .update({
       status,
-      estimate_data: JSON.stringify(nextData),
+      estimate_data: database.raw(
+        "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{automation}', COALESCE(estimate_data->'automation', '{}'::jsonb)), '{automation,autoSend}', COALESCE(estimate_data->'automation'->'autoSend', '{}'::jsonb) || ?::jsonb)",
+        [patchJson],
+      ),
       updated_at: database.fn.now(),
       ...extraUpdate,
     })
