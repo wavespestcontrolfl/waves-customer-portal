@@ -17,9 +17,11 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => {
   const fn = jest.fn();
-  fn.transaction = jest.fn();
   fn.raw = jest.fn((sql) => sql);
   fn.fn = { now: jest.fn(() => 'NOW()') };
+  // Claim + settle + close run under a row lock; the trx reuses the per-table
+  // recorder (forUpdate reads come from `locks`).
+  fn.transaction = jest.fn(async (work) => { const trx = (table) => fn(table); trx.fn = fn.fn; return work(trx); });
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -50,7 +52,11 @@ function builder(table) {
   const t = tables[table] || (tables[table] = { firsts: [], selects: [], updates: [], calls: [] });
   const b = {};
   ['where', 'whereIn', 'orderBy', 'limit'].forEach((m) => { b[m] = jest.fn((...a) => { t.calls.push([m, ...a]); return b; }); });
-  b.first = jest.fn(async () => (t.firsts.length ? t.firsts.shift() : null));
+  b.forUpdate = jest.fn(() => { t.calls.push(['forUpdate']); b.locked = true; return b; });
+  b.first = jest.fn(async () => {
+    if (b.locked) return t.locks && t.locks.length ? t.locks.shift() : { id: 'notice-1', status: 'parked' };
+    return t.firsts.length ? t.firsts.shift() : null;
+  });
   b.select = jest.fn(async () => (t.selects.length ? t.selects.shift() : []));
   b.update = jest.fn(async (patch) => { t.calls.push(['update', patch]); return t.updates.length ? t.updates.shift() : 1; });
   return b;
@@ -101,8 +107,8 @@ describe('GET /payment-notices', () => {
 describe('POST /payment-notices/:id/apply', () => {
   const liveExact = () => OpenBalance.openSelfPayInvoicesByAmountDue.mockResolvedValueOnce([{ id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', total: '117.00', credit_applied: 0 }]);
 
-  test('a live exact-cent invoice: claim first, settle via recordManualPayment (Zelle, receipt email + SMS), then close', async () => {
-    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [1, 1], calls: [] };
+  test('a live exact-cent invoice: lock the row, claim, settle via recordManualPayment (Zelle, receipt email + SMS), close — all in one transaction', async () => {
+    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [] };
     liveExact();
     await withServer(async (call) => {
       const r = await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' });
@@ -111,26 +117,16 @@ describe('POST /payment-notices/:id/apply', () => {
     });
     expect(OpenBalance.openSelfPayInvoicesByAmountDue).toHaveBeenCalledWith(11700);
     expect(OpenBalance.rowIsSelfPayDue).toHaveBeenCalledWith('cust-1', expect.objectContaining({ id: 'inv-1' }));
-    const updates = tables.inbound_payment_notices.calls.filter(([m]) => m === 'update').map(([, p]) => p);
-    // Claim precedes settlement; the settle call sits between the two updates.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    const calls = tables.inbound_payment_notices.calls;
+    const updates = calls.filter(([m]) => m === 'update').map(([, p]) => p);
+    expect(calls.map(([m]) => m).indexOf('forUpdate')).toBeLessThan(calls.map(([m]) => m).indexOf('update'));
     expect(updates[0]).toMatchObject({ status: 'processing' });
     expect(updates[1]).toMatchObject({ status: 'applied', match_method: 'manual', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: 'Adam' });
-    expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-1', status: 'parked' }]);
-    expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-1', status: 'processing' }]);
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', {
       method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: 'Adam', sendReceipt: true, via: 'both',
     });
     expect(tables.emails.calls.find(([m]) => m === 'update')[1]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500' });
-  });
-
-  test('a claim lost during a slow settlement still closes the notice as applied (forced, logged) — the ledger wins', async () => {
-    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [1, 0, 1], calls: [] };
-    liveExact();
-    await withServer(async (call) => { expect((await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' })).status).toBe(200); });
-    const updates = tables.inbound_payment_notices.calls.filter(([m]) => m === 'update').map(([, p]) => p);
-    expect(updates).toHaveLength(3);
-    expect(updates[2]).toMatchObject({ status: 'applied', matched_invoice_id: 'inv-1' });
-    expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-1' }]);
   });
 
   test('a stored candidate is NOT enough — the live exact-cent check decides (a ±$5 lead or a since-paid invoice is refused before any claim)', async () => {
@@ -153,8 +149,8 @@ describe('POST /payment-notices/:id/apply', () => {
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
-  test('losing the claim (a concurrent Apply or Ignore won) → 409, nothing settled', async () => {
-    tables.inbound_payment_notices = { firsts: [parked(), { status: 'ignored' }], selects: [], updates: [0], calls: [] };
+  test('a row that is no longer parked under the lock (a concurrent Apply or Ignore won) → 409, nothing settled', async () => {
+    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [], locks: [{ id: 'notice-1', status: 'ignored' }] };
     liveExact();
     await withServer(async (call) => {
       const r = await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' });
@@ -162,6 +158,7 @@ describe('POST /payment-notices/:id/apply', () => {
       expect(r.body).toEqual({ error: 'Payment notice is ignored, not parked', status: 'ignored' });
     });
     expect(recordManualPayment).not.toHaveBeenCalled();
+    expect(tables.inbound_payment_notices.calls.some(([m]) => m === 'update')).toBe(false);
   });
 
   test('missing invoiceId → 400; unknown notice → 404; not parked → 409; no amount → 400', async () => {
@@ -178,7 +175,7 @@ describe('POST /payment-notices/:id/apply', () => {
   });
 
   test('a settlement refusal keeps its status code and hands the notice back to the queue as apply_failed', async () => {
-    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [1, 1], calls: [] };
+    tables.inbound_payment_notices = { firsts: [parked()], selects: [], updates: [], calls: [] };
     liveExact();
     recordManualPayment.mockRejectedValueOnce(Object.assign(new Error('Invoice status changed before payment could be recorded'), { statusCode: 409, currentStatus: 'paid' }));
     await withServer(async (call) => {

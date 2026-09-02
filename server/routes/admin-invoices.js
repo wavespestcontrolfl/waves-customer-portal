@@ -679,7 +679,6 @@ router.get('/payment-notices', requireAdmin, async (req, res, next) => {
 // stored candidate list are never trusted on their own.
 router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) => {
   const { id } = req.params;
-  let claimed = false;
   try {
     const invoiceId = typeof req.body?.invoiceId === 'string' ? req.body.invoiceId.trim() : '';
     if (!invoiceId) return res.status(400).json({ error: 'invoiceId is required' });
@@ -702,57 +701,52 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
     if (!exact || !(await rowIsSelfPayDue(exact.customer_id, exact))) {
       return res.status(400).json({ error: 'Invoice is not an open self-pay invoice with exactly this amount due — pick an exact-amount invoice, or record the payment from the invoice itself' });
     }
-    // Claim BEFORE settling (parked → processing, CAS): two concurrent
-    // Apply clicks, or an Apply racing an Ignore, can never both reach
-    // recordManualPayment — only the claimant settles.
-    claimed = !!(await db('inbound_payment_notices')
-      .where({ id, status: 'parked' })
-      .update({ status: 'processing', updated_at: db.fn.now() }));
-    if (!claimed) {
-      const now = await db('inbound_payment_notices').where({ id }).first('status');
-      return res.status(409).json({ error: `Payment notice is ${now?.status || 'gone'}, not parked`, status: now?.status || null });
-    }
+    // Claim + settle + close under a ROW LOCK on the notice: a concurrent
+    // Apply, an Ignore, or the reconciler's stale-claim sweep all UPDATE this
+    // row and wait behind the lock until the settlement has committed and the
+    // row says applied / parked — nothing can settle twice or be "recovered"
+    // mid-flight. recordManualPayment runs its own transaction on another
+    // connection and never touches this table, so no deadlock.
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
-    let settled;
-    try {
-      settled = await recordManualPayment(invoiceId, {
-        method: 'zelle',
-        reference: notice.payer_name || 'Zelle',
-        note: notice.memo ? `Zelle memo: ${notice.memo}` : '',
-        recordedBy,
-        sendReceipt: true,
-        via: 'both',
+    const outcome = await db.transaction(async (trx) => {
+      const locked = await trx('inbound_payment_notices').where({ id }).forUpdate().first('id', 'status');
+      if (!locked || locked.status !== 'parked') {
+        return { refused: { status: 409, body: { error: `Payment notice is ${locked?.status || 'gone'}, not parked`, status: locked?.status || null } } };
+      }
+      await trx('inbound_payment_notices').where({ id }).update({ status: 'processing', updated_at: trx.fn.now() });
+      let settled;
+      try {
+        settled = await recordManualPayment(invoiceId, {
+          method: 'zelle',
+          reference: notice.payer_name || 'Zelle',
+          note: notice.memo ? `Zelle memo: ${notice.memo}` : '',
+          recordedBy,
+          sendReceipt: true,
+          via: 'both',
+        });
+      } catch (err) {
+        // Nothing settled — hand the notice back to the queue with the reason.
+        await trx('inbound_payment_notices').where({ id })
+          .update({ status: 'parked', park_reason: 'apply_failed', apply_error: err.message, updated_at: trx.fn.now() });
+        return { failed: err };
+      }
+      const { invoice, receipt } = settled;
+      await trx('inbound_payment_notices').where({ id }).update({
+        status: 'applied',
+        park_reason: null,
+        apply_error: null,
+        match_method: 'manual',
+        matched_invoice_id: invoiceId,
+        matched_customer_id: invoice?.customer_id || exact.customer_id,
+        applied_at: trx.fn.now(),
+        applied_by: recordedBy,
+        updated_at: trx.fn.now(),
       });
-    } catch (err) {
-      // Nothing settled — hand the notice back to the queue with the reason.
-      await db('inbound_payment_notices').where({ id, status: 'processing' })
-        .update({ status: 'parked', park_reason: 'apply_failed', apply_error: err.message, updated_at: db.fn.now() })
-        .catch((e) => logger.warn(`[admin-invoices:payment-notices] revert to parked failed for ${id}: ${e.message}`));
-      claimed = false;
-      throw err;
-    }
-    const { invoice, receipt } = settled;
-    // The payment has COMMITTED; the notice must say applied whatever
-    // happened to the claim meanwhile (a stale-claim sweep could have parked
-    // it during a slow settlement). Verify the transition and force it if
-    // lost — a notice contradicting the ledger is never reported as success
-    // silently.
-    const closePatch = {
-      status: 'applied',
-      park_reason: null,
-      apply_error: null,
-      match_method: 'manual',
-      matched_invoice_id: invoiceId,
-      matched_customer_id: invoice?.customer_id || exact.customer_id,
-      applied_at: db.fn.now(),
-      applied_by: recordedBy,
-      updated_at: db.fn.now(),
-    };
-    const closed = await db('inbound_payment_notices').where({ id, status: 'processing' }).update(closePatch);
-    if (!closed) {
-      logger.error(`[admin-invoices:payment-notices] notice ${id} lost its claim after ${invoiceId} settled — forcing applied to match the ledger`);
-      await db('inbound_payment_notices').where({ id }).update(closePatch);
-    }
+      return { invoice, receipt };
+    });
+    if (outcome.refused) return res.status(outcome.refused.status).json(outcome.refused.body);
+    if (outcome.failed) throw outcome.failed;
+    const { invoice, receipt } = outcome;
     await db('emails').where({ id: notice.email_id }).update({ auto_action: `zelle_notice_applied:${invoice?.invoice_number || exact.invoice_number}`, updated_at: new Date() })
       .catch((err) => logger.warn(`[admin-invoices:payment-notices] auto_action stamp failed: ${err.message}`));
     res.json({ ok: true, invoice, receipt });
@@ -763,7 +757,7 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
         ...(err.currentStatus !== undefined ? { current_status: err.currentStatus } : {}),
       });
     }
-    logger.error(`[admin-invoices] payment-notice apply failed${claimed ? ' after claim' : ''}: ${err.message}`);
+    logger.error(`[admin-invoices] payment-notice apply failed: ${err.message}`);
     next(err);
   }
 });

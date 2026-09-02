@@ -20,6 +20,13 @@ jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.fn = { now: jest.fn(() => 'NOW()') };
   fn.raw = jest.fn((sql) => sql);
+  // The settle-and-close step runs under a row lock: the trx is the same
+  // per-table recorder, plus forUpdate; the locked read comes from `locks`.
+  fn.transaction = jest.fn(async (work) => {
+    const trx = (table) => fn(table);
+    trx.fn = fn.fn;
+    return work(trx);
+  });
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -66,7 +73,12 @@ function builder(table) {
   const b = {};
   const chain = (name) => { b[name] = jest.fn((...args) => { t.calls.push([name, ...args]); return b; }); };
   ['where', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'onConflict', 'ignore', 'insert', 'join'].forEach(chain);
-  b.first = jest.fn(async (...args) => { t.calls.push(['first', ...args]); return t.firsts.length ? t.firsts.shift() : null; });
+  b.forUpdate = jest.fn(() => { t.calls.push(['forUpdate']); b.locked = true; return b; });
+  b.first = jest.fn(async (...args) => {
+    t.calls.push(['first', ...args]);
+    if (b.locked) return t.locks && t.locks.length ? t.locks.shift() : { id: 'notice-1', status: 'processing' };
+    return t.firsts.length ? t.firsts.shift() : null;
+  });
   b.select = jest.fn(async () => []);
   b.update = jest.fn(async (patch) => { t.calls.push(['update', patch]); return 1; });
   b.returning = jest.fn(async () => (t.returning.length ? t.returning.shift() : []));
@@ -164,19 +176,25 @@ describe('auto-apply', () => {
   });
 });
 
-describe('post-settlement transition', () => {
-  test('if the claim was lost while the payment settled, the notice is still forced to auto_applied (never contradicts the ledger)', async () => {
+describe('settlement under the row lock', () => {
+  test('the settle-and-close step takes the notice row lock, and a row no longer processing under it is not settled', async () => {
     claimed();
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
-    const orig = db.getMockImplementation();
-    let updates = 0;
-    db.mockImplementation((table) => { const b = orig(table); if (table === 'inbound_payment_notices') { const u = b.update; b.update = jest.fn(async (patch) => { updates += 1; await u(patch); return updates === 1 ? 0 : 1; }); } return b; });
+    tables.inbound_payment_notices.locks = [{ id: 'notice-1', status: 'parked' }]; // a sweep parked it before we got the lock
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
-    const patches = updatesOf('inbound_payment_notices');
-    expect(patches).toHaveLength(2);
-    expect(patches[0]).toMatchObject({ status: 'auto_applied' });
-    expect(patches[1]).toMatchObject({ status: 'auto_applied', matched_invoice_id: 'inv-1' });
-    expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-1' }]);
+    expect(db.transaction).toHaveBeenCalled();
+    expect(tables.inbound_payment_notices.calls).toContainEqual(['forUpdate']);
+    expect(recordManualPayment).not.toHaveBeenCalled();
+    expect(updatesOf('inbound_payment_notices')).toHaveLength(0);
+  });
+
+  test('a settlement that commits closes the row inside the same transaction', async () => {
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
+    expect(await maybeHandleZelleNotice(notice())).toBe(true);
+    const calls = tables.inbound_payment_notices.calls.map(([m]) => m);
+    expect(calls.indexOf('forUpdate')).toBeLessThan(calls.indexOf('update'));
+    expect(updatesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied' });
   });
 });
 

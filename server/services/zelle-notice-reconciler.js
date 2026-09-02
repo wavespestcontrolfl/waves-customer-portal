@@ -112,8 +112,8 @@ async function notifyOwner(title, body, noticeId) {
   }
 }
 
-async function finishParked(notice, email, reason, { candidates = null, applyError = null, matchedInvoice = null } = {}) {
-  await db('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
+async function finishParked(notice, email, reason, { candidates = null, applyError = null, matchedInvoice = null } = {}, trx = db) {
+  await trx('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
     status: 'parked',
     park_reason: reason,
     candidates: candidates ? JSON.stringify(candidates) : null,
@@ -132,12 +132,12 @@ async function finishParked(notice, email, reason, { candidates = null, applyErr
   return { status: 'parked', reason };
 }
 
-async function finishApplied(notice, email, invoice, matchMethod, receipt) {
+async function finishApplied(notice, email, invoice, matchMethod, receipt, trx = db) {
   // The payment has COMMITTED — the notice must say so whatever happened to
   // the claim meanwhile (a stale-claim sweep on another pod could have parked
   // it during a slow settlement). Verify the transition; a non-processing
   // row is overwritten and logged, never left contradicting the ledger.
-  const moved = await db('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
+  const moved = await trx('inbound_payment_notices').where({ id: notice.id, status: 'processing' }).update({
     status: 'auto_applied',
     park_reason: null,
     match_method: matchMethod,
@@ -149,7 +149,7 @@ async function finishApplied(notice, email, invoice, matchMethod, receipt) {
   });
   if (!moved) {
     logger.error(`[zelle-notice] notice ${notice.id} was no longer processing after ${invoice.invoice_number} settled — forcing auto_applied to match the ledger`);
-    await db('inbound_payment_notices').where({ id: notice.id }).update({
+    await trx('inbound_payment_notices').where({ id: notice.id }).update({
       status: 'auto_applied', park_reason: null, apply_error: null, match_method: matchMethod,
       matched_invoice_id: invoice.id, matched_customer_id: invoice.customer_id,
       applied_at: new Date(), applied_by: RECORDED_BY, updated_at: new Date(),
@@ -190,10 +190,10 @@ async function claimNotice(email, parsed) {
 // A claim the sync never finished (process exit, DB blip after the insert)
 // would otherwise sit in `processing` forever: the email row is stored, so
 // no later sync re-enters the hook. Park anything older than the window as
-// apply_failed for the operator — never re-run the money path blind (if
-// recordManualPayment had committed, the invoice is paid and no longer a
-// candidate, so a manual Apply is refused; if it had not, the operator can
-// apply it).
+// apply_failed for the operator — never re-run the money path blind. Safe
+// against an in-flight settlement: the settling path holds the notice's row
+// lock across recordManualPayment + close, so this UPDATE waits behind it
+// and its status='processing' predicate then no longer matches.
 const STALE_CLAIM_MS = 10 * 60 * 1000;
 async function recoverStaleClaims() {
   const cutoff = new Date(Date.now() - STALE_CLAIM_MS);
@@ -293,21 +293,36 @@ async function maybeHandleZelleNotice(email) {
     }
   }
 
-  try {
-    const { recordManualPayment } = require('./invoice-manual-payment');
-    const { invoice, receipt } = await recordManualPayment(match.id, {
-      method: 'zelle',
-      reference: parsed.payerName,
-      note: parsed.memo ? `Zelle memo: ${parsed.memo}` : '',
-      recordedBy: RECORDED_BY,
-      sendReceipt: true,
-      via: 'both',
-    });
-    await finishApplied(notice, email, invoice || match, matchMethod, receipt);
-  } catch (err) {
-    logger.error(`[zelle-notice] apply failed for ${match.invoice_number} (email ${email.id}): ${err.message}`);
-    await finishParked(notice, email, 'apply_failed', { candidates, applyError: err.message, matchedInvoice: match });
-  }
+  // Settle and close under a ROW LOCK on the notice: the stale-claim sweep
+  // and the operator's Apply both UPDATE this row and therefore wait behind
+  // the lock until the settlement has committed and the row says applied /
+  // parked — a claim can never be "recovered" or re-applied mid-settlement.
+  // recordManualPayment runs its own transaction on another connection and
+  // never touches this table, so holding the lock across it cannot deadlock.
+  await db.transaction(async (trx) => {
+    const locked = await trx('inbound_payment_notices').where({ id: notice.id }).forUpdate().first('id', 'status');
+    if (!locked || locked.status !== 'processing') {
+      logger.warn(`[zelle-notice] notice ${notice.id} is ${locked?.status || 'gone'} at settlement time — not settling`);
+      return;
+    }
+    let settled;
+    try {
+      const { recordManualPayment } = require('./invoice-manual-payment');
+      settled = await recordManualPayment(match.id, {
+        method: 'zelle',
+        reference: parsed.payerName,
+        note: parsed.memo ? `Zelle memo: ${parsed.memo}` : '',
+        recordedBy: RECORDED_BY,
+        sendReceipt: true,
+        via: 'both',
+      });
+    } catch (err) {
+      logger.error(`[zelle-notice] apply failed for ${match.invoice_number} (email ${email.id}): ${err.message}`);
+      await finishParked(notice, email, 'apply_failed', { candidates, applyError: err.message, matchedInvoice: match }, trx);
+      return;
+    }
+    await finishApplied(notice, email, settled.invoice || match, matchMethod, settled.receipt, trx);
+  });
   return true;
 }
 
