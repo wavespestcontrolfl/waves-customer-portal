@@ -91,7 +91,7 @@ import CancelPlanDialog from "./CancelPlanDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
-import { describeCardRequestResult } from "../schedule/cardLinkStatus";
+import { describeAutopaySetupLinkResult } from "../schedule/cardLinkStatus";
 import {
   CONSENT_TEXT,
   CONSENT_VERSION,
@@ -1217,12 +1217,12 @@ function ElectronicAuthorizationContractV2({
           <div
             className={cn(
               "px-4 py-2 text-12 border-b border-hairline border-zinc-200",
-              describeCardRequestResult(setupLinkResult).tone === "bad"
+              describeAutopaySetupLinkResult(setupLinkResult).tone === "bad"
                 ? "text-alert-fg"
                 : "text-ink-secondary",
             )}
           >
-            {describeCardRequestResult(setupLinkResult).text}
+            {describeAutopaySetupLinkResult(setupLinkResult).text}
             {setupLinkResult.secureUrl ? (
               <span className="ml-2 break-all u-nums text-zinc-900">{setupLinkResult.secureUrl}</span>
             ) : null}

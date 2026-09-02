@@ -132,9 +132,11 @@ describe('requestAutopaySetupLink — ordered checks', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  it('skips an unknown customer', async () => {
+  it('skips an unknown customer and a soft-deleted (archived) one', async () => {
     mockTableHandlers.customers = { first: () => null };
     expect((await requestAutopaySetupLink({ customerId: 'nope' })).reason).toBe('customer_not_found');
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, deleted_at: new Date() }) };
+    expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).reason).toBe('customer_not_found');
   });
 
   it('exempts payer-billed customers and fails toward exempt on a payer lookup error', async () => {
@@ -352,6 +354,23 @@ describe('loadAutopaySetupPageData — state machine', () => {
     expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completed', expires_at: PAST })).state).toBe('closed');
     mockTableHandlers.customers = { first: () => null };
     expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completed' })).state).toBe('closed');
+    // Soft-deleted (archived) customer counts as gone — pending and completed alike.
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, deleted_at: new Date() }) };
+    expect((await loadAutopaySetupPageData({ ...PENDING })).state).toBe('closed');
+    expect((await loadAutopaySetupPageData({ ...PENDING, status: 'completed' })).state).toBe('closed');
+    expect(mockCreateSetupIntent).not.toHaveBeenCalled();
+  });
+
+  it('replaces a still-unconfirmed card-only intent once bank becomes eligible (never pins the link to card)', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_card', client_secret: 'cs_card', status: 'requires_payment_method', payment_method_types: ['card'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_cb', setupIntentId: 'seti_cb', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
+    const d = await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_card' });
+    expect(d.setupIntentId).toBe('seti_cb');
+    expect(d.paymentMethodTypes).toEqual(['card', 'us_bank_account']);
+    // A SUCCEEDED card-only intent is kept — a card is already captured.
+    mockCreateSetupIntent.mockClear();
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_card', client_secret: 'cs_card', status: 'succeeded', payment_method: { id: 'pm_k', type: 'card' }, payment_method_types: ['card'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    expect((await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_card' })).setupIntentId).toBe('seti_card');
     expect(mockCreateSetupIntent).not.toHaveBeenCalled();
   });
 
@@ -369,9 +388,9 @@ describe('loadAutopaySetupPageData — state machine', () => {
     expect(mockCreateSetupIntent).not.toHaveBeenCalled();
   });
 
-  it('heals the row to satisfied and renders secured when Auto Pay is already active', async () => {
+  it('heals the row to satisfied and renders CLOSED (never a setup-success it did not earn) when Auto Pay was activated elsewhere', async () => {
     mockCustomerOnAutopay.mockResolvedValue(true);
-    expect((await loadAutopaySetupPageData({ ...PENDING })).state).toBe('secured');
+    expect((await loadAutopaySetupPageData({ ...PENDING })).state).toBe('closed');
     const calls = touches('appointment_card_requests').flatMap((c) => c.calls);
     expect(calls.find((c) => c[0] === 'update')[1]).toEqual(expect.objectContaining({ status: 'satisfied' }));
   });
@@ -409,10 +428,11 @@ describe('loadAutopaySetupPageData — state machine', () => {
   });
 
   it('replays an existing confirmable SetupIntent pinned to this request instead of minting again', async () => {
-    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_old', client_secret: 'cs_old', status: 'requires_payment_method', payment_method_types: ['card'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    // The existing intent already matches the current tender (card_or_bank).
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_old', client_secret: 'cs_old', status: 'requires_payment_method', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
     const d = await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_old' });
     expect(d.clientSecret).toBe('cs_old');
-    expect(d.paymentMethodTypes).toEqual(['card']);
+    expect(d.paymentMethodTypes).toEqual(['card', 'us_bank_account']);
     expect(mockCreateSetupIntent).not.toHaveBeenCalled();
   });
 
@@ -558,6 +578,18 @@ describe('completion tail (page POST + webhook)', () => {
     await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
     expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_new', expect.objectContaining({ methodType: 'ach' }));
     expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ methodType: 'ach' }));
+    // The legacy row is normalized to the bank vocabulary before enrollment.
+    const pmUpdate = touches('payment_methods').flatMap((c) => c.calls).find((c) => c[0] === 'update');
+    expect(pmUpdate[1]).toEqual(expect.objectContaining({ method_type: 'ach' }));
+  });
+
+  it('closes (no_longer_needed) when the customer was archived under the enrollment lock', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
+    mockTableHandlers.payment_methods = { first: () => null };
+    let calls = 0;
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'per_visit', deleted_at: (calls++ === 0 ? null : new Date()) }) };
+    expect((await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).code).toBe('no_longer_needed');
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
   });
 
   it('the AUTHORIZATION moment is the SetupAttempt (the confirm) — never SetupIntent.created, PaymentMethod.created, or a replay POST time', async () => {

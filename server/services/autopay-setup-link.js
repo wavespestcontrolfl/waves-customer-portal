@@ -135,7 +135,9 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
     if (!isAutopaySetupLinkEnabled()) return skip('gate_off');
     if (!customerId) return skip('no_customer');
     const customer = await db('customers').where({ id: customerId }).first();
-    if (!customer) return skip('customer_not_found');
+    // Deletion is SOFT (deleted_at) — an archived customer never gets a
+    // link (GH Codex P0).
+    if (!customer || customer.deleted_at) return skip('customer_not_found');
 
     const exempt = await payerExemption(customerId);
     if (exempt) return skip(exempt);
@@ -313,6 +315,12 @@ async function mintOrReplaySetupIntent(request) {
       const existing = await StripeService.retrieveSetupIntent(request.stripe_setup_intent_id);
       const existingTypes = existing?.payment_method_types || ['card'];
       const bankNoLongerOffered = tender === 'card' && existingTypes.includes('us_bank_account');
+      // The reverse too (GH Codex P0): a card-only intent minted while bank
+      // was off must not pin the link to card once bank becomes eligible —
+      // a still-unconfirmed one is stale and the tender-salted key mints a
+      // card_or_bank generation. A SUCCEEDED card intent is kept (a card is
+      // already captured; nothing to widen).
+      const bankNowOffered = tender === 'card_or_bank' && !existingTypes.includes('us_bank_account') && existing?.status !== 'succeeded';
       if (existing
         && existing.metadata?.purpose === PURPOSE
         && String(existing.metadata?.request_id) === String(request.id)
@@ -322,7 +330,8 @@ async function mintOrReplaySetupIntent(request) {
         // and every refresh would loop on bank_not_allowed (GH Codex #3726
         // r1 P0); the card-only generation below gives the customer a way
         // to finish with a card.
-        && !bankNoLongerOffered) {
+        && !bankNoLongerOffered
+        && !bankNowOffered) {
         // A SUCCEEDED replay already holds a method the customer will not
         // re-enter — the capture UI refuses a bank-capable succeeded replay
         // without its tender (GH Codex #3726 P1), so resolve it here, where
@@ -393,9 +402,10 @@ async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
     cancelFeeNote: null,
   };
   // Closure checks BEFORE any terminal success (GH Codex #3726 r5 P0): a
-  // bearer link closes once its 30 days pass or its customer is gone, even
-  // when the capture completed — the contract says the GET becomes closed.
-  if (isExpired(request) || !customer) return { state: 'closed', ...base };
+  // bearer link closes once its 30 days pass or its customer is gone —
+  // deletion is SOFT (deleted_at), so an archived customer counts as gone —
+  // even when the capture completed; the contract says the GET becomes closed.
+  if (isExpired(request) || !customer || customer.deleted_at) return { state: 'closed', ...base };
   if (request.status === 'completed' || request.status === 'satisfied') return { state: 'secured', ...base };
   // Mid-completion (page POST or webhook holds the claim): the intent
   // succeeded, but the tail can still revert the row — say "finishing up",
@@ -415,7 +425,10 @@ async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
       await db('appointment_card_requests')
         .where({ id: request.id, status: 'pending' })
         .update({ status: 'satisfied', completed_at: new Date(), updated_at: new Date() });
-      return { state: 'secured', ...base };
+      // Activated elsewhere → this link is no longer active: CLOSED, never a
+      // setup-success confirmation the link did not earn (GH Codex P0; the
+      // route contract says an already-active account renders closed).
+      return { state: 'closed', ...base };
     }
   } catch (err) {
     logger.warn(`[autopay-setup-link] autopay-active probe failed for request ${request.id} — rendering the form: ${err.message}`);
@@ -615,6 +628,15 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
       }
     }
     const consentMethodType = consentMethodTypeFor(methodType);
+    // A pre-existing local row for a Stripe-verified BANK method may carry a
+    // null/alias method_type (legacy portal rows) — normalize it to the
+    // vocabulary enrollment and charge routing recognize, or the row could
+    // bypass the ACH-health guard and later be charged as a card (GH Codex
+    // P1). Card rows are left alone.
+    if (saved && consentMethodType === 'ach' && !['ach', 'us_bank_account'].includes(saved.method_type)) {
+      await db('payment_methods').where({ id: saved.id }).update({ method_type: 'ach', updated_at: new Date() });
+      saved = { ...saved, method_type: 'ach' };
+    }
     const ConsentService = require('./payment-method-consents');
     // One ledger row per AUTHORIZATION EVENT (GH Codex #3726 r1 P1): a
     // consent recorded for this method before this link was minted (an
@@ -665,8 +687,9 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
       const locked = await trx('customers')
         .where({ id: request.customer_id })
         .forUpdate()
-        .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'autopay_enabled', 'autopay_paused_until');
-      if (!locked || !billingLaneSupported(locked)) return { enrolled: false, reason: 'lane_changed' };
+        .first('id', 'deleted_at', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'autopay_enabled', 'autopay_paused_until');
+      // Archived (soft-deleted) under the lock → never enable Auto Pay on it.
+      if (!locked || locked.deleted_at || !billingLaneSupported(locked)) return { enrolled: false, reason: 'lane_changed' };
       // A PAUSE taken since the link went out stands (pre-push Codex P1):
       // enrollment would report already_enrolled and this completion would
       // say "set up" while nothing collects. Resuming is the customer's or
