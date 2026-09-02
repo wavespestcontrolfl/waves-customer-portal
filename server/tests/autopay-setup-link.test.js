@@ -532,6 +532,17 @@ describe('completion tail (page POST + webhook)', () => {
     expect(mockEnrollConsentedMethod.mock.calls[0][0].authorizedAt).toBeUndefined();
   });
 
+  it('an opt-out after authorization retires the link permanently (opted_out) instead of looping retries', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
+    mockTableHandlers.payment_methods = { first: () => null };
+    mockEnrollConsentedMethod.mockResolvedValue({ enrolled: false, reason: 'opted_out_after_authorization' });
+    const r = await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' });
+    expect(r).toEqual({ ok: false, code: 'opted_out' });
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    const updates = touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'update').map((c) => c[1]);
+    expect(updates[updates.length - 1]).toEqual(expect.objectContaining({ status: 'expired' }));
+  });
+
   it('never reattaches a method the customer removed: PM_NOT_ATTACHED retires the link (method_removed, permanent)', async () => {
     mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
     mockTableHandlers.payment_methods = { first: () => null };

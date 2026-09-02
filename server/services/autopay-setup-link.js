@@ -633,6 +633,18 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
       // enrollConsentedMethod refuses opted_out_after_authorization.
       ...(authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime()) ? { authorizedAt } : {}),
     });
+    if (!enrollment.enrolled && enrollment.reason === 'opted_out_after_authorization') {
+      // PERMANENT (pre-push Codex P1): the customer turned Auto Pay off
+      // after authorizing — no retry can change that, and a retryable
+      // outcome would loop the link (page replay / webhook) forever. Retire
+      // the link; the office mints a fresh one if the customer changes
+      // their mind. The method stays saved (removable in the portal).
+      logger.info(`[autopay-setup-link] opt-out after authorization for customer ${request.customer_id} — retiring request ${request.id}`);
+      await db('appointment_card_requests')
+        .where({ id: request.id, status: 'completing', updated_at: claimStamp })
+        .update({ status: 'expired', updated_at: new Date() });
+      return { ok: false, code: 'opted_out' };
+    }
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
       logger.warn(`[autopay-setup-link] enrollment refused (${enrollment.reason}) for customer ${request.customer_id} — completion stays retryable`);
       await alertNeedsReview({ customerId: request.customer_id, requestId: request.id, reason: enrollment.reason });
