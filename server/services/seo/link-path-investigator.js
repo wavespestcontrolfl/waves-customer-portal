@@ -565,9 +565,26 @@ function pathRowFrom(modelPath, { legalTermsHash, now, evidence }) {
  * unique (domain_id, path_key) WHERE superseded_by IS NULL.
  * Returns the path row id.
  */
-async function upsertPath(trx, domainId, row, { replacesPathId = null, now, preserveTermsHash = false }) {
+async function upsertPath(trx, domainId, row, { replacesPathId = null, now, preserveTermsHash = false, workingUrlFor = null }) {
   let existing = await trx('seo_link_acquisition_paths')
     .where({ domain_id: domainId, path_key: row.path_key }).whereNull('superseded_by').first('*');
+  // The model reports the URL it SAW. When that page was reached through a
+  // working fallback origin (the https apex is dead), the route's identity
+  // MOVES with it: an existing row keyed on the original apex URL is this
+  // same path — re-keyed in place, never duplicated — and its placements'
+  // execution URL follows, or every claim would keep navigating the apex
+  // this investigation just proved unusable. (A www origin normalizes to
+  // the same key, so only the scheme case needs the alias lookup.)
+  let rekeyed = false;
+  if (!existing && workingUrlFor && workingUrlFor.size && row.submission_url) {
+    const mine = registry.normalizeSubmissionUrl(row.submission_url);
+    for (const [originalKey, working] of workingUrlFor) {
+      if (registry.normalizeSubmissionUrl(working) !== mine) continue;
+      existing = await trx('seo_link_acquisition_paths')
+        .where({ domain_id: domainId, path_key: registry.pathKey(row.acquisition_type, originalKey) }).whereNull('superseded_by').first('*');
+      if (existing) { rekeyed = true; break; }
+    }
+  }
   let id;
   if (!existing) {
     // Insert against the partial unique; a CONCURRENT winner (the boot/
@@ -623,13 +640,21 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
       revision_execution: changedInputs(existing, row, EXECUTION_INPUTS),
     };
     const patch = { ...row };
-    delete patch.path_key; // identity never changes in place
+    if (!rekeyed) delete patch.path_key; // identity never changes in place — except when the route moved to its working origin
     if (bump.revision_payment) patch.revision_payment = Number(existing.revision_payment) + 1;
     if (bump.revision_communication) patch.revision_communication = Number(existing.revision_communication) + 1;
     if (bump.revision_execution) patch.revision_execution = Number(existing.revision_execution) + 1;
     if (bump.revision_payment || bump.revision_communication || bump.revision_execution) patch.revision = Number(existing.revision) + 1;
     await trx('seo_link_acquisition_paths').where({ id: existing.id }).update(patch);
     id = existing.id;
+    // the execution URL moved to the working origin (www or http): un-leased
+    // placements follow now; a leased one is refreshed from the path at
+    // its next claim (claim() hands out the live path's submission_url)
+    const movedToWorkingOrigin = !!(row.submission_url && existing.submission_url && existing.submission_url !== row.submission_url
+      && workingUrlFor && workingUrlFor.has(registry.normalizeSubmissionUrl(existing.submission_url)));
+    if (movedToWorkingOrigin) {
+      await trx('seo_link_prospects').where({ path_id: existing.id }).whereNull('claimed_at').update({ target_url: row.submission_url, updated_at: now });
+    }
   }
   // §3.2 supersession, step-3 minimal form (nothing executes yet — no
   // purchases, approvals or authority instances exist to pin or carry):
@@ -1046,6 +1071,7 @@ async function investigatePaths(db, {
         // evidence keys (coverage, disproof, redirects) stay on the ORIGINAL
         // URL, which is the identity every path row and hint carries
         const rebasedFrom = new Map();
+        const workingUrlFor = new Map(); // normalized ORIGINAL (apex) URL → the working origin's URL that answered
         // BOUNDED origin fallbacks tried when the https apex homepage fails:
         // www-only sites, plain-http sites, and legacy http-only www hosts
         // (canonicalization strips the www the registry once observed, so
@@ -1110,6 +1136,10 @@ async function investigatePaths(db, {
             // (http→https, slash) covers BOTH aliases — the original path's
             // URL must not stay "never covered" and re-select forever
             pages.push({ url: finalUrl, requestedUrl: claimUrl, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html, truncated: !!page.truncated });
+            // a re-based fetch that ANSWERED is the route's WORKING execution
+            // URL: the path (and its placements' target_url) must move to
+            // it, or every claim would keep navigating the dead apex
+            if (claimUrl !== url) workingUrlFor.set(registry.normalizeSubmissionUrl(claimUrl), finalUrl);
             // the route counts as INSPECTED only when the model saw the
             // whole page — same full-observation rule as content coverage:
             // a byte-capped body or text past the prompt excerpt may hold
@@ -1269,8 +1299,12 @@ async function investigatePaths(db, {
         // …reconciled against what DID load: an apex 404 whose www/http
         // fallback then answered is the same normalized identity (www is
         // stripped), observed alive later in the pass — never a disproof.
+        // …and a submission route that finishes OFF the registry domain is
+        // disproof too: the investigator has definitive evidence the route
+        // no longer stays on this site, so its path must not keep a positive
+        // confidence the worker would keep navigating and rejecting.
         const goneKeys = new Set(fetchErrors
-          .filter((f) => /^status_(404|410)$/.test(String(f.reason)))
+          .filter((f) => /^(status_(404|410)|offsite_redirect)$/.test(String(f.reason)))
           .map((f) => registry.normalizeSubmissionUrl(f.url))
           .filter((k) => !fetchedKeys.has(k)));
         let verifyAttempts = 0;
@@ -1280,7 +1314,7 @@ async function investigatePaths(db, {
           if (fetchedKeys.has(key)) continue;
           // the candidate phase already got a deterministic 404/410 for this
           // URL — that IS the verdict; no probe spend, no transient retry
-          const goneReason = fetchErrors.find((f) => registry.normalizeSubmissionUrl(f.url) === key && /^status_(404|410)$/.test(String(f.reason)));
+          const goneReason = goneKeys.has(key) ? fetchErrors.find((f) => registry.normalizeSubmissionUrl(f.url) === key && /^(status_(404|410)|offsite_redirect)$/.test(String(f.reason))) : null;
           if (goneReason) { p.submissionUnverified = goneReason.reason; continue; }
           if (verifyAttempts >= SUBMISSION_VERIFY_BUDGET) { p.submissionUnverified = 'verify_budget_exhausted'; continue; }
           verifyAttempts += 1;
@@ -1490,14 +1524,14 @@ async function investigatePaths(db, {
               // URL itself — ARE verdicts and stamp normally (an echoed
               // dead URL must not re-select the domain every backoff
               // forever).
-              const deterministicReject = ['offhost_submission_url', 'missing_submission_url'].includes(p.submissionUnverified)
+              const deterministicReject = ['offhost_submission_url', 'missing_submission_url', 'offsite_redirect'].includes(p.submissionUnverified)
                 || /^status_(404|410)$/.test(String(p.submissionUnverified));
               if (!deterministicReject) {
                 row.last_investigated_at = null;
                 p.unstamped = true;
               }
             }
-            const id = await upsertPath(trx, domain.id, row, { replacesPathId: replaces, now, preserveTermsHash: termsInconclusive });
+            const id = await upsertPath(trx, domain.id, row, { replacesPathId: replaces, now, preserveTermsHash: termsInconclusive, workingUrlFor });
             if (id) {
               writtenIds.push(id);
               if (p.unstamped) unstampedIds.add(id);
@@ -1572,7 +1606,7 @@ async function investigatePaths(db, {
               const urlGone = !!s.submission_url && goneKeys.has(registry.normalizeSubmissionUrl(s.submission_url));
               await trx('seo_link_acquisition_paths').where({ id: s.id }).update({
                 confidence: 0,
-                investigation: JSON.stringify({ ...prior, disproven_at: now.toISOString(), disproven_reason: urlGone ? 'submission URL returned 404/410' : `re-investigation verdict '${verdict.verdict}' did not reproduce this path` }),
+                investigation: JSON.stringify({ ...prior, disproven_at: now.toISOString(), disproven_reason: urlGone ? 'submission URL is gone (404/410) or redirects off the registry domain' : `re-investigation verdict '${verdict.verdict}' did not reproduce this path` }),
                 updated_at: now,
               });
             }

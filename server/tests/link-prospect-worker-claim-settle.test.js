@@ -166,3 +166,13 @@ test('disproven and retired paths are filtered BEFORE the claim limit — a dead
   expect((await worker.claim({ n: 1, type: 'signup' })).map((r) => r.id)).toEqual(['r-live']);
 });
 
+test('claim refreshes a placement\'s execution URL from the live path when the route moved to its working origin (Codex PR r26 P2)', async () => {
+  const moved = { id: 'p-www', domain_id: 'd1', submission_url: 'https://www.example.com/get-listed', superseded_by: null, link_type: 'directory', confidence: 0.7 };
+  mockStore.seo_link_acquisition_paths.push(moved);
+  const row = { id: 'r1', status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40, target_domain: 'example.com', path_id: 'p-www', target_url: 'https://example.com/get-listed' };
+  mockStore.seo_link_prospects.push(row);
+  const claimed = await worker.claim({ n: 5, type: 'signup' });
+  expect(claimed[0]).toMatchObject({ id: 'r1', target_url: 'https://www.example.com/get-listed' }); // the runner navigates the origin that answers
+  expect(row.target_url).toBe('https://www.example.com/get-listed');
+});
+

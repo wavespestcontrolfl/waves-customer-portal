@@ -384,6 +384,11 @@ router.patch('/registry/:id', async (req, res, next) => {
     const now = new Date();
     const patch = { agent_state: nextState, updated_at: now };
     patch.watch_recheck_at = nextState === 'watching' ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
+    // A manual Watch starts a LONG-TERM watch generation exactly like the
+    // investigator's own parks: the probe-coverage mask resets, so the
+    // resumed pass a month later re-earns coverage instead of closing on
+    // routes credited before the park.
+    if (action === 'watch') patch.probe_coverage_mask = 0;
     // An explicit Reopen is a fresh mandate: clear the failure backoff so the
     // very next sweep picks the domain up instead of honoring a stale defer —
     // and the probe-tail deferral marker with it, so the reopened

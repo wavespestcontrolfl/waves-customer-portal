@@ -172,7 +172,13 @@ function collectJsonLdOffers(jsonLdStrings) {
           for (const n of nested) {
             if (!n) { flat.push(n); continue; }
             const child = { ...n };
-            if (parentCur && !child.priceCurrency) child.priceCurrency = parentCur;
+            // A child's OWN declaration may live in priceSpecification; only a
+            // child with no declaration at all inherits the parent's, and a
+            // parent/child CONFLICT (USD aggregate, CAD variant) is flagged
+            // so the child's currency is never attested as explicit.
+            const childCur = child.priceCurrency || (child.priceSpecification && child.priceSpecification.priceCurrency) || null;
+            if (parentCur && !childCur) child.priceCurrency = parentCur;
+            else if (parentCur && childCur && String(parentCur).toUpperCase() !== String(childCur).toUpperCase()) child.__currencyConflict = true;
             if (parentAvail && !child.availability && !child.availabilityStatus) child.availability = parentAvail;
             flat.push(child);
           }
@@ -207,7 +213,7 @@ function collectJsonLdOffers(jsonLdStrings) {
           // Whether the markup DECLARED the currency (vs the USD default
           // above) — a consumer proving a currency claim must not accept the
           // default as evidence.
-          explicitCurrency: !!(o.priceCurrency || (o.priceSpecification && o.priceSpecification.priceCurrency)),
+          explicitCurrency: !o.__currencyConflict && !!(o.priceCurrency || (o.priceSpecification && o.priceSpecification.priceCurrency)),
         });
       }
     }

@@ -155,13 +155,24 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // at confidence 0); neither is a route a worker may act on, whatever
     // policy the placement still carries.
     const pathIds = [...new Set(rows.map((r) => r.path_id).filter(Boolean))];
-    const blocked = new Set(pathIds.length
-      ? (await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'superseded_by', 'confidence'))
-        .filter((p) => p.superseded_by || (p.confidence != null && !(Number(p.confidence) > 0))).map((p) => p.id)
-      : []);
+    const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'superseded_by', 'confidence', 'submission_url') : [];
+    const blocked = new Set(paths.filter((p) => p.superseded_by || (p.confidence != null && !(Number(p.confidence) > 0))).map((p) => p.id));
     rows = rows.filter((r) => !blocked.has(r.path_id) && types.includes(r.link_type));
     if (effectivePolicy) rows = rows.filter((r) => r.automation_policy === effectivePolicy);
     if (rows.length === 0) return [];
+    // The LIVE path's submission_url is the execution truth: when the
+    // investigator moved a route to its working origin (www / http) while
+    // this placement was leased, its target_url still names the dead apex —
+    // refresh it here, under the claim's lock, so the runner navigates the
+    // origin that answers.
+    const urlOf = new Map(paths.map((p) => [p.id, p.submission_url]));
+    for (const r of rows) {
+      const liveUrl = r.path_id ? urlOf.get(r.path_id) : null;
+      if (liveUrl && r.target_url !== liveUrl) {
+        await trx('seo_link_prospects').where({ id: r.id }).whereNull('claimed_at').update({ target_url: liveUrl, updated_at: new Date() });
+        r.target_url = liveUrl;
+      }
+    }
     const leaseIds = rows.map((r) => r.id);
     const now = new Date();
     await trx('seo_link_prospects')

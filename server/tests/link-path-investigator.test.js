@@ -1631,7 +1631,7 @@ describe('full run', () => {
     await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
     const p = db._tables.seo_link_acquisition_paths.find((p2) => p2.id === dead.id);
     expect(Number(p.confidence)).toBe(0);
-    expect(JSON.parse(p.investigation).disproven_reason).toBe('submission URL returned 404/410');
+    expect(JSON.parse(p.investigation).disproven_reason).toMatch(/gone \(404\/410\)/);
     expect(p.last_investigated_at).not.toBeNull(); // stamped — no eternal re-selection
     expect(db._tables.seo_link_domains[0].best_path_id).toBeNull();
     expect(db._tables.seo_link_domains[0].agent_state).toBe('not_reproducible'); // closes instead of a 30-day watching park
@@ -1755,7 +1755,7 @@ describe('full run', () => {
     const p = db._tables.seo_link_acquisition_paths.find((p2) => p2.id === dead.id);
     expect(Number(p.confidence)).toBe(0); // 404 on the URL is a verdict, echo or not
     expect(p.last_investigated_at).not.toBeNull(); // stamped — never re-selects every backoff
-    expect(JSON.parse(p.investigation).disproven_reason).toBe('submission URL returned 404/410');
+    expect(JSON.parse(p.investigation).disproven_reason).toMatch(/gone \(404\/410\)/);
   });
 
   test('a covered probe entering as a path alias never displaces uncovered probes (Codex PR r14 P1)', () => {
@@ -2698,5 +2698,76 @@ describe('full run', () => {
     const dom = db._tables.seo_link_domains[0];
     expect(dom.agent_state).toBe('watching');
     expect(Number(dom.probe_coverage_mask) & registerBit).toBe(0);
+  });
+
+  // ---- Codex PR round 26 -------------------------------------------------
+
+  test('an existing route that redirects OFF the registry domain is disproven, stamped, and cleared as best path (Codex PR r26 P2)', async () => {
+    const d = domainRow({ agent_state: 'qualified', probe_coverage_mask: (1 << investigator.PROBE_PATHS.length) - 1 });
+    const path = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join', link_type: 'directory',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    d.best_path_id = path.id;
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [path] });
+    const fetcher = async (url) => (url.includes('/join')
+      ? { status: 200, finalUrl: 'https://forms.thirdparty.example/abc', contentType: 'text/html', html: '<html><body>Third-party form host. Please fill in the application below to continue with your listing.</body></html>', blocked: false, truncated: false }
+      : okFetch(url));
+    await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }), domainIds: [d.id] });
+    expect(path.confidence).toBe(0);
+    expect(JSON.parse(path.investigation).disproven_reason).toMatch(/redirects off the registry domain/);
+    expect(path.last_investigated_at).toEqual(NOW); // a verdict, so it stamps — no six-hour loop
+    expect(db._tables.seo_link_domains[0].best_path_id).toBeNull();
+  });
+
+  test('a route reached through a working origin MOVES to it — path URL, key when the scheme changed, and un-leased placements (Codex PR r26 P2)', async () => {
+    const mk = (host) => {
+      const d = domainRow();
+      const path = {
+        id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/get-listed', link_type: 'directory',
+        path_key: 'paid_listing:https://example.com/get-listed', superseded_by: null, baseline: false, confidence: 0.7,
+        last_investigated_at: null, investigation: JSON.stringify({}), revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+      };
+      const idle = { id: uid(), domain_id: d.id, path_id: path.id, status: 'prospect', claimed_at: null, link_type: 'directory', target_url: 'https://example.com/get-listed', automation_policy: 'submit_free' };
+      const leased = { id: uid(), domain_id: d.id, path_id: path.id, status: 'prospect', claimed_at: new Date('2026-08-31T11:55:00Z'), link_type: 'directory', target_url: 'https://example.com/get-listed', automation_policy: 'submit_free' };
+      const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [path], seo_link_prospects: [idle, leased] });
+      const origin = `${host}`;
+      const fetcher = async (url) => (url.startsWith(origin) ? okFetch(url) : { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' });
+      const working = `${origin}/get-listed`;
+      const echoed = modelPath({ submission_url: working, price_page_url: working, renewal_price_page_url: working });
+      return { db, path, idle, leased, working, run: () => investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([echoed]) }) })) };
+    };
+    // www: same normalized identity — URL updated in place, execution revision bumps
+    const w = mk('https://www.example.com');
+    await w.run();
+    expect(w.db._tables.seo_link_acquisition_paths).toHaveLength(1);
+    expect(w.path).toMatchObject({ submission_url: w.working, path_key: 'paid_listing:https://example.com/get-listed', revision_execution: 2, last_investigated_at: NOW });
+    expect(w.idle.target_url).toBe(w.working); // un-leased placement follows now
+    expect(w.leased.target_url).toBe('https://example.com/get-listed'); // leased: refreshed from the path at its next claim
+    // http: the scheme is part of the identity — the SAME row is re-keyed, never duplicated
+    const h = mk('http://example.com');
+    await h.run();
+    expect(h.db._tables.seo_link_acquisition_paths).toHaveLength(1);
+    expect(h.path).toMatchObject({ submission_url: h.working, path_key: 'paid_listing:http://example.com/get-listed', last_investigated_at: NOW });
+    expect(h.idle.target_url).toBe(h.working);
+  });
+
+  test('an AggregateOffer child declaring its own currency in priceSpecification never inherits the parent\'s — a conflict binds nothing (Codex PR r26 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const { collectJsonLdOffers } = require('../services/price-scan/extract');
+    // a Product wrapping an AggregateOffer reaches the flattening branch that inherits the parent's currency
+    const ld = '{"@type":"Product","name":"Membership","offers":[{"@type":"AggregateOffer","priceCurrency":"USD","lowPrice":"95","offers":[{"@type":"Offer","price":"95","priceSpecification":{"@type":"UnitPriceSpecification","price":"95","priceCurrency":"CAD"}}]}]}';
+    const offers = collectJsonLdOffers([ld]);
+    expect(offers).toHaveLength(1);
+    expect(offers[0]).toMatchObject({ currency: 'CAD', explicitCurrency: false }); // the child's own declaration stands; the conflict is never attested
+    const text = `Directory listing page with membership details. Join for $95 / year. ${'Copy. '.repeat(10)}`;
+    const html = `<html><script type="application/ld+json">${ld}</script><body>${text}</body></html>`;
+    const claim = modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null });
+    expect(verifyPriceEvidence([{ url: 'https://example.com/join', excerpt: text, text, html }], claim).currency_evidence).toBeNull();
+    // a child with NO declaration still inherits the parent's (unchanged)
+    const clean = collectJsonLdOffers(['{"@type":"Product","offers":[{"@type":"AggregateOffer","priceCurrency":"USD","offers":[{"@type":"Offer","price":"95"}]}]}']);
+    expect(clean[0]).toMatchObject({ currency: 'USD', explicitCurrency: true });
   });
 });
