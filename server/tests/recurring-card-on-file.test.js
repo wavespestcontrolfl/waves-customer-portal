@@ -526,7 +526,7 @@ describe('createRecurringCardSetupIntentForEstimate', () => {
   it('returns the client secret for the capture UI (card-only while GATE_ACCEPT_ACH_CAPTURE is off)', async () => {
     mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'requires_payment_method' });
     expect(await createRecurringCardSetupIntentForEstimate(EST))
-      .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1', paymentMethodTypes: ['card'] });
+      .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1', paymentMethodTypes: ['card'], capturedMethodType: null });
     expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledWith({ estimateId: 'est-1', generation: 0, paymentMethodType: 'card' });
   });
 
@@ -535,7 +535,7 @@ describe('createRecurringCardSetupIntentForEstimate', () => {
       .mockResolvedValueOnce({ id: 'seti_dead', client_secret: 'cs_dead', status: 'canceled' })
       .mockResolvedValueOnce({ id: 'seti_2', client_secret: 'cs_2', status: 'requires_payment_method' });
     expect(await createRecurringCardSetupIntentForEstimate(EST))
-      .toEqual({ clientSecret: 'cs_2', setupIntentId: 'seti_2', paymentMethodTypes: ['card'] });
+      .toEqual({ clientSecret: 'cs_2', setupIntentId: 'seti_2', paymentMethodTypes: ['card'], capturedMethodType: null });
     expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(1, { estimateId: 'est-1', generation: 0, paymentMethodType: 'card' });
     expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(2, { estimateId: 'est-1', generation: 1, paymentMethodType: 'card' });
   });
@@ -553,7 +553,7 @@ describe('createRecurringCardSetupIntentForEstimate', () => {
 
     it('mints card_or_bank for a new signup with no customer row', async () => {
       expect(await createRecurringCardSetupIntentForEstimate({ id: 'est-1', customer_id: null }))
-        .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1', paymentMethodTypes: ['card', 'us_bank_account'] });
+        .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1', paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: null });
       expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledWith({ estimateId: 'est-1', generation: 0, paymentMethodType: 'card_or_bank' });
     });
 
@@ -631,7 +631,20 @@ describe('createRecurringCardSetupIntentForEstimate', () => {
   it('passes a succeeded replay straight through (modal short-circuits to onSuccess)', async () => {
     mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'succeeded' });
     expect(await createRecurringCardSetupIntentForEstimate(EST))
-      .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1', paymentMethodTypes: ['card'] });
+      .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1', paymentMethodTypes: ['card'], capturedMethodType: null });
+  });
+
+  it('a succeeded replay resolves the tender already on the intent so the UI renders the matching consent (Codex #3723 r1 P1)', async () => {
+    mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'succeeded', payment_method: 'pm_b' });
+    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_b', type: 'us_bank_account' });
+    expect((await createRecurringCardSetupIntentForEstimate(EST)).capturedMethodType).toBe('us_bank_account');
+    mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'succeeded', payment_method: { id: 'pm_c', type: 'card' } });
+    expect((await createRecurringCardSetupIntentForEstimate(EST)).capturedMethodType).toBe('card');
+    // A lookup failure leaves it null — the client then fails closed on a
+    // bank-capable replay instead of assuming card.
+    mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'succeeded', payment_method: 'pm_x' });
+    mockRetrievePaymentMethod.mockRejectedValue(new Error('stripe down'));
+    expect((await createRecurringCardSetupIntentForEstimate(EST)).capturedMethodType).toBeNull();
   });
 });
 

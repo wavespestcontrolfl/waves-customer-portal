@@ -336,12 +336,31 @@ async function createRecurringCardSetupIntentForEstimate(estimate) {
     const setupIntent = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, generation, paymentMethodType });
     if (!setupIntent) return null;
     if (setupIntent.status === 'canceled') continue;
+    // A SUCCEEDED replay already holds a payment method the customer will
+    // not re-enter — the capture UI must render the consent for THAT
+    // tender (Codex #3723 r1 P1: a bank captured earlier must not sit under
+    // a card authorization). Resolve its type here, where the secret key
+    // can; the client cannot read a pm's type with a publishable key.
+    let capturedMethodType = null;
+    if (setupIntent.status === 'succeeded' && setupIntent.payment_method) {
+      const pm = setupIntent.payment_method;
+      try {
+        capturedMethodType = typeof pm === 'object' && pm?.type
+          ? pm.type
+          : (await StripeService.retrievePaymentMethod(typeof pm === 'string' ? pm : pm.id))?.type || null;
+      } catch (err) {
+        logger.warn(`[recurring-cof] captured method type lookup failed for replayed intent ${setupIntent.id}: ${err.message}`);
+      }
+    }
     return {
       clientSecret: setupIntent.client_secret,
       setupIntentId: setupIntent.id,
       // The capture UI keys its heading/consent copy on this — the Payment
       // Element only shows a bank tab when the intent allows it.
       paymentMethodTypes: paymentMethodType === 'card_or_bank' ? ['card', 'us_bank_account'] : ['card'],
+      // Non-null only for a succeeded replay: the tender already on the
+      // intent, so the UI initializes its consent to it.
+      capturedMethodType,
     };
   }
   logger.error(`[recurring-cof] exhausted SetupIntent generations for estimate ${estimate.id} — all replays terminal`);

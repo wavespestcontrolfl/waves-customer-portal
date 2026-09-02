@@ -2635,7 +2635,9 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
   // the intent was minted card_or_bank (GATE_ACCEPT_ACH_CAPTURE). Copy and
   // the consent text follow it; the checkbox re-arms on a switch so the
   // recorded ACH authorization is the one that was on screen.
-  const [methodType, setMethodType] = useState('card');
+  // A succeeded replay initializes to the tender already on the intent
+  // (Codex #3723 r1 P1) — the customer never re-enters it.
+  const [methodType, setMethodType] = useState(intent?.capturedMethodType || 'card');
   const bank = methodType === 'us_bank_account';
   const bankOffered = Array.isArray(intent?.paymentMethodTypes) && intent.paymentMethodTypes.includes('us_bank_account');
   useEffect(() => { setAgreed(false); }, [methodType]);
@@ -2672,6 +2674,14 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
       // re-confirming.
       const existing = await stripeRef.current.retrieveSetupIntent(intent.clientSecret);
       if (existing?.setupIntent?.status === 'succeeded') {
+        // Bank-capable replay with an unresolved captured tender: the
+        // consent on screen may not match what Stripe holds — fail closed.
+        const replayedTypes = existing.setupIntent.payment_method_types || [];
+        if (replayedTypes.includes('us_bank_account') && !intent?.capturedMethodType) {
+          setError('Your payment method was already saved. Please refresh this page to continue.');
+          setSubmitting(false);
+          return;
+        }
         onSuccess(existing.setupIntent.id);
         return;
       }

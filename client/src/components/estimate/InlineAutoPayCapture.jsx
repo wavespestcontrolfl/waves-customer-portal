@@ -42,7 +42,11 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // card_or_bank (GATE_ACCEPT_ACH_CAPTURE); the consent copy and the
   // surcharge line follow the selection so the recorded ACH authorization
   // matches what was on screen.
-  const [methodType, setMethodType] = useState('card');
+  // A succeeded REPLAY (the mint returned an intent that already holds a
+  // method) initializes to that captured tender — the customer never
+  // re-enters it, so the rendered authorization must match what Stripe
+  // holds, not a card default (Codex #3723 r1 P1).
+  const [methodType, setMethodType] = useState(intent?.capturedMethodType || 'card');
   const bank = methodType === 'us_bank_account';
   const bankOffered = Array.isArray(intent?.paymentMethodTypes) && intent.paymentMethodTypes.includes('us_bank_account');
   // The checkbox assents to the RENDERED authorization — if the variant
@@ -127,6 +131,16 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       try {
         const existing = await stripeRef.current.retrieveSetupIntent(intent.clientSecret);
         if (existing?.setupIntent?.status === 'succeeded') {
+          // Bank-capable intent whose captured tender the mint did not
+          // resolve: the consent on screen may not be the one Stripe
+          // holds — fail closed; a refresh re-mints and the replay then
+          // carries capturedMethodType.
+          const replayedTypes = existing.setupIntent.payment_method_types || [];
+          if (replayedTypes.includes('us_bank_account') && !intent?.capturedMethodType) {
+            const message = 'Your payment method was already saved. Please refresh this page to continue.';
+            setError(message);
+            return { ok: false, error: message };
+          }
           return { ok: true, setupIntentId: existing.setupIntent.id };
         }
         const result = await stripeRef.current.confirmSetup({

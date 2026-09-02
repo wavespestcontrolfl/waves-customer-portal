@@ -785,6 +785,9 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       // Tender families the intent allows (GATE_ACCEPT_ACH_CAPTURE adds
       // us_bank_account) — the capture UI keys its copy on this.
       paymentMethodTypes: intent.paymentMethodTypes,
+      // Succeeded replay only: the tender already captured on the intent,
+      // so the UI renders the matching consent instead of defaulting to card.
+      capturedMethodType: intent.capturedMethodType || null,
       // Both estimate UIs bootstrap Stripe Elements from this response — the
       // public estimate pages have no other authenticated key source.
       publishableKey: require('../config/stripe-config').publishableKey,

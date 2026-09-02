@@ -130,6 +130,53 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
     expect(getByText(/initiate electronic ACH debits/)).toBeInTheDocument();
   });
 
+  it('initializes to the captured tender on a succeeded replay so the ACH consent renders without a change event', async () => {
+    const { StripeCtor } = makeTenderStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText } = render(
+      <InlineAutoPayCapture
+        intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: 'us_bank_account' }}
+        loadStripeSdk={loadStripeSdk}
+      />,
+    );
+    await flush();
+    expect(getByText(/debit this bank account after each completed service/)).toBeInTheDocument();
+  });
+
+  it('fails closed on a bank-capable succeeded replay whose captured tender is unknown', async () => {
+    const handlers = {};
+    const StripeCtor = vi.fn(() => ({
+      elements: vi.fn(() => ({ create: vi.fn(() => ({ mount: vi.fn(), on: vi.fn((e, h) => { handlers[e] = h; }) })) })),
+      retrieveSetupIntent: vi.fn(async () => ({ setupIntent: { id: 'seti_1', status: 'succeeded', payment_method_types: ['card', 'us_bank_account'] } })),
+      confirmSetup: vi.fn(),
+    }));
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const ref = React.createRef();
+    render(
+      <InlineAutoPayCapture
+        ref={ref}
+        intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'] }}
+        loadStripeSdk={loadStripeSdk}
+      />,
+    );
+    await flush();
+    await act(async () => { handlers.ready(); });
+    const result = await ref.current.confirmSetup();
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/refresh this page/);
+    // With the tender resolved by the mint, the same replay passes through.
+    const ref2 = React.createRef();
+    render(
+      <InlineAutoPayCapture
+        ref={ref2}
+        intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: 'us_bank_account' }}
+        loadStripeSdk={loadStripeSdk}
+      />,
+    );
+    await flush();
+    expect(await ref2.current.confirmSetup()).toEqual({ ok: true, setupIntentId: 'seti_1' });
+  });
+
   it('keeps the card copy when the intent is card-only', async () => {
     const { StripeCtor, handlers } = makeTenderStub();
     const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
