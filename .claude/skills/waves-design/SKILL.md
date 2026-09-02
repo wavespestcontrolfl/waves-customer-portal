@@ -1,6 +1,6 @@
 ---
 name: waves-design
-description: Use when doing ANY UI work on the portal — admin pages (V2 zinc system or legacy D-palette), customer surfaces, or tech portal. Covers which style system a file uses, the V2 architecture (routes, retained V1 exports, feature flags), the palettes/tokens, the alert-fg and Customers-colored-indicators rules, and which spec document governs which surface.
+description: Use for ANY UI work on any portal surface — which style system a file uses, the V2 architecture and flags, palettes and tokens, the alert-fg rule, and which spec document governs the surface.
 ---
 
 # Waves portal design systems

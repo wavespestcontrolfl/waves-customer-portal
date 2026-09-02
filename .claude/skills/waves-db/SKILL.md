@@ -1,6 +1,6 @@
 ---
 name: waves-db
-description: Use whenever running knex commands, writing or reviewing migrations, writing raw SQL or backfills, querying the prod DB from a local machine, or writing any SQL/knex WHERE clause involving timestamps. Covers the DB traps that have each caused real incidents — wrong knexfile discovery, the ET/timestamptz window leak, edited-in-place migrations, unverified raw SQL, prod access from local, and the schema traps that produce wrong answers.
+description: Use for any knex command, migration, raw SQL or backfill, prod DB query from a local machine, or timestamp WHERE clause — the DB traps that have each caused real incidents.
 ---
 
 # Waves DB rules

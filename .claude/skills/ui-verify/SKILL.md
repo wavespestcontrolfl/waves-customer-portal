@@ -1,6 +1,6 @@
 ---
 name: ui-verify
-description: Use before requesting review on ANY PR that touches client UI (admin, customer portal, or tech portal). Render the real page, screenshot it, and check it against the goal and the design spec with vision — past UI parity bugs shipped because nobody looked at the rendered page before review.
+description: Use before requesting review on ANY PR that touches client UI — render the real page, screenshot desktop and mobile, and check it with vision against the spec.
 ---
 
 # Vision-verify UI changes before review

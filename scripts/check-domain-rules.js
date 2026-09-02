@@ -30,6 +30,12 @@
  *      "Make" is English and can't be flagged) / Elementor / NitroPack /
  *      RankMath in portal code.
  *
+ *   5. agents-md-budget — AGENTS.md stays under 30 KB. Codex silently
+ *      truncates the project doc at 32 KiB (DEFAULT_PROJECT_DOC_MAX_BYTES in
+ *      the Codex CLI), so every rule past that byte is invisible to the
+ *      pre-push audit and the @codex bot. The file once reached 114 KB with
+ *      70% never loaded.
+ *
  * Scope: the whole production server tree (server/) + client/src.
  * Tests, mocks, fixtures, migrations, seeds, contract-tests, one-off
  * scripts, and ops tooling are NOT scanned — they legitimately pin model
@@ -189,6 +195,19 @@ for (const file of files) {
       console.error(`    ${rule.message}\n`);
     }
   }
+}
+
+// =========================================================================
+// AGENTS.md budget (rule 5) — a byte check, not a source scan.
+// =========================================================================
+const AGENTS_MD = path.join(ROOT, 'AGENTS.md');
+const AGENTS_MD_BUDGET_BYTES = 30 * 1024;
+const agentsMdBytes = fs.statSync(AGENTS_MD).size;
+if (agentsMdBytes > AGENTS_MD_BUDGET_BYTES) {
+  violations += 1;
+  console.error('AGENTS.md  [agents-md-budget]');
+  console.error(`    ${agentsMdBytes} bytes > ${AGENTS_MD_BUDGET_BYTES}-byte budget (Codex truncates at 32 KiB).`);
+  console.error('    Sharpen an existing rule instead of adding one, or move prose to a skill / docs/public-route-contracts.md.\n');
 }
 
 if (violations) {
