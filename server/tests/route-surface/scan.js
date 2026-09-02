@@ -78,6 +78,8 @@ const HELPER_DIGEST_DEPTH = 4;
  * — the response is now repo code the package review never covered.
  */
 const RESPONDING_FACTORY_OPTIONS = new Set(['handler']);
+/** http.Server events whose listeners answer client requests directly. */
+const HTTP_SERVING_EVENTS = new Set(['request', 'upgrade', 'connect', 'checkContinue', 'checkExpectation']);
 // Every HTTP method Express exposes as a router method (router.checkout,
 // router.m-search, ... included) — a route registered under ANY of them is
 // surface.
@@ -463,10 +465,16 @@ class ModuleAnalysis {
       if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression'
         && ['on', 'addListener', 'prependListener', 'once', 'removeAllListeners'].includes(memberPropName(node.callee))
         && node.arguments[0] && node.arguments[0].type === 'StringLiteral'
-        && node.arguments[0].value === 'request') {
-        // Post-construction 'request' listener surgery swaps what the port
-        // serves away from the reviewed factory's app. Fail closed.
-        this.pushSweepProblem(`${this.loc(node)}: '${memberPropName(node.callee)}' on the 'request' event — replacing a server's request listener serves surface the scanner never walks`);
+        && HTTP_SERVING_EVENTS.has(node.arguments[0].value)
+        // A registry-reviewed serverHandle consumer (Socket.IO, the voice
+        // relay) attaches its 'upgrade' listener by design — that is what
+        // the review covers. 'request' surgery is never reviewed.
+        && !(node.arguments[0].value !== 'request'
+          && this.scanner.registry.routerConsumers.some((e) => e.serverHandle && e.module === this.file))) {
+        // Post-construction listener surgery on an HTTP-serving event
+        // ('request', or 'upgrade' for a raw WebSocket endpoint) serves
+        // surface away from the reviewed factory's app. Fail closed.
+        this.pushSweepProblem(`${this.loc(node)}: '${memberPropName(node.callee)}' on the '${node.arguments[0].value}' event — a direct server listener serves surface the scanner never walks`);
       }
       if (node.type === 'NewExpression' && node.callee.type === 'Identifier' && node.callee.name === 'Function') {
         this.pushSweepProblem(`${this.loc(node)}: dynamic code (new Function) in a server module — the scanner cannot see what it registers`);
@@ -1365,6 +1373,25 @@ class ModuleAnalysis {
   }
 
   /**
+   * The VALUE a named export resolves to, for identity binding: the local
+   * binding it names (`{ kind: 'ident' }`) or the literal/expression node
+   * written inline in the export object (`{ kind: 'node' }`). Opaque when
+   * the export surface is unstable or the name is absent.
+   */
+  exportValue(name) {
+    const viaIdent = this.exportLookup(name);
+    if (viaIdent.kind === 'ident') return viaIdent;
+    if (this.exportUnstable || !this.exportObjectNode) return { kind: 'opaque' };
+    for (const prop of this.exportObjectNode.properties) {
+      if (prop.type === 'ObjectProperty' && !prop.computed
+        && prop.key.type === 'Identifier' && prop.key.name === name && prop.value) {
+        return { kind: 'node', node: prop.value };
+      }
+    }
+    return { kind: 'opaque' };
+  }
+
+  /**
    * Root identifier of a fluent REGISTRATION chain
    * (`router.get(...).use(...)`), or null when the call is not one.
    */
@@ -1751,8 +1778,34 @@ class ModuleAnalysis {
    */
   enrichCond(cond) {
     if (!cond) return cond;
-    const tokens = [...new Set(cond.match(/[A-Za-z_$][\w$]*/g) || [])];
     const facts = [];
+    // An IMPORTED member predicate (`config.nodeEnv`, `flags.debug`) binds
+    // the exporting module's definition into the label — flipping a flag
+    // constant in flags.js must break the key exactly like a local literal.
+    // Unresolvable definitions fail closed as a scanner problem.
+    const members = [...new Set([...cond.matchAll(/([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)/g)].map((m) => `${m[1]}.${m[2]}`))];
+    for (const ref of members) {
+      const [obj, prop] = ref.split('.');
+      const ob = this.cleanBinding(this.canonName(obj));
+      if (!ob || ob.kind !== 'require' || ob.module === null || !this.scanner.exists(ob.module)) continue;
+      let fact = null;
+      try {
+        const m = this.scanner.peekModule(ob.module);
+        const v = m.exportValue(prop);
+        if (v.kind === 'node') fact = `${ref}=${predicateLabel(m.src.slice(v.node.start, v.node.end))}`;
+        else if (v.kind === 'ident') {
+          const vb = m.bindings.get(m.canonName(v.name));
+          if (vb && vb.kind === 'function' && vb.node) fact = `${ref}#${m.bodyDigest(vb.node)}`;
+          else if (vb && vb.kind === 'string') fact = `${ref}='${vb.value}'`;
+          else if (vb && vb.node) fact = `${ref}=${predicateLabel(m.src.slice(vb.node.start, vb.node.end))}`;
+        }
+      } catch { fact = null; }
+      // Unresolvable → `<unresolved>` in the label; result() turns that into
+      // a problem for PUBLIC routes only (a guarded route's predicate is not
+      // allowlist identity).
+      facts.push(fact || `${ref}=<unresolved>`);
+    }
+    const tokens = [...new Set(cond.match(/[A-Za-z_$][\w$]*/g) || [])];
     for (const t of tokens) {
       const b = this.cleanBinding(this.canonName(t));
       if (!b) continue;
@@ -2712,6 +2765,9 @@ class Scanner {
   result() {
     const problems = [...this.problems];
     for (const r of this.routes) {
+      if (r.public && r.cond && r.cond.includes('=<unresolved>')) {
+        problems.push(`${r.loc}: predicate for public route ${r.method} ${r.path} depends on an imported value the scanner cannot bind (${r.cond}) — export a literal/expression or a function it can capture`);
+      }
       if (!r.resolved && r.public) {
         problems.push(`${r.loc}: unguarded route with an unresolvable path (${r.method} ${r.path}) — the scanner cannot prove what it exposes`);
       }

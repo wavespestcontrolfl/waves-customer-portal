@@ -2584,6 +2584,40 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(safe.publicRoutes.find((r) => r.path === '/api/x/:id/leak')).toBeUndefined();
   });
 
+  test("an IMPORTED member predicate (flags.debug) binds the exporting module's definition into the identity", () => {
+    const mk = (flagsBody) => scanOf({
+      'server/index.js': app([
+        "const flags = require('./flags');",
+        "if (flags.debug) app.get('/debug', (req, res) => res.json({}));",
+      ].join('\n')),
+      'server/flags.js': flagsBody,
+    });
+    const off = mk('module.exports = { debug: false };').publicRoutes.find((r) => r.path === '/debug');
+    const on = mk('module.exports = { debug: true };').publicRoutes.find((r) => r.path === '/debug');
+    expect(off.cond).toBe('flags.debug [with flags.debug=false]');
+    expect(off.cond).not.toBe(on.cond);
+    const viaIdent = mk('const debug = process.env.DEBUG === "1";\nmodule.exports = { debug };').publicRoutes.find((r) => r.path === '/debug');
+    expect(viaIdent.cond).toBe('flags.debug [with flags.debug=process.env.DEBUG === "1"]');
+    const unresolved = mk('module.exports = require("./elsewhere");');
+    expect(unresolved.problems.some((p) => p.includes('predicate for public route GET /debug') && p.includes('flags.debug=<unresolved>'))).toBe(true);
+  });
+
+  test("a direct 'upgrade' listener on a constructed server is a problem like a 'request' listener", () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'createServer', module: 'http', appOnly: true }] },
+      files: {
+        'server/index.js': app([
+          "const http = require('http');",
+          'const httpServer = http.createServer(app);',
+          "httpServer.on('upgrade', (req, socket) => { socket.end('leak'); });",
+          'httpServer.listen(3000);',
+        ].join('\n')),
+      },
+    }).scan();
+    expect(res.problems.some((p) => p.includes("'on' on the 'upgrade' event"))).toBe(true);
+  });
+
   test('an UNRESOLVED static root is a problem, never a stable identity', () => {
     const res = scanOf({
       'server/index.js': app([
