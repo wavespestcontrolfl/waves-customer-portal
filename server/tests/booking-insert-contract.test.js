@@ -66,6 +66,10 @@ const CONTRACT_MODULE_CERTIFIED_SITES = [
   "createScheduledService :: const [row] = await trx( scheduled_services').insert(data",
   "createScheduledService :: const [row] = await trx( scheduled_services').insert(data",
 ];
+// …and the `data` those sites insert must still be the helper's output:
+// the certification pins the wrapper's completion statement, so swapping
+// it for raw input is a visible break, not a silent one (GH Codex r14 P2).
+const CONTRACT_MODULE_CERTIFIED_COMPLETION = 'const data = await completeScheduledServiceInsert(insertData, { trx, cols, source, allowNullCustomer });';
 
 // Frozen 2026-09-01 inventory (re-frozen at the origin/main merge base of
 // this PR — main reworked admin-dispatch's schedule-followup insert while
@@ -367,21 +371,7 @@ function isContractCompleted(source, arg) {
   // Passing the tracked object to a CALL is an escape too — a helper can
   // mutate it (`stripAttribution(data)`) — unless the callee is on the
   // known non-mutating list (GH Codex r11 P2).
-  // Arguments are split on top-level commas after a balanced walk, so a
-  // nested call earlier in the list (`mutate(makeOptions(), data)`) can't
-  // hide the escape (GH Codex r12 P2).
-  const callRe = /([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(/g;
-  let cm;
-  while ((cm = callRe.exec(source)) !== null) {
-    const open = cm.index + cm[0].length - 1;
-    const args = topLevelArgs(source.slice(open + 1, balancedParens(source, open) - 1));
-    if (!args.some((a) => a === text)) continue;
-    const callee = cm[1].replace(/\s+/g, '');
-    const last = callee.split('.').pop();
-    if (NOT_A_FUNCTION.has(callee)) continue; // `if (data)` is not a call
-    if (NON_MUTATING_CALLEES.has(callee) || NON_MUTATING_LAST.has(last) || /^(?:console|logger|log)\./.test(callee)) continue;
-    return false;
-  }
+  if (escapesThroughCall(source, text)) return false;
   // A method called ON the tracked value is a mutation unless it is a
   // known read-only one — `rows.unshift(raw)` / `splice` / `fill` would
   // smuggle an unvalidated row into a completed accumulator (GH Codex r12
@@ -401,9 +391,31 @@ function isContractCompleted(source, arg) {
     if (!params) continue;
     const list = (params[1] ?? params[2] ?? '').split(',').map((x) => x.trim().replace(/=.*$/, '').trim());
     const el = mm[1] === 'reduce' ? list[1] : list[0];
-    if (el && /^[A-Za-z_$][\w$]*$/.test(el) && mutatesIdentifier(cb, el)) return false;
+    if (el && /^[A-Za-z_$][\w$]*$/.test(el) && (mutatesIdentifier(cb, el) || escapesThroughCall(cb, el))) return false;
   }
   return true;
+}
+
+// Whether `id` is passed as a direct argument to a call that is not on
+// the non-mutating list (GH Codex r11 P2). Arguments are split on
+// top-level commas after a balanced walk, so a nested call earlier in the
+// list (`mutate(makeOptions(), data)`) can't hide it (r12 P2); the same
+// check runs on a callback's element parameter (`rows.forEach((row) =>
+// stripAttribution(row))` — r14 P2).
+function escapesThroughCall(text, id) {
+  const callRe = /([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(/g;
+  let cm;
+  while ((cm = callRe.exec(text)) !== null) {
+    const open = cm.index + cm[0].length - 1;
+    const args = topLevelArgs(text.slice(open + 1, balancedParens(text, open) - 1));
+    if (!args.some((a) => a === id)) continue;
+    const callee = cm[1].replace(/\s+/g, '');
+    const last = callee.split('.').pop();
+    if (NOT_A_FUNCTION.has(callee)) continue; // `if (data)` is not a call
+    if (NON_MUTATING_CALLEES.has(callee) || NON_MUTATING_LAST.has(last) || /^(?:console|logger|log)\./.test(callee)) continue;
+    return true;
+  }
+  return false;
 }
 
 // Property/index assignment (any depth, compound operators included),
@@ -761,6 +773,9 @@ describe('booking insert-site contract', () => {
       expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\n${cb}\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     }
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach((row) => { if (row.status === 'x') count += 1; });\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
+    // …and handing the element to a helper from the callback is an escape (r14 P2), a logger is not.
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach(row => stripAttribution(row));\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach((row) => logger.info('row', row));\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
     // …unless a completed row is mutated in place afterwards (r10 P2).
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows[0].source_action = null;\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     // Table-FIRST fluent forms are sites (GH Codex r8 P2)…
@@ -871,6 +886,10 @@ describe('booking insert-site contract', () => {
       if (rel === CONTRACT_MODULE) {
         const extra = multisetMissing(sites, CONTRACT_MODULE_CERTIFIED_SITES);
         if (extra.length) violations.push(`${rel}: insert site(s) [${extra.join(' | ')}] beyond the certified wrapper — every insert in the contract module must be of completeScheduledServiceInsert's output, inside createScheduledService.`);
+        const moduleSource = fs.readFileSync(path.join(REPO_ROOT, CONTRACT_MODULE), 'utf8');
+        if (moduleSource.split(CONTRACT_MODULE_CERTIFIED_COMPLETION).length !== 2) {
+          violations.push(`${rel}: the certified wrapper no longer completes its payload with exactly \`${CONTRACT_MODULE_CERTIFIED_COMPLETION}\` — the certified insert sites would insert something else.`);
+        }
         continue;
       }
       const frozen = FROZEN_LEGACY_INSERT_SITES_2026_09[rel];

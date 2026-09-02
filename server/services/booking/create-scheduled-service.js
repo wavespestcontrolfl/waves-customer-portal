@@ -188,12 +188,15 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
   // Catalog-identity snapshot: rows missing service_key_snapshot /
   // service_category_snapshot are the ones loadStoredDiscountScope
   // (admin-schedule.js) throws on when a scoped recurring discount is
-  // replayed. Only fills ABSENT fields; a caller that stamped its own
-  // snapshot (slot-reservation's deliberate restamp at commit, the
-  // seeder's child identity) is never overridden.
-  const wantsKey = cols.service_key_snapshot && data.service_key_snapshot === undefined;
-  const wantsCategory = cols.service_category_snapshot && data.service_category_snapshot === undefined;
-  const wantsServiceId = cols.service_id && data.service_id === undefined;
+  // replayed. Only fills MISSING fields — undefined OR null: the
+  // fixed-shape writers stamp null when pricing lacks identity
+  // (admin-schedule's "no identity" branch), and a null snapshot is
+  // exactly the snapshot-less row this exists to close (GH Codex r14 P1).
+  // A caller's NON-BLANK stamp (slot-reservation's deliberate restamp at
+  // commit, the seeder's child identity) is never overridden.
+  const wantsKey = cols.service_key_snapshot && blank(data.service_key_snapshot);
+  const wantsCategory = cols.service_category_snapshot && blank(data.service_category_snapshot);
+  const wantsServiceId = cols.service_id && data.service_id == null;
   if (wantsKey || wantsCategory || wantsServiceId) {
     const identity = await resolveCatalogIdentity(trx, data);
     // Conflicting evidence → no fill at all: a caller-stamped key or

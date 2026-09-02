@@ -6,8 +6,9 @@
  *     DB CHECK constraint is the one authority)
  *   - gate OFF → no behavioral enrichment; only provenance attribution,
  *     caller values winning
- *   - gate ON → catalog-identity snapshot completion fills ONLY absent
- *     fields, never overrides, never guesses on ambiguity; a catalog QUERY
+ *   - gate ON → catalog-identity snapshot completion fills ONLY missing
+ *     (undefined or null) fields, never overrides a non-blank stamp, never
+ *     guesses on ambiguity; a catalog QUERY
  *     error propagates (inside a trx the statement already aborted it)
  *   - createScheduledService wrapper: plain insert, and opt-in idempotency
  *     via onConflict('idempotency_key').ignore() with null on replay
@@ -223,7 +224,17 @@ describe('gate ON — catalog-identity snapshot completion', () => {
   test('caller-stamped snapshot fields are never overridden', async () => {
     const out = await run({ ...BASE, service_key_snapshot: 'termite_bond_1yr', service_category_snapshot: null });
     expect(out.service_key_snapshot).toBe('termite_bond_1yr');
-    expect(out.service_category_snapshot).toBeNull(); // explicit null = caller's decision
+    expect(out.service_category_snapshot).toBeNull(); // no live row for that key → nothing to fill from
+  });
+
+  test('NULL snapshot fields count as missing and are filled (the fixed-shape "no identity" stamp)', async () => {
+    // admin-schedule stamps both snapshots null when pricing lacks
+    // identity; that row is exactly the snapshot-less one the scoped
+    // discount replay throws on (GH Codex r14 P1).
+    const out = await run({ ...BASE, service_id: null, service_key_snapshot: null, service_category_snapshot: null });
+    expect(out.service_id).toBe('svc-1');
+    expect(out.service_key_snapshot).toBe('pest_quarterly');
+    expect(out.service_category_snapshot).toBe('pest');
   });
 
   test('inside a transaction the resolved catalog row is share-locked through the insert', async () => {
