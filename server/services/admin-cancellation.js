@@ -1228,7 +1228,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         let openTie = false;
         try {
           const priorReq = prior.service_request_id
-            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at')
+            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at', 'updated_at')
             : null;
           openTie = !!priorReq && priorReq.status === 'new';
           tied = openTie
@@ -1237,19 +1237,24 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           // An end-of-coverage cancel deliberately leaves paid visits on the
           // calendar, so the account keeps cancellable work and the always-
           // visible Customer 360 action could process it AGAIN once the 24h
-          // window passes. While the account is still in the churned state
-          // THIS acceptance produced (the processor stamps
-          // pipeline_stage_changed_at moments after the acceptance row), the
-          // recorded case is the completed run; the age cutoff applies only
-          // after a genuine win-back (deferred P2 from #3666 r32).
+          // window passes. While the account has stayed churned since that
+          // acceptance, the recorded case is the completed run; the age
+          // cutoff applies only after a genuine win-back. "Stayed churned"
+          // = churned now with NO churn transition stamped after that run
+          // RESOLVED its acceptance (updated_at — the close lands after the
+          // churn inside the same locked run). The processor stamps
+          // pipeline_stage_changed_at only on a fresh churn, so an account
+          // already churned when this cancel ran keeps its OLDER stamp
+          // (wasChurnedStage) and still counts; a stamp after the
+          // resolution can only be a win-back followed by a NEW churn —
+          // a new cancellation, never echoed. Durable ordering, no elapsed-
+          // time tolerance (deferred P2 from #3666 r32; #3727 r1; pre-push).
           if (!tied && priorReq && priorReq.status === 'resolved') {
             const cust = await db('customers').where({ id: customerId }).first('pipeline_stage', 'pipeline_stage_changed_at');
-            const acceptedAt = new Date(priorReq.created_at).getTime();
+            const resolvedAt = new Date(priorReq.updated_at || priorReq.created_at).getTime();
             const churnedAt = cust && cust.pipeline_stage_changed_at ? new Date(cust.pipeline_stage_changed_at).getTime() : NaN;
-            tied = !!cust && cust.pipeline_stage === 'churned'
-              && Number.isFinite(churnedAt)
-              && churnedAt >= acceptedAt - 60 * 1000
-              && churnedAt <= acceptedAt + 6 * 60 * 60 * 1000;
+            const rechurnedLater = Number.isFinite(churnedAt) && churnedAt > resolvedAt;
+            tied = !!cust && cust.pipeline_stage === 'churned' && !rechurnedLater;
           }
         } catch (tieErr) {
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);

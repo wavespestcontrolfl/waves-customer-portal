@@ -723,7 +723,8 @@ describe('POST /:id/cancel-plan', () => {
       id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
       subject: 'Cancel plan (Admin (user admin-1))', description: '',
       metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' } }),
-      created_at: acceptedAt, updated_at: acceptedAt,
+      // Resolved a minute after acceptance — the close lands after the churn.
+      created_at: acceptedAt, updated_at: new Date(acceptedAt.getTime() + 60 * 1000),
     }];
     mockState.cancellation_cases = [{
       id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed',
@@ -742,6 +743,20 @@ describe('POST /:id/cancel-plan', () => {
     expect(mockRaiseTermite).not.toHaveBeenCalled();
     expect(sendCancellationConfirmations).not.toHaveBeenCalled();
     expect((mockState.inserted || []).filter((i) => i.table === 'service_requests')).toHaveLength(0);
+    // An account ALREADY churned when that cancel ran keeps its older
+    // transition stamp (the processor restamps only a fresh churn) — it
+    // never left churned, so it stays latched too (#3727 r1 P2).
+    mockState.customers[0].pipeline_stage_changed_at = new Date(acceptedAt.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const already = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+    expect(already).toEqual(expect.objectContaining({ duplicate: true, caseId: 'case-old' }));
+    expect(mockProcess).not.toHaveBeenCalled();
+    // A churn transition stamped AFTER that run resolved its acceptance is
+    // a win-back followed by a NEW churn — that cancel processes fresh,
+    // however soon it happened (no elapsed-time tolerance).
+    mockState.customers[0].pipeline_stage_changed_at = new Date(acceptedAt.getTime() + 5 * 60 * 1000);
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
+    await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
+    expect(mockProcess).toHaveBeenCalledTimes(1);
   }));
 
   test('a HISTORICAL prepaid case never swallows a NEW cancellation — a re-won-back account processes fresh', () => withServer(async (baseUrl) => {
