@@ -15291,6 +15291,83 @@ router.post('/:token/bundle-inquiry', addServiceRequestLimiter, async (req, res,
 // post-estimate-versions token uses. Malformed tokens 404 before any DB read.
 const EXTENSION_REQUEST_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 
+// Mirrors measurementReviewLimiter: gate-aware skip so a dark gate answers the
+// generic 404 on every probe, shared IPv6-safe key.
+const softExitLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.isEnabled('estimateSoftExit'),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
+// POST /api/estimates/:token/change-request — the non-decline half of the
+// soft-exit sheet (GATE_ESTIMATE_SOFT_EXIT). body.kind:
+//   'change'         → parks ONE service_requests row + admin bell (note
+//                      required; topics optional chips)
+//   'still_deciding' → one activity_log row, no bell, no request row
+// Neither touches the estimate or messages the customer. Contract mirrors
+// measurement-review: gate + token-format gate + generic 404 (unknown /
+// malformed / ineligible / gate-off indistinguishable) + gate-aware limiter,
+// call-side verdict re-checked on the locked row for the request write.
+router.post('/:token/change-request', softExitLimiter, async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('estimateSoftExit')) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!req.params.token || !EXTENSION_REQUEST_TOKEN_RE.test(req.params.token)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const estimateRow = await db('estimates').where({ token: req.params.token }).first();
+    if (estimateRow && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimateRow))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const { createEstimateChangeRequest, recordEstimateStillDeciding } = require('../services/estimate-change-request');
+    // Same locked-row linkage re-check the measurement review runs: lead
+    // locked before call_log, verdict HELD through customer resolution and
+    // the insert.
+    const callSideBlockedFor = async (trx, lockedRow) => {
+      const linkData = parseEstimateDataSafe(lockedRow);
+      const eng = linkData?.estimatorEngine;
+      if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
+      if (await callSideBlockForEstimateData(trx, linkData)) return true;
+      const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+      if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
+        await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
+      }
+      return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true }));
+    };
+    const kind = String(req.body?.kind || 'change');
+    // Unknown kinds are a validation error, never a silent change request
+    // (pre-push codex P1) — but only once the token has cleared the public
+    // eligibility gates, so a probe cannot tell gate state from a 400.
+    if (!['change', 'still_deciding'].includes(kind)) {
+      const { isSoftExitEligible } = require('../services/estimate-change-request');
+      if (estimateRow && isEstimateCustomerViewable(estimateRow) && isSoftExitEligible(estimateRow)) {
+        return res.status(400).json({ error: 'kind must be change or still_deciding' });
+      }
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const result = kind === 'still_deciding'
+      ? await recordEstimateStillDeciding({ estimateToken: req.params.token, callSideBlockedFor })
+      : await createEstimateChangeRequest({
+        estimateToken: req.params.token,
+        topics: req.body?.topics,
+        note: req.body?.note,
+        callSideBlockedFor,
+      });
+    res.status(result.deduped ? 200 : 201).json(result);
+  } catch (err) {
+    const status = Number(err.status || err.statusCode || 0);
+    if (status >= 400 && status < 500) {
+      return res.status(status).json({ error: err.message || 'Request could not be processed' });
+    }
+    next(err);
+  }
+});
+
 // Mirrors extensionRequestLimiter exactly (codex #3376 r2): the shared
 // add-service limiter runs BEFORE the handler's gate check, so a dark gate
 // would leak a distinctive 429 on the ninth probe instead of the promised
@@ -15667,6 +15744,18 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
     const guard = resolveEstimateDeclineGuard(estimate);
     if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
     if (guard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
+    // Customer-stated reason (GATE_ESTIMATE_SOFT_EXIT): optional, validated
+    // against the same normalized loss codes the staff modal writes. With the
+    // gate dark the fields are ignored outright — the plain decline stays
+    // byte-identical to today — so a probe cannot detect the gate by a 400.
+    // Validated only after the guard cleared the token for the same reason.
+    let customerReason = null;
+    if (featureGates.isEnabled('estimateSoftExit')) {
+      const { customerDispositionUpdates } = require('../services/estimate-disposition');
+      const parsedReason = customerDispositionUpdates(req.body || {});
+      if (parsedReason.error) return res.status(400).json({ error: parsedReason.error });
+      customerReason = parsedReason.updates;
+    }
     // LIVE call-linkage revalidation ATOMIC with the decline write (codex
     // P0 r26, P1 GH r6): the whole transition runs in ONE transaction
     // with the call row locked FOR UPDATE and held through the UPDATE — a
@@ -15711,13 +15800,23 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
           status: 'declined',
           declined_at: trx.fn.now(),
           updated_at: trx.fn.now(),
-          // Normalized loss disposition (estimator audit 2026-08-29): this
-          // is the one CUSTOMER-authored decline path — no reason is
-          // collected, the classification IS the reason. COALESCE keeps any
-          // earlier staff stamp.
-          disposition: trx.raw("COALESCE(disposition, 'declined_by_customer')"),
+          // Normalized loss disposition (estimator audit 2026-08-29): the
+          // CUSTOMER-authored decline path. Without a stated reason the
+          // classification IS the reason; with one (soft-exit sheet) the
+          // customer's own code lands. COALESCE keeps any earlier staff
+          // stamp either way — a staff ruling on a live row is rare and
+          // deliberate, and the customer's words survive in the note.
+          disposition: customerReason
+            ? trx.raw('COALESCE(disposition, ?)', [customerReason.disposition])
+            : trx.raw("COALESCE(disposition, 'declined_by_customer')"),
           disposition_source: trx.raw("COALESCE(disposition_source, 'customer')"),
           disposition_at: trx.raw('COALESCE(disposition_at, NOW())'),
+          ...(customerReason ? {
+            disposition_note: trx.raw('COALESCE(disposition_note, ?)', [customerReason.disposition_note]),
+            competitor_name: trx.raw('COALESCE(competitor_name, ?)', [customerReason.competitor_name]),
+            competitor_price: trx.raw('COALESCE(competitor_price, ?)', [customerReason.competitor_price]),
+            decline_reason: trx.raw('COALESCE(decline_reason, ?)', [customerReason.decline_reason]),
+          } : {}),
         });
       // Click-to-estimate mints only (GitHub #3391 round P1, mirrors the
       // acceptance path): the customer just REJECTED the very thing the
@@ -15768,7 +15867,10 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
     // Notify admin of declined estimate
     try {
       const NotificationService = require('../services/notification-service');
-      await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo`, { icon: '\u274C', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
+      const reasonSuffix = customerReason
+        ? ` \u2014 ${customerReason.decline_reason}${customerReason.competitor_name ? ` (${customerReason.competitor_name}${customerReason.competitor_price != null ? ` at $${customerReason.competitor_price}` : ''})` : ''}`
+        : '';
+      await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo${reasonSuffix}`, { icon: '\u274C', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id, reason: customerReason?.disposition || null } });
     } catch (e) { logger.error(`[notifications] Estimate declined notification failed: ${e.message}`); }
 
     res.json({ success: true });
@@ -24838,6 +24940,19 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
+      // Soft-exit sheet (GATE_ESTIMATE_SOFT_EXIT). Include-when-TRUE only:
+      // gate on, a live accept-active row, never a staff draft preview (the
+      // write 404s a draft). Absent otherwise so gate-off responses stay
+      // byte-identical.
+      ...(featureGates.isEnabled('estimateSoftExit') && !adminDraftPreview && isEstimateAcceptActive(estimate)
+        ? {
+          softExit: true,
+          // The change branch needs a customer the resolver can attach or
+          // create (linked id, or a phone to create from); an unlinked
+          // email-only estimate would 400 on submit, so the page withholds
+          // the branch instead (GH codex P2). Include-when-true.
+          ...(estimate.customer_id || String(estimate.customer_phone || '').trim() ? { softExitChange: true } : {}),
+        } : {}),
       // Services this customer has opted out of. Present only when there is
       // something to report, so a gate-off (or never-used) response stays
       // byte-identical to today. The page renders the "Add it back" row from

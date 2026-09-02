@@ -221,8 +221,69 @@ function staffDispositionUpdates(body = {}) {
   return { updates };
 }
 
+// Customer-facing soft-exit reasons (GATE_ESTIMATE_SOFT_EXIT). The chip keys
+// are the public API contract; each maps onto the SAME normalized codes the
+// staff decline modal writes, so win/loss analytics read one vocabulary
+// regardless of who supplied the reason. 'still_deciding' is deliberately
+// absent: it is not a decline and never reaches this map.
+const CUSTOMER_DECLINE_REASONS = {
+  price: 'declined_price',
+  timing: 'declined_timing',
+  competitor: 'declined_competitor',
+  not_needed: 'not_needed',
+  other: 'declined_other',
+};
+
+/**
+ * Validate + normalize the customer-authored decline payload from the public
+ * soft-exit sheet. Mirrors staffDispositionUpdates but is stricter about
+ * origin: source is always 'customer', and every text field is clipped and
+ * angle-bracket-stripped (it renders in the admin UI verbatim). Returns the
+ * column updates to merge, or { error } for a 400. No reason at all is a
+ * valid plain decline (today's behavior) — the caller decides what to stamp.
+ */
+function customerDispositionUpdates(body = {}) {
+  const reasonKey = typeof body.reason === 'string' ? body.reason.trim() : '';
+  if (!reasonKey) return { updates: null };
+  // Own keys only — inherited names (constructor, __proto__) must take the
+  // invalid branch, not resolve to a prototype member (GH codex P2).
+  const code = Object.hasOwn(CUSTOMER_DECLINE_REASONS, reasonKey) ? CUSTOMER_DECLINE_REASONS[reasonKey] : null;
+  if (!code) {
+    return { error: `Invalid reason '${reasonKey}'. Must be one of: ${Object.keys(CUSTOMER_DECLINE_REASONS).join(', ')}.` };
+  }
+  const clean = (value, max) => String(value || '').replace(/[<>]/g, '').trim().slice(0, max);
+  const note = typeof body.note === 'string' ? clean(body.note, 500) : '';
+  // Same rule as the staff modal: "Other" without an explanation is the
+  // unexplained loss this taxonomy exists to end.
+  if (code === 'declined_other' && !note) {
+    return { error: 'Tell us a little more so we can do better next time.' };
+  }
+  const updates = {
+    disposition: code,
+    disposition_source: 'customer',
+    disposition_at: new Date(),
+    disposition_note: note || null,
+    competitor_name: null,
+    competitor_price: null,
+  };
+  if (code === 'declined_competitor') {
+    updates.competitor_name = clean(body.competitorName, 120) || null;
+    const priceSupplied = body.competitorPrice !== undefined && body.competitorPrice !== null
+      && String(body.competitorPrice).trim() !== '';
+    const price = positiveMoneyOrNull(body.competitorPrice);
+    if (priceSupplied && price === null) {
+      return { error: 'The other quote must be a dollar amount.' };
+    }
+    updates.competitor_price = price;
+  }
+  updates.decline_reason = (dispositionLabel(code) || code).slice(0, 100);
+  return { updates };
+}
+
 module.exports = {
   DISPOSITIONS,
+  CUSTOMER_DECLINE_REASONS,
+  customerDispositionUpdates,
   STAFF_DISPOSITION_CODES,
   EXPIRED_DISPOSITION_SQL,
   isDispositionCode,
