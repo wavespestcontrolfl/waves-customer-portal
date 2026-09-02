@@ -234,6 +234,7 @@ html.admin-app pre *,
    and sits on top of the keyboard, covering the field being typed in. */
 html[data-keyboard-open] .admin-mobile-tabbar {
   transform: translateY(150%);
+  visibility: hidden; /* also drops it from the tab order and the AT tree */
   pointer-events: none;
 }
 

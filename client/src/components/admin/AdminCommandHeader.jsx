@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useRef } from "react";
 import { Button, cn } from "../ui";
 
 export default function AdminCommandHeader({
@@ -27,6 +27,20 @@ export default function AdminCommandHeader({
   const Heading = headingLevel === 2 ? "h2" : "h1";
   const hasSections = sections.length > 0;
   const hasSecondary = secondarySections.length > 0;
+
+  // Below md the strip scrolls; a deep link can select a section that sits
+  // past the viewport edge, so bring the active tab into view whenever it
+  // changes (no-op at md+ where nothing overflows).
+  const primaryNavRef = useRef(null);
+  const secondaryNavRef = useRef(null);
+  useEffect(() => {
+    for (const nav of [primaryNavRef.current, secondaryNavRef.current]) {
+      const el = nav?.querySelector('[aria-current="page"]');
+      if (el && nav.scrollWidth > nav.clientWidth) {
+        el.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+    }
+  }, [activeKey, secondaryActiveKey]);
 
   const renderSections = (list, active, onChange) =>
     list.map(({ key, label, Icon: SectionIcon, className: sectionClassName }) => {
@@ -126,9 +140,12 @@ export default function AdminCommandHeader({
         </div>
         {hasSections && (
           <nav
+            ref={primaryNavRef}
             aria-label={ariaLabel || `${title} section`}
             className={cn(
-              "u-scroll-strip flex px-1 md:grid md:gap-1 md:overflow-visible md:p-2",
+              // p-1 on mobile leaves room for the 2px focus ring inside the
+              // strip's clip box (the outline sits 2px outside the button).
+              "u-scroll-strip flex p-1 md:grid md:gap-1 md:overflow-visible md:p-2",
               navGridClassName,
             )}
           >
@@ -137,9 +154,10 @@ export default function AdminCommandHeader({
         )}
         {hasSecondary && (
           <nav
+            ref={secondaryNavRef}
             aria-label={secondaryAriaLabel || `${title} sub-section`}
             className={cn(
-              "u-scroll-strip flex px-1 md:grid md:gap-1 md:overflow-visible md:p-2",
+              "u-scroll-strip flex p-1 md:grid md:gap-1 md:overflow-visible md:p-2",
               "border-t border-hairline border-zinc-200",
               secondaryNavGridClassName,
             )}
