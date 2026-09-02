@@ -38,7 +38,22 @@ dates, amounts, an accepted forwarded-link disclosure — and the Pay
 button charges the COMBINED total via one PI carrying a per-invoice
 metadata allocation (services/pay-combined.js is the one authority for
 selection, allocation, and settle). Sibling TOKENS still never ride the
-payload, and gate off ⇒ byte-identical to the single-invoice surface),
+payload, and gate off ⇒ byte-identical to the single-invoice surface.
+Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner
+ruling, Venmo and PayPal retired over their fees): the GET payload carries
+an OPTIONAL `manualPayOptions` = `{ zelle: { recipient }, amountDue,
+version, creditPending? }` only when `ZELLE_RECIPIENT` is set (unset ⇒ key
+absent, payload byte-identical — that is the kill switch; `VENMO_HANDLE` /
+`PAYPAL_ME_HANDLE` are ignored and cannot resurrect a tender) AND the
+invoice is collectible, not saved-method-required, not fully covered by
+account credit, not riding a combined-balance session, has no saved-card
+charge reconciliation pending, and any stamped PaymentIntent is still
+cancelable (inspect-only, fail-closed — unverifiable ⇒ key withheld). The
+recipient is the business's own Zelle contact, never customer data. The
+client re-reads this payload on expand / tab re-focus / 45 s cadence and
+keeps every control disabled until a fresh read succeeds; no pre-filled
+transfer link exists for Zelle, so nothing on the page constructs a
+payment URL from the payload),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
 statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves

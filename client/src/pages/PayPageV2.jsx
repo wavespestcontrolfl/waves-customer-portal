@@ -414,12 +414,12 @@ function SummaryRow({ label, value, strong, muted }) {
 }
 
 // ── Stripe Payment Element wrapper ─────────────────────────────────
-// "Other ways to pay" — Zelle / Venmo / PayPal under checkout (2026-08-29).
-// Collapsed by default so Stripe stays the headline path. None of the three
-// has a webhook into this system, so the block is informational: the customer
-// pays in their own app (the Venmo/PayPal links pre-fill amount + invoice
-// memo) and the invoice stays open until the payment is recorded. Rendered
-// only when the server sends `manualPayOptions` (env-driven, see
+// "Other ways to pay" — Zelle under checkout (2026-08-29; Zelle-only since
+// 2026-09-02 — Venmo and PayPal were dropped over their fees). Collapsed by
+// default so Stripe stays the headline path. Zelle has no webhook into this
+// system, so the block is informational: the customer pays from their own
+// banking app and the invoice stays open until the payment is recorded.
+// Rendered only when the server sends `manualPayOptions` (env-driven, see
 // pay-v2-helpers.js). Native data-glass markup like the rest of this page.
 const PHONE_RE = /^\+?[\d\s().-]{7,}$/;
 function formatPhoneDisplay(raw) {
@@ -431,26 +431,11 @@ function telHref(raw) {
   const d = String(raw).replace(/\D/g, '');
   return `tel:+${d.length === 10 ? `1${d}` : d}`;
 }
-function venmoPayHref(handle, amount, note) {
-  const user = String(handle).replace(/^@/, '');
-  const q = new URLSearchParams({ txn: 'pay', note });
-  if (Number(amount) > 0) q.set('amount', Number(amount).toFixed(2));
-  return `https://venmo.com/${encodeURIComponent(user)}?${q}`;
-}
-function paypalMeHref(handle, amount) {
-  const user = encodeURIComponent(String(handle).replace(/^@/, ''));
-  return Number(amount) > 0
-    ? `https://paypal.me/${user}/${Number(amount).toFixed(2)}USD`
-    : `https://paypal.me/${user}`;
-}
 
-// Brand marks — the Zelle / Venmo / PayPal logo glyphs (simple-icons path
-// data, CC0) on each app's brand-color tile. Purely decorative: the row's
-// text carries the name.
+// Brand mark — the Zelle logo glyph (simple-icons path data, CC0) on the
+// app's brand-color tile. Purely decorative: the row's text carries the name.
 const PAY_APP_MARKS = {
   zelle: { bg: '#6D1ED4', d: 'M13.559 24h-2.841a.483.483 0 0 1-.483-.483v-2.765H5.638a.667.667 0 0 1-.666-.666v-2.234a.67.67 0 0 1 .142-.412l8.139-10.382h-7.25a.667.667 0 0 1-.667-.667V3.914c0-.367.299-.666.666-.666h4.23V.483c0-.266.217-.483.483-.483h2.841c.266 0 .483.217.483.483v2.765h4.323c.367 0 .666.299.666.666v2.137a.67.67 0 0 1-.141.41l-8.19 10.481h7.665c.367 0 .666.299.666.666v2.477a.667.667 0 0 1-.666.667h-4.32v2.765a.483.483 0 0 1-.483.483Z' },
-  venmo: { bg: '#008CFF', d: 'M21.772 13.119c-.267 0-.381-.251-.38-.655 0-.533.121-1.575.712-1.575.267 0 .357.243.357.598 0 .533-.13 1.632-.689 1.632Zm.502-3.377c-1.677 0-2.405 1.285-2.405 2.658 0 1.042.421 1.874 1.693 1.874 1.717 0 2.438-1.406 2.438-2.763 0-1.025-.462-1.769-1.726-1.769Zm-3.833 0c-.558 0-.964.17-1.393.477-.154-.275-.462-.477-.932-.477-.542 0-.947.219-1.247.437l-.04-.364H13.54l-.688 4.354h1.506l.479-3.053c.129-.065.323-.154.518-.154.145 0 .267.049.267.267 0 .056-.016.145-.024.218l-.429 2.722h1.498l.478-3.053c.138-.073.324-.154.51-.154.146 0 .268.049.268.267 0 .056-.017.145-.025.218l-.429 2.722h1.499l.461-2.908c.025-.153.049-.388.049-.549 0-.582-.267-.97-1.037-.97Zm-6.871 0c-.575 0-.98.219-1.287.421l-.017-.348H8.962l-.689 4.354H9.78l.478-3.053c.13-.065.324-.154.518-.154.147 0 .268.049.268.242 0 .081-.024.227-.032.299l-.422 2.666h1.499l.462-2.908c.024-.153.049-.388.049-.549 0-.582-.268-.97-1.03-.97Zm-5.631 1.834c.041-.485.413-.824.697-.824.162 0 .299.097.299.291 0 .404-.713.533-.996.533Zm.843-1.834c-1.604 0-2.382 1.39-2.382 2.698 0 1.01.478 1.817 1.814 1.817.527 0 1.07-.113 1.418-.282l.186-1.26c-.494.25-.874.347-1.271.347-.365 0-.64-.194-.64-.687.826-.008 2.252-.347 2.252-1.453 0-.687-.494-1.18-1.377-1.18Zm-4.239.267c.089.186.146.412.146.743 0 .606-.429 1.494-.777 2.06l-.373-2.989L0 9.969l.705 4.2h1.757c.77-1.01 1.718-2.448 1.718-3.554 0-.347-.073-.622-.235-.889l-1.402.283Z' },
-  paypal: { bg: '#003087', d: 'M7.016 19.198h-4.2a.562.562 0 0 1-.555-.65L5.093.584A.692.692 0 0 1 5.776 0h7.222c3.417 0 5.904 2.488 5.846 5.5-.006.25-.027.5-.066.747A6.794 6.794 0 0 1 12.071 12H8.743a.69.69 0 0 0-.682.583l-.325 2.056-.013.083-.692 4.39-.015.087zM19.79 6.142c-.01.087-.01.175-.023.261a7.76 7.76 0 0 1-7.695 6.598H9.007l-.283 1.795-.013.083-.692 4.39-.134.843-.014.088H6.86l-.497 3.15a.562.562 0 0 0 .555.65h3.612c.34 0 .63-.249.683-.585l.952-6.031a.692.692 0 0 1 .683-.584h2.126a6.793 6.793 0 0 0 6.707-5.752c.306-1.95-.466-3.744-1.89-4.906z' },
 };
 function PayAppMark({ app, size = 32 }) {
   const spec = PAY_APP_MARKS[app];
@@ -515,15 +500,13 @@ function CopyValueButton({ value, label, disabled = false }) {
   );
 }
 
-// Three aligned columns on every row — app | Open | Copy — so the buttons
-// line up down the panel.
+// Three aligned columns — app | Open | Copy.
 const PAY_ROW_GRID = {
   display: 'grid',
   gridTemplateColumns: 'minmax(0, 1fr) 112px 76px',
   alignItems: 'center',
   columnGap: 6,
-  padding: `${SP.sm}px 0`,
-  borderTop: '1px solid rgba(4,57,94,0.12)',
+  paddingBottom: SP.sm,
 };
 const PAY_ROW_GRID_NARROW = {
   ...PAY_ROW_GRID,
@@ -531,12 +514,11 @@ const PAY_ROW_GRID_NARROW = {
   rowGap: SP.xs,
 };
 
-// Every configured recipient in one comparable key — the recipients ride
-// env, not the invoice row, so a rotated handle arrives with an unchanged
-// invoice version and must be detected on its own.
+// The recipient rides env, not the invoice row, so a rotated recipient
+// arrives with an unchanged invoice version and must be compared on its own.
 const MANUAL_PAY_REVALIDATE_MS = 45_000;
 function recipientsKey(opts) {
-  return JSON.stringify([opts?.zelle?.recipient ?? null, opts?.venmo?.handle ?? null, opts?.paypal?.handle ?? null]);
+  return opts?.zelle?.recipient ?? null;
 }
 
 function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onInvoiceChanged }) {
@@ -553,6 +535,12 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
   // shown and copied is always the latest server truth.
   const [validated, setValidated] = useState(false);
   const validating = !validated;
+  // aria-disabled + pointer-events:none only stops the mouse — Enter on a
+  // focused anchor still navigates (pre-push P1). Drop it from the tab order
+  // and cancel activation while a fresh read is pending or has failed.
+  const anchorGuard = validating
+    ? { tabIndex: -1, onClick: (e) => e.preventDefault() }
+    : {};
   const readFresh = async () => {
     const res = await fetch(`${API_BASE}/pay/${token}`);
     const fresh = await res.json().catch(() => null);
@@ -571,7 +559,7 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
       && (version == null || freshVersion === version)
       && Number(freshAmount) === Number(amountDue)
       && recipientsKey(freshOpts) === recipientsKey(options);
-    return { fresh, freshOpts, freshAmount, unchanged };
+    return { fresh, unchanged };
   };
   const STALE_NOTICE = 'This invoice was just updated — the details above have been refreshed. Please try again.';
   // Expand / visibility / interval can overlap; only the LATEST read may
@@ -620,36 +608,6 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
     const timer = setInterval(() => { if (document.visibilityState === 'visible') run(); }, MANUAL_PAY_REVALIDATE_MS);
     return () => { document.removeEventListener('visibilitychange', onVisible); clearInterval(timer); };
   }, [open]);
-  // Version-fenced open (codex #3610 r3 P1): a delivered invoice can be
-  // edited by an admin after this page loaded, and no PaymentIntent fence
-  // exists while Stripe is unavailable/pending. Open the tab synchronously
-  // (popup blockers), re-fetch the invoice, and only then point the tab at
-  // the pre-filled transfer — if the version or amount moved, close it and
-  // refresh the page data instead.
-  const openTransfer = async (row) => {
-    setStaleNotice('');
-    // Plain `_blank` so the handle is retained (browsers honoring the
-    // `noopener` feature return null — codex r5 P2); sever `opener` on the
-    // handle itself before it is pointed anywhere.
-    const tab = typeof window !== 'undefined' ? window.open('', '_blank') : null;
-    if (tab) { try { tab.opener = null; } catch { /* cross-origin guard */ } }
-    try {
-      const { fresh, freshOpts, freshAmount, unchanged } = await readFresh();
-      if (!unchanged) {
-        if (tab) tab.close();
-        setStaleNotice(STALE_NOTICE);
-        if (fresh?.invoice) onInvoiceChanged?.(fresh);
-        return;
-      }
-      // Built from the FRESH options, never the render-time closure.
-      const url = row.buildHref(Number(freshAmount), freshOpts);
-      if (tab) tab.location.href = url;
-      else if (typeof window !== 'undefined') window.location.assign(url);
-    } catch {
-      if (tab) tab.close();
-      setStaleNotice('Could not confirm the invoice amount — check your connection and try again.');
-    }
-  };
   const [narrow, setNarrow] = useState(() => (typeof window !== 'undefined' ? window.innerWidth < 560 : false));
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -657,43 +615,15 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
-  if (!options || (!options.zelle && !options.venmo && !options.paypal)) return null;
-  const memo = `Invoice ${invoiceNumber}`;
-  const rows = [];
-  if (options.zelle?.recipient) {
-    const v = options.zelle.recipient;
-    const isPhone = PHONE_RE.test(v);
-    rows.push({
-      key: 'zelle', name: 'Zelle',
-      value: isPhone ? formatPhoneDisplay(v) : v,
-      copyValue: isPhone ? formatPhoneDisplay(v) : v,
-      hint: isPhone ? 'Send to our phone number' : 'Send to our email',
-      valueHref: isPhone ? telHref(v) : null,
-      // Phone renders on its own line — inline it overflowed the 390px
-      // viewport ("Send to our phone number (941) 599-3489" clipped).
-      valueOnOwnLine: true,
-      // Zelle has no pay-link (it runs inside the customer's banking app);
-      // "Open Zelle" lands on Zelle's find-your-bank page.
-      href: 'https://www.zellepay.com/get-started',
-      openLabel: 'Open Zelle',
-    });
-  }
-  if (options.venmo?.handle) {
-    rows.push({
-      key: 'venmo', name: 'Venmo', value: options.venmo.handle, copyValue: options.venmo.handle,
-      hint: 'Send to', openLabel: 'Open Venmo',
-      buildHref: (amt, opts) => venmoPayHref(opts.venmo.handle, amt, memo),
-    });
-  }
-  if (options.paypal?.handle) {
-    rows.push({
-      key: 'paypal', name: 'PayPal', value: `paypal.me/${options.paypal.handle}`, copyValue: `https://paypal.me/${options.paypal.handle}`,
-      hint: 'Send to', openLabel: 'Open PayPal',
-      buildHref: (amt, opts) => paypalMeHref(opts.paypal.handle, amt),
-    });
-  }
-  const names = rows.map((r) => r.name);
-  const namesText = names.length > 1 ? `${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}` : names[0];
+  const recipient = options?.zelle?.recipient;
+  if (!recipient) return null;
+  const isPhone = PHONE_RE.test(recipient);
+  const value = isPhone ? formatPhoneDisplay(recipient) : recipient;
+  const hint = isPhone ? 'Send to our phone number' : 'Send to our email';
+  // Phone renders on its own line — inline it overflowed the 390px viewport
+  // ("Send to our phone number (941) 599-3489" clipped). Zelle has no
+  // pay-link (it runs inside the customer's banking app); "Open Zelle" lands
+  // on Zelle's find-your-bank page.
   const rowStyle = narrow ? PAY_ROW_GRID_NARROW : PAY_ROW_GRID;
   return (
     <div data-glass-clear="" className="waves-no-print" style={{ marginTop: SP.lg }}>
@@ -723,16 +653,12 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
           color: COLORS.glassNavy,
         }}
       >
-        <span style={{ display: 'flex', alignItems: 'center' }} aria-hidden="true">
-          {rows.map((row, i) => (
-            <span key={row.key} style={{ marginLeft: i ? -6 : 0, borderRadius: 8, boxShadow: '0 0 0 2px rgba(255,255,255,0.85)', display: 'inline-flex' }}>
-              <PayAppMark app={row.key} size={26} />
-            </span>
-          ))}
+        <span style={{ borderRadius: 8, boxShadow: '0 0 0 2px rgba(255,255,255,0.85)', display: 'inline-flex' }} aria-hidden="true">
+          <PayAppMark app="zelle" size={26} />
         </span>
         <span style={{ minWidth: 0, fontSize: FS.body, lineHeight: LH.snug, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           <span style={{ fontWeight: FW.semibold }}>Other ways to pay</span>
-          {!narrow && <span style={{ opacity: 0.75 }}> — {namesText}</span>}
+          {!narrow && <span style={{ opacity: 0.75 }}> — Zelle</span>}
         </span>
         <span aria-hidden="true" style={{ display: 'inline-flex', transition: 'transform 200ms ease', transform: open ? 'rotate(180deg)' : 'none' }}>
           <Icon name="chevronDown" size={18} strokeWidth={2} />
@@ -749,52 +675,42 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
             ...PAY_BOX,
           }}
         >
-          {rows.map((row, i) => (
-            <div key={row.key} style={{ ...rowStyle, ...(i === 0 ? { borderTop: 'none', paddingTop: 0 } : {}) }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: SP.sm, minWidth: 0, ...(narrow ? { gridColumn: '1 / -1' } : {}) }}>
-                <PayAppMark app={row.key} />
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: SP.xs, fontSize: FS.body, fontWeight: FW.semibold, color: DOC.ink }}>
-                    {row.name}
-                    <span style={{
-                      fontSize: FS.micro,
-                      fontWeight: FW.bold,
-                      letterSpacing: '0.08em',
-                      textTransform: 'uppercase',
-                      color: DOC.success,
-                      background: DOC.successBg,
-                      border: `1px solid ${DOC.successBorder}`,
-                      borderRadius: 999,
-                      padding: '2px 8px',
-                      lineHeight: LH.heading,
-                    }}>
-                      No fees
-                    </span>
-                  </div>
-                  <div style={{ fontSize: FS.body, color: DOC.muted, marginTop: 2, overflowWrap: 'anywhere' }}>
-                    {row.hint}{row.valueOnOwnLine ? null : ' '}
-                    {row.valueHref ? (
-                      <a href={row.valueHref} aria-disabled={validating || undefined} style={{ color: DOC.ink, fontWeight: FW.medium, ...(row.valueOnOwnLine ? { display: 'block', whiteSpace: 'nowrap' } : {}), ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>{row.value}</a>
-                    ) : (
-                      <span style={{ color: DOC.ink, fontWeight: FW.medium, ...(row.valueOnOwnLine ? { display: 'block', whiteSpace: 'nowrap' } : {}) }}>{row.value}</span>
-                    )}
-                  </div>
+          <div style={rowStyle}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: SP.sm, minWidth: 0, ...(narrow ? { gridColumn: '1 / -1' } : {}) }}>
+              <PayAppMark app="zelle" />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: SP.xs, fontSize: FS.body, fontWeight: FW.semibold, color: DOC.ink }}>
+                  Zelle
+                  <span style={{
+                    fontSize: FS.micro,
+                    fontWeight: FW.bold,
+                    letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                    color: DOC.success,
+                    background: DOC.successBg,
+                    border: `1px solid ${DOC.successBorder}`,
+                    borderRadius: 999,
+                    padding: '2px 8px',
+                    lineHeight: LH.heading,
+                  }}>
+                    No fees
+                  </span>
+                </div>
+                <div style={{ fontSize: FS.body, color: DOC.muted, marginTop: 2, overflowWrap: 'anywhere' }}>
+                  {hint}
+                  {isPhone ? (
+                    <a href={telHref(recipient)} aria-disabled={validating || undefined} {...anchorGuard} style={{ color: DOC.ink, fontWeight: FW.medium, display: 'block', whiteSpace: 'nowrap', ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>{value}</a>
+                  ) : (
+                    <span style={{ color: DOC.ink, fontWeight: FW.medium, display: 'block', whiteSpace: 'nowrap' }}>{value}</span>
+                  )}
                 </div>
               </div>
-              {row.buildHref ? (
-                <button type="button" data-glass-accent="" disabled={validating} style={goldChipButton} onClick={() => openTransfer(row)}>
-                  {row.openLabel}
-                </button>
-              ) : row.href ? (
-                <a href={row.href} target="_blank" rel="noopener noreferrer" data-glass-accent="" aria-disabled={validating || undefined} style={{ ...goldChipButton, ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>
-                  {row.openLabel}
-                </a>
-              ) : (
-                <span aria-hidden="true" />
-              )}
-              <CopyValueButton value={row.copyValue} label={`${row.name} address`} disabled={validating} />
             </div>
-          ))}
+            <a href="https://www.zellepay.com/get-started" target="_blank" rel="noopener noreferrer" data-glass-accent="" aria-disabled={validating || undefined} {...anchorGuard} style={{ ...goldChipButton, ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>
+              Open Zelle
+            </a>
+            <CopyValueButton value={value} label="Zelle address" disabled={validating} />
+          </div>
           {staleNotice && (
             <p role="status" style={{ margin: `0 0 ${SP.sm}px`, fontSize: FS.caption, color: DOC.danger, lineHeight: LH.body }}>{staleNotice}</p>
           )}
