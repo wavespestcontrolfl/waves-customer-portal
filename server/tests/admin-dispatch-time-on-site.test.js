@@ -1410,8 +1410,9 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     // a key-merge like the reprice restamp, not a whole-column write.
     // 14 since the report-token withhold marker (#3745): the completion SMS
     // 'failed' stamp for a report-v1 visit with no public token — a
-    // key-merge, not a whole-column write.
-    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(14);
+    // key-merge, not a whole-column write. 15 with the accepted-but-unaudited
+    // 'sent' stamp in the completion SMS catch (#3745 r4) — same shape.
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(15);
   });
 
   test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {

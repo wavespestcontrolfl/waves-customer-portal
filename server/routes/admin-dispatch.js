@@ -12327,6 +12327,123 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    // Report EMAIL enqueue, independent of the SMS lane (email-only customers
+    // still get the report). Hoisted into a function so the SMS lane's
+    // retry-503 exit below can queue the email BEFORE releasing the attempt
+    // (GitHub Codex r4 P1): the email channel must never wait on a retry
+    // the tech may not make. Idempotent — emailAlreadyHandled plus the
+    // queue's per-record dedupe make the call at the original site a no-op
+    // after an early one. Not called from the token-withhold exit: with no
+    // token there is nothing to email either; the retry that re-mints
+    // re-enters both lanes.
+    const queueServiceReportEmailIfEligible = async () => {
+      const serviceReportEmailEnabled = serviceReportV1Delivery
+        ? await runtimeServiceReportFlag(
+            req,
+            'service_report_email_delivery_enabled',
+            'SERVICE_REPORT_EMAIL_DELIVERY_ENABLED',
+            false,
+          )
+        : false;
+      // Email delivery is gated independently of the completion-SMS toggle (see
+      // serviceReportEmailEligible) so email-only customers still get the report.
+      if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && !serviceReportEmailEnabled) {
+        const latestNotes = parseJsonObject(record.structured_notes);
+        if (!latestNotes.serviceReportV1EmailStatus) {
+          const disabledDelta = {
+            serviceReportV1EmailStatus: 'disabled',
+            serviceReportV1EmailDisabledAt: new Date().toISOString(),
+          };
+          const disabledNotes = { ...latestNotes, ...disabledDelta };
+          await mergeRecordNotesKeys(record.id, disabledDelta)
+            .catch((updateErr) => logger.warn(`[dispatch] v1 report email disabled status update failed: ${updateErr.message}`));
+          record.structured_notes = disabledNotes;
+        }
+      }
+
+      if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && serviceReportEmailEnabled) {
+        const latestNotes = parseJsonObject(record.structured_notes);
+        const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
+        if (!emailAlreadyHandled) {
+          try {
+            // The email worker rebuilds and ATTACHES the current PDF at send
+            // time — an emailed attachment is unrecallable. While grounded
+            // copy is still pending, the job is enqueued DURABLY with a
+            // 20-minute hold (survives a process restart, unlike a promise
+            // callback — codex P1 r15+r16); the settlement callback below
+            // pulls next_attempt_at forward the moment copy settles, so the
+            // hold only fully elapses if the process died — and by then the
+            // locked late write/sanitize has landed anyway.
+            // Hold on timeout even if the regen landed grounded MEANWHILE
+            // (codex P1 r22): the initial PDF may have started rendering the
+            // stale copy during the timed-out window, and only the held path's
+            // worker fence + key invalidation guarantees the email attaches a
+            // post-settlement render.
+            const emailHoldMs = lawnRecRegenAttempted && (lawnRecRegenTimedOut || !lawnRecRegenGrounded)
+              ? 20 * 60 * 1000 : 0;
+            const queued = await enqueueServiceReportV1EmailDelivery({
+              serviceRecordId: record.id,
+              customerId: svc.customer_id,
+              token: reportToken,
+              reportUrl,
+              pdfUrl: reportToken ? `${portalUrl}/api/reports/${reportToken}` : null,
+              delayMs: emailHoldMs,
+              payload: {
+                scheduled_service_id: svc.id,
+                source: emailHoldMs ? 'dispatch_complete_held_for_grounding' : 'dispatch_complete',
+                // The delivery worker enforces grounding readiness itself for
+                // held jobs (elapsed time is not proof the settlement ran —
+                // codex P1 r17).
+                // The assessment identity rides on EVERY lawn-report delivery,
+                // not just held ones (issue #3135). When regeneration settles
+                // inside the hold window the job is enqueued normally, and
+                // without this the worker had no assessment to fence — that
+                // delivery dispatched with no version check and no send seal.
+                // awaiting_grounding stays hold-only: it means "sanitize before
+                // sending", which is a held-path obligation.
+                ...(completedLawnAssessmentId ? { lawn_assessment_id: completedLawnAssessmentId } : {}),
+                ...(emailHoldMs ? { awaiting_grounding: true } : {}),
+              },
+            });
+            if (emailHoldMs && queued.delivery?.id && lawnRecFinalCopyPromise) {
+              const heldDeliveryId = queued.delivery.id;
+              logger.info(`[dispatch] report email held ${Math.round(emailHoldMs / 60000)}m for ${record.id} pending grounded copy`);
+              void lawnRecFinalCopyPromise.then(async (finalCopy) => {
+                // Pull forward only on VERIFIED settlement (codex P1 r18) —
+                // unverified keeps the full hold, and the worker's own
+                // sanitize gate still protects the send.
+                if (!finalCopy?.verified) return;
+                await db('service_report_deliveries')
+                  .where({ id: heldDeliveryId, status: 'queued' })
+                  .update({ next_attempt_at: new Date(), updated_at: new Date() })
+                  .catch((pullErr) => logger.warn(`[dispatch] held email pull-forward failed for ${record.id}: ${pullErr.message}`));
+              }).catch((chainErr) => logger.error(`[dispatch] held email pull-forward chain failed for ${record.id}: ${chainErr.message}`));
+            }
+            const queuedDelta = {
+              serviceReportV1EmailStatus: queued.delivery?.status || (queued.skipped ? 'skipped' : 'queued'),
+              serviceReportV1EmailDeliveryId: queued.delivery?.id || null,
+              serviceReportV1EmailQueuedAt: queued.delivery?.created_at || new Date().toISOString(),
+              serviceReportV1EmailError: queued.ok ? null : queued.error || null,
+            };
+            const queuedNotes = { ...latestNotes, ...queuedDelta };
+            await mergeRecordNotesKeys(record.id, queuedDelta);
+            record.structured_notes = queuedNotes;
+          } catch (err) {
+            const failedDelta = {
+              serviceReportV1EmailStatus: 'failed',
+              serviceReportV1EmailError: err.message || 'Email queue failed',
+              serviceReportV1EmailFailedAt: new Date().toISOString(),
+            };
+            const failedNotes = { ...latestNotes, ...failedDelta };
+            await mergeRecordNotesKeys(record.id, failedDelta)
+              .catch((updateErr) => logger.error(`[dispatch] v1 report email queue status update failed: ${updateErr.message}`));
+            record.structured_notes = failedNotes;
+            logger.error(`[dispatch] v1 report email queue failed: ${err.message}`);
+          }
+        }
+      }
+    };
+
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
       && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
       // Report-v1 visit with no public report token (mint failed above): the
@@ -12387,6 +12504,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // merge, an event insert) must never be reported as "not delivered"
       // (GitHub Codex r3 P1).
       let completionSmsProviderAccepted = false;
+      // What the accepted text WAS, so the catch can stamp the honest 'sent'
+      // state (sentSmsBody is scoped inside the try).
+      let completionSmsAcceptedSnapshot = null;
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
         // Use the recap STORED on the record (the server-generated effectiveCustomerRecap,
@@ -12748,6 +12868,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
           }
           completionSmsProviderAccepted = smsResult.sent === true;
+          completionSmsAcceptedSnapshot = completionSmsProviderAccepted ? {
+            body: sentSmsBody,
+            type: sentSmsType,
+            channel: sentSmsChannel,
+            reviewCarried: !bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl),
+          } : null;
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
           // worker retries a 'blocked' status — so the held text is requeued
@@ -12876,23 +13002,33 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // to fix. Everything else — a retryable provider failure or a
               // failed requeue — is recoverable by re-entering this lane.
               const resumable = holdEnqueueFailed || smsResult.terminal !== true;
-              const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
-              await alertCompletionSmsFailed({
-                serviceRecordId: record.id,
-                customerId: svc.customer_id,
-                smsType: sentSmsType,
-                // sendCustomerMessage wraps every provider failure as the
-                // generic code PROVIDER_FAILURE and carries the actionable
-                // Twilio classification (21610, 21614, 20429 …) in
-                // providerErrorCode — same precedence as dropped-call-sms.js.
-                errorClass: holdEnqueueFailed
-                  ? 'SEND_WINDOW_REQUEUE_FAILED'
-                  : (smsResult.providerErrorCode || smsResult.code || 'provider_failure'),
-                error: holdEnqueueFailed
-                  ? completionHoldQueueError
-                  : (smsResult.reason || smsResult.code || 'SMS send failed'),
-                resumable,
-              });
+              if (smsResult.providerAlerted && !holdEnqueueFailed) {
+                // A Twilio API exception already raised twilio_failure from
+                // TwilioService.sendSMS (providerAlerted rides up from the
+                // provider wrapper's catch) — one provider event, one bell
+                // (GitHub Codex r4 P1). The completion-specific recovery
+                // still reaches the tech through the 503 below and the
+                // closeout reader's completion_sms_failed fact.
+                logger.info(`[dispatch] completion SMS failure for ${record.id} already alerted as twilio_failure (${smsResult.providerErrorCode || smsResult.providerHttpStatus || 'api'}) — no completion_sms_failed bell`);
+              } else {
+                const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
+                await alertCompletionSmsFailed({
+                  serviceRecordId: record.id,
+                  customerId: svc.customer_id,
+                  smsType: sentSmsType,
+                  // sendCustomerMessage wraps every provider failure as the
+                  // generic code PROVIDER_FAILURE and carries the actionable
+                  // Twilio classification (21610, 21614, 20429 …) in
+                  // providerErrorCode — same precedence as dropped-call-sms.js.
+                  errorClass: holdEnqueueFailed
+                    ? 'SEND_WINDOW_REQUEUE_FAILED'
+                    : (smsResult.providerErrorCode || smsResult.code || 'provider_failure'),
+                  error: holdEnqueueFailed
+                    ? completionHoldQueueError
+                    : (smsResult.reason || smsResult.code || 'SMS send failed'),
+                  resumable,
+                });
+              }
               if (resumable) {
                 // Keep the missing report / pay-link text RECOVERABLE
                 // (GitHub Codex r3 P1): finalizing succeeded here would make
@@ -12902,6 +13038,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 // release-for-resume + 503 exit as the token-mint failure:
                 // the 'failed' marker above is not completionSmsAlreadyHandled,
                 // so the tech's retry re-enters this lane and re-sends.
+                // The email channel does not depend on the text: queue it
+                // now, before this exit, so the customer keeps it even if
+                // the tech never retries (GitHub Codex r4 P1).
+                await queueServiceReportEmailIfEligible();
                 const sendErr = holdEnqueueFailed
                   ? completionHoldQueueError
                   : new Error(smsResult.reason || smsResult.code || 'Completion SMS provider failure');
@@ -12982,29 +13122,47 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
       } catch (e) {
-        const failedDelta = {
-          completionSmsStatus: 'failed',
-          completionSmsError: e.message || 'SMS send failed',
-          completionSmsFailedAt: new Date().toISOString(),
-        };
-        const failedNotes = { ...parseJsonObject(record.structured_notes), ...failedDelta };
-        await mergeRecordNotesKeys(record.id, failedDelta)
-          .catch((updateErr) => logger.error(`Completion SMS failure status update failed: ${updateErr.message}`));
-        record.structured_notes = failedNotes;
-        await markBundledReviewFailed();
-        logger.error(`Completion SMS failed: ${e.message}`);
         // sendCustomerMessage attaches providerOutcome to the error it throws
         // when Twilio ACCEPTED the message but the audit row failed to
-        // persist (send-customer-message.js auditErr). That text most likely
-        // reached the customer — a "not delivered, re-send it" bell would
-        // direct a duplicate completion / pay-link text, so it is logged as
-        // an accepted-but-unaudited handoff instead (GitHub Codex r2 P1).
-        // completionSmsProviderAccepted covers the route-local writes AFTER
-        // acceptance (the 'sent' notes merge, event inserts) that throw a
-        // plain error with no providerOutcome (GitHub Codex r3 P1).
-        if (completionSmsProviderAccepted || e.providerOutcome?.sent === true) {
-          logger.warn(`[dispatch] Completion SMS for service_record ${record.id} was accepted by the provider (${e.providerOutcome?.providerMessageId || 'no message id'}) but a post-send write failed — no failure bell, do not re-send`);
+        // persist (send-customer-message.js auditErr); the flag covers the
+        // route-local writes AFTER acceptance (the 'sent' notes merge, event
+        // inserts) that throw a plain error. Either way the text most likely
+        // reached the customer, so the honest state is 'sent' with the audit
+        // error recorded — NOT 'failed' (closeout-status would report
+        // completion_sms_failed, the UI would say the text failed, and a
+        // resume would send it again — GitHub Codex r2/r3/r4 P1s). No
+        // failure bell, no release-for-resume, and the bundled review is
+        // marked exactly as the success path would have.
+        const providerAccepted = completionSmsProviderAccepted || e.providerOutcome?.sent === true;
+        if (providerAccepted) {
+          const snap = completionSmsAcceptedSnapshot || {};
+          const acceptedDelta = {
+            completionSmsStatus: 'sent',
+            ...(snap.body ? { sentSmsBody: snap.body } : {}),
+            sentSmsAt: new Date().toISOString(),
+            ...(snap.type ? { sentSmsType: snap.type } : {}),
+            ...(snap.channel ? { sentSmsChannel: snap.channel } : {}),
+            completionSmsAuditError: e.message || 'post-send write failed',
+          };
+          const acceptedNotes = { ...parseJsonObject(record.structured_notes), ...acceptedDelta };
+          await mergeRecordNotesKeys(record.id, acceptedDelta)
+            .catch((updateErr) => logger.error(`Completion SMS accepted-state update failed: ${updateErr.message}`));
+          record.structured_notes = acceptedNotes;
+          if (snap.reviewCarried !== false) await markBundledReviewDelivered();
+          else await markBundledReviewFailed();
+          logger.warn(`[dispatch] Completion SMS for service_record ${record.id} was accepted by the provider (${e.providerOutcome?.providerMessageId || 'no message id'}) but a post-send write failed (${e.message}) — recorded as sent, no failure bell, do not re-send`);
         } else {
+          const failedDelta = {
+            completionSmsStatus: 'failed',
+            completionSmsError: e.message || 'SMS send failed',
+            completionSmsFailedAt: new Date().toISOString(),
+          };
+          const failedNotes = { ...parseJsonObject(record.structured_notes), ...failedDelta };
+          await mergeRecordNotesKeys(record.id, failedDelta)
+            .catch((updateErr) => logger.error(`Completion SMS failure status update failed: ${updateErr.message}`));
+          record.structured_notes = failedNotes;
+          await markBundledReviewFailed();
+          logger.error(`Completion SMS failed: ${e.message}`);
           // A send that THREW before acceptance (an inactive template, a
           // render failure) is not recovered by re-running it — the cause
           // needs an operator fix first, and holding the closeout open would
@@ -13055,111 +13213,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       logger.info(`[dispatch] Completion SMS already sent for service_record ${record.id}; skipping retry send`);
     }
 
-    const serviceReportEmailEnabled = serviceReportV1Delivery
-      ? await runtimeServiceReportFlag(
-          req,
-          'service_report_email_delivery_enabled',
-          'SERVICE_REPORT_EMAIL_DELIVERY_ENABLED',
-          false,
-        )
-      : false;
-    // Email delivery is gated independently of the completion-SMS toggle (see
-    // serviceReportEmailEligible) so email-only customers still get the report.
-    if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && !serviceReportEmailEnabled) {
-      const latestNotes = parseJsonObject(record.structured_notes);
-      if (!latestNotes.serviceReportV1EmailStatus) {
-        const disabledDelta = {
-          serviceReportV1EmailStatus: 'disabled',
-          serviceReportV1EmailDisabledAt: new Date().toISOString(),
-        };
-        const disabledNotes = { ...latestNotes, ...disabledDelta };
-        await mergeRecordNotesKeys(record.id, disabledDelta)
-          .catch((updateErr) => logger.warn(`[dispatch] v1 report email disabled status update failed: ${updateErr.message}`));
-        record.structured_notes = disabledNotes;
-      }
-    }
-
-    if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && serviceReportEmailEnabled) {
-      const latestNotes = parseJsonObject(record.structured_notes);
-      const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
-      if (!emailAlreadyHandled) {
-        try {
-          // The email worker rebuilds and ATTACHES the current PDF at send
-          // time — an emailed attachment is unrecallable. While grounded
-          // copy is still pending, the job is enqueued DURABLY with a
-          // 20-minute hold (survives a process restart, unlike a promise
-          // callback — codex P1 r15+r16); the settlement callback below
-          // pulls next_attempt_at forward the moment copy settles, so the
-          // hold only fully elapses if the process died — and by then the
-          // locked late write/sanitize has landed anyway.
-          // Hold on timeout even if the regen landed grounded MEANWHILE
-          // (codex P1 r22): the initial PDF may have started rendering the
-          // stale copy during the timed-out window, and only the held path's
-          // worker fence + key invalidation guarantees the email attaches a
-          // post-settlement render.
-          const emailHoldMs = lawnRecRegenAttempted && (lawnRecRegenTimedOut || !lawnRecRegenGrounded)
-            ? 20 * 60 * 1000 : 0;
-          const queued = await enqueueServiceReportV1EmailDelivery({
-            serviceRecordId: record.id,
-            customerId: svc.customer_id,
-            token: reportToken,
-            reportUrl,
-            pdfUrl: reportToken ? `${portalUrl}/api/reports/${reportToken}` : null,
-            delayMs: emailHoldMs,
-            payload: {
-              scheduled_service_id: svc.id,
-              source: emailHoldMs ? 'dispatch_complete_held_for_grounding' : 'dispatch_complete',
-              // The delivery worker enforces grounding readiness itself for
-              // held jobs (elapsed time is not proof the settlement ran —
-              // codex P1 r17).
-              // The assessment identity rides on EVERY lawn-report delivery,
-              // not just held ones (issue #3135). When regeneration settles
-              // inside the hold window the job is enqueued normally, and
-              // without this the worker had no assessment to fence — that
-              // delivery dispatched with no version check and no send seal.
-              // awaiting_grounding stays hold-only: it means "sanitize before
-              // sending", which is a held-path obligation.
-              ...(completedLawnAssessmentId ? { lawn_assessment_id: completedLawnAssessmentId } : {}),
-              ...(emailHoldMs ? { awaiting_grounding: true } : {}),
-            },
-          });
-          if (emailHoldMs && queued.delivery?.id && lawnRecFinalCopyPromise) {
-            const heldDeliveryId = queued.delivery.id;
-            logger.info(`[dispatch] report email held ${Math.round(emailHoldMs / 60000)}m for ${record.id} pending grounded copy`);
-            void lawnRecFinalCopyPromise.then(async (finalCopy) => {
-              // Pull forward only on VERIFIED settlement (codex P1 r18) —
-              // unverified keeps the full hold, and the worker's own
-              // sanitize gate still protects the send.
-              if (!finalCopy?.verified) return;
-              await db('service_report_deliveries')
-                .where({ id: heldDeliveryId, status: 'queued' })
-                .update({ next_attempt_at: new Date(), updated_at: new Date() })
-                .catch((pullErr) => logger.warn(`[dispatch] held email pull-forward failed for ${record.id}: ${pullErr.message}`));
-            }).catch((chainErr) => logger.error(`[dispatch] held email pull-forward chain failed for ${record.id}: ${chainErr.message}`));
-          }
-          const queuedDelta = {
-            serviceReportV1EmailStatus: queued.delivery?.status || (queued.skipped ? 'skipped' : 'queued'),
-            serviceReportV1EmailDeliveryId: queued.delivery?.id || null,
-            serviceReportV1EmailQueuedAt: queued.delivery?.created_at || new Date().toISOString(),
-            serviceReportV1EmailError: queued.ok ? null : queued.error || null,
-          };
-          const queuedNotes = { ...latestNotes, ...queuedDelta };
-          await mergeRecordNotesKeys(record.id, queuedDelta);
-          record.structured_notes = queuedNotes;
-        } catch (err) {
-          const failedDelta = {
-            serviceReportV1EmailStatus: 'failed',
-            serviceReportV1EmailError: err.message || 'Email queue failed',
-            serviceReportV1EmailFailedAt: new Date().toISOString(),
-          };
-          const failedNotes = { ...latestNotes, ...failedDelta };
-          await mergeRecordNotesKeys(record.id, failedDelta)
-            .catch((updateErr) => logger.error(`[dispatch] v1 report email queue status update failed: ${updateErr.message}`));
-          record.structured_notes = failedNotes;
-          logger.error(`[dispatch] v1 report email queue failed: ${err.message}`);
-        }
-      }
-    }
+    await queueServiceReportEmailIfEligible();
 
     // Only schedule the delayed follow-up message when the review wasn't
     // already bundled into the completion SMS above.
