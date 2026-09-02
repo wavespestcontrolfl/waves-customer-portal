@@ -235,6 +235,11 @@ function generateToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
+// Shape of every live review_requests.token: 64-hex from generateToken, plus
+// the legacy 32-char url-safe rows. Public routers gate on this BEFORE any DB
+// read so malformed probes get the same generic 404 as unknown tokens.
+const REVIEW_TOKEN_RE = /^[A-Za-z0-9_-]{32,64}$/;
+
 
 // pg DATE columns deserialize as 'YYYY-MM-DD' strings or UTC-midnight Dates;
 // new Date(...) + etDateString would shift them to the PREVIOUS Eastern day
@@ -2066,6 +2071,10 @@ const ReviewService = {
   async getByToken(token) {
     const request = await db("review_requests").where({ token }).first();
     if (!request) return null;
+    // An expired link is ineligible exactly like an unknown one: no open
+    // stamp, no customer read, and the route maps null to its generic 404
+    // (docs/public-route-contracts.md). Same expiry test as submitRating.
+    if (request.expires_at && new Date(request.expires_at) < new Date()) return null;
 
     // Record view
     const updates = { open_count: (request.open_count || 0) + 1 };
@@ -4934,5 +4943,6 @@ ReviewService.__private = {
 // review link back to a caller (tech-trigger) must use this — never build a
 // raw /rate/<token> URL, which bypasses the gate and the click stamp.
 ReviewService.unshortenedReviewUrl = unshortenedReviewUrl;
+ReviewService.REVIEW_TOKEN_RE = REVIEW_TOKEN_RE;
 
 module.exports = ReviewService;

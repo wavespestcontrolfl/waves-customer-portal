@@ -645,14 +645,15 @@ marketing site — no auth, no token, location filter + limit; reads
 `google_reviews` only).
 `/api/review/:token` (GET + POST; token-gated customer review flow — GET
 returns the review-request context by token, POST submits the customer's
-review. No auth beyond the review-request token. **Documented legacy
-exception to the baseline** (`server/routes/review-public.js`): no token
-format gate, no per-route limiter (global `/api/` limiter only), no privacy
-headers; the GET reads the request row, stamps open state, and returns
-customer name data, so malformed and high-rate probes reach the DB. This is
-remediation owed, not a pattern to copy: adding the baseline guards is a
-follow-up change, unrelated edits are not flagged for the missing guards,
-and a NEW token route must not cite this entry as precedent.)
+review. No auth beyond the review-request token. Baseline guards
+(`server/routes/review-public.js`): `REVIEW_TOKEN_RE` format gate (the
+shape `services/review-request.js` mints — 32-64 url-safe chars) via
+`router.param` before any DB read, one generic 404 body for malformed,
+unknown, and expired tokens on both verbs, a router-wide 30 req/min limiter
+on the shared IPv6-safe `rateLimitKey`, and the shared `noStore` privacy
+headers (`no-store`, `noindex`, `no-referrer`) on every response. The GET
+stamps open state and returns customer name data, so those guards are the
+whole defense.)
 `/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
 `/:token/generate-review`, `/:token/go`) (review-gate; token-scoped customer
 rating flow from a review-request link — high → the nearest GBP

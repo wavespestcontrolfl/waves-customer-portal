@@ -189,7 +189,7 @@ for i in "${!REF_SHAS[@]}"; do
     echo "  • Knex parameterization — no string-interpolated SQL via db.raw"
     echo "  • PII in logs (phone, email, address, full card numbers)"
     echo "  • Auth middleware on /api/admin/* and /api/internal/* routes"
-    echo "  • Hardcoded Anthropic model IDs (must use FLAGSHIP/WORKHORSE/FAST from server/config/models.js)"
+    echo "  • Hardcoded Anthropic model IDs (import a tier — DEEP/FLAGSHIP/WORKHORSE/FAST/VOICE/VISION/EXTREME — from server/config/models.js; DEEP calls go through services/llm/deep.js)"
     echo "  • References to retired tools: Square, Zapier, Make, Elementor, NitroPack, RankMath"
     echo ""
     echo "Output: JSON matching the provided schema. Cite file:line for every finding."

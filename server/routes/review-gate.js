@@ -61,7 +61,7 @@ const { isBotUserAgent } = require('../utils/bot-ua');
 // 2026-08-07, all 68 rows incl. one legacy 32-char). Malformed tokens get
 // the same generic 404 as unknown ones, before any DB lookup. Applies to
 // every /:token route on this router.
-const REVIEW_TOKEN_RE = /^[A-Za-z0-9_-]{32,64}$/;
+const { REVIEW_TOKEN_RE } = require('../services/review-request');
 router.param('token', (req, res, next, token) => {
   if (REVIEW_TOKEN_RE.test(String(token))) return next();
   // /go's contract is that EVERY failure path degrades to the rate page
