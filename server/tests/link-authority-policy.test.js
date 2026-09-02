@@ -20,7 +20,7 @@ const path = (over = {}) => ({
 });
 const domain = (over = {}) => ({ spam_score: 2, score: 75, ...over });
 const paid = (over = {}) => path({
-  acquisition_type: 'paid_listing', payment_required: true, estimated_cost_cents: 4500, currency: 'USD',
+  acquisition_type: 'paid_listing', payment_required: true, estimated_cost_cents: 4500, currency: 'USD', fee_scope: 'per_location',
   merchant_binding: { checkout_origin: 'https://x.example', processor: { host: 'checkout.stripe.com', merchant_account_id: 'acct_1' } },
   ...over,
 });
@@ -165,6 +165,8 @@ describe('§6.3 1a validity — INVALID for every dimension, never overrideable'
     ...P.BOOLEAN_FLAGS.map((f) => [`${f} not a literal boolean`, path({ [f]: 'true' }), domain()]),
     ['paid type without payment_required', path({ acquisition_type: 'paid_listing', payment_required: false }), domain()],
     ['self_service_free with payment', path({ payment_required: true, estimated_cost_cents: 100, currency: 'USD' }), domain()],
+    ['paid path without fee_scope', paid({ fee_scope: null }), domain()],
+    ['paid path with an unknown fee_scope', paid({ fee_scope: 'global' }), domain()],
     ['send-accepted terms + submit-first deadlock', outreach({ execution_after_send: false, terms_accepted_by_send: true }), domain()],
     ['legal_attestation without hash', path({ legal_attestation: true, legal_terms_hash: null }), domain()],
     ['legal_attestation with malformed hash', path({ legal_attestation: true, legal_terms_hash: 'ABC' }), domain()],
@@ -269,6 +271,8 @@ describe('§6.3 2b payment — independent of the other dimensions', () => {
     expect(level(P.decideAuthority({ path: paid({ currency: 'unknown' }), domain: domain(), policy: defaults() }), 'payment')).toBe('OWNER_INPUT_REQUIRED');
     expect(level(P.decideAuthority({ path: paid({ currency: 'foreign' }), domain: domain(), policy: defaults() }), 'payment')).toBe('OWNER_MANUAL_PAYMENT');
     expect(level(P.decideAuthority({ path: paid({ currency: 'foreign', estimated_cost_cents: null }), domain: domain(), policy: defaults() }), 'payment')).toBe('OWNER_MANUAL_PAYMENT');
+    // a missing fee scope is data validity, never a routing: INVALID for every dimension
+    expect(P.decideAuthority({ path: paid({ fee_scope: null, currency: 'unknown' }), domain: domain(), policy: defaults() }).verdict).toBe('INVALID');
   });
   test('the price-entry park still evaluates every other dimension', () => {
     const r = P.decideAuthority({ path: paid({ estimated_cost_cents: null, account_required: true }), domain: domain(), policy: { ...defaults(), auto_account_creation: true } });
@@ -332,7 +336,7 @@ describe('§6.3 2c communication', () => {
     expect(level(r, 'execution', 'terms')).toBe('OWNER_LEGAL');
   });
   test('a paid guest post needs BOTH a payment and a communication verdict', () => {
-    const r = P.decideAuthority({ path: outreach({ acquisition_type: 'editorial_outreach', link_type: 'guest_post', payment_required: true, estimated_cost_cents: 20000, currency: 'USD' }), domain: domain({ score: 90 }), policy: mandate(), draftClean: true });
+    const r = P.decideAuthority({ path: outreach({ acquisition_type: 'editorial_outreach', link_type: 'guest_post', payment_required: true, estimated_cost_cents: 20000, currency: 'USD', fee_scope: 'per_location' }), domain: domain({ score: 90 }), policy: mandate(), draftClean: true });
     expect(level(r, 'payment')).toBe('OWNER_MANUAL_PAYMENT'); // no merchant binding yet
     expect(level(r, 'communication')).toBe('AUTO_OUTREACH');
     expect(r.instances.map((i) => i.dimension)).toEqual(['payment', 'communication']);

@@ -28,7 +28,7 @@
  */
 
 const {
-  ATTEMPT_PROVIDERS, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES, ACQUISITION_TYPES, CURRENCIES, PATH_LINK_TYPES,
+  ATTEMPT_PROVIDERS, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES, ACQUISITION_TYPES, CURRENCIES, PATH_LINK_TYPES, FEE_SCOPES,
 } = require('./link-registry');
 
 const MEMBERSHIP_TYPES = Object.freeze(['membership', 'association', 'sponsorship']);
@@ -233,6 +233,7 @@ function validityFailure(path, domain, score) {
   if (path.superseded_by) return 'path superseded';
   if (path.baseline === true) return 'baseline placeholder is never executable';
   if (!CURRENCIES.includes(path.currency)) return `currency ${path.currency} unknown to the enum`;
+  if (path.payment_required && !FEE_SCOPES.includes(path.fee_scope)) return 'paid path without a fee_scope (per_location | account_wide)'; // §3.2: required when payment_required
   return null;
 }
 
