@@ -11,16 +11,19 @@
  * known — typo variants are a conflict on purpose (a near-miss is a lead for
  * a human, never a match).
  */
+// Byte-identical twin of the SQL normalization in call-recording-processor
+// (LOWER(REGEXP_REPLACE(name, '[^a-zA-Z0-9]', '', 'g'))) — the two must
+// agree, so this deliberately does NOT fold diacritics.
 function normalizeNamePart(value) {
-  // Fold diacritics before stripping (NFD splits "é" into "e" + a combining
-  // mark) so "José Nuñez" and "Jose Nunez" normalize identically instead of
-  // the accented letters vanishing ("jos nuez").
-  return String(value || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, '');
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+// Diacritic-folding variant for comparisons that never touch SQL (the Zelle
+// payer corroboration): NFD splits "é" into "e" + a combining mark, so
+// "José Nuñez" and "Jose Nunez" normalize identically instead of the
+// accented letters vanishing ("jos nuez").
+function normalizeNameFolded(value) {
+  return normalizeNamePart(String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, ''));
 }
 
 // Common NANP nickname/diminutive groups — "Bob" calling from a line whose
@@ -196,7 +199,7 @@ function sameFirstName(a, b) {
 // a missing customer name part never corroborates (amount alone is not
 // identity).
 function tokensOf(text) {
-  return String(text || '').split(/\s+/).map(normalizeNamePart).filter((t) => t.length > 1);
+  return String(text || '').split(/\s+/).map(normalizeNameFolded).filter((t) => t.length > 1);
 }
 function runsOf(tokens) {
   const runs = [];
@@ -232,14 +235,15 @@ function personCorroborates(person, customerFirst, customerLast) {
   return false;
 }
 function payerNameCorroborates(payerName, customer = {}) {
-  const customerLast = normalizeNamePart(customer.last_name);
-  const customerFirst = normalizeNamePart(customer.first_name);
+  const customerLast = normalizeNameFolded(customer.last_name);
+  const customerFirst = normalizeNameFolded(customer.first_name);
   if (!customerLast || !customerFirst) return false;
   return personsOf(payerName).some((person) => personCorroborates(person, customerFirst, customerLast));
 }
 
 module.exports = {
   normalizeNamePart,
+  normalizeNameFolded,
   NICKNAME_GROUPS,
   firstNameVariants,
   sameFirstName,
