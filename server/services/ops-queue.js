@@ -20,6 +20,7 @@ const logger = require('./logger');
 const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools');
 const { computeStalledCalls, MIN_DURATION_SECONDS } = require('./call-processing-stall-watchdog');
 const { activityLabel } = require('./intelligence-bar/authorization-contract');
+const { EXECUTING_RECOVERY_MINUTES } = require('./content/email-approvals');
 
 const ITEM_LIMIT = 25;
 const SCAN_LIMIT = 200;
@@ -75,7 +76,9 @@ async function laneScheduledJobs() {
     .map((j) => ({
       id: j.job,
       title: j.job,
-      status: j.state === 'running' ? 'pending' : j.state === 'stale' ? 'parked' : 'failed',
+      // `failed` is terminal (failing); stuck and stale are recoverable —
+      // the next tick may overwrite a stuck row's state — so they park.
+      status: j.state === 'running' ? 'pending' : j.state === 'failing' ? 'failed' : 'parked',
       detail: j.state === 'failing'
         ? `${j.consecutive_failures} consecutive failure${j.consecutive_failures === 1 ? '' : 's'}${j.last_error ? ` — ${String(j.last_error).slice(0, 140)}` : ''}`
         : j.state === 'stuck'
@@ -128,15 +131,19 @@ async function laneCallProcessing() {
     .limit(SCAN_LIMIT)
     .select(columns);
   // extraction_failed: retried while under the attempt cap AND inside the
-  // processor's 7-day fence (PAN-quarantined rows keep recording_url null by
-  // design and still retry); at the cap it is terminal. Scanned SEPARATELY so
-  // a backlog of live rows can never push failures out of the page.
+  // processor's 7-day CREATION fence (PAN-quarantined rows keep recording_url
+  // null by design and still retry); at the cap, or created before the fence,
+  // it is terminal — processAllPending never resurrects it. Scanned SEPARATELY
+  // so a backlog of live rows can never push failures out of the page, and
+  // windowed by the FAILURE event (updated_at), not creation: an admin
+  // force-reprocess of an old call that fails again is a fresh failure that
+  // needs attention, and a creation window would hide it.
   // Same eligibility as the live set: an under-cap retry the processor could
   // never pick up is not "retry scheduled", and at-cap rows are terminal
   // either way.
   const failedRows = await eligible(db('call_log')
     .where('processing_status', 'extraction_failed')
-    .where('created_at', '>', since(RECENT_DAYS)))
+    .where('updated_at', '>', since(RECENT_DAYS)))
     .orderBy('updated_at', 'desc')
     .limit(SCAN_LIMIT)
     .select(columns);
@@ -152,8 +159,13 @@ async function laneCallProcessing() {
     if (ps === 'no_transcription') {
       // Known-failed retry: processAllPending re-runs it on the next tick.
       detail = 'no transcript yet — retry scheduled';
-    } else if (ps === 'extraction_failed' && attempts < CALL_EXTRACTION_MAX_ATTEMPTS) {
+    } else if (ps === 'extraction_failed' && attempts < CALL_EXTRACTION_MAX_ATTEMPTS && new Date(r.created_at) > since(RECENT_DAYS)) {
       detail = `extraction failed, retry scheduled (${attempts}/${CALL_EXTRACTION_MAX_ATTEMPTS})`;
+    } else if (ps === 'extraction_failed' && attempts < CALL_EXTRACTION_MAX_ATTEMPTS) {
+      // Under the cap but outside the sweep's creation fence: nothing will
+      // retry it automatically (a force-reprocess that failed again lands here).
+      status = 'failed';
+      detail = `extraction failed (${attempts}/${CALL_EXTRACTION_MAX_ATTEMPTS}) — call older than the ${RECENT_DAYS}-day retry window, no automatic retry`;
     } else if (ps === 'extraction_failed') {
       status = 'failed';
       detail = `extraction failed after ${attempts} attempts — triage filed`;
@@ -167,7 +179,8 @@ async function laneCallProcessing() {
       title: `${r.direction === 'outbound' ? 'Outbound' : 'Inbound'} call · ${(r.direction === 'outbound' ? r.to_phone : r.from_phone) || 'unknown number'}`,
       status,
       detail,
-      at: iso(r.created_at),
+      // Failures dated by the failure event, live rows by the call.
+      at: iso(status === 'failed' ? (r.updated_at || r.created_at) : r.created_at),
       href: '/admin/communications#tab=calls',
     };
   });
@@ -208,15 +221,33 @@ async function laneEmailApprovals() {
     .whereIn('status', ['awaiting_reply', 'executing'])
     .orderBy('created_at', 'desc').limit(SCAN_LIMIT).select(cols);
   const rows = [...failedRows, ...openRows];
-  const items = rows.map((r) => ({
-    id: r.id,
-    title: `${r.token} · ${String(r.kind || '').replace(/_/g, ' ')}`,
-    status: r.status === 'failed' ? 'failed' : r.status === 'executing' ? 'pending' : 'parked',
-    detail: r.status === 'failed'
-      ? `approval failed${r.last_error ? ` — ${String(r.last_error).slice(0, 140)}` : ''}`
-      : r.status === 'executing' ? 'reply received, executing' : (r.email_sent_at ? 'awaiting an email reply' : 'approval email not yet sent'),
-    at: iso(r.status === 'failed' ? (r.updated_at || r.created_at) : r.created_at),
-  }));
+  const staleExecutingBefore = Date.now() - EXECUTING_RECOVERY_MINUTES * 60_000;
+  const items = rows.map((r) => {
+    let status = 'parked';
+    let detail = 'awaiting an email reply';
+    if (r.status === 'failed') {
+      status = 'failed';
+      detail = `approval failed${r.last_error ? ` — ${String(r.last_error).slice(0, 140)}` : ''}`;
+    } else if (r.status === 'executing') {
+      // Same rule as recoverExecutingRows: an execution older than the
+      // recovery window is an orphaned claim (or the poller is down), not
+      // healthy work in flight.
+      const stale = r.updated_at && new Date(r.updated_at).getTime() < staleExecutingBefore;
+      status = stale ? 'parked' : 'pending';
+      detail = stale ? `executing for over ${EXECUTING_RECOVERY_MINUTES} minutes — orphaned claim, awaiting recovery` : 'reply received, executing';
+    } else if (!r.email_sent_at) {
+      // No human has anything to answer yet; the poller retries the send.
+      status = 'pending';
+      detail = 'approval email not yet sent';
+    }
+    return {
+      id: r.id,
+      title: `${r.token} · ${String(r.kind || '').replace(/_/g, ' ')}`,
+      status,
+      detail,
+      at: iso(r.status === 'failed' ? (r.updated_at || r.created_at) : r.created_at),
+    };
+  });
   return finish(items, { truncated: hitCap(failedRows) || hitCap(openRows) });
 }
 

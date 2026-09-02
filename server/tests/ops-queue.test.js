@@ -35,6 +35,7 @@ jest.mock('../services/intelligence-bar/job-health-tools', () => ({
 jest.mock('../services/content/autonomous-review-queue', () => ({
   listReviewItems: (...a) => mockReviewItems(...a),
 }));
+jest.mock('../services/content/email-approvals', () => ({ EXECUTING_RECOVERY_MINUTES: 15 }));
 // The stall rule is the watchdog's; here it is a fixture: c1 is stalled.
 jest.mock('../services/intelligence-bar/authorization-contract', () => ({
   activityLabel: (name) => ({ send_sms: 'Send a text message' })[name] || String(name).replace(/_/g, ' '),
@@ -56,6 +57,8 @@ describe('getOpsQueue', () => {
       { job: 'pricing-sweep', state: 'failing', consecutive_failures: 3, last_error: 'boom', last_started_at: ago(30) },
       { job: 'ga4-sync', state: 'stale', last_success_age_minutes: 20000, last_success_at: ago(20000) },
       { job: 'digest', state: 'running', last_started_at: ago(2) },
+      // Stuck past its budget is recoverable (the next tick may overwrite it) — parked, not failed.
+      { job: 'nightly-audit', state: 'stuck', last_started_at: ago(90) },
       { job: 'healthy-one', state: 'healthy', last_success_at: ago(5) },
     ] });
     mockReviewItems.mockResolvedValue({ status: 'pending_review', counts: {}, items: [
@@ -71,10 +74,19 @@ describe('getOpsQueue', () => {
       { id: 'c7', from_phone: '+15550000107', direction: 'inbound', processing_status: 'no_transcription', created_at: ago(400) },
       // Under the retry cap: the processor re-runs it — pending, not failed.
       { id: 'c6', from_phone: '+15550000106', direction: 'inbound', processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(30) },
+      // Under the cap but created outside the sweep's 7-day fence (a force-reprocess
+      // of an old call that failed again): nothing retries it — failed, dated by the failure.
+      { id: 'c8', from_phone: '+15550000108', direction: 'inbound', processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(20000), updated_at: ago(15) },
     ];
     fixtures.content_email_approvals = [
       { id: 'ea-1', token: 'EA-1a2b3c4d', kind: 'named_competitor_review', status: 'awaiting_reply', email_sent_at: ago(10), created_at: ago(10) },
       { id: 'ea-2', token: 'EA-ffffffff', kind: 'trust_build_1_of_3', status: 'failed', last_error: 'smtp', created_at: ago(20000), updated_at: ago(200) },
+      // Email not yet sent (poller retries): nobody has anything to answer — pending, not parked.
+      { id: 'ea-3', token: 'EA-33333333', kind: 'trust_build_2_of_3', status: 'awaiting_reply', email_sent_at: null, created_at: ago(3) },
+      // Healthy execution inside the recovery window — pending.
+      { id: 'ea-4', token: 'EA-44444444', kind: 'trust_build_3_of_3', status: 'executing', email_sent_at: ago(30), created_at: ago(30), updated_at: ago(2) },
+      // Executing past EXECUTING_RECOVERY_MINUTES: an orphaned claim — parked.
+      { id: 'ea-5', token: 'EA-55555555', kind: 'named_competitor_review', status: 'executing', email_sent_at: ago(60), created_at: ago(60), updated_at: ago(40) },
     ];
     fixtures.ib_pending_actions = [
       { id: 'pa-1', tool_name: 'send_sms', summary: 'send_sms — to: +15550000100, message: SECRET SMS BODY', context: 'customers', expires_at: ago(-5), created_at: ago(1) },
@@ -102,22 +114,28 @@ describe('getOpsQueue', () => {
     const by = Object.fromEntries(q.lanes.map((l) => [l.key, l]));
 
     expect(by.jobs.items.map((i) => [i.id, i.status])).toEqual([
-      ['pricing-sweep', 'failed'], ['ga4-sync', 'parked'], ['digest', 'pending'],
+      ['pricing-sweep', 'failed'], ['nightly-audit', 'parked'], ['ga4-sync', 'parked'], ['digest', 'pending'],
     ]);
+    expect(by.jobs.items[1].detail).toMatch(/marked running for over an hour/);
     expect(by.jobs.items[0].detail).toMatch(/3 consecutive failures — boom/);
 
     expect(by.calls.items.map((i) => [i.id, i.status])).toEqual([
-      ['c3', 'failed'], ['c1', 'parked'], ['c2', 'pending'], ['c6', 'pending'], ['c5', 'pending'], ['c7', 'pending'],
+      ['c8', 'failed'], ['c3', 'failed'], ['c1', 'parked'], ['c2', 'pending'], ['c6', 'pending'], ['c5', 'pending'], ['c7', 'pending'],
     ]);
+    expect(by.calls.items[0]).toMatchObject({ at: ago(15), detail: expect.stringMatching(/no automatic retry/) });
     expect(by.calls.items.find((i) => i.id === 'c7').detail).toMatch(/retry scheduled/);
     expect(by.calls.items.find((i) => i.id === 'c6').detail).toMatch(/retry scheduled \(1\/3\)/);
-    expect(by.calls.items[1].detail).toMatch(/stalled in processing/);
-    expect(by.calls.items[0].title).toBe('Outbound call · +15550000102'); // the far end, not the Waves number
+    expect(by.calls.items[2].detail).toMatch(/stalled in processing/);
+    expect(by.calls.items[1].title).toBe('Outbound call · +15550000102'); // the far end, not the Waves number
     expect(by.calls.items.find((i) => i.id === 'c5').status).toBe('pending');
 
     expect(by.content.items).toEqual([expect.objectContaining({ id: 'opp-1', status: 'parked', title: 'Best ant bait for lanais', detail: 'parked: affiliate review' })]);
-    expect(by.approvals.items.map((i) => [i.id, i.status])).toEqual([['ea-2', 'failed'], ['ea-1', 'parked']]);
+    expect(by.approvals.items.map((i) => [i.id, i.status])).toEqual([
+      ['ea-2', 'failed'], ['ea-1', 'parked'], ['ea-5', 'parked'], ['ea-3', 'pending'], ['ea-4', 'pending'],
+    ]);
     expect(by.approvals.items[0].at).toBe(ago(200)); // the failure event, not the request
+    expect(by.approvals.items.find((i) => i.id === 'ea-5').detail).toMatch(/orphaned claim/);
+    expect(by.approvals.items.find((i) => i.id === 'ea-3').detail).toBe('approval email not yet sent');
     expect(by.ib.items).toEqual([expect.objectContaining({ id: 'pa-1', status: 'parked', title: 'Send a text message' })]);
     expect(JSON.stringify(by.ib)).not.toContain('SECRET');
     expect(by.reports.items.map((i) => [i.id, i.status])).toEqual([
@@ -127,11 +145,11 @@ describe('getOpsQueue', () => {
     expect(by.alerts.items.map((i) => [i.id, i.status])).toEqual([['aa-1', 'failed'], ['aa-2', 'parked'], ['aa-3', 'parked']]);
     expect(by.alerts.items[2].detail).toMatch(/snooze elapsed/);
 
-    expect(by.calls).toMatchObject({ pending: 4, parked: 1, failed: 1, total: 6, error: null });
+    expect(by.calls).toMatchObject({ pending: 4, parked: 1, failed: 2, total: 7, error: null });
     expect(q.totals).toEqual({
-      pending: 1 + 4 + 2, // digest, c2 + c5 + c6 + c7, d1 + p1
-      parked: 1 + 1 + 1 + 1 + 1 + 1 + 2, // ga4, c1, opp-1, ea-1, pa-1, da-1, aa-2 + aa-3
-      failed: 1 + 1 + 1 + 1 + 1, // pricing, c3, ea-2, d2, aa-1
+      pending: 1 + 4 + 2 + 2, // digest, c2 + c5 + c6 + c7, ea-3 + ea-4, d1 + p1
+      parked: 2 + 1 + 1 + 2 + 1 + 1 + 2, // ga4 + nightly-audit, c1, opp-1, ea-1 + ea-5, pa-1, da-1, aa-2 + aa-3
+      failed: 1 + 2 + 1 + 1 + 1, // pricing, c3 + c8, ea-2, d2, aa-1
       truncated: false,
     });
     expect(typeof q.generatedAt).toBe('string');
@@ -146,7 +164,7 @@ describe('getOpsQueue', () => {
     expect(by.approvals).toMatchObject({ error: expect.stringMatching(/does not exist/), items: [], total: 0 });
     expect(by.jobs).toMatchObject({ error: 'job_health missing', items: [] });
     expect(by.content).toMatchObject({ error: 'review tables unavailable', items: [] });
-    expect(by.calls.total).toBe(6);
+    expect(by.calls.total).toBe(7);
   });
 
   test('items are capped per lane and never carry tool params, transcripts, or bodies', async () => {
