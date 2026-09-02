@@ -1228,7 +1228,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         let openTie = false;
         try {
           const priorReq = prior.service_request_id
-            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at', 'resolved_at')
+            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at')
             : null;
           openTie = !!priorReq && priorReq.status === 'new';
           tied = openTie
@@ -1242,23 +1242,22 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           // refund task is pending — #3727 r2). While the account has
           // stayed churned since that run COMPLETED, the recorded case is
           // the completed run; the age cutoff applies only after a genuine
-          // win-back. "Stayed churned" = churned now with a FINITE churn
-          // stamp at or before the acceptance's resolved_at — the
-          // IMMUTABLE completion marker the close stamps (updated_at moves
-          // on any staff edit, #3727 r2). The processor stamps
-          // pipeline_stage_changed_at only on a fresh churn, so an account
-          // already churned when this cancel ran keeps its OLDER stamp
-          // (wasChurnedStage) and still counts; a stamp after the
-          // completion can only be a win-back followed by a NEW churn — a
-          // new cancellation, never echoed. No usable stamp or no
-          // completion marker proves nothing: fall through and process.
+          // win-back. "Stayed churned" = the customer's churn stamp today
+          // is THE SAME churn event the case recorded when that run
+          // completed (snapshot.churnStampAtRun — written once by the run,
+          // untouched by request reopen/re-resolve or staff edits; #3727
+          // r2/r3). A fresh churn and an already-churned account both
+          // record the stamp they stood on; a win-back followed by a new
+          // churn restamps the customer, so the instants differ and the
+          // new cancellation processes. No recorded stamp (older cases) or
+          // no stamp on the customer proves nothing: fall through.
           if (!tied && priorReq && priorReq.status === 'resolved'
-            && priorSnap && priorSnap.effectiveDate === 'end_of_coverage') {
+            && priorSnap && priorSnap.effectiveDate === 'end_of_coverage' && priorSnap.churnStampAtRun) {
             const cust = await db('customers').where({ id: customerId }).first('pipeline_stage', 'pipeline_stage_changed_at');
-            const resolvedAt = priorReq.resolved_at ? new Date(priorReq.resolved_at).getTime() : NaN;
+            const recorded = new Date(priorSnap.churnStampAtRun).getTime();
             const churnedAt = cust && cust.pipeline_stage_changed_at ? new Date(cust.pipeline_stage_changed_at).getTime() : NaN;
             tied = !!cust && cust.pipeline_stage === 'churned'
-              && Number.isFinite(resolvedAt) && Number.isFinite(churnedAt) && churnedAt <= resolvedAt;
+              && Number.isFinite(recorded) && Number.isFinite(churnedAt) && churnedAt === recorded;
           }
         } catch (tieErr) {
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
@@ -1954,8 +1953,23 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // has since left coverage (refund issued, term cancelled) — its terminal
   // facts are carried, never blanked.
   const carriedPrepay = !term && priorPrepayFacts ? priorPrepayFacts : null;
+  // The churn event this run stands on: the customer's churn stamp as it
+  // reads AFTER the processor (a fresh churn stamps now; an already-churned
+  // account keeps its older stamp). Immutable on the case, so the decided-
+  // term latch can prove "the account never left that churn" without any
+  // request-workflow timestamp (#3727 r3).
+  let churnStampAtRun = null;
+  try {
+    const postRun = await db('customers').where({ id: customerId }).first('pipeline_stage', 'pipeline_stage_changed_at');
+    if (postRun && postRun.pipeline_stage === 'churned' && postRun.pipeline_stage_changed_at) {
+      churnStampAtRun = new Date(postRun.pipeline_stage_changed_at).toISOString();
+    }
+  } catch (stampErr) {
+    logger.warn(`[admin-cancellation] churn stamp read failed for ${customerId}: ${stampErr.message}`);
+  }
   const caseSnapshotBody = {
     actor: { type: actorType, userId: actorUserId },
+    churnStampAtRun,
     effectiveDate: prepayPlan.effectiveDate,
     effectiveOn,
     waiveLateFee: input.waiveLateFee,
