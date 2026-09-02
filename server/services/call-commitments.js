@@ -782,7 +782,11 @@ async function addHumanCommitment(conn, callLogId, { party, kind, description, d
   if (!text) throw Object.assign(new Error('description is required'), { status: 400 });
   const due = parseDueAt(due_at);
   if (Number.isNaN(due)) throw Object.assign(new Error('due_at is not a valid date'), { status: 400 });
-  const key = `${commitmentKey({ party: p, kind: k, description: text })}:h${crypto.createHash('sha1').update(text).digest('hex').slice(0, 6)}`.slice(0, 160);
+  // The :h<hash> suffix is what keeps a human row from colliding with the
+  // AI row of the same kind, so the base is trimmed to leave room for it —
+  // never the suffix.
+  const suffix = `:h${crypto.createHash('sha1').update(text).digest('hex').slice(0, 6)}`;
+  const key = `${commitmentKey({ party: p, kind: k, description: text }).slice(0, 160 - suffix.length)}${suffix}`;
   // Idempotent: the key is deterministic on (party, kind, wording), so a
   // retried or double-submitted request returns the row it already created
   // instead of tripping the unique constraint.

@@ -200,6 +200,11 @@ Per file, with the proving test.
 - Pre-push Codex round 24 (1 P1, fixed): the intelligence response carries
   an admin flag; the panel shows customer relink and recording adoption
   only to admins (commitment controls stay staff-wide).
+- Pre-push Codex round 25 (1 P0 + 1 P1, fixed): adopting a parked recording
+  keeps the PAN invariant — a quarantined call refuses the swap and the
+  parked audio is deleted at Twilio, with the predicate re-checked in the
+  write; a human commitment key reserves room for its :h suffix so it can
+  never collide with the AI row.
 
 ## 4. The vertical slice: evidence-backed commitments and next actions
 

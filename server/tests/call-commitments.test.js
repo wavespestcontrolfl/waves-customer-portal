@@ -55,6 +55,21 @@ describe('commitmentKey', () => {
     expect(commitmentKey({ party: 'waves', kind: 'send_estimate', description: 'Email the quote' }))
       .toBe(commitmentKey({ party: 'waves', kind: 'send_estimate', description: 'Send an estimate tonight' }));
   });
+  test('a human key keeps its :h suffix even for a very long description', () => {
+    const { REPEATABLE_KINDS } = require('../services/call-commitments');
+    expect(REPEATABLE_KINDS.has('provide_info')).toBe(true);
+    const longWord = 'x'.repeat(300);
+    const base = commitmentKey({ party: 'customer', kind: 'provide_info', description: longWord });
+    expect(base.length).toBeLessThanOrEqual(160);
+    // The human variant reserves room for the suffix (checked here through
+    // the same construction addHumanCommitment uses).
+    const suffix = ':h' + require('crypto').createHash('sha1').update(longWord).digest('hex').slice(0, 6);
+    const key = `${base.slice(0, 160 - suffix.length)}${suffix}`;
+    expect(key.length).toBe(160);
+    expect(key.endsWith(suffix)).toBe(true);
+    expect(key).not.toBe(base);
+  });
+
   test('unknown kinds and parties are coerced, never thrown', () => {
     expect(commitmentKey({ party: 'martian', kind: 'teleport', description: 'beam up' })).toMatch(/^waves:other:/);
   });

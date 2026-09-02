@@ -4,7 +4,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'auth_test' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/call-recording-processor', () => ({ processRecording: jest.fn() }));
+jest.mock('../services/call-recording-processor', () => ({ processRecording: jest.fn(), quarantineCardRecording: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(() => Promise.resolve(true)) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.fn() }));
@@ -301,6 +301,28 @@ describe('POST /calls/:id/adopt-recording', () => {
       expect(updates.find((u) => u.table === 'call_log').patch.processing_status).toBeNull();
       expect(updates.find((u) => u.table === 'triage_items')).toBeUndefined();
     }
+  });
+
+  test('a PAN-quarantined call never gets a parked recording re-attached: the audio is deleted at Twilio and the swap is refused', async () => {
+    const updates = mockDb([{ ...call(), transcription_metadata: JSON.stringify({ pan_detected: true }) }]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
+      expect(res.status).toBe(409);
+      expect((await res.json()).reason).toBe('pan_quarantined');
+    });
+    expect(updates.find((u) => u.table === 'call_log')).toBeUndefined();
+    expect(processor.quarantineCardRecording).toHaveBeenCalledWith(expect.objectContaining({ recording_sid: PARKED }), { source: 'adopt_recording_post_quarantine' });
+    expect(processor.processRecording).not.toHaveBeenCalled();
+  });
+
+  test('the swap itself carries the quarantine predicate, so a stamp landing after the read refuses it', async () => {
+    const updates = mockDb([call()]);
+    await withServer(async (base) => {
+      processor.processRecording.mockResolvedValue({ success: true });
+      await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
+    });
+    const swap = updates.find((u) => u.table === 'call_log');
+    expect(JSON.stringify(swap.wheres)).toContain("pan_detected') IS DISTINCT FROM 'true'");
   });
 
   test('refuses while a pass holds the claim, and refuses a recording that is not parked', async () => {

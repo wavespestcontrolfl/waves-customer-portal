@@ -347,8 +347,19 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
     const wanted = String(req.body?.recording_sid || '');
     if (!/^RE[0-9a-f]{32}$/i.test(wanted)) return res.status(400).json({ error: 'recording_sid must be a Twilio RecordingSid' });
-    const call = await db('call_log').where({ id: req.params.id }).first('id', 'twilio_call_sid', 'recording_sid', 'recording_url', 'recording_duration_seconds', 'metadata', 'processing_status');
+    const call = await db('call_log').where({ id: req.params.id }).first('id', 'twilio_call_sid', 'recording_sid', 'recording_url', 'recording_duration_seconds', 'metadata', 'processing_status', 'transcription_metadata');
     if (!call) return res.status(404).json({ error: 'Call not found' });
+    // A PAN-quarantined call never gets audio re-attached — the webhook
+    // deletes a recording that arrives for one instead of storing it, and
+    // adoption must keep that invariant: a call quarantined AFTER the
+    // recording was parked would otherwise have card audio restored.
+    const panQuarantined = (() => {
+      try {
+        const raw = call.transcription_metadata;
+        const meta = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+        return String(meta?.pan_detected) === 'true';
+      } catch { return false; }
+    })();
     if (call.processing_status === 'processing') {
       return res.status(409).json({ error: 'A pass is still working this call. Try again after it finishes.', reason: 'already_processing' });
     }
@@ -357,6 +368,16 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     const parked = Array.isArray(meta.additional_recordings) ? meta.additional_recordings : [];
     const chosen = parked.find((r) => r && r.recording_sid === wanted);
     if (!chosen) return res.status(404).json({ error: 'That recording is not parked on this call' });
+    const quarantineParked = async () => {
+      await CallRecordingProcessor.quarantineCardRecording(
+        { ...call, recording_sid: chosen.recording_sid, recording_url: chosen.recording_url },
+        { source: 'adopt_recording_post_quarantine' },
+      ).catch((e) => logger.error(`[call-recordings] parked recording quarantine delete failed for ${maskSid(chosen.recording_sid)}: ${e.message}`));
+    };
+    if (panQuarantined) {
+      await quarantineParked();
+      return res.status(409).json({ error: 'This call is PAN-quarantined; recordings are deleted, never re-attached.', reason: 'pan_quarantined' });
+    }
     const remaining = parked.filter((r) => r.recording_sid !== wanted);
     if (call.recording_sid) {
       remaining.push({
@@ -370,6 +391,9 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     const swapped = await db('call_log')
       .where({ id: call.id })
       .whereRaw("processing_status IS DISTINCT FROM 'processing'")
+      // Re-checked IN the write: a quarantine stamp landing between the
+      // read above and this update makes the swap refuse.
+      .whereRaw("(transcription_metadata IS NULL OR (transcription_metadata::jsonb ->> 'pan_detected') IS DISTINCT FROM 'true')")
       // Fenced to the row this request READ: the recording it is replacing
       // and the parked entry it is adopting must both still be there — a
       // second operator or a fresh callback that changed either makes this
@@ -397,7 +421,22 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         ),
         updated_at: new Date(),
       });
-    if (!swapped) return res.status(409).json({ error: 'This call changed while the swap was being made (a pass claimed it, or its recordings changed). Reload and try again.', reason: 'call_changed' });
+    if (!swapped) {
+      // Distinguish the quarantine race from an ordinary contention: the
+      // former must also delete the parked audio at Twilio.
+      const now = await db('call_log').where({ id: call.id }).first('transcription_metadata').catch(() => null);
+      let racedQuarantine = false;
+      try {
+        const raw = now?.transcription_metadata;
+        const meta = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+        racedQuarantine = String(meta?.pan_detected) === 'true';
+      } catch { racedQuarantine = false; }
+      if (racedQuarantine) {
+        await quarantineParked();
+        return res.status(409).json({ error: 'This call was PAN-quarantined while the swap was being made; recordings are deleted, never re-attached.', reason: 'pan_quarantined' });
+      }
+      return res.status(409).json({ error: 'This call changed while the swap was being made (a pass claimed it, or its recordings changed). Reload and try again.', reason: 'call_changed' });
+    }
     logger.info(`[call-recordings] operator adopted recording ${maskSid(chosen.recording_sid)} on call ${call.id}; reprocessing`);
     const result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true });
     if (result?.success === true) {
