@@ -902,8 +902,24 @@ describe('acceptVisitEstimatedPrice — the reserved visit row never carries a m
     expect(acceptVisitEstimatedPrice({ tierBillsMonthly: true, tierPerApplicationPrice: 0, cadenceAmount: 51.75 })).toBeNull();
   });
 
-  test('a per-visit cadence plan still bills its cadence amount', () => {
+  test('a per-visit cadence plan still bills its cadence amount — when the cadence was inferred', () => {
+    expect(acceptVisitEstimatedPrice({ tierBillsMonthly: false, cadenceAmount: 112, cadenceInferred: true })).toBe(112);
     expect(acceptVisitEstimatedPrice({ tierBillsMonthly: false, cadenceAmount: 112 })).toBe(112);
+  });
+
+  test('a fallback-only cadence (nothing inferred from the selection or the estimate) stamps no row price', () => {
+    expect(acceptVisitEstimatedPrice({ tierBillsMonthly: false, cadenceAmount: 112, cadenceInferred: false })).toBeNull();
+  });
+
+  test('resolveBillingCadence reports whether the cadence was inferred or fell back', () => {
+    expect(resolveBillingCadence({ monthlyRate: 37.33, annualRate: 448, frequencyKey: 'quarterly' }).inferred).toBe(true);
+    expect(resolveBillingCadence({
+      monthlyRate: 37.33, annualRate: 448, frequencyKey: null,
+      estimateData: { result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] } } },
+    }).inferred).toBe(true);
+    const fallback = resolveBillingCadence({ monthlyRate: 37.33, annualRate: 448, frequencyKey: null, estimateData: {}, fallbackFrequencyKey: 'quarterly' });
+    expect(fallback.frequencyKey).toBe('quarterly');
+    expect(fallback.inferred).toBe(false);
   });
 });
 

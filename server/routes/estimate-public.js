@@ -10259,6 +10259,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       tierBillsMonthly: selectedServiceTierBillsMonthly,
       tierPerApplicationPrice: selectedTierPerApplicationPrice,
       cadenceAmount: effectiveBillingCadence?.amount,
+      cadenceInferred: effectiveBillingCadence?.inferred !== false,
     });
     const acceptedOneTimeServiceLabel = treatAsOneTime
       ? buildOneTimeInvoiceServiceLabel({
@@ -13780,6 +13781,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
 // monthly display rate, and stamping it would bill a third of a quarterly
 // plan's visit price on every completion (validation audit DATA-001 /
 // pre-push codex P0). Such a row stays unpriced and completion parks it.
+// The cadence amount itself counts only when the cadence was INFERRED from
+// the selection or the estimate (resolveBillingCadence `inferred`) — a
+// fallback-only quarterly cadence is a display convenience the converter
+// treats as "no cadence" (fee NULL), so stamping its amount on the row would
+// bill a fabricated price (pre-push codex P0).
 function acceptVisitEstimatedPrice({
   treatAsOneTime = false,
   billingTerm = 'standard',
@@ -13788,12 +13794,13 @@ function acceptVisitEstimatedPrice({
   tierBillsMonthly = false,
   tierPerApplicationPrice = null,
   cadenceAmount = null,
+  cadenceInferred = true,
 } = {}) {
   if (treatAsOneTime) return oneTimeTotal;
   if (billingTerm === 'prepay_annual') return null;
   if (firstApplicationInvoiceAmount) return firstApplicationInvoiceAmount;
   if (tierBillsMonthly) return Number(tierPerApplicationPrice) > 0 ? tierPerApplicationPrice : null;
-  return cadenceAmount;
+  return cadenceInferred ? cadenceAmount : null;
 }
 
 // PUT /api/estimates/:token/select-tier — customer selects a WaveGuard tier

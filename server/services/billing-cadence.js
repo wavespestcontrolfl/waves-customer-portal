@@ -315,8 +315,15 @@ function resolveBillingCadence({
   estimateData,
   fallbackFrequencyKey = 'monthly',
 } = {}) {
-  const normalized = normalizeFrequencyKey(frequencyKey)
+  // `inferred` records whether the cadence came from the caller's key or
+  // the estimate's own data, as opposed to the fallback: a fallback-only
+  // cadence is a display convenience, never evidence of a per-application
+  // price (validation audit DATA-001 / pre-push codex P0 — the accept path
+  // stamped a fabricated quarterly amount on the reserved visit).
+  const evidenced = normalizeFrequencyKey(frequencyKey)
     || inferFrequencyKeyFromEstimateData(estimateData)
+    || null;
+  const normalized = evidenced
     || normalizeFrequencyKey(fallbackFrequencyKey)
     || 'monthly';
   const display = displayForFrequencyKey(normalized);
@@ -337,6 +344,7 @@ function resolveBillingCadence({
 
   return {
     frequencyKey: normalized,
+    inferred: !!evidenced,
     frequencyLabel: display.frequencyLabel,
     intervalMonths: billingIntervalMonthsForFrequencyKey(normalized),
     monthlyRate: roundMoney(monthlyRate),
