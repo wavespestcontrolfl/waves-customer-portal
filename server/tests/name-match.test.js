@@ -48,6 +48,18 @@ describe('payerNameCorroborates', () => {
     expect(payerNameCorroborates('Doe, Robert', customer)).toBe(true);
   });
 
+  test('compound names on either side match as contiguous token runs', () => {
+    const delacruz = { first_name: 'Maria', last_name: 'De La Cruz' };
+    expect(payerNameCorroborates('MARIA DE LA CRUZ', delacruz)).toBe(true);
+    expect(payerNameCorroborates('Maria Delacruz', delacruz)).toBe(true);
+    expect(payerNameCorroborates('De La Cruz Maria', delacruz)).toBe(true);
+    expect(payerNameCorroborates('Jose De La Cruz', delacruz)).toBe(false);
+    const maryAnn = { first_name: 'Mary Ann', last_name: 'Smith' };
+    expect(payerNameCorroborates('MARY ANN SMITH', maryAnn)).toBe(true);
+    expect(payerNameCorroborates('MaryAnn Smith', maryAnn)).toBe(true);
+    expect(payerNameCorroborates('Ann Smith', maryAnn)).toBe(false);
+  });
+
   test('last name must appear as a whole token — typo variants never match', () => {
     expect(payerNameCorroborates('Robert Doee', customer)).toBe(false);
     expect(payerNameCorroborates('Robert Do', customer)).toBe(false);

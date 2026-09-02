@@ -773,8 +773,6 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
 
 // Name normalization + nickname-aware first-name matching live in
 // utils/name-match.js (shared with the Zelle notice reconciler, 2026-09-02).
-// sameFirstName / firstNameVariants stay re-exported below for existing
-// callers and tests.
 const { normalizeNamePart, firstNameVariants, sameFirstName } = require('../utils/name-match');
 
 function extractedNameMatchesCustomer(extracted = {}, customer = {}) {
@@ -15740,8 +15738,6 @@ CallRecordingProcessor._test = {
   resolveCallBookingPropertyLinkage,
   demoteFailOpenOnV1AddressConflict,
   buildFailOpenRoutingContext,
-  sameFirstName,
-  firstNameVariants,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,
   isUsableContactPhone,
