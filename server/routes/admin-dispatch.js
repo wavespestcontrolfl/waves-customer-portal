@@ -6760,6 +6760,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // a correction slipping between the two missed the fresh record
           // and was then overwritten. Locking up front makes finalization
           // and correction strictly ordered whichever starts first.
+          //
+          // Customer FOR SHARE is taken BEFORE the visit lock — the same
+          // customer → visit order customer-dedupe's executeMerge uses
+          // (customers locked first, then the loser's scheduled visits
+          // updated), so a merge racing a completion cannot form a lock
+          // cycle (codex P1 #3742 r4). Feeds the report identity snapshot.
+          const snapshotCustomerRow = await trx('customers')
+            .where({ id: svc.customer_id })
+            .forShare()
+            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
           const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
           // Linked-timer snapshot under the same lock (codex P2 #3152
           // round 23): the post-commit sync's version boundary is THIS
@@ -7077,15 +7087,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // so the frozen name can never disagree with the FK the report
           // routes join for the photo (pre-push codex P1).
           const snapshotVisitRow = lockedSvcRow || svc;
-          // FOR SHARE (after the visit row's FOR UPDATE, always in this
-          // order: visit → customer → technician → catalog) so a concurrent
+          // Lock order is customer (FOR SHARE, taken above before the visit
+          // FOR UPDATE) → visit → technician → catalog, so a concurrent
           // rename / reassignment / catalog edit cannot commit between these
           // reads and the completion commit — the frozen values are the
           // rows as they stand at commit (pre-push codex P1).
-          const snapshotCustomerRow = await trx('customers')
-            .where({ id: svc.customer_id })
-            .forShare()
-            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
           const snapshotTechnicianRow = svc.technician_id
             ? await trx('technicians').where({ id: svc.technician_id }).forShare().first('name')
             : null;

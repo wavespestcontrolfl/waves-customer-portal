@@ -1084,7 +1084,13 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
   });
 
   test('the finalization takes the row lock at transaction start — corrections and finalizations are strictly ordered (codex P2 round 14)', () => {
-    expect(source).toMatch(/await db\.transaction\(async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
+    // The only statement allowed ahead of the row lock is the report
+    // identity snapshot's customer FOR SHARE read — it must precede the
+    // visit lock to match customer-dedupe's customer → visit lock order
+    // (codex P1 #3742 r4) and touches no service_records/scheduled_services
+    // state, so the correction/finalization ordering this pin protects is
+    // unchanged.
+    expect(source).toMatch(/await db\.transaction\(async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*(?:\s*const snapshotCustomerRow = await trx\('customers'\)[^;]*;\s*\n)?\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
   });
 
   test('the finalization reconciles with the LOCKED row and preserves a mid-flight correction (codex P2 round 15)', () => {

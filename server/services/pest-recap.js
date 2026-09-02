@@ -356,6 +356,14 @@ async function submitRecap({
       if (vgErr && vgErr.code === 'VISIT_STOP_MOVED') throw vgErr;
       visitGroups = null;
     }
+    // 0a. Customer FOR SHARE BEFORE the visit lock — the customer → visit
+    //     order customer-dedupe's executeMerge uses, so a merge racing a
+    //     recap cannot form a lock cycle (codex P1 #3742 r4). Feeds the
+    //     report identity snapshot built after the record lookup below.
+    const snapshotCustomerRow = await trx('customers')
+      .where({ id: svc.customer_id })
+      .forShare()
+      .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
     // 0. Lock the service row — serializes concurrent recap submissions.
     const locked = await trx('scheduled_services')
       .where({ id: serviceId })
@@ -411,37 +419,14 @@ async function submitRecap({
     //     writes (report-identity-snapshot.js): a recap-completed visit's
     //     permanent report must not follow later customer / technician /
     //     catalog edits either (codex P2 on #3742). Read in THIS trx under
-    //     locks, keyed by the ids the record persists; a new record carries
-    //     it, an existing record gains it only when absent (first freeze
-    //     wins, same rule as the trace identity below). Product facts come
-    //     from the submitted catalog ids; the loop below re-validates the
-    //     same rows, which the FOR UPDATE here keeps unchanged meanwhile.
-    const snapshotCustomerRow = await trx('customers')
-      .where({ id: svc.customer_id })
-      .forShare()
-      .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+    //     locks (customer above, technician here, catalog after the record
+    //     lookup), keyed by the ids the record persists; a new record
+    //     carries it, an existing record gains it only when this recap IS
+    //     the completion (first freeze wins, same rule as the trace
+    //     identity below).
     const snapshotTechnicianRow = svc.technician_id
       ? await trx('technicians').where({ id: svc.technician_id }).forShare().first('name')
       : null;
-    const snapshotProductIds = [...new Set((Array.isArray(products) ? products : [])
-      .map((p) => canonicalProductId(p?.product_id))
-      .filter(Boolean))];
-    const snapshotCatalogRows = snapshotProductIds.length
-      ? await trx('products_catalog').whereRaw('lower(id::text) = ANY(?)', [snapshotProductIds]).forUpdate().select('*')
-      : [];
-    const snapshotCatalogById = new Map(snapshotCatalogRows.map((row) => [canonicalProductId(row.id), row]));
-    const reportProductFactsSnapshot = {};
-    for (const productId of snapshotProductIds) {
-      reportProductFactsSnapshot[productId] = approvedReportProductFacts(snapshotCatalogById.get(productId) || null);
-    }
-    const reportIdentitySnapshot = buildReportIdentitySnapshot({
-      // Locked-row fields win over the preflight join; the preflight row
-      // backfills anything the lock's column list did not carry.
-      visit: { ...svc, ...(locked || {}) },
-      customer: snapshotCustomerRow || null,
-      technicianName: snapshotTechnicianRow ? snapshotTechnicianRow.name : null,
-      productFacts: reportProductFactsSnapshot,
-    });
 
     // 2. Upsert the service_records row keyed by the direct FK. Under the
     // row lock this lookup is race-free — the loser sees the committed row.
@@ -462,6 +447,41 @@ async function submitRecap({
         ...(serviceRecordCols.service_type ? ['service_type'] : []),
         ...(serviceRecordCols.service_line ? ['service_line'] : []),
       );
+
+    // Product facts for the snapshot cover the FINAL product set: the ids
+    // this submit sends PLUS the ids already recorded on the existing record
+    // — a non-authoritative empty submit or productsPreserve keeps those
+    // rows, and a report that still consulted the live catalog for them
+    // would follow later EPA / re-entry / approval edits (codex P2 #3742
+    // r4). The product loop below re-validates the submitted rows, which
+    // the FOR UPDATE here keeps unchanged meanwhile.
+    const retainedProductIds = existing
+      ? (await trx('service_products')
+        .where({ service_record_id: existing.id })
+        .whereNotNull('product_id')
+        .select('product_id'))
+        .map((row) => canonicalProductId(row.product_id))
+      : [];
+    const snapshotProductIds = [...new Set([
+      ...(Array.isArray(products) ? products : []).map((p) => canonicalProductId(p?.product_id)),
+      ...retainedProductIds,
+    ].filter(Boolean))];
+    const snapshotCatalogRows = snapshotProductIds.length
+      ? await trx('products_catalog').whereRaw('lower(id::text) = ANY(?)', [snapshotProductIds]).forUpdate().select('*')
+      : [];
+    const snapshotCatalogById = new Map(snapshotCatalogRows.map((row) => [canonicalProductId(row.id), row]));
+    const reportProductFactsSnapshot = {};
+    for (const productId of snapshotProductIds) {
+      reportProductFactsSnapshot[productId] = approvedReportProductFacts(snapshotCatalogById.get(productId) || null);
+    }
+    const reportIdentitySnapshot = buildReportIdentitySnapshot({
+      // Locked-row fields win over the preflight join; the preflight row
+      // backfills anything the lock's column list did not carry.
+      visit: { ...svc, ...(locked || {}) },
+      customer: snapshotCustomerRow || null,
+      technicianName: snapshotTechnicianRow ? snapshotTechnicianRow.name : null,
+      productFacts: reportProductFactsSnapshot,
+    });
 
     // Tier/provenance/callback snapshot — the SAME shared builder the heavy
     // /complete path uses (completion-tier-snapshot.js), so a recap-created

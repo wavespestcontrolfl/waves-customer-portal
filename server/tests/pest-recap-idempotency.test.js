@@ -323,6 +323,34 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(inserted.reportIdentitySnapshot.technicianName).toBeUndefined();
   });
 
+  test('a recap that completes an existing record freezes facts for RETAINED products too; an already-completed record is left alone (codex #3742 r4)', async () => {
+    const CAT_ID = '11111111-1111-4111-8111-111111111111';
+    const base = {
+      serviceStatus: 'completed',
+      priorProductRows: [{ id: 'sp-1', product_id: CAT_ID.toUpperCase(), product_name: 'Termidor' }],
+      snapshotCatalogRows: [{ id: CAT_ID, name: 'Termidor', category: 'insecticide', product_type: 'pesticide', epa_reg_number: '7969-210', approved_for_service_report: true }],
+      customerRow: { first_name: 'Pat', last_name: 'Jones', address_line1: '200 Palm Ave' },
+    };
+    const submit = (knex) => submitRecap({ serviceId: SERVICE_ID, actorType: 'tech', actorId: 'tech-1', technicianNotes: 'x', products: [], customerRecap: 'Done.', sendSms: false, knex });
+    const snapshotsWritten = (store) => (store.recordUpdates || [])
+      .map((u) => (typeof u.service_data === 'string' ? JSON.parse(u.service_data) : null))
+      .filter((d) => d && d.reportIdentitySnapshot)
+      .map((d) => d.reportIdentitySnapshot);
+
+    // This recap IS the completion (existing row 'incomplete'); a
+    // non-authoritative empty submit keeps the recorded product.
+    const store = { ...base, records: [{ id: 'rec-old', recap_sms_sent_at: null, status: 'incomplete' }] };
+    expect((await submit(makeKnex(store))).ok).toBe(true);
+    const [snapshot] = snapshotsWritten(store);
+    expect(snapshot.productFacts[CAT_ID]).toMatchObject({ epaRegNumber: '7969-210' });
+    expect(snapshot.customer).toEqual({ firstName: 'Pat', lastName: 'Jones' });
+
+    // Same submit against a record that was ALREADY completed: nothing frozen.
+    const store2 = { ...base, records: [{ id: 'rec-done', recap_sms_sent_at: null, status: 'completed' }] };
+    expect((await submit(makeKnex(store2))).ok).toBe(true);
+    expect(snapshotsWritten(store2)).toEqual([]);
+  });
+
   test('a recap that did not text can still send later (complete-now, text-later)', async () => {
     // Pre-existing completed record with a NULL claim (e.g. completed via
     // the heavy /complete path, or a recap saved without texting).
