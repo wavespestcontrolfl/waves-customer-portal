@@ -211,10 +211,30 @@ function approvedReportProductFacts(catalog = {}) {
 // records, or a product attached after the freeze) keep the live lookup.
 async function attachApprovedReportProductFacts(knex, products = [], { frozenFacts = null } = {}) {
   const frozen = frozenFacts && typeof frozenFacts === 'object' ? frozenFacts : null;
-  const isFrozen = (productId) => !!frozen
-    && Object.prototype.hasOwnProperty.call(frozen, canonicalProductId(productId));
+  // service_products.product_id is ON DELETE SET NULL: a catalog row deleted
+  // after completion leaves the applied row keyed only by its snapshot
+  // product_name, so frozen facts are also reachable by that name
+  // (codex P2).
+  const frozenByName = new Map();
+  if (frozen) {
+    for (const facts of Object.values(frozen)) {
+      const name = String(facts?.name || '').trim().toLowerCase();
+      if (name && !frozenByName.has(name)) frozenByName.set(name, facts);
+    }
+  }
+  const frozenFor = (product) => {
+    if (!frozen) return undefined;
+    const id = canonicalProductId(product?.product_id);
+    if (id && Object.prototype.hasOwnProperty.call(frozen, id)) return frozen[id];
+    if (!id) return frozenByName.get(String(product?.product_name || '').trim().toLowerCase());
+    return undefined;
+  };
+  const isFrozen = (productOrId) => {
+    const product = productOrId && typeof productOrId === 'object' ? productOrId : { product_id: productOrId };
+    return frozenFor(product) !== undefined;
+  };
   const withFrozen = (product) => {
-    const facts = frozen[canonicalProductId(product.product_id)];
+    const facts = frozenFor(product);
     if (!facts || typeof facts !== 'object') return product;
     return {
       ...product,
@@ -230,7 +250,7 @@ async function attachApprovedReportProductFacts(knex, products = [], { frozenFac
     .filter((id) => id && !isFrozen(id)))];
   if (!productIds.length) {
     return frozen
-      ? (products || []).map((product) => (isFrozen(product.product_id) ? withFrozen(product) : product))
+      ? (products || []).map((product) => (isFrozen(product) ? withFrozen(product) : product))
       : products;
   }
   let catalogRows = [];
@@ -268,14 +288,14 @@ async function attachApprovedReportProductFacts(knex, products = [], { frozenFac
     // Frozen products keep their completion-time facts on this path too —
     // the failure concerns only the ids that still needed the live catalog.
     const marked = frozen
-      ? products.map((product) => (isFrozen(product.product_id) ? withFrozen(product) : product))
+      ? products.map((product) => (isFrozen(product) ? withFrozen(product) : product))
       : products.slice();
     marked.catalogEnrichmentFailed = true;
     return marked;
   }
   const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
   return products.map((product) => {
-    if (isFrozen(product.product_id)) return withFrozen(product);
+    if (isFrozen(product)) return withFrozen(product);
     const catalog = catalogById.get(String(product.product_id || ''));
     const facts = approvedReportProductFacts(catalog);
     if (!facts) return product;

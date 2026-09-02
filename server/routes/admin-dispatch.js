@@ -7097,7 +7097,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const snapshotProductIds = [...new Set((products || []).map((p) => canonicalProductId(p?.productId)).filter(Boolean))];
           const completionCatalogRowsById = new Map(
             (snapshotProductIds.length
-              ? await trx('products_catalog').whereIn('id', snapshotProductIds).forShare().select('*')
+              // FOR UPDATE, not FOR SHARE: deductProductInventory below
+              // upgrades to FOR UPDATE on these same rows, and two
+              // completions holding compatible share locks would deadlock
+              // on the upgrade (codex P1).
+              ? await trx('products_catalog').whereIn('id', snapshotProductIds).forUpdate().select('*')
               : []
             ).map((row) => [canonicalProductId(row.id), row]),
           );

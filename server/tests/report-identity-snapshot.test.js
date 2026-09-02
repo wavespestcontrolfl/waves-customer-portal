@@ -278,6 +278,15 @@ describe('attachApprovedReportProductFacts with frozen facts', () => {
     expect(product.approved_report_product_facts).toEqual(FROZEN_FACTS);
   });
 
+  test('a catalog row deleted after completion (product_id set NULL) still resolves frozen facts by snapshot name', async () => {
+    const knex = jest.fn(() => { throw new Error('catalog must not be queried'); });
+    const [product] = await attachApprovedReportProductFacts(knex, [
+      { product_id: null, product_name: 'Celsius WG', epa_reg_number: null },
+    ], { frozenFacts: { [PRODUCT_ID]: FROZEN_FACTS } });
+    expect(knex).not.toHaveBeenCalled();
+    expect(product).toMatchObject({ epa_reg_number: '432-1507', approved_report_product_facts: FROZEN_FACTS });
+  });
+
   test('a failed live enrichment keeps the frozen facts and still flags the failure', async () => {
     const chain = { whereIn: jest.fn(() => chain), select: jest.fn(() => Promise.reject(new Error('db down'))) };
     const knex = jest.fn(() => chain);
