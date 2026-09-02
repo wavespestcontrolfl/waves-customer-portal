@@ -32,6 +32,8 @@ authoritative procedure. Non-negotiables from it:
    ship. Never push with `--no-verify`/`-f` here; hook bypass is a
    waves-ship REFERENCE.md escape hatch, not a /ship default.
 6. Open the PR (or update the existing one) per the waves-ship procedure,
-   including the @codex tagging rules and the merge gate.
+   including the @codex tagging rules and the merge gate. Screenshots or
+   recordings go on with `--attach <file>` (`gh` ≥ 2.99.0, waves-ship §4),
+   not as paths or external links.
 
 Additional context for this run: $ARGUMENTS
