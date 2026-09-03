@@ -332,16 +332,22 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     const [lead] = await db('leads').insert({ phone: PHONE, twilio_call_sid: SID, estimate_id: est.id, status: 'estimate_sent' }).returning('id');
     try {
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      // …but ACCEPTED after the call: the promise was kept at acceptance,
+      // whatever sent_at says (pre-push hook P1 on 3b5b2cb27).
+      await db('estimates').where({ id: est.id }).update({ accepted_at: new Date(Date.now() - 30 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+      await db('estimates').where({ id: est.id }).update({ accepted_at: null });
       // Sent after the call ended even though CREATED before it (an existing
       // estimate re-sent on request — the watcher's rule, r14): direct proof.
       await db('estimates').where({ id: est.id }).update({ sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000), estimate_data: handedOff() });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
       // Sent after the call STARTED but before it ENDED (created_at is ring
       // time; this call ran 90 s): not this call's proof (codex #3738 gh-r13 P1).
-      await db('estimates').where({ id: est.id }).update({ sent_at: new Date(call.created_at.getTime() + 30 * 1000) });
+      const midCall = new Date(call.created_at.getTime() + 30 * 1000);
+      await db('estimates').where({ id: est.id }).update({ sent_at: midCall, estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: midCall.toISOString() } }) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
       // Created and sent after the call ended: direct proof.
-      await db('estimates').where({ id: est.id }).update({ created_at: new Date(Date.now() - 120 * 1000), sent_at: new Date(Date.now() - 60 * 1000) });
+      await db('estimates').where({ id: est.id }).update({ created_at: new Date(Date.now() - 120 * 1000), sent_at: new Date(Date.now() - 60 * 1000), estimate_data: handedOff() });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
       // The ONE handoff witness, every source: sent_at alone is the
       // publish-without-delivery stamp of a report/plan-restart mint AND the
@@ -424,13 +430,14 @@ maybeDescribe('call_commitments (live Postgres)', () => {
   test('fulfillment is measured from the END of the call: an estimate sent while the caller was still on the line is not proof of a promise made in that call', async () => {
     const call = await db('call_log').where({ id: callId }).first(); // inbound, 90 s long
     const midCall = new Date(call.created_at.getTime() + 30 * 1000);
-    const [est] = await db('estimates').insert({ status: 'sent', sent_at: midCall, created_at: midCall, estimate_data: handedOff() }).returning('id');
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: midCall, created_at: midCall, estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: midCall.toISOString() } }) }).returning('id');
     const [lead] = await db('leads').insert({ phone: PHONE, twilio_call_sid: SID, estimate_id: est.id, status: 'estimate_sent' }).returning('id');
     try {
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
       // Created mid-call (capture_lead's shape) but SENT after the call ended: direct proof.
-      await db('estimates').where({ id: est.id }).update({ sent_at: new Date(call.created_at.getTime() + 120 * 1000) });
-      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+      const afterEnd = new Date(call.created_at.getTime() + 120 * 1000);
+      await db('estimates').where({ id: est.id }).update({ sent_at: afterEnd, estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: afterEnd.toISOString() } }) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct', matched_at: afterEnd });
     } finally {
       await db('leads').where({ id: lead.id }).del();
       await db('estimates').where({ id: est.id }).del();

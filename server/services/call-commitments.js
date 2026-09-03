@@ -794,12 +794,29 @@ const HANDED_OFF_AT_SQL = `COALESCE(
   estimates.estimate_data #>> '{deliveryState,lastDeliveredAt}',
   (SELECT a.estimate_data #>> '{deliveryState,lastDeliveredAt}' FROM estimates a
      WHERE a.id::text = estimates.estimate_data ->> 'groupPublishedByEstimateId'))`;
-const handedOffAfter = (qb, after) => qb.where(function handoffWitness() {
-  this.whereRaw(`(COALESCE(${HANDED_OFF_AT_SQL}, '') <> '' AND (${HANDED_OFF_AT_SQL})::timestamptz > ?)`, [after])
-    .orWhere("accepted_at", ">", after);
+// Rows whose witness falls in (after, until]: the SQL form for a single
+// query, the row form for a batch fetched with the `handed_off_at`
+// column below. The witness time — not sent_at — is when the promise was
+// kept: an estimate sent BEFORE the call and accepted after it kept the
+// promise at acceptance (pre-push hook P1 on 3b5b2cb27).
+const handedOffWithin = (qb, after, until = null) => qb.where(function handoffWitness() {
+  this.whereRaw(
+    `(COALESCE(${HANDED_OFF_AT_SQL}, '') <> '' AND (${HANDED_OFF_AT_SQL})::timestamptz > ?${until ? ` AND (${HANDED_OFF_AT_SQL})::timestamptz <= ?` : ''})`,
+    until ? [after, until] : [after],
+  ).orWhere(function acceptedWitness() {
+    this.where("accepted_at", ">", after);
+    if (until) this.where("accepted_at", "<=", until);
+  });
 });
-const handedOffRowAfter = (row, after) => (Boolean(row.handed_off_at) && new Date(row.handed_off_at) > after)
-  || (Boolean(row.accepted_at) && new Date(row.accepted_at) > after);
+const HANDOFF_ORDER_SQL = `LEAST(COALESCE((${HANDED_OFF_AT_SQL})::timestamptz, 'infinity'::timestamptz), COALESCE(accepted_at, 'infinity'::timestamptz)) asc`;
+const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${HANDED_OFF_AT_SQL} as handed_off_at`)];
+// The EARLIEST post-boundary witness time on a fetched row, or null.
+const witnessAt = (row, after) => {
+  const times = [row.handed_off_at, row.accepted_at]
+    .map((t) => (t ? new Date(t) : null))
+    .filter((d) => d && !Number.isNaN(d.getTime()) && d > after);
+  return times.length ? new Date(Math.min(...times.map((d) => d.getTime()))) : null;
+};
 
 // The send_estimate DIRECT routes — the estimator's own callLogId stamp,
 // and an estimate on a lead THIS call minted (carrying its SID) by the
@@ -821,26 +838,24 @@ async function directEstimatesSentAfter(conn, probes) {
   }
   const minAfter = new Date(Math.min(...probes.map((p) => new Date(p.after).getTime())));
   const cols = [
-    "id", "sent_at", "source", "accepted_at",
-    conn.raw(`${HANDED_OFF_AT_SQL} as handed_off_at`),
+    ...HANDOFF_COLS(conn), "source",
     conn.raw("estimate_data #>> '{estimatorEngine,callLogId}' as stamped_call_id"),
     conn.raw("estimate_data ->> 'lead_id' as mirror_lead_id"),
   ];
   const consider = (callId, row, basis) => {
     for (const p of probesByCall.get(String(callId)) || []) {
-      const after = new Date(p.after);
-      if (!(new Date(row.sent_at) > after) || !handedOffRowAfter(row, after)) continue;
+      const at = witnessAt(row, new Date(p.after));
+      if (!at) continue;
       const cur = out.get(p.key);
-      if (!cur || new Date(row.sent_at) < new Date(cur.matched_at)) {
-        out.set(p.key, { kind: "estimate_sent", record_type: "estimate", record_id: row.id, matched_at: row.sent_at, strength: "direct", basis });
+      if (!cur || at < new Date(cur.matched_at)) {
+        out.set(p.key, { kind: "estimate_sent", record_type: "estimate", record_id: row.id, matched_at: at, strength: "direct", basis });
       }
     }
   };
   const callIds = [...probesByCall.keys()];
-  const stamped = await conn("estimates")
+  const stamped = await handedOffWithin(conn("estimates")
     .whereRaw(`estimate_data #>> '{estimatorEngine,callLogId}' IN (${callIds.map(() => "?").join(", ")})`, callIds)
-    .whereNotNull("sent_at")
-    .where("sent_at", ">", minAfter)
+    .whereNotNull("sent_at"), minAfter)
     .select(cols);
   for (const r of stamped) consider(r.stamped_call_id, r, "estimate_stamped_with_this_call");
 
@@ -852,13 +867,12 @@ async function directEstimatesSentAfter(conn, probes) {
   if (!leads.length) return out;
   const estimateIds = leads.map((l) => l.estimate_id).filter(Boolean);
   const leadIds = leads.map((l) => String(l.id));
-  const linked = await conn("estimates")
+  const linked = await handedOffWithin(conn("estimates")
     .where(function linkedToLeads() {
       if (estimateIds.length) this.orWhereIn("id", estimateIds);
       this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${leadIds.map(() => "?").join(", ")})`, leadIds);
     })
-    .whereNotNull("sent_at")
-    .where("sent_at", ">", minAfter)
+    .whereNotNull("sent_at"), minAfter)
     .select(cols);
   const leadByEstimateId = new Map(leads.filter((l) => l.estimate_id).map((l) => [String(l.estimate_id), l]));
   const leadById = new Map(leads.map((l) => [String(l.id), l]));
@@ -899,16 +913,15 @@ async function resolveFulfillment(conn, commitment, call) {
       const reusedLeadIds = leadIds.filter((id) => !mintedIds.has(id));
       const reusedEstimateIds = reused.map((l) => l.estimate_id).filter(Boolean);
       if (reusedEstimateIds.length || reusedLeadIds.length) {
-        const onReused = await handedOffAfter(conn("estimates")
+        const onReused = await handedOffWithin(conn("estimates")
           .where(function linkedToLeads() {
             if (reusedEstimateIds.length) this.orWhereIn("id", reusedEstimateIds);
             if (reusedLeadIds.length) this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${reusedLeadIds.map(() => "?").join(", ")})`, reusedLeadIds);
           })
-          .whereNotNull("sent_at")
-          .where("sent_at", ">", after), after)
-          .orderBy("sent_at", "asc")
-          .first("id", "sent_at", "status");
-        if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: onReused.sent_at, strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
+          .whereNotNull("sent_at"), after)
+          .orderByRaw(HANDOFF_ORDER_SQL)
+          .first(...HANDOFF_COLS(conn));
+        if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: witnessAt(onReused, after), strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
       }
       // An estimate linked only through estimates.customer_phone still keeps
       // the promise (commercial proposals store the phone with a NULL
@@ -918,10 +931,7 @@ async function resolveFulfillment(conn, commitment, call) {
       // by an UNLINKED estimate whose phone matches the caller — a shared
       // household number never lets one customer's estimate clear another's
       // promise.
-      const estQ = handedOffAfter(conn("estimates")
-        .whereNotNull("sent_at")
-        .where("sent_at", ">", after)
-        .where("sent_at", "<=", until), after);
+      const estQ = handedOffWithin(conn("estimates").whereNotNull("sent_at"), after, until);
       if (customerId) {
         estQ.where("customer_id", customerId);
       } else if (phone) {
@@ -929,8 +939,8 @@ async function resolveFulfillment(conn, commitment, call) {
       } else {
         return null;
       }
-      const est = await estQ.orderBy("sent_at", "asc").first("id", "sent_at", "status");
-      return est ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.sent_at, strength: "association", basis: customerId ? `estimate_sent_to_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` : `estimate_sent_to_caller_phone_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+      const est = await estQ.orderByRaw(HANDOFF_ORDER_SQL).first(...HANDOFF_COLS(conn));
+      return est ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: witnessAt(est, after), strength: "association", basis: customerId ? `estimate_sent_to_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` : `estimate_sent_to_caller_phone_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "send_appointment_confirmation": {
       if (!phone) return null;
