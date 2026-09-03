@@ -29,29 +29,42 @@ const OPEN_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewe
 // the same bounded, cycle-safe hop-by-hop resolution followDuplicateLink
 // does: through live 'duplicate' hops only — a deleted hop or a dead
 // marker ends it with no root (pre-push P1 on r14). A won root counts only
-// when it is the same customer's (or unlinked — the marker was minted from
-// an exact contact match): a repeat promoted BECAUSE its root is another
-// customer's already-won lead (a shared household contact) is that
-// customer's own conversion (codex #3834 r15 P2). NULL-safe: no marker, or
-// a marker naming nothing, never excludes; a malformed marker fails the
-// uuid guard rather than the cast. Applied through knex .modify() on an
-// unaliased `leads` query.
+// when it is the same opportunity by the rule the accept path applies
+// (leadMatchesEstimateContact): the same customer when both rows are
+// linked, otherwise the root's CURRENT phone or email still matches the
+// repeat's — a repeat promoted BECAUSE its root is another customer's
+// already-won lead (a shared household contact), or an unlinked root whose
+// contact staff corrected since, is that customer's own conversion (codex
+// #3834 r15 P2, r16 P2). NULL-safe: no marker, or a marker naming nothing,
+// never excludes; a malformed marker fails the uuid guard rather than the
+// cast. Applied through knex .modify() on an unaliased `leads` query, or
+// spliced raw (PROSPECT_SCOPE_SQL) into a correlated subquery over `leads`.
 const UUID_RE = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+// Last 10 digits — the phone identity the wizard lookup and the link
+// resolver's normalizePhone agree on (a leading country code drops away).
+const phoneDigits = (col) => `right(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10)`;
 const markerUuid = (extracted) => `(CASE WHEN ${extracted}->>'duplicate_of_lead_id' ~ '${UUID_RE}' THEN (${extracted}->>'duplicate_of_lead_id')::uuid END)`;
 const SECOND_WIN_SQL = `(leads.status IS DISTINCT FROM 'won' OR NOT EXISTS (
   WITH RECURSIVE chain AS (
-    SELECT o.status, o.deleted_at, o.customer_id, ${markerUuid('o.extracted_data')} AS parent_id, 1 AS depth
+    SELECT o.status, o.deleted_at, o.customer_id, o.phone, o.email, ${markerUuid('o.extracted_data')} AS parent_id, 1 AS depth
     FROM leads o
     WHERE o.id = ${markerUuid('leads.extracted_data')}
     UNION ALL
-    SELECT p.status, p.deleted_at, p.customer_id, ${markerUuid('p.extracted_data')}, chain.depth + 1
+    SELECT p.status, p.deleted_at, p.customer_id, p.phone, p.email, ${markerUuid('p.extracted_data')}, chain.depth + 1
     FROM chain JOIN leads p ON p.id = chain.parent_id
     WHERE chain.status = 'duplicate' AND chain.deleted_at IS NULL AND chain.depth < 8
   )
   SELECT 1 FROM chain
   WHERE chain.status = 'won' AND chain.deleted_at IS NULL
-    AND (chain.customer_id IS NULL OR leads.customer_id IS NULL OR chain.customer_id = leads.customer_id)
+    AND CASE
+      WHEN chain.customer_id IS NOT NULL AND leads.customer_id IS NOT NULL THEN chain.customer_id = leads.customer_id
+      ELSE (${phoneDigits('chain.phone')} <> '' AND ${phoneDigits('chain.phone')} = ${phoneDigits('leads.phone')})
+        OR (LOWER(TRIM(COALESCE(chain.email, ''))) <> '' AND LOWER(TRIM(chain.email)) = LOWER(TRIM(leads.email)))
+    END
 ))`;
+// The same scope as a raw fragment, for the correlated COUNT subqueries the
+// sources summary builds over an unaliased `leads` (GET /leads/sources).
+const PROSPECT_SCOPE_SQL = `leads.status NOT IN (${NON_ENGAGED_LEAD_STATUSES.map((s) => `'${s}'`).join(', ')}) AND ${SECOND_WIN_SQL}`;
 function scopeToProspects(qb) {
   return qb.whereNotIn('status', NON_ENGAGED_LEAD_STATUSES).whereRaw(SECOND_WIN_SQL);
 }
@@ -60,6 +73,7 @@ module.exports = {
   NON_ENGAGED_LEAD_STATUSES,
   OPEN_LEAD_STATUSES,
   scopeToProspects,
+  PROSPECT_SCOPE_SQL,
   // exported for tests
   SECOND_WIN_SQL,
 };

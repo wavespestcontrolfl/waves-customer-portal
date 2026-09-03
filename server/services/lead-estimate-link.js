@@ -611,11 +611,13 @@ async function markLinkedLeadEstimateAccepted({
       if (claim) stamp.whereNull('estimate_id').whereIn('status', claim);
       stamped = await stamp.update({ estimate_id: estimateId, updated_at: new Date() });
       if (claim && !stamped) {
-        const current = await database('leads').where({ id: lead.id }).first('estimate_id', 'status');
-        // Refresh the caller's row from the re-read so the fallback judges
-        // the original's CURRENT status: an original the office closed as
-        // won between the read and the stamp must not let the duplicate
-        // row record a second win (pre-push P1 on #3834 r8).
+        const current = await database('leads').where({ id: lead.id }).first();
+        // Refresh the caller's row from the re-read — the WHOLE row — so the
+        // fallback judges the original AS IT IS NOW: its status (an original
+        // the office closed as won between the read and the stamp must not
+        // let the duplicate row record a second win — pre-push P1 on #3834
+        // r8) and its identity (an original staff re-assigned or re-contacted
+        // in the same window is no longer this opportunity — codex r16 P1).
         if (current) Object.assign(lead, current);
         if (!current || String(current.estimate_id) !== String(estimateId) || CLOSED_LEAD_STATUSES.has(current.status)) return false;
       }
@@ -632,7 +634,7 @@ async function markLinkedLeadEstimateAccepted({
       // a closed original must not stay linked to the accepted repeat
       // estimate, so the stamp THIS call made is reverted (pre-push P1).
       if (stamped) await database('leads').where({ id: lead.id }).where({ estimate_id: estimateId }).update({ estimate_id: null, updated_at: new Date() });
-      const current = await database('leads').where({ id: lead.id }).first('estimate_id', 'status');
+      const current = await database('leads').where({ id: lead.id }).first();
       if (current) Object.assign(lead, current);
       return false;
     }
@@ -682,11 +684,14 @@ async function markLinkedLeadEstimateAccepted({
     // the win to that estimate and leave the accepted one unlinked, codex
     // #3834 r4 P1). A named lead that is itself open converts as before.
     const indirect = lead.id !== named.id;
-    const sameOpportunity = indirect
+    // A function of the row AS IT IS NOW: `lead` is refreshed in full when a
+    // claim loses, and every later judgement re-reads the identity (codex
+    // #3834 r16 P1) — not a value computed before the race.
+    const sameOpportunity = () => indirect
       && leadMatchesEstimateContact(lead, estimate)
       && (!lead.customer_id || !customerId || lead.customer_id === customerId)
       && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId));
-    const eligible = !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at && (!indirect || sameOpportunity);
+    const eligible = !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at && (!indirect || sameOpportunity());
     if (eligible && (await convert(lead, { claim: indirect ? OPEN_LEAD_CLAIM : null }))) return;
     // The hop could not land (original gone, another customer's, contact
     // mismatch, already FK-linked to a different estimate, or lost the
@@ -707,8 +712,7 @@ async function markLinkedLeadEstimateAccepted({
     // P1). Judged as the original IS NOW (the lost claim refreshed it): won
     // via a DIFFERENT estimate since the read is a different deal. When the
     // hop did not resolve, `lead` IS the named duplicate row, never won here.
-    const creditedOnOriginal = lead.status === 'won' && sameOpportunity
-      && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId));
+    const creditedOnOriginal = lead.status === 'won' && sameOpportunity();
     if (named.status === 'duplicate' && !named.deleted_at && !creditedOnOriginal) {
       // The duplicate row never got an ad_service_attribution row (/calculate
       // skips it for repeats), so markConverted's funnel bridge on the named
@@ -724,8 +728,7 @@ async function markLinkedLeadEstimateAccepted({
       // reaches no funnel row at all, so the named row gets the one its own
       // run would have stamped, straight at the booked stage (codex #3834
       // r14 P2).
-      const stillOurs = sameOpportunity && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at
-        && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId));
+      const stillOurs = sameOpportunity() && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at;
       if (await convert(named, { claim: DUPLICATE_LEAD_CLAIM })) {
         if (stillOurs) await bridgeLeadFunnelStage(lead.id, 'won', database);
         else await stampLeadFunnelRow(database, named, { customerId, funnelStage: 'booked' });
@@ -930,6 +933,7 @@ async function isOriginatingLead(database, customerId, lead) {
 // is not ours (a shared-household root's date is not borrowed, so a later
 // repeat of another customer's lead is still a later add-on). Bounded and
 // cycle-safe; a dead marker ends the walk.
+const earlierOf = (a, b) => (!a ? b : !b ? a : (new Date(b) < new Date(a) ? b : a));
 async function ancestryFirstContactAt(database, repeat, ownedByUs) {
   let earliest = repeat.first_contact_at || repeat.created_at || null;
   const seen = new Set([repeat.id]);
@@ -940,8 +944,7 @@ async function ancestryFirstContactAt(database, repeat, ownedByUs) {
     const parent = await database('leads').where({ id: parentId }).first();
     if (!parent || !ownedByUs(parent)) break;
     seen.add(parent.id);
-    const began = parent.first_contact_at || parent.created_at;
-    if (began && (!earliest || new Date(began) < new Date(earliest))) earliest = began;
+    earliest = earlierOf(earliest, parent.first_contact_at || parent.created_at);
     current = parent;
   }
   return earliest;
@@ -976,20 +979,31 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
     .where({ customer_id: customerId, lead_type: 'quote_wizard', status: 'duplicate' })
     .whereNull('deleted_at')
     .orderBy('created_at', 'desc');
-  const seenAncestry = new Set();
+  // One keeper per ancestry: the open root when it is ours, else the newest
+  // repeat (the query is newest-first) standing in for it. A repeat keeper
+  // carries the ancestry's first contact for the origination test below —
+  // and every OLDER sibling of the same ancestry folds its own inquiry date
+  // in, since the sibling that created the customer row is the one that
+  // says when this customer's inquiry began (codex #3834 r16 P1).
+  const keepers = new Map(); // ancestry key → keeper
   for (const repeat of repeats) {
     const marker = duplicateMarkerOf(repeat);
     if (!marker) continue;
     const root = await followDuplicateLink(database, repeat);
     const resolved = root.id !== repeat.id;
     const ancestryKey = resolved ? root.id : marker;
-    if (linked.some((l) => l.id === ancestryKey) || seenAncestry.has(ancestryKey)) continue;
-    seenAncestry.add(ancestryKey);
+    if (linked.some((l) => l.id === ancestryKey)) continue;
     const rootIsOurs = resolved && !CLOSED_LEAD_STATUSES.has(root.status) && !root.deleted_at && ownedByUs(root);
-    // The repeat standing in for its ancestry carries the ancestry's first
-    // contact for the origination test below.
-    linked.push(rootIsOurs ? root : { ...repeat, first_contact_at: await ancestryFirstContactAt(database, repeat, ownedByUs) });
+    if (rootIsOurs) {
+      if (!keepers.has(ancestryKey)) keepers.set(ancestryKey, root);
+      continue;
+    }
+    const began = await ancestryFirstContactAt(database, repeat, ownedByUs);
+    const keeper = keepers.get(ancestryKey);
+    if (keeper) keeper.first_contact_at = earlierOf(keeper.first_contact_at, began);
+    else keepers.set(ancestryKey, { ...repeat, first_contact_at: began });
   }
+  linked.push(...keepers.values());
   // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
   // estimate belongs to that deal — exclude it so we never convert it or
   // misattribute this estimate's value hints. (Tier 1 already handled a

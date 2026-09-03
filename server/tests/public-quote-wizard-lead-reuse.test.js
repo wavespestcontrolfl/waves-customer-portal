@@ -79,6 +79,16 @@ describe('findPriorOpenWizardLeadId', () => {
     expect(calls.where.filter((a) => a[0] === 'created_at' && a[1] === '<')).toEqual([]);
   });
 
+  test('the documented direct `services` shape (no catalog key) is identified by its normalized service mix label (codex r16 P2)', async () => {
+    const { dbh, calls } = chainMock({ id: 'lead-prior-direct' });
+    await expect(_internals.findPriorOpenWizardLeadId(dbh, { ...SAME, serviceKey: null, serviceInterest: ' Recurring Pest Control + Recurring Lawn Care ' })).resolves.toBe('lead-prior-direct');
+    expect(calls.where[0]).toEqual([{ lead_type: 'quote_wizard', service_key: null, service_interest: 'Recurring Pest Control + Recurring Lawn Care' }]);
+    // A catalog key wins over the label when both are present.
+    const keyed = chainMock({ id: 'lead-prior-keyed' });
+    await _internals.findPriorOpenWizardLeadId(keyed.dbh, { ...SAME, serviceInterest: 'Recurring Pest Control' });
+    expect(keyed.calls.where[0]).toEqual([{ lead_type: 'quote_wizard', service_key: 'pest_general_quarterly' }]);
+  });
+
   test('no matching open lead → null (the row inserts as a normal new lead)', async () => {
     const { dbh } = chainMock(undefined);
     await expect(_internals.findPriorOpenWizardLeadId(dbh, SAME)).resolves.toBeNull();
@@ -88,7 +98,7 @@ describe('findPriorOpenWizardLeadId', () => {
     ['missing email', { ...SAME, email: '' }],
     ['short phone', { ...SAME, phone: '555-0142' }],
     ['missing address', { ...SAME, address: '  ' }],
-    ['no catalog service key (manual / quote-on-request mix)', { ...SAME, serviceKey: null }],
+    ['no catalog service key AND no service label', { ...SAME, serviceKey: null, serviceInterest: '  ' }],
   ])('%s → null without touching the database (all four keys are required)', async (_label, keys) => {
     const { dbh } = chainMock({ id: 'never' });
     await expect(_internals.findPriorOpenWizardLeadId(dbh, keys)).resolves.toBeNull();
@@ -134,7 +144,7 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // After the label lands (either path) the target is re-checked: a
     // target the office closed in the window makes this a fresh inquiry,
     // reopened on THIS row only (codex r12 P1).
-    expect(src).toMatch(/const targetOpen = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, onlyLeadId: duplicateOfLeadId \}\);/);
+    expect(src).toMatch(/const targetOpen = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, onlyLeadId: duplicateOfLeadId \}\);/);
     // ...scoped to the identity this request typed AND the marker it just
     // validated, so a concurrent request's valid label on the same token is
     // never erased by this one's failed validation (codex r14 P1).
@@ -153,13 +163,13 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // The stored additional-property list counts as well as the request's
     // (codex r12 P1).
     expect(block).toMatch(/const widerInquiry = additionalProperties\.length > 0 \|\| \(parseExtracted\(lead\.extracted_data\)\?\.additional_properties\?\.length > 0\);/);
-    expect(block).toMatch(/duplicateOfLeadId = widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead\.id, beforeCreatedAt: lead\.created_at \}\)/);
+    expect(block).toMatch(/duplicateOfLeadId = widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: lead\.id, beforeCreatedAt: lead\.created_at \}\)/);
     expect(block).toMatch(/if \(duplicateOfLeadId !== stored\)/);
     // The relabel is scoped to the status just read (codex r9 P1): a staff
     // transition in between wins and this public retry updates 0 rows.
     // ...and the identity this request wrote (codex r13 P1).
     // The identity predicate is defined once and shared with the reopen.
-    expect(src).toMatch(/const scopedToTypedIdentity = \(qb\) => qb\n\s+\.where\(\{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey \}\)\n\s+\.whereRaw\("COALESCE\(jsonb_array_length\(COALESCE\(extracted_data, '\{\}'::jsonb\)->'additional_properties'\), 0\) = \?", \[observedExtraCount\]\);/);
+    expect(src).toMatch(/const scopedToTypedIdentity = \(qb\) => qb\n\s+\.where\(\{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey, service_interest: serviceInterest \}\)\n\s+\.whereRaw\("COALESCE\(jsonb_array_length\(COALESCE\(extracted_data, '\{\}'::jsonb\)->'additional_properties'\), 0\) = \?", \[observedExtraCount\]\);/);
     expect(block).toMatch(/const relabelled = await db\('leads'\)\n\s+\.where\(\{ id: lead\.id, status: lead\.status \}\)\n\s+\.modify\(scopedToTypedIdentity\)\n\s+\.update\(/);
     // A row that just filed as a repeat drops its own lead-stage funnel row
     // (its earlier stamp, or a concurrent repeat's root repair that picked

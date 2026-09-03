@@ -94,7 +94,19 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     // through live duplicate hops only, on the uuid primary key.
     expect(SECOND_WIN_SQL).toMatch(/WITH RECURSIVE chain AS/);
     expect(SECOND_WIN_SQL).toMatch(/WHERE chain\.status = 'duplicate' AND chain\.deleted_at IS NULL AND chain\.depth < 8/);
-    expect(SECOND_WIN_SQL).toMatch(/WHERE chain\.status = 'won' AND chain\.deleted_at IS NULL\n\s+AND \(chain\.customer_id IS NULL OR leads\.customer_id IS NULL OR chain\.customer_id = leads\.customer_id\)/);
+    // ...and a won root is a second win only for the SAME opportunity by the
+    // accept path's rule: same customer when both are linked, else the
+    // root's current phone or email still matches (codex r15 P2, r16 P2).
+    expect(SECOND_WIN_SQL).toMatch(/WHEN chain\.customer_id IS NOT NULL AND leads\.customer_id IS NOT NULL THEN chain\.customer_id = leads\.customer_id/);
+    expect(SECOND_WIN_SQL).toMatch(/right\(regexp_replace\(COALESCE\(chain\.phone, ''\), '\[\^0-9\]', '', 'g'\), 10\) = right\(regexp_replace\(COALESCE\(leads\.phone, ''\), '\[\^0-9\]', '', 'g'\), 10\)/);
+    expect(SECOND_WIN_SQL).toMatch(/LOWER\(TRIM\(chain\.email\)\) = LOWER\(TRIM\(leads\.email\)\)/);
+    // The sources summary counts (GET /leads/sources) splice the same scope
+    // into every COUNT subquery, so the client-derived source conversion
+    // rate agrees with the ROI (codex r16 P2).
+    const { PROSPECT_SCOPE_SQL } = require('../services/lead-statuses');
+    expect(PROSPECT_SCOPE_SQL).toBe(`leads.status NOT IN ('cancelled', 'spam', 'duplicate') AND ${SECOND_WIN_SQL}`);
+    const adminLeadsSrc = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-leads.js'), 'utf8');
+    expect((adminLeadsSrc.match(/leads\.deleted_at IS NULL AND \$\{PROSPECT_SCOPE_SQL\}/g) || []).length).toBe(4);
     expect(statusExclusion[3]).toEqual(expect.arrayContaining(['duplicate', 'spam', 'cancelled']));
   });
 

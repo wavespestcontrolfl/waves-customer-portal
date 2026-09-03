@@ -32,16 +32,20 @@ function duplicateOfFromExtracted(extractedData) {
 // property-lookup stage already minted) — a row is never its own prior.
 // `onlyLeadId` re-validates ONE already-chosen target against the exact same
 // predicate (open lead, live courtship, identity) after the label lands.
-async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKey, excludeLeadId = null, beforeCreatedAt = null, onlyLeadId = null } = {}, now = Date.now()) {
+async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKey, serviceInterest = null, excludeLeadId = null, beforeCreatedAt = null, onlyLeadId = null } = {}, now = Date.now()) {
   const emailLc = String(email || '').trim().toLowerCase();
   const phoneDigits = String(phone || '').replace(/\D/g, '').slice(-10);
   const addressLc = String(address || '').trim().toLowerCase().replace(/\s+/g, ' ');
   // The quoted service is part of the identity (codex #3834 r1 P1): pest
-  // today and lawn next week at the same property are two opportunities.
-  // No catalog key (a quote-on-request / manual mix) → never a duplicate.
-  if (!emailLc || phoneDigits.length !== 10 || !addressLc || !serviceKey) return null;
+  // today and lawn next week at the same property are two opportunities. A
+  // catalog key names it; the documented direct `services` shape carries no
+  // key (docs/public-route-contracts.md), so its identity is the normalized
+  // service mix — the label buildPublicQuoteServiceInterest derives from it
+  // in a fixed order (codex #3834 r16 P2). Neither → never a duplicate.
+  const serviceLabel = serviceKey ? null : String(serviceInterest || '').trim();
+  if (!emailLc || phoneDigits.length !== 10 || !addressLc || (!serviceKey && !serviceLabel)) return null;
   const prior = await dbh('leads')
-    .where({ lead_type: 'quote_wizard', service_key: serviceKey })
+    .where(serviceKey ? { lead_type: 'quote_wizard', service_key: serviceKey } : { lead_type: 'quote_wizard', service_key: null, service_interest: serviceLabel })
     .whereNull('deleted_at')
     .whereRaw('LOWER(email) = ?', [emailLc])
     .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
@@ -1834,7 +1838,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // (attribution, bells) must see it on later stages (codex #3834 r3 P1).
     let duplicateOfLeadId = null;
     // The identity THIS request typed, as observed on the row (contact,
-    // address, service, extra-property count): every public write that
+    // address, service — catalog key and label — extra-property count): every public write that
     // moves a label — the relabel (codex #3834 r13 P1) and the
     // post-validation reopen (r14 P1) — is scoped to it, so two requests on
     // one lookup token typing different inquiries never stamp or clear each
@@ -1842,7 +1846,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // tokenless path labels only a row it inserted with no extra property.
     let observedExtraCount = additionalProperties.length;
     const scopedToTypedIdentity = (qb) => qb
-      .where({ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey })
+      .where({ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey, service_interest: serviceInterest })
       .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [observedExtraCount]);
     if (leadId) {
       // OWNERSHIP (atomic): leadId is a client-supplied id on a public,
@@ -1916,7 +1920,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // property-lookup stage stored counts too (the update above carried
         // it forward when this stage omitted the optional field, r12 P1).
         const widerInquiry = additionalProperties.length > 0 || (parseExtracted(lead.extracted_data)?.additional_properties?.length > 0);
-        duplicateOfLeadId = widerInquiry ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
+        duplicateOfLeadId = widerInquiry ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
         // Scoped to the status just read: a staff transition landing in
         // between (won / lost / contacted) wins, and this public retry
         // updates 0 rows instead of regressing it (codex #3834 r9 P1). On 0
@@ -1963,7 +1967,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // a trusted-path job (the office merge). Two concurrent first runs can
     // still both land 'new' — the office merges those by hand, as before.
     if (!lead && !additionalProperties.length) {
-      duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey });
+      duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest });
     }
     if (!lead) {
       const rows = await db('leads').insert({
@@ -2003,7 +2007,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // drift — and reopen THIS row, scoped to the label it just received, so
     // a staff transition on this row in the meantime still wins.
     if (duplicateOfLeadId) {
-      const targetOpen = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, onlyLeadId: duplicateOfLeadId });
+      const targetOpen = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, onlyLeadId: duplicateOfLeadId });
       if (!targetOpen) {
         // 0 rows ⇒ a staff transition on this row won; its marker stands and
         // the request keeps following the database (no second funnel row).

@@ -125,7 +125,7 @@ const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate
 // `status=open` filter (the Pipeline table's default) to this set — shared
 // with the dashboard alerts service so action queues use the same
 // membership.
-const { OPEN_LEAD_STATUSES, scopeToProspects } = require('../services/lead-statuses');
+const { OPEN_LEAD_STATUSES, scopeToProspects, PROSPECT_SCOPE_SQL } = require('../services/lead-statuses');
 
 // Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
 async function ensureLeadsTables(db) {
@@ -514,13 +514,17 @@ router.get('/sources', async (req, res, next) => {
   try {
     const monthStart = startOfETMonth();
 
+    // The same prospect population the source's ROI and the overview count
+    // (scopeToProspects): the client derives the source conversion rate from
+    // these raw counts, so a suppressed wizard rerun or a second win must not
+    // dilute it here either (codex #3834 r16 P2).
     const sources = await db('lead_sources')
       .select(
         'lead_sources.*',
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND leads.first_contact_at >= ?) as month_leads`, [monthStart]),
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND leads.status = 'won' AND leads.first_contact_at >= ?) as month_conversions`, [monthStart]),
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL) as total_leads`),
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND leads.status = 'won') as total_conversions`),
+        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND ${PROSPECT_SCOPE_SQL} AND leads.first_contact_at >= ?) as month_leads`, [monthStart]),
+        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND ${PROSPECT_SCOPE_SQL} AND leads.status = 'won' AND leads.first_contact_at >= ?) as month_conversions`, [monthStart]),
+        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND ${PROSPECT_SCOPE_SQL}) as total_leads`),
+        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND ${PROSPECT_SCOPE_SQL} AND leads.status = 'won') as total_conversions`),
       )
       .orderBy('name');
 
