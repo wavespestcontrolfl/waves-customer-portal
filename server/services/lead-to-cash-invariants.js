@@ -2,11 +2,13 @@
 /**
  * Lead-to-cash invariants sweep — READ-ONLY registry over EXISTING detectors.
  *
- * Every check below already exists somewhere in the repo with its own incident
- * provenance; this module only (1) gives each a common finding shape,
- * (2) runs them together once a day, and (3) emails contact@ when — and only
- * when — something is off. It adds NO new predicates, writes NO rows except the
- * ops-email send marker, and never talks to a customer. Two of the checks
+ * Every check below lives elsewhere in the repo with its own incident
+ * provenance (the completion-record predicates in
+ * completion-record-invariants.js included); this module only (1) gives each
+ * a common finding shape, (2) runs them together once a day, and (3) emails
+ * contact@ when — and only when — something is off. It defines NO predicates
+ * of its own, writes NO rows except the ops-email send marker, and never
+ * talks to a customer. Two of the checks
  * (`churned_live_state`, `waveguard_alignment_drift`) promote CLI audits that
  * were manual-only until now; the alignment scan is invoked with no `onRepair`,
  * so this path has no write capability at all.
@@ -209,6 +211,24 @@ const DETECTORS = Object.freeze([
       return { count: ids.length, ids, detail: { checked: Math.min(visits.length, CLOSEOUT_VISIT_CAP), unevaluable, date: yesterday, truncated } };
     },
   },
+  // History-wide completion ↔ report record invariants (integrity audit
+  // 2026-09-02). closeout_failed_facts above reads yesterday only and skips
+  // `pending` facts, so a missing record / token / tracker stamp / customer
+  // text that failed silently on day one was invisible from day two on.
+  // One adapter per predicate so each reads as its own OK/FAIL line.
+  ...require('./completion-record-invariants').PREDICATE_KEYS.map((key) => {
+    const { PREDICATES } = require('./completion-record-invariants');
+    return {
+      key,
+      label: PREDICATES[key].label,
+      href: PREDICATES[key].href,
+      provenance: 'completion ↔ report integrity audit 2026-09-02 — completion-record-invariants.js',
+      async run() {
+        const { runPredicate } = require('./completion-record-invariants');
+        return runPredicate(key);
+      },
+    };
+  }),
 ]);
 
 // ---------------------------------------------------------------------------
@@ -224,7 +244,9 @@ async function runDetectors({ now = new Date(), detectors = DETECTORS } = {}) {
       const ids = Array.isArray(out.ids) ? out.ids.map(String) : [];
       results.push({
         key: d.key, label: d.label, href: d.href, ok: out.count === 0, unavailable: false,
-        count: Number(out.count) || 0, sample: ids.slice(0, SAMPLE_IDS), truncated: ids.length > SAMPLE_IDS,
+        // A detector that already capped its sample in SQL reports the cap
+        // itself (out.truncated) — the length test alone cannot see it.
+        count: Number(out.count) || 0, sample: ids.slice(0, SAMPLE_IDS), truncated: ids.length > SAMPLE_IDS || out.truncated === true,
         detail: out.detail || null, ms: Date.now() - started,
       });
     } catch (err) {
