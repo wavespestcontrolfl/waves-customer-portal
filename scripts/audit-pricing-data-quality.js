@@ -204,8 +204,13 @@ const CHECKS = [
     // trim, lower, spaces → _, drop one trailing "s"). A product with a price but no
     // package size or an unconvertible unit costs $0 there, so it counts here
     // (codex r16 P2). A $0 price stays "no cost" for audit purposes.
+    // no_quantity mirrors the same calculator's usage resolution: a usage of zero or
+    // less resolves as missing and costs $0 with a warning, and the admin create /
+    // update endpoints accept zero and negative values unvalidated — so a row counts
+    // here when BOTH usage columns are NULL or non-positive, not only when both are
+    // NULL (codex r21 P2).
     sql: `select count(*) as rows, count(distinct u.service_type) as service_types,
-                 count(*) filter (where u.usage_amount is null and u.usage_per_1000sf is null) as no_quantity,
+                 count(*) filter (where coalesce(u.usage_amount, 0) <= 0 and coalesce(u.usage_per_1000sf, 0) <= 0) as no_quantity,
                  count(*) filter (where u.usage_unit is null) as no_unit,
                  count(*) filter (where p.id is null) as product_missing,
                  count(*) filter (where p.id is not null

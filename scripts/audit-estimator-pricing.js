@@ -137,16 +137,37 @@ function footprintOf(homeSqFt, stories = 1) {
   return Math.round((Number(homeSqFt) || 0) / Math.max(1, Number(stories) || 1));
 }
 
-// Hardscape estimate documented in constants.HARDSCAPE (single-family curve).
+// Hardscape estimate — FROZEN literal mirror of constants.HARDSCAPE and
+// HARDSCAPE_ADDITIONS (property-calculator.js estimateHardscape), deliberately
+// NOT the production functions: a breakpoint, slope, clamp or pool-addition
+// change in constants.js must move the engine away from this expectation and
+// surface as a mosquito mismatch instead of moving both sides together
+// (codex r21 P2). A deliberate curve change updates these literals in the same
+// PR (the plan's per-PR verification rule). The property-type dispatch mirrors
+// estimateHardscape's string tests: commercial / townhome-or-duplex / condo /
+// everything else single-family.
+const HARDSCAPE_CURVES = Object.freeze({
+  commercial: { perLotSqFt: 0.15 },
+  single_family: { base: 800, tier1: { from: 7500, to: 15000, perSqFt: 0.03 }, tier2: { from: 15000, perSqFt: 0.05 } },
+  townhome: { base: 400, from: 7500, perSqFt: 0.02 },
+  condo: { base: 200, from: 7500, perSqFt: 0.05 },
+  additions: { poolCage: 600, poolNoCage: 450 },
+});
 function hardscapeOf(lotSqFt, propertyType = 'single_family', features = {}) {
-  const { HARDSCAPE, HARDSCAPE_ADDITIONS } = constants;
-  let fn = HARDSCAPE.single_family;
-  if (propertyType === 'commercial') fn = HARDSCAPE.commercial;
-  else if (String(propertyType).includes('townhome') || propertyType === 'duplex') fn = HARDSCAPE.townhome;
-  else if (String(propertyType).includes('condo')) fn = HARDSCAPE.condo;
-  let hs = fn(lotSqFt);
-  if (features.poolCage) hs += HARDSCAPE_ADDITIONS.poolCage;
-  else if (features.pool) hs += HARDSCAPE_ADDITIONS.poolNoCage;
+  const C = HARDSCAPE_CURVES;
+  const type = String(propertyType || 'single_family');
+  let hs;
+  if (type === 'commercial') hs = lotSqFt * C.commercial.perLotSqFt;
+  else if (type.includes('townhome') || type === 'duplex') hs = C.townhome.base + Math.max(0, lotSqFt - C.townhome.from) * C.townhome.perSqFt;
+  else if (type.includes('condo')) hs = C.condo.base + Math.max(0, lotSqFt - C.condo.from) * C.condo.perSqFt;
+  else {
+    const sf = C.single_family;
+    hs = sf.base;
+    if (lotSqFt > sf.tier1.from) hs += (Math.min(lotSqFt, sf.tier1.to) - sf.tier1.from) * sf.tier1.perSqFt;
+    if (lotSqFt > sf.tier2.from) hs += (lotSqFt - sf.tier2.from) * sf.tier2.perSqFt;
+  }
+  if (features.poolCage) hs += C.additions.poolCage;
+  else if (features.pool) hs += C.additions.poolNoCage;
   return Math.round(hs);
 }
 
@@ -314,10 +335,10 @@ function lawnCostStack({ track, lawnSqFt, visits, onSiteMinutesOverride = null, 
 }
 
 // MOSQUITO — treatable = lot − footprint − hardscape; anchors at category top edges; 500-sf steps
-function expectMosquito({ homeSqFt, stories = 1, lotSqFt, features = {}, program = 'seasonal9', stationCount = 0, dunkCount = 0 }) {
+function expectMosquito({ homeSqFt, stories = 1, lotSqFt, propertyType = 'single_family', features = {}, program = 'seasonal9', stationCount = 0, dunkCount = 0 }) {
   const M = constants.MOSQUITO;
   const footprint = footprintOf(homeSqFt, stories);
-  const hardscape = hardscapeOf(lotSqFt, 'single_family', features);
+  const hardscape = hardscapeOf(lotSqFt, propertyType, features);
   const treatable = Math.max(0, lotSqFt - footprint - hardscape);
   const cats = M.lotCategories;
   const cat = cats.find((c) => treatable <= c.maxSqFt) || cats[cats.length - 1];
@@ -944,6 +965,26 @@ function runMosquitoMatrix() {
     const r = runEngine({ ...BASE, lawnSqFt: undefined, features, services: { mosquito: { tier: 'seasonal9' } } });
     const li = line(r.result, 'mosquito');
     record(section, `features ${JSON.stringify(features)}`, features, exp.perVisit, li ? li.perVisit : null, { extra: { pressureExpected: exp.pressure, pressureActual: li ? li.pressureMultiplier ?? li.pressure : null } });
+  }
+  // Every hardscape curve and pool addition (codex r21 P2): the residential
+  // curves price through expectMosquito against the engine's perVisit; a
+  // commercial property routes to the commercial mosquito pricer (its own
+  // section), so only its treatable area — the part the hardscape curve
+  // decides — is asserted here. Lots 6,000 / 8,000 / 20,000 sit below, inside
+  // and beyond the 7,500 / 15,000 breakpoints.
+  for (const propertyType of ['single_family', 'townhome', 'duplex', 'condo', 'condo_ground', 'commercial']) {
+    for (const features of [{}, { pool: true }, { poolCage: true }]) {
+      for (const lot of [6000, 8000, 20000]) {
+        const exp = expectMosquito({ homeSqFt: 2000, lotSqFt: lot, propertyType, features, program: 'seasonal9' });
+        const r = runEngine({ ...BASE, propertyType, lotSqFt: lot, lawnSqFt: undefined, features, services: { mosquito: { tier: 'seasonal9' } } });
+        const li = line(r.result, 'mosquito') || line(r.result, 'commercial_mosquito');
+        const treatableActual = li ? (li.mosquitoTreatableSqFt ?? li.treatableSqFt ?? null) : null;
+        const name = `hardscape curve ${propertyType} ${JSON.stringify(features)} lot ${lot}`;
+        const input = { propertyType, lotSqFt: lot, features };
+        if (propertyType === 'commercial') record(section, `${name} treatable`, input, exp.treatable, treatableActual, { extra: { hardscapeExpected: exp.hardscape, service: li ? li.service : null, engineError: r.ok ? null : r.error } });
+        else record(section, name, input, exp.perVisit, li ? li.perVisit : null, { extra: { hardscapeExpected: exp.hardscape, treatableExpected: exp.treatable, treatableActual, engineError: r.ok ? null : r.error } });
+      }
+    }
   }
   const bad = [
     { name: 'zero lot', input: { ...BASE, lotSqFt: 0, lawnSqFt: undefined } },

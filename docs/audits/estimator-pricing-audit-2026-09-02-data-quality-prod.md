@@ -101,6 +101,8 @@ _Round 8 (Codex P2): `stale_90d` now also counts rows whose `last_checked_at` is
 
 _Round 16 (Codex P2): `product_no_cost` now mirrors the COGS calculator's fallback prerequisites (`product-costing.js` `costLineFromUsage`) — a product without a positive `cost_per_unit` counts as costless unless `best_price` > 0 AND `unit_size_oz` > 0 AND the usage unit converts to ounces (`normalizeUnit`: trim, lower, spaces → `_`, one trailing `s` dropped). The row below is the 2026-09-03T05:43Z run under the price-only predicate (`cost_per_unit` or `best_price` > 0) and is a lower bound; it was not re-queried against prod._
 
+_Round 22 (Codex P2): `no_quantity` now counts a row whose usage columns are both NULL **or non-positive** (`coalesce(usage_amount, 0) <= 0 and coalesce(usage_per_1000sf, 0) <= 0`), mirroring the calculator's resolution of a zero-or-less usage as missing; the `0` below is the NULL-only figure and therefore a lower bound — not re-queried against prod (query executed on the local test schema)._
+
 | rows | service_types | no_quantity | no_unit | product_missing | product_no_cost | service_type_not_a_catalog_key |
 |---|---|---|---|---|---|---|
 | 32 | 24 | 0 | 0 | 0 | 6 | 32 |
