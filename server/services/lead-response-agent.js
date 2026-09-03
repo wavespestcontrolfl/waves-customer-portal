@@ -23,6 +23,8 @@ const db = require('../models/db');
 const { executeLeadTool } = require('./lead-response-tools');
 const { getBreaker } = require('./intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('./intelligence-bar/tool-events');
+const { LEAD_RESPONSE_AGENT_CONFIG } = require('./lead-response-agent-config');
+const { recordSessionUsage } = require('./llm-dispatch-metrics');
 
 const leadToolBreaker = getBreaker('lead-response-agent');
 
@@ -154,13 +156,14 @@ const LeadResponseAgent = {
     prompt += `\nTime is ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET.`;
     prompt += `\n\nFollow your workflow: analyze → gather context → draft response → decide auto-send vs queue → set up follow-up → save report.`;
 
+    let sessionId = null;
     try {
       const session = await apiCall('POST', '/sessions', {
         agent: LEAD_AGENT_ID,
         environment_id: LEAD_AGENT_ENVIRONMENT_ID,
       });
 
-      const sessionId = session.id;
+      sessionId = session.id;
       logger.info(`[lead-agent] Session ${sessionId} for lead ${lead.leadId}`);
 
       await sendSessionEvents(sessionId, [{
@@ -312,6 +315,11 @@ const LeadResponseAgent = {
 
       // Non-fatal — the webhook already sent a basic auto-reply as fallback
       return null;
+    } finally {
+      // Call ledger (never throws): one session row with the session's token
+      // usage, written however the session ends — a stream that throws still
+      // consumed tokens. No session id = nothing was created, nothing to bill.
+      if (sessionId) void recordSessionUsage({ laneId: 'agent_lead', sessionId, agentId: LEAD_AGENT_ID, model: LEAD_RESPONSE_AGENT_CONFIG.model, startedAt: startTime });
     }
   },
 };

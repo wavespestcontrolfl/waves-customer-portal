@@ -9,6 +9,8 @@
 const logger = require('./logger');
 const db = require('../models/db');
 const { executeBITool } = require('./bi-agent-tools');
+const { BI_AGENT_CONFIG } = require('./bi-agent-config');
+const { recordSessionUsage } = require('./llm-dispatch-metrics');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BI_AGENT_ID = process.env.BI_AGENT_ID;
@@ -85,41 +87,49 @@ const BIAgent = {
     let smsSent = false;
     let maxIterations = 25;
 
-    for await (const { event, data } of streamSessionEvents(sessionId)) {
-      if (--maxIterations <= 0) break;
+    // Call ledger (never throws): one session row with the session's token
+    // usage, written however the stream ends — a loop that throws or times
+    // out still consumed tokens. Upserted by session id, so re-billing is safe.
+    try {
+      for await (const { event, data } of streamSessionEvents(sessionId)) {
+        if (--maxIterations <= 0) break;
 
-      if (event === 'assistant' || event === 'text') {
-        if (data.text) report += data.text;
-        if (data.content) { for (const b of data.content) { if (b.type === 'text') report += b.text; } }
-      }
-
-      if (event === 'tool_use' || data?.type === 'tool_use') {
-        const toolName = data.name;
-        const toolInput = data.input || {};
-        const toolUseId = data.id;
-
-        notify('pulling', `Tool: ${toolName}`);
-        logger.info(`[bi-agent] Tool: ${toolName}`);
-
-        let toolResult;
-        try {
-          toolResult = await executeBITool(toolName, toolInput);
-          if (toolName === 'send_briefing_sms' && toolResult.sent) smsSent = true;
-        } catch (err) {
-          toolResult = { error: `Tool failed: ${err.message}` };
-          logger.error(`[bi-agent] Tool ${toolName} error: ${err.message}`);
+        if (event === 'assistant' || event === 'text') {
+          if (data.text) report += data.text;
+          if (data.content) { for (const b of data.content) { if (b.type === 'text') report += b.text; } }
         }
 
-        toolsExecuted.push(toolName);
+        if (event === 'tool_use' || data?.type === 'tool_use') {
+          const toolName = data.name;
+          const toolInput = data.input || {};
+          const toolUseId = data.id;
 
-        await apiCall('POST', `/sessions/${sessionId}/events`, {
-          type: 'tool_result', tool_use_id: toolUseId,
-          content: [{ type: 'text', text: JSON.stringify(toolResult) }],
-        });
+          notify('pulling', `Tool: ${toolName}`);
+          logger.info(`[bi-agent] Tool: ${toolName}`);
+
+          let toolResult;
+          try {
+            toolResult = await executeBITool(toolName, toolInput);
+            if (toolName === 'send_briefing_sms' && toolResult.sent) smsSent = true;
+          } catch (err) {
+            toolResult = { error: `Tool failed: ${err.message}` };
+            logger.error(`[bi-agent] Tool ${toolName} error: ${err.message}`);
+          }
+
+          toolsExecuted.push(toolName);
+
+          await apiCall('POST', `/sessions/${sessionId}/events`, {
+            type: 'tool_result', tool_use_id: toolUseId,
+            content: [{ type: 'text', text: JSON.stringify(toolResult) }],
+          });
+        }
+
+        if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') break;
+        if (event === 'error') { logger.error(`[bi-agent] Error: ${JSON.stringify(data)}`); break; }
       }
 
-      if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') break;
-      if (event === 'error') { logger.error(`[bi-agent] Error: ${JSON.stringify(data)}`); break; }
+    } finally {
+      void recordSessionUsage({ laneId: 'agent_bi', sessionId, agentId: BI_AGENT_ID, model: BI_AGENT_CONFIG.model, startedAt: startTime });
     }
 
     const durationSeconds = Math.round((Date.now() - startTime) / 1000);

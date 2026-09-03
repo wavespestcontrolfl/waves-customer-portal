@@ -30,6 +30,8 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const ContextAggregator = require('../context-aggregator');
 const { executeToolCall } = require('./tools-expanded');
+const { AGENT_CONFIG } = require('./managed-agent-config');
+const { recordSessionUsage } = require('../llm-dispatch-metrics');
 
 const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MANAGED_AGENT_ID = process.env.MANAGED_AGENT_ID;
@@ -148,8 +150,9 @@ class ManagedAssistant {
       channel,
     });
 
+    let sessionId = conversation.managed_session_id;
+    const turnStartedAt = Date.now();
     try {
-      let sessionId = conversation.managed_session_id;
 
       // 4. Create or resume Managed Agent session
       if (!sessionId) {
@@ -213,6 +216,13 @@ class ManagedAssistant {
         reply: "I'm having trouble right now. Let me connect you with our team. — Waves Pest Control",
         escalated: false,
       };
+    } finally {
+      // Call ledger (never throws): a conversation is ONE long-lived session,
+      // so every turn re-records the session's cumulative usage and the
+      // recorder updates that session's single row in place (latency = this
+      // turn). Runs on the error path too — a turn that threw mid-stream
+      // still consumed tokens.
+      if (sessionId) void recordSessionUsage({ laneId: 'agent_assistant', sessionId, agentId: MANAGED_AGENT_ID, model: AGENT_CONFIG.model, startedAt: turnStartedAt });
     }
   }
 

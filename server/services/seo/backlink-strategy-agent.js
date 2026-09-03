@@ -13,6 +13,8 @@
 const logger = require('../logger');
 const db = require('../../models/db');
 const { executeBacklinkTool } = require('./backlink-strategy-tools');
+const { BACKLINK_STRATEGY_AGENT_CONFIG } = require('./backlink-strategy-agent-config');
+const { recordSessionUsage } = require('../llm-dispatch-metrics');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BACKLINK_STRATEGY_AGENT_ID = process.env.BACKLINK_STRATEGY_AGENT_ID;
@@ -241,72 +243,80 @@ const BacklinkStrategyAgent = {
       return toolResult;
     };
 
-    for await (const { event, data } of streamSessionEvents(sessionId)) {
-      if (event === 'assistant' || event === 'text') {
-        if (data.text) finalReport += data.text;
-        if (data.content) {
-          for (const block of data.content) {
-            if (block.type === 'text') finalReport += block.text;
+    // Call ledger (never throws): one session row with the session's token
+    // usage, written however the stream ends — a loop that throws or times
+    // out still consumed tokens. Upserted by session id, so re-billing is safe.
+    try {
+      for await (const { event, data } of streamSessionEvents(sessionId)) {
+        if (event === 'assistant' || event === 'text') {
+          if (data.text) finalReport += data.text;
+          if (data.content) {
+            for (const block of data.content) {
+              if (block.type === 'text') finalReport += block.text;
+            }
           }
         }
-      }
 
-      const isCustomToolUse = event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
-      const isLegacyToolUse = event === 'tool_use' || data?.type === 'tool_use';
-      if (isCustomToolUse) {
-        const toolName = data.name;
-        const toolInput = data.input || {};
-        const toolUseId = toolUseIdFromEvent(data);
-        if (!toolUseId) {
-          logger.error(`[backlink-strategy] Tool ${toolName || '(unknown)'} missing tool use id: ${JSON.stringify(data).slice(0, 500)}`);
-          continue;
-        }
-        pendingCustomToolUses.set(toolUseId, { toolName, toolInput });
-      } else if (isLegacyToolUse) {
-        const toolName = data.name;
-        const toolInput = data.input || {};
-        const toolUseId = toolUseIdFromEvent(data);
-        if (!toolUseId) {
-          logger.error(`[backlink-strategy] Tool ${toolName || '(unknown)'} missing tool use id: ${JSON.stringify(data).slice(0, 500)}`);
-          continue;
-        }
-
-        const toolResult = await executeToolUse(toolName, toolInput, toolUseId);
-        if (!toolResult) break;
-
-        await sendSessionEvents(sessionId, [
-          buildToolResultEvent(toolUseId, toolResult, { custom: false }),
-        ]);
-      }
-
-      const stopReason = stopReasonFromEvent(data);
-      if (event === 'session.status_idle' && stopReason?.type === 'requires_action') {
-        const toolResultEvents = [];
-        for (const toolUseId of stopReason.event_ids || []) {
-          const pending = pendingCustomToolUses.get(toolUseId);
-          if (!pending) {
-            logger.error(`[backlink-strategy] Missing pending custom tool use for required event ${toolUseId}`);
+        const isCustomToolUse = event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
+        const isLegacyToolUse = event === 'tool_use' || data?.type === 'tool_use';
+        if (isCustomToolUse) {
+          const toolName = data.name;
+          const toolInput = data.input || {};
+          const toolUseId = toolUseIdFromEvent(data);
+          if (!toolUseId) {
+            logger.error(`[backlink-strategy] Tool ${toolName || '(unknown)'} missing tool use id: ${JSON.stringify(data).slice(0, 500)}`);
             continue;
           }
-          const toolResult = await executeToolUse(pending.toolName, pending.toolInput, toolUseId);
+          pendingCustomToolUses.set(toolUseId, { toolName, toolInput });
+        } else if (isLegacyToolUse) {
+          const toolName = data.name;
+          const toolInput = data.input || {};
+          const toolUseId = toolUseIdFromEvent(data);
+          if (!toolUseId) {
+            logger.error(`[backlink-strategy] Tool ${toolName || '(unknown)'} missing tool use id: ${JSON.stringify(data).slice(0, 500)}`);
+            continue;
+          }
+
+          const toolResult = await executeToolUse(toolName, toolInput, toolUseId);
           if (!toolResult) break;
-          pendingCustomToolUses.delete(toolUseId);
-          toolResultEvents.push(buildToolResultEvent(toolUseId, toolResult, { custom: true }));
+
+          await sendSessionEvents(sessionId, [
+            buildToolResultEvent(toolUseId, toolResult, { custom: false }),
+          ]);
         }
-        if (toolResultEvents.length) {
-          await sendSessionEvents(sessionId, toolResultEvents);
+
+        const stopReason = stopReasonFromEvent(data);
+        if (event === 'session.status_idle' && stopReason?.type === 'requires_action') {
+          const toolResultEvents = [];
+          for (const toolUseId of stopReason.event_ids || []) {
+            const pending = pendingCustomToolUses.get(toolUseId);
+            if (!pending) {
+              logger.error(`[backlink-strategy] Missing pending custom tool use for required event ${toolUseId}`);
+              continue;
+            }
+            const toolResult = await executeToolUse(pending.toolName, pending.toolInput, toolUseId);
+            if (!toolResult) break;
+            pendingCustomToolUses.delete(toolUseId);
+            toolResultEvents.push(buildToolResultEvent(toolUseId, toolResult, { custom: true }));
+          }
+          if (toolResultEvents.length) {
+            await sendSessionEvents(sessionId, toolResultEvents);
+          }
+          continue;
         }
-        continue;
+
+        if (event === 'done' || event === 'session_complete' || stopReason?.type === 'end_turn') {
+          break;
+        }
+
+        if (event === 'error' || event === 'session.error') {
+          logger.error(`[backlink-strategy] Agent error: ${JSON.stringify(data)}`);
+          break;
+        }
       }
 
-      if (event === 'done' || event === 'session_complete' || stopReason?.type === 'end_turn') {
-        break;
-      }
-
-      if (event === 'error' || event === 'session.error') {
-        logger.error(`[backlink-strategy] Agent error: ${JSON.stringify(data)}`);
-        break;
-      }
+    } finally {
+      void recordSessionUsage({ laneId: 'agent_backlink', sessionId, agentId: BACKLINK_STRATEGY_AGENT_ID, model: BACKLINK_STRATEGY_AGENT_CONFIG.model, startedAt: startTime });
     }
 
     const durationSeconds = Math.round((Date.now() - startTime) / 1000);

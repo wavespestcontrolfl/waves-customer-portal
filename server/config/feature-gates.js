@@ -40,6 +40,8 @@
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
+ *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
+ *   GATE_LLM_CALL_TRACES=true   (redacted prompt / response bodies in llm_call_traces for lanes whose runtime policy opts in; needs GATE_LLM_CALL_LEDGER; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
@@ -2264,6 +2266,25 @@ const gates = {
   // logGateStatus; the service reads gateEnvValue('GATE_AGENT_ACTIVITY')
   // at CALL time (the techTips idiom), so a flip needs no redeploy.
   agentActivity: gateEnvValue('GATE_AGENT_ACTIVITY'),
+
+  // LLM call ledger — services/llm-dispatch-metrics.js recordCall. ON: every
+  // provider call through the llm adapters (call.js, deep.js) and every
+  // Managed Agents session writes one row_kind=call / session row to
+  // llm_dispatch_log with token usage, latency, the model actually served
+  // and the ambient agent-control lane / run / step ids. OFF (default, dev
+  // AND prod): no row, no DB touch — the chain rows GATE_LLM_DISPATCH_METRICS
+  // governs are unaffected either way. Kill switch: unset. This entry is for
+  // logGateStatus; the recorder reads gateEnvValue at CALL time.
+  llmCallLedger: gateEnvValue('GATE_LLM_CALL_LEDGER'),
+
+  // LLM call traces — services/llm-dispatch-metrics.js recordTrace. ON: for
+  // lanes whose agent-control runtime policy sets trace: true, the REDACTED
+  // system / prompt / response bodies (pii-redactor, 8 KB cap each) are kept
+  // in llm_call_traces for 7 days, keyed to the call row — so it needs the
+  // ledger gate too. Inbound lanes skip low-confidence redactions. OFF
+  // (default, dev AND prod): nothing is written. Kill switch: unset. Read at
+  // CALL time via gateEnvValue.
+  llmCallTraces: gateEnvValue('GATE_LLM_CALL_TRACES'),
 
   // Ops digests in-app — server/services/ops-digest.js deliverOpsDigest.
   // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become

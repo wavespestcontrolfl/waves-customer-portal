@@ -21,6 +21,7 @@
 
 const logger = require('../../logger');
 const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft, registerSessionLint } = require('./brief-driven-tools');
+const { recordSessionUsage } = require('../../llm-dispatch-metrics');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const API_BASE = 'https://api.anthropic.com/v1';
@@ -233,9 +234,13 @@ class AgentDispatcher {
     }
 
     // Stream events; execute tool calls; capture emit_draft / emit_metadata_only.
+    // Call ledger (never throws): one session row per finished session, on
+    // both the streaming-failure and success paths so timeouts are billed too.
+    const recordSession = () => void recordSessionUsage({ laneId: route.role === 'meta' ? 'agent_meta' : 'agent_content', sessionId, agentId: route.agent_id, model: null, startedAt: t0 });
     try {
       await this._streamAndExecute(sessionId, sessionTimeoutMs);
     } catch (err) {
+      recordSession();
       const partial = getDraft(sessionId);
       clearDraft(sessionId);
       return {
@@ -248,6 +253,7 @@ class AgentDispatcher {
       };
     }
 
+    recordSession();
     const draft = getDraft(sessionId);
     // Captured BEFORE clearDraft — clearing drops the session's checked-route
     // set alongside the draft.
