@@ -265,6 +265,28 @@ describe('extractTreeShrubEstimate', () => {
     });
   });
 
+  it('a revision\'s mapped tier and replayed access outrank a stale raw draft line (pre-push r6 P1)', () => {
+    // Admin revisions replace result + engineRequest but keep the agent
+    // draft's original engineResult: the raw line still says 6x / easy while
+    // the revision sold 9x / difficult.
+    expect(extractTreeShrubEstimate({
+      engineResult: {
+        lineItems: [{ service: 'tree_shrub', bedArea: 1500, bedAreaSource: 'explicit', treeCount: 4, access: 'easy', tier: 'standard', onSiteMin: 25 }],
+      },
+      result: { results: { tsMeta: { eb: 1500, et: 4, bedAreaIsEstimated: false }, ts: [{ tier: 'standard', selected: false }, { tier: 'enhanced', selected: true }] } },
+      engineRequest: { profile: { homeSqFt: 2000 }, options: { treeShrubAccess: 'difficult' } },
+    })).toEqual({
+      bedSqFt: 1500, bedAreaSource: 'explicit', bedAreaEstimated: false, treeCount: 4,
+      access: 'difficult', tier: 'enhanced', onSiteMin: 25,
+    });
+    // The v4.8 builder's replayed access is THE priced access on the mapped
+    // path too.
+    expect(extractTreeShrubEstimate({
+      result: { results: { tsMeta: { eb: 1800, et: 2, bedAreaIsEstimated: false }, ts: [{ tier: 'light', selected: true }] } },
+      engineRequest: { profile: { access: 'Easy' }, options: { treeShrubAccess: 'moderate' } },
+    })).toMatchObject({ access: 'moderate', tier: 'light' });
+  });
+
   it('admin estimates without a profile access record the engine default "easy" — that IS the priced access (pre-push P1 r4)', () => {
     expect(extractTreeShrubEstimate({
       result: { results: { tsMeta: { eb: 1800, et: 2, bedAreaIsEstimated: false }, ts: [] } },

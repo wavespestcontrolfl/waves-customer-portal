@@ -105,7 +105,9 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
   });
 
   test('a malformed tree count is refused (INP-005), not clamped', () => {
-    for (const treeCount of ['abc', -3, 2.5]) {
+    // Shape is strict: Number() coercion would admit true, [], '1e2', '0x10'
+    // and unsafe magnitudes.
+    for (const treeCount of ['abc', -3, 2.5, true, [], {}, '1e2', '0x10', ' 12 3', 1e21, Number.MAX_SAFE_INTEGER + 2, NaN]) {
       let caught;
       try { translateV2CallToV1Input(baseProfile({ treeCount }), ['TREE_SHRUB'], {}); } catch (err) { caught = err; }
       expect(caught?.statusCode).toBe(400);
@@ -119,6 +121,8 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
       expect(input.features).not.toHaveProperty('treeCount');
     }
     expect(translateV2CallToV1Input(baseProfile({ treeCount: 6 }), ['PEST'], {}).features.treeCount).toBe(6);
+    // Digit strings with surrounding whitespace are the one tolerated shape.
+    expect(translateV2CallToV1Input(baseProfile({ treeCount: ' 6 ' }), ['TREE_SHRUB'], {}).services.treeShrub.treeCount).toBe(6);
   });
 
   test('commercial keeps the commercial pricer contract: zero is omitted, a positive count is passed through', () => {
@@ -264,7 +268,7 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
   });
 
   test('a present-but-invalid OPERATOR palm count is refused under the 1–200 contract', () => {
-    for (const palmCount of [-1, 201, 'many', 3.5]) {
+    for (const palmCount of [-1, 201, 'many', 3.5, true, [], '1e1', '0x10']) {
       let caught;
       try { translateV2CallToV1Input(baseProfile({ palmCount }), ['TREE_SHRUB'], {}); } catch (err) { caught = err; }
       expect(caught?.statusCode).toBe(400);

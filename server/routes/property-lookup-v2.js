@@ -3929,13 +3929,24 @@ function treeShrubInputError(message) {
   err.failClosed = true;
   return err;
 }
+// Strict whole-number SHAPE: a safe non-negative integer number, or a string
+// of plain digits (whitespace-trimmed). Number() alone would admit true, [],
+// '1e2', '0x10' and imprecise magnitudes through a boundary that promises to
+// reject malformed input (pre-push r6 P1). Returns NaN for anything else.
+function strictWholeNumber(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 ? value : NaN;
+  if (typeof value === 'string' && /^\s*\d{1,9}\s*$/.test(value)) return Number(value.trim());
+  return NaN;
+}
+const isBlankInput = (value) => value === undefined || value === null
+  || (typeof value === 'string' && value.trim() === '');
 // First PRESENT value wins: a non-negative integer (an explicit 0 is a real
 // answer) is returned, a malformed one throws, undefined/null/'' are skipped.
 function firstNonNegativeIntegerOrThrow(label, ...values) {
   for (const value of values) {
-    if (value === undefined || value === null || String(value).trim() === '') continue;
-    const n = Number(value);
-    if (!Number.isInteger(n) || n < 0) throw treeShrubInputError(`${label} must be a whole number of 0 or more.`);
+    if (isBlankInput(value)) continue;
+    const n = strictWholeNumber(value);
+    if (Number.isNaN(n)) throw treeShrubInputError(`${label} must be a whole number of 0 or more.`);
     return n;
   }
   return undefined;
@@ -4155,9 +4166,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   const typedTreeCountRaw = sel.has('TREE_SHRUB')
     ? firstNonNegativeIntegerOrThrow('Tree count', p.treeCount)
     : (() => {
-      const n = Number(p.treeCount);
-      return p.treeCount !== undefined && p.treeCount !== null && String(p.treeCount).trim() !== ''
-        && Number.isInteger(n) && n >= 0 ? n : undefined;
+      const n = strictWholeNumber(p.treeCount);
+      return Number.isNaN(n) ? undefined : n;
     })();
   // COMMERCIAL keeps the commercial pricer's own contract — a zero count is
   // "omitted" and the lot-density estimate prices the plant program
@@ -4192,10 +4202,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // were found, so a non-positive fallback is simply ABSENT (pre-push r3
     // P0), the same way the palmInventory block below reads it.
     let tsPalmCount;
-    const typedPalmRaw = measurementValue(p.palmCount);
-    if (typedPalmRaw !== undefined) {
-      const n = Number(typedPalmRaw);
-      if (!(Number.isInteger(n) && n >= 0 && n <= 200)) throw treeShrubInputError('Palm count must be a whole number between 1 and 200.');
+    if (!isBlankInput(p.palmCount)) {
+      const n = strictWholeNumber(p.palmCount);
+      if (!(n >= 0 && n <= 200)) throw treeShrubInputError('Palm count must be a whole number between 1 and 200.');
       // An operator zero is "no palms" and ends the resolution here — a
       // positive vision estimate must never resurrect a count the operator
       // rejected (pre-push r4 P0).
