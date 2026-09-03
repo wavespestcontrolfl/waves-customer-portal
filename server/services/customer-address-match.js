@@ -92,4 +92,26 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   return matches;
 }
 
-module.exports = { findCustomersAtAddress, _private: { houseNumberOf, candidateAddressString } };
+const phoneKey = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+const emailKey = (v) => String(v || '').trim().toLowerCase();
+
+/**
+ * Same-address matches, contact matches first. When the operator already
+ * has a phone or email on the form (lead prefill, typed before lookup), the
+ * row whose phone (last 10) or email equals it is the person they mean —
+ * it leads the list with `contactMatch: 'phone' | 'email'`; everyone else
+ * keeps the query order with `contactMatch: null`. Pure; stable.
+ */
+function rankByContact(rows, { phone = null, email = null } = {}) {
+  const p = phoneKey(phone);
+  const e = emailKey(email);
+  const tagged = rows.map((row) => {
+    let contactMatch = null;
+    if (p.length === 10 && phoneKey(row.phone) === p) contactMatch = 'phone';
+    else if (e && emailKey(row.email) === e) contactMatch = 'email';
+    return { ...row, contactMatch };
+  });
+  return [...tagged.filter((r) => r.contactMatch), ...tagged.filter((r) => !r.contactMatch)];
+}
+
+module.exports = { findCustomersAtAddress, rankByContact, _private: { houseNumberOf, candidateAddressString } };

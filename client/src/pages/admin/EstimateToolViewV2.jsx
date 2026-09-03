@@ -3187,10 +3187,14 @@ export default function EstimateToolViewV2({
   // the old silent first-hit link put the second person's quote on the first
   // person's profile.
   const [addressMatches, setAddressMatches] = useState([]);
-  // The address those matches were found for. Suggestions render only while
-  // form.address still equals it — an edited address must not keep a stale
-  // Link actionable for the previous property.
+  // The address + typed contact those matches were found and ranked for.
+  // Suggestions render only while the form still matches — an edited
+  // address must not keep a stale Link actionable for the previous
+  // property, and an edited phone/email must not keep a stale
+  // "phone matches" label (codex #3782 r1).
   const [addressMatchesFor, setAddressMatchesFor] = useState("");
+  const addressMatchKey = (address, phone, email) =>
+    `${String(address || "").trim()}|${phone || ""}|${email || ""}`;
   // Contact fields as typed before a link, so Unlink restores them instead
   // of leaving the unlinked customer's name/phone/email on the estimate.
   const preLinkContactRef = useRef(null);
@@ -4072,14 +4076,20 @@ export default function EstimateToolViewV2({
           const custR = await fetch("/api/admin/customers/at-address", {
             method: "POST",
             headers: authHeaders,
-            body: JSON.stringify({ address }),
+            // Typed/prefilled contact ranks the matching household member
+            // first (server tags it contactMatch).
+            body: JSON.stringify({
+              address,
+              phone: form.customerPhone || null,
+              email: form.customerEmail || null,
+            }),
             signal: lookupController.signal,
           });
           if (custR.ok) {
             const custData = await custR.json();
             if (lookupSuperseded()) return;
             setAddressMatches(custData.customers || []);
-            setAddressMatchesFor(address);
+            setAddressMatchesFor(addressMatchKey(address, form.customerPhone, form.customerEmail));
           }
         } catch {
           /* ignore customer lookup errors */
@@ -6183,7 +6193,7 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               {addressMatches.length > 0 &&
-                addressMatchesFor === form.address.trim() &&
+                addressMatchesFor === addressMatchKey(form.address, form.customerPhone, form.customerEmail) &&
                 !existingCustomerMatch &&
                 !form.customerId && (
                   <div className="mb-2.5 border-hairline border-zinc-300 rounded-xs overflow-hidden">
@@ -6205,6 +6215,12 @@ export default function EstimateToolViewV2({
                           <div className="flex-1 min-w-0">
                             <div className="text-14 text-zinc-900 font-medium truncate">
                               {name}
+                              {c.contactMatch === "phone" && (
+                                <span className="font-normal text-zinc-500"> · phone matches</span>
+                              )}
+                              {c.contactMatch === "email" && (
+                                <span className="font-normal text-zinc-500"> · email matches</span>
+                              )}
                             </div>
                             <div className="text-14 text-ink-secondary truncate">
                               {[
