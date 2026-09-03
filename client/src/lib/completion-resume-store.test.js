@@ -70,20 +70,23 @@ describe("completion resume store (IndexedDB)", () => {
 });
 
 describe("persistCompletionResumeOwed / restore / clear (marker + body)", () => {
-  // The body write is fire-and-forget; settle it before asserting.
+  // clear's body delete is fire-and-forget; settle it before asserting.
   const settle = () => new Promise((r) => setTimeout(r, 0));
 
-  it("sets the durable marker and stores the exact body beside it", async () => {
+  it("stores the exact body, then sets the durable marker", async () => {
     const body = committedBody();
-    persistCompletionResumeOwed("svc-1", body);
+    const pending = persistCompletionResumeOwed("svc-1", body);
+    // The marker must never be visible ahead of the body it promises: a
+    // reload between the two would land on the mismatch path.
+    expect(completionResumeOwed("svc-1")).toBe(false);
+    await pending;
     expect(completionResumeOwed("svc-1")).toBe(true);
-    await settle();
     expect(await restoreCompletionResumeBody("svc-1")).toEqual(body);
   });
 
-  it("keeps the marker when the body cannot be stored (today's behavior)", async () => {
+  it("still sets the marker when the body cannot be stored (today's behavior)", async () => {
     globalThis.indexedDB = undefined;
-    persistCompletionResumeOwed("svc-1", committedBody());
+    await persistCompletionResumeOwed("svc-1", committedBody());
     expect(completionResumeOwed("svc-1")).toBe(true);
     expect(await restoreCompletionResumeBody("svc-1")).toBeNull();
   });
@@ -95,8 +98,7 @@ describe("persistCompletionResumeOwed / restore / clear (marker + body)", () => 
   });
 
   it("clear removes both the marker and the body", async () => {
-    persistCompletionResumeOwed("svc-1", committedBody());
-    await settle();
+    await persistCompletionResumeOwed("svc-1", committedBody());
     clearCompletionResumeOwed("svc-1");
     await settle();
     expect(completionResumeOwed("svc-1")).toBe(false);
