@@ -924,12 +924,13 @@ function deriveCloseoutFacts(inputs) {
     const emailSentAt = isoOrNull(inv.email_sent_at);
     const paidAt = isoOrNull(inv.paid_at);
     const evidence = { invoiceId: inv.id, status, sentAt, smsSentAt, emailSentAt, receiptSentAt, paidAt, ...(live ? {} : { source: 'sibling_first_application' }) };
-    if (status === 'prepaid') invoiceDelivery = fact('done', 'prepaid', evidence);
     // A child invoice accrued to a NET payer's monthly statement is never
     // sent (or receipted) individually — admin-invoices refuses the
     // individual send for rows with payer_statement_id; the statement owns
-    // delivery in every status, including paid after settlement (#3776 r2 P2).
-    else if (inv.payer_statement_id) invoiceDelivery = fact('not_required', 'statement_accrued', { ruleSource: 'payer_statement', ...evidence, payerStatementId: inv.payer_statement_id });
+    // delivery in EVERY status, prepaid and paid-after-settlement included
+    // (#3776 r2 P2), so this outranks the status branches below.
+    if (inv.payer_statement_id) invoiceDelivery = fact('not_required', 'statement_accrued', { ruleSource: 'payer_statement', ...evidence, payerStatementId: inv.payer_statement_id });
+    else if (status === 'prepaid') invoiceDelivery = fact('done', 'prepaid', evidence);
     else if (INVOICE_SETTLED_STATUSES.has(status)) {
       // Paid ≠ receipted: receipt_sent_at is stamped only on confirmed
       // delivery; the queue row says where an unstamped receipt stands.
@@ -951,9 +952,10 @@ function deriveCloseoutFacts(inputs) {
       else if (jobStatus) invoiceDelivery = fact('pending', `receipt_${jobStatus}`, { ...evidence, receiptJobId: job.id, nextAttemptAt: isoOrNull(job.next_attempt_at) });
       // The Stripe success handler stamps paid_at before it enqueues the
       // receipt job (several awaited side effects later) — a read inside
-      // that window is not an operator gap (#3776 r1 P2). Older, or no
-      // paid_at to age against, is a genuinely never-enqueued receipt.
-      else if (paidAt && now.getTime() - new Date(paidAt).getTime() < RECEIPT_ENQUEUE_GRACE_MS) invoiceDelivery = fact('pending', 'paid_receipt_pending_enqueue', evidence);
+      // that window is not an operator gap (#3776 r1 P2). Older, no
+      // paid_at to age against, or a FUTURE paid_at (clock skew / bad data
+      // must not suppress a real gap) is a genuinely never-enqueued receipt.
+      else if (paidAt && (() => { const age = now.getTime() - new Date(paidAt).getTime(); return age >= 0 && age < RECEIPT_ENQUEUE_GRACE_MS; })()) invoiceDelivery = fact('pending', 'paid_receipt_pending_enqueue', evidence);
       else invoiceDelivery = fact('pending', 'paid_receipt_not_sent', evidence);
     }
     else if (inv.payer_id) invoiceDelivery = fact((sentAt || emailSentAt) ? 'done' : 'pending', (sentAt || emailSentAt) ? 'payer_invoice_sent' : 'payer_invoice_unsent', evidence);

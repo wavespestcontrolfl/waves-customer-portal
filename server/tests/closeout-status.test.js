@@ -422,6 +422,8 @@ describe('closeout-status: invoice + invoice delivery', () => {
     // Enqueue grace (#3776 follow-up): paid_at inside 5 min of NOW with no job is the webhook's own window, not a gap.
     expect(run({ liveInvoice: { ...paid, paid_at: '2026-08-31T14:58:00Z' } })).toMatchObject({ state: 'pending', reason: 'paid_receipt_pending_enqueue', paidAt: '2026-08-31T14:58:00.000Z' });
     expect(run({ liveInvoice: { ...paid, paid_at: '2026-08-31T14:50:00Z' } })).toMatchObject({ state: 'pending', reason: 'paid_receipt_not_sent' });
+    // A future paid_at never qualifies for the grace (clock skew must not hide a gap).
+    expect(run({ liveInvoice: { ...paid, paid_at: '2026-08-31T15:02:00Z' } })).toMatchObject({ state: 'pending', reason: 'paid_receipt_not_sent' });
     // A queued job inside the window still reports the queue state, not the grace.
     expect(run({ liveInvoice: { ...paid, paid_at: '2026-08-31T14:58:00Z' }, receiptJob: { id: 'rj', status: 'queued' } })).toMatchObject({ state: 'pending', reason: 'receipt_queued' });
     expect(run({ receiptJobLookupFailed: true })).toMatchObject({ state: 'unknown' });
@@ -493,7 +495,7 @@ describe('closeout-status: invoice + invoice delivery', () => {
     expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: { ...payer, email_sent_at: '2026-08-30T19:00:00Z' } })).facts.invoiceDelivery)
       .toMatchObject({ state: 'done', reason: 'payer_invoice_sent', emailSentAt: '2026-08-30T19:00:00.000Z' });
     // Statement-accrued child: never sent individually, in any status — the statement owns delivery (#3776 r2 P2).
-    for (const status of ['draft', 'sent', 'paid']) {
+    for (const status of ['draft', 'sent', 'paid', 'prepaid']) {
       expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: { ...payer, status, payer_statement_id: 'stmt-1' } })).facts.invoiceDelivery)
         .toMatchObject({ state: 'not_required', reason: 'statement_accrued', ruleSource: 'payer_statement', payerStatementId: 'stmt-1' });
     }
