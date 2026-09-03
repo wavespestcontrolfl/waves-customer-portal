@@ -5,6 +5,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const leadAttribution = require('../services/lead-attribution');
 const agentActivity = require('../services/agent-activity');
+const modelSwitchboard = require('../services/model-switchboard');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
@@ -999,6 +1000,14 @@ router.get('/activity', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// Models tab: every AI lane resolved against the live registry
+// (config/models.js + the per-lane env pins), plus the model catalog the
+// picker may offer. Read-only — the switch itself is a Railway env change the
+// client composes; nothing here writes. See services/model-switchboard.js.
+router.get('/models', (_req, res) => {
+  res.json(modelSwitchboard.getSwitchboard());
 });
 
 router.get('/overview', async (_req, res) => {

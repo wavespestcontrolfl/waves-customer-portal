@@ -7,6 +7,8 @@
  *                            parked message_drafts; approve/revise sends)
  *   - "Shadow Drafts"      — AgentShadowDraftsPage (brand-voice loop:
  *                            silent SMS drafts + nightly judge scores)
+ *   - "Models"             — AgentModelsTab (model registry per AI lane +
+ *                            Railway env change composer)
  *
  * Per-tab URL state via ?tab=<key>; the URL is the single source of
  * truth (tab derives from useSearchParams on every render), so in-app
@@ -31,7 +33,7 @@
  */
 import React, { useState, useRef, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Activity, Bot, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, RefreshCw } from "lucide-react";
+import { Activity, Bot, Cpu, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, RefreshCw } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import AgentOpsPage from "./AgentOpsPage";
 import AgentDecisionsPage from "./AgentDecisionsPage";
@@ -39,6 +41,7 @@ import AgentShadowDraftsPage from "./AgentShadowDraftsPage";
 import PendingDraftsTab from "./PendingDraftsTab";
 import DataHygienePage from "./DataHygienePage";
 import AgentActivityTab from "./AgentActivityTab";
+import AgentModelsTab from "./AgentModelsTab";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const TAB_KEY = "tab";
@@ -49,6 +52,7 @@ const TABS = {
   DRAFTS: "drafts",
   SHADOW: "shadow",
   HYGIENE: "hygiene",
+  MODELS: "models",
 };
 const TAB_LIST = [
   { key: TABS.OVERVIEW, label: "Overview", Icon: LayoutGrid },
@@ -59,6 +63,9 @@ const TAB_LIST = [
   { key: TABS.DRAFTS, label: "Pending Drafts", Icon: MailCheck },
   { key: TABS.SHADOW, label: "Shadow Drafts", Icon: MessageSquareDashed },
   { key: TABS.HYGIENE, label: "Data Hygiene", Icon: DatabaseZap },
+  // Models — which model every AI lane runs on today, and the Railway env
+  // change that moves it (server/services/model-switchboard.js).
+  { key: TABS.MODELS, label: "Models", Icon: Cpu },
 ];
 const VALID_TABS = TAB_LIST.map((t) => t.key);
 
@@ -114,7 +121,7 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName="grid-cols-2 md:grid-cols-6"
+        navGridClassName="grid-cols-2 md:grid-cols-4 lg:grid-cols-7"
         action={
           tab === TABS.OVERVIEW
             ? {
@@ -137,6 +144,8 @@ export default function AgentsHubPage() {
           <PendingDraftsTab embedded />
         ) : tab === TABS.SHADOW ? (
           <AgentShadowDraftsPage embedded />
+        ) : tab === TABS.MODELS ? (
+          <AgentModelsTab />
         ) : (
           <DataHygienePage embedded />
         )}
