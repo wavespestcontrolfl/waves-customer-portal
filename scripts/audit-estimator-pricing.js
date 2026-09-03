@@ -798,9 +798,12 @@ function runBundleAndDiscountMatrix() {
       if (expectedAfter !== null) record(section, `${combo.join('+')} → ${li.service} annual after tier %`, { combo }, expectedAfter, li.annualAfterDiscount ?? li.finalAnnual ?? null, { extra: { tier: res.waveGuard.tier, finalMargin: li.finalMargin ?? null, belowMarginFloor: li.belowMarginFloor ?? null, listMargin: li.margin ?? null } });
     }
     // summary reconciliation: sum of recurring after-discount annuals = summary.recurringAnnualAfterDiscount (± rounding)
-    const sumAfter = round2(res.lineItems.filter((l) => Number.isFinite(l.annualAfterDiscount)).reduce((s, l) => s + l.annualAfterDiscount, 0));
-    record(section, `${combo.join('+')} summary recurringAnnualAfterDiscount vs Σ lines`, {}, sumAfter, res.summary.recurringAnnualAfterDiscount, { tolerance: 1.0 });
-    record(section, `${combo.join('+')} monthly = annual/12`, {}, round2(res.summary.recurringAnnualAfterDiscount / 12), res.summary.recurringMonthlyAfterDiscount, { tolerance: 1.0 });
+    // Cent-scale (codex r3 P2): every line annual and the summary are cent values,
+    // so the only legitimate slack is one half-cent of rounding per summed line.
+    const afterLines = res.lineItems.filter((l) => Number.isFinite(l.annualAfterDiscount));
+    const sumAfter = round2(afterLines.reduce((s, l) => s + l.annualAfterDiscount, 0));
+    record(section, `${combo.join('+')} summary recurringAnnualAfterDiscount vs Σ lines`, {}, sumAfter, res.summary.recurringAnnualAfterDiscount, { tolerance: afterLines.length * 0.005 + 0.001 });
+    record(section, `${combo.join('+')} monthly = annual/12`, {}, round2(res.summary.recurringAnnualAfterDiscount / 12), res.summary.recurringMonthlyAfterDiscount, { tolerance: 0.006 });
   }
   // Manual discount on top of Platinum (deepest permitted discount)
   const full = { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', tier: 'enhanced' }, mosquito: { tier: 'seasonal9' }, treeShrub: { tier: 'standard', treeCount: 6 } };
@@ -867,6 +870,9 @@ function runCommercialMatrix() {
     const r = runEngine(c.input);
     const lines = r.ok ? r.result.lineItems.map((l) => ({ service: l.service, annual: l.annual ?? null, price: l.price ?? null, perApp: l.perApp ?? l.perVisit ?? null, visits: l.visitsPerYear ?? l.visits ?? null, manualQuote: !!(l.quoteRequired || l.requiresCustomQuote || l.manualQuote), taxable: l.taxable ?? null, taxCategory: l.taxCategory ?? null, margin: l.margin ?? null, review: l.requiresManualReview ?? null })) : [];
     scenarios.push({ section, name: c.name, expected: null, actual: null, status: r.ok ? 'engine_only' : 'engine_error', extra: { engineError: r.ok ? null : r.error, tier: r.ok ? r.result.waveGuard.tier : null, lines } });
+    // A throwing commercial path is a P1 finding and a counted status, never a
+    // silent observation (codex r3 P1).
+    if (!r.ok) findings.push({ severity: 'P1', section, name: c.name, detail: `generateEstimate threw: ${r.error}` });
   }
 }
 
@@ -974,6 +980,7 @@ async function main() {
     scenarioCount: scenarios.length,
     matches: scenarios.filter((s) => s.status === 'match').length,
     mismatches: scenarios.filter((s) => s.status === 'MISMATCH').length,
+    engineErrors: scenarios.filter((s) => s.status === 'engine_error').length,
     noPrice: scenarios.filter((s) => s.status === 'NO_PRICE').length,
     engineOnly: scenarios.filter((s) => s.status === 'engine_only').length,
     findings,
@@ -983,7 +990,7 @@ async function main() {
   md.push('# Independent estimator pricing audit — run output');
   md.push('');
   md.push(`Generated ${summary.generatedAt}. Constants source: **${summary.engineConstantsSource}**.`);
-  md.push(`Scenarios: ${summary.scenarioCount} · independent-vs-engine matches: ${summary.matches} · mismatches: ${summary.mismatches} · expected a price but the engine returned none: ${summary.noPrice} · engine-only observations: ${summary.engineOnly} (${summary.matches} + ${summary.mismatches} + ${summary.noPrice} + ${summary.engineOnly} = ${summary.matches + summary.mismatches + summary.noPrice + summary.engineOnly}).`);
+  md.push(`Scenarios: ${summary.scenarioCount} · independent-vs-engine matches: ${summary.matches} · mismatches: ${summary.mismatches} · expected a price but the engine returned none: ${summary.noPrice} · engine-only observations: ${summary.engineOnly} (${summary.matches} + ${summary.mismatches} + ${summary.noPrice} + ${summary.engineOnly} = ${summary.matches + summary.mismatches + summary.noPrice + summary.engineOnly}) · commercial engine errors: ${summary.engineErrors}`);
   md.push('');
   md.push('## Findings raised by this run');
   md.push('');

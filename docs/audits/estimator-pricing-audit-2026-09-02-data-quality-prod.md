@@ -158,7 +158,7 @@ _(0 rows)_
 
 ## Live estimates whose stored WaveGuard tier differs from the engine tier
 
-_Round 2 (Codex P2): `differs_from_engine` now uses `IS DISTINCT FROM`, so a NULL stored tier beside a non-null engine tier counts. The table below is from the 2026-09-03T05:43Z run under the old `<>` predicate (NULL-tier rows could not register a difference) and was not re-queried; treat the NULL row's 0 as unmeasured until the next run._
+_Round 3 (Codex P2): the engine tier is read from every persisted carrier `serviceOptOutEngineTierReference` enumerates (ten paths), not two. Round 2 (Codex P2): `differs_from_engine` now uses `IS DISTINCT FROM`, so a NULL stored tier beside a non-null engine tier counts. The table below is from the 2026-09-03T05:43Z run under the old `<>` predicate (NULL-tier rows could not register a difference) and was not re-queried; treat the NULL row's 0 as unmeasured until the next run._
 
 | waveguard_tier | n | differs_from_engine |
 |---|---|---|
@@ -167,6 +167,8 @@ _Round 2 (Codex P2): `differs_from_engine` now uses `IS DISTINCT FROM`, so a NUL
 | Silver | 10 | 0 |
 
 ## Accepted estimates with a frozen cost/margin snapshot (plus the all-snapshot missing-cost count, scoped separately)
+
+_Round 3 (Codex P2): `accepted_without_cost` now evaluates the LATEST snapshot per accepted estimate; the value below is from the any-snapshot predicate and was not re-queried._
 
 | accepted | with_snapshot | accepted_without_cost | all_snapshots | all_snapshots_without_cost |
 |---|---|---|---|---|
@@ -183,6 +185,8 @@ _Round 2 (Codex P2): `differs_from_engine` now uses `IS DISTINCT FROM`, so a NUL
 | monthly_membership | 3 | 3 | 0 | 0 | 0 |
 
 ## Completed billable visits since 2026-06-01 with no invoice (by lane)
+
+_Round 3 (Codex P1): the script's predicate now mirrors the Billing Recovery workbench's `uninvoicedLeakQuery` (effective price incl. per-application fee, dispositions, record-level callbacks, always-free types, self-pay only, autopay rule). The table below is the earlier, looser predicate and was not re-queried; the workbench figure supersedes it._
 
 _Round 2 (Codex P2): membership-covered visits (`billing_mode = monthly_membership`) are excluded — dues cover them and no per-visit invoice is expected. The query groups by lane, so the filter removes exactly that lane's row (2 visits, $196.60); the remaining rows are unchanged from the 2026-09-03T05:43Z run and were not re-queried._
 

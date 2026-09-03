@@ -1,7 +1,7 @@
 # Independent estimator pricing audit — run output
 
-Generated 2026-09-03T10:47:45.150Z. Constants source: **constants.js (in-code defaults)**.
-Scenarios: 1247 · independent-vs-engine matches: 1204 · mismatches: 0 · expected a price but the engine returned none: 0 · engine-only observations: 43 (1204 + 0 + 0 + 43 = 1247).
+Generated 2026-09-03T11:02:53.018Z. Constants source: **constants.js (in-code defaults)**.
+Scenarios: 1247 · independent-vs-engine matches: 1204 · mismatches: 0 · expected a price but the engine returned none: 0 · engine-only observations: 43 (1204 + 0 + 0 + 43 = 1247) · commercial engine errors: 0
 
 ## Findings raised by this run
 

@@ -196,8 +196,10 @@ describe('pricing audit — one-time pest, discounts, tiers', () => {
         if (eligible) expect(close(li.annualAfterDiscount, Math.round(li.annual * (1 - exp.discount) * 100) / 100)).toBe(true);
         if (li.service === 'palm_injection') expect(li.discount.effectiveDiscount).toBe(0);
       }
-      const sumAfter = res.lineItems.filter((l) => Number.isFinite(l.annualAfterDiscount)).reduce((s, l) => s + l.annualAfterDiscount, 0);
-      expect(close(sumAfter, res.summary.recurringAnnualAfterDiscount, 1.0)).toBe(true);
+      const afterLines = res.lineItems.filter((l) => Number.isFinite(l.annualAfterDiscount));
+      const sumAfter = Math.round(afterLines.reduce((s, l) => s + l.annualAfterDiscount, 0) * 100) / 100;
+      // cent-scale: one half-cent of rounding per summed line is the only legitimate slack
+      expect(close(sumAfter, res.summary.recurringAnnualAfterDiscount, afterLines.length * 0.005 + 0.001)).toBe(true);
     },
   );
 
@@ -384,7 +386,7 @@ describe("pricing audit — FROZEN golden prices (in-code constants, reviewed 20
     ["mosquito monthly12 15,000 sf lot", { ...BASE, lotSqFt: 15000, lawnSqFt: undefined, services: { mosquito: { tier: "monthly12" } } }, "mosquito", { perVisit: 72, annual: 864, monthly: 72 }],
     ["rodent bait 2,000 sf", { ...BASE, services: { rodentBait: {} } }, "rodent_bait", { perVisit: 89, annual: 356, monthly: 29.67, visitsPerYear: 4 }],
     ["termite bait (Trelona) 2,000 sf monitoring", { ...BASE, services: { termite: { system: "trelona" } } }, "termite_bait", { perApp: 72, annual: 288, monthly: 24, visitsPerYear: 4 }],
-    ["one-time pest 2,000 sf", { ...BASE, services: { oneTimePest: {} } }, "one_time_pest", { basePrice: 112 }],
+    ["one-time pest 2,000 sf", { ...BASE, services: { oneTimePest: {} } }, "one_time_pest", { price: 246, priceAfterDiscount: 246, multiplier: 2.2, basePrice: 112, selectedFloor: 199 }],
   ];
   test.each(FROZEN)("%s prices exactly as frozen", (_name, input, service, expected) => {
     const li = line(generateEstimate(input), service);

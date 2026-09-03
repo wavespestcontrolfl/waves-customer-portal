@@ -31,6 +31,16 @@ const MD_OUT = argValue('--md');
 // PR B1) must never silently run the default checks (codex P1 on PR #3792).
 const KNOWN_FLAGS = new Map([['--json', 1], ['--md', 1], ['--since', 1]]);
 const SINCE = argValue('--since') || '2026-06-01';
+// Reused from the billing code, never re-typed (codex r3 P1): the always-free
+// service-type list and the active-autopay predicate the workbench applies.
+const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS } = require(path.join(__dirname, '..', 'server', 'services', 'no-cost-visit-types'));
+const { autopayActivePredicate } = require(path.join(__dirname, '..', 'server', 'services', 'autopay-eligibility'));
+const { etDateString } = require(path.join(__dirname, '..', 'server', 'utils', 'datetime-et'));
+const TODAY_ET = etDateString(new Date());
+const ALWAYS_FREE_SQL_ARRAY = ALWAYS_FREE_SERVICE_TYPE_PATTERNS.map((p) => `'%${p.replace(/'/g, "''")}%'`).join(',');
+const AUTOPAY_ACTIVE_SQL = autopayActivePredicate(new Date()).sql.replace('?', '$2');
+const ENGINE_TIER_SQL = `coalesce(${['serviceOptOut,engineTier','result,recurring,waveGuardTier','result,recurring,tier','recurring,waveGuardTier','recurring,tier','engineResult,recurring,waveGuardTier','engineResult,recurring,tier','engineResult,waveGuard,tier','result,waveGuard,tier','waveGuard,tier'].map((p) => { const k = p.split(','); return `nullif(trim(estimate_data${k.slice(0, -1).map((x) => `->'${x}'`).join('')}->>'${k[k.length - 1]}'), '')`; }).join(', ')})`;
+const EFFECTIVE_PRICE_SQL = "coalesce(nullif(ss.estimated_price, 0), case when c.billing_mode = 'per_application' then c.per_application_fee end, 0)";
 // CLI-only validation (a library require under another argv must not exit):
 // unknown flags are rejected, and the window is validated as YYYY-MM-DD and
 // bound as a query parameter below (never interpolated into SQL — codex P1
@@ -207,8 +217,8 @@ const CHECKS = [
     title: 'Live estimates whose stored WaveGuard tier differs from the engine tier',
     sql: `select waveguard_tier, count(*) as n,
                  -- IS DISTINCT FROM so a NULL stored tier beside a non-null engine tier counts (codex r2 P2); rows with no engine tier in the snapshot are not comparable
-                 count(*) filter (where coalesce(estimate_data->'result'->'recurring'->>'waveGuardTier', estimate_data->'engineResult'->'waveGuard'->>'tier') is not null
-                                    and lower(waveguard_tier) is distinct from lower(coalesce(estimate_data->'result'->'recurring'->>'waveGuardTier', estimate_data->'engineResult'->'waveGuard'->>'tier'))) as differs_from_engine
+                 -- engine-tier carriers mirror serviceOptOutEngineTierReference (estimate-service-opt-out.js) — codex r3 P2
+                 count(*) filter (where ${ENGINE_TIER_SQL} is not null and lower(waveguard_tier) is distinct from lower(${ENGINE_TIER_SQL})) as differs_from_engine
           from estimates where archived_at is null and status in ('sent','viewed','accepted','draft') group by 1 order by 2 desc`,
   },
   {
@@ -216,8 +226,9 @@ const CHECKS = [
     title: 'Accepted estimates with a frozen cost/margin snapshot (plus the all-snapshot missing-cost count, scoped separately)',
     sql: `select (select count(*) from estimates where status='accepted') as accepted,
                  (select count(distinct s.estimate_id) from estimate_pricing_audit_snapshots s join estimates e on e.id=s.estimate_id where e.status='accepted') as with_snapshot,
-                 (select count(distinct s.estimate_id) from estimate_pricing_audit_snapshots s join estimates e on e.id=s.estimate_id
-                    where e.status='accepted' and (s.estimated_cost is null or s.estimated_cost = 0)) as accepted_without_cost,
+                 -- LATEST snapshot per accepted estimate (snapshots are append-only; the reader uses the newest row — codex r3 P2)
+                 (select count(*) from (select distinct on (s.estimate_id) s.estimate_id, s.estimated_cost from estimate_pricing_audit_snapshots s join estimates e on e.id=s.estimate_id where e.status='accepted' order by s.estimate_id, s.snapshot_at desc) latest
+                    where latest.estimated_cost is null or latest.estimated_cost = 0) as accepted_without_cost,
                  (select count(*) from estimate_pricing_audit_snapshots) as all_snapshots,
                  (select count(*) from estimate_pricing_audit_snapshots where estimated_cost is null or estimated_cost = 0) as all_snapshots_without_cost`,
   },
@@ -233,19 +244,40 @@ const CHECKS = [
   },
   {
     key: 'visits_uninvoiced',
-    title: `Completed billable visits since ${SINCE} with no invoice (by lane)`,
-    params: [SINCE],
+    // Mirrors uninvoicedLeakQuery in server/routes/admin-billing-recovery.js
+    // (the authoritative Billing Recovery workbench predicate — codex r3 P1):
+    // effective price > 0 (row price, else the per-application fee), completed
+    // service record or status-only completion, not dispositioned, no
+    // non-void invoice on the record or the visit, no callback on either row,
+    // not fully prepaid, self-pay only, never an always-free type, and not an
+    // active-autopay customer unless on a per-visit lane. Two deliberate
+    // differences: membership-covered visits are excluded outright (dues cover
+    // them), and any visit stamped with an annual-prepay term is excluded —
+    // the workbench validates term coverage in JS (annualPrepayCoversVisit),
+    // which this raw-SQL audit cannot, so it under-counts lapsed terms.
+    title: `Completed billable visits since ${SINCE} with no invoice (by lane) — Billing Recovery predicate`,
+    params: [SINCE, TODAY_ET],
     sql: `with u as (
-            select ss.id, ss.customer_id, ss.scheduled_date, ss.estimated_price, c.billing_mode
-            from scheduled_services ss join customers c on c.id = ss.customer_id
+            select distinct ss.id, ss.customer_id, ss.scheduled_date, ${EFFECTIVE_PRICE_SQL} as effective_price, c.billing_mode
+            from scheduled_services ss
+            join customers c on c.id = ss.customer_id
+            left join service_records sr on sr.scheduled_service_id = ss.id
+            left join visit_billing_dispositions d on d.scheduled_service_id = ss.id
             where ss.status='completed' and ss.scheduled_date >= $1::date
-              and not coalesce(ss.is_callback,false)
-              and not (coalesce(ss.prepaid_amount,0) > 0 or ss.annual_prepay_term_id is not null)
-              and coalesce(c.billing_mode,'') <> 'monthly_membership' -- dues cover these visits; no per-visit invoice is expected (admin-dispatch.js dues_covered_priced_series)
-              and not exists (select 1 from invoices i where (i.scheduled_service_id = ss.id or (i.service_record_id is not null and i.service_record_id in (select id from service_records sr where sr.scheduled_service_id = ss.id))) and i.archived_at is null))
+              and ${EFFECTIVE_PRICE_SQL} > 0
+              and d.id is null
+              and (sr.status = 'completed' or (sr.id is null and ss.status = 'completed'))
+              and not exists (select 1 from invoices i where (i.service_record_id = sr.id or i.scheduled_service_id = ss.id) and coalesce(i.status, '') <> 'void')
+              and coalesce(ss.is_callback,false) = false and coalesce(sr.is_callback,false) = false
+              and coalesce(ss.prepaid_amount,0) < ${EFFECTIVE_PRICE_SQL}
+              and ss.annual_prepay_term_id is null
+              and coalesce(ss.payer_id, case when coalesce(ss.self_pay_override,false) then null else c.payer_id end) is null
+              and coalesce(ss.service_type,'') not ilike all (array[${ALWAYS_FREE_SQL_ARRAY}]::text[])
+              and coalesce(c.billing_mode,'') <> 'monthly_membership'
+              and (not ${AUTOPAY_ACTIVE_SQL} or c.billing_mode in ('per_application','per_visit','one_time')))
           select coalesce(billing_mode,'NULL') as lane, count(*) as uninvoiced,
                  count(*) filter (where not exists (select 1 from invoices i where i.customer_id = u.customer_id and i.archived_at is null and i.service_date between u.scheduled_date - 3 and u.scheduled_date + 3)) as no_invoice_within_3_days,
-                 round(coalesce(sum(estimated_price) filter (where not exists (select 1 from invoices i where i.customer_id = u.customer_id and i.archived_at is null and i.service_date between u.scheduled_date - 3 and u.scheduled_date + 3)),0)::numeric,2) as est_price_at_risk
+                 round(coalesce(sum(effective_price) filter (where not exists (select 1 from invoices i where i.customer_id = u.customer_id and i.archived_at is null and i.service_date between u.scheduled_date - 3 and u.scheduled_date + 3)),0)::numeric,2) as est_price_at_risk
           from u group by 1 order by 2 desc`,
   },
   {
