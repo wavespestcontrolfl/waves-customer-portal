@@ -147,8 +147,11 @@ function extractTreeShrubEstimate(estimateData) {
 
   const tsMeta = estimateData.result?.results?.tsMeta;
   if (tsMeta && (positiveNumber(tsMeta.eb) || positiveNumber(tsMeta.et))) {
-    const profile = (estimateData.engineRequest && typeof estimateData.engineRequest === 'object'
-      ? estimateData.engineRequest.profile : null) || {};
+    const engineRequest = estimateData.engineRequest && typeof estimateData.engineRequest === 'object'
+      ? estimateData.engineRequest : null;
+    const profile = engineRequest?.profile || {};
+    const options = engineRequest?.options && typeof engineRequest.options === 'object'
+      ? engineRequest.options : {};
     const tierRows = estimateData.result?.results?.ts;
     const selected = Array.isArray(tierRows) ? tierRows.find((row) => row?.selected) : null;
     return {
@@ -162,13 +165,15 @@ function extractTreeShrubEstimate(estimateData) {
         ? tsMeta.bedAreaIsEstimated : null,
       treeCount: nonnegativeCount(tsMeta.et),
       // Every writer that produces this mapped shape prices T&S through
-      // translateV2CallToV1Input's services.treeShrub = { tier } — the
-      // engine then receives access: 'easy' explicitly (estimate-engine
-      // :839). 'easy' IS the priced access here, so null would defeat the
-      // priced-vs-observed access calibration (pre-push P1 r4). The
-      // profile reads stay first for any future writer that persists a
-      // real access on the replay profile.
-      access: normalizedEnum(profile.access || profile.features?.access) || 'easy',
+      // translateV2CallToV1Input's services.treeShrub — since v4.8 the
+      // admin builder's Access select rides engineRequest.options
+      // .treeShrubAccess (audit INP-004), which is THE priced access when
+      // present; the older { tier } shape priced 'easy' explicitly
+      // (estimate-engine :839), so 'easy' stays the fallback — null would
+      // defeat the priced-vs-observed access calibration (pre-push P1 r4).
+      access: normalizedEnum(options.treeShrubAccess)
+        || normalizedEnum(profile.access || profile.features?.access)
+        || 'easy',
       tier: normalizedEnum(selected?.tier),
       onSiteMin: null,
     };

@@ -3911,6 +3911,30 @@ function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
 
 // Bermuda suppression is dark until GATE_BERMUDA_SUPPRESSION is flipped.
 // Requested-while-dark fails CLOSED with a 400 the builder surfaces verbatim.
+// Tree & shrub service-line inputs from the admin builder (audit
+// INP-001..005). A present-but-malformed value is REJECTED at the API
+// boundary — never silently dropped, defaulted, or clamped into a confident
+// price; an absent value stays absent so the pricer's own fallbacks run.
+const TREE_SHRUB_TIERS = new Set(['light', 'standard', 'enhanced']);
+const TREE_SHRUB_ACCESS = new Set(['easy', 'moderate', 'difficult']);
+function treeShrubInputError(message) {
+  const err = new Error(message);
+  err.statusCode = 400;
+  err.code = 'TREE_SHRUB_INPUT_INVALID';
+  return err;
+}
+// First PRESENT value wins: a non-negative integer (an explicit 0 is a real
+// answer) is returned, a malformed one throws, undefined/null/'' are skipped.
+function firstNonNegativeIntegerOrThrow(label, ...values) {
+  for (const value of values) {
+    if (value === undefined || value === null || String(value).trim() === '') continue;
+    const n = Number(value);
+    if (!Number.isInteger(n) || n < 0) throw treeShrubInputError(`${label} must be a whole number of 0 or more.`);
+    return n;
+  }
+  return undefined;
+}
+
 function requireBermudaSuppressionGate() {
   if (require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) return true;
   const err = new Error('Bermudagrass suppression is not enabled on this environment (GATE_BERMUDA_SUPPRESSION) — uncheck the add-on or flip the gate.');
@@ -4111,7 +4135,50 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       ...(commercialProfile && commercialSubtype ? { commercialSubtype } : {}),
     };
   }
-  if (sel.has('TREE_SHRUB')) services.treeShrub = { tier: 'standard' };
+  // Tree count for the property features AND the tree & shrub service line:
+  // the operator's typed value (an explicit 0 included) wins, a positive
+  // vision estimate backstops, and nothing at all stays ABSENT so
+  // priceTreeShrub's treeDensity fallback runs — the old
+  // `Number(a || b) || 0` fabricated a 0 that priced the per-tree material
+  // away (audit INP-002).
+  const typedTreeCount = firstNonNegativeIntegerOrThrow('Tree count', p.treeCount);
+  const estimatedTreeCount = Number(p.estimatedTreeCount);
+  const resolvedTreeCount = typedTreeCount
+    ?? (Number.isInteger(estimatedTreeCount) && estimatedTreeCount > 0 ? estimatedTreeCount : undefined);
+  if (sel.has('TREE_SHRUB')) {
+    // v4.8 (audit INP-001..004): the builder's tree & shrub inputs ride the
+    // SERVICE line exactly like the public quote's (public-quote.js). The
+    // line used to be the literal { tier: 'standard' }, so program and
+    // access were never selectable and property-level palms only reached the
+    // disarmed palm reserve — 30 palms priced $0 here and $505/yr on the
+    // website form for the same home.
+    const tsTier = String(o.treeShrubTier || 'standard').trim().toLowerCase();
+    if (!TREE_SHRUB_TIERS.has(tsTier)) throw treeShrubInputError('Tree & Shrub program must be light, standard, or enhanced.');
+    const tsAccess = String(o.treeShrubAccess || 'easy').trim().toLowerCase();
+    if (!TREE_SHRUB_ACCESS.has(tsAccess)) throw treeShrubInputError('Tree & Shrub access must be easy, moderate, or difficult.');
+    // Palms: the same resolution the property block uses below (a stored
+    // inventory count, else the vision estimate when its trust verdict
+    // allows it); a present-but-invalid count is rejected under the
+    // public-quote / intent-schema contract (whole number 1–200), never
+    // clamped into a confident price.
+    const palmRaw = measurementValue(
+      p.palmCount,
+      p.palmInventory?.palmCount,
+      p.palmCountTrusted === false ? undefined : p.estimatedPalmCount,
+    );
+    let tsPalmCount;
+    if (palmRaw !== undefined) {
+      const n = Number(palmRaw);
+      if (!(Number.isInteger(n) && n > 0 && n <= 200)) throw treeShrubInputError('Palm count must be a whole number between 1 and 200.');
+      tsPalmCount = n;
+    }
+    services.treeShrub = {
+      tier: tsTier,
+      access: tsAccess,
+      ...(resolvedTreeCount !== undefined ? { treeCount: resolvedTreeCount } : {}),
+      ...(tsPalmCount !== undefined ? { palmCount: tsPalmCount } : {}),
+    };
+  }
   if (sel.has('PALM_INJECTION')) {
     const requestedPalmSize = String(palmRequest.palmSize || o.palmSize || p.palmSize || 'medium').toLowerCase();
     const palmSize = ['small', 'medium', 'large'].includes(requestedPalmSize)
@@ -4483,7 +4550,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     complexity: (p.landscapeComplexity || 'SIMPLE').toLowerCase(),
     nearWater: p.nearWater === 'YES',
     irrigation: !!p.irrigation,
-    treeCount: Number(p.treeCount || p.estimatedTreeCount) || 0,
+    // Absent when nothing was typed or estimated (see resolvedTreeCount).
+    ...(resolvedTreeCount !== undefined ? { treeCount: resolvedTreeCount } : {}),
   };
 
   const perimeterLF = p.perimeterLF ?? p.perimeterLf;

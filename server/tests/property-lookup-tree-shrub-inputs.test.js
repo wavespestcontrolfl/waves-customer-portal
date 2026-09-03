@@ -1,0 +1,143 @@
+// Admin builder → tree & shrub service line (estimator pricing audit
+// INP-001, INP-002, INP-004). translateV2CallToV1Input used to emit the
+// literal services.treeShrub = { tier: 'standard' }: program and access were
+// never selectable, property-level palms never reached the per-tree terms
+// (30 palms priced $0 on the admin path and $505/yr on the website form for
+// the same home), and a blank tree count posted an explicit 0 that priced
+// the treeDensity fallback away.
+const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+const { generateEstimate } = require('../services/pricing-engine');
+
+function baseProfile(extra = {}) {
+  return {
+    address: 'TEST-TREE-SHRUB-INPUTS',
+    propertyType: 'single_family',
+    category: 'residential',
+    homeSqFt: 2400,
+    lotSqFt: 9000,
+    stories: 1,
+    footprint: 2400,
+    serviceZone: 'A',
+    shrubDensity: 'MODERATE',
+    treeDensity: 'MODERATE',
+    landscapeComplexity: 'MODERATE',
+    pool: 'NO',
+    poolCage: 'NO',
+    hasLargeDriveway: false,
+    nearWater: 'NO',
+    ...extra,
+  };
+}
+
+const treeShrubLine = (input) => generateEstimate(input).lineItems.find((li) => li.service === 'tree_shrub');
+
+describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () => {
+  test('defaults: standard program, easy access, no count fabricated (INP-002)', () => {
+    const input = translateV2CallToV1Input(baseProfile(), ['TREE_SHRUB'], {});
+    expect(input.services.treeShrub).toEqual({ tier: 'standard', access: 'easy' });
+    // The property block carries NO treeCount either — the pricer's
+    // treeDensity fallback must run instead of pricing zero trees.
+    expect(input.features).not.toHaveProperty('treeCount');
+    const line = treeShrubLine(input);
+    expect(line.treeCountSource).toBe('density_estimate');
+    expect(line.treeCount).toBeGreaterThan(0);
+  });
+
+  test('program and access selections ride the service line (INP-004)', () => {
+    const input = translateV2CallToV1Input(baseProfile(), ['TREE_SHRUB'], {
+      treeShrubTier: 'enhanced',
+      treeShrubAccess: 'difficult',
+    });
+    expect(input.services.treeShrub).toMatchObject({ tier: 'enhanced', access: 'difficult' });
+    const line = treeShrubLine(input);
+    expect(line.tier).toBe('enhanced');
+    expect(line.frequency).toBe(9);
+    expect(line.access).toBe('difficult');
+    // Case-insensitive, whitespace-tolerant — the select posts lowercase
+    // but a replayed engineRequest is data, not a contract.
+    expect(translateV2CallToV1Input(baseProfile(), ['TREE_SHRUB'], { treeShrubTier: ' Light ', treeShrubAccess: 'MODERATE' })
+      .services.treeShrub).toMatchObject({ tier: 'light', access: 'moderate' });
+  });
+
+  test('a malformed program or access is refused at the boundary, never defaulted', () => {
+    for (const options of [{ treeShrubTier: 'premium' }, { treeShrubTier: 'gold' }, { treeShrubAccess: 'impossible' }]) {
+      let caught;
+      try { translateV2CallToV1Input(baseProfile(), ['TREE_SHRUB'], options); } catch (err) { caught = err; }
+      expect(caught).toBeTruthy();
+      expect(caught.statusCode).toBe(400);
+      expect(caught.code).toBe('TREE_SHRUB_INPUT_INVALID');
+    }
+    // Not selected ⇒ the options are inert, never validated.
+    expect(() => translateV2CallToV1Input(baseProfile(), ['PEST'], { treeShrubTier: 'gold' })).not.toThrow();
+  });
+
+  test('typed tree count wins, an explicit 0 is a real answer, the vision estimate backstops (INP-002)', () => {
+    const typed = translateV2CallToV1Input(baseProfile({ treeCount: 7, estimatedTreeCount: 20 }), ['TREE_SHRUB'], {});
+    expect(typed.services.treeShrub.treeCount).toBe(7);
+    expect(typed.features.treeCount).toBe(7);
+
+    const zero = translateV2CallToV1Input(baseProfile({ treeCount: 0, estimatedTreeCount: 20 }), ['TREE_SHRUB'], {});
+    expect(zero.services.treeShrub.treeCount).toBe(0);
+    expect(zero.features.treeCount).toBe(0);
+    expect(treeShrubLine(zero).treeCountSource).toBe('explicit');
+
+    const estimated = translateV2CallToV1Input(baseProfile({ treeCount: '', estimatedTreeCount: 12 }), ['TREE_SHRUB'], {});
+    expect(estimated.services.treeShrub.treeCount).toBe(12);
+    expect(estimated.features.treeCount).toBe(12);
+
+    // A zero/absent estimate is "unknown", not a count.
+    const unknown = translateV2CallToV1Input(baseProfile({ treeCount: null, estimatedTreeCount: 0 }), ['TREE_SHRUB'], {});
+    expect(unknown.services.treeShrub).not.toHaveProperty('treeCount');
+    expect(unknown.features).not.toHaveProperty('treeCount');
+  });
+
+  test('a blank tree count prices MORE than a fabricated zero would have (INP-002 repro direction)', () => {
+    const blank = treeShrubLine(translateV2CallToV1Input(baseProfile({ treeCount: '' }), ['TREE_SHRUB'], {}));
+    const zero = treeShrubLine(translateV2CallToV1Input(baseProfile({ treeCount: 0 }), ['TREE_SHRUB'], {}));
+    expect(blank.annual).toBeGreaterThan(zero.annual);
+  });
+
+  test('a malformed tree count is refused (INP-005), not clamped', () => {
+    for (const treeCount of ['abc', -3, 2.5]) {
+      let caught;
+      try { translateV2CallToV1Input(baseProfile({ treeCount }), ['TREE_SHRUB'], {}); } catch (err) { caught = err; }
+      expect(caught?.statusCode).toBe(400);
+      expect(caught?.code).toBe('TREE_SHRUB_INPUT_INVALID');
+    }
+  });
+
+  test('property palms reach the tree & shrub service line and the price (INP-001)', () => {
+    const withPalms = translateV2CallToV1Input(baseProfile({ palmCount: 30 }), ['TREE_SHRUB'], {});
+    expect(withPalms.services.treeShrub.palmCount).toBe(30);
+    const palmLine = treeShrubLine(withPalms);
+    expect(palmLine.palmCount).toBe(30);
+    expect(palmLine.palmCountSource).toBe('service_line');
+
+    const noPalms = treeShrubLine(translateV2CallToV1Input(baseProfile(), ['TREE_SHRUB'], {}));
+    expect(palmLine.annual).toBeGreaterThan(noPalms.annual);
+  });
+
+  test('palm resolution mirrors the property block: inventory count, else a TRUSTED vision estimate', () => {
+    const inventory = translateV2CallToV1Input(
+      baseProfile({ palmInventory: { palmCount: 4 }, estimatedPalmCount: 40 }), ['TREE_SHRUB'], {},
+    );
+    expect(inventory.services.treeShrub.palmCount).toBe(4);
+
+    const trusted = translateV2CallToV1Input(baseProfile({ estimatedPalmCount: 9 }), ['TREE_SHRUB'], {});
+    expect(trusted.services.treeShrub.palmCount).toBe(9);
+
+    const untrusted = translateV2CallToV1Input(
+      baseProfile({ estimatedPalmCount: 9, palmCountTrusted: false }), ['TREE_SHRUB'], {},
+    );
+    expect(untrusted.services.treeShrub).not.toHaveProperty('palmCount');
+  });
+
+  test('a present-but-invalid palm count is refused under the 1–200 contract', () => {
+    for (const palmCount of [0, 201, 'many', 3.5]) {
+      let caught;
+      try { translateV2CallToV1Input(baseProfile({ palmCount }), ['TREE_SHRUB'], {}); } catch (err) { caught = err; }
+      expect(caught?.statusCode).toBe(400);
+      expect(caught?.code).toBe('TREE_SHRUB_INPUT_INVALID');
+    }
+  });
+});
