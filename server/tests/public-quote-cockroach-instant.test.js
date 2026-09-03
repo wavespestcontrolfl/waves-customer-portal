@@ -9,7 +9,7 @@ const { generateEstimate } = require('../services/pricing-engine');
 const { PEST } = require('../services/pricing-engine/constants');
 const { _internals, PUBLIC_QUOTE_SERVICE_KEYS } = require('../routes/public-quote');
 const { quoteServicesForKey, PUBLIC_INSTANT_QUOTE_KEYS, COCKROACH_PACKAGE_VISITS } = require('../services/public-services-menu');
-const { buildPublicQuoteServiceInterest, buildCompactPublicQuoteServiceInterest, derivePerApplication, isManualQuoteLine } = _internals;
+const { buildPublicQuoteServiceInterest, buildCompactPublicQuoteServiceInterest, derivePerApplication, isManualQuoteLine, estimateBlocksSelfBookLink, keyedLeadLabel } = _internals;
 
 const BASE_PROPERTY = { homeSqFt: 1800, lotSqFt: 8783, stories: 1, yearBuilt: 2005 };
 const roachLine = (input) => generateEstimate(input).lineItems.find((l) => l.service === 'pest_initial_roach');
@@ -57,6 +57,32 @@ describe('cockroach_control as a public instant quote', () => {
     // ONE knockdown fee — the package count never multiplies the price.
     const bracket = PEST.pestInitialRoach.regular_standalone.find((b) => 1800 < b.sqft);
     expect(Number(line.price)).toBe(Number(bracket.price));
+  });
+  test('keyed lead labels read the standalone display name the estimate line renders, not the catalog name (codex r1 P2)', () => {
+    const catalogRow = { service_key: 'cockroach_control', name: 'Cockroach Treatment', instant: true, booking_enabled: true };
+    const services = quoteServicesForKey('cockroach_control');
+    // Null ⇒ the route derives both labels from the expanded services.
+    expect(keyedLeadLabel(catalogRow, services)).toBeNull();
+    expect(buildPublicQuoteServiceInterest(services)).toBe('Cockroach Treatment Service');
+    expect(buildCompactPublicQuoteServiceInterest(services)).toBe('Roach');
+    const original = PEST.pestInitialRoach.display.regular_standalone;
+    PEST.pestInitialRoach.display.regular_standalone = { ...original, name: 'Roach Package' };
+    try {
+      expect(buildPublicQuoteServiceInterest(services)).toBe('Roach Package');
+    } finally {
+      PEST.pestInitialRoach.display.regular_standalone = original;
+    }
+    // Every other keyed product keeps the catalog name — identity wins.
+    expect(keyedLeadLabel({ service_key: 'mosquito_one_time', name: 'One-Time Mosquito' }, quoteServicesForKey('mosquito_one_time'))).toBe('One-Time Mosquito');
+    expect(keyedLeadLabel({ service_key: 'palm_injection', name: 'Palm Injection' }, {})).toBe('Palm Injection');
+    expect(keyedLeadLabel(null, services)).toBeNull();
+  });
+  test('prices instantly but never mints a self-book slot — the funnel cannot carry the identity visit 2 needs (codex r1 P1)', () => {
+    const estimate = generateEstimate({ ...BASE_PROPERTY, services: quoteServicesForKey('cockroach_control') });
+    expect(estimateBlocksSelfBookLink(estimate)).toBe(true);
+    // The block is the roach line itself, not a quote-required / handoff flag.
+    expect(estimateBlocksSelfBookLink({ lineItems: [{ service: 'pest_initial_roach', price: 250 }] })).toBe(true);
+    expect(estimateBlocksSelfBookLink({ lineItems: [{ service: 'mosquito', price: 250 }] })).toBe(false);
   });
   test('the footprint drives the bracket, not the lot', () => {
     const small = roachLine({ ...BASE_PROPERTY, homeSqFt: 1200, services: quoteServicesForKey('cockroach_control') });

@@ -627,6 +627,13 @@ const NO_SELF_BOOK_LINE_SERVICES = new Set([
   // never a self-book slot (GH codex #3585).
   'plugging',
   'top_dressing',
+  // Standalone cockroach package (catalog cockroach_control): the self-book
+  // funnel collapses the product to the generic pest_control key and persists
+  // a visit with no catalog service_id, so completion could never resolve the
+  // two-treatment profile that schedules the included second visit. Same
+  // rule as bed_bug, the other TWO_TREATMENT_PACKAGE_KEYS member: instant
+  // price, the owner books the first visit (codex #3842 r1 P1).
+  'pest_initial_roach',
 ]);
 function estimateBlocksSelfBookLink(estimate) {
   return estimateBlocksBookingHandoff(estimate)
@@ -735,6 +742,17 @@ function quoteOnRequestEstimate(keyedService, engineInput = {}) {
     property: { ...(engineInput.property || {}), turfFlags: [] },
     quoteOnRequest: true,
   };
+}
+
+// Keyed quotes carry the catalog name as the lead label — identity wins —
+// EXCEPT the standalone cockroach package, whose engine line renders the
+// admin-editable regular_standalone display name: the lead, notifications
+// and the customer's compact interest must read what the estimate line the
+// customer saw says, not a catalog name renamed independently of it (codex
+// #3842 r1 P2). Null ⇒ derive both labels from the expanded services.
+function keyedLeadLabel(keyedService, services = {}) {
+  if (!keyedService || services.pestInitialRoach) return null;
+  return keyedService.name;
 }
 
 function buildPublicQuoteServiceInterest(services = {}) {
@@ -1602,8 +1620,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       ? (commercialEstimatedLines[0].disclaimer || 'Estimated from property data — final price confirmed on site.')
       : null;
 
-    // Keyed quotes carry the catalog name as the label — identity wins.
-    const serviceInterest = keyedService ? keyedService.name : buildPublicQuoteServiceInterest(services);
+    const keyedLabel = keyedLeadLabel(keyedService, services);
+    const serviceInterest = keyedLabel || buildPublicQuoteServiceInterest(services);
     const leadServiceKey = keyedService ? keyedService.service_key : null;
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
@@ -1754,8 +1772,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // A keyed quote (instant or on-request) names its product from the
       // catalog — never derived from `services`, which is {} for on-request
       // (pre-push codex P1: that erased the customer's interest).
-      const serviceInterestForCustomer = keyedService
-        ? String(compactServiceInterestPart(keyedService.name) || keyedService.name).slice(0, 32)
+      const serviceInterestForCustomer = keyedLabel
+        ? String(compactServiceInterestPart(keyedLabel) || keyedLabel).slice(0, 32)
         : buildCompactPublicQuoteServiceInterest(services);
       // landing_page_url is varchar(500); UTM-heavy URLs can creep past it.
       const landingForCustomer = attr?.landing_url ? String(attr.landing_url).slice(0, 500) : null;
@@ -2922,6 +2940,7 @@ module.exports._internals = {
   publicQuoteBedBugInput,
   estimateBlocksBookingHandoff,
   estimateBlocksSelfBookLink,
+  keyedLeadLabel,
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   quoteOnRequestEstimate,

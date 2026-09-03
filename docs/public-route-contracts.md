@@ -463,7 +463,12 @@ review like the lawn programs). Catalog `cockroach_control` → `pestInitialRoac
 (owner ruling 2026-09-03: the two-treatment package priced as one
 regular_standalone knockdown on the home footprint; species / severity /
 price override stay staff-scoped, the site prices the native scale; the
-included second visit is booked at completion at no charge). All three are
+included second visit is booked at completion at no charge). It prices
+instantly but never mints a self-book slot (`bookingUrl` null, like bed
+bug): the self-book funnel collapses it to the generic pest visit with no
+catalog `service_id`, which the included second visit's scheduling needs —
+the owner books the first visit. Instant eligibility also requires the live
+`regular_standalone.treatments` display count to still read 2. All three are
 additive — no existing key or response field changed. Lot-priced keys (`mosquito`, `oneTimeMosquito`,
 `treeShrub`) park as `lot_size_requires_verification` when the lookup
 flagged the lot verify-first; the response is then a manual quote, never a

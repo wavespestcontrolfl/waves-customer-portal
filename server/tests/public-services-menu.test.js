@@ -8,6 +8,7 @@
  *    handler keeps it only when the catalog says it is publicly selectable.
  */
 const { loadPublicServicesMenu, isPublicSelectableServiceKey, publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS } = require('../services/public-services-menu');
+const { PEST } = require('../services/pricing-engine/constants');
 
 function fakeConn(rows, { hasColumn = true, throws = false } = {}) {
   const conn = () => {
@@ -170,6 +171,20 @@ describe('catalog drift never leaks into an instant quote', () => {
     expect(requestMatchesCatalogRow('cockroach_control', roach({ visits_per_year: 3 }))).toBe(false);
     expect(requestMatchesCatalogRow('cockroach_control', roach({ visits_per_year: null }))).toBe(false);
     expect(requestMatchesCatalogRow('cockroach_control', roach({ billing_type: 'recurring', frequency: 'semiannual' }))).toBe(false);
+    // The live display count the estimate line renders is the second
+    // authority: an admin edit to regular_standalone.treatments (3, or a
+    // missing key) stops the instant advertisement too (codex #3842 r1 P1).
+    const standalone = PEST.pestInitialRoach.display.regular_standalone;
+    try {
+      PEST.pestInitialRoach.display.regular_standalone = { ...standalone, treatments: 3 };
+      expect(requestMatchesCatalogRow('cockroach_control', roach())).toBe(false);
+      expect(menuItem(roach()).public_instant_quote).toBe(false);
+      PEST.pestInitialRoach.display.regular_standalone = { name: standalone.name };
+      expect(requestMatchesCatalogRow('cockroach_control', roach())).toBe(false);
+    } finally {
+      PEST.pestInitialRoach.display.regular_standalone = standalone;
+    }
+    expect(menuItem(roach()).public_instant_quote).toBe(true);
     expect(menuItem(pest6({ visits_per_year: 4 })).public_instant_quote).toBe(false);
     // admin edits only the frequency word — still not instant
     expect(requestMatchesCatalogRow('pest_general_bimonthly', pest6({ frequency: 'quarterly' }))).toBe(false);

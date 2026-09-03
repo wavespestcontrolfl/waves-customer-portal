@@ -12,6 +12,9 @@
  * its own reviewed product copy keyed by service_key (pre-push codex P1).
  */
 const db = require('../models/db');
+// Live (db-bridge merged) pricing display config — the treatment count the
+// cockroach estimate line advertises.
+const { constants: pricingConstants } = require('./pricing-engine');
 
 const FAMILY_LABELS = {
   pest_control: 'Pest Control',
@@ -88,7 +91,9 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
   // regular_standalone footprint scale); the included second visit is booked
   // at completion at no charge (typed-followup-obligation
   // TWO_TREATMENT_PACKAGE_KEYS). Species / severity / price override are
-  // staff-scoped — the site prices the native (regular) scale.
+  // staff-scoped — the site prices the native (regular) scale. Instant
+  // price only: the self-book funnel cannot carry the catalog identity the
+  // second visit needs (public-quote NO_SELF_BOOK_LINE_SERVICES).
   cockroach_control: { pestInitialRoach: { roachType: 'regular' } },
 });
 // Selectable but NOT instant (quote-on-request), because the public engine
@@ -145,17 +150,24 @@ function expectedCadenceForRequest(request) {
 // mapped request prices: recurring rows must match visits/year AND
 // frequency; one-time rows must not have become recurring.
 // The standalone cockroach request prices ONE knockdown and presents the
-// two-treatment package (pest_base.initial_roach.display.regular_standalone
-// .treatments = 2, pinned by public-quote-cockroach-instant.test.js). The
-// catalog row must still describe that package — an admin edit to its
-// visits_per_year (a one-visit row, or a three-visit program) would otherwise
-// keep advertising two included treatments (pre-push codex P1).
+// two-treatment package typed-followup-obligation schedules (visit 2 at
+// completion, then stops). Two independently admin-editable authorities
+// describe the package to the customer — the catalog row's visits_per_year
+// and the live pest_base.initial_roach.display.regular_standalone.treatments
+// the estimate line renders ("Includes N treatment visits.") — and BOTH must
+// still say two, or the instant quote advertises a package the obligation
+// does not deliver (pre-push codex P1; codex #3842 r1 P1).
 const COCKROACH_PACKAGE_VISITS = 2;
+function liveCockroachPackageTreatments() {
+  return Number(pricingConstants.PEST?.pestInitialRoach?.display?.regular_standalone?.treatments);
+}
 function requestMatchesCatalogRow(serviceKey, row) {
   const request = PUBLIC_QUOTE_REQUESTS[serviceKey];
   if (!request || !row) return false;
   if (request.pestInitialRoach) {
-    return row.billing_type !== 'recurring' && Number(row.visits_per_year) === COCKROACH_PACKAGE_VISITS;
+    return row.billing_type !== 'recurring'
+      && Number(row.visits_per_year) === COCKROACH_PACKAGE_VISITS
+      && liveCockroachPackageTreatments() === COCKROACH_PACKAGE_VISITS;
   }
   const expected = expectedCadenceForRequest(request);
   if (expected == null) return row.billing_type !== 'recurring';
