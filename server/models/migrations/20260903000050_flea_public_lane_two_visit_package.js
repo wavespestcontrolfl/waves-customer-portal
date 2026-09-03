@@ -12,7 +12,7 @@
  *    this PR is inert in prod until the single-visit offer leaves the row.
  *    Read-modify-write: only the `flea_knockdown_single` entry is dropped;
  *    every other key (admin-tuned prices, exterior tiers, guarantee) is
- *    kept. Audit row written; down() keys off it.
+ *    kept. Audit row written (down() never reverses it — see below).
  *
  * 2. service_completion_profiles.flea_tick — followup_policy 'none' →
  *    'alert' with default_followup_days 14: the same follow-up contract the
@@ -46,17 +46,15 @@
  *    reverse of the package (interior + follow-up; yard as the add-on);
  *    rewritten to match.
  *
- * ROLLBACK KEEPS BOTH IDENTITIES AND THE PROFILE: once a two-visit flea
- * estimate has been issued, its stored `flea_package` line must keep an
- * owner (catalogLinkForProfile) and its follow-up contract (the profile),
- * or an in-flight link would accept into an unlinked, follow-up-less visit
- * (GH codex #3845 r3 P0); and a reverted engine emits the single key again,
- * which must link too (pre-push codex). down() therefore restores the
- * pricing offer, RE-ADDS the single key BESIDE flea_package on the recorded
- * row (one row owns both — containment lookups resolve either, no duplicate
- * owner), restores the description, and leaves the profile at the package
- * policy (the roach and bed-bug rows carry the same policy on single-lane
- * catalog rows; a closeout card is dismissible). State is cleared.
+ * THE CUTOVER IS EXPLICITLY IRREVERSIBLE (GH codex #3845 r3 P0 + pre-push
+ * P0s): every partial rollback re-creates an incoherent contract — restoring
+ * the single offer / key re-enables a product whose single visits would then
+ * close out under the package follow-up policy, while restoring the profile
+ * strips issued package estimates of their follow-up contract. down()
+ * therefore only clears the migration state and warns; the pricing offer,
+ * the engine key, the description and the profile stay as up() left them.
+ * A code rollback must be paired with a NEW migration that re-seeds the
+ * single offer on purpose, never with this down().
  *
  * Prod 2026-09-03 (read-only): 0 estimates ever carried the single key; no
  * row claims flea_package.
@@ -66,7 +64,6 @@ const SINGLE_OFFER_KEY = 'flea_knockdown_single';
 const MIGRATION_TAG = 'migration:20260903000050';
 const STATE_KEY = 'migration.20260903000050.state';
 const UP_REASON = 'Remove the single-visit flea knockdown offer — flea is sold only as the two-visit package (owner ruling 2026-09-03)';
-const DOWN_REASON = 'Rollback: restore the single-visit flea knockdown offer (20260903000050)';
 
 const SERVICE_KEY = 'flea_tick';
 const OLD_ENGINE_KEYS = [SINGLE_OFFER_KEY];
@@ -226,40 +223,9 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
-  if (await knex.schema.hasTable('pricing_config_audit')) {
-    const ownUp = await knex('pricing_config_audit')
-      .where({ config_key: FLEA_CONFIG_KEY, changed_by: MIGRATION_TAG, reason: UP_REASON })
-      .orderBy('id', 'desc')
-      .first('old_value');
-    const row = await knex('pricing_config').where({ config_key: FLEA_CONFIG_KEY }).first();
-    if (ownUp && row) {
-      const before = parseData(ownUp.old_value);
-      const single = (before.offers || []).find((o) => offerKeyOf(o) === SINGLE_OFFER_KEY);
-      const data = parseData(row.data);
-      if (single && Array.isArray(data.offers) && !data.offers.some((o) => offerKeyOf(o) === SINGLE_OFFER_KEY)) {
-        await writeFleaConfig(knex, data, { ...data, offers: [single, ...data.offers] }, DOWN_REASON);
-      }
-    }
-  }
-
-  const state = await loadState(knex);
-  if (state && await knex.schema.hasTable('services') && await knex.schema.hasColumn('services', 'engine_keys')) {
-    // Both identities stay owned by the recorded row (see header): the
-    // single key rejoins the array, flea_package is never removed.
-    // Value-guarded on the exact array up() wrote.
-    for (const rec of (Array.isArray(state.stamped) ? state.stamped : [])) {
-      if (!rec || !rec.id || !Array.isArray(rec.before) || !Array.isArray(rec.after)) continue;
-      const restored = [...new Set([...rec.after, ...rec.before])];
-      await knex('services')
-        .where({ id: rec.id, service_key: SERVICE_KEY })
-        .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(rec.after)])
-        .update({
-          engine_keys: JSON.stringify(restored),
-          ...(rec.description ? { description: OLD_DESCRIPTION } : {}),
-          updated_at: knex.fn.now(),
-        });
-    }
-  }
+  // Irreversible by design (see header): nothing is restored. The state row
+  // is cleared so a deliberate re-seed migration starts from a clean record.
+  console.warn('[migration 20260903000050] rollback is a no-op by design: the flea two-visit cutover (pricing offer, catalog key, completion profile) is irreversible — re-seed the single-visit offer with a new migration if the product returns.');
   if (await knex.schema.hasTable('system_settings')) {
     await knex('system_settings').where({ key: STATE_KEY }).del();
   }
