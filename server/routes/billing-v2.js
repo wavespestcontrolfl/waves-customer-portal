@@ -319,10 +319,11 @@ router.get('/cards', async (req, res, next) => {
           const [soonest] = await liveHoldsForPaymentMethod({ customerId: req.customerId, stripePaymentMethodId: c.stripe_payment_method_id });
           if (!soonest) continue;
           // Same posture as GET /schedule: a grouped (or unknown-membership)
-          // stop is not customer self-reschedulable, so no link.
-          const grouped = soonest.rescheduleToken
-            ? await groupedVisit({ id: soonest.scheduledServiceId, visit_id: soonest.groupVisitId })
-            : true;
+          // stop is not customer self-reschedulable, so no link; a row with
+          // no group id is a solo stop and keeps its link (schedule.js skips
+          // the grouped lookup for those too).
+          const grouped = !soonest.rescheduleToken
+            || (soonest.groupVisitId ? await groupedVisit({ id: soonest.scheduledServiceId, visit_id: soonest.groupVisitId }) : false);
           holdsByCard.set(c.id, {
             serviceId: soonest.scheduledServiceId,
             start: soonest.start.toISOString(),

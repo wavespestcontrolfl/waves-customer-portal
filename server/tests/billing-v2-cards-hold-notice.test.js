@@ -101,6 +101,13 @@ test('no reschedule token: grouped lookup skipped, link null', async () => {
   expect(body.cards[0].holdsAppointment.rescheduleUrl).toBeNull();
 });
 
+test('no group id (solo stop): grouped lookup skipped, link kept — same as GET /schedule', async () => {
+  mockLiveHolds.mockResolvedValue([{ ...liveHold, groupVisitId: null }]);
+  const { body } = await getCards();
+  expect(mockGrouped).not.toHaveBeenCalled();
+  expect(body.cards[0].holdsAppointment.rescheduleUrl).toBe('/reschedule/tok-9');
+});
+
 test('lookup failure on one card: that card is bare, the list still renders, warning logged', async () => {
   mockLiveHolds.mockImplementation(async ({ stripePaymentMethodId }) => {
     if (stripePaymentMethodId === 'pm_stripe_1') throw new Error('db down');
