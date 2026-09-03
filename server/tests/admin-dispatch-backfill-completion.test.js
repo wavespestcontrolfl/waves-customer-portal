@@ -2265,7 +2265,10 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect(body).toContain("link: `/admin/customers/${svc.customer_id}`,");
       // A committed invoice row + a later failure is a RECONCILE bell, never a "create another" instruction (GH r1 P1).
       expect(body).toContain("dedupeKey: `live_invoice_postmint_failed:${svc.id}`,");
-      expect(body).toMatch(/const bell = invoice\?\.id\s*\n\s*\? await NotificationService\.notifyAdmin\(/);
+      // Lock + rescan + wording + insert in ONE transaction (GH r2 P1): a mint by another writer after the failed one released its lock must flip the wording, never leave a "create it" bell beside a live invoice.
+      expect(body).toMatch(/const bell = await db\.transaction\(async \(trx\) => \{\s*\n\s*await acquireScheduledInvoiceMintLock\(trx, svc\.id\);\s*\n\s*const liveNow = invoice\?\.id\s*\n\s*\? invoice\s*\n\s*: await completionSuppressorInvoiceLookup\(trx, \{ scheduled_service_id: svc\.id \}\);/);
+      expect(body).toMatch(/return liveNow\?\.id\s*\n\s*\? NotificationService\.notifyAdmin\(/);
+      expect((body.match(/\n\s*trx,\n/g) || []).length).toBe(2); // both bells dedupe + insert on the lock's transaction
       expect(body).toContain('do NOT create a second invoice');
       // No amount in either bell — the base amount is not the mint's total (GH r1 P1).
       expect(body).not.toContain('expectedAmountCents');

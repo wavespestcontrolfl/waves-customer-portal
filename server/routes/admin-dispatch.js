@@ -11509,26 +11509,41 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // completion is already committed.
         try {
           const NotificationService = require('../services/notification-service');
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
           const visitLabel = `${svc.service_type || 'this visit'} on ${String(svc.scheduled_date).slice(0, 10)}`;
-          const bell = invoice?.id
-            ? await NotificationService.notifyAdmin(
+          // Under the visit's invoice-mint lock, RESCAN for a live invoice
+          // and pick the wording in the same transaction (GH r2 P1): the
+          // failed mint released its lock, and Charge Now / checkout /
+          // a resume can mint between that release and this bell — a
+          // "create the invoice" instruction beside a live invoice is how
+          // a second collectible invoice happens. notifyAdmin dedupes on
+          // this trx too (its `trx` option), so lock, rescan, wording and
+          // insert commit together.
+          const bell = await db.transaction(async (trx) => {
+            await acquireScheduledInvoiceMintLock(trx, svc.id);
+            const liveNow = invoice?.id
+              ? invoice
+              : await completionSuppressorInvoiceLookup(trx, { scheduled_service_id: svc.id });
+            return liveNow?.id
+              ? NotificationService.notifyAdmin(
               'billing',
               'Completion invoice needs review — a post-mint step failed',
-              `The completion for ${visitLabel} committed and invoice ${invoice.invoice_number || invoice.id} was created, but a later invoicing step failed. Review that invoice on the customer page before it is sent — do NOT create a second invoice for this visit.`,
+              `The completion for ${visitLabel} committed and invoice ${liveNow.invoice_number || liveNow.id} exists, but a later invoicing step failed. Review that invoice on the customer page before it is sent — do NOT create a second invoice for this visit.`,
               {
                 link: `/admin/customers/${svc.customer_id}`,
                 bell: true,
                 dedupeKey: `live_invoice_postmint_failed:${svc.id}`,
+                trx,
                 metadata: {
                   customerId: svc.customer_id,
                   scheduledServiceId: svc.id,
                   serviceRecordId: record.id,
-                  invoiceId: invoice.id,
+                  invoiceId: liveNow.id,
                   error: String(invErr?.message || '').slice(0, 200),
                 },
               },
             )
-            : await NotificationService.notifyAdmin(
+            : NotificationService.notifyAdmin(
               'billing',
               'Completion invoice not created — bill this visit by hand',
               `The completion for ${visitLabel} committed, but its invoice could not be created; any completion text that sends will carry no pay link. Create and send the invoice from the customer page at the visit's price plus any add-ons or setup fee.`,
@@ -11536,6 +11551,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 link: `/admin/customers/${svc.customer_id}`,
                 bell: true,
                 dedupeKey: `live_invoice_mint_failed:${svc.id}`,
+                trx,
                 metadata: {
                   customerId: svc.customer_id,
                   scheduledServiceId: svc.id,
@@ -11544,6 +11560,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 },
               },
             );
+          });
           // notifyAdmin returns null (no throw) when its dedupe lock/insert
           // fails — log that too, or a lost bell reads as delivered.
           if (!bell) logger.error(`[dispatch] live invoice-mint-failed bell NOT recorded for ${svc.id} (notifyAdmin returned null)`);
