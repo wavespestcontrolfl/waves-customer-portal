@@ -10,7 +10,6 @@
  */
 
 const express = require('express');
-const { anthropicCreateWithSamplingRetry } = require('../services/llm/call');
 const router = express.Router();
 const crypto = require('crypto');
 const multer = require('multer');
@@ -468,7 +467,6 @@ async function analyzeWdoProjectIntelligence({ customer, propertyAddress, curren
     images,
     maxTokens: 900,
     jsonMode: true,
-    temperature: 0.2,
   });
 
   if (!msg.ok || !msg.json) {
@@ -536,10 +534,9 @@ function normalizeWdoTreatmentPhotoResult(raw) {
 async function extractWdoTreatmentPhoto({ photo, propertyAddress }) {
   const Anthropic = require('@anthropic-ai/sdk');
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const msg = await anthropicCreateWithSamplingRetry(anthropic, {
+  const msg = await anthropic.messages.create({
     model: MODELS.VISION,
     max_tokens: 700,
-    temperature: 0.2,
     messages: [{
       role: 'user',
       content: [
