@@ -132,7 +132,7 @@ Owner decisions that block implementation: §16 (11 items).
 | Quarterly Pest Control Service | 89–98 | 25 | 44 | 48 | 63 | 78–79 | $14.58 | $25.67 | −$11.08 (−9.9 pts at $112) | 45 min (median), report p75 |
 | Pest Control Service / Quarterly Pest Control / Pest Control (legacy names) | 19–33 each | 25 | 51–57 | 53–58 | 65–68 | 78–85 | $14.58 | $29.75–33.25 | −$15 to −$19 | same |
 | Monthly Pest Control Service | 6 | 20 | 36–37 | 41 | 51 | 61 | $11.67 | $21.58 | −$9.91 (−12.7 pts at $78) | 35 min |
-| Every 6 Weeks Lawn Care Service (9x) | 17 | 23.25 (4,500 sf) | 44 | 51 | 50 | 56 | $16.48 (incl. 5 drive) | $28.58 (+20 drive: $37.33) | −$12 to −$21 (−19 to −33 pts at $64) | 45 min + real drive |
+| Every 6 Weeks Lawn Care Service (9x) | 17 | 23.25 (4,500 sf) | 44 | 51 | 50 | 56 | $16.48 (incl. 5 drive) | $28.58 (recorded span, drive included) | −$12 to −$21 (−19 to −33 pts at $64) | 45 min + real drive |
 | Monthly Lawn Care Service (12x) | 7 | 23.25 | 37 | 40 | 46 | 54 | $16.48 | $24.50 | −$8 (−19 pts at $41) | 40 min |
 | Lawn Care Visit / Lawn Care (legacy) | 3–6 | 23.25 | 46–54 | 58–61 | 64–69 | 70–100 | $16.48 | $32–$36 | — | — |
 | One-Time Pest Control Service | 3 | (2.2× quarterly) | 36 | 37 | 38–39 | 40 | — | $32.67 | fine ($182 avg) | — |
@@ -141,7 +141,7 @@ Owner decisions that block implementation: §16 (11 items).
 | Rodent Trapping Service | 7 | none | 92 | 92 | 92 | 92 | $0 | $65.33 (+ unlimited callbacks) | 28% of $235 avg unmodeled | 90 min + callback reserve |
 | Pest Control Re-Service (callbacks) | 4–7 | none | 28 | 30 | 38 | 44 | $0 | $28 | 8 of 307 visits (2.6%) ⇒ ≈$0.73/visit | add reserve |
 
-Realized revenue per labor-hour including 20 min drive (production): quarterly pest $120/h, one-time pest $192/h, cockroach $268/h, WDO $188/h, rodent trapping $174/h, **lawn 9x $66/h, lawn 12x $62/h, lawn visit $54/h**. At a $35 loaded hour plus materials, lawn is the thin line.
+Realized revenue per hour of RECORDED span (production; the span already contains drive, so no drive minutes are added — MON-004; from the data-quality appendix): quarterly pest $305/h, one-time pest $295/h, cockroach $445/h, monthly pest $124/h, **lawn 9x $101/h**, **lawn 12x $92/h**, **lawn visit $77/h**. These are revenue per recorded hour, not margins, and carry no pricing recommendation; even so, at a $35 loaded hour plus materials, lawn is the thin line.
 
 Grouping by residential/commercial, size band and discount tier is **UNKNOWN** from production today: `scheduled_services` carries no sqft, `customers.property_sqft` is lawn area by schema, and the `service_type` string does not identify the plan (42 distinct strings, 21 match a catalog name, 0 match a key). Query needed once `service_key_snapshot` (219 of 434 visits) is universal: join `scheduled_services.source_estimate_id → estimates.estimate_data.engineInputs.homeSqFt/lawnSqFt` and `customers.waveguard_tier`.
 

@@ -35,11 +35,14 @@ const SINCE = argValue('--since') || '2026-06-01';
 // service-type list and the active-autopay predicate the workbench applies.
 const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS } = require(path.join(__dirname, '..', 'server', 'services', 'no-cost-visit-types'));
 const { autopayActivePredicate } = require(path.join(__dirname, '..', 'server', 'services', 'autopay-eligibility'));
+const { INTERNAL_TEST_CUSTOMERS } = require(path.join(__dirname, '..', 'server', 'services', 'internal-test-customers'));
 const { etDateString } = require(path.join(__dirname, '..', 'server', 'utils', 'datetime-et'));
 const TODAY_ET = etDateString(new Date());
 const ALWAYS_FREE_SQL_ARRAY = ALWAYS_FREE_SERVICE_TYPE_PATTERNS.map((p) => `'%${p.replace(/'/g, "''")}%'`).join(',');
 const AUTOPAY_ACTIVE_SQL = autopayActivePredicate(new Date()).sql.replace('?', '$2');
 const ENGINE_TIER_SQL = `coalesce(${['serviceOptOut,engineTier','result,recurring,waveGuardTier','result,recurring,tier','recurring,waveGuardTier','recurring,tier','engineResult,recurring,waveGuardTier','engineResult,recurring,tier','engineResult,waveGuard,tier','result,waveGuard,tier','waveGuard,tier'].map((p) => { const k = p.split(','); return `nullif(trim(estimate_data${k.slice(0, -1).map((x) => `->'${x}'`).join('')}->>'${k[k.length - 1]}'), '')`; }).join(', ')})`;
+// Same exclusion as the workbench (admin-billing-recovery.js INTERNAL_NAME_SQL + INTERNAL_TEST_CUSTOMERS) — codex r4 P1; empty list ⇒ no-op
+const INTERNAL_TEST_SQL = INTERNAL_TEST_CUSTOMERS.length ? `and lower(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')) not in (${INTERNAL_TEST_CUSTOMERS.map((n) => `'${String(n).toLowerCase().replace(/'/g, "''")}'`).join(',')})` : '';
 const EFFECTIVE_PRICE_SQL = "coalesce(nullif(ss.estimated_price, 0), case when c.billing_mode = 'per_application' then c.per_application_fee end, 0)";
 // CLI-only validation (a library require under another argv must not exit):
 // unknown flags are rejected, and the window is validated as YYYY-MM-DD and
@@ -274,6 +277,7 @@ const CHECKS = [
               and coalesce(ss.payer_id, case when coalesce(ss.self_pay_override,false) then null else c.payer_id end) is null
               and coalesce(ss.service_type,'') not ilike all (array[${ALWAYS_FREE_SQL_ARRAY}]::text[])
               and coalesce(c.billing_mode,'') <> 'monthly_membership'
+              ${INTERNAL_TEST_SQL}
               and (not ${AUTOPAY_ACTIVE_SQL} or c.billing_mode in ('per_application','per_visit','one_time')))
           select coalesce(billing_mode,'NULL') as lane, count(*) as uninvoiced,
                  count(*) filter (where not exists (select 1 from invoices i where i.customer_id = u.customer_id and i.archived_at is null and i.service_date between u.scheduled_date - 3 and u.scheduled_date + 3)) as no_invoice_within_3_days,
