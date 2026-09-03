@@ -22,7 +22,7 @@
  *              understate it.
  *   estimate — the customer's newest OPEN estimate (sending/sent/viewed ∩
  *              isEstimateCustomerViewable), short-wrapped kind 'estimate'.
- *   referral — referral-engine.enrollPromoter: idempotent, self-healing,
+ *   referral — referral-engine.resolvePromoter: idempotent, self-healing,
  *              guarantees a personal /r/CODE link. No short code (referral
  *              links go out raw everywhere).
  */
@@ -300,7 +300,7 @@ async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert
 }
 
 async function buildReferralLink(customerId) {
-  const { enrollPromoter, getLiveSettings } = require('./referral-engine');
+  const { resolvePromoter, getLiveSettings } = require('./referral-engine');
   // Same STRICT settings read as the report referral endpoint
   // (reports-public.js): no live row or inactive program = no enrollment
   // and no link — enrollPromoter's own getSettings() falls back to
@@ -318,35 +318,17 @@ async function buildReferralLink(customerId) {
   }
   let promoter;
   try {
-    ({ promoter } = await enrollPromoter(customerId));
-  } catch (err) {
-    // enrollPromoter is strictly per-customer while referral_promoters.
-    // customer_phone stays unique, so a multi-property sibling whose phone
-    // already backs another sibling's promoter loses the insert (23505).
-    // Same household fallback as the report referral endpoint
-    // (reports-public.js): resolve the promoter read-only, scoped to the
-    // SAME account_id — phone alone is not identity (recycled/shared
-    // numbers cross unrelated customers). No account-scoped match = a
-    // genuine cross-account collision → the plain reason, never a guessed
+    // Enroll-or-resolve: a multi-property sibling whose phone already backs
+    // another sibling's promoter resolves the household promoter read-only,
+    // scoped to the account (referral-engine.resolvePromoter); a cross-
+    // account collision rethrows → the plain reason, never a guessed
     // attribution. Log err.code only, never err.message — PG constraint
     // violations quote the conflicting value, which here is a phone number
     // (AGENTS.md PII-in-logs rule).
-    if (err?.code === '23505') {
-      const profile = await db('customers')
-        .where({ id: customerId })
-        .first('id', 'phone', 'account_id');
-      promoter = profile?.phone && profile?.account_id
-        ? await db('referral_promoters as rp')
-          .join('customers as c', 'rp.customer_id', 'c.id')
-          .where('rp.customer_phone', profile.phone)
-          .where('c.account_id', profile.account_id)
-          .first('rp.*')
-        : null;
-    }
-    if (!promoter) {
-      logger.warn(`[composer-links] referral enroll failed (customerId=${customerId}, code=${err?.code || 'none'})`);
-      return { url: null, line: '', reason: 'Could not build a referral link for this customer' };
-    }
+    ({ promoter } = await resolvePromoter(customerId));
+  } catch (err) {
+    logger.warn(`[composer-links] referral enroll failed (customerId=${customerId}, code=${err?.code || 'none'})`);
+    return { url: null, line: '', reason: 'Could not build a referral link for this customer' };
   }
   if (!promoter?.referral_link) {
     return { url: null, line: '', reason: 'Could not build a referral link for this customer' };

@@ -19,7 +19,7 @@ jest.mock('../services/pay-combined', () => ({
   amountDueCents: jest.fn((inv) => Math.round((inv.amount_due ?? 0) * 100)),
 }));
 jest.mock('../services/referral-engine', () => ({
-  enrollPromoter: jest.fn(),
+  resolvePromoter: jest.fn(),
   getLiveSettings: jest.fn(async () => ({ program_active: true })),
 }));
 jest.mock('../routes/estimate-public', () => ({
@@ -52,7 +52,7 @@ jest.mock('../models/db', () => mockDb);
 
 const { openBalanceSummary } = require('../services/open-balance');
 const { combinedEligibleSiblings } = require('../services/pay-combined');
-const { enrollPromoter, getLiveSettings } = require('../services/referral-engine');
+const { resolvePromoter, getLiveSettings } = require('../services/referral-engine');
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
 const { requestAutopaySetupLink, setupLinkIneligibility } = require('../services/autopay-setup-link');
 const { isEnabled } = require('../config/feature-gates');
@@ -337,23 +337,20 @@ describe('buildReviewRequestLink', () => {
 });
 
 describe('buildReferralLink', () => {
-  test('a 23505 unique-phone conflict falls back to the account-scoped household promoter', async () => {
-    // Multi-property sibling: another sibling's promoter row already owns
-    // the shared phone — same fallback as the report referral endpoint.
-    enrollPromoter.mockRejectedValue(Object.assign(new Error('duplicate key'), { code: '23505' }));
-    mockBuilders = {
-      customers: chainBuilder({ firstRow: { id: 'c2', phone: '(941) 555-0184', account_id: 'acct-1' } }),
-      'referral_promoters as rp': chainBuilder({
-        firstRow: { id: 'p1', referral_code: 'WAVES-ABC12345', referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345' },
-      }),
-    };
+  test('a household-resolved promoter (multi-property sibling) links like a fresh enrollment', async () => {
+    // The account-scoped 23505 fallback lives in referral-engine.resolvePromoter.
+    resolvePromoter.mockResolvedValue({
+      promoter: { id: 'p1', referral_code: 'WAVES-ABC12345', referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345' },
+      alreadyEnrolled: true,
+      household: true,
+    });
     const r = await buildReferralLink('c2');
     expect(r.url).toContain('/r/WAVES-ABC12345');
     expect(r.line).toContain(r.url);
   });
 
   test('a non-conflict enroll failure answers the plain reason', async () => {
-    enrollPromoter.mockRejectedValue(new Error('db down'));
+    resolvePromoter.mockRejectedValue(new Error('db down'));
     const r = await buildReferralLink('c1');
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/Could not build/);
@@ -364,7 +361,7 @@ describe('buildReferralLink', () => {
     const r = await buildReferralLink('c1');
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/not active/);
-    expect(enrollPromoter).not.toHaveBeenCalled();
+    expect(resolvePromoter).not.toHaveBeenCalled();
   });
 
   test('an unavailable settings read fails closed — no enrollment, no link', async () => {
@@ -372,7 +369,7 @@ describe('buildReferralLink', () => {
     const r = await buildReferralLink('c1');
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/not active/);
-    expect(enrollPromoter).not.toHaveBeenCalled();
+    expect(resolvePromoter).not.toHaveBeenCalled();
   });
 });
 
