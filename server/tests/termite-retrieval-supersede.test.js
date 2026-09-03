@@ -12,7 +12,9 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mo
 
 let mockTables;
 let mockFailUpdate;
-jest.mock('../models/db', () => jest.fn((table) => {
+const mockLog = [];
+jest.mock('../models/db', () => {
+  const build = (table) => {
   const conds = [];
   const b = {
     where(c) { if (typeof c === 'object') Object.entries(c).forEach(([k, v]) => conds.push((r) => r[k] === v)); return b; },
@@ -31,16 +33,26 @@ jest.mock('../models/db', () => jest.fn((table) => {
       if (mockFailUpdate === table) throw new Error('notifications table down');
       const hit = (mockTables[table] || []).filter((r) => conds.every((c) => c(r)));
       hit.forEach((r) => Object.assign(r, patch));
+      mockLog.push(`update:${table}`);
       return hit.length;
     },
   };
   return b;
-}));
+  };
+  const db = jest.fn(build);
+  db.transaction = async (fn) => {
+    const trx = (table) => build(table);
+    trx.raw = async (sql, binds) => { mockLog.push(`raw:${binds && binds[0]}`); return {}; };
+    return fn(trx);
+  };
+  return db;
+});
 
 const { raiseTermiteRetrievalTask } = require('../services/cancellation-processor');
 
 beforeEach(() => {
   mockNotifyAdmin.mockClear();
+  mockLog.length = 0;
   mockFailUpdate = null;
   mockTables = {
     customers: [{ id: 'c1', termite_stations_rented: false }],
@@ -54,9 +66,13 @@ const datedRow = (id, overrides = {}) => ({
   metadata: { kind: 'termite_station_retrieval', customerId: 'c1', retrieveAfter: '2027-02-28', dedupeKey: `termite_station_retrieval:c1:${id}`, ...overrides },
 });
 
-test('the immediate task retires the dated one, then raises', async () => {
+test('the immediate task retires the dated one, then raises — under the account-scoped lock', async () => {
+  mockNotifyAdmin.mockImplementationOnce(async () => { mockLog.push('notifyAdmin'); return { id: 'n-1' }; });
   const out = await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: null });
   expect(mockTables.notifications[0].read_at).not.toBeNull();
+  // Lock first, retire second, insert third: a concurrent raise for another
+  // request waits on the lock and then sees this one's committed row.
+  expect(mockLog).toEqual(['raw:admin:termite_station_retrieval:c1', 'update:notifications', 'notifyAdmin']);
   expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/supersedes the earlier dated retrieval task/);
   expect(out).toEqual(expect.objectContaining({ raised: true }));
