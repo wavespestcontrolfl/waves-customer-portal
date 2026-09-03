@@ -83,7 +83,8 @@ async function geocodeAddressWithStatus(address) {
         // sweep exclude the row instead of spending a call per pass. Only
         // an address edit can change the verdict, and the sweep's
         // pruneStaleExclusions already re-admits a row when that happens.
-        logger.warn(`[geocoder] rejected geocode for "${address}": ${rejected}`);
+        // Reason only — the address is customer PII and does not belong in logs.
+        logger.warn(`[geocoder] rejected geocode: ${rejected}`);
         memo.set(address, null);
         return { location: null, permanent: true };
       }
