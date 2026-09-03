@@ -242,4 +242,8 @@ module.exports = {
   // Shared so street-key builders (scope-guards burst dedup) cut route
   // spellings identically to how this module compares them.
   canonicalizeRouteTokens,
+  // Shared so the customers-at-address prefilter (customer-address-match.js)
+  // reads the house number from the same street-first form this module
+  // compares ("Unit 7, 123 Main St" → "123 Main St Unit 7").
+  canonicalizeLeadingUnit,
 };

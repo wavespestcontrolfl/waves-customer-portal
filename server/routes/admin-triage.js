@@ -14,6 +14,8 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { lockTriageCall } = require('../utils/triage-locks');
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 const OPEN_STATES = ['open', 'in_progress'];
@@ -59,14 +61,29 @@ async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, ve
 // GET /api/admin/triage?status=open  → list items + per-status counts
 router.get('/', async (req, res) => {
   try {
-    const status = ALL_STATES.includes(req.query.status) ? req.query.status : 'open';
+    // 'active' = every still-owed card (open OR in_progress — a claimed
+    // card is still pending work); the inbox's own tabs read one state.
+    const status = req.query.status === 'active'
+      ? OPEN_STATES
+      : [ALL_STATES.includes(req.query.status) ? req.query.status : 'open'];
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+    // Optional narrowing to one customer's calls — the estimate tool reads
+    // the linked customer's open address-review cards (an owed unit number)
+    // so the property panel can say the address is still being confirmed.
+    // A malformed id is a 400, never a silent fall-through to EVERY
+    // customer's cards (pre-push codex P1).
+    const rawCustomerId = req.query.customer_id == null ? '' : String(req.query.customer_id);
+    if (rawCustomerId && !UUID_RE.test(rawCustomerId)) {
+      return res.status(400).json({ error: 'customer_id must be a UUID' });
+    }
+    const customerId = rawCustomerId || null;
 
     const items = await db('triage_items')
       .leftJoin('call_log', 'triage_items.call_log_id', 'call_log.id')
       .leftJoin('customers', 'call_log.customer_id', 'customers.id')
       .leftJoin('route_feedback', 'triage_items.call_log_id', 'route_feedback.call_log_id')
-      .where('triage_items.status', status)
+      .whereIn('triage_items.status', status)
+      .modify((q) => { if (customerId) q.where('call_log.customer_id', customerId); })
       // property_role_confirm payloads embed the customer's OTHER property
       // addresses — the same data admin-customers gates behind requireAdmin —
       // and only an admin can apply them; hide the cards from tech users.

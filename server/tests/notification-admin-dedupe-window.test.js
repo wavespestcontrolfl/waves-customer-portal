@@ -60,3 +60,19 @@ test('an invalid window is ignored (forever dedupe), never a broken predicate', 
   await NotificationService.notifyAdmin('estimate_hot_view', 't', 'b', { dedupeKey: 'k', dedupeWindowMs: 'soon' });
   expect(mockCalls.where.some((a) => a[0] === 'created_at')).toBe(false);
 });
+
+test('trx: the lock + probe + insert run on the CALLER\'s transaction, and errors propagate to it', async () => {
+  const db = require('../models/db');
+  db.transaction.mockClear();
+  const callerTrx = jest.fn(() => ({
+    where: () => ({ whereRaw: () => ({ first: async () => null }) }),
+  }));
+  callerTrx.raw = jest.fn(async (expr, bindings) => { mockCalls.locks.push(`caller:${bindings[0]}`); return {}; });
+  const out = await NotificationService.notifyAdmin('service', 't', 'b', { dedupeKey: 'k', trx: callerTrx });
+  expect(out).toMatchObject({ id: 'n-new', deduped: false });
+  expect(db.transaction).not.toHaveBeenCalled();
+  expect(mockCalls.locks).toEqual(['caller:admin:k']);
+  expect(NotificationService.create).toHaveBeenCalledWith(expect.objectContaining({ connection: callerTrx }));
+  NotificationService.create.mockResolvedValueOnce(null);
+  await expect(NotificationService.notifyAdmin('service', 't', 'b', { dedupeKey: 'k', trx: callerTrx })).rejects.toThrow(/insert failed/);
+});

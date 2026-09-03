@@ -75,11 +75,16 @@ const ATTEMPT_OUTCOMES = Object.freeze([
 
 // §3.3b / §6.1 — dimension levels. OWNER_OVERRIDE is deliberately absent: it is
 // only ever the `authority` of a floor-waiver approval row, never a level.
+// Step 4a appended OWNER_INPUT_REQUIRED (payment dimension only: a valid path
+// whose price is unparseable or whose currency is unknown parks for a
+// price-entry card, §6.1); its migration swaps the CHECK — the step-1 literal
+// stays a prefix of this list.
 const AUTHORITY_DIMENSIONS = Object.freeze(['execution', 'payment', 'communication']);
 const AUTHORITY_LEVELS = Object.freeze([
   'AUTO_FREE', 'AUTO_ACCOUNT', 'AUTO_OUTREACH', 'AUTO_PAID_WITHIN_POLICY',
   'OWNER_FREE', 'OWNER_ACCOUNT', 'OWNER_OUTREACH', 'OWNER_PAYMENT', 'OWNER_MANUAL_PAYMENT',
   'OWNER_MEMBERSHIP', 'OWNER_LEGAL', 'OWNER_HUMAN_STEP', 'DENY', 'INVALID',
+  'OWNER_INPUT_REQUIRED',
 ]);
 
 // §4 step 1 — hosts that are references to opportunities or our own, never a

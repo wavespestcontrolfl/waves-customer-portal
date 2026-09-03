@@ -837,6 +837,9 @@ async function processDuePdfRenderJobs({ now = new Date(), limit = CLAIM_LIMIT }
 
 module.exports = {
   CLAIM_LIMIT,
+  // Shared with the ops queue so its stale-claim rule cannot drift from
+  // recoverStalePdfRenderClaims.
+  STALE_CLAIM_MS,
   DEFAULT_MAX_ATTEMPTS,
   RETRY_DELAYS_MINUTES,
   claimDuePdfRenderJobs,

@@ -466,9 +466,21 @@ function lookupCategoryConflict({
   // whole-building request on a complex would be exempted and priced as
   // one residential unit (codex r19 P1).
   if (!unitOccupantEvidence) return 'lookup_category:commercial';
+  if (serviceScope === 'residential_unit'
+    && residentialMultifamilyVerdict({ commercialSubtype, commercialDetectionSource })) return null;
+  return 'lookup_category:commercial';
+}
+
+/**
+ * Whether a COMMERCIAL lookup verdict is a residential-multifamily verdict
+ * (an apartment/condo/HOA building typed commercial for the whole-property
+ * question) rather than positive commercial-USE evidence. Shared by the
+ * engine's category-conflict rule and the lookup's own unit-address
+ * reclassification so the two never drift.
+ */
+function residentialMultifamilyVerdict({ commercialSubtype, commercialDetectionSource }) {
   const subtype = String(commercialSubtype || '');
-  const residentialMultifamilyVerdict =
-    RESIDENTIAL_MULTIFAMILY_SUBTYPES.has(subtype)
+  return RESIDENTIAL_MULTIFAMILY_SUBTYPES.has(subtype)
     // The ≥5-unit stacked aggregate: a unit count, not a commercial use —
     // but ONLY when the subtype adds no positive commercial-use evidence.
     // A >4-unit record that ALSO reads office_retail/warehouse/etc. must
@@ -476,8 +488,55 @@ function lookupCategoryConflict({
     // any future subtype defaults to conflicting (codex r17 P1).
     || (commercialDetectionSource === 'property_record_unit_count'
       && NEUTRAL_COMMERCIAL_SUBTYPES.has(subtype));
-  if (serviceScope === 'residential_unit' && residentialMultifamilyVerdict) return null;
-  return 'lookup_category:commercial';
+}
+
+/**
+ * Gate ON only: the manual lookup's answer to "is THIS address one unit
+ * inside a building the whole-property verdict typed COMMERCIAL?". A
+ * lookup run with a dwelling subpremise (Apt/Unit/#) on an
+ * apartment/condo/HOA verdict is a unit occupant's quote — a residential
+ * customer, per the doctrine at the top of this module. Positive
+ * commercial-use verdicts (office/warehouse/retail, or a structured
+ * satellite COMMERCIAL read) never reclassify: a "Suite 200" in an office
+ * park is still commercial. Pure; the caller decides what a true means
+ * for dimensions and flags.
+ */
+const SUITE_DESIGNATOR_RE = /\b(?:ste|suite)\.?\s*#?\s*[\w-]+/i;
+const DESIGNATOR_PERIOD_RE = /\b(apt|apartment|unit|ste|suite)\./gi;
+
+function residentialUnitLookupVerdict({
+  address, category, commercialSubtype, commercialDetectionSource,
+  structuredCommercialSignal = false, commercialUseSignal = false,
+}) {
+  if (!unitScopeGuardrailsEnabled()) return false;
+  if (String(category || '').toUpperCase() !== 'COMMERCIAL') return false;
+  // Staff type "Apt. 204" / "Ste. 4" as often as the bare designator; the
+  // dwelling regexes read the unpunctuated form, so strip the period the
+  // way the lookup's own address parser does (codex r3 P1).
+  const normalizedAddress = String(address || '').replace(DESIGNATOR_PERIOD_RE, '$1');
+  if (!normalizedAddress || !shadowPrivate.hasSubpremiseSignal({ address: normalizedAddress })) return false;
+  // hasSubpremiseSignal accepts Suite/Ste (an office suite is a subpremise
+  // for scope purposes), but a SUITE is not a dwelling: "Suite 200" on a
+  // mixed-use building whose whole-property verdict reads multifamily is a
+  // business tenant, and pricing it residential is the opposite error
+  // (pre-push codex P1). Apt / Unit / Apartment / #<n> only.
+  if (SUITE_DESIGNATOR_RE.test(normalizedAddress)) return false;
+  // Vision looked at THIS parcel and read a commercial USE — the record's
+  // multifamily string does not outrank it (the subtype resolver checks
+  // apartment/multifamily text before the structured signal, so the
+  // subtype alone cannot tell the two apart). The caller decides what
+  // counts: vision's own MULTIFAMILY_COMMON_AREA read is the same
+  // whole-property verdict this override permits, so a verdict whose ONLY
+  // source is that read (detection source satellite_ai_property_use) must
+  // not be vetoed by its source alone (pre-push codex P1 r7).
+  if (structuredCommercialSignal) return false;
+  // Mixed-use: a record whose text carries BOTH multifamily and a positive
+  // commercial use ("Retail Store" land use under an apartment type)
+  // collapses to the multifamily subtype because the resolver checks that
+  // first — the caller passes the record's own commercial-use read so a
+  // business unit in that building stays commercial (codex r1 P1).
+  if (commercialUseSignal) return false;
+  return residentialMultifamilyVerdict({ commercialSubtype, commercialDetectionSource });
 }
 
 /**
@@ -594,6 +653,7 @@ module.exports = {
   resolveUnitScopeModel,
   applyUnitScopeToPropertyFacts,
   lookupCategoryConflict,
+  residentialUnitLookupVerdict,
   _private: {
     resolvePropertyUse,
     resolveCustomerRelationship,

@@ -363,6 +363,22 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
   return warnings;
 }
 
+// Triage reason codes that mean the lead's address itself is still owed
+// or unverified (call-routing-gates address_review lane, validation half).
+const ADDRESS_ASK_REASONS = new Set([
+  "missing_unit_number",
+  "address_unverified",
+  "missing_service_address",
+  "low_confidence_address",
+  "address_validation_unavailable",
+  "address_unverifiable",
+  "address_not_validated",
+]);
+
+// A dwelling unit designator anywhere in a typed address (the server's
+// unit-scope model reads the same forms; "#" alone counts).
+const UNIT_DESIGNATOR_RE = /\b(?:apt|apartment|unit)\.?\s*#?\s*[\w-]+|#\s*\w+/i;
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...options,
@@ -2714,6 +2730,11 @@ export default function EstimateToolViewV2({
   // never autofill — or stamp its customer match onto — a newer one.
   const lookupSeqRef = useRef(0);
   const lookupAbortRef = useRef(null);
+  // The address a unit-scoped lookup was run for — the satellite guard
+  // below keys on it, not on the (possibly stale) profile alone, so editing
+  // the address after a unit lookup re-enables the standalone analysis
+  // (codex r2 P2).
+  const unitLookupAddressRef = useRef("");
   // Live mirror of form.address for the in-flight lookup's apply gate: the
   // seq only advances when ANOTHER lookup starts, so an address
   // edit/select/clear during a lookup needs its own invalidation — the
@@ -2950,6 +2971,8 @@ export default function EstimateToolViewV2({
     // Hydration now seeds the linked-customer chip — clear it with the rest
     // of the edit state or it lingers over the next blank form.
     setExistingCustomerMatch(null);
+    setAddressMatches([]);
+    preLinkContactRef.current = null;
   }
 
   const set = useCallback((key, val) => {
@@ -3158,6 +3181,81 @@ export default function EstimateToolViewV2({
 
   const [enrichedProfile, setEnrichedProfile] = useState(null);
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
+  // Customers whose street line matches the looked-up address. Surfaced as a
+  // suggestion the operator links explicitly — never auto-applied. Two adults
+  // at one address (spouses quoting separately) each need their own estimate;
+  // the old silent first-hit link put the second person's quote on the first
+  // person's profile.
+  const [addressMatches, setAddressMatches] = useState([]);
+  // The address those matches were found for. Suggestions render only while
+  // form.address still equals it — an edited address must not keep a stale
+  // Link actionable for the previous property.
+  const [addressMatchesFor, setAddressMatchesFor] = useState("");
+  // Contact fields as typed before a link, so Unlink restores them instead
+  // of leaving the unlinked customer's name/phone/email on the estimate.
+  const preLinkContactRef = useRef(null);
+
+  // The ONE way a customer row becomes the linked customer — shared by the
+  // Customer Lookup list and the address-match suggestion. The lookup list
+  // adopts the customer's address (the operator searched by person); the
+  // suggestion keeps the address the operator just looked up.
+  function applyCustomerLink(c, { adoptAddress }) {
+    const name = `${c.firstName || ""} ${c.lastName || ""}`.trim();
+    if (!preLinkContactRef.current) {
+      preLinkContactRef.current = {
+        customerName: form.customerName || "",
+        customerPhone: form.customerPhone || "",
+        customerEmail: form.customerEmail || "",
+        isRecurringCustomer: form.isRecurringCustomer,
+      };
+    }
+    // 'Commercial' is a flat non-member tier — exclude it so a commercial
+    // customer doesn't unlock recurring-customer loyalty discounts.
+    const hasActivePlan =
+      c.tier && c.tier !== "null" && c.tier !== "Commercial" && c.monthlyRate > 0;
+    setForm((f) => ({
+      ...f,
+      customerId: c.id || "",
+      ...(adoptAddress
+        ? { address: c.address || f.address, measuredTurfSf: "" }
+        : {}),
+      customerName: name,
+      customerPhone: c.phone || f.customerPhone || "",
+      customerEmail: c.email || f.customerEmail || "",
+      // No plan: the address suggestion resets the loyalty flag (it may have
+      // been set for whoever was linked before); the lookup list keeps the
+      // operator's own answer, as it always has.
+      isRecurringCustomer: hasActivePlan ? "YES" : adoptAddress ? f.isRecurringCustomer : "NO",
+    }));
+    setExistingCustomerMatch(c);
+    setAddressMatches([]);
+    setCustomerSearch("");
+    setCustomers([]);
+    // isRecurringCustomer is a pricing input — a preview or saved row priced
+    // before the link is stale.
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }
+
+  // Unlink is offered only where a save can actually honor it: the revise
+  // PUT keeps the row's customer_id (codex #3768 r1), and a grouped sibling
+  // must share the anchor's customer or the save 400s (codex #3768 r3).
+  const canUnlink = !editMode?.id && !groupAnchorId;
+
+  // Drops the linked customer but keeps the typed contact fields, so a wrong
+  // link (address suggestion, deep link, or a mis-click) is one tap to undo.
+  function unlinkCustomer() {
+    setExistingCustomerMatch(null);
+    // No snapshot (edit hydration, deep link): keep the contact fields as
+    // they are — only the linkage and its pricing flag go.
+    const restore = preLinkContactRef.current || { isRecurringCustomer: "NO" };
+    preLinkContactRef.current = null;
+    setForm((f) => ({ ...f, customerId: "", ...restore }));
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }
   // What the linked customer already buys and pays PER APPLICATION today —
   // the office prices an upgrade against this. Read-only context: it never
   // feeds the quote, so a failed/absent load just renders no panel (the
@@ -3195,6 +3293,43 @@ export default function EstimateToolViewV2({
         if (!cancelled) setCustomerSpend(d);
       } catch {
         if (!cancelled) setCustomerSpend(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [existingCustomerMatch?.id, form.customerId]);
+  // The linked customer's OPEN address-review cards (an owed unit number,
+  // an unverified address) from the call that created the lead. Without
+  // this the property panel prices whatever address the lead carries and
+  // nothing on this page says the office still owes a callback for it —
+  // the Triage Inbox knew, the estimate tool didn't (2026-09-02: a tenant's
+  // bare complex address quoted as a 358-unit commercial property).
+  // Read-only context, same fail-open contract as customerSpend.
+  const [openAddressAsks, setOpenAddressAsks] = useState([]);
+  useEffect(() => {
+    setOpenAddressAsks([]);
+    const customerId = existingCustomerMatch?.id || form.customerId;
+    if (!customerId) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await adminFetch(
+          // active = open OR in_progress: a card the office already claimed
+          // is still an owed callback (pre-push codex P1).
+          `/admin/triage?status=active&customer_id=${encodeURIComponent(customerId)}`,
+        );
+        if (!r.ok) return;
+        const d = await r.json();
+        if (cancelled) return;
+        // Validation-ask cards only: the address_review lane also files
+        // multi-property / second-address / property-role / dropped-call
+        // cards, which are not "this address may be wrong" (codex r1 P2).
+        setOpenAddressAsks(
+          (Array.isArray(d.items) ? d.items : []).filter((i) => ADDRESS_ASK_REASONS.has(i.reason_code)),
+        );
+      } catch {
+        if (!cancelled) setOpenAddressAsks([]);
       }
     })();
     return () => {
@@ -3455,6 +3590,8 @@ export default function EstimateToolViewV2({
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
     setExistingCustomerMatch(null);
+    setAddressMatches([]);
+    preLinkContactRef.current = null;
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
     // A fresh lead/customer prefill is a new job — never chain it into a
@@ -3716,6 +3853,8 @@ export default function EstimateToolViewV2({
 
   async function doLookup() {
     const address = form.address.trim();
+    // Read at click time: a deep link seeds form.customerId with no chip.
+    const customerAlreadyLinked = !!(existingCustomerMatch || form.customerId);
     if (!address) {
       setLookupStatus({ type: "err", msg: "Enter an address" });
       return;
@@ -3775,6 +3914,7 @@ export default function EstimateToolViewV2({
       const ep = data.enriched;
       setEnrichedProfile(ep);
       setVerifySaveState("");
+      unitLookupAddressRef.current = ep.residentialUnitLookup ? address : "";
 
       const upd = {};
       if (ep.homeSqFt) upd.homeSqFt = String(ep.homeSqFt);
@@ -3784,6 +3924,32 @@ export default function EstimateToolViewV2({
         Object.assign(upd, resolveLookupPropertyTypeAutofill(ep.propertyType, ep.category));
       }
       if (ep.commercialSubtype) upd.commercialSubtype = ep.commercialSubtype;
+      if (ep.residentialUnitLookup) {
+        // One unit inside a building: the server already blanked the
+        // parcel's dims and dropped its parcel-wide reads, but the copies
+        // above only land TRUTHY values — so a bare-building lookup run a
+        // moment earlier (the usual sequence: address first, then "which
+        // apartment?") would keep the complex's sqft / lot / stories /
+        // pool / landscape in the form through the spread below and price
+        // the whole property anyway (codex r1 P1). Reset those to the form
+        // defaults; the operator supplies the unit's own figures.
+        Object.assign(upd, {
+          homeSqFt: ep.homeSqFt ? String(ep.homeSqFt) : "",
+          lotSqFt: "",
+          stories: ep.stories ? String(ep.stories) : "1",
+          hasPool: "NO",
+          hasPoolCage: "NO",
+          poolCageSize: "MEDIUM",
+          shrubDensity: "MODERATE",
+          treeDensity: "MODERATE",
+          landscapeComplexity: "MODERATE",
+          nearWater: "NO",
+          bedArea: "",
+          // Parcel-wide canopy count from the earlier bare-building lookup
+          // (pre-push codex P1 r4); palms clear through palmPrefillAllowed.
+          treeCount: "",
+        });
+      }
       if (ep.pool === "YES" || ep.pool === "POSSIBLE") upd.hasPool = "YES";
       if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
@@ -3834,7 +4000,10 @@ export default function EstimateToolViewV2({
         // With derivation suppressed nothing would refresh a previous
         // address's auto-derived footprint — clear it (manual entries keep
         // the same never-overwritten contract as the boxes below).
-        if (ep.footprintUnknown === true && f._termiteFootprintAuto) {
+        // A unit lookup has no building footprint to offer either, and the
+        // bare-building lookup's auto-derived one must not survive as a
+        // "manual" termite measurement (codex r2 P1).
+        if ((ep.footprintUnknown === true || ep.residentialUnitLookup) && f._termiteFootprintAuto) {
           next.termiteFootprintSqFt = "";
           next._termiteFootprintAuto = false;
         }
@@ -3890,51 +4059,31 @@ export default function EstimateToolViewV2({
       setSavedId(null);
       setSavedViewUrl(null);
 
-      try {
-        const addrSearch = address.split(",")[0].trim();
-        const custR = await fetch(
-          `/api/admin/customers?search=${encodeURIComponent(addrSearch)}&limit=3`,
-          { headers: authHeaders, signal: lookupController.signal },
-        );
-        if (custR.ok) {
-          const custData = await custR.json();
-          if (lookupSuperseded()) return;
-          const custs = custData.customers || custData || [];
-          const match = custs.find(
-            (c) =>
-              c.address &&
-              address
-                .toLowerCase()
-                .includes(c.address.split(",")[0].trim().toLowerCase()),
-          );
-          if (match) {
-            setExistingCustomerMatch(match);
-            // 'Commercial' is a flat non-member tier — exclude it so a commercial
-            // customer doesn't unlock recurring-customer loyalty discounts.
-            const hasActivePlan =
-              match.tier && match.tier !== "null" && match.tier !== "Commercial" && match.monthlyRate > 0;
-            setForm((f) => ({
-              ...f,
-              customerId: match.id || f.customerId || "",
-              isRecurringCustomer: hasActivePlan ? "YES" : "NO",
-              customerName:
-                `${match.firstName || ""} ${match.lastName || ""}`.trim(),
-              customerPhone: match.phone || f.customerPhone || "",
-              customerEmail: match.email || f.customerEmail || "",
-            }));
-            // isRecurringCustomer is a pricing input and this apply lands
-            // after a second awaited fetch — invalidate so a Generate started
-            // after the property apply (but before this match) can't mount a
-            // price computed without the loyalty flag.
-            setEstimate(null);
-            setSavedId(null);
-            setSavedViewUrl(null);
-          } else {
-            setExistingCustomerMatch(null);
+      // Existing customers at this street. A SUGGESTION only: the operator
+      // links one explicitly (or keeps what they typed). Skipped when a
+      // customer is already linked — a deliberate link is never second-
+      // guessed by a re-lookup.
+      setAddressMatches([]);
+      if (!customerAlreadyLinked) {
+        try {
+          // Server-side, unit-aware (the canonical street comparator): a
+          // typed "Unit 4" excludes "Apt 7" at the same building; a typed
+          // address with no unit still lists every unit there.
+          const custR = await fetch("/api/admin/customers/at-address", {
+            method: "POST",
+            headers: authHeaders,
+            body: JSON.stringify({ address }),
+            signal: lookupController.signal,
+          });
+          if (custR.ok) {
+            const custData = await custR.json();
+            if (lookupSuperseded()) return;
+            setAddressMatches(custData.customers || []);
+            setAddressMatchesFor(address);
           }
+        } catch {
+          /* ignore customer lookup errors */
         }
-      } catch {
-        /* ignore customer lookup errors */
       }
 
       // The inner catch above deliberately swallows customer-lookup errors —
@@ -4015,6 +4164,19 @@ export default function EstimateToolViewV2({
     const address = form.address.trim();
     if (!address) {
       setSatelliteStatus({ type: "err", msg: "Enter an address first" });
+      return;
+    }
+    // A unit lookup dropped every parcel-wide read on purpose; this action
+    // would write them straight back (lot, bed area, canopy, densities,
+    // pool, water) — pre-push codex P1 r4.
+    // …the same address, OR any address still carrying a dwelling unit
+    // ("Apt 204" corrected to "Apt 205" is the same parcel — codex r4 P1).
+    if (enrichedProfile?.residentialUnitLookup
+      && (unitLookupAddressRef.current === address || UNIT_DESIGNATOR_RE.test(address))) {
+      setSatelliteStatus({
+        type: "err",
+        msg: "Satellite analysis reads the whole parcel — not applied to a single-unit lookup. Enter the unit's own figures.",
+      });
       return;
     }
     setSatelliteStatus({
@@ -5103,6 +5265,8 @@ export default function EstimateToolViewV2({
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
     setExistingCustomerMatch(null);
+    setAddressMatches([]);
+    preLinkContactRef.current = null;
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
     setCustomerSearch("");
@@ -5727,30 +5891,7 @@ export default function EstimateToolViewV2({
                       <button
                         key={c.id}
                         type="button"
-                        onClick={() => {
-                          // 'Commercial' is a flat non-member tier — exclude it
-                          // so a commercial customer doesn't unlock loyalty discounts.
-                          const hasActivePlan =
-                            c.tier && c.tier !== "null" && c.tier !== "Commercial" && c.monthlyRate > 0;
-                          setForm((f) => ({
-                            ...f,
-                            customerId: c.id || "",
-                            address: c.address || f.address,
-                            measuredTurfSf: "",
-                            customerName: name,
-                            customerPhone: c.phone || f.customerPhone || "",
-                            customerEmail: c.email || f.customerEmail || "",
-                            isRecurringCustomer: hasActivePlan
-                              ? "YES"
-                              : f.isRecurringCustomer,
-                          }));
-                          setExistingCustomerMatch(c);
-                          setCustomerSearch("");
-                          setCustomers([]);
-                          setEstimate(null);
-                          setSavedId(null);
-                          setSavedViewUrl(null);
-                        }}
+                        onClick={() => applyCustomerLink(c, { adoptAddress: true })}
                         className="w-full text-left px-3 py-2 border-b-hairline border-zinc-200 last:border-b-0 hover:bg-zinc-50 cursor-pointer"
                       >
                         {" "}
@@ -5870,6 +6011,11 @@ export default function EstimateToolViewV2({
                     setLookupStatus({ type: "", msg: "" });
                     setEnrichedProfile(null);
                     setExistingCustomerMatch(null);
+                    setAddressMatches([]);
+                    // The customer linkage survives Clear All (customerId is
+                    // kept above), so the pre-link snapshot must survive with
+                    // it — a later Unlink still restores what was typed
+                    // (codex #3768 r4).
                     setSatelliteStatus({ type: "", msg: "" });
                     setSatelliteData(null);
                     setEstimate(null);
@@ -5988,22 +6134,133 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               {existingCustomerMatch && (
+                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900 flex items-center gap-2">
+                  <span className="flex-1 min-w-0">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
+                    Existing customer:{" "}
+                    <strong>
+                      {existingCustomerMatch.firstName}{" "}
+                      {existingCustomerMatch.lastName}
+                    </strong>
+                    {matchHasActivePlan(existingCustomerMatch)
+                      ? " · Recurring plan"
+                      : " · No active plan"}
+                    {matchHasActivePlan(existingCustomerMatch) &&
+                    existingCustomerMatch.monthlyRate > 0 &&
+                    form.isRecurringCustomer === "YES"
+                      ? " · 15% loyalty discount applied"
+                      : ""}
+                  </span>
+                  {canUnlink && (
+                    <button
+                      type="button"
+                      onClick={unlinkCustomer}
+                      className="bg-transparent border-0 p-0 cursor-pointer text-14 text-zinc-600 underline underline-offset-2 hover:text-zinc-900 shrink-0"
+                    >
+                      Unlink
+                    </button>
+                  )}
+                </div>
+              )}
+              {/* ID-only linked state: the customer-record deep link seeds
+                  form.customerId with no match object. The estimate IS linked
+                  (lookup skips suggestions, save carries the id), so the
+                  operator needs the same Unlink here (see canUnlink). */}
+              {!existingCustomerMatch && form.customerId && canUnlink && (
+                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900 flex items-center gap-2">
+                  <span className="flex-1 min-w-0">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
+                    Linked customer:{" "}
+                    <strong>{form.customerName || "from the customer record"}</strong>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={unlinkCustomer}
+                    className="bg-transparent border-0 p-0 cursor-pointer text-14 text-zinc-600 underline underline-offset-2 hover:text-zinc-900 shrink-0"
+                  >
+                    Unlink
+                  </button>
+                </div>
+              )}
+              {addressMatches.length > 0 &&
+                addressMatchesFor === form.address.trim() &&
+                !existingCustomerMatch &&
+                !form.customerId && (
+                  <div className="mb-2.5 border-hairline border-zinc-300 rounded-xs overflow-hidden">
+                    <div className="px-3 py-2 bg-zinc-50 border-b border-zinc-200 text-14 font-medium text-zinc-900">
+                      This address matches{" "}
+                      {addressMatches.length === 1
+                        ? "an existing customer"
+                        : `${addressMatches.length} existing customers`}
+                    </div>
+                    {addressMatches.map((c) => {
+                      const name =
+                        `${c.firstName || ""} ${c.lastName || ""}`.trim() ||
+                        "(no name)";
+                      return (
+                        <div
+                          key={c.id}
+                          className="flex items-center gap-3 px-3 py-2 border-b-hairline border-zinc-200"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="text-14 text-zinc-900 font-medium truncate">
+                              {name}
+                            </div>
+                            <div className="text-14 text-ink-secondary truncate">
+                              {[
+                                // Street line incl. unit, so two units of one
+                                // building are distinguishable before linking.
+                                c.streetLine || (c.address ? c.address.split(",")[0].trim() : null),
+                                c.phone,
+                                c.email,
+                                matchHasActivePlan(c) ? c.tier : null,
+                              ]
+                                .filter(Boolean)
+                                .join(" · ") || "no contact on file"}
+                            </div>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => applyCustomerLink(c, { adoptAddress: false })}
+                          >
+                            Link
+                          </Button>
+                        </div>
+                      );
+                    })}
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-3 py-2 bg-zinc-50">
+                      <span className="text-14 text-ink-secondary">
+                        Or search above to link someone else.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setAddressMatches([])}
+                        className="bg-transparent border-0 p-0 cursor-pointer text-14 text-zinc-900 underline underline-offset-2 shrink-0 self-start sm:self-auto"
+                      >
+                        Not this person — keep what I typed
+                      </button>
+                    </div>
+                  </div>
+                )}
+              {openAddressAsks.length > 0 && (
                 <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
-                  {" "}
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
-                  Existing customer:{" "}
-                  <strong>
-                    {existingCustomerMatch.firstName}{" "}
-                    {existingCustomerMatch.lastName}
-                  </strong>
-                  {matchHasActivePlan(existingCustomerMatch)
-                    ? " · Recurring plan"
-                    : " · No active plan"}
-                  {matchHasActivePlan(existingCustomerMatch) &&
-                  existingCustomerMatch.monthlyRate > 0 &&
-                  form.isRecurringCustomer === "YES"
-                    ? " · 15% loyalty discount applied"
-                    : ""}
+                  <strong>Address still being confirmed</strong>
+                  {" — "}
+                  {openAddressAsks.some((i) => i.reason_code === "missing_unit_number")
+                    ? "the caller gave the building but no unit number"
+                    : "the address from the call did not validate"}
+                  {(() => {
+                    const b = openAddressAsks.find((i) => i.payload?.unit_ask_building?.street_line_1)?.payload
+                      ?.unit_ask_building;
+                    return b
+                      ? ` (${[b.street_line_1, b.city, b.postal_code].filter(Boolean).join(", ")})`
+                      : "";
+                  })()}
+                  . Callback pending in the Triage Inbox — this lookup may be the whole building, not
+                  the unit.
                 </div>
               )}
               {/* Gated on the DATA, not on existingCustomerMatch — the

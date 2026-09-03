@@ -17,6 +17,16 @@
  * READ-ONLY. No writes, no comms.
  */
 const { getCloseoutStatus } = require('./closeout-status');
+const gates = require('../config/feature-gates');
+
+// GATE_CLOSEOUT_MONEY_COMMS_ALERTS — the comms / invoice / invoiceDelivery
+// facts become per-visit alert issues (and hold the readability floor).
+// OFF (default, dev AND prod): the five legacy facts only — byte-identical
+// to the pre-gate mapping. Read at CALL time (the techTips idiom) so a flip
+// needs no redeploy; fails closed when feature-gates is mocked partially.
+function moneyCommsAlertsEnabled() {
+  return typeof gates.gateEnvValue === 'function' && gates.gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS') === true;
+}
 
 // One status fans out probe groups of up to ~10 concurrent queries; 2 keeps
 // a full sweep's worst case at ~20 in-flight queries so a dashboard poll
@@ -49,6 +59,12 @@ const CLOSEOUT_ALERT_TYPES = Object.freeze({
   // fact reads done/not_required. Issues carry an `identity` including the
   // code so a NEW contradiction on an already-dismissed visit re-surfaces.
   contradiction: 'closeout_contradiction',
+  // Money + comms facts (GATE_CLOSEOUT_MONEY_COMMS_ALERTS): each gets its
+  // own lifecycle key so a dismissed report card never masks a failed
+  // completion notice or an unminted invoice on the same visit.
+  comms: 'completion_notice_failed',
+  invoice: 'invoice_not_minted',
+  invoiceDelivery: 'invoice_delivery_incomplete',
 });
 const CLOSEOUT_ALERT_LABELS = Object.freeze({
   completion_not_committed: 'Completion not committed',
@@ -58,6 +74,9 @@ const CLOSEOUT_ALERT_LABELS = Object.freeze({
   missing_required_photos: 'Missing required photos',
   customer_signature_unverified: 'Customer signature unverified',
   closeout_contradiction: 'Closeout records contradict',
+  completion_notice_failed: 'Completion notice failed',
+  invoice_not_minted: 'Invoice owed but not minted',
+  invoice_delivery_incomplete: 'Invoice or receipt delivery incomplete',
 });
 // Operator copy for the canonical contradiction codes closeout-status
 // emits today; unknown future codes fall back to a humanized code so a new
@@ -76,9 +95,43 @@ const MAPPED_FACT_KEYS = Object.freeze(['completion', 'report', 'reportDelivery'
 // the invoice_* contradictions (pre-push r18 P1) — with facts.invoice
 // 'unknown' those contradictions are silently absent, so treating the read
 // as complete would let an outage clear a contradiction alert and the cron
-// re-fire it on recovery. followUp/license/comms/invoiceDelivery still
-// never hold the floor: they produce no issues here (r14).
+// re-fire it on recovery. followUp/license never hold the floor: they
+// produce no issues here (r14). comms/invoiceDelivery join the set ONLY
+// while the money+comms gate is on — that is when their outage would hide
+// an issue this mapper emits (the gate's one semantic change to holding).
 const ISSUE_INPUT_FACT_KEYS = Object.freeze([...MAPPED_FACT_KEYS, 'invoice']);
+const MONEY_COMMS_INPUT_FACT_KEYS = Object.freeze([...ISSUE_INPUT_FACT_KEYS, 'comms', 'invoiceDelivery']);
+function issueInputFactKeys() {
+  return moneyCommsAlertsEnabled() ? MONEY_COMMS_INPUT_FACT_KEYS : ISSUE_INPUT_FACT_KEYS;
+}
+// Invoice reasons an operator can act on HERE: a frozen required mint that
+// never minted, and the expected-<lane>-not-minted family. The two parked
+// manual cases (parked_manual_refunded_invoice / _canceled_setup_fee) are
+// NOT mapped: /complete already parks a fail-closed, deduped
+// terminal_invoice_manual_billing bell notification for them
+// (admin-dispatch.js) — a second card here would be a parallel alert path
+// with its own dismissal state (GH r3 P1). The invoice fact never emits
+// `failed`; awaiting_completion is transient; `unknown` = outage.
+const ACTIONABLE_INVOICE_PENDING = (reason) => reason === 'frozen_required_mint_not_minted'
+  || /^expected_.+_not_minted$/.test(reason || '');
+// Invoice-delivery pending reasons an operator owns: a paid invoice whose
+// receipt was never enqueued, and a payer-billed invoice never sent. The
+// queue-owned states (receipt_<jobStatus>), the send-window hold,
+// no_invoice_yet (the invoice fact's issue, not this one) and
+// invoice_draft_unsent (the stale-drafts alert owns that population at
+// three days) stay silent; opt-out reads not_required upstream.
+const ACTIONABLE_INVOICE_DELIVERY_PENDING = new Set(['paid_receipt_not_sent', 'payer_invoice_unsent']);
+// The receipt failures closeout-status emits today, allowlisted so a future
+// failed reason never maps to a card whose copy does not describe it.
+// NOT completion_sms_failed: that fact reads the shared completion-SMS
+// status and cannot tell whether the body carried a pay link (the
+// report-only choice, includePayLink === false, shares the stamp — GH r1
+// P2), so the comms card owns that failure; resending the notice resends
+// the link when one belongs.
+const ACTIONABLE_INVOICE_DELIVERY_FAILED = new Set(['receipt_no_recipient', 'receipt_delivery_exhausted']);
+// comms emits exactly one failed reason (the provider rejected the
+// completion SMS); the card copy is written for it.
+const ACTIONABLE_COMMS_FAILED = new Set(['completion_sms_failed']);
 // Report-delivery reasons that are in flight or held BY DESIGN — not an
 // operator gap (the queue / payment hold / send window owns them).
 const TRANSIENT_DELIVERY_REASONS = new Set([
@@ -93,7 +146,7 @@ const TRANSIENT_DELIVERY_REASONS = new Set([
 function factsFullyKnown(status) {
   if (!status || !status.found) return false;
   const facts = status.facts || {};
-  return ISSUE_INPUT_FACT_KEYS.every((k) => facts[k]?.state !== 'unknown');
+  return issueInputFactKeys().every((k) => facts[k]?.state !== 'unknown');
 }
 
 async function memoisedCloseoutStatus(serviceId, now, fresh = false) {
@@ -211,6 +264,7 @@ function closeoutIssuesForVisit(status) {
       summary: `Completed job has ${actualPhotoCount} of ${requiredPhotoCount} required closeout photo${requiredPhotoCount === 1 ? '' : 's'}.`,
     });
   }
+  if (moneyCommsAlertsEnabled()) issues.push(...moneyCommsIssues(facts));
   // Unevaluated requirement (GH codex r3 P2): a catalog service with
   // requires_customer_signature keeps summary.closedOut false even when every
   // fact is done — closeout-status lists it as requirements.unevaluated
@@ -242,6 +296,71 @@ function closeoutIssuesForVisit(status) {
   return issues;
 }
 
+// Money + comms issues (GATE_CLOSEOUT_MONEY_COMMS_ALERTS). Only what an
+// operator must act on: a completion notice the provider rejected, an
+// invoice that is owed but was never minted (or is parked for a manual
+// bill), and an invoice / receipt that failed to deliver or was never
+// sent. Quiet-hours deferral, sending, recap in flight, queue-owned
+// receipt states, consent blocks and every not_required rule stay silent
+// (owner rulings already encoded in closeout-status). `unknown` never
+// alerts — it holds the floor through factsFullyKnown instead.
+function moneyCommsIssues(facts) {
+  const issues = [];
+  const comms = facts.comms;
+  if (comms?.state === 'failed' && ACTIONABLE_COMMS_FAILED.has(comms.reason)) {
+    issues.push({
+      type: CLOSEOUT_ALERT_TYPES.comms,
+      fact: 'comms',
+      reason: comms.reason,
+      // No completion-notice resend endpoint exists and Dispatch will not
+      // reopen a committed completion (GH r3 P2) — point at the manual
+      // messaging flow the office already uses. That flow never clears the
+      // record's completionSmsStatus, so the card cannot auto-resolve; the
+      // operator dismisses it after sending (GH r4 P2).
+      summary: 'Completion notice to the customer failed to send — send it manually from Communications, then dismiss this card.',
+    });
+  }
+  const invoice = facts.invoice;
+  if (invoice?.state === 'pending' && ACTIONABLE_INVOICE_PENDING(invoice.reason)) {
+    const summary = 'This visit owes an invoice that was never minted — create it before the customer is billed elsewhere.';
+    // Reason-qualified identity (GH r1 P1): a dismissed expected-not-minted
+    // card must not swallow a later parked-manual exception on the same
+    // visit — same idiom as the contradiction issues.
+    issues.push({
+      type: CLOSEOUT_ALERT_TYPES.invoice,
+      fact: 'invoice',
+      reason: invoice.reason,
+      identity: `${CLOSEOUT_ALERT_TYPES.invoice}:${invoice.reason}`,
+      summary,
+    });
+  }
+  const delivery = facts.invoiceDelivery;
+  const deliveryOpen = Boolean(delivery)
+    && ((delivery.state === 'failed' && ACTIONABLE_INVOICE_DELIVERY_FAILED.has(delivery.reason))
+      || (delivery.state === 'pending' && ACTIONABLE_INVOICE_DELIVERY_PENDING.has(delivery.reason)));
+  if (deliveryOpen) {
+    const summary = delivery.reason === 'receipt_no_recipient'
+      // Adding a recipient does not retry the completed receipt job (GH
+      // r2 P2) — the operator resends from the invoice afterwards.
+      ? 'Payment receipt could not be sent — no receipt recipient on file; add an email or mobile for this customer, then resend the receipt from the invoice.'
+      : delivery.reason === 'receipt_delivery_exhausted'
+        ? 'Payment receipt delivery failed after retries.'
+        : delivery.reason === 'paid_receipt_not_sent'
+          ? 'Invoice is paid but no receipt was ever sent.'
+          : 'Payer-billed invoice was never sent to the payer.';
+    // Reason-qualified identity (GH r2 P2): a dismissed paid-but-no-receipt
+    // card must not swallow a later exhausted delivery on the same invoice.
+    issues.push({
+      type: CLOSEOUT_ALERT_TYPES.invoiceDelivery,
+      fact: 'invoiceDelivery',
+      reason: delivery.reason,
+      identity: `${CLOSEOUT_ALERT_TYPES.invoiceDelivery}:${delivery.reason}`,
+      summary,
+    });
+  }
+  return issues;
+}
+
 module.exports = {
   loadCloseoutStatuses,
   closeoutIssuesForVisit,
@@ -249,5 +368,5 @@ module.exports = {
   CLOSEOUT_ALERT_TYPES,
   CLOSEOUT_ALERT_LABELS,
   CLOSEOUT_CONCURRENCY,
-  __private: { memo, openFact },
+  __private: { memo, openFact, moneyCommsIssues },
 };

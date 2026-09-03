@@ -6,7 +6,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }));
 
 const { getCloseoutStatus } = require('../services/closeout-status');
-const { loadCloseoutStatuses, closeoutIssuesForVisit, CLOSEOUT_ALERT_TYPES, __private } = require('../services/closeout-alerts');
+const { loadCloseoutStatuses, closeoutIssuesForVisit, factsFullyKnown, CLOSEOUT_ALERT_TYPES, CLOSEOUT_ALERT_LABELS, __private } = require('../services/closeout-alerts');
 
 const fact = (state, reason, extra = {}) => ({ state, reason, ...extra });
 const base = (o = {}) => ({
@@ -17,7 +17,7 @@ const base = (o = {}) => ({
   },
 });
 
-beforeEach(() => { jest.clearAllMocks(); __private.memo.clear(); });
+beforeEach(() => { jest.clearAllMocks(); __private.memo.clear(); delete process.env.GATE_CLOSEOUT_MONEY_COMMS_ALERTS; });
 
 describe('closeoutIssuesForVisit', () => {
   test('closed out / unavailable / not found → no issues', () => {
@@ -98,6 +98,88 @@ describe('closeoutIssuesForVisit', () => {
       }),
     ]);
     expect(closeoutIssuesForVisit({ ...base(), contradictions: [] })).toEqual([]);
+  });
+});
+
+describe('money + comms facts (GATE_CLOSEOUT_MONEY_COMMS_ALERTS)', () => {
+  const on = () => { process.env.GATE_CLOSEOUT_MONEY_COMMS_ALERTS = 'true'; };
+  const money = (o = {}) => base({ invoice: fact('done', 'invoice_exists'), invoiceDelivery: fact('done', 'invoice_delivered'), comms: fact('done', 'completion_sms_sent'), ...o });
+
+  test('gate OFF: the three facts never produce an issue and never hold the floor (byte-identical to the legacy mapping)', () => {
+    const open = money({ comms: fact('failed', 'completion_sms_failed'), invoice: fact('pending', 'expected_invoice_not_minted'), invoiceDelivery: fact('failed', 'receipt_delivery_exhausted') });
+    expect(closeoutIssuesForVisit(open)).toEqual([]);
+    expect(factsFullyKnown(money({ comms: fact('unknown', 'no_comms_marker_on_record'), invoiceDelivery: fact('unknown', 'receipt_job_lookup_failed') }))).toBe(true);
+  });
+
+  test('comms: only failed alerts; deferral, sending, recap in flight, consent block and every not_required stay silent', () => {
+    on();
+    expect(closeoutIssuesForVisit(money({ comms: fact('failed', 'completion_sms_failed') }))).toEqual([
+      expect.objectContaining({ type: 'completion_notice_failed', fact: 'comms', reason: 'completion_sms_failed', summary: expect.stringMatching(/failed to send.*Communications, then dismiss this card/) }),
+    ]);
+    for (const c of [
+      fact('pending', 'deferred_send_window'), fact('pending', 'completion_sms_sending'), fact('pending', 'recap_sms_in_flight'), fact('pending', 'awaiting_completion'),
+      fact('not_required', 'completion_sms_blocked_consent'), fact('not_required', 'frozen_posture_manual'), fact('not_required', 'catalog_no_customer_notice'), fact('not_required', 'backfill_completion'),
+      fact('unknown', 'no_comms_marker_on_record'), fact('unknown', 'recap_claim_unverified'),
+      fact('failed', 'some_future_failed_reason'), // allowlisted: the card copy describes the SMS rejection only
+    ]) expect(closeoutIssuesForVisit(money({ comms: c }))).toEqual([]);
+  });
+
+  test('invoice: the not-minted pending reasons alert; parked-manual (owned by the /complete bell), awaiting, not_required, unknown, done stay silent', () => {
+    on();
+    const reasons = ['frozen_required_mint_not_minted', 'expected_invoice_not_minted', 'expected_payer_not_minted', 'expected_auto_charge_not_minted'];
+    for (const r of reasons) {
+      const issues = closeoutIssuesForVisit(money({ invoice: fact('pending', r) }));
+      expect(issues).toEqual([expect.objectContaining({ type: 'invoice_not_minted', fact: 'invoice', reason: r, identity: `invoice_not_minted:${r}` })]);
+    }
+    expect(closeoutIssuesForVisit(money({ invoice: fact('pending', 'frozen_required_mint_not_minted') }))[0].summary).toMatch(/never minted/);
+    // /complete already parks a deduped terminal_invoice_manual_billing bell for these (GH r3 P1) — no parallel card.
+    for (const f of [fact('pending', 'parked_manual_refunded_invoice'), fact('pending', 'parked_manual_canceled_setup_fee'), fact('pending', 'awaiting_completion'), fact('not_required', 'lane_covered_membership'), fact('not_required', 'disposition_intentionally_free'), fact('unknown', 'invoice_lookup_failed'), fact('done', 'invoice_paid')]) {
+      expect(closeoutIssuesForVisit(money({ invoice: f }))).toEqual([]);
+    }
+  });
+
+  test('invoiceDelivery: failed + the two never-sent pendings alert; queue-owned, send-window, draft-unsent, no-invoice-yet, opt-out stay silent', () => {
+    on();
+    const cases = [
+      ['receipt_no_recipient', 'failed', /no receipt recipient.*then resend the receipt/],
+      ['receipt_delivery_exhausted', 'failed', /failed after retries/],
+      ['paid_receipt_not_sent', 'pending', /no receipt was ever sent/],
+      ['payer_invoice_unsent', 'pending', /never sent to the payer/],
+    ];
+    for (const [reason, state, re] of cases) {
+      expect(closeoutIssuesForVisit(money({ invoiceDelivery: fact(state, reason) }))).toEqual([
+        expect.objectContaining({ type: 'invoice_delivery_incomplete', fact: 'invoiceDelivery', reason, identity: `invoice_delivery_incomplete:${reason}`, summary: expect.stringMatching(re) }),
+      ]);
+    }
+    for (const f of [
+      fact('pending', 'receipt_queued'), fact('pending', 'receipt_processing'), fact('pending', 'receipt_pending'), fact('pending', 'deferred_send_window'),
+      fact('pending', 'invoice_draft_unsent'), fact('pending', 'no_invoice_yet'), fact('pending', 'awaiting_completion'),
+      fact('not_required', 'receipt_opted_out'), fact('not_required', 'lane_covered_annual'), fact('unknown', 'receipt_job_lookup_failed'), fact('done', 'paid_receipt_delivered'),
+      fact('failed', 'some_future_failed_reason'), // allowlisted failed reasons only
+      fact('failed', 'completion_sms_failed'), // the comms card owns the SMS failure; this fact cannot see whether a pay link was in the body
+    ]) expect(closeoutIssuesForVisit(money({ invoiceDelivery: f }))).toEqual([]);
+  });
+
+  test('gate ON: the three issues stack after the legacy ones on distinct lifecycle keys; a stuck completion still short-circuits', () => {
+    on();
+    const issues = closeoutIssuesForVisit(money({
+      report: fact('pending', 'no_report_artifact'),
+      comms: fact('failed', 'completion_sms_failed'),
+      invoice: fact('pending', 'expected_invoice_not_minted'),
+      invoiceDelivery: fact('pending', 'no_invoice_yet'),
+    }));
+    expect(issues.map((i) => i.identity || i.type)).toEqual(['missing_required_service_report', 'completion_notice_failed', 'invoice_not_minted:expected_invoice_not_minted']);
+    expect(new Set(issues.map((i) => i.type)).size).toBe(issues.length);
+    for (const t of ['completion_notice_failed', 'invoice_not_minted', 'invoice_delivery_incomplete']) expect(CLOSEOUT_ALERT_LABELS[t]).toEqual(expect.any(String));
+    const stuck = money({ completion: fact('failed', 'completion_attempt_failed'), comms: fact('failed', 'completion_sms_failed'), invoice: fact('pending', 'expected_invoice_not_minted') });
+    expect(closeoutIssuesForVisit(stuck).map((i) => i.type)).toEqual([CLOSEOUT_ALERT_TYPES.completion]);
+  });
+
+  test('gate ON: a comms or invoiceDelivery outage makes the read incomplete (holds the floor); followUp/license still do not', () => {
+    on();
+    expect(factsFullyKnown(money({ comms: fact('unknown', 'no_comms_marker_on_record') }))).toBe(false);
+    expect(factsFullyKnown(money({ invoiceDelivery: fact('unknown', 'receipt_job_lookup_failed') }))).toBe(false);
+    expect(factsFullyKnown(money({ followUp: fact('unknown', 'x'), license: fact('unknown', 'x') }))).toBe(true);
   });
 });
 

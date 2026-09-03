@@ -1299,3 +1299,17 @@ describe('customerScheduledHistoryQuery (customer-detail `scheduled`)', () => {
     expect(calls[0][1]).toEqual([expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)]);
   });
 });
+
+describe('360 payload: technician stripping covers address neighbours', () => {
+  const { techSafe360Payload, TECH_360_STRIPPED_KEYS } = adminCustomersRoute._private;
+  it('addressNeighbors names other customers, so a technician token never receives it', () => {
+    expect(TECH_360_STRIPPED_KEYS).toContain('addressNeighbors');
+    const out = techSafe360Payload({
+      customer: { id: 'c1' },
+      accountProperties: [{ id: 'p' }],
+      addressNeighbors: [{ id: 'spouse', firstName: 'John' }],
+    });
+    expect(out.addressNeighbors).toBeUndefined();
+    expect(out.accountProperties).toBeUndefined();
+  });
+});
