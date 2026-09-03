@@ -152,18 +152,22 @@ exports.up = async function up(knex) {
 
   if (await knex.schema.hasTable('service_completion_profiles')) {
     // Profiles are keyed by service_key (no surrogate id).
+    // Row lock + compare-and-set: an admin edit racing this migration is
+    // never overwritten (same posture as the pricing row above).
     const profile = await knex('service_completion_profiles')
       .where({ service_key: SERVICE_KEY })
+      .forUpdate()
       .first('followup_policy', 'default_followup_days');
     if (profile && (!profile.followup_policy || profile.followup_policy === 'none')) {
       const openJobs = await openLegacyFleaJobs(knex);
       if (openJobs > 0) {
         console.warn(`[migration 20260903000050] ${openJobs} open flea_tick job(s) were sold as single visits: their closeout will park a follow_up_needed card — dismiss it; nothing books or bills without a staff tap.`);
       }
-      await knex('service_completion_profiles')
+      const count = await knex('service_completion_profiles')
         .where({ service_key: SERVICE_KEY })
+        .where((qb) => qb.whereNull('followup_policy').orWhere({ followup_policy: profile.followup_policy || 'none' }))
         .update({ followup_policy: FOLLOWUP_POLICY, default_followup_days: FOLLOWUP_DAYS, updated_at: knex.fn.now() });
-      state.profile = {
+      if (count) state.profile = {
         service_key: SERVICE_KEY,
         followup_policy: profile.followup_policy || null,
         default_followup_days: profile.default_followup_days ?? null,
