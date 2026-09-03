@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { UNPIN, buildMigrationSet, computeChanges, effectiveLegFor, envBlockOf, modelsInUse, selectorDraftFor } from "./modelDraft";
+import { UNPIN, buildMigrationSet, computeChanges, discoveredEntry, effectiveLegFor, envBlockOf, modelsInUse, selectorDraftFor } from "./modelDraft";
 import { CATALOG, makeData } from "./modelDraft.fixture";
 
 const resolve = (data, draft) => {
@@ -45,6 +45,30 @@ describe("computeChanges", () => {
     const draft2 = { MODEL_FLAGSHIP: "m1" };
     expect(computeChanges({ data, draft: draft2, selectorDraft: resolve(data, draft2).selectorDraft })).toHaveLength(0);
   });
+
+  it("deleting a selector override returns every follower to the registry default; no override → nothing to delete", () => {
+    const data = makeData();
+    // Railway pins FLAGSHIP at m1 while the registry default has moved to m2.
+    Object.assign(data.selectors[0], { overridden: true, codeDefault: "m2" });
+    const draft = { MODEL_FLAGSHIP: UNPIN };
+    const { selectorDraft, effectiveLeg } = resolve(data, draft);
+    const changes = computeChanges({ data, draft, selectorDraft });
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ env: "MODEL_FLAGSHIP", from: "m1", to: "m2", unpin: true, lanes: 3 });
+    expect(effectiveLeg(data.lanes[0].primary)).toBe("m2");
+    expect(envBlockOf(changes, CATALOG)).toBe("# delete MODEL_FLAGSHIP  (unpin → Claude Opus 5)");
+    const plain = makeData();
+    expect(computeChanges({ data: plain, draft, selectorDraft: resolve(plain, draft).selectorDraft })).toHaveLength(0);
+  });
+
+  it("a registration-locked managed agent never rides a selector change", () => {
+    const data = makeData();
+    data.lanes[4].lock = { kind: "registration", label: "Registered agent", detail: "re-register to move it" };
+    const draft = { MODEL_FLAGSHIP: "m2" };
+    const changes = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
+    expect(changes[0]).toMatchObject({ lanes: 2, lockedLanes: [] });
+    expect(changes[0].laneNames).toEqual(["SMS intent", "SMS draft"]);
+  });
 });
 
 describe("buildMigrationSet", () => {
@@ -78,12 +102,53 @@ describe("buildMigrationSet", () => {
     expect(set.shadow.map((e) => e.env)).toEqual(["PIN_SMS_DRAFT"]);
     expect(buildMigrationSet({ data, catalog: CATALOG, fromId: null, toId: "m2" })).toEqual({ eligible: [], shadow: [], approval: [], blocked: [] });
   });
+
+  it("a target found through live search moves once its discovered entry joins the catalog", () => {
+    const data = makeData();
+    const found = { id: "m9", label: "Claude Next", provider: "anthropic" };
+    const blind = buildMigrationSet({ data, catalog: CATALOG, fromId: "m1", toId: "m9" });
+    expect(blind.eligible).toEqual([]);
+    expect(blind.blocked.every((e) => e.reasons.includes("unknown model"))).toBe(true);
+    const catalog = { ...CATALOG, m9: discoveredEntry(found, null, "text") };
+    expect(catalog.m9).toMatchObject({ label: "Claude Next", provider: "anthropic", caps: ["text"], discovered: true });
+    const set = buildMigrationSet({ data, catalog, fromId: "m1", toId: "m9" });
+    expect(set.eligible.map((e) => e.env)).toEqual(["PIN_REPORT"]);
+    expect(set.blocked).toEqual([]);
+  });
+
+  it("an unset per-lane env whose code default is the source still moves by setting it; a selector-fed leg moves through its selector", () => {
+    const data = makeData();
+    data.lanes.push({
+      id: "lawn_writer", name: "Lawn writer", area: "reports", continuity: "verified", inbound: false, lock: null, fanout: false, applies: "restart",
+      primary: { model: "m3", selector: null, pinEnv: "LAWN_WRITER_MODEL", pinned: false, unpinnedModel: "m3", accepts: { providers: ["openai"], cap: "text", deep: false }, live: false },
+      fallback: null, retry: null, also: [],
+    });
+    // SMS intent's primary follows FLAGSHIP through an unset env pin (E-style).
+    data.lanes[0].primary = { ...data.lanes[0].primary, pinEnv: "SMS_INTENT_MODEL" };
+    const set = buildMigrationSet({ data, catalog: CATALOG, fromId: "m3", toId: "m4" });
+    expect(set.eligible.map((e) => e.env)).toEqual(["LAWN_WRITER_MODEL"]);
+    const flagship = buildMigrationSet({ data, catalog: CATALOG, fromId: "m1", toId: "m2" });
+    expect(flagship.approval.map((e) => e.env).sort()).toEqual(["MODEL_FLAGSHIP", "PIN_IB"]);
+    expect(flagship.approval.find((e) => e.env === "MODEL_FLAGSHIP").lanes.map((l) => l.id)).toContain("sms_intent");
+  });
+
+  it("registration-locked lanes are left out of a selector's migration entry", () => {
+    const data = makeData();
+    data.lanes[4].lock = { kind: "registration", label: "Registered agent", detail: "re-register to move it" };
+    const set = buildMigrationSet({ data, catalog: CATALOG, fromId: "m1", toId: "m2" });
+    const shared = set.approval.find((e) => e.env === "MODEL_FLAGSHIP");
+    expect(shared.lanes.map((l) => l.id)).toEqual(["sms_intent", "sms_draft"]);
+    expect(shared.reasons).toEqual(["carries customer content"]);
+  });
 });
 
 describe("modelsInUse", () => {
-  it("counts primary legs and parallel arms, most-used first", () => {
+  it("counts every leg — backups and retries included — once per lane, most-used first", () => {
     const data = makeData();
+    // SMS intent already runs m4 as its backup; a parallel arm on m4 is the same lane.
     data.lanes[0].also = [{ model: "m4", selector: null, pinEnv: null, pinned: false }];
-    expect(modelsInUse(data)).toEqual([["m1", 5], ["m4", 1]]);
+    expect(modelsInUse(data)).toEqual([["m1", 5], ["m4", 2]]);
+    data.lanes[1].retry = { model: "m3", selector: null, pinEnv: null, pinned: false };
+    expect(modelsInUse(data)).toContainEqual(["m3", 1]);
   });
 });

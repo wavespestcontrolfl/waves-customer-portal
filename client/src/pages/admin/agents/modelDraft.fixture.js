@@ -24,15 +24,15 @@ export function makeData() {
     models: { ...CATALOG },
     areas: AREAS.map((a) => ({ ...a })),
     selectors: [
-      { key: "FLAGSHIP", env: "MODEL_FLAGSHIP", current: "m1", derived: false, derivesFrom: null, lock: null, accepts: text(["anthropic"]) },
-      { key: "OPENAI_FAST", env: "MODEL_OPENAI_FAST", current: "m4", derived: false, derivesFrom: null, lock: null, accepts: text(["openai"]) },
+      { key: "FLAGSHIP", env: "MODEL_FLAGSHIP", current: "m1", derived: false, derivesFrom: null, lock: null, overridden: false, codeDefault: "m1", accepts: text(["anthropic"]) },
+      { key: "OPENAI_FAST", env: "MODEL_OPENAI_FAST", current: "m4", derived: false, derivesFrom: null, lock: null, overridden: false, codeDefault: "m4", accepts: text(["openai"]) },
     ],
     lanes: [
-      { id: "sms_intent", name: "SMS intent", describe: "Works out what a text asks for", area: "sms", continuity: "verified", inbound: false, lock: null, applies: "restart", primary: onSelector("FLAGSHIP", "m1"), fallback: onSelector("OPENAI_FAST", "m4"), retry: null, also: [] },
-      { id: "sms_draft", name: "SMS draft", describe: "Drafts a reply", area: "sms", continuity: "judged", inbound: true, lock: null, applies: "restart", primary: onSelector("FLAGSHIP", "m1"), fallback: null, retry: null, also: [] },
-      { id: "ib_admin", name: "Intelligence Bar", describe: "Answers the admin", area: "ib", continuity: "unchecked", inbound: false, lock: null, applies: "restart", primary: pinned("PIN_IB", "m1"), fallback: onSelector("OPENAI_FAST", "m4"), retry: null, also: [] },
-      { id: "report_copy", name: "Report copy", describe: "Writes the visit report", area: "reports", continuity: "verified", inbound: false, lock: null, applies: "restart", primary: pinned("PIN_REPORT", "m1", text(["anthropic", "openai"])), fallback: null, retry: null, also: [] },
-      { id: "audit_deep", name: "Deep audit", describe: "Audits the books", area: "office", continuity: "verified", inbound: false, lock: { label: "Bake-off", detail: "pinned by ruling" }, applies: "restart", primary: onSelector("FLAGSHIP", "m1"), fallback: null, retry: null, also: [] },
+      { id: "sms_intent", name: "SMS intent", describe: "Works out what a text asks for", area: "sms", continuity: "verified", inbound: false, lock: null, fanout: false, applies: "restart", primary: onSelector("FLAGSHIP", "m1"), fallback: onSelector("OPENAI_FAST", "m4"), retry: null, also: [] },
+      { id: "sms_draft", name: "SMS draft", describe: "Drafts a reply", area: "sms", continuity: "judged", inbound: true, lock: null, fanout: false, applies: "restart", primary: onSelector("FLAGSHIP", "m1"), fallback: null, retry: null, also: [] },
+      { id: "ib_admin", name: "Intelligence Bar", describe: "Answers the admin", area: "ib", continuity: "unchecked", inbound: false, lock: null, fanout: false, applies: "restart", primary: pinned("PIN_IB", "m1"), fallback: onSelector("OPENAI_FAST", "m4"), retry: null, also: [] },
+      { id: "report_copy", name: "Report copy", describe: "Writes the visit report", area: "reports", continuity: "verified", inbound: false, lock: null, fanout: false, applies: "restart", primary: pinned("PIN_REPORT", "m1", text(["anthropic", "openai"])), fallback: null, retry: null, also: [] },
+      { id: "audit_deep", name: "Deep audit", describe: "Audits the books", area: "office", continuity: "verified", inbound: false, lock: { label: "Bake-off", detail: "pinned by ruling" }, fanout: false, applies: "restart", primary: onSelector("FLAGSHIP", "m1"), fallback: null, retry: null, also: [] },
     ],
   };
 }

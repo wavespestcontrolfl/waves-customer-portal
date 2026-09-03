@@ -66,6 +66,61 @@ describe("AgentModelsTab", () => {
     expect(await screen.findByText(/lanes move after restart/)).toHaveTextContent(/^3 lanes move after restart$/);
     fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
     expect(await screen.findByText("MODEL_FLAGSHIP=m2")).toBeInTheDocument();
+    // Two of the moving lanes have nothing to degrade to — the dialog says so instead of promising a backup.
+    expect(screen.getByText(/No backup for SMS draft, Deep audit/)).toBeInTheDocument();
+    expect(screen.queryByText(/Every moving lane keeps its backup/)).toBeNull();
+  });
+
+  it("a lane on an overridden selector can delete the override, back to the registry default", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/agents/models") {
+        const data = makeData();
+        Object.assign(data.selectors[0], { overridden: true, codeDefault: "m2" });
+        return data;
+      }
+      if (path.startsWith("/admin/agents/models/search")) return { newest: [], results: [], unavailable: [] };
+      throw new Error(path);
+    });
+    renderTab();
+    const card = (await screen.findByText("SMS intent")).closest(".p-4");
+    fireEvent.click(within(card).getByRole("button", { name: /Change/ }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /Remove the FLAGSHIP override · back to the registry default \(Claude Opus 5\)/ }));
+    expect(await screen.findByText(/lanes move after restart/)).toHaveTextContent(/^3 lanes move after restart$/);
+    fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+    expect(await screen.findByText(/# delete MODEL_FLAGSHIP \(unpin → Claude Opus 5\)/)).toBeInTheDocument();
+  });
+
+  it("a fan-out lane shows its second model as running alongside, not as a backup", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/agents/models") {
+        const data = makeData();
+        data.lanes[0].fanout = true;
+        return data;
+      }
+      throw new Error(path);
+    });
+    renderTab();
+    const card = (await screen.findByText("SMS intent")).closest(".p-4");
+    expect(within(card).getByText(/Alongside/)).toBeInTheDocument();
+    expect(within(card).queryByText(/Backup/)).toBeNull();
+  });
+
+  it("a failed load offers Retry, and a failed refresh keeps the lanes on screen", async () => {
+    let fail = true;
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/agents/models") {
+        if (fail) throw new Error("upstream 502");
+        return makeData();
+      }
+      throw new Error(path);
+    });
+    renderTab();
+    expect(await screen.findByRole("alert")).toHaveTextContent("upstream 502");
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("SMS intent")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("Move a model… walks the migration set and drafts only the eligible env", async () => {
@@ -87,5 +142,31 @@ describe("AgentModelsTab", () => {
     fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
     expect(await screen.findByText("PIN_REPORT=m2")).toBeInTheDocument();
     expect(screen.queryByText("MODEL_FLAGSHIP=m2")).toBeNull();
+  });
+
+  it("Move a model… to a target found by live search still classifies the set (not 'unknown model')", async () => {
+    adminFetch.mockImplementation(async (path, init) => {
+      if (path === "/admin/agents/models") return makeData();
+      if (path.startsWith("/admin/agents/models/search")) {
+        return path.includes("q=next") ? { results: [{ id: "m9", label: "Claude Next", provider: "anthropic" }], unavailable: [] } : { newest: [], results: [], unavailable: [] };
+      }
+      if (path === "/admin/agents/models/probe") return { ok: true, provider: JSON.parse(init.body).provider, id: JSON.parse(init.body).id };
+      throw new Error(path);
+    });
+    renderTab();
+    await screen.findByText("SMS intent");
+    fireEvent.click(screen.getByRole("button", { name: /Move a model/ }));
+    let dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button", { name: "Move" })[0]);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Pick the target model" }));
+    dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByPlaceholderText(/fable 5.1/), { target: { value: "next" } });
+    expect(await within(dialog).findByText("Claude Next")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Use" }));
+    expect(await screen.findByText("Eligible")).toBeInTheDocument();
+    dialog = screen.getByRole("dialog");
+    expect(within(dialog).queryByText(/unknown model/)).toBeNull();
+    expect(within(dialog).getByText("Report copy")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Draft eligible" })).toBeEnabled();
   });
 });

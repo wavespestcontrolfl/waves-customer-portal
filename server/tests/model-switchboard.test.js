@@ -48,7 +48,7 @@ describe('model-switchboard', () => {
         expect(typeof lane.fallback.model).toBe('string');
         expect(models[lane.fallback.model]).toBeDefined();
       }
-      expect(['live', 'restart']).toContain(lane.applies);
+      expect(['live', 'restart', 'registration']).toContain(lane.applies);
     }
   });
 
@@ -58,6 +58,40 @@ describe('model-switchboard', () => {
     expect(flagship.laneCount).toBeGreaterThan(5);
     expect(flagship.overridden).toBe(!!process.env.MODEL_FLAGSHIP);
     expect(flagship.current).toBe(MODELS.FLAGSHIP);
+    // Every non-derived selector reports the default it returns to when its
+    // override is deleted, and that default is the registry's own.
+    for (const sel of selectors) {
+      if (sel.derivesFrom) expect(sel.codeDefault).toBeNull();
+      else expect(sel.codeDefault).toBe(MODELS.DEFAULTS[sel.key]);
+    }
+    expect(MODELS.DEFAULTS.FLAGSHIP).toMatch(/^claude-/);
+  });
+
+  it('managed agents are registration-locked: not counted in a selector blast radius, applies at re-registration', () => {
+    const { selectors, lanes } = sb.getSwitchboard();
+    const agents = lanes.filter((l) => l.policy === 'agents');
+    expect(agents.length).toBeGreaterThan(0);
+    for (const lane of agents) {
+      expect(lane.lock.kind).toBe('registration');
+      expect(lane.applies).toBe('registration');
+    }
+    const flagship = selectors.find((s) => s.key === 'FLAGSHIP');
+    const following = lanes.filter((l) => l.primary.selector === 'FLAGSHIP' && !l.primary.pinned && l.lock?.kind !== 'registration').length;
+    expect(flagship.laneCount).toBe(following);
+  });
+
+  it('turf OCR is a two-model consensus (fan-out), and the SMS canary probes are lanes of their own', () => {
+    const { lanes } = sb.getSwitchboard();
+    const turf = lanes.find((l) => l.id === 'turf_ocr');
+    expect(turf.fanout).toBe(true);
+    expect(turf.fallback).toBeNull();
+    expect(turf.also.map((a) => a.model)).toEqual([MODELS.VISION]);
+    const canary = lanes.find((l) => l.id === 'sms_canary_default');
+    expect(canary.primary.model).toBe(MODELS.ROUTES.smsDraftDefault.model);
+    expect(canary.fallback).toBeNull();
+    expect(lanes.find((l) => l.id === 'sms_canary_save_sale').primary.model).toBe(MODELS.ROUTES.smsDraftSaveSale.model);
+    // lead triage maps the JSON without validating it → nothing catches a regression.
+    expect(lanes.find((l) => l.id === 'lead_triage').continuity).toBe('unchecked');
   });
 
   it('reflects an env override as the running model and as a pin', () => {
@@ -79,8 +113,9 @@ describe('model-switchboard', () => {
       expect(ib.primary.pinEnv).toBe('INTELLIGENCE_BAR_MODEL');
       // Deleting the pin returns the lane to its selector (which is overridden here).
       expect(ib.primary.unpinnedModel).toBe('claude-opus-5');
-      // A pinned lane no longer follows its selector, so it is not counted there.
-      const following = lanes.filter((l) => l.primary.selector === 'FLAGSHIP' && !l.primary.pinned).length;
+      // A pinned lane no longer follows its selector, so it is not counted
+      // there; nor does a registration-locked managed agent.
+      const following = lanes.filter((l) => l.primary.selector === 'FLAGSHIP' && !l.primary.pinned && l.lock?.kind !== 'registration').length;
       expect(flagship.laneCount).toBe(following);
     } finally {
       if (prevFlagship === undefined) delete process.env.MODEL_FLAGSHIP; else process.env.MODEL_FLAGSHIP = prevFlagship;

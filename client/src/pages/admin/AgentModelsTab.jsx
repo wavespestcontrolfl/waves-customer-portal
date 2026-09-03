@@ -6,7 +6,7 @@ import { useHubParams } from "./agents/hubParams";
 import LaneModelCard from "./agents/LaneModelCard";
 import MigrationSetDialog from "./agents/MigrationSetDialog";
 import PickModelDialog from "./agents/PickModelDialog";
-import { UNPIN, computeChanges, destinationLabel, effectiveLegFor, envBlockOf, envForLeg as envForLegIn, legsOf, modelLabel, selectorDraftFor } from "./agents/modelDraft";
+import { UNPIN, computeChanges, destinationLabel, discoveredEntry, effectiveLegFor, envBlockOf, envForLeg as envForLegIn, legsOf, modelLabel, movesOnEnv, selectorDraftFor, selectorUnpinnedModel } from "./agents/modelDraft";
 
 // Agents → Models: one card per AI lane, grouped by product area (the area
 // strip in the hub header filters them), each with a plain-English line, the
@@ -82,7 +82,7 @@ export default function AgentModelsTab({ setRefreshHandler }) {
   const laneChanged = useCallback((lane) => legsOf(lane).some((leg) => effectiveLeg(leg) !== leg.model), [effectiveLeg]);
   const siblingsOf = (lane, leg) => {
     if (leg.pinEnv || !leg.selector) return [];
-    return data.lanes.filter((l) => l.id !== lane.id && legsOf(l).some((g) => g.selector === leg.selector && !g.pinned)).map((l) => l.name);
+    return data.lanes.filter((l) => l.id !== lane.id && movesOnEnv(l) && legsOf(l).some((g) => g.selector === leg.selector && !g.pinned)).map((l) => l.name);
   };
 
   const changes = useMemo(() => computeChanges({ data, draft, selectorDraft }), [data, draft, selectorDraft]);
@@ -90,6 +90,9 @@ export default function AgentModelsTab({ setRefreshHandler }) {
   const restartCount = changes.filter((c) => c.restart && !c.hold).length;
   const affectedLanes = data ? data.lanes.filter(laneChanged).length : 0;
   const uncheckedMoving = data ? data.lanes.filter((l) => laneChanged(l) && l.continuity === "unchecked").length : 0;
+  // Moving lanes with nothing to degrade to: a model that passes the probe can
+  // still reject the lane's request shape, and these fail rather than fall back.
+  const noBackupMoving = data ? data.lanes.filter((l) => laneChanged(l) && !l.fallback).map((l) => l.name) : [];
 
   // Inbound-content lanes that a change lands on Gemini (the adapter folds the
   // system prompt into the user turn — no instruction boundary yet).
@@ -115,6 +118,11 @@ export default function AgentModelsTab({ setRefreshHandler }) {
     const env = envForLeg(leg);
     if (!env) return;
     const siblings = siblingsOf(lane, leg);
+    // Unpin = delete the env var. For a lane pin that returns the leg to its
+    // selector / code default; for a leg on an OVERRIDDEN selector it returns
+    // the whole selector to the registry default (every follower moves).
+    const selector = !leg.pinEnv && leg.selector ? selectorByKey[leg.selector] : null;
+    const selectorUnpin = selector?.overridden ? selectorUnpinnedModel(selector, selectorByKey) : null;
     setFind({
       envs: [env],
       accepts: leg.accepts,
@@ -123,28 +131,19 @@ export default function AgentModelsTab({ setRefreshHandler }) {
       subtitle: siblings.length
         ? `This lane shares its model with ${siblings.length} other${siblings.length === 1 ? "" : "s"}. A change moves all of them.`
         : lane.describe,
-      canUnpin: !!leg.pinned,
-      unpinLabel: leg.pinned ? `Unpin · follow ${leg.selector || "code default"} (${modelLabel(catalog, leg.unpinnedModel)})` : null,
+      canUnpin: !!leg.pinned || !!selectorUnpin,
+      unpinLabel: leg.pinned
+        ? `Unpin · follow ${leg.selector || "code default"} (${modelLabel(catalog, leg.unpinnedModel)})`
+        : selectorUnpin
+          ? `Remove the ${leg.selector} override · back to ${selector.derivesFrom ? `following ${selector.derivesFrom}` : "the registry default"} (${modelLabel(catalog, selectorUnpin)})`
+          : null,
     });
   };
 
   const onFound = (envs, model) => {
     setPickProblem(null);
     if (model.id !== UNPIN) {
-      setDiscovered((prev) => ({
-        ...prev,
-        // Keep whatever the catalog knew (caps, deep-only); a live-search
-        // find is offered only for the modality it was found for.
-        [model.id]: {
-          ...(prev[model.id] || catalog[model.id] || {}),
-          label: model.label || model.id,
-          provider: model.provider,
-          caps: catalog[model.id]?.caps?.length ? catalog[model.id].caps : [find?.accepts?.cap || "text"],
-          status: "current",
-          discovered: !catalog[model.id] || !!catalog[model.id].discovered,
-          ...((model.requiresDeep || catalog[model.id]?.requires === "deep") ? { requires: "deep" } : {}),
-        },
-      }));
+      setDiscovered((prev) => ({ ...prev, [model.id]: discoveredEntry(model, prev[model.id] || catalog[model.id], model.cap || find?.accepts?.cap) }));
     }
     if (model.unverified) setPickProblem(`${model.label || model.id} drafted UNVERIFIED: the provider check could not run on this server. Confirm the id is enabled for the prod account before applying.`);
     envs.forEach((env) => setDraftValue(env, model.id));
@@ -181,14 +180,17 @@ export default function AgentModelsTab({ setRefreshHandler }) {
       </Card>
     );
   }
-  if (error) {
-    return (
-      <Card className="p-5 text-14 text-alert-fg" role="alert">
-        {error}
-      </Card>
-    );
-  }
-  if (!data) return null;
+  // A failed load must leave a way back: Retry here, and when a refresh fails
+  // the data already on screen stays usable under the notice.
+  const errorNotice = error && (
+    <Card className="flex flex-wrap items-center justify-between gap-3 p-4 text-14 text-alert-fg" role="alert">
+      <span>{error}</span>
+      <Button size="sm" variant="secondary" onClick={load} disabled={loading}>
+        {loading ? "Retrying…" : "Retry"}
+      </Button>
+    </Card>
+  );
+  if (!data) return errorNotice || null;
 
   const noBackup = data.lanes.filter((l) => !l.fallback).length;
   const unchecked = data.lanes.filter((l) => l.continuity === "unchecked").length;
@@ -197,6 +199,7 @@ export default function AgentModelsTab({ setRefreshHandler }) {
 
   return (
     <div className="flex flex-col gap-4 pb-6">
+      {errorNotice}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <p className="m-0 text-14 text-ink-secondary">
           <span className="font-medium text-zinc-900 u-nums">{data.lanes.length}</span> AI lanes ·{" "}
@@ -292,8 +295,16 @@ export default function AgentModelsTab({ setRefreshHandler }) {
           <DialogTitle>Apply these changes</DialogTitle>
           <p className="m-0 mt-1 text-13 text-ink-secondary">
             Paste into Railway → portal service → Variables. Railway restarts the service on save; every lane below picks up its
-            new model then. Backups stay in place, so a bad model id degrades to the backup instead of failing.
+            new model then.
+            {noBackupMoving.length === 0
+              ? " Every moving lane keeps its backup, so a bad model id degrades to the backup instead of failing."
+              : ""}
           </p>
+          {noBackupMoving.length > 0 && (
+            <div className="mt-2 text-13 text-alert-fg" role="alert">
+              No backup for {noBackupMoving.join(", ")}: if the new model rejects this lane's requests, the lane fails instead of degrading.
+            </div>
+          )}
         </DialogHeader>
         <DialogBody className="flex flex-col gap-3">
           <ul className="m-0 flex list-none flex-col gap-2 p-0">

@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Button, Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle } from "../../../components/ui";
 import PickModelDialog from "./PickModelDialog";
-import { buildMigrationSet, modelLabel, modelsInUse } from "./modelDraft";
+import { buildMigrationSet, discoveredEntry, modelLabel, modelsInUse } from "./modelDraft";
 
 // Whole-model move, as a migration set rather than a mutation: pick the model
 // to move off, pick the target (probed, like every pick), then see every env
@@ -24,7 +24,10 @@ export default function MigrationSetDialog({ data, catalog, onClose, onDraft }) 
   const [picking, setPicking] = useState(false);
 
   const inUse = useMemo(() => modelsInUse(data), [data]);
-  const set = useMemo(() => buildMigrationSet({ data, catalog, fromId, toId: target?.id || null }), [data, catalog, fromId, target]);
+  // A target found through live search is not in the catalog yet; without an
+  // entry every env would be "blocked: unknown model".
+  const withTarget = useMemo(() => (target && !catalog[target.id] ? { ...catalog, [target.id]: discoveredEntry(target, null, target.cap) } : catalog), [catalog, target]);
+  const set = useMemo(() => buildMigrationSet({ data, catalog: withTarget, fromId, toId: target?.id || null }), [data, withTarget, fromId, target]);
 
   // The target search spans every provider / modality the source's envs can
   // take; per-env compatibility then lands in the "Cannot move" group.
@@ -43,7 +46,7 @@ export default function MigrationSetDialog({ data, catalog, onClose, onDraft }) 
         catalog={catalog}
         onClose={() => setPicking(false)}
         onPick={(model) => {
-          setTarget(model);
+          setTarget({ ...model, cap: accepts.cap });
           setPicking(false);
         }}
       />

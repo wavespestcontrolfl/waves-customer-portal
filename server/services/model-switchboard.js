@@ -148,8 +148,14 @@ const LOCK = {
   provider: (detail) => ({ kind: 'provider', label: 'Provider-specific', detail }),
   migration: (detail) => ({ kind: 'migration', label: 'Requires re-embed', detail }),
   measurement: (detail) => ({ kind: 'measurement', label: 'Measurement probe', detail }),
-  agents: (detail) => ({ kind: 'provider', label: 'Anthropic only', detail }),
+  // Managed agents: the model is embedded when the agent is registered with
+  // Anthropic (out of band, from the *-agent-config.js files); the runtime
+  // invokes the registered agent by id, so a registry change reaches these
+  // lanes at the NEXT registration, not on a Railway restart. The composer
+  // therefore never counts them in a selector's blast radius.
+  registration: (detail) => ({ kind: 'registration', label: 'Registered agent', detail }),
 };
+const AGENT_LOCK = LOCK.registration('Anthropic Managed Agents · model set at registration; re-register to move it');
 
 // Lane extras: `retry` = the availability retry of the fallback leg (the photo
 // lanes re-run Gemini on GEMINI_VISION_FALLBACK); `also` = further legs that
@@ -197,7 +203,7 @@ const LANES = [
   L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, retry: T('GEMINI_VISION_FALLBACK'), also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'three legs in parallel · owner ruling 2026-09-02: one Gemini model — not yet coded' }),
   L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), D('GEMINI_PROPERTY_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D(['OPENAI_PROPERTY_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
   L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), D('GEMINI_VISION_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })] }),
-  L('turf_ocr', 'Turf-height gauge OCR', 'turf-height-ocr.js', 'multimodal', D('GEMINI_TURF_OCR_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), T('VISION')),
+  L('turf_ocr', 'Turf-height gauge OCR', 'turf-height-ocr.js', 'multimodal', D('GEMINI_TURF_OCR_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), null, { fanout: true, also: [T('VISION')], note: 'Claude + Gemini in parallel; consensus of both readings' }),
   L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'drives customer-facing health scores (owner 2026-07-21)' }),
   L('vision_delta', 'Before / after vision delta', 'vision-delta.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_quality_gate', 'Lawn photo-quality gate', 'lawn-intelligence.js', 'multimodal', T('VISION')),
@@ -216,6 +222,11 @@ const LANES = [
   L('sms_suggest', 'SMS draft suggestion (comms panel)', 'routes/admin-communications.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
   L('response_drafter', 'SMS reply drafter (auto / high-stakes split)', 'response-drafter.js', 'voice', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true, note: 'routine intents ride customerCopy' }),
   L('estimate_followup', 'Estimate-conversion follow-up SMS', 'estimate-conversion-agent.js, sms-shadow-drafter.js', 'voice', R('smsDraftDefault'), P('highStakes', 'fallback'), { inbound: true, note: 'delegates to the SMS drafter' }),
+  // Health probes: one tiny billed call per SMS draft route at boot and every
+  // six hours (scheduler.js). No fallback by design — the canary exists to
+  // notice the route itself failing.
+  L('sms_canary_default', 'SMS draft canary · routine route', 'sms-draft-canary.js', 'voice', R('smsDraftDefault'), null, { note: 'probe at boot + every 6h; alerts the owner when the route stops answering' }),
+  L('sms_canary_save_sale', 'SMS draft canary · save-the-sale route', 'sms-draft-canary.js', 'voice', R('smsDraftSaveSale'), null, { note: 'probe at boot + every 6h; alerts the owner when the route stops answering' }),
   L('completion_recap', 'Completion recap (customer-facing)', 'completion-recap.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('lawn_visit_narratives', 'Lawn + visit-summary narratives', 'service-report/lawn-report-narrative.js, service-report/visit-summary-narrative.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('social_copy', 'Social post copy', 'social-media.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
@@ -283,12 +294,12 @@ const LANES = [
   L('extreme_tier', 'Explicit deep audit (EXTREME tier)', 'config/models.js', 'deep', T('EXTREME'), null, { note: 'no automatic lane — deliberate opt-in only' }),
 
   // ── Managed agents (Anthropic only) ──
-  L('agent_bi', 'Weekly BI briefing agent', 'bi-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: LOCK.agents('Anthropic Managed Agents') }),
-  L('agent_lead', 'Lead response agent', 'lead-response-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: LOCK.agents('Anthropic Managed Agents') }),
-  L('agent_content', 'Content, blog writer, refresh agents', 'content/content-agent-config.js, content/agents/writer-agent-config.js, content/agents/refresh-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: LOCK.agents('Anthropic Managed Agents') }),
-  L('agent_meta', 'Meta rewriter agent', 'content/agents/meta-rewriter-config.js', 'agents', T('WORKHORSE'), null, { lock: LOCK.agents('Anthropic Managed Agents') }),
-  L('agent_backlink', 'Backlink strategy agent', 'seo/backlink-strategy-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: LOCK.agents('Anthropic Managed Agents') }),
-  L('agent_assistant', 'Customer assistant (managed)', 'ai-assistant/managed-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: LOCK.agents('Anthropic Managed Agents') }),
+  L('agent_bi', 'Weekly BI briefing agent', 'bi-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: AGENT_LOCK }),
+  L('agent_lead', 'Lead response agent', 'lead-response-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: AGENT_LOCK }),
+  L('agent_content', 'Content, blog writer, refresh agents', 'content/content-agent-config.js, content/agents/writer-agent-config.js, content/agents/refresh-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: AGENT_LOCK }),
+  L('agent_meta', 'Meta rewriter agent', 'content/agents/meta-rewriter-config.js', 'agents', T('WORKHORSE'), null, { lock: AGENT_LOCK }),
+  L('agent_backlink', 'Backlink strategy agent', 'seo/backlink-strategy-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: AGENT_LOCK }),
+  L('agent_assistant', 'Customer assistant (managed)', 'ai-assistant/managed-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: AGENT_LOCK }),
 
   // ── Specialized / locked ──
   L('call_extraction', 'Call extraction V2', 'call-recording-processor.js', 'locked',
@@ -333,6 +344,8 @@ const AREAS = [
 const LANE_AREA = {
   sms_draft: 'sms',
   sms_save_sale: 'sms',
+  sms_canary_default: 'sms',
+  sms_canary_save_sale: 'sms',
   sms_tone: 'sms',
   sms_suggest: 'sms',
   response_drafter: 'sms',
@@ -455,6 +468,8 @@ const LANE_AREA = {
 const LANE_DESCRIBE = {
   sms_draft: 'Writes the reply to an everyday customer text',
   sms_save_sale: 'Writes the reply when a customer wants to cancel or complains',
+  sms_canary_default: 'Checks every six hours that the routine SMS drafting route still answers',
+  sms_canary_save_sale: 'Checks every six hours that the save-the-sale SMS drafting route still answers',
   sms_tone: 'Rewrites a staff text in the Waves voice',
   sms_suggest: 'Suggests a reply inside the comms panel',
   response_drafter: 'Drafts replies, splitting routine from high-stakes',
@@ -577,10 +592,10 @@ const LANE_DESCRIBE = {
 //   judged    an LLM judge / replay eval scores output against human truth
 //             (shadow judge, sealed exam, call replay eval, social judge, fact gates)
 //   verified  a deterministic checker gates the output (report safe-copy gate,
-//             estimator floors, triage flags, transcription validation)
+//             estimator floors, transcription validation)
 //   unchecked nothing but the owner notices
 const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "response_drafter", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
-const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "fact_check_gate", "intent_composer", "lawn_visit_narratives", "lead_triage", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative"]);
+const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "fact_check_gate", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative"]);
 
 // ── Resolution ────────────────────────────────────────────────────────
 function firstSetEnv(names) {
@@ -608,6 +623,9 @@ function resolveSelectors() {
       provider: providerOf(current),
       overridden: !!overrideEnv,
       overrideEnv,
+      // What the selector returns to when its override is deleted (null for
+      // a selector that derives from another — it follows that one instead).
+      codeDefault: MODELS.DEFAULTS[sel.key] || null,
       // `derivesFrom`: config/models.js defaults this selector to another one
       // (OPENAI_SMS_DRAFT = MODEL_OPENAI_SMS_DRAFT || OPENAI_FAST), so while
       // it is not set in env, a change to the parent moves it too.
@@ -695,7 +713,8 @@ function getSwitchboard() {
     const fallback = withProvider(legs.fallback);
     const retry = withProvider(resolveRef(lane.retry));
     const also = (lane.also || []).map((ref) => withProvider(resolveRef(ref)));
-    if (primary.selector && byKey[primary.selector] && !primary.pinned) byKey[primary.selector].laneCount += 1;
+    const registration = lane.lock?.kind === 'registration';
+    if (primary.selector && byKey[primary.selector] && !primary.pinned && !registration) byKey[primary.selector].laneCount += 1;
     return {
       id: lane.id,
       name: lane.name,
@@ -708,7 +727,7 @@ function getSwitchboard() {
       fallback,
       retry,
       also,
-      applies: primary.live ? 'live' : 'restart',
+      applies: registration ? 'registration' : primary.live ? 'live' : 'restart',
       lock: lane.lock || null,
       fanout: !!lane.fanout,
       inbound: !!lane.inbound,

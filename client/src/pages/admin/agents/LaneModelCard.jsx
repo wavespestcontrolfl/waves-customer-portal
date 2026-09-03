@@ -57,7 +57,7 @@ export default function LaneModelCard({ lane, catalog, draft, effectiveLeg, envF
   const primaryNow = effectiveLeg(l.primary);
   const changed = [l.primary, l.fallback, l.retry, ...(l.also || [])].filter(Boolean).some((leg) => effectiveLeg(leg) !== leg.model);
   const extraLegs = [
-    { leg: l.fallback, which: "backup" },
+    { leg: l.fallback, which: l.fanout ? "parallel arm" : "backup" },
     { leg: l.retry, which: "retry" },
     ...(l.also || []).map((a) => ({ leg: a, which: "parallel arm" })),
   ].filter((x) => x.leg);
@@ -85,10 +85,10 @@ export default function LaneModelCard({ lane, catalog, draft, effectiveLeg, envF
         <span className="text-ink-secondary">
           {l.fallback ? (
             <>
-              Backup <ModelChip catalog={catalog} id={effectiveLeg(l.fallback)} />
+              {l.fanout ? "Alongside" : "Backup"} <ModelChip catalog={catalog} id={effectiveLeg(l.fallback)} />
               {l.retry && (
                 <>
-                  {" "}then <ModelChip catalog={catalog} id={effectiveLeg(l.retry)} />
+                  {l.fanout ? " retried on" : " then"} <ModelChip catalog={catalog} id={effectiveLeg(l.retry)} />
                 </>
               )}
             </>
@@ -154,7 +154,7 @@ export default function LaneModelCard({ lane, catalog, draft, effectiveLeg, envF
             <dt className="text-11 uppercase tracking-label text-ink-tertiary">Continuity</dt>
             <dd className="m-0 text-ink-secondary">{cont.help}</dd>
             <dt className="text-11 uppercase tracking-label text-ink-tertiary">Applies</dt>
-            <dd className="m-0 text-ink-secondary">{l.applies === "live" ? "next request" : "after the Railway restart"}</dd>
+            <dd className="m-0 text-ink-secondary">{l.applies === "live" ? "next request" : l.applies === "registration" ? "when the agent is next registered with Anthropic — not on restart" : "after the Railway restart"}</dd>
             {l.note && (
               <>
                 <dt className="text-11 uppercase tracking-label text-ink-tertiary">Notes</dt>
