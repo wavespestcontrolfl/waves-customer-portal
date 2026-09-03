@@ -23,7 +23,12 @@ jest.mock('../models/db', () => {
       orderByRaw() { return builder; },
       whereRaw(sql, params) { mockState.raws.push({ sql: String(sql), params }); return builder; },
       forUpdate() { return builder; },
-      first: async () => (mockState.firstQueue.length ? mockState.firstQueue.shift() : mockState.existingDraft),
+      first: async () => {
+        mockState.firsts.push(table);
+        const v = mockState.firstQueue.length ? mockState.firstQueue.shift() : mockState.existingDraft;
+        if (v instanceof Error) throw v;
+        return v;
+      },
       select: async () => (mockState.selectQueue && mockState.selectQueue.length ? mockState.selectQueue.shift() : []),
       update: async (payload) => {
         mockState.updates.push({ table, payload });
@@ -104,6 +109,12 @@ const mockSyncPrimaryAddress = jest.fn();
 jest.mock('../services/customer-properties', () => ({
   recordCallProperty: (...a) => mockRecordCallProperty(...a),
   syncPrimaryAddress: (...a) => mockSyncPrimaryAddress(...a),
+  // Pure — the upgrade-in-place path recomputes the row's dedup key with it.
+  addressKey: jest.requireActual('../services/customer-properties').addressKey,
+}));
+const mockEnqueueCallPropertyLookup = jest.fn();
+jest.mock('../services/call-property-lookup', () => ({
+  enqueueCallPropertyLookup: (...a) => mockEnqueueCallPropertyLookup(...a),
 }));
 
 const {
@@ -119,7 +130,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { existingDraft: null, firstQueue: [], selectQueue: [], inserts: [], updates: [], updateResults: [], locks: [], raws: [] };
+  mockState = { existingDraft: null, firstQueue: [], selectQueue: [], inserts: [], updates: [], updateResults: [], locks: [], raws: [], firsts: [] };
   mockRecordCallProperty.mockReset().mockResolvedValue({ created: true, propertyId: 'prop-1' });
   mockSyncPrimaryAddress.mockReset().mockResolvedValue(undefined);
   mockIsEnabled.mockImplementation((key) => key === 'estimateClarifyAsks');
@@ -1387,10 +1398,12 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
   });
   const reply = async (leadRow, customerRow, draftRow, flags = {}) => {
     const a = AWAITING(flags);
-    // first() order in the locked phase: fresh draft, customer (locked first), lead, unsent draft;
-    // later flag stamps re-read the draft row (existingDraft) once the queue drains.
+    // first() order in the locked phase: fresh draft, the call's unsent draft (locked FIRST — only
+    // when the call asked for a quote), customer, lead; later flag stamps re-read the draft row
+    // (existingDraft) once the queue drains.
+    const quoteAsked = flags.unit_quote_promised === true || flags.unit_quote_requested !== false;
     mockState.existingDraft = a;
-    mockState.firstQueue = [a, a, customerRow, leadRow, draftRow];
+    mockState.firstQueue = [a, a, ...(quoteAsked ? [draftRow] : []), customerRow, leadRow];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
     await result.repricePromise;
     return result;
@@ -1417,6 +1430,28 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     expect(flags.unit_writeback).toEqual(expect.objectContaining({ lead: 'filled', customer: 'primary_property', propertyId: 'prop-1' }));
     // The card stamp still happens.
     expect(mockState.updates.find((u) => u.table === 'triage_items')).toBeDefined();
+    // The NEW row is enriched like a call-pipeline insert (the recovery sweep only covers that source).
+    expect(mockEnqueueCallPropertyLookup).toHaveBeenCalledWith({ propertyId: 'prop-1' });
+  });
+
+  test('lock order: the call\'s estimate row is read FOR UPDATE before the customer and lead rows (finalizer order estimates → leads)', async () => {
+    await reply({ id: 'lead-1', address: null }, { id: 'cust-1', address_line1: null }, { id: 'est-1' });
+    const locked = mockState.firsts.filter((t) => ['estimates', 'customers', 'leads'].includes(t));
+    expect(locked.slice(0, 3)).toEqual(['estimates', 'customers', 'leads']);
+  });
+
+  test('the card is the human verdict: a unit texted after staff closed the missing_unit_number card is kept on the ask only — no CRM writes, no re-draft', async () => {
+    mockState.updateResults = [0]; // the triage_items stamp hits zero open/in_progress rows
+    const result = await reply({ id: 'lead-1', address: null }, { id: 'cust-1', address_line1: null }, { id: 'est-1' });
+    expect(result.handled).toBe(true);
+    expect(mockState.updates.find((u) => u.table === 'leads')).toBeUndefined();
+    expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
+    expect(mockState.updates.find((u) => u.table === 'estimates')).toBeUndefined();
+    expect(mockRecordCallProperty).not.toHaveBeenCalled();
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+    const flags = JSON.parse(mockState.updates.find((u) => u.table === 'message_drafts').payload.flags);
+    expect(flags.unit_number_answer).toBe('Apt 204');
+    expect(flags.unit_writeback).toEqual(expect.objectContaining({ lead: 'skipped', customer: 'skipped', reason: 'card_closed' }));
   });
 
   test('existing customer whose OWN address is the building: line 2 filled + primary synced; lead gets the unit as line 2; the unsent building-level draft is superseded under the re-price guard', async () => {
@@ -1451,6 +1486,31 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     expect(flags.unit_writeback).toEqual(expect.objectContaining({ lead: 'different_building', customer: 'second_property' }));
   });
 
+  test('existing customer elsewhere whose call already persisted the building as a UNITLESS secondary: that row is upgraded in place (unit + address_key), never duplicated, not re-enriched', async () => {
+    mockState.selectQueue = [[{ id: 'prop-bldg', address_line1: '1048 Example Lakes Cir', address_line2: null, city: 'Sarasota', zip: '34232' }]];
+    await reply(
+      { id: 'lead-1', address: '5 Other Rd, Venice, FL 34285' },
+      { id: 'cust-1', address_line1: '9 Home St', address_line2: null, city: 'Venice', zip: '34285' },
+      null,
+    );
+    expect(mockRecordCallProperty).not.toHaveBeenCalled();
+    const upgrade = mockState.updates.find((u) => u.table === 'customer_properties');
+    expect(upgrade.payload.address_line2).toBe('Apt 204');
+    expect(upgrade.payload.address_key).toBe(jest.requireActual('../services/customer-properties').addressKey({ address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 204', city: 'Sarasota', zip: '34232' }));
+    const flags = JSON.parse(mockState.updates.find((u) => u.table === 'message_drafts').payload.flags);
+    expect(flags.unit_writeback).toEqual(expect.objectContaining({ customer: 'property_unit_added', propertyId: 'prop-bldg' }));
+    expect(mockEnqueueCallPropertyLookup).not.toHaveBeenCalled();
+  });
+
+  test('existing customer elsewhere with the exact unit already on file at the building: nothing is inserted or upgraded', async () => {
+    mockState.selectQueue = [[{ id: 'prop-unit', address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 204', city: 'Sarasota', zip: '34232' }]];
+    await reply({ id: 'lead-1', address: null }, { id: 'cust-1', address_line1: '9 Home St', city: 'Venice', zip: '34285' }, null);
+    expect(mockRecordCallProperty).not.toHaveBeenCalled();
+    expect(mockState.updates.find((u) => u.table === 'customer_properties')).toBeUndefined();
+    const flags = JSON.parse(mockState.updates.find((u) => u.table === 'message_drafts').payload.flags);
+    expect(flags.unit_writeback.customer).toBe('property_exists');
+  });
+
   test('a lead line that already carries a unit, and a customer line 2 already set at the building, are never overwritten', async () => {
     await reply(
       { id: 'lead-1', address: '1048 Example Lakes Cir Apt 9, Sarasota, FL 34232' },
@@ -1480,11 +1540,36 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     // After the re-run: unsentDraftForCall finds the draft the original composer just inserted.
     mockState.firstQueue = [];
     const a = AWAITING();
-    mockState.firstQueue = [a, a, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, null, { id: 'est-race', status: 'draft' }];
+    mockState.firstQueue = [a, a, null, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, { id: 'est-race', status: 'draft' }];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
     await result.repricePromise;
     expect(mockState.updates.some((u) => u.table === 'estimates')).toBe(true);
     expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', 'Unit number received — re-draft the estimate', expect.stringMatching(/still being drafted/), expect.anything());
+  });
+
+  test('race guard failing twice fails CLOSED: a durable guard_failed marker on the ask and an operator bell, never silence', async () => {
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ lane: 'existing', created: false });
+    const a = AWAITING();
+    mockState.existingDraft = a;
+    // The guard's own lookup throws on both attempts.
+    mockState.firstQueue = [a, a, null, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, new Error('connection reset'), new Error('connection reset')];
+    const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
+    await result.repricePromise;
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', expect.stringMatching(/check the call's estimate/), expect.stringMatching(/could not be recorded/), expect.objectContaining({ metadata: expect.objectContaining({ guard_failed: true, callLogId: 'call-1' }) }));
+    const stamps = mockState.updates.filter((u) => u.table === 'message_drafts').map((u) => { try { return JSON.parse(u.payload.flags); } catch { return {}; } });
+    expect(stamps.some((f) => f.reprice_pending?.guard_failed === true && f.reprice_pending.race === true)).toBe(true);
+  });
+
+  test('race guard failing ONCE retries and succeeds: the appeared draft is guarded, no failure marker', async () => {
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ lane: 'existing', created: false });
+    const a = AWAITING();
+    mockState.existingDraft = a;
+    mockState.firstQueue = [a, a, null, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, new Error('deadlock detected'), { id: 'est-race', status: 'draft' }];
+    const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
+    await result.repricePromise;
+    expect(mockState.updates.some((u) => u.table === 'estimates')).toBe(true);
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', 'Unit number received — re-draft the estimate', expect.any(String), expect.anything());
+    expect(mockNotifyAdmin).not.toHaveBeenCalledWith('lead', expect.stringMatching(/check the call's estimate/), expect.any(String), expect.anything());
   });
 
   test('a customer row with the unit INLINE on line 1 is never given a second unit', async () => {
@@ -1512,13 +1597,13 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
 
   test('legacy in-flight ask (no unit_* targets, call-origin): targets and quote signals come from the unit\'s OWN call row, never the merged generic linkage', async () => {
     const a = AWAITING({ lead_id: 'lead-B', unit_lead_id: undefined, unit_customer_id: undefined, unit_quote_promised: undefined, unit_quote_requested: undefined }, { customer_id: 'cust-B' });
-    // first() order: fresh, call_log (A), lead by A's metadata stamp, customer (locked), lead, unsent draft.
+    // first() order: fresh, call_log (A), lead by A's metadata stamp, unsent draft (locked first), customer, lead.
     mockState.firstQueue = [a, a,
       { id: 'call-1', customer_id: 'cust-A', twilio_call_sid: 'CA-A', metadata: { lead_id: 'lead-A' }, ai_extraction: { quote_requested: true }, ai_extraction_enriched: null, v2_extraction_status: 'valid' },
       { id: 'lead-A' },
+      null,
       { id: 'cust-A', address_line1: null },
       { id: 'lead-A', address: null },
-      null,
     ];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
     await result.repricePromise;
@@ -1531,7 +1616,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
 
   test('unit + bedroom answered in one text: one call re-run carries BOTH overrides against the shared target', async () => {
     const a = AWAITING({ missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-1' });
-    mockState.firstQueue = [a, a, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, { id: 'est-1' }];
+    mockState.firstQueue = [a, a, { id: 'est-1' }, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204, 2 bedrooms' });
     expect(result.handled).toBe(true);
     await result.repricePromise;
@@ -1544,7 +1629,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
 
   test('unit + bedroom with DISTINCT targets: the unit re-run supersedes its draft; the bedroom draft is guarded and handed to the operator', async () => {
     const a = AWAITING({ missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-bed' });
-    mockState.firstQueue = [a, a, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, { id: 'est-call' }];
+    mockState.firstQueue = [a, a, { id: 'est-call' }, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204, 2 bedrooms' });
     await result.repricePromise;
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-call' }));
@@ -1560,7 +1645,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     mockState.existingDraft = a;
     mockState.firstQueue = [a, a,
       { id: 'call-1', customer_id: 'cust-1', twilio_call_sid: 'CA-1', metadata: { lead_id: 'lead-1' }, ai_extraction: {}, ai_extraction_enriched: { service_request: { quote_requested: true } }, v2_extraction_status: 'schema_failed' },
-      { id: 'lead-1' }, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, null,
+      { id: 'lead-1' }, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null },
     ];
     const r1 = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
     await r1.repricePromise;
@@ -1570,7 +1655,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
   test('combined reply while the call\'s draft has not committed: the unit re-run has NO supersede target; the bedroom draft is guarded and belled, never archived by the unit run', async () => {
     const a = AWAITING({ missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-bed' });
     mockState.existingDraft = a;
-    mockState.firstQueue = [a, a, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, null];
+    mockState.firstQueue = [a, a, null, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }];
     mockMaybeDraftEstimateForCall.mockResolvedValue({ lane: 'green', created: true, estimateId: 'est-new' });
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204, 2 bedrooms' });
     await result.repricePromise;
@@ -1584,7 +1669,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
   test('unit answered first on a combined ask: the still-open bedroom item re-points to the replacement draft', async () => {
     const a = AWAITING({ missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-1' });
     mockState.existingDraft = a;
-    mockState.firstQueue = [a, a, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, { id: 'est-1' }];
+    mockState.firstQueue = [a, a, { id: 'est-1' }, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
     await result.repricePromise;
     const stamps = mockState.updates.filter((u) => u.table === 'message_drafts').map((u) => { try { return JSON.parse(u.payload.flags); } catch { return {}; } });

@@ -252,8 +252,20 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
   }
   if (customerId) {
     if (customerRow) {
-      const { recordCallProperty, syncPrimaryAddress } = require('./customer-properties');
+      const { recordCallProperty, syncPrimaryAddress, addressKey } = require('./customer-properties');
+      const { unitLineValueKey } = require('../utils/address-normalizer');
       const ownAddress = String(customerRow.address_line1 || '').trim();
+      // The customer's active property rows AT the asked building, read
+      // under the customer lock taken above. A unit is either line 2 or
+      // INLINE on line 1 (a legacy shape the property address_key
+      // canonicalizes the same).
+      const wanted = unitLineValueKey(unitLine);
+      const props = await trx('customer_properties')
+        .where({ customer_id: customerId, active: true })
+        .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+      const propUnit = (p) => String(p.address_line2 || '').trim() || splitStreetLineUnit(String(p.address_line1 || '')).unit || '';
+      const atBuilding = (props || []).filter((p) => sameBuilding(customerAddressLine(p), building));
+      const unitAlreadyOnFile = atBuilding.some((p) => propUnit(p) && unitLineValueKey(propUnit(p)) === wanted);
       if (ownAddress && sameBuilding(customerAddressLine(customerRow), building)) {
         // A legacy row may carry the unit INLINE on line 1 ("… Cir Apt 9")
         // with line 2 blank — that is a unit, never fill a second one
@@ -265,16 +277,6 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
           // (customer_id, address_key) index and roll the whole reply back
           // (codex r1 P1 on #3785) — the unit is already on file; leave both
           // rows as they are.
-          const { unitLineValueKey } = require('../utils/address-normalizer');
-          const wanted = unitLineValueKey(unitLine);
-          // Either representation: line 2, or the unit INLINE on line 1 (a
-          // legacy shape the property address_key canonicalizes the same).
-          const props = await trx('customer_properties')
-            .where({ customer_id: customerId, active: true })
-            .select('address_line1', 'address_line2', 'city', 'zip');
-          const propUnit = (p) => String(p.address_line2 || '').trim() || splitStreetLineUnit(String(p.address_line1 || '')).unit || '';
-          const unitAlreadyOnFile = (props || []).some((p) => propUnit(p) && unitLineValueKey(propUnit(p)) === wanted
-            && sameBuilding(customerAddressLine(p), building));
           if (unitAlreadyOnFile) {
             out.customer = 'property_exists';
           } else {
@@ -285,19 +287,42 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
         } else {
           out.customer = 'already_has_unit';
         }
+      } else if (unitAlreadyOnFile) {
+        out.customer = 'property_exists';
       } else {
-        const rec = await recordCallProperty({
-          customerId,
-          address_line1: building.street_line_1,
-          address_line2: unitLine,
-          city: building.city || null,
-          state: 'FL',
-          zip: building.postal_code || null,
-          source: 'clarify_unit_reply',
-          conn: trx,
-        });
-        out.customer = rec?.created ? (ownAddress ? 'second_property' : 'primary_property') : 'property_exists';
-        out.propertyId = rec?.propertyId || null;
+        // The call pipeline may already have persisted the building as an
+        // active UNITLESS secondary (a PREMISE missing only its subpremise
+        // is still a resolved building). Inserting the exact unit beside
+        // it would leave two active rows for one building and make the
+        // exactly-one-property selection ambiguous (codex r4 P1 on #3785)
+        // — upgrade that placeholder in place, recomputing its
+        // address_key; the coordinates still point at the building.
+        const unitless = atBuilding.find((p) => !propUnit(p));
+        if (unitless?.id) {
+          await trx('customer_properties').where({ id: unitless.id }).update({
+            address_line2: unitLine,
+            address_key: addressKey({ address_line1: unitless.address_line1, address_line2: unitLine, city: unitless.city, zip: unitless.zip }),
+            updated_at: new Date(),
+          });
+          out.customer = 'property_unit_added';
+          out.propertyId = String(unitless.id);
+        } else {
+          const rec = await recordCallProperty({
+            customerId,
+            address_line1: building.street_line_1,
+            address_line2: unitLine,
+            city: building.city || null,
+            state: 'FL',
+            zip: building.postal_code || null,
+            source: 'clarify_unit_reply',
+            conn: trx,
+          });
+          out.customer = rec?.created ? (ownAddress ? 'second_property' : 'primary_property') : 'property_exists';
+          out.propertyId = rec?.propertyId || null;
+          // A NEW row is enqueued for enrichment by the caller after commit
+          // — the call-pipeline recovery sweep only covers its own source.
+          out.propertyCreated = rec?.created === true;
+        }
       }
     }
   }
@@ -306,7 +331,10 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
 
 // The call's engine draft that a unit reply should supersede: unsent, still
 // a draft, not archived or invalidated (same predicate the engine's own
-// existing-draft lookups use).
+// existing-draft lookups use). Taken FOR UPDATE: every caller writes the
+// row next (the re-price guard), and the invalidation finalizer's order
+// is estimates → leads → call_log — so the reply handler locks this row
+// BEFORE its customer/lead rows, never after (codex r4 P1 on #3785).
 async function unsentDraftForCall(trx, callLogId) {
   if (!callLogId) return null;
   return trx('estimates')
@@ -323,6 +351,7 @@ async function unsentDraftForCall(trx, callLogId) {
     .whereNull('sent_at')
     .whereNull('archived_at')
     .orderBy('created_at', 'desc')
+    .forUpdate()
     .first('id', 'status');
 }
 
@@ -1008,33 +1037,49 @@ async function handleClarifyReply({ phone, body }) {
         // its human verdict (AGENTS.md: no auto-resolution for
         // missing_unit_number); the reviewer sees the unit beside the ask
         // and the existing address-edit flows carry it into the record.
+        let cardStamped = false;
         if (freshFlags.unit_call_log_id) {
-          await trx('triage_items')
+          const stamped = await trx('triage_items')
             .where({ call_log_id: String(freshFlags.unit_call_log_id), reason_code: 'missing_unit_number' })
             .whereIn('status', ['open', 'in_progress'])
             .update({
               payload: trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('customer_reply_unit', ?::text, 'customer_reply_at', ?::text)", [unitLine, new Date().toISOString()]),
               updated_at: new Date(),
             });
+          cardStamped = Number(stamped) > 0;
         }
         freshFlags.unit_number_answer = unitLine;
         if (unitWritebackEnabled()) {
-          const targets = await unitTargets(trx, freshFlags);
-          freshFlags.unit_writeback = await applyUnitWriteback(trx, { unitLine, flags: freshFlags, targets });
-          // Re-draft target: the call's live-unsent building-level draft,
-          // guarded exactly like the bedroom re-price (the send guard is
-          // stamped in THIS locked phase so the stale draft cannot go out
-          // first). Quote signals: the item's own, or recovered from the
-          // call row for a legacy ask.
-          if (freshFlags.unit_call_log_id && (targets.quotePromised || targets.quoteRequested)) {
-            const existing = await unsentDraftForCall(trx, freshFlags.unit_call_log_id);
-            unitRedraft = {
-              callLogId: String(freshFlags.unit_call_log_id),
-              quotePromised: targets.quotePromised === true,
-              supersedeEstimateId: existing?.id ? String(existing.id) : null,
-              // The item-bound building, not the call row's rolling extraction.
-              building: freshFlags.unit_ask_building || null,
-            };
+          if (!cardStamped) {
+            // The card is the human verdict (AGENTS.md: no auto-resolution
+            // for missing_unit_number). A sent ask stays routable for days,
+            // so a unit texted AFTER staff resolved or dismissed the card
+            // — e.g. the whole building IS the service address — must not
+            // mutate the record or supersede the draft (codex r4 P1 on
+            // #3785): the answer is kept on the ask for the audit only.
+            freshFlags.unit_writeback = { lead: 'skipped', customer: 'skipped', at: new Date().toISOString(), reason: freshFlags.unit_call_log_id ? 'card_closed' : 'no_card' };
+          } else {
+            const targets = await unitTargets(trx, freshFlags);
+            // Re-draft target: the call's live-unsent building-level draft,
+            // guarded exactly like the bedroom re-price (the send guard is
+            // stamped in THIS locked phase so the stale draft cannot go out
+            // first). Looked up — and row-locked — BEFORE the CRM rows
+            // below: the invalidation finalizer holds the estimate and then
+            // locks its leads, so taking the lead first could deadlock and
+            // roll the whole reply back (codex r4 P1 on #3785). Quote
+            // signals: the item's own, or recovered from the call row for a
+            // legacy ask.
+            if (freshFlags.unit_call_log_id && (targets.quotePromised || targets.quoteRequested)) {
+              const existing = await unsentDraftForCall(trx, freshFlags.unit_call_log_id);
+              unitRedraft = {
+                callLogId: String(freshFlags.unit_call_log_id),
+                quotePromised: targets.quotePromised === true,
+                supersedeEstimateId: existing?.id ? String(existing.id) : null,
+                // The item-bound building, not the call row's rolling extraction.
+                building: freshFlags.unit_ask_building || null,
+              };
+            }
+            freshFlags.unit_writeback = await applyUnitWriteback(trx, { unitLine, flags: freshFlags, targets });
           }
         }
       }
@@ -1115,11 +1160,23 @@ async function handleClarifyReply({ phone, body }) {
         recorded, estimateId: lockedEstimateId, repriceGuarded, repriceAttempt,
         callOrigin: freshFlags.call_origin === true,
         unitRedraft,
+        unitWriteback: freshFlags.unit_writeback || null,
         extraBedroomTarget: extraBedroomGuarded ? extraBedroomTarget : null,
       };
     });
     if (!locked.recorded.length) return { handled: false };
     const recorded = locked.recorded;
+    // A property row this reply CREATED is enriched exactly like a
+    // call-pipeline insert — after commit, fire-and-forget (codex r4 P2 on
+    // #3785): the recovery sweep only covers source 'call_pipeline', so
+    // without this the row would never gain coordinates or a type.
+    if (locked.unitWriteback?.propertyCreated && locked.unitWriteback.propertyId) {
+      try {
+        require('./call-property-lookup').enqueueCallPropertyLookup({ propertyId: locked.unitWriteback.propertyId });
+      } catch (enqErr) {
+        logger.warn(`[estimate-clarify] property lookup enqueue failed: ${enqErr.message}`);
+      }
+    }
 
     // A bedroom answer that must RE-PRICE a linked draft is durable state
     // on the ask row until a replacement is confirmed created: the
@@ -1255,12 +1312,43 @@ async function handleClarifyReply({ phone, body }) {
         // unlocked read.
         const { withAutomatedEstimatePhoneLock } = require('./estimate-automation-duplicates');
         const raceAttempt = require('crypto').randomUUID();
-        const guardedId = await withAutomatedEstimatePhoneLock(`+1${digits}`, async (trx) => {
+        const runGuard = () => withAutomatedEstimatePhoneLock(`+1${digits}`, async (trx) => {
           const appeared = await unsentDraftForCall(trx, locked.unitRedraft.callLogId);
           if (!appeared?.id) return null;
           const ok = await setEstimateRepricePending(trx, String(appeared.id), new Date().toISOString(), raceAttempt);
           return ok ? String(appeared.id) : null;
-        }).catch((err) => { logger.warn(`[estimate-clarify] race guard failed: ${err.message}`); return null; });
+        });
+        // This transaction is the ONLY thing that makes a late-appearing
+        // unitless draft unsendable, so a transient failure must not
+        // degrade to "nothing happened" (codex r4 P1 on #3785): retry once,
+        // then leave a durable failure marker on the ask and bell the
+        // operator so the call's draft is checked before it goes out.
+        let guardedId = null;
+        let guardError = null;
+        for (let attempt = 0; attempt < 2 && !guardedId && !guardError; attempt += 1) {
+          try {
+            guardedId = await runGuard();
+          } catch (err) {
+            if (attempt === 0) { logger.warn(`[estimate-clarify] race guard failed, retrying: ${err.message}`); continue; }
+            guardError = err;
+          }
+        }
+        if (guardError) {
+          logger.error(`[estimate-clarify] race guard failed twice — the call's draft may be sendable: ${guardError.message}`);
+          await stampClarifyFlags(digits, awaiting.id, {
+            reprice_pending: { call_log_id: locked.unitRedraft.callLogId, unit: unitLine, at: new Date().toISOString(), race: true, guard_failed: true },
+          });
+          try {
+            await require('./notification-service').notifyAdmin(
+              'lead',
+              'Unit number received — check the call\'s estimate before sending',
+              `The customer texted their unit (${unitLine}) while the call's estimate was still being drafted, and the hold on that draft could not be recorded. If a whole-building estimate exists for this call, re-draft it before sending.`,
+              { link: '/admin/estimates', metadata: { estimate_clarify: true, reprice_pending: true, guard_failed: true, draftId: awaiting.id, callLogId: locked.unitRedraft.callLogId, unit: unitLine } },
+            );
+          } catch (bellErr) {
+            logger.warn(`[estimate-clarify] race guard-failed bell failed: ${bellErr.message}`);
+          }
+        }
         const appeared = guardedId ? { id: guardedId } : null;
         if (appeared?.id) {
           const guarded = true;
