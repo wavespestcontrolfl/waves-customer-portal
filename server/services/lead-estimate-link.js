@@ -580,6 +580,11 @@ async function markLinkedLeadEstimateAccepted({
       const stamped = await stamp.update({ estimate_id: estimateId, updated_at: new Date() });
       if (atomic && !stamped) {
         const current = await database('leads').where({ id: lead.id }).first('estimate_id', 'status');
+        // Refresh the caller's row from the re-read so the fallback judges
+        // the original's CURRENT status: an original the office closed as
+        // won between the read and the stamp must not let the duplicate
+        // row record a second win (pre-push P1 on #3834 r8).
+        if (current) Object.assign(lead, current);
         if (!current || String(current.estimate_id) !== String(estimateId) || CLOSED_LEAD_STATUSES.has(current.status)) return false;
       }
     }

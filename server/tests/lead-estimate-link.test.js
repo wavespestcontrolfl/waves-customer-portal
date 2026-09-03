@@ -345,6 +345,24 @@ describe('lead-estimate link service', () => {
     expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('lead-orig6', 'won', database);
   });
 
+  test('an original closed as won between the read and the atomic stamp records no second win on the duplicate row', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2h', estimate_data: { lead_id: 'lead-dup8' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: {
+        'lead-dup8': { id: 'lead-dup8', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-orig8' } },
+        'lead-orig8': { id: 'lead-orig8', status: 'new', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com' },
+      },
+      // The office marked the original won after the eligibility read: the
+      // conditional stamp hits 0 rows and the re-read shows 'won'.
+      raceRows: { 'lead-orig8': { id: 'lead-orig8', status: 'won', estimate_id: null } },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2h', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    expect(database._updates).toEqual([]);
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+  });
+
   test('an indirectly resolved original that belongs to a DIFFERENT customer is never converted', async () => {
     const database = makeAcceptDb({
       linked: [],
