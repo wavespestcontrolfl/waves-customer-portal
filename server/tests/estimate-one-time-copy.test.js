@@ -266,6 +266,15 @@ describe('Waves AI intelligence payload', () => {
       { recurringServices: [{ name: 'Pest Control', service: 'pest_control', mo: 39 }] },
     );
     expect(plan.title).toBe('Waves AI reviewed your property before pricing this estimate');
+
+    // A plan estimate handed in with an EMPTY recurringServices option is
+    // still a plan — the stored recurring rows decide, not the caller's list.
+    const planEmptyOpt = buildWaveGuardIntelligencePayload(
+      { address: '1 Main St, Bradenton, FL 34203' },
+      { result: { recurring: { services: [{ name: 'Pest Control', service: 'pest_control', mo: 39 }] }, oneTime: { items: [{ ...roach2, price: 350, name: roach2.label }] } } },
+      { recurringServices: [] },
+    );
+    expect(planEmptyOpt.title).toBe('Waves AI reviewed your property before pricing this estimate');
   });
 });
 

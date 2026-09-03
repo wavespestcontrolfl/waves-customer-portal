@@ -4313,7 +4313,10 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   // service instead of the generic "reviewed your property" line. Mixed
   // one-time quotes and anything with a recurring service keep the
   // category branches below.
-  const oneTimeOnlyCopy = recurringServices.length === 0
+  // Structural one-time-only check, not "no recurring rows were passed":
+  // a caller can hand in an empty recurringServices for a plan estimate
+  // (codex pre-push P1).
+  const oneTimeOnlyCopy = recurringServices.length === 0 && isStructuralOneTimeOnlyEstimate(parsedData, estimate)
     ? oneTimeOnlyIntelligenceCopy(intelligenceOneTimeItems)
     : null;
   const intelligenceTitle = isLawnOnly
