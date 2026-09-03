@@ -98,4 +98,6 @@ async function executeJobHealthTool(toolName) {
   }
 }
 
-module.exports = { JOB_HEALTH_TOOLS, executeJobHealthTool };
+// getScheduledJobHealth is also the Ops-queue reader (services/ops-queue.js)
+// so the tool and the page can never classify a job differently.
+module.exports = { JOB_HEALTH_TOOLS, executeJobHealthTool, getScheduledJobHealth };

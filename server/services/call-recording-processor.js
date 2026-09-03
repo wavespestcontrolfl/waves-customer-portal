@@ -15789,4 +15789,10 @@ CallRecordingProcessor.demoteFailOpenOnV1AddressConflict = demoteFailOpenOnV1Add
 // have fallen into the catch and had its booking refused.
 CallRecordingProcessor.resolveCallBookingPropertyLinkage = resolveCallBookingPropertyLinkage;
 
+// Retry budget for extraction_failed rows — the SINGLE authority for what
+// processAllPending will still re-run vs. what is terminal. Consumers (the
+// Agents-hub Queue view) read it from here so a change to the env parsing
+// or default can never split "retryable" from "failed" across surfaces.
+CallRecordingProcessor.CALL_EXTRACTION_MAX_ATTEMPTS = CALL_EXTRACTION_MAX_ATTEMPTS;
+
 module.exports = CallRecordingProcessor;

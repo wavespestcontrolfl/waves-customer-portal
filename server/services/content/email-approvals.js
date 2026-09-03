@@ -1188,6 +1188,9 @@ module.exports = {
   // per-item approval emails from this module — two notifications for one
   // decision would double-surface it).
   isApprovableKind,
+  // Shared with the ops queue so its stale-executing rule cannot drift from
+  // recoverExecutingRows.
+  EXECUTING_RECOVERY_MINUTES,
   _internals: {
     parseDecision,
     extractReplyText,

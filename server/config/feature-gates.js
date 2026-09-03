@@ -59,6 +59,7 @@
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
+ *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true (season timeline under the lawn price card — four SWFL turf seasons from the current month, one-line focus each, cadence + projected months per frequency from the scheduling catalog on /data; dev-open, prod dark)
@@ -2128,6 +2129,13 @@ const gates = {
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   techTips: gateEnvValue('GATE_TECH_TIPS'),
 
+  // Ops queue (2026-09-02): the Agents hub "Queue" tab — a read-only
+  // projection of every long-running lane's persisted state (pending /
+  // parked / failed) in one place. No actions live there. OFF unless set,
+  // dev AND prod — GET /api/admin/agents/queue/availability answers
+  // { available: false }, /queue is 404, and the tab is not rendered.
+  // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
+  adminOpsQueue: gateEnvValue('GATE_ADMIN_OPS_QUEUE'),
   // Audio-synced call transcript (admin call log). When on, calls whose
   // call_log.transcript_structured carries diarized segments render them as
   // a clickable list that follows recording playback; click a line to seek.

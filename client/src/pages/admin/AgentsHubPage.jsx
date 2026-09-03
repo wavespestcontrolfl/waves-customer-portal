@@ -29,9 +29,9 @@
  * Tier 1 V2 styling for the shell; the embedded pages keep their own
  * Tier 2 styles.
  */
-import React, { useState, useRef, useCallback } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Activity, Bot, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, RefreshCw } from "lucide-react";
+import { Activity, Bot, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, RefreshCw, Layers } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import AgentOpsPage from "./AgentOpsPage";
 import AgentDecisionsPage from "./AgentDecisionsPage";
@@ -39,6 +39,8 @@ import AgentShadowDraftsPage from "./AgentShadowDraftsPage";
 import PendingDraftsTab from "./PendingDraftsTab";
 import DataHygienePage from "./DataHygienePage";
 import AgentActivityTab from "./AgentActivityTab";
+import AgentQueueTab from "./AgentQueueTab";
+import { adminFetch } from "../../utils/admin-fetch";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const TAB_KEY = "tab";
@@ -49,6 +51,7 @@ const TABS = {
   DRAFTS: "drafts",
   SHADOW: "shadow",
   HYGIENE: "hygiene",
+  QUEUE: "queue",
 };
 const TAB_LIST = [
   { key: TABS.OVERVIEW, label: "Overview", Icon: LayoutGrid },
@@ -60,12 +63,24 @@ const TAB_LIST = [
   { key: TABS.SHADOW, label: "Shadow Drafts", Icon: MessageSquareDashed },
   { key: TABS.HYGIENE, label: "Data Hygiene", Icon: DatabaseZap },
 ];
-const VALID_TABS = TAB_LIST.map((t) => t.key);
+// GATE_ADMIN_OPS_QUEUE: the Queue tab exists only when the server says the
+// gate is on (availability probe), so a dark gate renders nothing new.
+const QUEUE_TAB = { key: TABS.QUEUE, label: "Queue", Icon: Layers };
 
 export default function AgentsHubPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const [queueAvailable, setQueueAvailable] = useState(false);
+  useEffect(() => {
+    let disposed = false;
+    adminFetch("/admin/agents/queue/availability")
+      .then((d) => { if (!disposed) setQueueAvailable(d?.available === true); })
+      .catch(() => { if (!disposed) setQueueAvailable(false); });
+    return () => { disposed = true; };
+  }, []);
+  const tabList = queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST;
+  const validTabs = tabList.map((t) => t.key);
   const paramTab = searchParams.get(TAB_KEY);
-  const tab = VALID_TABS.includes(paramTab) ? paramTab : TABS.OVERVIEW;
+  const tab = validTabs.includes(paramTab) ? paramTab : TABS.OVERVIEW;
   const setTab = useCallback(
     (next) => {
       // Re-clicking the active section renders nothing new — skip the URL
@@ -110,11 +125,11 @@ export default function AgentsHubPage() {
       <AdminCommandHeader
         title="Agents"
         icon={Bot}
-        sections={TAB_LIST}
+        sections={tabList}
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName="grid-cols-2 md:grid-cols-6"
+        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-7" : "grid-cols-2 md:grid-cols-6"}
         action={
           tab === TABS.OVERVIEW
             ? {
@@ -137,6 +152,8 @@ export default function AgentsHubPage() {
           <PendingDraftsTab embedded />
         ) : tab === TABS.SHADOW ? (
           <AgentShadowDraftsPage embedded />
+        ) : tab === TABS.QUEUE ? (
+          <AgentQueueTab embedded />
         ) : (
           <DataHygienePage embedded />
         )}
