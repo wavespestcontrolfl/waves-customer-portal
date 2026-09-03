@@ -219,6 +219,24 @@ async function assertNoLiveAutoOrder(trx, productId) {
   throw err;
 }
 
+/**
+ * Refuse a manual transition (mark ordered / cancel / receive) on a request
+ * whose automatic order is being placed RIGHT NOW (vendor_orders 'placing').
+ * Marking it ordered would double the purchase, cancelling would hide the
+ * in-flight order, receiving is premature. Once the claim settles — placed,
+ * or parked needs_review/failed — the actions are exactly the reconciliation
+ * they exist for, so only 'placing' blocks. Call under the request row lock
+ * (pre-push P0). Throws { statusCode: 409, code: 'auto_order_placing' }.
+ */
+async function assertRequestNotPlacing(trx, requestId) {
+  const placing = await trx('vendor_orders').where({ restock_request_id: requestId, status: 'placing' }).first('id');
+  if (!placing) return;
+  const err = new Error('An automatic order for this request is being placed right now — wait for it to place or park (Restock tab), then act.');
+  err.statusCode = 409;
+  err.code = 'auto_order_placing';
+  throw err;
+}
+
 // Month-to-date money that is spent OR may be: live reservations (placing)
 // and every row whose vendor call was dispatched (placed_at set — placed,
 // and the post-submit needs_review parks). A row parked BEFORE submission
@@ -671,6 +689,7 @@ module.exports = {
   findDispatchable,
   vendorOrderQuantity,
   assertNoLiveAutoOrder,
+  assertRequestNotPlacing,
   AUTO_ORDER_GATE: GATE,
   _internals: { adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS },
 };

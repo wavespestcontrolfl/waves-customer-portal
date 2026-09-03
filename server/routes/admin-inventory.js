@@ -3321,6 +3321,10 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
         err.statusCode = 404;
         throw err;
       }
+      // An automatic order for this request is being placed right now →
+      // 409 for every manual transition (pre-push P0); settled claims are
+      // what these actions reconcile.
+      await require('../services/procurement/order-dispatch').assertRequestNotPlacing(trx, request.id);
       const status = String(request.status || '').toLowerCase();
       if (action === 'receive' && !['open', 'ordered'].includes(status)) {
         const err = new Error(`Restock request is already ${status}; refresh the list`);

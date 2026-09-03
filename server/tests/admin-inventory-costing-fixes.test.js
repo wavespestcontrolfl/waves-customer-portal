@@ -106,6 +106,7 @@ describe('POST /restock-requests/:id/action', () => {
         }
         return { id: 'prod-1', inventory_on_hand: 10, inventory_unit: 'gal' };
       }
+      if (q._table === 'vendor_orders') return requestRow.placingClaim ? { id: 'vo-1' } : null; // assertRequestNotPlacing
       if (q._table === 'product_inventory_movements') {
         movements.push(q.args('insert')[0]);
         return [{ id: 'movement-1', ...q.args('insert')[0] }];
@@ -150,6 +151,23 @@ describe('POST /restock-requests/:id/action', () => {
       expect(res.status).toBe(409);
       expect(stockUpdates).toHaveLength(0);
       expect(movements).toHaveLength(0);
+    });
+  });
+
+  test.each(['cancel', 'mark_ordered', 'receive'])('%s while the automatic order is placing → 409, request untouched (pre-push P0)', async (action) => {
+    const { statusUpdates, stockUpdates } = wireRestock({
+      id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal', placingClaim: true,
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/being placed right now/);
+      expect(statusUpdates).toHaveLength(0);
+      expect(stockUpdates).toHaveLength(0);
     });
   });
 

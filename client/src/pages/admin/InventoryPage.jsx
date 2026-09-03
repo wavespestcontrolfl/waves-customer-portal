@@ -2923,7 +2923,7 @@ function RestockRequestsTab({ showToast, onUpdate }) {
                           )}
                         </div>
                       )}
-                      {request.status === "open" && (
+                      {request.status === "open" && request.order?.status !== "placing" && (
                         <button
                           onClick={() => runAction(request, "mark_ordered")}
                           disabled={receivingId === request.id}
@@ -2934,7 +2934,10 @@ function RestockRequestsTab({ showToast, onUpdate }) {
                       )}
                     </td>
                     <td style={tdS}>
-                      {["open", "ordered"].includes(request.status) ? (
+                      {request.order?.status === "placing" ? (
+                        // The dispatcher owns this request until its order places or parks (server 409s these anyway).
+                        <span style={{ color: D.muted }}>Auto-order in progress</span>
+                      ) : ["open", "ordered"].includes(request.status) ? (
                         <div style={{ display: "grid", gap: 6, minWidth: 220 }}>
                           <div style={{ display: "grid", gridTemplateColumns: "1fr 80px", gap: 6 }}>
                             <input
