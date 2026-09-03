@@ -18,7 +18,8 @@ const globals = require('globals');
 const react = require('eslint-plugin-react');
 
 // Structural warnings (see header). Every production block (server, shared,
-// scripts, ops, packages, client/src, client/public, video) — test files,
+// scripts, ops, packages, client/src, client/public, client build configs,
+// video) — test files,
 // test setup and __fixtures__ modules are exempt: a describe() body with
 // many cases or a fixture builder is not a decision tree, and the counter
 // would just teach people to split suites.
@@ -173,7 +174,7 @@ module.exports = [
       sourceType: 'module',
       globals: { ...globals.nodeBuiltin },
     },
-    rules: ERRORS_ONLY,
+    rules: SOURCE_RULES,
   },
   // A future client/*.cjs really is CommonJS regardless of package type.
   {
@@ -183,7 +184,7 @@ module.exports = [
       sourceType: 'commonjs',
       globals: { ...globals.node },
     },
-    rules: ERRORS_ONLY,
+    rules: SOURCE_RULES,
   },
   // Client tests — vitest WITHOUT runner globals (vite.config has no
   // `globals: true`; tests import describe/it/expect/vi from 'vitest').
