@@ -51,6 +51,7 @@ function makeDb(seed = {}) {
         const STORED = "LOWER\\(REGEXP_REPLACE\\(\\?\\?, '\\\\s', '', 'g'\\)\\)";
         if (new RegExp(`^${STORED} = ANY\\(\\?\\)$`).test(sql)) st.preds.push((r) => bindings[1].includes(lower(r[bindings[0]])));
         else if (new RegExp(`^split_part\\(${STORED}, '@', 2\\) = ANY\\(\\?\\)$`).test(sql)) st.preds.push((r) => bindings[1].includes(lower(r[bindings[0]]).split('@')[1]));
+        else if (new RegExp(`^split_part\\(${STORED}, '@', 2\\) = ANY\\(\\?\\) OR split_part\\(${STORED}, '@', 2\\) LIKE ANY\\(\\?\\)$`).test(sql)) st.preds.push((r) => { const host = lower(r[bindings[0]]).split('@')[1] || ''; return bindings[1].includes(host) || bindings[3].some((p) => host.endsWith(p.slice(1))); });
         else if (/gmail-canonical/.test(sql)) st.preds.push((r) => { const c = canonicalEmail(r[bindings[0]]); return Boolean(c) && bindings[1].includes(c.split('@')[1]) && bindings[3].includes(c.split('@')[0]); });
         else if (/split_part/.test(sql)) st.preds.push((r) => canonicalProspectDomain(r.target_domain) === bindings[0]);
         // the sender's trailing-24h attempt count (link-prospect-outreach dailySendCount): rows attempted since `since`

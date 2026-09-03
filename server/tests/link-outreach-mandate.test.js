@@ -24,6 +24,10 @@ describe('classifyDraft', () => {
     ['purchase offer', 'We would purchase this placement from you', ['payment']],
     ['buy / price', 'happy to buy a listing at your price', ['payment']],
     ['a placement charge', 'We can cover the placement charge', ['payment']],
+    ['a discounted rate', 'We can offer you a discounted rate for the placement', ['discount']],
+    ['a reduced rate', 'a reduced rate for your readers', ['discount']],
+    ['reciprocity without the word link', "If you include us, we'll promote your website on ours", ['reciprocal_promise']],
+    ['a mention in return', 'we will mention you in our newsletter', ['reciprocal_promise']],
     ['a discount', 'your readers get 20% off their first treatment', ['discount']],
     ['a free service', 'a free inspection for your staff', ['discount']],
     ['a guarantee', 'we guarantee results', ['guarantee']],
@@ -97,6 +101,14 @@ describe('recipientReview (§13)', () => {
     expect(billing).toMatchObject({ kind: 'customer', matched: [{ source: 'notification_prefs.billing_email', id: 'cust-9' }] });
     const lead = await M.recipientReview(seed({ leads: [{ id: 'lead-3', email: 'editor@bradentonherald.com' }] }), 'editor@bradentonherald.com');
     expect(lead).toMatchObject({ kind: 'customer', matched: [{ source: 'leads.email', id: 'lead-3' }] });
+  });
+  test('the shared domain is the ORGANIZATION (registrable domain): a customer mailbox on a mail subdomain, or the reverse, is the same business; consumer mail stays exempt on either side', async () => {
+    const sub = customer({ email: 'accounts@mail.bradentonherald.com' });
+    expect(await M.recipientReview(seed({ customers: [sub] }), 'editor@bradentonherald.com')).toMatchObject({ kind: 'ambiguous', matched: [{ source: 'customers.email', id: sub.id }] });
+    const apex = customer({ email: 'accounts@bradentonherald.com' });
+    expect(await M.recipientReview(seed({ customers: [apex] }), 'editor@news.bradentonherald.com')).toMatchObject({ kind: 'ambiguous', matched: [{ source: 'customers.email', id: apex.id }] });
+    expect((await M.recipientReview(seed({ customers: [customer({ email: 'other@tampabay.rr.com' })] }), 'editor@tampabay.rr.com')).kind).toBe('clear');
+    expect((await M.recipientReview(seed({ customers: [customer({ email: 'other@bradentonherald.com' })] }), 'editor@bradentonherald.co.uk')).kind).toBe('clear'); // a different registrable domain
   });
   test('a shared BUSINESS domain is ambiguous (the owner reviews it); a shared consumer-mail domain is not', async () => {
     const c = customer({ email: 'accounts@bradentonherald.com' });

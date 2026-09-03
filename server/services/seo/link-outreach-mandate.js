@@ -29,6 +29,7 @@
  * so the same draft always gets the same verdict and the test corpus pins it.
  */
 const crypto = require('crypto');
+const psl = require('psl');
 const { lintComms } = require('../comms-lint');
 const { canonicalEmail } = require('../ads/ad-audience-consent');
 const { SERVICE_CONTACT_SLOTS } = require('../customer-contact');
@@ -37,9 +38,9 @@ const { isValidEmail } = require('./link-prospect-worker');
 // The commitments §6.4 keeps out of an automatic send. Conservative by design:
 // a false positive costs one owner click; a false negative sends a promise.
 const CLASSIFIER_RULES = Object.freeze([
-  { flag: 'reciprocal_promise', re: /\b(link\s*back|in\s+return|in\s+exchange|reciprocal|link\s+(?:to|at)\s+you|we(?:'ll|\s+will)\s+link|link\s+swap|link\s+exchange|exchange\s+links|(?:can|could|would|will|happy\s+to|glad\s+to|able\s+to)\s+(?:also\s+)?(?:add|include|place|feature|put|give)\s+(?:a\s+|the\s+|your\s+)?link|link\s+(?:to|for)\s+your)\b/i },
-  { flag: 'payment', re: /(\$\s?\d|\b(?:pay(?:ment|ing)?|paid|fee|fees|sponsor(?:ed|ship)?|compensat(?:e|ion)|invoice|budget\s+for|rate\s+card|purchas(?:e|ed|ing)|buy(?:ing)?|bought|price|pricing|cost(?:s)?|charge(?:s|d)?)\b)/i },
-  { flag: 'discount', re: /\b(discount|%\s*off|percent\s+off|coupon|complimentary|free\s+(?:service|treatment|inspection|month|visit)|on\s+the\s+house|no\s+charge)\b/i },
+  { flag: 'reciprocal_promise', re: /\b(link\s*back|in\s+return|in\s+exchange|reciprocal|link\s+(?:to|at)\s+you|we(?:'ll|\s+will)\s+link|link\s+swap|link\s+exchange|exchange\s+links|(?:can|could|would|will|happy\s+to|glad\s+to|able\s+to)\s+(?:also\s+)?(?:add|include|place|feature|put|give)\s+(?:a\s+|the\s+|your\s+)?link|link\s+(?:to|for)\s+your|we(?:'ll|\s+will|\s+can|\s+could|\s+would)?\s+(?:also\s+)?(?:promote|mention|feature|showcase|highlight|recommend|share)\s+(?:you|your)|(?:promote|mention|feature|showcase|highlight|recommend)\s+your\s+(?:site|website|business|page|brand|company|content|guide)|on\s+ours)\b/i },
+  { flag: 'payment', re: /(\$\s?\d|\b(?:pay(?:ment|ing)?|paid|fee|fees|sponsor(?:ed|ship)?|compensat(?:e|ion)|invoice|budget\s+for|rate\s+card|purchas(?:e|ed|ing)|buy(?:ing)?|bought|price|pricing|cost(?:s)?|charge(?:s|d)?|rates?\s+for|(?:our|flat|monthly|annual|placement|listing)\s+rates?)\b)/i },
+  { flag: 'discount', re: /\b(discount(?:ed|s)?|reduced\s+(?:rate|price|pricing|fee|cost)|(?:special|lower|preferred|introductory)\s+(?:rate|price|pricing)|%\s*off|percent\s+off|coupon|complimentary|free\s+(?:service|treatment|inspection|month|visit)|on\s+the\s+house|no\s+charge)\b/i },
   { flag: 'guarantee', re: /\b(guarantee[ds]?|we\s+promise|promise\s+to|assure\s+you|100%)\b/i },
   { flag: 'commitment', re: /\b(exclusive|exclusivity|contract|agreement|commit(?:ment)?\s+to|retainer|partnership\s+deal|ongoing\s+(?:fee|payment|arrangement))\b/i },
 ]);
@@ -89,6 +90,13 @@ const GOOGLE_HOSTS = Object.freeze(['gmail.com', 'googlemail.com']);
 const STORED_SQL = "LOWER(REGEXP_REPLACE(??, '\\s', '', 'g'))";
 const GMAIL_CANONICAL_SQL = `/* gmail-canonical */ split_part(${STORED_SQL}, '@', 2) = ANY(?) AND REPLACE(split_part(split_part(${STORED_SQL}, '@', 1), '+', 1), '.', '') = ANY(?)`;
 const domainOf = (e) => { const s = normalizeEmail(e); const i = s.lastIndexOf('@'); return i === -1 ? '' : s.slice(i + 1); };
+// the ORGANIZATION a mail host belongs to: its registrable domain (mail.publisher.com and publisher.com are one
+// business — a customer mailbox on either side of that line is the same shared-domain match); a host psl cannot
+// place (an IP, a bare label) is its own organization
+const registrableOf = (host) => (host ? psl.get(host) || host : '');
+const orgDomainOf = (e) => registrableOf(domainOf(e));
+// consumer mail is exempt by its host or by its registrable domain (tampabay.rr.com is listed as the host it is)
+const consumerMail = (host) => SHARED_MAIL_DOMAINS.has(host) || SHARED_MAIL_DOMAINS.has(registrableOf(host));
 
 /** sha256(recipient, subject, body) — the outreach_send action hash (§3.6b). */
 function draftHash({ outreach_to_email: to, outreach_subject: subject, outreach_body: body } = {}) {
@@ -111,12 +119,13 @@ const CONTACT_SOURCES = Object.freeze([
   { source: 'leads.email', table: 'leads', column: 'email' },
 ]);
 
-const groupByDomain = (recipients) => recipients.reduce((m, r) => { const d = domainOf(r); if (d) (m.get(d) || m.set(d, []).get(d)).push(r); return m; }, new Map());
+const groupByDomain = (recipients) => recipients.reduce((m, r) => { const d = orgDomainOf(r); if (d) (m.get(d) || m.set(d, []).get(d)).push(r); return m; }, new Map());
 /**
  * One contact source's hits, each landed on the recipient it matches, as flat [recipient, { source, id }] pairs:
  * `exact` = the stored address equals the recipient (normalized the same way — case + every whitespace character;
  * the stored value comes back so each hit lands on its own recipient) or is its gmail-canonical form at a google
- * host; `shared` = the stored address shares the recipient's business domain.
+ * host; `shared` = the stored address shares the recipient's business organization (registrable domain: the
+ * exact host or any subdomain of it — `accounts@mail.publisher.com` shares `editor@publisher.com`'s).
  */
 async function sourceHits(q, src, { recipients, googleLocals, domains, recipientsByDomain }) {
   const idCol = src.idColumn || 'id';
@@ -124,9 +133,11 @@ async function sourceHits(q, src, { recipients, googleLocals, domains, recipient
   const onRecipient = (rows) => rows.map((h) => [normalizeEmail(h.email), { source: src.source, id: h.id }]).filter(([r]) => recipients.has(r));
   const exact = onRecipient(await q(src.table).whereRaw(`${STORED_SQL} = ANY(?)`, [src.column, [...recipients]]).select(...cols));
   const canon = googleLocals.length ? onRecipient(await q(src.table).whereRaw(GMAIL_CANONICAL_SQL, [src.column, GOOGLE_HOSTS, src.column, googleLocals]).select(...cols)) : [];
-  const byDomain = domains.length ? await q(src.table).whereRaw(`split_part(${STORED_SQL}, '@', 2) = ANY(?)`, [src.column, domains]).select(...cols) : [];
+  const byDomain = domains.length
+    ? await q(src.table).whereRaw(`split_part(${STORED_SQL}, '@', 2) = ANY(?) OR split_part(${STORED_SQL}, '@', 2) LIKE ANY(?)`, [src.column, domains, src.column, domains.map((d) => `%.${d}`)]).select(...cols)
+    : [];
   const shared = [];
-  for (const h of byDomain) for (const r of recipientsByDomain.get(domainOf(h.email)) || []) shared.push([r, { source: src.source, id: h.id }]);
+  for (const h of byDomain) for (const r of recipientsByDomain.get(orgDomainOf(h.email)) || []) shared.push([r, { source: src.source, id: h.id }]);
   return { exact: [...exact, ...canon], shared };
 }
 
@@ -139,7 +150,8 @@ async function sourceHits(q, src, { recipients, googleLocals, domains, recipient
 async function recipientReviews(q, emails) {
   const recipients = [...new Set((emails || []).map(normalizeEmail).filter(Boolean))];
   if (!recipients.length) return [];
-  const domains = [...new Set(recipients.map(domainOf).filter((d) => d && !SHARED_MAIL_DOMAINS.has(d)))];
+  // the recipients' business ORGANIZATIONS (registrable domains) — consumer mail never makes a shared-domain match
+  const domains = [...new Set(recipients.filter((r) => !consumerMail(domainOf(r))).map(orgDomainOf).filter(Boolean))];
   const googleLocals = [...new Set(recipients.filter((r) => GOOGLE_HOSTS.includes(domainOf(r))).map((r) => r.slice(0, r.lastIndexOf('@'))))];
   const exact = new Map(recipients.map((r) => [r, []]));
   const shared = new Map(recipients.map((r) => [r, []]));
