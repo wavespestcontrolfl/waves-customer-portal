@@ -406,7 +406,7 @@
     "hero": {
       "eyebrow": "Your lawn plugging",
       "h1": "Hello {first}, your lawn plugging quote is ready!",
-      "sub": "Live plugs matched to your grass, placed on a grid across the measured area — approve online and pick a day. Licensed & insured."
+      "sub": "Live plugs matched to your grass, placed on a grid across your turf area — approve online and pick a day. Licensed & insured."
     }
   },
   "dethatching": {
@@ -422,7 +422,7 @@
     "hero": {
       "eyebrow": "Your lawn dethatching",
       "h1": "Hello {first}, your lawn dethatching quote is ready!",
-      "sub": "A power dethatching pass across the measured turf — approve online and pick a day. Licensed & insured."
+      "sub": "A power dethatching pass across your turf area — approve online and pick a day. Licensed & insured."
     },
     "debrisBullet": "Removal and disposal of thatch debris"
   },
@@ -438,7 +438,7 @@
     "hero": {
       "eyebrow": "Your lawn top dressing",
       "h1": "Hello {first}, your lawn top dressing quote is ready!",
-      "sub": "Sand spread evenly across the measured turf — approve online and pick a day. Licensed & insured."
+      "sub": "Sand spread evenly across your turf area — approve online and pick a day. Licensed & insured."
     }
   },
   "palm_injection": {
