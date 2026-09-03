@@ -625,6 +625,8 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     expect(stampAt).toBeGreaterThan(lockAt);
     const engine = src('../services/estimator-engine/index.js');
     expect(engine).toContain('callUnitAnswer(db, callLogId)');
+    // The adoption compares the street the run HEARD (codex r9 P1).
+    expect(engine).toContain('const own = ownStreetForUnitAdoption(context);');
     // A failed fence read FAILS the run — never a quiet whole-building compose (pre-push codex P1 on #3804 r5).
     expect(engine).not.toContain('unit-answer fence read failed (composing without it)');
     expect(engine).toContain('fenceErr.message = `unit-answer fence read failed: ${fenceErr.message}`;');

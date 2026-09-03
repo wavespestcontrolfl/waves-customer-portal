@@ -856,6 +856,19 @@ describe('review fixes', () => {
       .toBe('1048 Example Lakes Cir');
   });
 
+  test('the unit-adoption compare judges the street the run HEARD, not a locality-borrowed composition (codex r9 P1 on #3804)', () => {
+    // Street-only extraction + this call's lead on another property: the
+    // composed line borrows Venice/34285, but the adoption compare must
+    // still see the asked street.
+    const ctx = { extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Cir' } } }, lead: { address: '5 Other Rd', city: 'Venice', zip: '34285' }, leadIsForThisCall: true };
+    expect(idxPriv.addressFromContext(ctx)).toBe('1048 Example Lakes Cir, Venice, FL 34285');
+    expect(idxPriv.ownStreetForUnitAdoption(ctx)).toBe('1048 Example Lakes Cir');
+    expect(idxPriv.sameStreetAddress(idxPriv.ownStreetForUnitAdoption(ctx), '1048 Example Lakes Cir, Sarasota, FL 34232')).toBe(true);
+    // No extraction: the composed line (lead / customer records carry their own locality).
+    expect(idxPriv.ownStreetForUnitAdoption({ extraction: null, lead: { address: '5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true })).toBe('5 Other Rd, Venice, FL 34285');
+    expect(idxPriv.ownStreetForUnitAdoption({ extraction: null, lead: null })).toBe('');
+  });
+
   test('existing-customer address beats a stale phone-matched lead', () => {
     const context = {
       extraction: null,

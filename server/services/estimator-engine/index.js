@@ -377,6 +377,18 @@ function addressFromContext(context) {
   return withUnitOverride(addressFromContextBase(context), context);
 }
 
+// The street this run HEARD, for the unit-adoption compare: the extracted
+// street as spoken (before addressFromContextBase's locality borrow — a
+// street-only extraction can be lent an unrelated lead's city/ZIP, which
+// would read as another building and skip the stamped unit; codex r9 P1
+// on #3804), else the composed line, whose lead/customer sources carry
+// their own locality.
+function ownStreetForUnitAdoption(context) {
+  const sa = context?.extraction?.property?.service_address;
+  if (sa?.street_line_1) return String(sa.street_line_1).trim();
+  return String(addressFromContextBase(context) || '').trim();
+}
+
 function addressFromContextBase(context) {
   // The item-bound building of a clarify re-run outranks EVERY other
   // source — the extraction (a reprocess may name another building) and,
@@ -1352,7 +1364,7 @@ async function maybeDraftEstimateForCall({
         const { callUnitAnswer } = require('../../utils/estimate-claim-sql');
         const fence = await callUnitAnswer(db, callLogId);
         if (fence?.unit) {
-          const own = String(addressFromContextBase(context) || '').trim();
+          const own = ownStreetForUnitAdoption(context);
           const b = fence.building;
           const buildingLine = b?.street_line_1
             ? [b.street_line_1, b.city, b.postal_code ? `FL ${b.postal_code}` : null].filter(Boolean).join(', ')
@@ -2650,7 +2662,7 @@ module.exports = {
   runDraftPipeline,
   notify,
   _private: {
-    addressFromContext, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
+    addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
     parcelSignalsDescribeGatheredAddress,
   },
 };
