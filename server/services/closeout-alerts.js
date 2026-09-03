@@ -104,13 +104,15 @@ const MONEY_COMMS_INPUT_FACT_KEYS = Object.freeze([...ISSUE_INPUT_FACT_KEYS, 'co
 function issueInputFactKeys() {
   return moneyCommsAlertsEnabled() ? MONEY_COMMS_INPUT_FACT_KEYS : ISSUE_INPUT_FACT_KEYS;
 }
-// Invoice reasons an operator can act on: the two parked manual cases, a
-// frozen required mint that never minted, and the expected-<lane>-not-
-// minted family. The invoice fact never emits `failed`; every other
-// pending reason (awaiting_completion) is transient. `unknown` = outage.
-const ACTIONABLE_INVOICE_PENDING = (reason) => reason === 'parked_manual_refunded_invoice'
-  || reason === 'parked_manual_canceled_setup_fee'
-  || reason === 'frozen_required_mint_not_minted'
+// Invoice reasons an operator can act on HERE: a frozen required mint that
+// never minted, and the expected-<lane>-not-minted family. The two parked
+// manual cases (parked_manual_refunded_invoice / _canceled_setup_fee) are
+// NOT mapped: /complete already parks a fail-closed, deduped
+// terminal_invoice_manual_billing bell notification for them
+// (admin-dispatch.js) — a second card here would be a parallel alert path
+// with its own dismissal state (GH r3 P1). The invoice fact never emits
+// `failed`; awaiting_completion is transient; `unknown` = outage.
+const ACTIONABLE_INVOICE_PENDING = (reason) => reason === 'frozen_required_mint_not_minted'
   || /^expected_.+_not_minted$/.test(reason || '');
 // Invoice-delivery pending reasons an operator owns: a paid invoice whose
 // receipt was never enqueued, and a payer-billed invoice never sent. The
@@ -310,18 +312,15 @@ function moneyCommsIssues(facts) {
       type: CLOSEOUT_ALERT_TYPES.comms,
       fact: 'comms',
       reason: comms.reason,
-      summary: 'Completion notice to the customer failed to send — resend it from the visit.',
+      // No completion-notice resend endpoint exists and Dispatch will not
+      // reopen a committed completion (GH r3 P2) — point at the manual
+      // messaging flow the office already uses.
+      summary: 'Completion notice to the customer failed to send — send it manually from Communications.',
     });
   }
   const invoice = facts.invoice;
   if (invoice?.state === 'pending' && ACTIONABLE_INVOICE_PENDING(invoice.reason)) {
-    // A refunded row can sit beside a PAID live sibling (closeout-status
-    // parks it either way) — never tell the operator to bill (GH r1 P1).
-    const summary = invoice.reason === 'parked_manual_refunded_invoice'
-      ? 'A refunded invoice sits beside this visit — reconcile the two invoices and bill only if that review finds an unpaid balance.'
-      : invoice.reason === 'parked_manual_canceled_setup_fee'
-        ? 'The acceptance invoice carrying the setup fee was canceled — bill the visit and the setup fee by hand.'
-        : 'This visit owes an invoice that was never minted — create it before the customer is billed elsewhere.';
+    const summary = 'This visit owes an invoice that was never minted — create it before the customer is billed elsewhere.';
     // Reason-qualified identity (GH r1 P1): a dismissed expected-not-minted
     // card must not swallow a later parked-manual exception on the same
     // visit — same idiom as the contradiction issues.

@@ -114,7 +114,7 @@ describe('money + comms facts (GATE_CLOSEOUT_MONEY_COMMS_ALERTS)', () => {
   test('comms: only failed alerts; deferral, sending, recap in flight, consent block and every not_required stay silent', () => {
     on();
     expect(closeoutIssuesForVisit(money({ comms: fact('failed', 'completion_sms_failed') }))).toEqual([
-      expect.objectContaining({ type: 'completion_notice_failed', fact: 'comms', reason: 'completion_sms_failed', summary: expect.stringMatching(/failed to send/) }),
+      expect.objectContaining({ type: 'completion_notice_failed', fact: 'comms', reason: 'completion_sms_failed', summary: expect.stringMatching(/failed to send.*Communications/) }),
     ]);
     for (const c of [
       fact('pending', 'deferred_send_window'), fact('pending', 'completion_sms_sending'), fact('pending', 'recap_sms_in_flight'), fact('pending', 'awaiting_completion'),
@@ -124,17 +124,16 @@ describe('money + comms facts (GATE_CLOSEOUT_MONEY_COMMS_ALERTS)', () => {
     ]) expect(closeoutIssuesForVisit(money({ comms: c }))).toEqual([]);
   });
 
-  test('invoice: the actionable pending reasons alert; awaiting / not_required / unknown / done stay silent', () => {
+  test('invoice: the not-minted pending reasons alert; parked-manual (owned by the /complete bell), awaiting, not_required, unknown, done stay silent', () => {
     on();
-    const reasons = ['parked_manual_refunded_invoice', 'parked_manual_canceled_setup_fee', 'frozen_required_mint_not_minted', 'expected_invoice_not_minted', 'expected_payer_not_minted', 'expected_auto_charge_not_minted'];
+    const reasons = ['frozen_required_mint_not_minted', 'expected_invoice_not_minted', 'expected_payer_not_minted', 'expected_auto_charge_not_minted'];
     for (const r of reasons) {
       const issues = closeoutIssuesForVisit(money({ invoice: fact('pending', r) }));
       expect(issues).toEqual([expect.objectContaining({ type: 'invoice_not_minted', fact: 'invoice', reason: r, identity: `invoice_not_minted:${r}` })]);
     }
-    expect(closeoutIssuesForVisit(money({ invoice: fact('pending', 'parked_manual_refunded_invoice') }))[0].summary).toMatch(/reconcile the two invoices and bill only if/);
-    expect(closeoutIssuesForVisit(money({ invoice: fact('pending', 'parked_manual_canceled_setup_fee') }))[0].summary).toMatch(/setup fee/);
     expect(closeoutIssuesForVisit(money({ invoice: fact('pending', 'frozen_required_mint_not_minted') }))[0].summary).toMatch(/never minted/);
-    for (const f of [fact('pending', 'awaiting_completion'), fact('not_required', 'lane_covered_membership'), fact('not_required', 'disposition_intentionally_free'), fact('unknown', 'invoice_lookup_failed'), fact('done', 'invoice_paid')]) {
+    // /complete already parks a deduped terminal_invoice_manual_billing bell for these (GH r3 P1) — no parallel card.
+    for (const f of [fact('pending', 'parked_manual_refunded_invoice'), fact('pending', 'parked_manual_canceled_setup_fee'), fact('pending', 'awaiting_completion'), fact('not_required', 'lane_covered_membership'), fact('not_required', 'disposition_intentionally_free'), fact('unknown', 'invoice_lookup_failed'), fact('done', 'invoice_paid')]) {
       expect(closeoutIssuesForVisit(money({ invoice: f }))).toEqual([]);
     }
   });
