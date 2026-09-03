@@ -1244,6 +1244,26 @@ describe('unit_number ask (call pipeline lane)', () => {
     expect(merged.payload.draft_response).toMatch(/unit number at 1048 Example Lakes Cir\?$/);
   });
 
+  test('a non-call merge CLEARS a stale call origin (the reply must not re-run call A for request B)', async () => {
+    mockState.existingDraft = {
+      id: 'draft-1', status: 'pending', sent_at: null,
+      flags: JSON.stringify({ missing: ['street_address'], lead_id: 'lead-A', call_log_id: 'call-A', call_scoped_street: true }),
+    };
+    const result = await parkClarifyAsk({ missing: ['street_address'], phone: '+17735550142', leadId: 'lead-B', source: 'lead_intake', channelProvenance: 'sms' });
+    expect(result.skipped).toBe('merged_into_open_clarify');
+    const flags = JSON.parse(mockState.updates.find((u) => u.table === 'message_drafts').payload.flags);
+    expect(flags.call_log_id).toBeNull();
+    expect(flags.call_scoped_street).toBe(false);
+    expect(flags.lead_id).toBe('lead-B');
+  });
+
+  test('a call-lane street ask is stamped call-scoped', async () => {
+    await parkClarifyAsk({ missing: ['street_address'], phone: '+17735550142', customerId: 'cust-1', leadId: 'lead-1', callLogId: 'call-1', source: 'call_missing_service_address', channelProvenance: 'voice' });
+    const flags = JSON.parse(mockState.inserts[0].flags);
+    expect(flags.call_scoped_street).toBe(true);
+    expect(flags.call_log_id).toBe('call-1');
+  });
+
   test('extractUnitReply: designated forms always (incl. PH1 / TH12 / A-204); a bare token only when allowed; never a bare word', () => {
     const { extractUnitReply } = _private;
     expect(extractUnitReply('Apt 204')).toBe('Apt 204');
@@ -1352,6 +1372,34 @@ describe('unit_number ask (call pipeline lane)', () => {
       const verdict = await claimClarifyDispatch({ draft: DRAFT });
       expect(verdict.outcome).toBe('send');
       expect(verdict.body).toBe('Unit?');
+    });
+
+    test('a call-scoped street ask is not retired by the customer\'s saved home address', async () => {
+      mockState.firstQueue = [
+        freshRow({ missing: ['street_address'], call_scoped_street: true, unit_lead_id: undefined, unit_ask_building: undefined }, { customer_id: 'cust-1' }),
+        { id: 'lead-1', status: 'new', address: null, first_name: 'Anna' },
+        { id: 'cust-1', first_name: 'Anna', address_line1: '9 Home St', city: 'Venice', zip: '34285' },
+      ];
+      const verdict = await claimClarifyDispatch({ draft: DRAFT });
+      expect(verdict.outcome).toBe('send');
+    });
+
+    test('same street line, different ZIP: not the asked building', async () => {
+      mockState.firstQueue = [
+        freshRow({ unit_customer_id: 'cust-1' }, { customer_id: 'cust-1' }),
+        { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir', first_name: 'Anna' },
+        { id: 'cust-1', first_name: 'Anna', address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 3', city: 'Venice', zip: '34285' },
+      ];
+      expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('send');
+    });
+
+    test('a unit on a DIFFERENT building\'s address (merged ask re-pointed the estimate) is not evidence', async () => {
+      mockState.firstQueue = [
+        freshRow({ estimate_id: 'est-B' }),
+        { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir', first_name: 'Anna' },
+        { id: 'est-B', status: 'draft', sent_at: null, address: '5 Other Rd, Apt 9, Venice, FL 34285' },
+      ];
+      expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('send');
     });
 
     test('a member\'s HOME unit on line 2 is not evidence for a second property\'s unit', async () => {

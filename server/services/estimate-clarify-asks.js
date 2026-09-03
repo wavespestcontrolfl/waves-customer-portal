@@ -116,13 +116,38 @@ function withClarifyLock(digits, callback) {
 // building the ask named — the ONLY case a unit may be written to, or
 // read from, that customer's line 2 (an existing member asking about a
 // second property keeps their home address untouched, codex r1/r2 P1).
-function customerAtAskedBuilding(customerRow, unitAskBuilding) {
-  const street = String(customerRow?.address_line1 || '').trim();
+// Locality rides along whenever BOTH sides carry it (codex r3 P1): the
+// same street line exists in more than one city, and a ZIP pair that
+// disagrees is a different building; postal-city aliases (Bradenton /
+// Lakewood Ranch share a ZIP) mean a city mismatch only disqualifies when
+// no ZIP pair already agreed — the unit-scope model's own rule.
+function atAskedBuilding({ street, city, zip }, unitAskBuilding) {
+  const line = String(street || '').trim();
   const asked = String(unitAskBuilding?.street_line_1 || '').trim();
-  if (!street || !asked) return false;
+  if (!line || !asked) return false;
   const { splitStreetLineUnit, normalizeStreetLine } = require('../utils/address-normalizer');
-  const key = (line) => normalizeStreetLine(splitStreetLineUnit(line).street).toLowerCase().replace(/[^a-z0-9]/g, '');
-  return key(street) === key(asked);
+  const key = (value) => normalizeStreetLine(splitStreetLineUnit(value).street).toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (key(line) !== key(asked)) return false;
+  const zip5 = (value) => (String(value || '').match(/^\d{5}/) || [''])[0];
+  const placeKey = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const askedZip = zip5(unitAskBuilding?.postal_code);
+  const ownZip = zip5(zip);
+  if (askedZip && ownZip) return askedZip === ownZip;
+  const askedCity = placeKey(unitAskBuilding?.city);
+  const ownCity = placeKey(city);
+  if (askedCity && ownCity && askedCity !== ownCity) return false;
+  return true;
+}
+function customerAtAskedBuilding(customerRow, unitAskBuilding) {
+  return atAskedBuilding({ street: customerRow?.address_line1, city: customerRow?.city, zip: customerRow?.zip }, unitAskBuilding);
+}
+// One formatted address line ("123 Main St, Apt 4, Sarasota, FL 34236")
+// judged against the asked building.
+function addressLineAtAskedBuilding(line, unitAskBuilding) {
+  if (!line) return false;
+  const { normalizeLeadAddress } = require('../utils/address-normalizer');
+  const parsed = normalizeLeadAddress({ raw: String(line) });
+  return atAskedBuilding({ street: parsed.line1 || String(line), city: parsed.city, zip: parsed.zip }, unitAskBuilding);
 }
 
 // Item-specific linkage for the unit ask: the call whose card it serves,
@@ -167,8 +192,17 @@ async function mergePendingClarify(trx, existing, { askable, firstName, linkage 
         lead_id: linkage.leadId || null,
         estimate_id: linkage.estimateId || null,
         // Call origin (both call lanes): the reply resumes drafting from
-        // the CALL context, not the short SMS exchange (codex r2 P1).
-        ...(linkage.callLogId ? { call_log_id: String(linkage.callLogId) } : {}),
+        // the CALL context, not the short SMS exchange (codex r2 P1). The
+        // NEWEST producer owns it — a later SMS/web/email ask on the same
+        // phone CLEARS a stale call origin, or answering that ask would
+        // re-run a call whose transcript does not hold the answer (codex
+        // r3 P1). The unit item keeps its own unit_call_log_id for the card.
+        call_log_id: linkage.callLogId ? String(linkage.callLogId) : null,
+        // Likewise the call-scoped street rule follows the producer that
+        // asks for the street.
+        ...(askable.includes('street_address')
+          ? { call_scoped_street: String(linkage.source || '').startsWith('call_') }
+          : {}),
         ...unitLinkage,
         // The bedroom item binds to ITS unit draft, independent of the
         // generic linkage a later merged ask may re-point.
@@ -339,6 +373,10 @@ async function parkClarifyAsk({
           lead_id: leadId || null,
           estimate_id: estimateId || null,
           ...(callLogId ? { call_log_id: String(callLogId) } : {}),
+          // A street ask raised by a CALL is about THAT call's property: the
+          // customer's saved home (or a reused estimate) must not retire it
+          // at approval (codex r3 P1) — only the call's own lead row counts.
+          ...(askable.includes('street_address') && String(source || '').startsWith('call_') ? { call_scoped_street: true } : {}),
           ...(askable.includes('unit_number') ? unitAskFlags({ callLogId, leadId, customerId, unitAskBuilding }) : {}),
           // Item-specific target for the bedroom re-price (see mergePendingClarify).
           ...(askable.includes('bedroom_count') && estimateId ? { bedroom_estimate_id: String(estimateId) } : {}),
@@ -1211,8 +1249,11 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
       // estimate's address counts — operators resolve missing addresses
       // directly on the estimate row. ONLY the lead row answers a service
       // ask: customers.lead_service_interest is leftover intake state.
-      const hasAddressNow = [lead?.address, customer?.address_line1, estimate?.address]
-        .some((value) => value && /\d/.test(String(value)));
+      const hasAddressNow = [
+        lead?.address,
+        // A call-scoped street ask is judged on the call's own lead only.
+        ...(flags.call_scoped_street === true ? [] : [customer?.address_line1, estimate?.address]),
+      ].some((value) => value && /\d/.test(String(value)));
       const { hasConcreteServiceInterest } = require('./lead-estimate-automation');
       const hasServiceNow = hasConcreteServiceInterest(lead?.service_interest);
       // A unit is "on file" when the customer's line 2 holds one, or the
@@ -1229,9 +1270,17 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
       // The customer's line 2 is evidence only when that customer row IS
       // the asked building (codex r2 P1 — a member's home unit is not the
       // second property's unit).
+      // Every unit read is scoped to the ASKED building (codex r3 P1): a
+      // merged ask can re-point the estimate — or edit the lead — to
+      // another property, whose apartment answers nothing here. With no
+      // building on the ask (never the case for the call lane) any unit
+      // on the ask's own lead counts.
+      const askedBuilding = flags.unit_ask_building || null;
+      const unitOn = (value) => !!value && !!splitStreetLineUnit(String(value)).unit
+        && (!askedBuilding || addressLineAtAskedBuilding(String(value), askedBuilding));
       const hasUnitNow = (!!String(unitCustomer?.address_line2 || '').trim()
-          && customerAtAskedBuilding(unitCustomer, flags.unit_ask_building))
-        || [unitLead?.address, estimate?.address].some((value) => value && splitStreetLineUnit(String(value)).unit);
+          && customerAtAskedBuilding(unitCustomer, askedBuilding))
+        || unitOn(unitLead?.address) || (!!askedBuilding && unitOn(estimate?.address));
       const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
         || (item === 'specific_service' && !hasServiceNow)
         || (item === 'unit_number' && !hasUnitNow)
