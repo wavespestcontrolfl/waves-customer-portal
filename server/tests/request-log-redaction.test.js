@@ -23,9 +23,9 @@ describe('request URL log redaction', () => {
   });
 
   test('redacts free-text lookup parameters (typed addresses, phones, names) but keeps the rest of the query', () => {
-    expect(redactRequestUrl('/api/admin/customers?search=4315%20Fence%20Row%20Ct&limit=10&sort=name'))
+    expect(redactRequestUrl('/api/admin/customers?search=123%20Palm%20Ave&limit=10&sort=name'))
       .toBe('/api/admin/customers?search=[REDACTED]&limit=10&sort=name');
-    expect(redactRequestUrl('/api/admin/leads?q=%2B13169905400&page=2'))
+    expect(redactRequestUrl('/api/admin/leads?q=%2B19415550102&page=2'))
       .toBe('/api/admin/leads?q=[REDACTED]&page=2');
     expect(redactRequestUrl('/api/admin/estimator/geocode?address=123+Main+St'))
       .toBe('/api/admin/estimator/geocode?address=[REDACTED]');

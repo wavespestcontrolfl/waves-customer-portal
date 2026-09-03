@@ -103,11 +103,11 @@ describe('findCustomersAtAddress', () => {
 
   describe('rankByContact', () => {
     const rows = [
-      ROW('amy', '4315 Fence Row Ct', null, { phone: '+13168210389', email: 'amy@example.com' }),
-      ROW('tom', '4315 Fence Row Ct', null, { phone: '+13169905400', email: 'tom@example.com' }),
+      ROW('amy', '123 Palm Ave', null, { phone: '+19415550101', email: 'amy@example.com' }),
+      ROW('tom', '123 Palm Ave', null, { phone: '+19415550102', email: 'tom@example.com' }),
     ];
     it('puts the phone match first, tagged, and leaves the rest in query order', () => {
-      const out = rankByContact(rows, { phone: '(316) 990-5400' });
+      const out = rankByContact(rows, { phone: '(941) 555-0102' });
       expect(out.map((r) => [r.id, r.contactMatch])).toEqual([['tom', 'phone'], ['amy', null]]);
     });
     it('falls back to an exact email match', () => {
