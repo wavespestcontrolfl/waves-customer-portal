@@ -1884,7 +1884,7 @@ describe('unit hold (GATE_CLARIFY_UNIT_WRITEBACK — PR C2a: call-row fence + ev
     expect(hold).toEqual(expect.objectContaining({ estimate_id: 'est-1', estimate_ids: ['est-1'], unit: 'Apt 204' }));
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', 'Unit number received — re-draft the estimate', expect.stringMatching(/whole building/), expect.objectContaining({
-      link: '/admin/estimates/est-1', metadata: expect.objectContaining({ unit: 'Apt 204', estimateIds: ['est-1'] }),
+      link: '/admin/estimates?estimateId=est-1', metadata: expect.objectContaining({ unit: 'Apt 204', estimateIds: ['est-1'] }),
     }));
     expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
   });
@@ -1901,7 +1901,7 @@ describe('unit hold (GATE_CLARIFY_UNIT_WRITEBACK — PR C2a: call-row fence + ev
     expect(stamps().find((f) => f.unit_hold).unit_hold.estimate_ids).toEqual(['est-newer', 'est-bldg', 'est-noaddr']);
     expect(unscheduleUpdates()).toHaveLength(3);
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
-    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', expect.any(String), expect.stringMatching(/3 unsent estimates/), expect.objectContaining({ link: '/admin/estimates/est-newer' }));
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', expect.any(String), expect.stringMatching(/3 unsent estimates/), expect.objectContaining({ link: '/admin/estimates?estimateId=est-newer' }));
   });
 
   test('a draft that appeared between the first lookup and the call-row lock is caught by the second pass and held', async () => {
@@ -1929,6 +1929,14 @@ describe('unit hold (GATE_CLARIFY_UNIT_WRITEBACK — PR C2a: call-row fence + ev
     expect(lead).toBeDefined();
     // Rebuilt from the PEELED street: the unpeeled parse read "Bldg 9" as the
     // street and dropped Sarasota (codex r4 P1 on #3804).
+    expect(lead.payload.address).toBe('1048 Example Lakes Cir, Bldg 9 Apt 204, Sarasota, FL 34232');
+    expect(stamps().at(-1).unit_writeback.lead).toBe('unit_added');
+  });
+
+  test('a STREET-FIRST structural lead line ("1048 …, Bldg 9, Sarasota") gets the apartment beside the building part — never a silent unitless write reported as unit_added (codex r8 P1)', async () => {
+    await reply({ leadRow: { id: 'lead-1', address: '1048 Example Lakes Cir, Bldg 9, Sarasota, FL 34232' } });
+    const lead = mockState.updates.find((u) => u.table === 'leads');
+    expect(lead).toBeDefined();
     expect(lead.payload.address).toBe('1048 Example Lakes Cir, Bldg 9 Apt 204, Sarasota, FL 34232');
     expect(stamps().at(-1).unit_writeback.lead).toBe('unit_added');
   });

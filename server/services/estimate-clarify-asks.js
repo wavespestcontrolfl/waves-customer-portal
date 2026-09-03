@@ -360,7 +360,7 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = 
   // never be given a second unit (codex r6 P1 on #3796), while a structural
   // component alone ("Bldg 9, …") still lacks the apartment (pre-push
   // codex P1 on #3804).
-  const { dwellingUnitOnLine, normalizeLeadAddress, splitUnitFirstLine, structuralUnitPart } = require('../utils/address-normalizer');
+  const { dwellingUnitOnLine, normalizeLeadAddress, splitUnitFirstLine, splitStreetLineUnitParts, structuralUnitPart } = require('../utils/address-normalizer');
   const { leadId, customerId } = targets;
   // Lock order: CUSTOMER row first, then the lead — the Customer 360
   // address edit takes customer → leads (customer-address-fanout), and the
@@ -425,11 +425,17 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = 
       // rebuilt from its PEELED street — normalizeLeadAddress would read
       // "Bldg 9" as the street and the street as the city — with the
       // structural component kept beside the replied dwelling unit
-      // (codex r4 P1 on #3804).
+      // (codex r4 P1 on #3804). A STREET-FIRST structural line ("1048
+      // Example Lakes Cir, Bldg 9, Sarasota, …") is rebuilt the same way
+      // from its street + place tail: handed whole, normalizeLeadAddress
+      // reads "Bldg 9" as a unit that CONFLICTS with the replied apartment,
+      // drops line 2, and the write would report unit_added while storing
+      // the unitless line (codex r8 P1 on #3804).
       const peeled = splitUnitFirstLine(leadAddress);
-      const formatted = peeled
-        ? normalizeLeadAddress({ raw: peeled.rest, line2: [structuralUnitPart(peeled.unit), unitLine].filter(Boolean).join(' ') })
-        : normalizeLeadAddress({ raw: leadAddress, line2: unitLine });
+      const inline = peeled ? null : splitStreetLineUnitParts(leadAddress);
+      const existingUnit = peeled ? peeled.unit : (inline?.unit || '');
+      const street = peeled ? peeled.rest : (inline?.unit ? [inline.street, inline.tail].filter(Boolean).join(', ') : leadAddress);
+      const formatted = normalizeLeadAddress({ raw: street, line2: [structuralUnitPart(existingUnit), unitLine].filter(Boolean).join(' ') });
       await trx('leads').where({ id: leadId }).whereNull('deleted_at').update({ address: formatted.fullAddress || `${leadAddress}, ${unitLine}` });
       out.lead = 'unit_added';
     } else if (leadRow) {
@@ -1401,7 +1407,10 @@ async function handleClarifyReply({ phone, body }) {
           'lead',
           'Unit number received — re-draft the estimate',
           `The customer texted their unit (${unitLine}). ${held.length === 1 ? 'The unsent estimate for this call' : `${held.length} unsent estimates for this call`} still describe${held.length === 1 ? 's' : ''} the whole building and ${held.length === 1 ? 'is' : 'are'} held — re-draft before sending.`,
-          { link: `/admin/estimates/${held[0]}`, metadata: { estimate_clarify: true, reprice_pending: true, draftId: awaiting.id, estimateId: held[0], estimateIds: held, unit: unitLine } },
+          // The Estimates page's deep-link form (EstimatesPageV2 reads
+          // ?estimateId=; /admin/estimates/<id> is not a mounted route —
+          // codex r8 P2 on #3804).
+          { link: `/admin/estimates?estimateId=${encodeURIComponent(held[0])}`, metadata: { estimate_clarify: true, reprice_pending: true, draftId: awaiting.id, estimateId: held[0], estimateIds: held, unit: unitLine } },
         );
       } catch (bellErr) {
         logger.warn(`[estimate-clarify] held-draft bell failed (guard stands): ${bellErr.message}`);
