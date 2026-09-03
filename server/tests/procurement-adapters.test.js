@@ -1,5 +1,5 @@
 /**
- * procurement/adapters — Sticker Mule reorder API.
+ * procurement/adapters — Sticker Mule reorder API + SiteOne bot internals.
  *
  * Sticker Mule contract:
  *   - bindingQuote = the account's latest single-item order of this item at this
@@ -8,6 +8,8 @@
  *   - item not on the account / ≠1 address / ≠1 payment → RefusedError, NO POST
  *   - POST failure / missing number → err.ambiguous (never re-POSTed)
  *   - success → order number + the vendor's read-back total (quote fallback)
+ * SiteOne internals: trusted-host guard, allowlist parsing, money parsing,
+ * and the SELECTORS map is the only place selectors live.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
@@ -103,4 +105,245 @@ test('a failed read-back keeps the order and falls back to the quote', async () 
   expect(r.externalOrderNumber).toBe('SM-90001');
   expect(r.amountCents).toBe(31400);
   expect(r.evidence.totalSource).toBe('quote');
+});
+
+describe('siteone internals', () => {
+  const s1 = require('../services/procurement/adapters/siteone');
+  const { isTrustedSiteOneUrl, allowedHosts, parseMoney, normalizeSku, SELECTORS } = s1._internals;
+
+  test('SKU match is exact after label/whitespace/case normalization; empty never matches', () => {
+    expect(normalizeSku('SKU: 123-ABC ')).toBe('123-ABC');
+    expect(normalizeSku('Item # 123 abc')).toBe('123ABC');
+    expect(normalizeSku('123-ABC') === normalizeSku(' sku:123-abc')).toBe(true);
+    expect(normalizeSku('123-ABC') === normalizeSku('123-ABCD')).toBe(false);
+    expect(normalizeSku('')).toBe('');
+  });
+
+  test('trusted host = https + siteone.com or a subdomain', () => {
+    expect(isTrustedSiteOneUrl('https://www.siteone.com/en/login')).toBe(true);
+    expect(isTrustedSiteOneUrl('https://siteone.com/')).toBe(true);
+    expect(isTrustedSiteOneUrl('http://www.siteone.com/en/login')).toBe(false);
+    expect(isTrustedSiteOneUrl('https://siteone.com.evil.example/')).toBe(false);
+    expect(isTrustedSiteOneUrl('https://notsiteone.com/')).toBe(false);
+    expect(isTrustedSiteOneUrl('garbage')).toBe(false);
+  });
+
+  test('allowlist = siteone hosts + SITEONE_BOT_ALLOWED_HOSTS (csv, lowercased, deduped)', () => {
+    expect(allowedHosts({})).toEqual(['siteone.com', 'www.siteone.com']);
+    expect(allowedHosts({ SITEONE_BOT_ALLOWED_HOSTS: ' CDN.siteone.com, static.example.net,,www.siteone.com ' })).toEqual(['siteone.com', 'www.siteone.com', 'cdn.siteone.com', 'static.example.net']);
+  });
+
+  test('cart total parses to cents', () => {
+    expect(parseMoney('Order total: $1,234.56')).toBe(123456);
+    expect(parseMoney('$99')).toBe(9900);
+    expect(parseMoney('')).toBeNull();
+    expect(parseMoney('$0.00')).toBeNull();
+    // exactly ONE $ amount, or nothing (pre-push P0): a count before the total, or two amounts, never cap-check as the wrong figure
+    expect(parseMoney('2 items · Total $105.93')).toBe(10593);
+    expect(parseMoney('2 items · Total 105.93')).toBeNull();
+    expect(parseMoney('Subtotal $99.00 Total $105.93')).toBeNull();
+  });
+
+  test('missing credentials / account number / sku refuse before any browser work', async () => {
+    const launchBrowser = jest.fn();
+    await expect(s1.place({ vendorSku: 'X', quantity: 1, credentials: null }, { launchBrowser })).rejects.toMatchObject({ refuse: 'no_credentials' });
+    await expect(s1.place({ vendorSku: 'X', quantity: 1, credentials: { email: 'a', password: 'b' } }, { launchBrowser })).rejects.toMatchObject({ refuse: 'no_account_number' });
+    await expect(s1.place({ vendorSku: null, quantity: 1, credentials: { email: 'a', password: 'b', accountNumber: '1' } }, { launchBrowser })).rejects.toMatchObject({ refuse: 'no_sku' });
+    expect(launchBrowser).not.toHaveBeenCalled();
+  });
+
+  test('no playwright → run-level error (claim released, batch aborts)', async () => {
+    await expect(s1.place({ vendorSku: 'X', quantity: 1, credentials: { email: 'a', password: 'b', accountNumber: '1' } }, { launchBrowser: null })).rejects.toMatchObject({ runLevel: true });
+  });
+
+  test('www.siteone.com not resolving public → run-level, no launch', async () => {
+    const launchBrowser = jest.fn();
+    await expect(s1.place({ vendorSku: 'X', quantity: 1, credentials: { email: 'a', password: 'b', accountNumber: '1' }, approvedShipTo: '1 x' }, { launchBrowser, resolveHostIps: async () => [] })).rejects.toMatchObject({ runLevel: true });
+    expect(launchBrowser).not.toHaveBeenCalled();
+  });
+
+  test('context / page setup failing after launch → run-level (claim released, not parked), Chromium closed (Codex r6 P2)', async () => {
+    const browser = { newContext: async () => { throw new Error('context boom'); }, close: jest.fn(async () => {}) };
+    const deps = { launchBrowser: async () => browser, resolveHostIps: async () => ['203.0.113.10'] };
+    await expect(s1.place({ vendorSku: 'X', quantity: 1, credentials: { email: 'a', password: 'b', accountNumber: '1' }, approvedShipTo: '1 x' }, deps)).rejects.toMatchObject({ runLevel: true, message: expect.stringMatching(/browser setup failed: context boom/) });
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  test('every selector lives in the frozen SELECTORS map', () => {
+    expect(Object.isFrozen(SELECTORS)).toBe(true);
+    for (const k of ['loginUser', 'loginPass', 'searchInput', 'qtyInput', 'addToCart', 'cartTotal', 'cardField', 'mfaField', 'billToAccount', 'placeOrder', 'orderNumber']) expect(typeof SELECTORS[k]).toBe('string');
+  });
+});
+
+// A minimal fake Playwright page driven by the SELECTORS map: enough surface
+// for place() to walk login → cart reset → add → verify → checkout → submit.
+describe('siteone bot cart + tender rules (fake page)', () => {
+  const s1 = require('../services/procurement/adapters/siteone');
+  const S = s1._internals.SELECTORS;
+
+  function fakeSiteOne(opts = {}) {
+    const st = { cart: [], removable: true, accountSelectable: true, url: 'https://www.siteone.com/en/login', loggedIn: false, placeClicked: 0, addClicked: 0, qty: null, ...opts };
+    const el = (spec = {}) => ({
+      count: async () => spec.count ?? 0,
+      first() { return this; },
+      nth: (i) => spec.nth ? spec.nth(i) : el(spec),
+      textContent: async () => spec.text ?? null,
+      inputValue: async () => { if (spec.value == null) throw new Error('not an input'); return String(spec.value); },
+      isVisible: async () => !!spec.visible,
+      isChecked: async () => { if (spec.checked == null) throw new Error('n/a'); return spec.checked; },
+      click: async () => { if (spec.onClick) await spec.onClick(); },
+      fill: async (v) => { if (spec.onFill) spec.onFill(v); },
+      press: async () => {},
+      waitFor: async () => {},
+      locator: (sub) => (spec.sub ? spec.sub(sub) : el()),
+    });
+    const line = (l) => el({ count: 1, sub: (sub) => sub === S.cartLineSku ? el({ count: 1, text: l.sku }) : sub === S.cartLineQty ? el({ count: 1, value: l.qty }) : el() });
+    const resolve = (sel) => {
+      if (sel.startsWith(S.loginPass)) return el({ count: st.loggedIn ? 0 : 1 });
+      if (sel === S.loginSubmit) return el({ count: 1, onClick: () => { st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; } });
+      if (sel === S.loginError) return el();
+      if (sel === S.searchInput) return el({ count: 1 });
+      if (sel === S.productLink) return el({ count: 1 });
+      if (sel === S.productSku) return el({ count: 1, text: 'SKU: S1-77' });
+      if (sel === S.unavailable) return el();
+      if (sel === S.qtyInput) return el({ count: 1, onFill: (v) => { st.qty = Number(v); } });
+      if (sel === S.addToCart) return el({ count: 1, onClick: () => { st.addClicked += 1; st.cart.push({ sku: 'S1-77', qty: st.qty }); if (st.addExtra) st.cart.push(st.addExtra); } });
+      if (sel === S.cartLine) return el({ count: st.cart.length, nth: (i) => line(st.cart[i]) });
+      if (sel === S.cartRemove) return el({ count: st.cart.length && st.removable ? 1 : 0, onClick: () => { st.cart.shift(); } });
+      if (sel === S.cartTotal) return el({ count: 1, text: '$99.00' });
+      if (sel === S.checkoutButton) return el({ count: 1 });
+      if (sel === S.mfaField || sel === S.cardField) return el();
+      if (sel === S.termsCheckbox) return el(st.termsUnreadable ? { count: 1 } : {}); // count 1 with no `checked` → isChecked throws
+      // `checked` is a live getter: a real locator re-resolves, so the option clicked a moment ago reads its CURRENT state
+      if (sel === S.billToAccount) return el({ count: 1, visible: true, get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } });
+      // extraCheckedAccounts = checked account radios ELSEWHERE on the page (hidden responsive duplicates, stale nodes)
+      if (sel === S.billToAccountSelected) return el({ count: (st.accountChecked ? 1 : 0) + (st.extraCheckedAccounts || 0) });
+      if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountText === undefined ? 'Account # 12345' : st.accountText });
+      if (sel === S.checkoutShipTo) return el({ count: st.shipToCount ?? 1, visible: st.shipToVisible ?? true, text: st.shipToText === undefined ? 'Ship to: Waves Pest Control\n 123 Example Ave\n Bradenton, FL 34205' : st.shipToText });
+      if (sel === S.checkoutTotal) return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: 'Order total $105.93' });
+      if (sel === S.placeOrder) return el({ count: 1, onClick: () => { st.placeClicked += 1; } });
+      if (sel === S.orderNumber) return el({ count: 1, text: 'Order # SO-778899' });
+      return el();
+    };
+    const page = {
+      goto: async (u) => { if (st.gotoFailOnce) { st.gotoFailOnce = false; throw new Error('net::ERR_TIMED_OUT'); } st.url = u; },
+      url: () => st.url,
+      evaluate: async () => 'ok',
+      waitForFunction: async () => {},
+      waitForTimeout: async () => {},
+      waitForLoadState: async () => {},
+      screenshot: async () => Buffer.from('png'),
+      locator: resolve,
+    };
+    const context = { newPage: async () => page, route: async () => {} };
+    // routeWebSocket: undefined → a working interception; null → the API is missing; a function → that registration
+    if (st.routeWebSocket !== null) context.routeWebSocket = st.routeWebSocket || (async () => {});
+    const browser = { newContext: async () => context, close: jest.fn(async () => {}) };
+    const deps = { launchBrowser: async () => browser, resolveHostIps: async () => ['203.0.113.10'], upload: async () => 'evidence-key' };
+    return { st, deps, browser };
+  }
+  const creds = { email: 'buyer@example.com', password: 'pw', accountNumber: '12345' };
+  const args = (extra = {}) => ({ vendorSku: 'S1-77', quantity: 2, credentials: creds, beforeSubmit: async () => ({ ok: true }), dryRun: false, approvedShipTo: '123 Example Ave, 34205', ...extra });
+
+  test('no approved ship-to configured → refused before the browser launches (pre-push P0)', async () => {
+    const { st, deps } = fakeSiteOne();
+    await expect(s1.place(args({ approvedShipTo: '' }), deps).catch((e) => e)).resolves.toMatchObject({ refuse: 'ship_to_unconfigured' });
+    expect(st.loggedIn).toBe(false);
+  });
+
+  test.each([
+    ['account_mismatch', { accountText: 'Account # 99999' }],
+    ['account_mismatch', { accountText: 'Account # 912345' }], // superstring is not a match
+    ['account_mismatch', { accountText: 'Account # 12345 (was 54321)' }], // two runs = ambiguous
+    ['ship_to_mismatch', { shipToText: 'Ship to: 123 Example Ave, Bradenton FL 342051' }], // zip token must be whole
+    ['account_unverified', { accountText: '' }],
+    ['ship_to_mismatch', { shipToText: 'Ship to: 9 Other Rd, Venice, FL 34285' }],
+    ['ship_to_unverified', { shipToText: null }],
+    ['account_ambiguous', { accountCount: 2 }],
+    ['terms_unreadable', { termsUnreadable: true }], // unknown ≠ accepted (r4 P2)
+    ['account_hidden', { accountVisible: false }], // a hidden node carrying the right number is not what the checkout shows
+    ['ship_to_hidden', { shipToVisible: false }],
+    ['checkout_total_ambiguous', { totalCount: 2 }], // hidden desktop/mobile duplicate
+    ['checkout_total_hidden', { totalVisible: false }],
+    ['no_checkout_total', { totalCount: 0 }],
+    ['ship_to_ambiguous', { shipToCount: 3 }],
+    ['account_unverified', { accountCount: 0 }],
+  ])('checkout %s → refused, no place-order click, cart cleaned (pre-push P0)', async (reason, patch) => {
+    const { st, deps } = fakeSiteOne(patch);
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: reason });
+    expect(st.placeClicked).toBe(0);
+    expect(st.cart).toEqual([]);
+  });
+
+  test('a leftover cart the bot cannot empty refuses before anything is added (r1 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ cart: [{ sku: 'OLD-1', qty: 5 }], removable: false });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'cart_not_empty' });
+    expect(st.addClicked).toBe(0);
+  });
+
+  test('a leftover cart is emptied first; the cart must then be exactly [sku × packages]; a dry run leaves the cart empty', async () => {
+    const { st, deps } = fakeSiteOne({ cart: [{ sku: 'OLD-1', qty: 5 }] });
+    const r = await s1.place(args({ dryRun: true }), deps);
+    expect(r).toMatchObject({ dryRun: true, amountCents: 9900 });
+    expect(st.qty).toBe(2);
+    expect(st.cart).toEqual([]); // post-run cleanup: nothing left for the next run
+    expect(st.placeClicked).toBe(0);
+  });
+
+  test('an unexpected extra cart line refuses cart_mismatch with the lines in evidence (r1 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ addExtra: { sku: 'OTHER-9', qty: 1 } });
+    const err = await s1.place(args(), deps).catch((e) => e);
+    expect(err.refuse).toBe('cart_mismatch');
+    expect(err.evidence.cartLines).toEqual([{ sku: 'S1-77', qty: 2 }, { sku: 'OTHER-9', qty: 1 }]);
+    expect(st.placeClicked).toBe(0);
+    expect(st.cart).toEqual([]); // cleaned up after the refusal
+  });
+
+  test('the egress lock fails CLOSED: no WebSocket interception API, or a throwing registration → run-level, Chromium closed, no login (r7 P1)', async () => {
+    const missing = fakeSiteOne({ routeWebSocket: null });
+    await expect(s1.place(args(), missing.deps)).rejects.toMatchObject({ runLevel: true });
+    expect(missing.browser.close).toHaveBeenCalled();
+    expect(missing.st.loggedIn).toBe(false);
+    const throwing = fakeSiteOne({ routeWebSocket: async () => { throw new Error('ws route boom'); } });
+    await expect(s1.place(args(), throwing.deps)).rejects.toMatchObject({ runLevel: true });
+    expect(throwing.browser.close).toHaveBeenCalled();
+    expect(throwing.st.loggedIn).toBe(false);
+  });
+
+  test('bill-to proof is the CLICKED option: a checked account radio elsewhere does not count, and two checked refuse (r7 P1)', async () => {
+    // The click did not take, but a hidden duplicate account radio is checked → still unverified.
+    const masked = fakeSiteOne({ accountSelectable: false, extraCheckedAccounts: 1 });
+    await expect(s1.place(args(), masked.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
+    expect(masked.st.placeClicked).toBe(0);
+    // The click took, but a second account radio is also checked → ambiguous, never submit.
+    const doubled = fakeSiteOne({ extraCheckedAccounts: 1 });
+    await expect(s1.place(args(), doubled.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_ambiguous' });
+    expect(doubled.st.placeClicked).toBe(0);
+  });
+
+  test('bill-to-account must be CONFIRMED selected before the place-order click (r1 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ accountSelectable: false });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
+    expect(st.placeClicked).toBe(0);
+  });
+
+  test('a transient login navigation failure is one attempt of three, not a terminal failure (r4 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ gotoFailOnce: true });
+    const r = await s1.place(args(), deps);
+    expect(r).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.loggedIn).toBe(true);
+  });
+
+  test('bill-to-account confirmed → checkout total cap-checked → one place-order click, cart left to the vendor', async () => {
+    const { st, deps } = fakeSiteOne();
+    const totals = [];
+    const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
+    expect(r).toMatchObject({ externalOrderNumber: 'SO-778899', amountCents: 10593, dryRun: false });
+    expect(r.evidence.billToAccountVerified).toBe(true);
+    expect(r.evidence.accountVerified).toBe(true);
+    expect(r.evidence.shipToVerified).toMatch(/123 example ave/);
+    expect(totals).toEqual([9900, 10593]);
+    expect(st.placeClicked).toBe(1);
+    expect(st.cart).toEqual([{ sku: 'S1-77', qty: 2 }]); // submitted: never cleared
+  });
 });

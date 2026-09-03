@@ -90,6 +90,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
 const { startOfETMonth } = require('../../utils/datetime-et');
+const { getVendorLoginCredentials } = require('../vendor-credentials');
 const { auditVendorOrder } = require('../audit-log');
 const { parsePackSize, convertToOz } = require('../product-costing');
 const { normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
@@ -108,11 +109,8 @@ const ADAPTER_BY_CODE = { 1: 'siteone', 25: 'stickermule' };
 const ADAPTER_BY_NAME = { siteone: 'siteone', 'sticker mule': 'stickermule' };
 const VENDOR_GATE = { siteone: 'GATE_AUTO_ORDER_SITEONE', stickermule: 'GATE_AUTO_ORDER_STICKERMULE' };
 
-// vendors.code → adapter key is registry knowledge; the SiteOne module itself
-// ships in PR 3 — until then a SiteOne vendor has no adapter here and stays
-// bell-and-click (canAutoOrder is false for it).
 function loadAdapters() {
-  return { stickermule: require('./adapters/stickermule') };
+  return { siteone: require('./adapters/siteone'), stickermule: require('./adapters/stickermule') };
 }
 
 function adapterKeyFor(vendor) {
@@ -761,6 +759,16 @@ function parkIfUnpriced(conn, { ctx, pricing, order, vendor, product }) {
   return null;
 }
 
+// A login-driven adapter (the SiteOne browser bot) places with the vendor
+// row's stored credentials. A lookup that THROWS (DB hiccup) is run-level:
+// nothing was sent, so the claim is released for tomorrow's tick instead of
+// burning the request's one-shot claim as 'failed' (pre-push P1). A lookup
+// that RETURNS null/incomplete is configuration and parks inside place().
+async function withVendorLogin(conn, { placeArgs, vendor, releaseClaim }) {
+  try { return { ...placeArgs, credentials: await getVendorLoginCredentials(conn, vendor.id) }; }
+  catch (e) { await releaseClaim(); const err = new Error(`vendor credential lookup failed: ${e.message}`); err.runLevel = true; throw err; }
+}
+
 // Detector: the vendor's read-back total should equal the reserved one. If it
 // came out higher and breaks a cap, the order exists but parks for the owner
 // (cancel with the vendor / revoke); the request is ordered. Returns the park
@@ -797,7 +805,8 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     // An adapter with no static quote reads the vendor's total at the point of
     // sale and runs the cap reservation through beforeSubmit right before it
     // submits (the binding total is the vendor's, never a local estimate).
-    const placeArgs = adapter.quotesAtPlace ? { ...base, beforeSubmit: (cents) => reserveUnderCaps(conn, ledger.id, cents, { now, env }) } : base;
+    const quoted = adapter.quotesAtPlace ? { ...base, beforeSubmit: (cents) => reserveUnderCaps(conn, ledger.id, cents, { now, env }) } : base;
+    const placeArgs = adapter.loginRequired ? await withVendorLogin(conn, { placeArgs: quoted, vendor, releaseClaim }) : quoted;
     const stopHeartbeat = startClaimHeartbeat(conn, ledger.id);
     try {
       placed = await adapter.place(placeArgs);
