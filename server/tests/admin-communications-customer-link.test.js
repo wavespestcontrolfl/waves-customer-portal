@@ -79,6 +79,12 @@ jest.mock('../services/composer-customer-links', () => ({
   buildLatestEstimateLink: jest.fn(),
   buildReferralLink: jest.fn(),
   buildAutopaySetupLink: jest.fn(),
+  buildAppointmentPageLink: jest.fn(),
+  buildCardRequestLink: jest.fn(),
+  buildPrepGuideLink: jest.fn(),
+  buildServiceReportLink: jest.fn(),
+  buildContractSigningLink: jest.fn(),
+  buildStatementLink: jest.fn(),
 }));
 jest.mock('../services/review-request', () => ({
 }));
@@ -162,8 +168,21 @@ function soloCustomer(id = CUSTOMER_UUID, firstName = 'PersonA') {
   });
 }
 
-function wireDb({ customers, reviewRequests = makeReviewRequestsBuilder() }) {
-  db.mockImplementation((table) => (table === 'customers' ? customers : reviewRequests));
+// scheduled_services: the shared soonestUpcomingVisit pick (whereIn/where/
+// orderBy/limit/offset chain ending in select).
+function makeVisitsBuilder(rows = []) {
+  const b = {};
+  for (const m of ['whereIn', 'where', 'orderBy', 'limit', 'offset']) b[m] = jest.fn(() => b);
+  b.select = jest.fn(() => Promise.resolve(rows));
+  return b;
+}
+
+function wireDb({ customers, reviewRequests = makeReviewRequestsBuilder(), visits = makeVisitsBuilder() }) {
+  db.mockImplementation((table) => {
+    if (table === 'customers') return customers;
+    if (table === 'scheduled_services') return visits;
+    return reviewRequests;
+  });
 }
 
 describe('POST /admin/communications/customer-link', () => {
@@ -338,6 +357,59 @@ describe('POST /admin/communications/customer-link', () => {
       expect((await res.json()).error).toBe('No open balance on this account');
     });
   });
+
+  test('statement: the builder receives the account ids AND the recipient number (AP-phone match is the builder\'s)', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildStatementLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/pay/statement/' + 'f'.repeat(64),
+      line: 'You can view and pay statement S-31 securely here: https://portal.wavespestcontrol.com/pay/statement/' + 'f'.repeat(64) + '\n\n',
+      statement: { id: 31, number: 'S-31', total: 412.5, payerName: 'Gulf Coast PM' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'statement' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(builders.buildStatementLink).toHaveBeenCalledWith([CUSTOMER_UUID], '5551234567');
+      expect(body.statement).toEqual({ id: 31, number: 'S-31', total: 412.5, payerName: 'Gulf Coast PM' });
+      expect(body.url).toBe('portal.wavespestcontrol.com/pay/statement/' + 'f'.repeat(64));
+    });
+  });
+
+  test('appointment + card_request: the route picks the soonest live visit and hands the row to the builder', async () => {
+    const visit = { id: 'v1', customer_id: CUSTOMER_UUID, scheduled_date: '2026-09-08', window_start: '09:00', window_end: '11:00', service_type: 'Flea Treatment', status: 'confirmed' };
+    wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([visit]) });
+    builders.buildAppointmentPageLink.mockResolvedValue({
+      url: 'https://wavespest.co/a/abc',
+      line: 'Everything about your visit: https://wavespest.co/a/abc\n\n',
+      appointment: { id: 'v1', scheduledDate: '2026-09-08', serviceType: 'Flea Treatment' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'appointment' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(builders.buildAppointmentPageLink).toHaveBeenCalledWith(visit);
+      expect(body.appointment).toEqual({ id: 'v1', scheduledDate: '2026-09-08', serviceType: 'Flea Treatment' });
+    });
+
+    wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([]) });
+    builders.buildCardRequestLink.mockResolvedValue({ url: null, line: '', reason: 'No upcoming appointment for this customer' });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'card_request' });
+      expect(res.status).toBe(404);
+      expect(builders.buildCardRequestLink).toHaveBeenCalledWith(null);
+      expect((await res.json()).error).toMatch(/No upcoming appointment/);
+    });
+  });
+
+  test('card_request: autoSecured answers 200 like Auto Pay — a success with nothing to insert', async () => {
+    wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([{ id: 'v1', customer_id: CUSTOMER_UUID, scheduled_date: '2026-09-08', status: 'confirmed' }]) });
+    builders.buildCardRequestLink.mockResolvedValue({ url: null, line: '', autoSecured: true });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'card_request' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.autoSecured).toBe(true);
+      expect(body.url).toBeNull();
+    });
+  });
 });
-
-

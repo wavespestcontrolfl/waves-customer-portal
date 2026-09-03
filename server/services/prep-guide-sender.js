@@ -62,11 +62,14 @@ function isSupportedPestType(pestType) {
 
 // Soonest upcoming visit of this pest family, so the emailed guide's "Service
 // date" row references the real appointment and the prep token can hang off
-// the visit row. Null when there is no matching upcoming visit.
-async function nextUpcomingVisit(customerId, serviceKeyword) {
+// the visit row. Null when there is no matching upcoming visit. Takes one
+// customer id or an account's ids (the composer's prep-guide insert looks
+// across siblings).
+async function nextUpcomingVisit(customerIds, serviceKeyword) {
+  const ids = [].concat(customerIds).filter(Boolean);
   try {
     const row = await db('scheduled_services')
-      .where({ customer_id: customerId })
+      .whereIn('customer_id', ids)
       .whereRaw('LOWER(service_type) LIKE ?', [`%${serviceKeyword}%`])
       .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
       // ET, not CURRENT_DATE: the DB session runs UTC, so between ~8pm and
@@ -74,10 +77,10 @@ async function nextUpcomingVisit(customerId, serviceKeyword) {
       // email would say "To be confirmed" despite a real upcoming appointment.
       .where('scheduled_date', '>=', etDateString())
       .orderBy('scheduled_date', 'asc')
-      .first('id', 'scheduled_date');
+      .first('id', 'customer_id', 'scheduled_date', 'service_type', 'prep_expires_at');
     return row || null;
   } catch (err) {
-    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${customerId}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${ids.join(',')}: ${err.message}`);
     return null;
   }
 }
@@ -254,4 +257,4 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', actorId = nul
   return result;
 }
 
-module.exports = { sendPrepToCustomer, isSupportedPestType, PREP_CONFIG };
+module.exports = { sendPrepToCustomer, isSupportedPestType, nextUpcomingVisit, PREP_CONFIG };

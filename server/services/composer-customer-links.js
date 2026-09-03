@@ -1,7 +1,9 @@
 /**
  * Per-customer link builders for the SMS composer's Insert Link sheet —
  * the link kinds beyond the existing reschedule/re-service pair:
- * review request, pay balance, latest estimate, referral, Auto Pay setup.
+ * review request, pay balance, latest estimate, referral, Auto Pay setup,
+ * and (step 2) appointment page, card request, prep guide, latest service
+ * report, contract signing, payer statement.
  *
  * Contract mirrors reschedule-link/reservice-link: each builder returns
  * { url, line, ...context } with url null + a `reason` sentence when there
@@ -602,6 +604,262 @@ async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) 
   return { present: true, ok: true, tokens: live.map((l) => l.token) };
 }
 
+// ---------------------------------------------------------------------------
+// Step 2 rows (Adam's rulings 2026-09-03): appointment page, card request,
+// prep guide, latest service report, contract signing, payer statement.
+// Every builder is MINT-ONLY — the operator's composer send is the only
+// delivery — and each one is dark wherever its owning system's gate is off
+// (the reason names the gate). The visit-anchored builders take the row the
+// route already picked (soonestUpcomingVisit — the reschedule link's pick)
+// so there is exactly one "next visit" definition across the sheet.
+// ---------------------------------------------------------------------------
+
+function dateOnly(value) {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+}
+
+const NO_UPCOMING_VISIT = 'No upcoming appointment for this customer';
+
+/**
+ * Appointment page — delegates to appointment-link's builder (the one the
+ * confirmation and 24h reminder texts use): reuses reschedule_token, one
+ * short code per visit, mints nothing while GATE_APPOINTMENT_PAGE is off.
+ */
+async function buildAppointmentPageLink(visit) {
+  if (!visit) return { url: null, line: '', reason: NO_UPCOMING_VISIT };
+  if (process.env.GATE_APPOINTMENT_PAGE !== 'true') {
+    return { url: null, line: '', reason: 'Appointment pages are switched off (GATE_APPOINTMENT_PAGE)' };
+  }
+  const { buildAppointmentLink } = require('./appointment-link');
+  const { url, line } = await buildAppointmentLink(visit.id, { customerId: visit.customer_id });
+  if (!url) return { url: null, line: '', reason: 'This appointment has no appointment link yet' };
+  return {
+    url,
+    line,
+    appointment: { id: visit.id, scheduledDate: dateOnly(visit.scheduled_date), serviceType: visit.service_type || null },
+  };
+}
+
+// requestCardForAppointment's skip vocabulary, phrased for the composer.
+// Unknown reasons stay visible (never pretend a link exists).
+const CARD_REQUEST_SKIP_REASONS = {
+  gate_off: 'Appointment card requests are switched off (APPOINTMENT_CARD_REQUEST)',
+  visit_not_found: 'That appointment could not be found',
+  no_customer: 'That appointment has no customer on it',
+  visit_in_past: 'That appointment is in the past',
+  unpriced_visit: 'This appointment has no price yet — price it before asking for a card',
+  zero_price_visit: 'This appointment is $0 — nothing to secure with a card',
+  template_inactive: 'The card request text is inactive in Templates — activate it before texting a card link',
+  payer_billed: 'This customer bills to a third-party payer — no card request',
+  payer_check_uncertain: 'Could not confirm who this customer bills to — try again in a moment',
+  card_hold_lane: 'This appointment already holds a card through its estimate',
+  hold_lookup_failed: 'Could not check the card-hold lane — try again in a moment',
+  existing_customer: 'Card requests are for first-time customers only — this customer has completed history',
+  existing_recurring_customer: 'Card requests are for first-time customers only — this customer is already on a plan',
+  existing_plan_member: 'Card requests are for first-time customers only — this customer is already on a plan',
+  request_exists: 'A card request for this appointment was already completed',
+  rodent_setup_staff_review: 'This rodent setup needs staff review before a card request',
+  commercial_rodent_setup_staff_review: 'Commercial rodent setups are billed by staff — no card request',
+  rodent_setup_undisclosed: 'This rodent setup has no disclosure yet — no card request',
+};
+
+function cardRequestSkipReason(reason) {
+  const key = String(reason || '');
+  if (CARD_REQUEST_SKIP_REASONS[key]) return CARD_REQUEST_SKIP_REASONS[key];
+  if (key.startsWith('visit_not_live')) return 'This appointment is not confirmed yet — confirm it before asking for a card';
+  return `Could not build a card request link (${key || 'unknown'})`;
+}
+
+/**
+ * Card request (the "secure your appointment" /secure/:token visit lane) —
+ * delegates to requestCardForAppointment with inline delivery: every gate
+ * (env + template levers, priced visit, first-time customer, payer
+ * exemption, hold-rail exclusion, saved-card auto-secure, dedup) stays in
+ * that one entry point; nothing is texted. The inserted copy is the
+ * reviewed secure_appointment_card SMS template rendered with the real
+ * link (same rule as Auto Pay: never a second hand-written copy).
+ */
+async function buildCardRequestLink(visit) {
+  if (!visit) return { url: null, line: '', reason: NO_UPCOMING_VISIT };
+  const card = require('./appointment-card-request');
+  const result = await card.requestCardForAppointment({ scheduledServiceId: visit.id, trigger: 'admin', delivery: 'inline' });
+  if (result?.action === 'auto_secured') return { url: null, line: '', autoSecured: true };
+  if (result?.action !== 'link_created' || !result.secureUrl) {
+    return { url: null, line: '', reason: cardRequestSkipReason(result?.reason) };
+  }
+  const profile = await db('customers').where({ id: visit.customer_id }).first('first_name');
+  const body = await card.renderTemplate({
+    first_name: profile?.first_name || 'there',
+    service_type: visit.service_type || 'service',
+    date_line: card.dateLineFor(visit.scheduled_date),
+    secure_link: result.secureUrl,
+    cancel_fee_line: card.cancelFeeLine(),
+  });
+  if (!body) return { url: null, line: '', reason: CARD_REQUEST_SKIP_REASONS.template_inactive };
+  const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
+  if (!String(body).includes(stripPortalUrlScheme(result.secureUrl))) {
+    return { url: null, line: '', reason: 'The card request text in Templates has no {secure_link} placeholder — add it before texting a card link' };
+  }
+  return {
+    url: result.secureUrl,
+    line: `${String(body).replace(/\s*\n+\s*/g, ' ').trim()}\n\n`,
+    standalone: true,
+    appointment: { id: visit.id, scheduledDate: dateOnly(visit.scheduled_date), serviceType: visit.service_type || null },
+  };
+}
+
+/**
+ * Prep guide — insert-only: mints (or reuses) the /prep/:token page for the
+ * soonest upcoming visit of a prep-supported family across the account,
+ * using the prep sender's own visit pick and token mint. The tracker's
+ * prep_sent_at proof is NOT stamped: that marks a confirmed guide-email
+ * delivery, and this text is the operator's own send. Raw URL — the prep
+ * sender never shortens prep links either.
+ */
+async function buildPrepGuideLink(customerIds) {
+  const { PREP_CONFIG, nextUpcomingVisit } = require('./prep-guide-sender');
+  const { ensureServicePrepToken } = require('./project-email');
+  let pick = null;
+  for (const [pestType, config] of Object.entries(PREP_CONFIG)) {
+    const visit = await nextUpcomingVisit(customerIds, config.serviceKeyword);
+    if (!visit) continue;
+    if (!pick || dateOnly(visit.scheduled_date) < dateOnly(pick.visit.scheduled_date)) pick = { visit, config, pestType };
+  }
+  if (!pick) {
+    return { url: null, line: '', reason: 'No upcoming flea, bed bug, or cockroach visit on this account' };
+  }
+  const { visit, config, pestType } = pick;
+  // The page 404s past prep_expires_at and the mint would hand back the
+  // same expired token — refuse rather than insert a dead link.
+  if (visit.prep_expires_at && new Date(visit.prep_expires_at).getTime() <= Date.now()) {
+    return { url: null, line: '', reason: 'The prep guide link for this appointment has expired' };
+  }
+  const token = await ensureServicePrepToken(visit.id, config.emailTemplateKey);
+  const url = `${publicPortalUrl()}/prep/${token}`;
+  return {
+    url,
+    line: `Your prep checklist for the upcoming ${config.label} is here: ${url}\n\n`,
+    prep: { pestType, label: config.label, scheduledDate: dateOnly(visit.scheduled_date) },
+    expiresAt: visit.prep_expires_at || null,
+  };
+}
+
+/**
+ * Latest service report — the newest completed visit that already carries
+ * a public report token. Never mints: a completed record with no token is
+ * one whose typed delivery was disabled (admin-dispatch mints on closeout
+ * only while the mode is not 'disabled'), and an internal_only/disabled
+ * typed report 404s publicly, so those are skipped too (reports-public's
+ * own predicate). Short-wrapped with the closeout text's idiom.
+ */
+async function buildServiceReportLink(customerIds) {
+  const { suppressedTypedReport } = require('../routes/reports-public');
+  const PAGE = 15;
+  let record = null;
+  for (let offset = 0; ; offset += PAGE) {
+    const rows = await db('service_records')
+      .whereIn('customer_id', customerIds)
+      .where({ status: 'completed' })
+      .whereNotNull('report_view_token')
+      .orderBy([{ column: 'service_date', order: 'desc' }, { column: 'created_at', order: 'desc' }])
+      .offset(offset)
+      .limit(PAGE);
+    record = rows.find((row) => !suppressedTypedReport(row)) || null;
+    if (record || rows.length < PAGE) break;
+  }
+  if (!record) return { url: null, line: '', reason: 'No service report on this account yet' };
+  const url = await shortenOrPassthrough(`${publicPortalUrl()}/report/${record.report_view_token}`, {
+    kind: 'service_report',
+    entityType: 'service_records',
+    entityId: record.id,
+    customerId: record.customer_id,
+    channel: 'sms',
+    purpose: 'composer_insert',
+    codePrefix: 'report',
+  });
+  return {
+    url,
+    line: `Here is your latest service report: ${url}\n\n`,
+    report: { id: record.id, serviceDate: dateOnly(record.service_date), serviceType: record.service_type || null },
+  };
+}
+
+// A contract a signing link can still be minted for — the share-link
+// route's own status allow-list (expired only re-opens for document
+// requests, which re-issue on a fresh window).
+const CONTRACT_LINKABLE_STATUSES = ['draft', 'sent', 'viewed'];
+
+/**
+ * Contract signing link — the account's newest contract still awaiting a
+ * signature, minted through the share-link route's ONE writer
+ * (createShareLink). The raw token is never stored, so this necessarily
+ * ROTATES any previously sent link; `contract.rotated` says whether one
+ * existed so the composer can say so. The recipient-phone trust the
+ * document delivery enforces (SMS_RECIPIENT_UNTRUSTED) already holds here:
+ * /customer-link only resolves a customer whose phone is the recipient.
+ */
+async function buildContractSigningLink(customerIds, req) {
+  const row = await db('customer_contracts')
+    .whereIn('customer_id', customerIds)
+    .where((qb) => qb
+      .whereIn('status', CONTRACT_LINKABLE_STATUSES)
+      .orWhere({ status: 'expired', contract_type: 'document_template' }))
+    .orderBy('created_at', 'desc')
+    .first('id', 'title', 'status', 'contract_type', 'share_token_hash');
+  if (!row) return { url: null, line: '', reason: 'No contract awaiting signature on this account' };
+  const { createShareLink } = require('../routes/admin-contracts');
+  const result = await createShareLink(row.id, req);
+  if (result?.error) return { url: null, line: '', reason: result.error.message };
+  const title = String(row.title || '').trim() || 'agreement';
+  return {
+    url: result.signingUrl,
+    line: `Please review and sign your ${title} here: ${result.signingUrl}\n\n`,
+    contract: { id: row.id, title, rotated: !!row.share_token_hash },
+    expiresAt: result.expiresAt || null,
+  };
+}
+
+/**
+ * Payer statement pay link — FAIL CLOSED on identity: a statement covers
+ * the bill-to's whole book and its pay page charges the PAYER's Stripe
+ * customer, so the link only ever goes to the payer's own AP phone. The
+ * recipient number must equal the AP phone of an active payer one of the
+ * account's rows bills to; a homeowner's number never qualifies. Newest
+ * payable statement (finalized/sent/viewed — the settle module's own
+ * predicate). Raw URL, same as the follow-up emails.
+ */
+async function buildStatementLink(customerIds, recipientLast10) {
+  if (!require('../config/feature-gates').isEnabled('payerStatements')) {
+    return { url: null, line: '', reason: 'Payer statements are switched off (GATE_PAYER_STATEMENTS)' };
+  }
+  const billed = await db('customers').whereIn('id', customerIds).whereNotNull('payer_id').select('payer_id');
+  const payerIds = [...new Set(billed.map((r) => r.payer_id))];
+  if (!payerIds.length) {
+    return { url: null, line: '', reason: 'This account bills to itself — statement links are for third-party payers only' };
+  }
+  const payers = await db('payers').whereIn('id', payerIds).where({ active: true }).select('id', 'display_name', 'ap_phone');
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const payer = payers.find((p) => last10(p.ap_phone) && last10(p.ap_phone) === String(recipientLast10 || ''));
+  if (!payer) {
+    return { url: null, line: '', reason: "This number is not the payer's AP phone on file — statement links go to the bill-to contact only" };
+  }
+  const { isPayableStatementStatus } = require('./payer-statement-settle');
+  const statements = await db('payer_statements')
+    .where({ payer_id: payer.id })
+    .orderBy('created_at', 'desc')
+    .limit(20);
+  const stmt = statements.find((s) => isPayableStatementStatus(s.status) && s.token) || null;
+  if (!stmt) return { url: null, line: '', reason: `No payable statement for ${payer.display_name}` };
+  const url = `${publicPortalUrl()}/pay/statement/${stmt.token}`;
+  const number = `S-${stmt.id}`;
+  return {
+    url,
+    line: `You can view and pay statement ${number} securely here: ${url}\n\n`,
+    statement: { id: stmt.id, number, total: Number(stmt.total) || 0, payerName: payer.display_name },
+  };
+}
+
 module.exports = {
   OPEN_ESTIMATE_STATUSES,
   REVIEW_GATE_REASONS,
@@ -616,4 +874,11 @@ module.exports = {
   AUTOPAY_SKIP_REASONS,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
+  buildAppointmentPageLink,
+  CARD_REQUEST_SKIP_REASONS,
+  buildCardRequestLink,
+  buildPrepGuideLink,
+  buildServiceReportLink,
+  buildContractSigningLink,
+  buildStatementLink,
 };

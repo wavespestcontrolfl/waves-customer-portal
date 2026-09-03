@@ -31,7 +31,35 @@ jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: je
 // Only the Auto Pay customer-SMS gate reads true — every other gate (the
 // pricing-authority send gate the estimate builder consults) stays off.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => g === 'autopayCustomerSms') }));
-jest.mock('../services/appointment-card-request', () => ({ renderTemplate: jest.fn() }));
+jest.mock('../services/appointment-card-request', () => ({
+  renderTemplate: jest.fn(),
+  requestCardForAppointment: jest.fn(),
+  dateLineFor: jest.fn(() => ' on Tue, Sep 8'),
+  cancelFeeLine: jest.fn(() => ''),
+}));
+jest.mock('../services/appointment-link', () => ({ buildAppointmentLink: jest.fn() }));
+jest.mock('../services/prep-guide-sender', () => ({
+  PREP_CONFIG: {
+    flea: { label: 'Flea Treatment', serviceKeyword: 'flea', emailTemplateKey: 'prep.flea' },
+    bed_bug: { label: 'Bed Bug Treatment Service', serviceKeyword: 'bed bug', emailTemplateKey: 'prep.bed_bug' },
+  },
+  nextUpcomingVisit: jest.fn(),
+}));
+jest.mock('../services/project-email', () => ({ ensureServicePrepToken: jest.fn() }));
+// The real predicate: typedReportDelivery set to anything but auto_send is
+// suppressed (internal_only / disabled typed reports 404 publicly).
+jest.mock('../routes/reports-public', () => ({
+  suppressedTypedReport: (record) => {
+    let notes = record?.structured_notes;
+    if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = null; } }
+    const mode = notes && typeof notes === 'object' ? notes.typedReportDelivery : null;
+    return Boolean(mode) && mode !== 'auto_send';
+  },
+}));
+jest.mock('../routes/admin-contracts', () => ({ createShareLink: jest.fn() }));
+jest.mock('../services/payer-statement-settle', () => ({
+  isPayableStatementStatus: (s) => ['finalized', 'sent', 'viewed'].includes(s),
+}));
 // getTemplate strips https:// from owned portal hosts before returning —
 // the mocked render mirrors that, and the comparison helper is the real
 // contract the builder must use.
@@ -56,7 +84,11 @@ const { enrollPromoter, getLiveSettings } = require('../services/referral-engine
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
 const { requestAutopaySetupLink, setupLinkIneligibility } = require('../services/autopay-setup-link');
 const { isEnabled } = require('../config/feature-gates');
-const { renderTemplate } = require('../services/appointment-card-request');
+const { renderTemplate, requestCardForAppointment } = require('../services/appointment-card-request');
+const { buildAppointmentLink } = require('../services/appointment-link');
+const { nextUpcomingVisit } = require('../services/prep-guide-sender');
+const { ensureServicePrepToken } = require('../services/project-email');
+const { createShareLink } = require('../routes/admin-contracts');
 const ReviewService = require('../services/review-request');
 const {
   buildPayBalanceLink,
@@ -65,6 +97,12 @@ const {
   buildReferralLink,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
+  buildAppointmentPageLink,
+  buildCardRequestLink,
+  buildPrepGuideLink,
+  buildServiceReportLink,
+  buildContractSigningLink,
+  buildStatementLink,
 } = require('../services/composer-customer-links');
 
 function chainBuilder({ firstRow = null, rows = [] } = {}) {
@@ -72,6 +110,7 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.where = jest.fn(() => b);
   b.whereIn = jest.fn(() => b);
   b.whereNull = jest.fn(() => b);
+  b.whereNotNull = jest.fn(() => b);
   b.join = jest.fn(() => b);
   b.orderBy = jest.fn(() => b);
   b.offset = jest.fn(() => b);
@@ -679,5 +718,265 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
     const r = await autopayLinkSendCheck(body, '9415550184');
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/different customer/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 2 rows: appointment page, card request, prep guide, latest service
+// report, contract signing, payer statement. Each builder is mint-only and
+// answers the composer's { url, line } / reason contract; the gate-off and
+// nothing-to-link paths are pinned alongside the happy path.
+// ---------------------------------------------------------------------------
+
+const VISIT = { id: 'v1', customer_id: 'c1', scheduled_date: '2026-09-08', service_type: 'Flea Treatment', status: 'confirmed' };
+
+describe('buildAppointmentPageLink', () => {
+  const gate = process.env.GATE_APPOINTMENT_PAGE;
+  afterEach(() => {
+    if (gate === undefined) delete process.env.GATE_APPOINTMENT_PAGE;
+    else process.env.GATE_APPOINTMENT_PAGE = gate;
+  });
+
+  test('no picked visit → plain reason, nothing minted', async () => {
+    process.env.GATE_APPOINTMENT_PAGE = 'true';
+    const r = await buildAppointmentPageLink(null);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/No upcoming appointment/);
+    expect(buildAppointmentLink).not.toHaveBeenCalled();
+  });
+
+  test('gate off → reason names GATE_APPOINTMENT_PAGE and the builder is never called', async () => {
+    delete process.env.GATE_APPOINTMENT_PAGE;
+    const r = await buildAppointmentPageLink(VISIT);
+    expect(r.reason).toMatch(/GATE_APPOINTMENT_PAGE/);
+    expect(buildAppointmentLink).not.toHaveBeenCalled();
+  });
+
+  test('delegates to appointment-link with the visit owner and returns the visit context', async () => {
+    process.env.GATE_APPOINTMENT_PAGE = 'true';
+    buildAppointmentLink.mockResolvedValue({ url: 'https://wavespest.co/a/abc', line: 'Everything about your visit: https://wavespest.co/a/abc\n\n' });
+    const r = await buildAppointmentPageLink(VISIT);
+    expect(buildAppointmentLink).toHaveBeenCalledWith('v1', { customerId: 'c1' });
+    expect(r.url).toBe('https://wavespest.co/a/abc');
+    expect(r.line).toContain(r.url);
+    expect(r.appointment).toEqual({ id: 'v1', scheduledDate: '2026-09-08', serviceType: 'Flea Treatment' });
+  });
+
+  test('a legacy row with no token (builder answers null) → reason, no link', async () => {
+    process.env.GATE_APPOINTMENT_PAGE = 'true';
+    buildAppointmentLink.mockResolvedValue({ url: null, line: '' });
+    const r = await buildAppointmentPageLink(VISIT);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/no appointment link/);
+  });
+});
+
+describe('buildCardRequestLink', () => {
+  beforeEach(() => {
+    requestCardForAppointment.mockReset();
+    mockBuilders = { customers: chainBuilder({ firstRow: { first_name: 'Pat' } }) };
+    renderTemplate.mockReset().mockImplementation(async (vars) => (
+      `Hi ${vars.first_name}! Save a card to secure your ${vars.service_type}${vars.date_line}: ${vars.secure_link.replace(/^https:\/\//, '')}\nNothing is charged today.`
+    ));
+  });
+
+  test('delegates inline (no text) and inserts the reviewed template as a standalone line', async () => {
+    requestCardForAppointment.mockResolvedValue({ requested: true, action: 'link_created', reason: 'created', secureUrl: 'https://portal.wavespestcontrol.com/secure/tok22' });
+    const r = await buildCardRequestLink(VISIT);
+    expect(requestCardForAppointment).toHaveBeenCalledWith({ scheduledServiceId: 'v1', trigger: 'admin', delivery: 'inline' });
+    expect(r.url).toBe('https://portal.wavespestcontrol.com/secure/tok22');
+    expect(r.standalone).toBe(true);
+    expect(r.line).toBe('Hi Pat! Save a card to secure your Flea Treatment on Tue, Sep 8: portal.wavespestcontrol.com/secure/tok22 Nothing is charged today.\n\n');
+    expect(r.line).not.toMatch(/\n[^\n]/);
+  });
+
+  test('auto_secured → autoSecured outcome, nothing to insert', async () => {
+    requestCardForAppointment.mockResolvedValue({ requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' });
+    const r = await buildCardRequestLink(VISIT);
+    expect(r.autoSecured).toBe(true);
+    expect(r.url).toBeNull();
+    expect(renderTemplate).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['gate_off', /APPOINTMENT_CARD_REQUEST/],
+    ['unpriced_visit', /no price yet/],
+    ['existing_customer', /first-time customers only/],
+    ['visit_not_live:rescheduled', /not confirmed yet/],
+    ['payer_billed', /third-party payer/],
+    ['something_new', /something_new/],
+  ])('skip %s → plain reason', async (reason, expected) => {
+    requestCardForAppointment.mockResolvedValue({ requested: false, action: 'skipped', reason });
+    const r = await buildCardRequestLink(VISIT);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(expected);
+  });
+
+  test('a template that dropped {secure_link} refuses (the minted URL must be in the body)', async () => {
+    requestCardForAppointment.mockResolvedValue({ requested: true, action: 'link_created', reason: 'created', secureUrl: 'https://portal.wavespestcontrol.com/secure/tok22' });
+    renderTemplate.mockResolvedValue('Hi Pat! Save a card please.');
+    const r = await buildCardRequestLink(VISIT);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/\{secure_link\}/);
+  });
+
+  test('no picked visit → reason, the funnel is never entered', async () => {
+    const r = await buildCardRequestLink(null);
+    expect(r.reason).toMatch(/No upcoming appointment/);
+    expect(requestCardForAppointment).not.toHaveBeenCalled();
+  });
+});
+
+describe('buildPrepGuideLink', () => {
+  beforeEach(() => {
+    nextUpcomingVisit.mockReset();
+    ensureServicePrepToken.mockReset().mockResolvedValue('a'.repeat(32));
+  });
+
+  test('no prep-family visit on the account → reason, nothing minted', async () => {
+    nextUpcomingVisit.mockResolvedValue(null);
+    const r = await buildPrepGuideLink(['c1', 'c2']);
+    expect(nextUpcomingVisit).toHaveBeenCalledWith(['c1', 'c2'], 'flea');
+    expect(nextUpcomingVisit).toHaveBeenCalledWith(['c1', 'c2'], 'bed bug');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/No upcoming flea, bed bug, or cockroach visit/);
+    expect(ensureServicePrepToken).not.toHaveBeenCalled();
+  });
+
+  test('picks the soonest visit across pest families and mints that visit\'s token with its family key', async () => {
+    nextUpcomingVisit.mockImplementation(async (_ids, keyword) => (
+      keyword === 'flea'
+        ? { id: 'v-flea', customer_id: 'c2', scheduled_date: '2026-09-20', service_type: 'Flea Treatment', prep_expires_at: null }
+        : { id: 'v-bb', customer_id: 'c1', scheduled_date: '2026-09-10', service_type: 'Bed Bug Treatment', prep_expires_at: null }
+    ));
+    const r = await buildPrepGuideLink(['c1', 'c2']);
+    expect(ensureServicePrepToken).toHaveBeenCalledWith('v-bb', 'prep.bed_bug');
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/prep/${'a'.repeat(32)}`);
+    expect(r.line).toContain('Bed Bug Treatment Service');
+    expect(r.line).toContain(r.url);
+    expect(r.prep).toEqual({ pestType: 'bed_bug', label: 'Bed Bug Treatment Service', scheduledDate: '2026-09-10' });
+    expect(r.expiresAt).toBeNull();
+  });
+
+  test('an expired prep token refuses rather than inserting a dead page', async () => {
+    nextUpcomingVisit.mockImplementation(async (_ids, keyword) => (
+      keyword === 'flea' ? { id: 'v-flea', customer_id: 'c1', scheduled_date: '2026-09-20', prep_expires_at: '2020-01-01T00:00:00Z' } : null
+    ));
+    const r = await buildPrepGuideLink(['c1']);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/expired/);
+    expect(ensureServicePrepToken).not.toHaveBeenCalled();
+  });
+});
+
+describe('buildServiceReportLink', () => {
+  const { shortenOrPassthrough } = require('../services/short-url');
+
+  test('newest completed record with a public token, skipping suppressed typed reports; never mints', async () => {
+    mockBuilders = {
+      service_records: chainBuilder({
+        rows: [
+          { id: 'r-new', customer_id: 'c1', service_date: '2026-09-01', service_type: 'Quarterly Pest', report_view_token: 'b'.repeat(32), structured_notes: JSON.stringify({ typedReportDelivery: 'internal_only' }) },
+          { id: 'r-ok', customer_id: 'c2', service_date: '2026-08-01', service_type: 'Lawn', report_view_token: 'c'.repeat(32), structured_notes: null },
+        ],
+      }),
+    };
+    const r = await buildServiceReportLink(['c1', 'c2']);
+    expect(mockBuilders.service_records.whereNotNull).toHaveBeenCalledWith('report_view_token');
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/report/${'c'.repeat(32)}`);
+    expect(shortenOrPassthrough).toHaveBeenCalledWith(r.url, expect.objectContaining({
+      kind: 'service_report', entityType: 'service_records', entityId: 'r-ok', customerId: 'c2', codePrefix: 'report',
+    }));
+    expect(r.report).toEqual({ id: 'r-ok', serviceDate: '2026-08-01', serviceType: 'Lawn' });
+  });
+
+  test('no tokened report → reason', async () => {
+    mockBuilders = { service_records: chainBuilder({ rows: [] }) };
+    const r = await buildServiceReportLink(['c1']);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/No service report/);
+  });
+});
+
+describe('buildContractSigningLink', () => {
+  const req = { technicianId: 'admin-1', ip: '127.0.0.1', get: () => 'jest' };
+  beforeEach(() => { createShareLink.mockReset(); });
+
+  test('no contract awaiting signature → reason, no mint', async () => {
+    mockBuilders = { customer_contracts: chainBuilder({ firstRow: null }) };
+    const r = await buildContractSigningLink(['c1'], req);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/No contract awaiting signature/);
+    expect(createShareLink).not.toHaveBeenCalled();
+  });
+
+  test('mints through the share-link writer and flags rotation when a link already existed', async () => {
+    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Auto Pay Authorization', status: 'sent', contract_type: 'autopay_authorization', share_token_hash: 'deadbeef' } }) };
+    const expiresAt = new Date('2026-10-03T00:00:00Z');
+    createShareLink.mockResolvedValue({ signingUrl: 'https://portal.wavespestcontrol.com/contract/tokX', expiresAt, contract: { id: 'k1' } });
+    const r = await buildContractSigningLink(['c1'], req);
+    expect(createShareLink).toHaveBeenCalledWith('k1', req);
+    expect(r.url).toBe('https://portal.wavespestcontrol.com/contract/tokX');
+    expect(r.line).toBe('Please review and sign your Auto Pay Authorization here: https://portal.wavespestcontrol.com/contract/tokX\n\n');
+    expect(r.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', rotated: true });
+    expect(r.expiresAt).toBe(expiresAt);
+  });
+
+  test('a share-link refusal (status drift) becomes the reason', async () => {
+    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Doc', status: 'draft', contract_type: 'document_template', share_token_hash: null } }) };
+    createShareLink.mockResolvedValue({ error: { status: 409, message: 'Contract status changed. Refresh and try again.' } });
+    const r = await buildContractSigningLink(['c1'], req);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/status changed/);
+  });
+});
+
+describe('buildStatementLink', () => {
+  beforeEach(() => {
+    isEnabled.mockReset().mockImplementation((g) => g === 'payerStatements');
+  });
+
+  test('gate off → reason names GATE_PAYER_STATEMENTS, no reads', async () => {
+    isEnabled.mockReturnValue(false);
+    const r = await buildStatementLink(['c1'], '5551234567');
+    expect(r.reason).toMatch(/GATE_PAYER_STATEMENTS/);
+    expect(mockDb).not.toHaveBeenCalled();
+  });
+
+  test('self-pay account → reason', async () => {
+    mockBuilders = { customers: chainBuilder({ rows: [] }) };
+    const r = await buildStatementLink(['c1'], '5551234567');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/bills to itself/);
+  });
+
+  test('FAIL CLOSED: the recipient number must be the payer\'s AP phone — a homeowner\'s number gets no statement', async () => {
+    mockBuilders = {
+      customers: chainBuilder({ rows: [{ payer_id: 7 }] }),
+      payers: chainBuilder({ rows: [{ id: 7, display_name: 'Gulf Coast PM', ap_phone: '(941) 555-0100' }] }),
+      payer_statements: chainBuilder({ rows: [{ id: 31, status: 'sent', token: 'f'.repeat(64), total: '412.50' }] }),
+    };
+    const r = await buildStatementLink(['c1'], '5551234567');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/not the payer's AP phone/);
+    expect(mockDb).not.toHaveBeenCalledWith('payer_statements');
+  });
+
+  test('AP phone matches → newest payable statement, raw /pay/statement link', async () => {
+    mockBuilders = {
+      customers: chainBuilder({ rows: [{ payer_id: 7 }, { payer_id: 7 }] }),
+      payers: chainBuilder({ rows: [{ id: 7, display_name: 'Gulf Coast PM', ap_phone: '+1 (941) 555-0100' }] }),
+      payer_statements: chainBuilder({
+        rows: [
+          { id: 40, status: 'open', token: 'e'.repeat(64), total: '99.00' },
+          { id: 31, status: 'sent', token: 'f'.repeat(64), total: '412.50' },
+        ],
+      }),
+    };
+    const r = await buildStatementLink(['c1', 'c2'], '9415550100');
+    expect(mockBuilders.payers.whereIn).toHaveBeenCalledWith('id', [7]);
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`);
+    expect(r.line).toContain('statement S-31');
+    expect(r.statement).toEqual({ id: 31, number: 'S-31', total: 412.5, payerName: 'Gulf Coast PM' });
   });
 });

@@ -307,59 +307,68 @@ router.post('/customer/:customerId/autopay-authorization', async (req, res, next
   } catch (err) { next(err); }
 });
 
+// Mint a fresh signing link for a live contract — the ONE share-link
+// writer (the route below and the composer's "Contract signing link" insert
+// both come through here). The raw token is never stored (hash only), so
+// every mint ROTATES the previous link. Returns { signingUrl, expiresAt,
+// contract } or { error: { status, message } }.
+async function createShareLink(contractId, req) {
+  const token = mintContractToken();
+  let expiresAt = contractExpiresAt();
+  let error = null;
+  await db.transaction(async (trx) => {
+    const contract = await trx('customer_contracts')
+      .where({ id: contractId })
+      .forUpdate()
+      .first();
+    if (!contract) {
+      error = { status: 404, message: 'Contract not found' };
+      return;
+    }
+    if (['signed', 'cancelled', 'voided'].includes(contract.status)) {
+      error = { status: 400, message: `Cannot create a signing link for a ${contract.status} contract.` };
+      return;
+    }
+    const isDocumentRequest = contract.contract_type === 'document_template';
+    if (isDocumentRequest && contract.document_template_id) {
+      const template = await trx('document_templates')
+        .where({ id: contract.document_template_id })
+        .first('expire_after_days', 'requires_signature');
+      expiresAt = documentContractExpiresAt(new Date(), template?.expire_after_days || 14, {
+        requires_signature_snapshot: contract.requires_signature_snapshot,
+        requires_signature: template?.requires_signature,
+      });
+    }
+
+    const updated = await trx('customer_contracts')
+      .where({ id: contract.id })
+      .whereIn('status', isDocumentRequest ? ['draft', 'sent', 'viewed', 'expired'] : ['draft', 'sent', 'viewed'])
+      .update({
+        status: 'sent',
+        share_token_hash: hashContractToken(token),
+        share_token_expires_at: expiresAt,
+        shared_at: new Date(),
+        updated_at: new Date(),
+      });
+    if (updated !== 1) {
+      error = { status: 409, message: 'Contract status changed. Refresh and try again.' };
+      return;
+    }
+    await insertEvent(trx, contract.id, contract.customer_id, 'share_link_created', req, {
+      expiresAt: expiresAt.toISOString(),
+    });
+  });
+  if (error) return { error };
+  const contract = await loadContract(contractId);
+  return { signingUrl: publicContractUrl(token), expiresAt, contract };
+}
+
 router.post('/:id/share-link', async (req, res, next) => {
   try {
-    const token = mintContractToken();
-    let expiresAt = contractExpiresAt();
-    let response;
-    await db.transaction(async (trx) => {
-      const contract = await trx('customer_contracts')
-        .where({ id: req.params.id })
-        .forUpdate()
-        .first();
-      if (!contract) {
-        response = { status: 404, body: { error: 'Contract not found' } };
-        return;
-      }
-      if (['signed', 'cancelled', 'voided'].includes(contract.status)) {
-        response = { status: 400, body: { error: `Cannot create a signing link for a ${contract.status} contract.` } };
-        return;
-      }
-      const isDocumentRequest = contract.contract_type === 'document_template';
-      if (isDocumentRequest && contract.document_template_id) {
-        const template = await trx('document_templates')
-          .where({ id: contract.document_template_id })
-          .first('expire_after_days', 'requires_signature');
-        expiresAt = documentContractExpiresAt(new Date(), template?.expire_after_days || 14, {
-          requires_signature_snapshot: contract.requires_signature_snapshot,
-          requires_signature: template?.requires_signature,
-        });
-      }
-
-      const updated = await trx('customer_contracts')
-        .where({ id: contract.id })
-        .whereIn('status', isDocumentRequest ? ['draft', 'sent', 'viewed', 'expired'] : ['draft', 'sent', 'viewed'])
-        .update({
-          status: 'sent',
-          share_token_hash: hashContractToken(token),
-          share_token_expires_at: expiresAt,
-          shared_at: new Date(),
-          updated_at: new Date(),
-        });
-      if (updated !== 1) {
-        response = { status: 409, body: { error: 'Contract status changed. Refresh and try again.' } };
-        return;
-      }
-      await insertEvent(trx, contract.id, contract.customer_id, 'share_link_created', req, {
-        expiresAt: expiresAt.toISOString(),
-      });
-    });
-
-    if (response) return res.status(response.status).json(response.body);
-
-    const updated = await loadContract(req.params.id);
-    const signingUrl = publicContractUrl(token);
-    res.json({ contract: serializeContract(updated, { signingUrl }), signingUrl });
+    const result = await createShareLink(req.params.id, req);
+    if (result.error) return res.status(result.error.status).json({ error: result.error.message });
+    const { contract, signingUrl } = result;
+    res.json({ contract: serializeContract(contract, { signingUrl }), signingUrl });
   } catch (err) { next(err); }
 });
 
@@ -502,3 +511,4 @@ router.post('/:id/renewal-notice', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.createShareLink = createShareLink;

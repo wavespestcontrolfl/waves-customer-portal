@@ -1354,6 +1354,56 @@ function isElapsedSameDayReschedulePlaceholder(svc, now = new Date()) {
   return Math.max(...bounds) <= nowEt.hour * 60 + nowEt.minute;
 }
 
+// Soonest customer-facing upcoming visit across an account — the visit
+// the reschedule, appointment, and card-request composer inserts all
+// anchor on (one pick, one set of exclusions).
+//
+// Candidate visits, soonest first. ET day frame: scheduled_date is a
+// DATE column, so comparing against the ET 'YYYY-MM-DD' string is exact
+// (same comparison reschedule-public makes). The status gate mirrors
+// RESCHEDULABLE_STATUSES there — live (en_route/on_site) and terminal
+// rows never match. Dispatch-owned pending call-pipeline bookings are
+// excluded with the same null-safe predicate /api/schedule uses: their
+// tentative times are hidden from the customer until the office
+// confirms, so this button must not hand out a bearer link to one.
+//
+// The elapsed-placeholder skip happens in JS (the time math doesn't
+// survive SQL TIME wrap-arounds cleanly), so page until a usable
+// candidate turns up or the candidate set is exhausted — a page full of
+// today's elapsed 'rescheduled' placeholders must not read as "no
+// upcoming appointment" when a later visit exists. Ordering is fully
+// deterministic (id tie-breaker), so offset pages can't skip or repeat
+// rows within a request.
+async function soonestUpcomingVisit(customerIds) {
+  const PAGE = 25;
+  let svc = null;
+  for (let offset = 0; ; offset += PAGE) {
+    const candidates = await db('scheduled_services')
+      .whereIn('customer_id', customerIds)
+      .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+      .where('scheduled_date', '>=', etDateString())
+      .where((qb) => qb
+        .whereNull('source_action')
+        .orWhereNotIn('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+        .orWhereNot('status', 'pending')
+        .orWhere('customer_confirmed', true))
+      .orderBy([
+        { column: 'scheduled_date', order: 'asc' },
+        { column: 'window_start', order: 'asc' },
+        // Stable tie-breaker: two properties' visits can share a date and
+        // window, and without a unique key the "soonest" pick would be
+        // whichever row Postgres returns first that day.
+        { column: 'id', order: 'asc' },
+      ])
+      .limit(PAGE)
+      .offset(offset)
+      .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'status');
+    svc = candidates.find((c) => !isElapsedSameDayReschedulePlaceholder(c)) || null;
+    if (svc || candidates.length < PAGE) break;
+  }
+  return svc;
+}
+
 // All live customer rows under one account. Self-adoption sets
 // account_id = id, and rows created by webhook/call paths can carry NULL
 // until the lazy login-time adoption (backfill 20260721000000) — callers
@@ -1477,48 +1527,7 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     // goes to the phone's owner.
     const recipientFirstName = await firstNameForPhone(last10, customerIds);
 
-    // Candidate visits, soonest first. ET day frame: scheduled_date is a
-    // DATE column, so comparing against the ET 'YYYY-MM-DD' string is exact
-    // (same comparison reschedule-public makes). The status gate mirrors
-    // RESCHEDULABLE_STATUSES there — live (en_route/on_site) and terminal
-    // rows never match. Dispatch-owned pending call-pipeline bookings are
-    // excluded with the same null-safe predicate /api/schedule uses: their
-    // tentative times are hidden from the customer until the office
-    // confirms, so this button must not hand out a bearer link to one.
-    //
-    // The elapsed-placeholder skip happens in JS (the time math doesn't
-    // survive SQL TIME wrap-arounds cleanly), so page until a usable
-    // candidate turns up or the candidate set is exhausted — a page full of
-    // today's elapsed 'rescheduled' placeholders must not read as "no
-    // upcoming appointment" when a later visit exists. Ordering is fully
-    // deterministic (id tie-breaker), so offset pages can't skip or repeat
-    // rows within a request.
-    const PAGE = 25;
-    let svc = null;
-    for (let offset = 0; ; offset += PAGE) {
-      const candidates = await db('scheduled_services')
-        .whereIn('customer_id', customerIds)
-        .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
-        .where('scheduled_date', '>=', etDateString())
-        .where((qb) => qb
-          .whereNull('source_action')
-          .orWhereNotIn('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-          .orWhereNot('status', 'pending')
-          .orWhere('customer_confirmed', true))
-        .orderBy([
-          { column: 'scheduled_date', order: 'asc' },
-          { column: 'window_start', order: 'asc' },
-          // Stable tie-breaker: two properties' visits can share a date and
-          // window, and without a unique key the "soonest" pick would be
-          // whichever row Postgres returns first that day.
-          { column: 'id', order: 'asc' },
-        ])
-        .limit(PAGE)
-        .offset(offset)
-        .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'status');
-      svc = candidates.find((c) => !isElapsedSameDayReschedulePlaceholder(c)) || null;
-      if (svc || candidates.length < PAGE) break;
-    }
+    const svc = await soonestUpcomingVisit(customerIds);
     if (!svc) return res.status(404).json({ error: 'No upcoming appointment for this customer' });
 
     const { url, line } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
@@ -1655,7 +1664,9 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
 
 // POST /api/admin/communications/customer-link  { phone, customerId?, kind }
 // The Insert Link sheet's other per-customer links — kind ∈ review_request |
-// pay_balance | estimate | referral | autopay_setup. Same fail-closed recipient contract as
+// pay_balance | estimate | referral | autopay_setup | appointment |
+// card_request | prep_guide | service_report | contract | statement. Same
+// fail-closed recipient contract as
 // /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
 // cross-checked then expanded to the account, cross-account 409). Builders
 // live in services/composer-customer-links.js; a kind with nothing to insert
@@ -1681,9 +1692,20 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       // gate, payer exemption, dedup and the saved-card auto-secure all
       // live there; a link_created outcome is the ONLY thing inserted.
       autopay_setup: (ids, primaryId) => builders.buildAutopaySetupLink(primaryId),
+      // Visit-anchored kinds share the reschedule-link pick (one set of
+      // exclusions — dispatch-owned pendings, elapsed placeholders); the
+      // builders take the picked row so the pick stays route-owned.
+      appointment: async (ids) => builders.buildAppointmentPageLink(await soonestUpcomingVisit(ids)),
+      card_request: async (ids) => builders.buildCardRequestLink(await soonestUpcomingVisit(ids)),
+      prep_guide: (ids) => builders.buildPrepGuideLink(ids),
+      service_report: (ids) => builders.buildServiceReportLink(ids),
+      contract: (ids) => builders.buildContractSigningLink(ids, req),
+      // A payer statement covers the bill-to's whole book: the builder only
+      // answers when the recipient number IS the payer's AP phone.
+      statement: (ids) => builders.buildStatementLink(ids, last10),
     };
     if (!builderByKind[kind]) {
-      return res.status(400).json({ error: 'kind must be one of review_request, pay_balance, estimate, referral, autopay_setup' });
+      return res.status(400).json({ error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` });
     }
 
     const last10 = fullPhoneLast10(req.body?.phone);
@@ -1769,6 +1791,11 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       requestId: result.requestId || undefined,
       balance: result.balance || undefined,
       estimate: result.estimate || undefined,
+      appointment: result.appointment || undefined,
+      prep: result.prep || undefined,
+      report: result.report || undefined,
+      contract: result.contract || undefined,
+      statement: result.statement || undefined,
       expiresAt: result.expiresAt || undefined,
       // Auto Pay: the resolved owner rides back so the composer can select
       // it — the /sms send then carries customerId and the link's owner

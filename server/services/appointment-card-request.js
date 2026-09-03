@@ -3468,6 +3468,8 @@ module.exports = {
   sendDeferredInvitationEmailLeg,
   resolveExemption,
   renderTemplate,
+  dateLineFor,
+  cancelFeeLine,
   LIVE_VISIT_STATUSES,
   _test: {
     dateLineFor,
