@@ -1040,7 +1040,8 @@ function scrubNames(span, grounding) {
   if (!span) return span;
   const names = new Set([grounding.review?.firstName, ...(grounding.allow?.names || []), ...(grounding.allow?.forbiddenNames || []), ...(grounding.review?.mentionedTechNames || [])].filter(Boolean));
   let out = String(span);
-  for (const name of names) out = out.replace(new RegExp(`\\b${escapeRe(name)}\\b`, 'gi'), '(name)');
+  // Unicode boundaries: `\b` is ASCII-only and would leave "José" or "Zoë" in place.
+  for (const name of names) out = out.replace(new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRe(name)}(?![\\p{L}\\p{N}])`, 'giu'), '$1(name)');
   return out;
 }
 

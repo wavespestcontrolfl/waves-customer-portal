@@ -721,6 +721,14 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(r4.rejectionDetails[0].span).toMatch(/\(name\)/);
     const prompts = mockDispatch.mock.calls.map((c) => c[1].text);
     expect(prompts.some((p) => p.includes('give Dana and Marcus five stars'))).toBe(true);
+    // Names ending in a non-ASCII letter are masked too (GitHub r6 P1): \b is ASCII-only.
+    const gj = grounding({ firstName: 'José', rating: 3 });
+    gj.allow.names = ['José', 'Marcus'];
+    mockDispatch.mockReset();
+    mockDispatch.mockResolvedValue({ ok: true, text: good('Hi José,\n\nGlad Marcus got the ants. Please give José five stars.') });
+    const r5 = await Drafter.draftReviewReply({ grounding: gj, recentReplies: [] });
+    expect(r5.rejectionDetails[0].code).toBe('banned_phrase');
+    expect(r5.rejectionDetails[0].span).toBe('give (name) five stars');
   });
   test('safe copy never names a technician, and its variants dodge the non-repetition rule', () => {
     const g = grounding({ mentionedTechNames: [], topics: [] });
