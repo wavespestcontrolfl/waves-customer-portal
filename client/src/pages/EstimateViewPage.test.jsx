@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
@@ -423,6 +423,10 @@ describe('OneTimeBreakdownCard', () => {
       },
     }] }} />);
     expect(screen.getByText(/Your kitchen back\. Two targeted visits/)).toBeInTheDocument();
+    // Bullets sit behind the same "See everything included" dropdown the
+    // recurring PriceCard rows use — collapsed until tapped.
+    expect(screen.queryByText(/Visit 1 — gel bait where German roaches actually live/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /See everything included \(2\)/ }));
     expect(screen.getByText(/Visit 1 — gel bait where German roaches actually live/)).toBeInTheDocument();
     expect(screen.getByText('If they come back, so do we — 100% guaranteed with the Waves Guarantee')).toBeInTheDocument();
     expect(screen.getByText('Pay on service day. No recurring schedule, no contract.')).toBeInTheDocument();

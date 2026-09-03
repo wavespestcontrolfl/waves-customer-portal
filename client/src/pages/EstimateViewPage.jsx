@@ -1999,7 +1999,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                       {item.copy.outcome}
                     </div>
                     {Array.isArray(item.copy.includes) && item.copy.includes.length ? (
-                      <RowInclusions items={item.copy.includes} />
+                      <RowInclusions items={item.copy.includes} collapsible />
                     ) : null}
                     {item.copy.terms ? (
                       <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 10, lineHeight: 1.5 }}>
@@ -6786,9 +6786,20 @@ function EstimateViewPageInner() {
     'termite_trenching', 'pre_slab_termiticide', 'bora_care',
     'wdo_inspection', 'termite_foam', 'trap_only',
   ]).has(serviceCategory);
-  const glassPack = estimate.isOneTimeOnly === true
+  const baseGlassPack = estimate.isOneTimeOnly === true
     ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking, preserveServiceHero: serviceSpecificOneTimeHero })
     : glassEstimateCopyFor(serviceCategory);
+  // One-time-only service copy (server contract pricing.oneTimeServiceCopy —
+  // roach cleanout, flea, wasp, bed bug, …): its hero names the service
+  // actually quoted, replacing the category hero ("your service quote is
+  // ready" / "One visit, priced from…") that misdescribed a multi-visit
+  // program. Same pack the server-rendered hero reads.
+  const oneTimeServiceCopy = estimate.isOneTimeOnly === true && pricing.oneTimeServiceCopy?.hero
+    ? pricing.oneTimeServiceCopy
+    : null;
+  const glassPack = baseGlassPack && oneTimeServiceCopy
+    ? { ...baseGlassPack, eyebrow: oneTimeServiceCopy.hero.eyebrow, heroH1: oneTimeServiceCopy.hero.h1, heroSub: oneTimeServiceCopy.hero.sub }
+    : baseGlassPack;
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
   // onFirstSlotDate; 'tomorrow' until it loads). {first} stays Header's job.
@@ -6824,16 +6835,12 @@ function EstimateViewPageInner() {
   // The server's intelligence.title/body outrank the static copy fallbacks in
   // WaveGuardIntelligenceCard, so the glass headline has to be applied to the
   // intelligence payload itself — metrics/signals/satellite stay untouched.
-  // One-time-only service copy (server contract pricing.oneTimeServiceCopy —
-  // roach cleanout, flea, wasp, bed bug, …) outranks the glass hero pack for
-  // the Waves AI card and the Ask Waves chips, so the card describes the
-  // service actually quoted instead of the generic pest plan copy.
-  const oneTimeServiceCopy = estimate.isOneTimeOnly === true && pricing.oneTimeServiceCopy?.aiTitle
-    ? pricing.oneTimeServiceCopy
-    : null;
+  // The same one-time pack outranks the glass hero pack for the Waves AI
+  // card (where it carries AI copy) and the Ask Waves chips, so the card
+  // describes the service actually quoted instead of the generic pest plan.
   const intelligenceDisplay = isRegulatedCertificateSurface
     ? null
-    : oneTimeServiceCopy && estimate.intelligence
+    : oneTimeServiceCopy?.aiTitle && estimate.intelligence
     ? { ...estimate.intelligence, title: oneTimeServiceCopy.aiTitle, body: oneTimeServiceCopy.aiBody }
     : glassPack && estimate.intelligence
     ? { ...estimate.intelligence, title: fillGlassTokens(glassPack.aiTitle), body: glassPack.aiBody }

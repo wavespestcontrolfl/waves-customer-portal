@@ -1,17 +1,19 @@
 {
   "german_roach": {
-    "outcome": "Your kitchen back. {Visits} targeted visits that clear the roaches and the eggs they left behind — 100% guaranteed.",
+    "outcome": "Your home back — every room, not just the kitchen. {Visits} targeted visits that clear the roaches and the eggs they left behind, 100% guaranteed.",
     "includes": [
-      "Visit 1 — gel bait where German roaches actually live: kitchen, bath, hinges, appliances, and plumbing voids",
-      "Crack-and-crevice treatment plus an insect growth regulator (IGR), so the population collapses — not just the visible bugs",
-      "Monitors placed and counted — you see the activity drop in your service report"
+      "Gel bait placed where German roaches actually live — kitchens, baths, hinges, appliances, plumbing voids, and anywhere else we find activity",
+      "ULV fogging with a non-repellent plus an insect growth regulator (IGR), so the population collapses — not just the visible bugs",
+      "Every visit works in tandem: the bait keeps working between visits while the IGR stops the next generation from hatching",
+      "Monitors placed and counted — you see the activity drop in your service report",
+      "A prep email before your first visit — what to clear and how to get the most out of the treatment"
     ],
     "includesByVisits": {
       "2": [
-        "Visit 2 about 10–14 days later — confirm zero live activity and treat anything that surfaced"
+        "Visit 2 about 10–14 days later — re-fog, re-bait, and confirm zero live activity"
       ],
       "default": [
-        "Follow-up visits every 10–14 days until the monitors read zero — {visits} in total"
+        "Follow-up visits every 10–14 days — re-fog, re-bait, and confirm zero live activity — {visits} in total"
       ]
     },
     "assurance": "If they come back, so do we — 100% guaranteed with the Waves Guarantee",
@@ -24,7 +26,12 @@
       "What precautions should I follow for pets and children?",
       "What should I do before the first visit?",
       "When am I charged?"
-    ]
+    ],
+    "hero": {
+      "eyebrow": "Your German roach cleanout",
+      "h1": "Hello {first}, your German roach cleanout quote is ready!",
+      "sub": "{Visits} targeted visits, priced from your home and how established the activity is — approve online and pick your first day. Licensed & insured, 100% guaranteed."
+    }
   },
   "one_time_pest": {
     "outcome": "One thorough visit that knocks the current problem down — no plan, no commitment.",
@@ -44,7 +51,12 @@
       "What precautions should I follow for pets and children?",
       "When am I charged?",
       "What if I still see bugs?"
-    ]
+    ],
+    "hero": {
+      "eyebrow": "Your one-time pest control visit",
+      "h1": "Hello {first}, your one-time pest control quote is ready!",
+      "sub": "One thorough visit, priced from your actual property — approve online and pick a day that works. Licensed & insured, 30-day callback included."
+    }
   },
   "flea": {
     "outcome": "Fleas out of the house and the yard, with the egg cycle broken so they don't come back — 100% guaranteed.",
@@ -52,7 +64,8 @@
       "Indoor insect growth regulator (IGR) treatment to break the breeding cycle",
       "Yard treatment focused on shaded harborage where flea larvae develop",
       "Products chosen with pets in mind — treated areas are safe once dry, and your technician confirms the re-entry timing on the day",
-      "Coordination guidance with your pet's vet treatment — the pet is half the job"
+      "Coordination guidance with your pet's vet treatment — the pet is half the job",
+      "A prep email before your visit — what to wash, what to clear, and how to get pets ready"
     ],
     "includesByVisits": {
       "2": [
@@ -72,7 +85,12 @@
       "Can I stay in the house after flea treatment?",
       "Why do fleas seem to come back after treatment?",
       "What precautions should I follow for pets and children?"
-    ]
+    ],
+    "hero": {
+      "eyebrow": "Your flea treatment",
+      "h1": "Hello {first}, your flea treatment quote is ready!",
+      "sub": "Interior and yard treatment priced from your home, with the follow-up built in — approve online and pick a day. Licensed & insured, 100% guaranteed."
+    }
   },
   "wasp": {
     "outcome": "The nest gone and the yard yours again — usually the same day.",
@@ -92,7 +110,12 @@
       "What precautions should I follow for pets and children?",
       "What if they come back?",
       "When am I charged?"
-    ]
+    ],
+    "hero": {
+      "eyebrow": "Your wasp & hornet service",
+      "h1": "Hello {first}, your wasp & hornet quote is ready!",
+      "sub": "Nest treatment and removal priced by species and location — approve online and pick a day. Licensed & insured, 30-day callback included."
+    }
   },
   "bed_bug": {
     "outcome": "Sleep in your own bed again. A full treatment cycle sized to the infestation, with a follow-up at the egg-hatch window.",
@@ -100,7 +123,8 @@
       "On-site inspection and species confirmation — it's not always bed bugs",
       "Mattress and box-spring encasements where appropriate",
       "Interceptor traps under bed legs for post-treatment monitoring",
-      "Follow-up visit at the 10–14 day egg-hatch window"
+      "Follow-up visit at the 10–14 day egg-hatch window",
+      "A prep email before your visit — what to bag, wash, and clear so the treatment reaches everywhere"
     ],
     "includesByMethod": {
       "heat": [
@@ -125,7 +149,12 @@
       "Do I need to throw out my mattress?",
       "Can I stay home during treatment?",
       "Why do bed bugs come back?"
-    ]
+    ],
+    "hero": {
+      "eyebrow": "Your bed bug treatment",
+      "h1": "Hello {first}, your bed bug treatment quote is ready!",
+      "sub": "A full treatment cycle sized to the rooms with activity, follow-up included — approve online and pick a day. Licensed & insured."
+    }
   },
   "rodent_exclusion": {
     "outcome": "Sealed out, not just trapped — every entry point closed with the right material and photographed.",
@@ -144,7 +173,12 @@
       "What materials do you use to seal?",
       "Do I need sanitation?",
       "Is the inspection fee credited?"
-    ]
+    ],
+    "hero": {
+      "eyebrow": "Your rodent exclusion",
+      "h1": "Hello {first}, your rodent exclusion quote is ready!",
+      "sub": "Every entry point sealed with the right material, priced from your home’s roofline and access points — approve online and pick a day. Licensed & insured."
+    }
   },
   "rodent_trapping": {
     "outcome": "The fastest way to drop an active interior population — we set, monitor, and clear traps until the activity stops.",
@@ -163,7 +197,12 @@
       "Trapping vs exclusion?",
       "How long until they're gone?",
       "What happens to what you catch?"
-    ]
+    ],
+    "hero": {
+      "eyebrow": "Your rodent trapping plan",
+      "h1": "Hello {first}, your rodent trapping quote is ready!",
+      "sub": "Interior trap lines set, checked, and cleared until the activity stops — approve online and pick a start day. Licensed & insured."
+    }
   },
   "trap_only": {
     "outcome": "Interior trap lines set, checked, and cleared on a schedule — monitoring you don't have to think about.",
@@ -174,7 +213,12 @@
       "Handoff to exclusion to keep the next ones out"
     ],
     "assurance": null,
-    "terms": "Setup is billed once; the monitoring plan bills on its scheduled cadence."
+    "terms": "Setup is billed once; the monitoring plan bills on its scheduled cadence.",
+    "hero": {
+      "eyebrow": "Your trap-only monitoring plan",
+      "h1": "Hello {first}, your trap-only monitoring plan is ready!",
+      "sub": "Setup plus scheduled trap checks on the plan’s cadence — approve online and pick your setup day. Licensed & insured."
+    }
   },
   "termite_foam": {
     "outcome": "A targeted treatment at the exact spot termites are active — not a whole-house job you don't need.",
@@ -185,7 +229,12 @@
       "Treatment recommendations if activity is found elsewhere — never a surprise upsell"
     ],
     "assurance": null,
-    "terms": "Pay on service day. No contract."
+    "terms": "Pay on service day. No contract.",
+    "hero": {
+      "eyebrow": "Your termite foam treatment",
+      "h1": "Hello {first}, your termite foam treatment quote is ready!",
+      "sub": "A targeted treatment at the active spot — approve online and pick a day. Licensed & insured."
+    }
   },
   "termite_trenching": {
     "outcome": "A continuous liquid barrier around your foundation — termites pick it up and carry it back to the colony.",
@@ -197,18 +246,12 @@
       "Renewal-cycle pricing built into the estimate"
     ],
     "assurance": null,
-    "terms": "Our team reviews the measured perimeter and confirms scheduling with you."
-  },
-  "wdo_inspection": {
-    "outcome": "The termite report Florida real-estate closings run on, delivered on your closing timeline.",
-    "includes": [
-      "Visual inspection of accessible interior, exterior, attic, and crawl areas",
-      "Evidence of active or previous infestation, damage, and conducive conditions",
-      "Completed Florida WDO inspection report (FDACS form) for the transaction file",
-      "Treatment recommendations if activity is found — never a surprise upsell"
-    ],
-    "assurance": null,
-    "terms": "Report turnaround built around your closing timeline."
+    "terms": "Our team reviews the measured perimeter and confirms scheduling with you.",
+    "hero": {
+      "eyebrow": "Your termite trenching quote",
+      "h1": "Hello {first}, your termite trenching quote is ready!",
+      "sub": "A continuous liquid barrier priced from your measured foundation — our team reviews it and confirms scheduling with you. Licensed & insured."
+    }
   },
   "one_time_mosquito": {
     "outcome": "One barrier treatment where mosquitoes actually rest — for a party, a bad stretch, or to try us out.",
@@ -218,7 +261,12 @@
       "Weather-aware timing so the treatment works instead of washing away"
     ],
     "assurance": "30-day callback — if they're back within a month, so are we, free",
-    "terms": "Pay on service day. No recurring schedule, no tier discount."
+    "terms": "Pay on service day. No recurring schedule, no tier discount.",
+    "hero": {
+      "eyebrow": "Your one-time mosquito treatment",
+      "h1": "Hello {first}, your mosquito treatment quote is ready!",
+      "sub": "One barrier treatment priced from your lot — approve online and pick a day. Licensed & insured, 30-day callback included."
+    }
   },
   "one_time_lawn": {
     "outcome": "One targeted treatment for the problem in front of you — chinch bugs, weeds, or fungus — matched to your turf.",
@@ -235,6 +283,11 @@
       "How does your lawn assessment tech work?",
       "When am I charged?",
       "What if the problem comes back?"
-    ]
+    ],
+    "hero": {
+      "eyebrow": "Your one-time lawn treatment",
+      "h1": "Hello {first}, your lawn treatment quote is ready!",
+      "sub": "One targeted application priced from your measured turf — approve online and pick a day. Licensed & insured."
+    }
   }
 }

@@ -32,35 +32,71 @@ function searchText(item = {}) {
     .replace(/[_-]+/g, ' ');
 }
 
-// Copy key for a one-time breakdown row, or null. Service keys are the
-// pricer's (server/services/pricing-engine/service-pricing.js); name
-// matching is the fallback for legacy rows that carry no service key. Order
-// matters: the recurring plan's first-visit roach knockdown
-// (pest_initial_roach) is NOT the standalone cleanout, and a trap-only
-// retainer is not interior trapping.
+// Copy key for a one-time breakdown row, or null. The pricer's service key
+// (server/services/pricing-engine/service-pricing.js) is AUTHORITATIVE:
+// a recognized key maps directly, a key on the no-copy list returns null,
+// and any other present key returns null too — label/detail text is only
+// consulted for legacy rows that carry NO service key at all (a
+// one_time_pest row whose detail mentions fleas must never inherit the
+// flea package's scope or guarantee — codex pre-push P1).
+const SERVICE_KEY_TO_COPY = {
+  german_roach: 'german_roach',
+  flea_package: 'flea',
+  flea_knockdown_single: 'flea',
+  bed_bug: 'bed_bug',
+  bed_bug_chemical: 'bed_bug',
+  bed_bug_heat: 'bed_bug',
+  wasp: 'wasp',
+  stinging_insect: 'wasp',
+  trap_only_setup: 'trap_only',
+  trap_only_retainer: 'trap_only',
+  trap_only_extra_callback: 'trap_only',
+  rodent_trapping: 'rodent_trapping',
+  rodent_trapping_followup: 'rodent_trapping',
+  rodent_exclusion: 'rodent_exclusion',
+  exclusion: 'rodent_exclusion',
+  rodent_plugging: 'rodent_exclusion',
+  rodent_wire_mesh: 'rodent_exclusion',
+  termite_foam: 'termite_foam',
+  foam_drill: 'termite_foam',
+  trenching: 'termite_trenching',
+  termite_trenching: 'termite_trenching',
+  one_time_pest: 'one_time_pest',
+  pest_initial_cleanout: 'one_time_pest',
+  initial_pest_cleanout: 'one_time_pest',
+  pest_cleanout: 'one_time_pest',
+  one_time_mosquito: 'one_time_mosquito',
+  one_time_lawn: 'one_time_lawn',
+};
+
+// Label-only fallback for legacy rows with no service key. WDO is
+// deliberately absent everywhere: a regulated FDACS certificate surface
+// stays narrative-free (AGENTS.md), so it never resolves to a pack.
+function copyKeyFromText(item = {}) {
+  const nameText = [item.name, item.label, item.displayName].filter(Boolean).join(' ').toLowerCase();
+  const text = searchText(item);
+  if (nameText.includes('roach') && nameText.includes('cleanout')) return 'german_roach';
+  if (/initial german roach|roach knockdown/.test(nameText)) return null;
+  if (/\bflea/.test(nameText)) return 'flea';
+  if (/\bbed bugs?\b/.test(nameText)) return 'bed_bug';
+  if (/\bwasps?\b|\bhornets?\b|yellow ?jackets?|stinging insect/.test(nameText)) return 'wasp';
+  if (/\btrap only\b/.test(text)) return 'trap_only';
+  if (/\btrapping\b/.test(nameText)) return 'rodent_trapping';
+  if (/\bexclusion\b|entry point plugging|wire mesh/.test(nameText)) return 'rodent_exclusion';
+  if (/\bfoam\b/.test(nameText) && /termite|termidor/.test(text)) return 'termite_foam';
+  if (/\btrench/.test(nameText)) return 'termite_trenching';
+  if (/one ?time pest|initial pest cleanout|general pest cleanout/.test(nameText)) return 'one_time_pest';
+  if (/one ?time mosquito/.test(nameText)) return 'one_time_mosquito';
+  if (/one ?time lawn/.test(nameText)) return 'one_time_lawn';
+  return null;
+}
+
 function oneTimeCopyKeyFor(item = {}) {
   if (!item || typeof item !== 'object') return null;
   if (item.kind === 'discount' || item.kind === 'included' || item.quoteRequired === true || item.kind === 'quote_required') return null;
-  const service = String(item.service || '').toLowerCase();
-  const text = searchText(item);
-  if (service === 'pest_initial_roach' || service === 'german_roach_initial') return null;
-  const nameText = [item.name, item.label, item.displayName].filter(Boolean).join(' ').toLowerCase();
-  if (service === 'german_roach' || (nameText.includes('roach') && nameText.includes('cleanout'))) return 'german_roach';
-  if (service.startsWith('flea') || /\bflea/.test(text)) return 'flea';
-  if (service.startsWith('bed_bug') || /\bbed bugs?\b/.test(text)) return 'bed_bug';
-  if (service === 'wasp' || service === 'stinging_insect' || /\bwasps?\b|\bhornets?\b|yellow ?jackets?|stinging insect/.test(text)) return 'wasp';
-  if (service.startsWith('trap_only') || /\btrap only\b/.test(text)) return 'trap_only';
-  if (service.startsWith('rodent_trapping') || /\btrapping\b/.test(text)) return 'rodent_trapping';
-  if (['rodent_exclusion', 'exclusion', 'rodent_plugging', 'rodent_wire_mesh'].includes(service)
-    || /\bexclusion\b|entry point plugging|wire mesh/.test(text)) return 'rodent_exclusion';
-  if (service === 'termite_foam' || service === 'foam_drill' || (/\bfoam\b/.test(text) && /termite|termidor/.test(text))) return 'termite_foam';
-  if (service === 'trenching' || service.includes('termite_trench') || /\btrench/.test(text)) return 'termite_trenching';
-  if (service === 'wdo' || service === 'wdo_inspection' || /\bwdo\b|wood destroying/.test(text)) return 'wdo_inspection';
-  if (['one_time_pest', 'pest_initial_cleanout', 'initial_pest_cleanout', 'pest_cleanout'].includes(service)
-    || /one ?time pest|initial pest cleanout|general pest cleanout/.test(text)) return 'one_time_pest';
-  if (service === 'one_time_mosquito' || /one ?time mosquito/.test(text)) return 'one_time_mosquito';
-  if (service === 'one_time_lawn' || /one ?time lawn/.test(text)) return 'one_time_lawn';
-  return null;
+  const service = String(item.service || '').toLowerCase().trim();
+  if (service) return SERVICE_KEY_TO_COPY[service] || null;
+  return copyKeyFromText(item);
 }
 
 function visitWord(n) {
@@ -114,10 +150,13 @@ function resolveOneTimeServiceCopy(item = {}) {
   };
 }
 
-// Page-level Waves AI card + Ask Waves chips for a ONE-TIME-ONLY estimate:
-// the billable rows must all resolve to ONE key that carries AI copy
-// (mixed one-time quotes keep the category-derived copy). Returns
-//   { key, aiTitle, aiBody, askChips } or null.
+// Page-level copy for a ONE-TIME-ONLY estimate — hero eyebrow/headline/
+// subline, and (where the pack carries them) the Waves AI card + Ask Waves
+// chips. The billable rows must all resolve to ONE key (mixed one-time
+// quotes keep the category-derived copy). Returns
+//   { key, hero: { eyebrow, h1, sub }, aiTitle?, aiBody?, askChips } or null.
+// Hero strings keep {first}/{city} for the renderer; {Visits} is filled
+// here from the row's visit count.
 function oneTimeOnlyIntelligenceCopy(items = []) {
   const rows = (Array.isArray(items) ? items : []).filter((item) => item
     && item.kind !== 'discount' && item.kind !== 'included'
@@ -127,11 +166,16 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
   if (keys.size !== 1) return null;
   const [key] = [...keys];
   const entry = key ? PACK[key] : null;
-  if (!entry || !entry.aiTitle) return null;
+  if (!entry || !entry.hero) return null;
+  const visits = Number(rows[0].visits) || (key === 'flea' && String(rows[0].offerKey || '').includes('two_visit') ? 2 : 0);
   return {
     key,
-    aiTitle: entry.aiTitle,
-    aiBody: entry.aiBody,
+    hero: {
+      eyebrow: entry.hero.eyebrow,
+      h1: fillVisits(entry.hero.h1, visits),
+      sub: fillVisits(entry.hero.sub, visits),
+    },
+    ...(entry.aiTitle ? { aiTitle: entry.aiTitle, aiBody: entry.aiBody } : {}),
     askChips: Array.isArray(entry.askChips) ? [...entry.askChips] : [],
   };
 }

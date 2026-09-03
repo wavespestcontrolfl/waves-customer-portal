@@ -26,6 +26,8 @@ describe('oneTimeCopyKeyFor', () => {
   test('classifies every one-time service the pack covers, by service key and by name', () => {
     expect(oneTimeCopyKeyFor(roach2)).toBe('german_roach');
     expect(oneTimeCopyKeyFor({ name: 'German Roach Cleanout — 4 Visit Program' })).toBe('german_roach');
+    expect(oneTimeCopyKeyFor({ name: 'Initial German Roach Knockdown' })).toBeNull();
+    expect(oneTimeCopyKeyFor({ label: 'Flea Elimination Package' })).toBe('flea');
     expect(oneTimeCopyKeyFor({ service: 'flea_knockdown_single', label: 'Flea Knockdown' })).toBe('flea');
     expect(oneTimeCopyKeyFor({ service: 'flea_package', label: 'Flea Elimination Package', offerKey: 'flea_elimination_two_visit' })).toBe('flea');
     expect(oneTimeCopyKeyFor({ service: 'bed_bug', label: 'Bed Bug Heat Treatment — 2 room(s)' })).toBe('bed_bug');
@@ -39,7 +41,6 @@ describe('oneTimeCopyKeyFor', () => {
     expect(oneTimeCopyKeyFor({ service: 'trap_only_retainer', label: 'Standard Trap-Only Retainer Service' })).toBe('trap_only');
     expect(oneTimeCopyKeyFor({ service: 'termite_foam', label: 'Termidor Foam Spot Treatment' })).toBe('termite_foam');
     expect(oneTimeCopyKeyFor({ service: 'trenching', label: 'Termite Trenching' })).toBe('termite_trenching');
-    expect(oneTimeCopyKeyFor({ service: 'wdo_inspection', label: 'WDO Inspection' })).toBe('wdo_inspection');
     expect(oneTimeCopyKeyFor({ service: 'one_time_pest', label: 'One-Time Pest Control' })).toBe('one_time_pest');
     expect(oneTimeCopyKeyFor({ service: 'pest_initial_cleanout', label: 'Initial Pest Cleanout' })).toBe('one_time_pest');
     expect(oneTimeCopyKeyFor({ service: 'one_time_mosquito', label: 'One-Time Mosquito Treatment' })).toBe('one_time_mosquito');
@@ -53,8 +54,15 @@ describe('oneTimeCopyKeyFor', () => {
     expect(oneTimeCopyKeyFor({ service: 'waveguard_setup', label: 'WaveGuard Setup' })).toBeNull();
     expect(oneTimeCopyKeyFor({ service: 'one_time_adjustment', label: 'WaveGuard Member Discount', amount: -50, kind: 'discount' })).toBeNull();
     expect(oneTimeCopyKeyFor({ ...roach2, kind: 'quote_required', quoteRequired: true, amount: null })).toBeNull();
-    // A one-time pest row whose DETAIL mentions roaches is still general pest.
-    expect(oneTimeCopyKeyFor({ service: 'one_time_pest', label: 'One-Time Pest Control', detail: 'roach cleanout requested' })).toBe('one_time_pest');
+    // The service key is authoritative: label/detail text never overrides it.
+    expect(oneTimeCopyKeyFor({ service: 'one_time_pest', label: 'One-Time Pest Control', detail: 'roach cleanout + fleas requested' })).toBe('one_time_pest');
+    expect(oneTimeCopyKeyFor({ service: 'rodent_exclusion', label: 'Rodent Exclusion', detail: 'after trapping' })).toBe('rodent_exclusion');
+    // An unrecognized service key gets NO pack (fail-safe), even with a matching label.
+    expect(oneTimeCopyKeyFor({ service: 'rodent_inspection', label: 'Rodent Inspection' })).toBeNull();
+    expect(oneTimeCopyKeyFor({ service: 'pest_control', label: 'One-Time Pest Control' })).toBeNull();
+    // WDO is a regulated certificate surface — never a pack, by key or by name.
+    expect(oneTimeCopyKeyFor({ service: 'wdo_inspection', label: 'WDO Inspection' })).toBeNull();
+    expect(oneTimeCopyKeyFor({ label: 'WDO Inspection' })).toBeNull();
   });
 });
 
@@ -62,17 +70,20 @@ describe('resolveOneTimeServiceCopy', () => {
   test('German roach copy adapts its outcome and follow-up bullet to the severity tier visit count', () => {
     const two = resolveOneTimeServiceCopy(roach2);
     expect(two.key).toBe('german_roach');
-    expect(two.outcome).toMatch(/^Your kitchen back\. Two targeted visits/);
-    expect(two.includes).toContain('Visit 2 about 10–14 days later — confirm zero live activity and treat anything that surfaced');
+    expect(two.outcome).toMatch(/Two targeted visits/);
+    expect(two.includes).toContain('Visit 2 about 10–14 days later — re-fog, re-bait, and confirm zero live activity');
+    expect(two.includes.some((line) => /ULV fogging with a non-repellent plus an insect growth regulator/.test(line))).toBe(true);
+    expect(two.includes.some((line) => /prep email before your first visit/.test(line))).toBe(true);
+    expect(two.outcome).not.toMatch(/^Your kitchen back/);
     // Assurance rides as the LAST bullet, like the recurring card's guarantee line.
     expect(two.includes[two.includes.length - 1]).toBe(two.assurance);
     expect(two.assurance).toMatch(/100% guaranteed with the Waves Guarantee/);
     expect(two.terms).toBe('Pay on service day. No recurring schedule, no contract.');
 
     const three = resolveOneTimeServiceCopy(roach3);
-    expect(three.outcome).toMatch(/^Your kitchen back\. Three targeted visits/);
-    expect(three.includes).toContain('Follow-up visits every 10–14 days until the monitors read zero — three visits in total');
-    expect(three.includes).not.toContain('Visit 2 about 10–14 days later — confirm zero live activity and treat anything that surfaced');
+    expect(three.outcome).toMatch(/Three targeted visits/);
+    expect(three.includes).toContain('Follow-up visits every 10–14 days — re-fog, re-bait, and confirm zero live activity — three visits in total');
+    expect(three.includes).not.toContain('Visit 2 about 10–14 days later — re-fog, re-bait, and confirm zero live activity');
   });
 
   test('flea: two-visit package gets the follow-up bullet, single knockdown does not; both 100% guaranteed (owner 2026-09-03)', () => {
@@ -92,12 +103,11 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(chem.assurance).toBe('Written 30-day guarantee on the treated areas');
   });
 
-  test('one-time pest keeps the 30-day callback; termite, WDO, rodent exclusion/trapping carry NO guarantee line', () => {
+  test('one-time pest keeps the 30-day callback; termite and rodent exclusion/trapping carry NO guarantee line', () => {
     expect(resolveOneTimeServiceCopy({ service: 'one_time_pest', label: 'One-Time Pest Control' }).assurance).toMatch(/^30-day callback/);
     for (const row of [
       { service: 'termite_foam', label: 'Termite Foam Treatment' },
       { service: 'trenching', label: 'Termite Trenching' },
-      { service: 'wdo_inspection', label: 'WDO Inspection' },
       { service: 'rodent_exclusion', label: 'Rodent Exclusion' },
       { service: 'rodent_trapping', label: 'Rodent Trapping' },
     ]) {
@@ -107,30 +117,38 @@ describe('resolveOneTimeServiceCopy', () => {
     }
   });
 
-  test('every pack entry ships an outcome, at least three bullets, and terms', () => {
+  test('every pack entry ships an outcome, at least three bullets, terms, and a service-specific hero', () => {
     for (const entry of Object.values(ONE_TIME_SERVICE_COPY)) {
       expect(typeof entry.outcome).toBe('string');
       expect(entry.outcome.length).toBeGreaterThan(0);
       expect(entry.includes.length).toBeGreaterThanOrEqual(3);
       expect(typeof entry.terms).toBe('string');
+      expect(typeof entry.hero.eyebrow).toBe('string');
+      expect(entry.hero.h1).toMatch(/\{first\}/);
+      expect(typeof entry.hero.sub).toBe('string');
     }
   });
 });
 
 describe('oneTimeOnlyIntelligenceCopy', () => {
-  test('a single-service one-time quote gets that service\'s Waves AI copy and chips', () => {
+  test('a single-service one-time quote gets that service\'s hero, Waves AI copy, and chips', () => {
     const ai = oneTimeOnlyIntelligenceCopy([roach2]);
     expect(ai.key).toBe('german_roach');
+    expect(ai.hero.eyebrow).toBe('Your German roach cleanout');
+    expect(ai.hero.h1).toBe('Hello {first}, your German roach cleanout quote is ready!');
+    expect(ai.hero.sub).toMatch(/^Two targeted visits/);
     expect(ai.aiTitle).toBe('Waves AI sized this cleanout to your infestation');
     expect(ai.askChips[0]).toBe('How do you get rid of German roaches?');
     expect(ai.askChips).toContain('What precautions should I follow for pets and children?');
   });
 
-  test('discount rows do not break the single-key rule; mixed services and no-AI packs return null', () => {
+  test('discount rows do not break the single-key rule; mixed services return null; hero-only packs carry no AI copy', () => {
     expect(oneTimeOnlyIntelligenceCopy([roach2, { service: 'one_time_adjustment', kind: 'discount', amount: -50 }]).key).toBe('german_roach');
     expect(oneTimeOnlyIntelligenceCopy([roach2, { service: 'wasp', label: 'Wasp Nest Treatment', amount: 150 }])).toBeNull();
-    expect(oneTimeOnlyIntelligenceCopy([{ service: 'wdo_inspection', label: 'WDO Inspection', amount: 125 }])).toBeNull();
-    expect(oneTimeOnlyIntelligenceCopy([{ service: 'termite_foam', label: 'Termite Foam', amount: 180 }])).toBeNull();
+    const foam = oneTimeOnlyIntelligenceCopy([{ service: 'termite_foam', label: 'Termite Foam', amount: 180 }]);
+    expect(foam.hero.eyebrow).toBe('Your termite foam treatment');
+    expect(foam.aiTitle).toBeUndefined();
+    expect(foam.askChips).toEqual([]);
     expect(oneTimeOnlyIntelligenceCopy([])).toBeNull();
   });
 });
@@ -164,7 +182,7 @@ describe('React /data contract', () => {
     expect(contract.oneTimeServiceCopy).toBeUndefined();
   });
 
-  test('a WDO quote (regulated certificate surface) still surfaces no chips', () => {
+  test('a WDO quote (regulated certificate surface) gets no chips and no row copy', () => {
     const wdo = { service: 'wdo_inspection', label: 'WDO Inspection', amount: 125 };
     const contract = attachPublicPricingContract(
       { frequencies: [], oneTimeBreakdown: { total: 125, items: [wdo] } },
@@ -172,7 +190,8 @@ describe('React /data contract', () => {
       { result: { recurring: { services: [] }, oneTime: { items: [{ ...wdo, price: 125, name: wdo.label }] } } },
     );
     expect(contract.askChips).toEqual([]);
-    expect(contract.oneTimeBreakdown.items[0].copy.key).toBe('wdo_inspection');
+    expect(contract.oneTimeBreakdown.items[0].copy).toBeUndefined();
+    expect(contract.oneTimeServiceCopy).toBeUndefined();
   });
 });
 
@@ -212,8 +231,15 @@ describe('server-rendered page', () => {
     });
     expect(html).toContain('class="onetime-outcome"');
     expect(html).toContain('Two targeted visits');
-    expect(html).toContain('Visit 1 — gel bait where German roaches actually live');
+    // Bullets ride a native <details> dropdown, collapsed by default.
+    expect(html).toContain('<details class="onetime-includes-wrap"><summary>See everything included (7)</summary>');
+    expect(html).toContain('Gel bait placed where German roaches actually live');
+    expect(html).toContain('ULV fogging with a non-repellent plus an insect growth regulator (IGR)');
     expect(html).toContain('Visit 2 about 10–14 days later');
+    // Hero names the service, with the first name and the visit count filled.
+    expect(html).toContain('<div class="eyebrow">Your German roach cleanout</div>');
+    expect(html).toContain('<h1>Hello Test, your German roach cleanout quote is ready!</h1>');
+    expect(html).toContain('<p class="hero-sub">Two targeted visits, priced from your home');
     expect(html).toContain('100% guaranteed with the Waves Guarantee');
     expect(html).toContain('Pay on service day. No recurring schedule, no contract.');
     expect(html).toContain('Waves AI sized this cleanout to your infestation');

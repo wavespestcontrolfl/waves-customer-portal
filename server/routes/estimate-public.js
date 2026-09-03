@@ -5650,7 +5650,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
     const rowCopy = resolveOneTimeServiceCopy(it);
     const rowCopyHtml = rowCopy
-      ? `<div class="onetime-outcome">${escapeHtml(rowCopy.outcome)}</div><ul class="onetime-includes">${rowCopy.includes.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>${rowCopy.terms ? `<div class="onetime-terms">${escapeHtml(rowCopy.terms)}</div>` : ''}`
+      ? `<div class="onetime-outcome">${escapeHtml(rowCopy.outcome)}</div><details class="onetime-includes-wrap"><summary>See everything included (${rowCopy.includes.length})</summary><ul class="onetime-includes">${rowCopy.includes.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></details>${rowCopy.terms ? `<div class="onetime-terms">${escapeHtml(rowCopy.terms)}</div>` : ''}`
       : '';
     return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}${rowCopyHtml}</td><td style="text-align:right">${priceCell}</td></tr>`;
   }).join('');
@@ -5988,8 +5988,19 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     : quoteRequired
     ? { h1: `Hello ${firstName}, your custom quote is in the works.`, eyebrow: 'Your custom quote' }
     : null;
-  const heroH1 = stateHero?.h1 || `Hello ${firstName}, your estimate is ready!`;
-  const heroEyebrow = stateHero?.eyebrow || `Your estimate · ${escapeHtml(quotedServicesLabel)}`;
+  // One-time-only service copy pack hero (roach cleanout, flea, …) — the
+  // eyebrow/headline/subline name the service actually quoted. Terminal
+  // states outrank it, same as the React TERMINAL_HERO rule.
+  const heroCity = (/,\s*([^,]+),\s*FL\b/i.exec(String(est.address || '')) || [])[1]?.trim() || null;
+  const fillOneTimeHero = (str) => escapeHtml(String(str || '')
+    .replace(/\{first\}/g, (est.customerName || '').split(' ')[0] || 'there')
+    .replace(/\s+in \{city\}/gi, heroCity ? ` in ${heroCity}` : '')
+    .replace(/\{city\}/g, heroCity || '')
+    .replace(/ {2,}/g, ' '));
+  const oneTimeHero = !stateHero && oneTimeOnlyAskCopy?.hero ? oneTimeOnlyAskCopy.hero : null;
+  const heroH1 = stateHero?.h1 || (oneTimeHero ? fillOneTimeHero(oneTimeHero.h1) : `Hello ${firstName}, your estimate is ready!`);
+  const heroEyebrow = stateHero?.eyebrow || (oneTimeHero ? escapeHtml(oneTimeHero.eyebrow) : `Your estimate · ${escapeHtml(quotedServicesLabel)}`);
+  const heroSubHtml = oneTimeHero?.sub ? `<p class="hero-sub">${fillOneTimeHero(oneTimeHero.sub)}</p>` : '';
 
   return `<!doctype html>
 <html lang="en"><head>
@@ -6012,6 +6023,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   h3{font-size:18px;font-weight:600}
   p{margin:0 0 12px}
   .eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#475569;font-weight:600;margin-bottom:6px;font-family:Inter,system-ui,sans-serif}
+  .hero-sub{font-size:16px;line-height:1.5;color:#3F4A65;margin:8px 0 12px;max-width:62ch}
   .top-bar{background:#fff;border-bottom:1px solid #E7E2D7}
   .top-bar-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:16px 24px}
   .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
@@ -6276,6 +6288,11 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   td.val{text-align:right;font-weight:500;color:#1B2C5B}
   .sub{font-size:12px;color:#475569;margin-top:2px}
   .onetime-outcome{font-size:15px;font-weight:400;color:#3F4A65;margin-top:6px;line-height:1.5}
+  .onetime-includes-wrap{margin-top:8px}
+  .onetime-includes-wrap summary{cursor:pointer;font-size:14px;font-weight:600;color:#0369a1;list-style:none;user-select:none}
+  .onetime-includes-wrap summary::-webkit-details-marker{display:none}
+  .onetime-includes-wrap summary::after{content:" ▾"}
+  .onetime-includes-wrap[open] summary::after{content:" ▴"}
   .onetime-includes{list-style:none;margin:10px 0 0;padding:10px 0 0;border-top:1px solid #E6EEF6;display:grid;gap:8px}
   .onetime-includes li{position:relative;padding-left:18px;font-size:14px;font-weight:600;color:#3F4A65;line-height:1.35}
   .onetime-includes li::before{content:"";position:absolute;left:0;top:7px;width:6px;height:6px;border-radius:999px;background:#1B2C5B}
@@ -6412,6 +6429,7 @@ ${shellTopBar()}
   <div class="hero">
     <div class="eyebrow">${heroEyebrow}</div>
     <h1>${heroH1}</h1>
+    ${heroSubHtml}
     ${est.estimateSlug ? `<div class="hero-contact">Estimate ${escapeHtml(est.estimateSlug)}</div>` : ''}
     ${fullName ? `<div class="hero-contact">${fullName}</div>` : ''}
     ${address ? `<div class="hero-contact">${address}</div>` : ''}
