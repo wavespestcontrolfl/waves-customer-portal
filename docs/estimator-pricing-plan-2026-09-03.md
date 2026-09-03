@@ -252,7 +252,7 @@ Translator builds `services.treeShrub = { tier, access, treeCount, palmCount, co
 
 **One-time price = max(line floor, recurring per-application anchor × 2.2 + treatment material difference ÷ (1 − 0.35)) → urgency → 15% recurring-customer perk → floor again.** The material difference = catalog cost of the one-time treatment's products minus the anchor's average per-application material, both from the B4 generator (zero for pest and mosquito, so those lines are plain 2.2×; lawn fungicide keeps its real cost without a hand-typed 1.38); the pest "> quarterly + $99" clamp stays pest-only. Mosquito anchors on the seasonal9 per-visit price and **keeps the over-acre increment** as the large-lot slope. T&S one-time is **manual review** until a defined scope exists (evaluation-only / evaluation + standard foliar / corrective insect / corrective disease / nutritional); rodent bait one-time stays absent. Lawn keeps today's treatment multipliers until B4 supplies costs — no interim change.
 
-Effects at reference sizes once costed: mosquito 8,000 sf $156 → $169; 40,000 sf ≈ $224 + over-acre increment (ruling D-3 sees the delta); lawn 4,500 sf fert ≈ $141, fungicide ≈ $141 + its material difference; pest unchanged.
+Effects at reference sizes once costed: mosquito 8,000 sf $156 → $169; 40,000 sf ≈ $224 + over-acre increment (ruling D-3 sees the delta); lawn 4,500 sf St. Augustine fert ≈ $167 (ruling D-4 anchor: 6x standard $38/month = $76 per application × 2.2; today's $115-floored $114 becomes $167), fungicide ≈ $167 + its material difference; pest unchanged.
 
 ### D2. Changes (one PR, gated `GATE_ONE_TIME_PRICING_V2` with a shadow log of old vs new on every one-time quote; old pricers deleted after the flip — the named rule-19 exception)
 

@@ -50,6 +50,17 @@ const CADENCE_LABELS = ['monthly', 'monthly_nth_weekday', 'every_6_weeks', 'seas
 const CADENCE_CASE_SQL = `(case lower(trim(frequency)) ${CADENCE_LABELS.map((l) => `when '${l}' then ${visitsPerYearForCadence(l)}`).join(' ')} else null end)`;
 // coalesce: a NULL engine_keys makes the bare predicate NULL, and NOT NULL is NULL — null rows are gaps (codex r6 P2).
 const HAS_ENGINE_KEY_SQL = "coalesce(jsonb_typeof(engine_keys) = 'array' and jsonb_array_length(engine_keys) > 0, false)";
+// Mirror of cadenceCatalogKeyForProfile in server/services/slot-reservation.js:
+// recurring pest / lawn / mosquito / tree-shrub visits resolve their catalog row
+// by service_key (category x visits/yr), bypassing engine-key containment, so
+// these rows are linked without an engine key and are not a gap (codex r8 P2).
+const CADENCE_RESOLVER_KEYS = [
+  'pest_general_monthly', 'pest_general_bimonthly', 'pest_general_quarterly', 'pest_general_semiannual',
+  'lawn_care_monthly', 'lawn_care_6week', 'lawn_care_recurring', 'lawn_care_quarterly',
+  'mosquito_monthly', 'mosquito_seasonal',
+  'tree_shrub_6week', 'tree_shrub_program', 'tree_shrub_quarterly',
+];
+const CADENCE_RESOLVER_KEYS_SQL = CADENCE_RESOLVER_KEYS.map((k) => `'${k}'`).join(', ');
 const EFFECTIVE_PRICE_SQL = "coalesce(nullif(ss.estimated_price, 0), case when c.billing_mode = 'per_application' then c.per_application_fee end, 0)";
 // CLI-only validation (a library require under another argv must not exit):
 // unknown flags are rejected, and the window is validated as YYYY-MM-DD and
@@ -93,12 +104,15 @@ const CHECKS = [
     // engine key claimed by MORE THAN ONE active row is refused (no service_id
     // stamp), so both rows are effectively unmapped even though each carries a
     // non-empty engine_keys array (codex r7 P2). Same predicate as the guard —
-    // is_active only, archived rows included if still active.
+    // is_active only, archived rows included if still active. Owners are
+    // DISTINCT rows: a member repeated inside one row's array expands to two
+    // lateral rows but the runtime containment query still returns one service
+    // and accepts it (codex r8 P2).
     title: 'Active catalog rows that claim the same engine key (slot-reservation refuses to stamp service_id on these)',
-    sql: `select k.engine_key, count(*) as active_owners, string_agg(s.service_key, ', ' order by s.service_key) as service_keys
+    sql: `select k.engine_key, count(distinct s.id) as active_owners, string_agg(distinct s.service_key, ', ' order by s.service_key) as service_keys
           from services s cross join lateral jsonb_array_elements_text(s.engine_keys) as k(engine_key)
           where s.is_active and jsonb_typeof(s.engine_keys) = 'array'
-          group by k.engine_key having count(*) > 1 order by k.engine_key`,
+          group by k.engine_key having count(distinct s.id) > 1 order by k.engine_key`,
   },
   {
     key: 'catalog_cadence_drift',
@@ -111,9 +125,18 @@ const CHECKS = [
   },
   {
     key: 'catalog_engine_gaps',
-    title: 'Active, quote-selectable catalog rows with no engine key (priced by name matching only)',
+    title: 'Active, quote-selectable catalog rows with no engine key and outside the cadence-key resolver (linked by name matching only)',
     sql: `select service_key, name, category, billing_type, frequency, visits_per_year, pricing_model_key
           from services where is_active and not is_archived and not ${HAS_ENGINE_KEY_SQL} and public_quote_selectable
+            and service_key not in (${CADENCE_RESOLVER_KEYS_SQL})
+          order by category, service_key`,
+  },
+  {
+    key: 'catalog_cadence_keyed',
+    title: 'Active, quote-selectable catalog rows with no engine key that slot-reservation resolves by cadence service_key (linked, not a gap)',
+    sql: `select service_key, name, category, frequency, visits_per_year
+          from services where is_active and not is_archived and not ${HAS_ENGINE_KEY_SQL} and public_quote_selectable
+            and service_key in (${CADENCE_RESOLVER_KEYS_SQL})
           order by category, service_key`,
   },
   {
@@ -154,7 +177,8 @@ const CHECKS = [
                  count(*) filter (where price_per_oz is null and normalized_unit_price is null) as no_normalized_unit_price,
                  count(*) filter (where unit is null) as no_unit,
                  count(*) filter (where approval_status in ('approved','auto_approved')) as approved,
-                 count(*) filter (where last_checked_at < now() - interval '90 days') as stale_90d
+                 count(*) filter (where last_checked_at is null) as never_checked,
+                 count(*) filter (where last_checked_at is null or last_checked_at < now() - interval '90 days') as stale_90d
           from vendor_pricing`,
   },
   {

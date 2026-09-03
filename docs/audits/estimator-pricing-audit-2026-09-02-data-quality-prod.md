@@ -10,13 +10,15 @@ Generated 2026-09-03T05:43:04.582Z · database host ma….pr….rl….net · win
 
 ## Active catalog rows that claim the same engine key (slot-reservation refuses to stamp service_id on these)
 
-_Round 7 (Codex P2): new check, not yet run against production — regenerate on the next read-only run. Executed on the local test schema: 0 rows._
+_Round 7 (Codex P2): new check, not yet run against production — regenerate on the next read-only run. Executed on the local test schema: 0 rows. Round 8 (Codex P2): owners are now counted as distinct catalog rows, so a member repeated inside one row's array is no longer reported as two owners._
 
 ## Catalog rows whose frequency label disagrees with visits_per_year
 
 _(0 rows)_
 
 ## Active, quote-selectable catalog rows with no engine key (priced by name matching only)
+
+_Round 8 (Codex P2): the query now excludes the 13 cadence service_keys that `slot-reservation.js` resolves directly by `service_key` (`pest_general_*`, `lawn_care_monthly/6week/recurring/quarterly`, `mosquito_monthly/seasonal`, `tree_shrub_*`) and lists them under a separate "resolved by cadence service_key" section. The table below is the pre-exclusion 2026-09-03T05:43Z run and was not re-queried: its cadence rows (e.g. `lawn_care_6week`, `mosquito_seasonal`, the four `pest_general_*` rows) are linked at booking time, so the genuinely name-only population is the remainder._
 
 | service_key | name | category | billing_type | frequency | visits_per_year | pricing_model_key |
 |---|---|---|---|---|---|---|
@@ -86,6 +88,8 @@ _(0 rows)_
 | dup_sku | 1 |
 
 ## Vendor pricing normalization
+
+_Round 8 (Codex P2): `stale_90d` now also counts rows whose `last_checked_at` is NULL (never checked) and a separate `never_checked` column reports them. The row below is the 2026-09-03T05:43Z run under the old predicate (NULL excluded) and was not re-queried, so 177 is a lower bound._
 
 | rows | active | no_normalized_unit_price | no_unit | approved | stale_90d |
 |---|---|---|---|---|---|
