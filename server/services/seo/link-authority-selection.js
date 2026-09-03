@@ -106,14 +106,17 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), best ? ts(best.updated_at) : 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
     const staleRow = (r, p) => (best && rotationOutcome(r, best) !== null)
       || (!r.satisfied_at && (ts(r.decided_at) < cutoff || ts(r.decided_at) < ts(p.updated_at)));
-    // the OPEN instance set must equal what the path REQUIRES now (policy requiredInstances): an in-place
-    // re-investigation that adds a fee or legal terms needs a new row even when every existing row is satisfied,
-    // and an instance the path no longer requires must be ended
+    // the OPEN instance set must cover what the path REQUIRES now (policy requiredInstances): an in-place
+    // re-investigation that adds a fee or legal terms needs a new row even when every existing row is satisfied;
+    // an UNSATISFIED instance the path no longer requires must be ended (the bridge keeps a satisfied surplus row —
+    // it is history — so it is never a reason to re-select)
     const required = best ? new Set(requiredInstances(best).map((i) => `${i.dimension}|${i.instance_kind}`)) : null;
     const instanceSetMoved = (p) => {
       if (!required) return false;
-      const openKeys = new Set((rowsByProspect.get(p.id) || []).map((r) => `${r.dimension}|${r.instance_kind}`));
-      return [...required].some((k) => !openKeys.has(k)) || [...openKeys].some((k) => !required.has(k));
+      const open = rowsByProspect.get(p.id) || [];
+      const openKeys = new Set(open.map((r) => `${r.dimension}|${r.instance_kind}`));
+      const unsatisfiedKeys = open.filter((r) => !r.satisfied_at).map((r) => `${r.dimension}|${r.instance_kind}`);
+      return [...required].some((k) => !openKeys.has(k)) || unsatisfiedKeys.some((k) => !required.has(k));
     };
     const withRows = mine.filter((p) => rowsByProspect.has(p.id) && !frozen(p));
     let why = null;

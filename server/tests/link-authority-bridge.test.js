@@ -648,6 +648,23 @@ describe('re-decision', () => {
     expect(rows(db).filter((x) => x.prospect_id === pl.id && !x.ended_at).map((x) => [x.dimension, x.level, Boolean(x.satisfied_at)]).sort()).toEqual([['execution', 'OWNER_FREE', true], ['payment', 'OWNER_PAYMENT', false]]);
     expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
   });
+  test('an in-place re-investigation that REMOVES a required instance leaves a satisfied surplus row as history and never re-selects the domain', async () => {
+    const { db, d, p } = scenario({ make: paidPath });
+    const pl = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: p.id, status: 'live', link_type: 'directory', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(pl);
+    const base = { prospect_id: pl.id, path_id: p.id, instance_kind: '-', instance_key: '-:1', decision_inputs_hash: 'old', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: EARLIER };
+    db._tables.seo_link_placement_authorities.push({ id: uid(), ...base, dimension: 'execution', level: 'OWNER_FREE', satisfied_reason: 'placed' });
+    db._tables.seo_link_placement_authorities.push({ id: uid(), ...base, dimension: 'payment', level: 'OWNER_PAYMENT', satisfied_reason: 'charged' });
+    db._tables.seo_link_domains[0].agent_state = 'watching';
+    Object.assign(db._tables.seo_link_acquisition_paths[0], { acquisition_type: 'self_service_free', payment_required: false, estimated_cost_cents: null, currency: 'unknown', fee_scope: null, merchant_binding: null }); // the fee went away
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // the charged proof is history, not a reason to revisit
+    // …but an UNSATISFIED surplus instance still is (the bridge ends it)
+    Object.assign(db._tables.seo_link_placement_authorities[1], { satisfied_at: null, satisfied_reason: null });
+    expect((await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['stale']);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r.ended).toBe(1);
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+  });
   test('an UNLOCKED conversation (a draft) on another page bound to the previous path follows the re-rank through the mover', async () => {
     const { db, d, p } = scenario({ make: outreachPath });
     const old = outreachPath(d); // live, no longer best
