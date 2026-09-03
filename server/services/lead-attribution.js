@@ -170,7 +170,10 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 // ---------------------------------------------------------------------------
 // 2. markConverted
 // ---------------------------------------------------------------------------
-async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource } = {}) {
+// `onlyIfStatusIn` (the estimate-accept claim paths) makes the status write
+// conditional on the state the caller claimed: 0 rows ⇒ a concurrent
+// transition wins and nothing below runs. Returns whether the lead converted.
+async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn } = {}) {
   // Only write the fields the caller actually supplied. Trigger-driven
   // conversions (service completed / invoice sent) have no estimate to source
   // revenue from, so they omit the value fields rather than null them out —
@@ -189,10 +192,12 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
 
   // Soft-deleted leads are out of every live mutation path: 0 rows updated
   // means the lead is missing or deleted, and nothing below should run.
-  const updatedRows = await db('leads').where('id', leadId).whereNull('deleted_at').update(updates);
+  const claim = db('leads').where('id', leadId).whereNull('deleted_at');
+  if (onlyIfStatusIn) claim.whereIn('status', onlyIfStatusIn);
+  const updatedRows = await claim.update(updates);
   if (!updatedRows) {
-    logger.info(`[LeadAttribution] markConverted skipped — lead ${leadId} missing or deleted`);
-    return;
+    logger.info(`[LeadAttribution] markConverted skipped — lead ${leadId} missing, deleted, or no longer in ${onlyIfStatusIn ? onlyIfStatusIn.join('/') : 'a live state'}`);
+    return false;
   }
 
   // Mirror the win onto the lead's ad_service_attribution funnel row
@@ -224,6 +229,7 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   });
 
   logger.info(`[LeadAttribution] Lead ${leadId} converted${triggerSource ? ` (${triggerSource})` : ''}`);
+  return true;
 }
 
 // ---------------------------------------------------------------------------

@@ -153,6 +153,8 @@ describe('lead staleness sweep', () => {
       const { sql } = buildStaleLeadUpdate(knex, { now: NOW, cutoff, excludeSoftDeleted: true }).toSQL();
 
       expect(sql).toContain('"leads"."deleted_at" is null');
+      // A removed repeat must not keep its original out of the sweep.
+      expect(sql).toContain('"repeat"."deleted_at" is null');
 
       return knex.destroy();
     });

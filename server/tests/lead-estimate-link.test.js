@@ -5,7 +5,7 @@
 process.env.PUBLIC_PORTAL_URL = 'https://portal.wavespestcontrol.com';
 
 jest.mock('../models/db', () => jest.fn());
-jest.mock('../services/lead-attribution', () => ({ markConverted: jest.fn() }));
+jest.mock('../services/lead-attribution', () => ({ markConverted: jest.fn(async () => true) }));
 jest.mock('../services/lead-source-resolver', () => ({
   resolveLeadSource: jest.fn(async () => ({ leadSourceId: 'ls-fb', leadSourceName: 'Facebook', leadSourceDetail: 'Meta click (fbclid)' })),
   MAIN_SITE_NAME: 'Main Site (wavespestcontrol.com)',
@@ -217,6 +217,7 @@ describe('lead-estimate link service', () => {
   function makeAcceptDb(opts = {}) {
     const updates = [];
     const lostRace = new Set();
+    const stamped = new Set();
     const database = (table) => ({
       where(clause) {
         if (table === 'leads' && clause && 'estimate_id' in clause) return Promise.resolve(opts.linked || []);
@@ -229,10 +230,11 @@ describe('lead-estimate link service', () => {
             whereNull: () => { conditional = true; return q; },
             whereNotIn: () => { conditional = true; return q; },
             whereIn: () => { conditional = true; return q; },
-            first: async () => (lostRace.has(clause.id) ? opts.raceRows[clause.id] : (opts.leadsById || {})[clause.id]) || null,
+            first: async () => (lostRace.has(clause.id) ? opts.raceRows[clause.id] : (stamped.has(clause.id) && opts.afterStamp && opts.afterStamp[clause.id]) || (opts.leadsById || {})[clause.id]) || null,
             update: async (patch) => {
               if (conditional && opts.raceRows && opts.raceRows[clause.id]) { lostRace.add(clause.id); return 0; }
               updates.push({ id: clause.id, patch, conditional });
+              stamped.add(clause.id);
               return 1;
             },
           };
@@ -338,6 +340,40 @@ describe('lead-estimate link service', () => {
     expect(leadAttribution.markConverted).toHaveBeenCalledTimes(1);
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-O', expect.objectContaining({ customerId: 'customer-1' }));
     expect(database._updates).toEqual([{ id: 'lead-O', patch: expect.objectContaining({ estimate_id: 'estimate-2j' }), conditional: true }]);
+  });
+
+  test('a soft-deleted named duplicate never resolves to its live original (nothing converts)', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2l', estimate_data: { lead_id: 'lead-delD' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: {
+        'lead-delD': { id: 'lead-delD', status: 'duplicate', deleted_at: '2026-09-02T00:00:00Z', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-liveO' } },
+        'lead-liveO': { id: 'lead-liveO', status: 'new', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com' },
+      },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2l', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    expect(database._updates).toEqual([]);
+  });
+
+  test('the conversion carries the claim: a staff closure between the stamp and the status write wins, and the duplicate records no win either', async () => {
+    leadAttribution.markConverted.mockResolvedValueOnce(false);
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2m', estimate_data: { lead_id: 'lead-dupM' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: {
+        'lead-dupM': { id: 'lead-dupM', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-origM' } },
+        'lead-origM': { id: 'lead-origM', status: 'new', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com' },
+      },
+      // After the stamp, the office closed the original as won: the claimed
+      // status write hits 0 rows and the re-read shows it.
+      raceRows: {},
+      afterStamp: { 'lead-origM': { id: 'lead-origM', status: 'won', estimate_id: 'estimate-2m' } },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2m', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).toHaveBeenCalledTimes(1);
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-origM', expect.objectContaining({ onlyIfStatusIn: expect.arrayContaining(['new']) }));
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
   });
 
   test('a duplicate marker cycle (A ↔ B) terminates and credits the named row', async () => {
@@ -529,6 +565,15 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
           if (table === 'customers') return { first: async () => opts.customer || null };
           if (table === 'leads' && clause && 'estimate_id' in clause) {
             return Promise.resolve(opts.leadsByEstimate || []);
+          }
+          if (table === 'leads' && clause && 'id' in clause) {
+            return { first: async () => (opts.leadsById || {})[clause.id] || null };
+          }
+          // the tier-2 duplicate-repeat lookup: .where({ customer_id, lead_type, status: 'duplicate' })
+          // .whereNull('deleted_at').orderBy(...).first()
+          if (table === 'leads' && clause && 'lead_type' in clause) {
+            const rep = { whereNull: () => rep, orderBy: () => rep, first: async () => opts.customerDuplicateLead || null };
+            return rep;
           }
           // customerHasWonLead: .where({ customer_id, status: 'won' })
           // .whereNull('deleted_at').first('id')
@@ -876,6 +921,37 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
 
     expect(result).toEqual({ converted: false, reason: 'customer_link_not_originating' });
     expect(markConverted).not.toHaveBeenCalled();
+  });
+
+  test('self-booking: a repeat filed as duplicate converts its open root when the root is this customer\'s', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [],
+      customerDuplicateLead: { id: 'L-rep', status: 'duplicate', customer_id: 'c1', extracted_data: { duplicate_of_lead_id: 'L-root' }, first_contact_at: '2026-09-01T12:00:00Z' },
+      leadsById: { 'L-root': { id: 'L-root', status: 'new', customer_id: 'c1', first_contact_at: '2026-08-30T12:00:00Z' } },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-root'] });
+    expect(markConverted).toHaveBeenCalledWith('L-root', expect.objectContaining({ customerId: 'c1' }));
+  });
+
+  test('self-booking: when the original belongs to a DIFFERENT customer, the authenticated repeat row takes the win', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const database = makeConvertDb({
+      customer: { id: 'c2', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [],
+      customerDuplicateLead: { id: 'L-rep2', status: 'duplicate', customer_id: 'c2', extracted_data: { duplicate_of_lead_id: 'L-other' }, first_contact_at: '2026-09-01T12:00:00Z' },
+      leadsById: { 'L-other': { id: 'L-other', status: 'new', customer_id: 'c-OTHER', first_contact_at: '2026-08-30T12:00:00Z' } },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c2', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-rep2'] });
+    expect(markConverted).toHaveBeenCalledWith('L-rep2', expect.objectContaining({ customerId: 'c2' }));
+    expect(markConverted).not.toHaveBeenCalledWith('L-other', expect.anything());
   });
 
   test('for an estimate-scoped event, does NOT convert a lead tied to a DIFFERENT estimate', async () => {

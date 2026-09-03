@@ -41,11 +41,15 @@ function normalizeEmail(value) {
 // of an existing open lead O can chain B → A → O when B picked A before A's
 // own relabel landed (codex #3834 r10 P1), so one hop would stop on the
 // closed duplicate A. Bounded and cycle-safe; a dead end (marker without a
-// row) resolves to the named lead itself, as before.
+// row) resolves to the named lead itself, as before. A soft-deleted row —
+// the named one or any hop — is out of every live mutation path (admin
+// delete contract), so it is never followed to a live original (codex
+// #3834 r11 P1).
 async function followDuplicateLink(database, lead) {
   const seen = new Set();
   let current = lead;
   while (current && current.status === 'duplicate' && !seen.has(current.id) && seen.size < 8) {
+    if (current.deleted_at) return lead;
     seen.add(current.id);
     let data = current.extracted_data;
     if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
@@ -592,7 +596,10 @@ async function markLinkedLeadEstimateAccepted({
   // pre-push P1 on #3834 r8); on 0 rows re-read and proceed only if the link
   // that won the race is THIS estimate. Returns false when another estimate
   // or a closure took the lead so the caller can decide what to credit. The
-  // direct path keeps its unconditional stamp as before.
+  // status write itself carries the same claim (markConverted's
+  // onlyIfStatusIn), so a staff closure landing between the stamp and the
+  // conversion is never overwritten (codex #3834 r11 P1). The direct path
+  // keeps its unconditional stamp and conversion as before.
   const convert = async (lead, { claim = null } = {}) => {
     if (!lead.estimate_id) {
       const stamp = database('leads').where({ id: lead.id });
@@ -608,12 +615,18 @@ async function markLinkedLeadEstimateAccepted({
         if (!current || String(current.estimate_id) !== String(estimateId) || CLOSED_LEAD_STATUSES.has(current.status)) return false;
       }
     }
-    await leadAttributionService.markConverted(lead.id, {
+    const converted = await leadAttributionService.markConverted(lead.id, {
       customerId,
       monthlyValue,
       initialServiceValue,
       waveguardTier,
+      ...(claim ? { onlyIfStatusIn: claim } : {}),
     });
+    if (claim && !converted) {
+      const current = await database('leads').where({ id: lead.id }).first('estimate_id', 'status');
+      if (current) Object.assign(lead, current);
+      return false;
+    }
     return true;
   };
 
@@ -923,6 +936,7 @@ async function convertLeadFromEvent({
     //  3. contact fallback — an open, never-linked lead matched by phone/email.
     let candidates = [];
     let resolution = null; // 'estimate' | 'customer_link' | 'contact'
+    let duplicateWinner = null; // the authenticated repeat row taking the win (tier 2)
     if (estimateId) {
       candidates = await database('leads').where({ estimate_id: estimateId });
       if (candidates.length) resolution = 'estimate';
@@ -942,6 +956,26 @@ async function convertLeadFromEvent({
       // skip rather than guess which deal the event closed.
       if (resolvedCustomerId) {
         let linked = await findOpenLeadsForCustomer(database, resolvedCustomerId);
+        // The customer's only wizard row may be a repeat filed as 'duplicate'
+        // (codex #3834 r11 P1): the win goes to the open root when that root
+        // is this customer's (or unlinked); an original under a DIFFERENT
+        // customer (shared household contact) is not ours to convert, so the
+        // authenticated repeat row itself takes the booking win — as it did
+        // before the label existed.
+        if (!linked.length) {
+          const repeat = await database('leads')
+            .where({ customer_id: resolvedCustomerId, lead_type: 'quote_wizard', status: 'duplicate' })
+            .whereNull('deleted_at')
+            .orderBy('created_at', 'desc')
+            .first();
+          if (repeat) {
+            const root = await followDuplicateLink(database, repeat);
+            const rootIsOurs = root.id !== repeat.id && !CLOSED_LEAD_STATUSES.has(root.status) && !root.deleted_at
+              && (!root.customer_id || String(root.customer_id) === String(resolvedCustomerId));
+            duplicateWinner = rootIsOurs ? null : repeat;
+            linked = [rootIsOurs ? root : repeat];
+          }
+        }
         // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
         // estimate belongs to that deal — exclude it so we never convert it or
         // misattribute this estimate's value hints. (Tier 1 already handled a
@@ -993,7 +1027,7 @@ async function convertLeadFromEvent({
     // deleted_at covers the tier-1 estimate-link candidates (queried without a
     // guard so an all-deleted linkage still counts as "accounted for" and
     // blocks the fuzzy tiers); tiers 2/3 come pre-filtered by their finders.
-    const open = (candidates || []).filter((lead) => lead && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at);
+    const open = (candidates || []).filter((lead) => lead && (!CLOSED_LEAD_STATUSES.has(lead.status) || lead === duplicateWinner) && !lead.deleted_at);
     if (!open.length) return { converted: false, reason: 'no_open_lead' };
     // FK-linked leads are authoritatively tied to THIS estimate, so convert them
     // all; tier 2 already enforced a single first-close lead. Only the fuzzy

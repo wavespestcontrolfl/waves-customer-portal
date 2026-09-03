@@ -33,7 +33,9 @@ describe('public-quote ad_service_attribution wiring', () => {
   });
 
   test('carries the paid flag from the shared map, not a local guess', () => {
-    expect(src).toMatch(/is_paid:\s*channelAttr\.isPaid\s*&&\s*sourceMeta\.isPaidClick/);
+    // The current touch is built from the shared map; the insert copies it.
+    expect(src).toMatch(/isPaid:\s*channelAttr\.isPaid\s*&&\s*sourceMeta\.isPaidClick\s*===\s*true/);
+    expect(src).toMatch(/is_paid:\s*touch\.isPaid/);
   });
 
   test('skips the funnel row entirely when the source has no mapped channel (fail-closed)', () => {

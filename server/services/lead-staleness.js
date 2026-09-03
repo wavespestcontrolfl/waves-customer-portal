@@ -70,7 +70,11 @@ function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
       this.select(1).from('leads as repeat')
         .whereRaw("repeat.lead_type = 'quote_wizard' AND repeat.status = 'duplicate'")
         .whereRaw("repeat.extracted_data->>'duplicate_of_lead_id' = leads.id::text")
-        .where('repeat.created_at', '>=', cutoff);
+        .where('repeat.created_at', '>=', cutoff)
+        // A removed repeat says nothing about re-engagement (codex r11 P2).
+        .modify((builder) => {
+          if (excludeSoftDeleted) builder.whereNull('repeat.deleted_at');
+        });
     })
     // A lead linked to a customer with booked (or already-delivered) service
     // FROM THIS LEAD'S COURTSHIP is pending won-conversion, not

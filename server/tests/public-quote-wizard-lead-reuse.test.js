@@ -105,8 +105,15 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // A repeat inserts no attribution row of its own — unless the original
     // never got one, in which case the single row is backfilled onto the
     // original's id (codex r10 P2).
-    expect(src).toMatch(/let attributionLeadId = lead\.id;\n\s+if \(duplicateOfLeadId\) \{\n\s+const root = await followDuplicateLink\(db, await db\('leads'\)\.where\(\{ id: duplicateOfLeadId \}\)\.first\('id', 'status', 'extracted_data'\)\);\n\s+const rootId = root \? root\.id : duplicateOfLeadId;\n\s+attributionLeadId = \(await db\('ad_service_attribution'\)\.where\(\{ lead_id: rootId \}\)\.first\('id'\)\) \? null : rootId;\n\s+\}/);
-    expect(src).toMatch(/if \(attributionLeadId\) await db\('ad_service_attribution'\)\.insert\(\{\n\s+customer_id: customerId,\n\s+lead_id: attributionLeadId,/);
+    // The backfill is the ORIGINAL touch rebuilt from the root row (its
+    // source's channel, click ids, service, date), resolved through the
+    // chain root; a root that already has a row, or whose stored source has
+    // no channel, gets nothing (codex r10 P2, pre-push r10, r11 P2).
+    expect(src).toMatch(/const root = await followDuplicateLink\(db, await db\('leads'\)\.where\(\{ id: duplicateOfLeadId \}\)\.first\(\)\);/);
+    expect(src).toMatch(/const rootHasRow = await db\('ad_service_attribution'\)\.where\(\{ lead_id: rootId \}\)\.first\('id'\);/);
+    expect(src).toMatch(/const rootChannel = attributionForSourceType\(rootSource\?\.source_type\);/);
+    expect(src).toMatch(/touch = rootHasRow \|\| !root \|\| !rootChannel \? null : \{\n\s+leadId: root\.id, serviceInterest: root\.service_interest \|\| serviceInterest, leadDate: etDateString\(new Date\(root\.created_at\)\), channel: rootChannel,/);
+    expect(src).toMatch(/if \(touch\) await db\('ad_service_attribution'\)\.insert\(\{\n\s+customer_id: customerId,\n\s+lead_id: touch\.leadId,/);
     // A submission that adds properties is a wider inquiry, never a repeat
     // (codex r10 P1) — on both paths.
     expect(src).toMatch(/duplicateOfLeadId = additionalProperties\.length \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);

@@ -1992,35 +1992,54 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // the open ROOT of the ancestry, not the immediate parent — two
         // concurrent repeats can chain B → A → O, and the prospect gets one
         // funnel row, on O (pre-push P1 on r10).
-        let attributionLeadId = lead.id;
-        if (duplicateOfLeadId) {
-          const root = await followDuplicateLink(db, await db('leads').where({ id: duplicateOfLeadId }).first('id', 'status', 'extracted_data'));
-          const rootId = root ? root.id : duplicateOfLeadId;
-          attributionLeadId = (await db('ad_service_attribution').where({ lead_id: rootId }).first('id')) ? null : rootId;
-        }
-        if (attributionLeadId) await db('ad_service_attribution').insert({
-          customer_id: customerId,
-          lead_id: attributionLeadId,
-          service_line: inferServiceLine(serviceInterest),
-          specific_service: inferSpecificService(serviceInterest),
-          service_bucket: inferServiceBucket(serviceInterest),
-          lead_date: etDateString(),
-          lead_source: channelAttr.leadSource,
-          lead_source_detail: sourceMeta.leadSourceDetail,
-          gclid: gclid || null,
-          wbraid: wbraid || null,
-          gbraid: gbraid || null,
-          fbclid: fbclid || null,
-          fbc: fbc || null,
-          fbp: fbp || null,
-          utm_campaign: attr?.utm?.campaign || null,
-          utm_term: attr?.utm?.term || null,
-          funnel_stage: 'lead',
+        // The backfill row is the ORIGINAL touch, rebuilt from what the root
+        // row stored (its lead source's channel, click ids, service, date) —
+        // never this return visit's channel, which would credit acquisition
+        // to the wrong touch and corrupt first-touch ROI (codex r11 P2). A
+        // root whose stored source has no channel gets no row, exactly as
+        // its own run would have.
+        let touch = {
+          leadId: lead.id, serviceInterest, leadDate: etDateString(), channel: channelAttr,
+          leadSourceDetail: sourceMeta.leadSourceDetail, gclid, wbraid, gbraid, fbclid, fbc, fbp,
+          utmCampaign: attr?.utm?.campaign || null, utmTerm: attr?.utm?.term || null,
           // The map's isPaid says the CHANNEL is a paid one; the resolver's
           // isPaidClick says THIS visit carried paid evidence (click id / cpc).
           // Both must hold — organic utm_source=facebook traffic lands in the
           // Facebook channel but must not count as paid spend attribution.
-          is_paid: channelAttr.isPaid && sourceMeta.isPaidClick === true,
+          isPaid: channelAttr.isPaid && sourceMeta.isPaidClick === true,
+        };
+        if (duplicateOfLeadId) {
+          const root = await followDuplicateLink(db, await db('leads').where({ id: duplicateOfLeadId }).first());
+          const rootId = root ? root.id : duplicateOfLeadId;
+          const rootHasRow = await db('ad_service_attribution').where({ lead_id: rootId }).first('id');
+          const rootSource = !rootHasRow && root?.lead_source_id ? await db('lead_sources').where({ id: root.lead_source_id }).first('source_type') : null;
+          const rootChannel = attributionForSourceType(rootSource?.source_type);
+          touch = rootHasRow || !root || !rootChannel ? null : {
+            leadId: root.id, serviceInterest: root.service_interest || serviceInterest, leadDate: etDateString(new Date(root.created_at)), channel: rootChannel,
+            leadSourceDetail: null, gclid: root.gclid, wbraid: root.wbraid, gbraid: root.gbraid, fbclid: root.fbclid, fbc: root.fbc, fbp: root.fbp,
+            utmCampaign: null, utmTerm: null,
+            isPaid: rootChannel.isPaid && !!(root.gclid || root.wbraid || root.gbraid || root.fbclid),
+          };
+        }
+        if (touch) await db('ad_service_attribution').insert({
+          customer_id: customerId,
+          lead_id: touch.leadId,
+          service_line: inferServiceLine(touch.serviceInterest),
+          specific_service: inferSpecificService(touch.serviceInterest),
+          service_bucket: inferServiceBucket(touch.serviceInterest),
+          lead_date: touch.leadDate,
+          lead_source: touch.channel.leadSource,
+          lead_source_detail: touch.leadSourceDetail,
+          gclid: touch.gclid || null,
+          wbraid: touch.wbraid || null,
+          gbraid: touch.gbraid || null,
+          fbclid: touch.fbclid || null,
+          fbc: touch.fbc || null,
+          fbp: touch.fbp || null,
+          utm_campaign: touch.utmCampaign,
+          utm_term: touch.utmTerm,
+          funnel_stage: 'lead',
+          is_paid: touch.isPaid,
         }).onConflict('lead_id').ignore();
       }
     } catch (attrErr) {
