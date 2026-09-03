@@ -17,76 +17,8 @@ const P = require('../services/seo/link-authority-policy');
 const bridge = require('../services/seo/link-authority-bridge');
 const selection = require('../services/seo/link-authority-selection');
 
-// ---------------------------------------------------------------------------
-// In-memory knex-shaped store
-// ---------------------------------------------------------------------------
-let idSeq = 0;
-const uid = () => `00000000-0000-4000-8000-${String(++idSeq).padStart(12, '0')}`;
-const TABLES = ['seo_link_domains', 'seo_link_acquisition_paths', 'seo_link_prospects', 'seo_link_placement_authorities', 'seo_link_floor_waivers', 'seo_link_approvals', 'seo_link_policy'];
-
-function makeDb(seed = {}) {
-  const tables = Object.fromEntries(TABLES.map((t) => [t, []]));
-  for (const [t, rows] of Object.entries(seed)) tables[t] = rows.map((r) => ({ ...r }));
-  const raws = [];
-  const op = (a, l, r) => (a === '<' ? l < r : a === '<=' ? l <= r : a === '>' ? l > r : a === '>=' ? l >= r : a === '<>' || a === '!=' ? l !== r : l === r);
-  function builder(table) {
-    const rows = tables[table];
-    if (!rows) throw new Error(`unknown table ${table}`);
-    const st = { preds: [], order: null, limit: null, cols: null };
-    const matches = (r) => st.preds.every((p) => p(r));
-    const project = (r) => (!st.cols || st.cols.includes('*') ? { ...r } : Object.fromEntries(st.cols.map((c) => [c, r[c]])));
-    const resolve = () => {
-      if (db._beforeResolve) db._beforeResolve(table, db);
-      let out = rows.filter(matches);
-      const sortKey = (v) => (v instanceof Date ? v.getTime() : typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v) ? Date.parse(v) : String(v));
-      if (st.order) out = [...out].sort((a, b) => (sortKey(a[st.order.col]) < sortKey(b[st.order.col]) ? -1 : 1) * (st.order.dir === 'desc' ? -1 : 1));
-      if (st.limit != null) out = out.slice(0, st.limit);
-      return out.map(project);
-    };
-    const q = {
-      where(a, b, c) {
-        if (typeof a === 'object') st.preds.push((r) => Object.entries(a).every(([k, v]) => r[k] === v));
-        else if (c !== undefined) st.preds.push((r) => op(b, r[a], c));
-        else st.preds.push((r) => r[a] === b);
-        return q;
-      },
-      whereNull(col) { st.preds.push((r) => r[col] == null); return q; },
-      whereNotNull(col) { st.preds.push((r) => r[col] != null); return q; },
-      whereIn(col, arr) { st.preds.push((r) => arr.includes(r[col])); return q; },
-      whereRaw(sql, bindings = []) {
-        if (/split_part/.test(sql)) st.preds.push((r) => canonicalProspectDomain(r.target_domain) === bindings[0]);
-        else if (/COALESCE\(link_type, ''\) NOT IN/.test(sql)) st.preds.push((r) => !bindings.includes(r.link_type || ''));
-        else throw new Error(`unsupported whereRaw: ${sql}`);
-        return q;
-      },
-      orderBy(col, dir = 'asc') { st.order = { col, dir }; return q; },
-      limit(n) { st.limit = n; return q; },
-      select(...cols) { st.cols = cols.length ? cols : null; return q; },
-      forUpdate() { raws.push(`FOR UPDATE ${table}`); return q; },
-      async first(...cols) { if (cols.length) st.cols = cols; return resolve()[0]; },
-      async update(patch) { if (db._failUpdate === table) throw new Error(`injected failure on ${table}`); if (db._beforeUpdate) db._beforeUpdate(table, db); const hit = rows.filter(matches); for (const r of hit) Object.assign(r, patch); return hit.length; },
-      insert(row) {
-        const created = { id: uid(), ...row };
-        if (table === 'seo_link_placement_authorities' && rows.some((r) => r.prospect_id === row.prospect_id && r.dimension === row.dimension && r.instance_key === row.instance_key)) throw new Error('duplicate key value violates unique constraint "seo_link_placement_authorities_prospect_id_dimension_instance_key_unique"');
-        if (table === 'seo_link_placement_authorities' && rows.some((r) => r.prospect_id === row.prospect_id && r.dimension === row.dimension && r.instance_kind === row.instance_kind && r.ended_at == null)) throw new Error('duplicate key value violates unique constraint "seo_link_placement_authorities_open_instance_uniq"');
-        rows.push(created);
-        return { returning: async () => [{ ...created }], then: (res, rej) => Promise.resolve([{ ...created }]).then(res, rej) };
-      },
-      then(res, rej) { return Promise.resolve(resolve()).then(res, rej); },
-    };
-    return q;
-  }
-  const db = Object.assign((table) => builder(table), {
-    _failUpdate: null,
-    _beforeResolve: null,
-    _beforeUpdate: null,
-    raw: async (sql) => { raws.push(sql); return {}; },
-    transaction: async (cb) => cb(db),
-    _tables: tables,
-    _raws: raws,
-  });
-  return db;
-}
+// In-memory knex-shaped store — shared with the owner-queue tests
+const { makeDb, uid } = require("./helpers/link-authority-store");
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -332,6 +264,33 @@ describe('outreach-lane paths', () => {
     expect(domainState(db)).toBe('acquiring'); // the conversation is in flight, not owner-held
     expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
   });
+  test('a CONSUMED approval on a still-unsatisfied row is spent: the nightly re-parks the placement instead of releasing it again', async () => {
+    const { db, p } = scenario({ make: paidPath });
+    await run(db);
+    const fee = rows(db).find((x) => x.dimension === 'payment');
+    const approval = { id: uid(), prospect_id: fee.prospect_id, path_id: p.id, decision: 'approved', authority: 'OWNER_PAYMENT', dimension: 'payment', instance_key: '-:1', invalidated_at: null, consumed_at: null };
+    db._tables.seo_link_approvals.push(approval);
+    fee.approval_id = approval.id;
+    for (const r of rows(db).filter((x) => x.prospect_id === fee.prospect_id && x.dimension !== 'payment')) Object.assign(r, { satisfied_at: NOW, satisfied_reason: 'human_step_done' });
+    db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 1000);
+    await run(db, { now: new Date(NOW.getTime() + 60000) });
+    const placement = placements(db).find((x) => x.id === fee.prospect_id);
+    expect(placement.status).toBe('prospect'); // released under the live approval
+    // the runner charged and reported a failed placement: the approval is consumed, the row stays unsatisfied
+    approval.consumed_at = new Date(NOW.getTime() + 120000);
+    db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 130000);
+    const again = await run(db, { now: new Date(NOW.getTime() + 180000) });
+    expect(again.released).toBe(0);
+    expect(placements(db).find((x) => x.id === fee.prospect_id).status).toBe('awaiting_owner'); // parked for a fresh approval
+    expect(approval.invalidated_at).toBeNull(); // spent, not invalidated — the audit trail keeps it
+    // …and on a SATISFIED row the consumed approval is the durable prerequisite: nothing re-parks
+    Object.assign(fee, { satisfied_at: new Date(NOW.getTime() + 200000), satisfied_reason: 'charged' });
+    placements(db).find((x) => x.id === fee.prospect_id).status = 'prospect';
+    db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 210000);
+    const settled = await run(db, { now: new Date(NOW.getTime() + 240000) });
+    expect(settled.parked).toBe(0);
+  });
+
   test('an approved send with the fee DEFERRED to checkout reads ready_to_acquire — the deferred payment row holds nothing back', async () => {
     const { db, p } = scenario({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: 20000, currency: 'USD', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
     await run(db);
