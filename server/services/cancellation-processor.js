@@ -84,38 +84,66 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
   if (!rented.length && !flaggedRental) return { raised: false, reason: 'no_rented_stations' };
   const NotificationService = require('./notification-service');
   const count = rented.length;
-  // An ACCELERATED program end (end_at_term later switched to
-  // end_now_refund) SUPERSEDES the earlier dated task — staff must never
-  // hold a wait-until-term-end instruction and a pull-now instruction at
-  // once. Stamp the dated task read and say so in the new body.
-  let supersededDated = false;
-  if (!retrieveAfter) {
-    try {
-      const stamped = await db('notifications')
-        .where({ recipient_type: 'admin' })
-        .whereNull('read_at')
-        .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
-        .whereRaw("metadata->>'customerId' = ?", [String(customerId)])
-        .whereRaw("metadata->>'retrieveAfter' IS NOT NULL")
-        .update({ read_at: new Date() });
-      supersededDated = Number(stamped) > 0;
-    } catch (supersedeErr) {
-      // NOT swallowed: raising the immediate task while the dated one may
-      // still stand would leave staff two contradictory instructions with
-      // no review error naming the stale one. Throwing lands as
-      // termite_retrieval_task on the run, and the latch's lost-task repair
-      // retries this whole raise (supersede + task) (deferred P2 from
-      // #3666 r32).
-      logger.error(`[cancellation-processor] dated-retrieval supersede failed for ${customerId}: ${supersedeErr.message}`);
-      throw new Error(`dated retrieval task could not be superseded: ${supersedeErr.message}`);
+  // Keyed per cancellation EVENT (request), not per customer: retries of
+  // the same request stay idempotent, while a restored customer who later
+  // cancels another rental program gets a fresh task.
+  const dedupeKey = `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`;
+  // Staff hold at most ONE open retrieval instruction per account. Before
+  // this raise, every earlier UNREAD retrieval row for the customer is
+  // stamped read, whatever its class or date: an ACCELERATED program end
+  // (end_at_term later switched to end_now_refund) must not leave a
+  // wait-until-term-end instruction beside a pull-now one; a CORRECTED
+  // coverage end must not leave two retrieval dates; and a prior churn
+  // episode's dated row (cancel at term end, win-back before the date,
+  // cancel the same still-current term again) or a repeat end-of-coverage
+  // commit that opened a new request must not leave two identical
+  // instructions. Only this event's OWN row is exempt — a retry of the
+  // same request dedupes against it below and must not retire it. Read
+  // rows are never touched: an instruction staff already acted on is
+  // history, not a duplicate.
+  let superseded = null;
+  try {
+    const stale = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereNull('read_at')
+      .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
+      .whereRaw("metadata->>'customerId' = ?", [String(customerId)])
+      .whereRaw("COALESCE(metadata->>'dedupeKey', '') <> ?", [dedupeKey])
+      .select('id', 'metadata');
+    if (stale.length) {
+      await db('notifications').whereIn('id', stale.map((row) => row.id)).update({ read_at: new Date() });
+      superseded = {
+        dated: stale.some((row) => {
+          let meta = row.metadata;
+          if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+          return !!(meta && meta.retrieveAfter);
+        }),
+      };
     }
+  } catch (supersedeErr) {
+    // NOT swallowed: raising the new task while a stale one may still
+    // stand would leave staff two contradictory instructions with no
+    // review error naming the stale one. Throwing lands as
+    // termite_retrieval_task on the run, and the latch's lost-task repair
+    // retries this whole raise (retire + task) (deferred P2 from #3666
+    // r32).
+    logger.error(`[cancellation-processor] retrieval-task retire failed for ${customerId}: ${supersedeErr.message}`);
+    throw new Error(`earlier retrieval task could not be superseded: ${supersedeErr.message}`);
   }
+  // The body names what the new instruction replaces: the dated → immediate
+  // transition keeps its specific wording; every other retirement reads as
+  // a plain "act on this one".
+  const supersedeNote = !superseded
+    ? ''
+    : (!retrieveAfter && superseded.dated
+      ? ' This supersedes the earlier dated retrieval task — the program now ends immediately.'
+      : ' This supersedes an earlier station-retrieval task for this account — act on this one.');
   // retrieveAfter (C3 end_of_coverage): paid termite visits stay on the
   // calendar through the coverage boundary — pulling the stations now would
   // make those visits undeliverable, so the task is DATED, never "pull now".
-  const timing = retrieveAfter
+  const timing = (retrieveAfter
     ? ` Paid coverage runs through ${retrieveAfter} — schedule the retrieval AFTER that date, not before; covered termite visits still deliver until then.`
-    : ` Schedule the retrieval visit.${supersededDated ? ' This supersedes the earlier dated retrieval task — the program now ends immediately.' : ''}`;
+    : ' Schedule the retrieval visit.') + supersedeNote;
   const result = await NotificationService.notifyAdmin(
     'service',
     retrieveAfter
@@ -133,10 +161,7 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
       // never be silenced by the category allowlist.
       bell: true,
       link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
-      // Keyed per cancellation EVENT (request), not per customer: retries of
-      // the same request stay idempotent, while a restored customer who later
-      // cancels another rental program gets a fresh task.
-      dedupeKey: `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`,
+      dedupeKey,
       metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental, ...(retrieveAfter ? { retrieveAfter } : {}) },
     }
   );
