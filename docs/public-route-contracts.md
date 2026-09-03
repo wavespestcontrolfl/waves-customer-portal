@@ -463,7 +463,12 @@ review like the lawn programs). Both are additive — no existing key or
 response field changed. Lot-priced keys (`mosquito`, `oneTimeMosquito`,
 `treeShrub`) park as `lot_size_requires_verification` when the lookup
 flagged the lot verify-first; the response is then a manual quote, never a
-price built from the synthetic sqft×4 fallback).
+price built from the synthetic sqft×4 fallback. `oneTimeMosquito` goes one
+step further: the engine line itself routes to review whenever the route
+passes `lotSizeMeasured:false` (lookup miss, or a direct-API lot posted
+without `lotSizeConfirmed`), the same caller contract commercial mosquito
+already enforces — a one-time mosquito price is only ever built from a
+lookup-measured or customer-confirmed lot).
 `/api/public/ai-intake` (`GET /status` + `POST /message`) (the Ask Waves
 marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
 (503 when off; fails closed in prod). Rate limits: 30 req/15min in-route on

@@ -5823,6 +5823,11 @@ function priceOneTimeMosquito(property, options = {}) {
   if (dunkCount > 0) detailParts.push(`${dunkCount} Bti dunk tablet${dunkCount === 1 ? '' : 's'} (+$${Math.round(dunkAddOnTotal)})`);
   const manualReviewReasons = uniqueList([
     ...areaResolution.manualReviewReasons,
+    // A synthetic/default lot (caller passed lotSizeMeasured:false) is not
+    // a treatable-area measurement — resolveMosquitoTreatableArea grades any
+    // positive lot MEDIUM, so the flag is the only thing that distinguishes a
+    // parcel from a guess (same contract as priceCommercialMosquito).
+    options.lotSizeMeasured === false ? 'mosquito_treatable_area_unverified' : null,
     base.requiresManualReview ? 'over_acre_mosquito_treatment' : null,
     stationCount >= 6 ? 'high_station_count' : null,
     dunkCount >= 10 ? 'high_dunk_count' : null,

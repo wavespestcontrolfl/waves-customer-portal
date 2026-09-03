@@ -34,6 +34,19 @@ describe('oneTimeMosquito as a public quote service', () => {
     const bigLot = generateEstimate({ ...BASE_PROPERTY, lotSqFt: 30000, services: quoteServicesForKey('mosquito_one_time') });
     expect(Number(bigLot.lineItems.find((l) => l.service === 'one_time_mosquito').price)).toBeGreaterThan(Number(line.price));
   });
+  test('a synthesized lot (lotSizeMeasured:false) routes it to review; a measured lot prices', () => {
+    // Public wizard cache miss / unconfirmed direct-API lot: the route passes
+    // lotSizeMeasured:false and the pricer must not quote a fabricated area
+    // (pre-push codex P0; same contract as commercial mosquito).
+    const synthetic = generateEstimate({ ...BASE_PROPERTY, lotSizeMeasured: false, services: quoteServicesForKey('mosquito_one_time') })
+      .lineItems.find((l) => l.service === 'one_time_mosquito');
+    expect(synthetic.requiresManualReview).toBe(true);
+    expect(synthetic.manualReviewReasons).toContain('mosquito_treatable_area_unverified');
+    const measured = generateEstimate({ ...BASE_PROPERTY, lotSizeMeasured: true, services: quoteServicesForKey('mosquito_one_time') })
+      .lineItems.find((l) => l.service === 'one_time_mosquito');
+    expect(measured.requiresManualReview).toBeFalsy();
+    expect(Number(measured.price)).toBeGreaterThan(0);
+  });
   test('a lot the lookup flagged verify-first parks it like the recurring program', () => {
     // The route's lot-flag park (lot_size_requires_verification) reads this
     // predicate; without it a flagged lot priced the synthetic sqft×4 area.
