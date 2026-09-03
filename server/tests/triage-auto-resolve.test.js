@@ -387,17 +387,18 @@ describe('evidence rules', () => {
       customer_address_line1: '1234 Palm Ave',
       customer_address_line2: 'Apt 2', // the raw reading names unit 2 — units are identity
       customer_created_at: CUSTOMER_AFTER, // customer born from the call — address_moot cannot fire
-      payload: { flag: 'address_unverifiable', address_as_heard: '1234 Palm Avenue' },
-      call_extraction: { property: { service_address: { street_line_1: '1234 Palm Ave', raw_text: '1234 palm ave unit 2' } } },
+      payload: { flag: 'address_unverifiable', address_as_heard: '1234 Palm Avenue', heard_address: { street_line_1: '1234 Palm Ave', raw_text: '1234 palm ave unit 2' } },
     };
     expect(classifyTriageItem(item(heard), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW }))
       .toEqual({ action: 'resolve', rule: 'visit_completed_at_address' });
     // A different house number anywhere in the heard set fails closed.
-    expect(classifyTriageItem(item({ ...heard, payload: { flag: 'x', address_as_heard: '1236 Palm Ave' } }), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ ...heard, payload: { ...heard.payload, address_as_heard: '1236 Palm Ave' } }), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW })).toBeNull();
     // No heard address at all → nothing to prove (address_moot owns that shape).
-    expect(classifyTriageItem(item({ ...heard, payload: { flag: 'x' }, call_extraction: NO_ADDR_EXTRACTION }), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW })).toBeNull();
-    // Soft-deleted customer never resolves.
-    expect(classifyTriageItem(item({ ...heard, customer_deleted_at: FRESH }), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ ...heard, payload: { flag: 'address_unverifiable' } }), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW })).toBeNull();
+    // The rolling extraction is never a reading — only the card's snapshot is.
+    expect(classifyTriageItem(item({ ...heard, payload: { flag: 'address_unverifiable' }, call_extraction: { property: { service_address: { street_line_1: '1234 Palm Ave' } } } }), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW })).toBeNull();
+    // No visit evidence → open.
+    expect(classifyTriageItem(item(heard), evidenceFor('t1', {}), { now: NOW })).toBeNull();
   });
 
   test('no evidence map (gate off) → the evidence codes behave exactly as before', () => {
@@ -408,38 +409,36 @@ describe('evidence rules', () => {
 });
 
 describe('evidence helpers', () => {
-  test('heardAddressMatchesOnFile uses the shared suffix-aware street key, fails closed on unparseable input', () => {
-    const heard = (line) => item({ customer_address_line1: '77 Oak St', call_extraction_v1: JSON.stringify({ address_line1: line }), call_extraction: NO_ADDR_EXTRACTION, payload: {} });
-    expect(heardAddressMatchesOnFile(heard('77 oak street, bradenton'))).toBe(true);
-    // Locality is compared when the reading carries it and the file has it.
-    const located = (line, extra = {}) => item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({ address_line1: line, ...extra }), call_extraction: NO_ADDR_EXTRACTION, payload: {} });
-    expect(heardAddressMatchesOnFile(located('77 Oak St', { city: 'Bradenton', zip: '34205-1234' }))).toBe(true);
-    expect(heardAddressMatchesOnFile(located('77 Oak St', { city: 'Tampa' }))).toBe(false);
-    expect(heardAddressMatchesOnFile(located('77 Oak St', { zip: '33601' }))).toBe(false);
-    // Units are identity: a reading naming a unit the file lacks or differs from fails.
-    expect(heardAddressMatchesOnFile(located('77 Oak St Apt 4'))).toBe(false);
-    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_address_line2: 'Unit 4', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({ address_line1: '77 Oak St', address_line2: '#4' }), call_extraction: NO_ADDR_EXTRACTION, payload: {} }))).toBe(true);
-    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_address_line2: 'Unit B', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({}), call_extraction: { property: { service_address: { street_line_1: '77 Oak St', street_line_2: 'Unit A', city: 'Bradenton', postal_code: '34205' } } }, payload: {} }))).toBe(false);
-    // A reading that carries a locality the file LACKS cannot be established.
-    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: null, customer_zip: null, call_extraction_v1: JSON.stringify({ address_line1: '77 Oak St', city: 'Tampa' }), call_extraction: NO_ADDR_EXTRACTION, payload: {} }))).toBe(false);
-    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({}), call_extraction: NO_ADDR_EXTRACTION, payload: { address_as_heard: '77 Oak St, Tampa FL 33601' } }))).toBe(false);
-    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({}), call_extraction: NO_ADDR_EXTRACTION, payload: { address_as_heard: '77 Oak Street, Bradenton, FL 34205' } }))).toBe(true);
-    // (a unit the file lacks — see the unit cases below)
-    expect(heardAddressMatchesOnFile(heard('77 Oak St Apt 4'))).toBe(false);
+  test('heardAddressMatchesOnFile uses the shared suffix-aware street key, locality and unit, and fails closed', () => {
+    const snap = (heard_address, over = {}) => item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', payload: { heard_address }, ...over });
+    const heard = (line) => snap({ street_line_1: line });
+    expect(heardAddressMatchesOnFile(heard('77 oak street'))).toBe(true);
+    expect(heardAddressMatchesOnFile(snap({ raw_text: '77 oak street, bradenton' }))).toBe(true);
     // Same number, different street type = a different street.
     expect(heardAddressMatchesOnFile(heard('77 Oak Ave'))).toBe(false);
     expect(heardAddressMatchesOnFile(heard('77 Oak'))).toBe(false);
     // A bare street with no house number proves nothing.
     expect(heardAddressMatchesOnFile(heard('Oak St'))).toBe(false);
-    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', call_extraction_v1: 'not-json{', call_extraction: NO_ADDR_EXTRACTION, payload: {} }))).toBe(false);
-    // A matching structured extraction cannot hide an unkeyable raw reading.
-    expect(heardAddressMatchesOnFile(item({
-      customer_address_line1: '77 Oak St',
-      call_extraction_v1: JSON.stringify({ address_line1: '77 Oak St' }),
-      call_extraction: { property: { service_address: { street_line_1: '77 Oak Street', raw_text: 'Oak Street' } } },
-      payload: {},
-    }))).toBe(false);
-    expect(heardAddressMatchesOnFile(item({ customer_address_line1: null, call_extraction_v1: JSON.stringify({ address_line1: '77 Oak St' }), payload: {} }))).toBe(false);
+    // No on-file street, no snapshot, or a snapshot with no readings → false.
+    expect(heardAddressMatchesOnFile(snap({ street_line_1: '77 Oak St' }, { customer_address_line1: null }))).toBe(false);
+    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', payload: {} }))).toBe(false);
+    expect(heardAddressMatchesOnFile(snap({ street_line_1: null, raw_text: null }))).toBe(false);
+    // A matching structured reading cannot hide an unkeyable raw reading.
+    expect(heardAddressMatchesOnFile(snap({ street_line_1: '77 Oak Street', raw_text: 'Oak Street' }))).toBe(false);
+    // Locality is compared when the reading carries it.
+    expect(heardAddressMatchesOnFile(snap({ street_line_1: '77 Oak St', city: 'Bradenton', postal_code: '34205-1234' }))).toBe(true);
+    expect(heardAddressMatchesOnFile(snap({ street_line_1: '77 Oak St', city: 'Tampa' }))).toBe(false);
+    expect(heardAddressMatchesOnFile(snap({ street_line_1: '77 Oak St', postal_code: '33601' }))).toBe(false);
+    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', payload: { address_as_heard: '77 Oak St, Tampa FL 33601' } }))).toBe(false);
+    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', payload: { address_as_heard: '77 Oak Street, Bradenton, FL 34205' } }))).toBe(true);
+    // A reading that carries a locality the file LACKS cannot be established.
+    expect(heardAddressMatchesOnFile(snap({ street_line_1: '77 Oak St', city: 'Tampa' }, { customer_city: null, customer_zip: null }))).toBe(false);
+    // Units are identity: a reading naming a unit the file lacks or differs from fails.
+    expect(heardAddressMatchesOnFile(heard('77 Oak St Apt 4'))).toBe(false);
+    expect(heardAddressMatchesOnFile(snap({ street_line_1: '77 Oak St', street_line_2: '#4' }, { customer_address_line2: 'Unit 4' }))).toBe(true);
+    expect(heardAddressMatchesOnFile(snap({ street_line_1: '77 Oak St', street_line_2: 'Unit A' }, { customer_address_line2: 'Unit B' }))).toBe(false);
+    // A unit-only fragment with no street is an ask about some address that cannot be keyed.
+    expect(heardAddressMatchesOnFile(snap({ street_line_2: 'Unit 4' }))).toBe(false);
   });
 
   test('callerPhoneOnFile matches any of the five slots by digits, outbound uses to_phone', () => {

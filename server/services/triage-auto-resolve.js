@@ -188,8 +188,8 @@ function addressKey(text) {
   return streetKey(street) || null;
 }
 
-// Every address the CALL supplied (payload as-heard, V2 street/raw, V1
-// street) must agree with the on-file address — street key AND whatever
+// Every address the CALL supplied (payload as-heard, the snapshotted V2
+// street/raw) must agree with the on-file address — street key AND whatever
 // locality the reading carries (city, ZIP). Fail closed: no heard address
 // (nothing to prove), an unparseable extraction, or any heard address that
 // keys or localizes differently keeps the card.
@@ -238,21 +238,25 @@ function localityMatches(item, { city, zip }) {
   return true;
 }
 
+// Readings come ONLY from the card: payload.address_as_heard and the
+// heard_address snapshot call-routing-gates stamps at filing. Never the
+// call's rolling extraction columns — a force-reprocess rewrites those while
+// the open card keeps its ask. A card with neither fails closed.
 function heardAddressMatchesOnFile(item) {
   const onFile = addressKey(item.customer_address_line1);
   if (!onFile) return false;
   const heard = [];
   const payload = parseMaybeJson(item.payload);
-  if (payload === undefined) return false;
-  if (payload?.address_as_heard) heard.push({ text: payload.address_as_heard, ...localityOfRaw(payload.address_as_heard) });
-  const v2 = parseMaybeJson(item.call_extraction);
-  if (v2 === undefined) return false;
-  const addr = v2?.property?.service_address || {};
-  if (addr.street_line_1) heard.push({ text: addr.street_line_1, line2: addr.street_line_2, city: addr.city, zip: addr.postal_code });
-  if (addr.raw_text) heard.push({ text: addr.raw_text, ...localityOfRaw(addr.raw_text) });
-  const v1 = parseMaybeJson(item.call_extraction_v1);
-  if (v1 === undefined) return false;
-  if (v1?.address_line1) heard.push({ text: v1.address_line1, line2: v1.address_line2, city: v1.city, zip: v1.zip });
+  if (!payload || typeof payload !== 'object') return false;
+  if (payload.address_as_heard) heard.push({ text: payload.address_as_heard, ...localityOfRaw(payload.address_as_heard) });
+  const snap = payload.heard_address;
+  if (snap && typeof snap === 'object') {
+    if (snap.street_line_1) heard.push({ text: snap.street_line_1, line2: snap.street_line_2, city: snap.city, zip: snap.postal_code });
+    if (snap.raw_text) heard.push({ text: snap.raw_text, ...localityOfRaw(snap.raw_text) });
+    // A unit / city / ZIP fragment with no street is an ask about SOME
+    // address that cannot be keyed.
+    if (!snap.street_line_1 && !snap.raw_text && [snap.street_line_2, snap.city, snap.postal_code].some((v) => String(v || '').trim())) return false;
+  }
   const readings = heard.filter((h) => String(h.text || '').trim());
   if (!readings.length) return false;
   // Every reading must key AND agree — one unkeyable representation (a bare

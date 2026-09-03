@@ -357,6 +357,25 @@ function buildTriageItem({
     };
   }
 
+  // Address-review cards carry the address the call NAMED, snapshotted at
+  // filing: the evidence sweep proves "a visit completed at the address this
+  // call named" against THIS, never the call's rolling extraction columns
+  // (a force-reprocess rewrites those while the open card keeps its ask).
+  const ADDRESS_SNAPSHOT_FLAGS = new Set([
+    'missing_service_address', 'low_confidence_address', 'address_unverifiable',
+    'address_unverified', 'address_validation_unavailable',
+  ]);
+  if (ADDRESS_SNAPSHOT_FLAGS.has(flag)) {
+    const sa = extraction?.property?.service_address || {};
+    flagPayload.heard_address = {
+      street_line_1: sa.street_line_1 ?? null,
+      street_line_2: sa.street_line_2 ?? null,
+      city: sa.city ?? null,
+      postal_code: sa.postal_code ?? null,
+      raw_text: sa.raw_text ?? null,
+    };
+  }
+
   // "Ask which unit" is useless without saying which building — and the
   // enforce lane files this card through the generic deterministic-flags
   // loop, which passes no extraPayload. Same argument as the secondary
