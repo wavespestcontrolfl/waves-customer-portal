@@ -970,7 +970,7 @@ function runMosquitoMatrix() {
   // curves price through expectMosquito against the engine's perVisit; a
   // commercial property routes to the commercial mosquito pricer (its own
   // section), so only its treatable area — the part the hardscape curve
-  // decides — is asserted here. Lots 6,000 / 8,000 / 20,000 sit below, inside
+  // decides — is asserted for it. Lots 6,000 / 8,000 / 20,000 sit below, inside
   // and beyond the 7,500 / 15,000 breakpoints.
   for (const propertyType of ['single_family', 'townhome', 'duplex', 'condo', 'condo_ground', 'commercial']) {
     for (const features of [{}, { pool: true }, { poolCage: true }]) {
@@ -981,8 +981,11 @@ function runMosquitoMatrix() {
         const treatableActual = li ? (li.mosquitoTreatableSqFt ?? li.treatableSqFt ?? null) : null;
         const name = `hardscape curve ${propertyType} ${JSON.stringify(features)} lot ${lot}`;
         const input = { propertyType, lotSqFt: lot, features };
-        if (propertyType === 'commercial') record(section, `${name} treatable`, input, exp.treatable, treatableActual, { extra: { hardscapeExpected: exp.hardscape, service: li ? li.service : null, engineError: r.ok ? null : r.error } });
-        else record(section, name, input, exp.perVisit, li ? li.perVisit : null, { extra: { hardscapeExpected: exp.hardscape, treatableExpected: exp.treatable, treatableActual, engineError: r.ok ? null : r.error } });
+        // The treatable area is compared DIRECTLY for every property type: a
+        // one-square-foot curve regression rarely moves the rounded price, so
+        // the perVisit row alone would stay green through it (codex r22 P2).
+        record(section, `${name} treatable`, input, exp.treatable, treatableActual, { extra: { hardscapeExpected: exp.hardscape, service: li ? li.service : null, engineError: r.ok ? null : r.error } });
+        if (propertyType !== 'commercial') record(section, name, input, exp.perVisit, li ? li.perVisit : null, { extra: { hardscapeExpected: exp.hardscape, treatableExpected: exp.treatable, treatableActual, engineError: r.ok ? null : r.error } });
       }
     }
   }
