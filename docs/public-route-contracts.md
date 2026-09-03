@@ -124,7 +124,12 @@ its own eligibility judgments is a P0),
 `/api/bouncie` + `/api/webhooks/bouncie`, `/api/webhooks/sendgrid`,
 `/api/webhooks/resend` (Svix-signed), `/api/webhooks/lead`
 (+ `POST /api/leads`, an alias accepting the same pair with identical
-semantics),
+semantics; both also accept an OPTIONAL `timeline` — the visitor's own
+"when do you want this handled?" answer, `now` | `this_week` |
+`this_month` | `browsing` plus the form aliases in
+`server/services/lead-timeline.js`; stored verbatim in
+`extracted_data.timeline`, mapped onto `leads.urgency`, and it WINS over
+the AI triage's urgency guess; unknown values are ignored, never guessed),
 `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:
@@ -413,7 +418,9 @@ Also accepts an OPTIONAL `prefill_lead_id` + `prefill_token` pair — the
 lead-prefill HMAC below — which, when valid, makes the lead capture UPDATE
 that existing open call-pipeline lead instead of inserting a new row; the
 same pair is accepted by `/api/webhooks/lead` and its `/api/leads` alias
-with identical semantics).
+with identical semantics. Also accepts the OPTIONAL `timeline` described
+under `/api/webhooks/lead` above, with the same storage and urgency
+semantics; it survives the later `/api/public/quote/calculate` snapshot).
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,

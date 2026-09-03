@@ -1092,13 +1092,14 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
               // On an attached call-pipeline lead, MERGE — a wholesale replace
               // here would clobber the voicemail provenance and the text-back
               // one-shot stamp the attach just preserved. The replace branch
-              // still carries forward additional_properties captured at intake
-              // (jsonb_strip_nulls drops the key when the row had none) so the
-              // triage snapshot can't erase the extra-property ask.
+              // still carries forward additional_properties and the declared
+              // timeline captured at intake (jsonb_strip_nulls drops a key the
+              // row never had) so the triage snapshot — whose schema has neither
+              // — can't erase the extra-property ask or the "Wants service" line.
               updates.extracted_data = attachedCallLead
                 ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(triageResult.extractedData)])
                 : db.raw(
-                  "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties')) || ?::jsonb",
+                  "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline')) || ?::jsonb",
                   [JSON.stringify(triageResult.extractedData)]
                 );
             }
