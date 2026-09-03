@@ -89,8 +89,9 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
 //   depth options move the price ~4× and the site does not collect them) ·
 //   rodent_exclusion_only (per-entry-point pricing; with no counts the
 //   engine returns the floor) — all pre-push / GH codex findings.
-//   pest_general_semiannual and german_roach_initial are no longer selectable
-//   at all (owner rulings 2026-09-03, migration 20260903000020).
+//   Office-only rows (cadence variants, termite riders, the rodent job
+//   decomposition, species tiers) are no longer selectable at all — see
+//   migration 20260903000020 (owner rulings 2026-09-03).
 // The contract test runs every instant key through the engine and requires
 // a positive, non-manual line.
 const PUBLIC_INSTANT_QUOTE_KEYS = new Set(Object.keys(PUBLIC_QUOTE_REQUESTS));
