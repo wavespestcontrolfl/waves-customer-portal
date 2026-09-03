@@ -209,15 +209,15 @@ function localityOfRaw(text) {
 }
 
 // Does a reading's locality agree with the on-file one? Only the fields the
-// reading carries are compared; a reading with neither city nor ZIP still
-// has to pass the street key.
+// reading carries are compared — but a field the reading carries and the
+// file LACKS cannot be established, so it fails (two readings naming
+// different cities must not both pass a street-only file). A reading with
+// neither city nor ZIP still has to pass the street key.
 function localityMatches(item, { city, zip }) {
-  const onZip = zip5(item.customer_zip);
   const heardZip = zip5(zip);
-  if (heardZip && onZip && heardZip !== onZip) return false;
-  const onCity = cityKey(item.customer_city);
+  if (heardZip && heardZip !== zip5(item.customer_zip)) return false;
   const heardCity = cityKey(city);
-  if (heardCity && onCity && heardCity !== onCity) return false;
+  if (heardCity && heardCity !== cityKey(item.customer_city)) return false;
   return true;
 }
 
@@ -623,12 +623,213 @@ const EVIDENCE_CODES = new Set([
   ...ADDRESS_MOOT_CODES,
 ]);
 
-// Per-item proof map for the evidence rules. Every predicate compares
-// against the CARD's created_at (strict >): evidence that predates the card
-// — including anything the filing pass itself wrote — never counts. Empty
-// when the evidence gate is off. With `lock`, the scheduled_services rows
-// that prove a booking/visit are held FOR UPDATE until commit, the same
-// contract loadBookedCallIds applies.
+// ── Evidence arms ───────────────────────────────────────────────────────
+// One loader per rule; loadEvidence below runs them and hands each a
+// `flag(itemId, key)` writer. Every predicate compares against the CARD's
+// created_at (strict >): evidence that predates the card — including
+// anything the filing pass itself wrote — never counts.
+
+// The boundary a card's evidence must follow: the later of the card and
+// its call (a card cannot predate its call, but the guard is free).
+const cardBoundary = (item) => new Date(Math.max(
+  toDate(item.created_at)?.getTime() || 0,
+  toDate(item.call_created_at)?.getTime() || 0,
+));
+
+// quote_promised → an estimate DIRECTLY linked to this call, delivered
+// after the CARD (call-commitments' batched direct routes — three queries
+// for the whole backlog, each card its own boundary; association-strength
+// matches — same customer, unlinked — are ignored on purpose).
+async function loadEstimateEvidence(conn, items, flag) {
+  const quoteItems = items.filter((i) => i.reason_code === 'quote_promised');
+  if (!quoteItems.length) return;
+  const { directEstimatesSentAfter } = require('./call-commitments');
+  try {
+    const proofs = await directEstimatesSentAfter(conn, quoteItems.map((item) => ({
+      key: item.id,
+      callId: item.call_log_id,
+      twilioCallSid: item.call_twilio_call_sid,
+      after: cardBoundary(item),
+    })));
+    for (const item of quoteItems) {
+      const proof = proofs.get(item.id);
+      if (proof && strictlyAfter(proof.matched_at, item.created_at)) flag(item.id, 'estimate_direct');
+    }
+  } catch (err) {
+    logger.warn(`[triage-sweep] estimate evidence lookup failed: ${err.message}`);
+  }
+}
+
+// email_unverified → the card's release target ENGAGED (opened/clicked — a
+// delivery alone only proves some mailbox exists) with a message SENT
+// after the card (an older message opened later proves nothing about
+// this call's capture), and never bounced/complained.
+async function loadEmailEvidence(conn, items, flag) {
+  const emailItems = items.filter((i) => i.reason_code === 'email_unverified');
+  const emailsByItem = new Map(emailItems.map((i) => [i.id, capturedEmails(i)]));
+  const allEmails = [...new Set([...emailsByItem.values()].flat())];
+  if (!allEmails.length) return;
+  const rows = await conn('email_messages')
+    .whereRaw('LOWER(recipient_email_snapshot) IN (' + allEmails.map(() => '?').join(', ') + ')', allEmails)
+    .whereNotNull('sent_at')
+    .whereNull('bounced_at')
+    .whereNull('complained_at')
+    .whereNotIn('status', ['bounced', 'failed', 'complained', 'dropped'])
+    .where(function engaged() {
+      this.whereNotNull('opened_at').orWhereNotNull('clicked_at');
+    })
+    .select('recipient_email_snapshot', 'sent_at', 'opened_at', 'clicked_at');
+  for (const item of emailItems) {
+    const mine = new Set(emailsByItem.get(item.id));
+    const hit = rows.some((r) => mine.has(String(r.recipient_email_snapshot || '').toLowerCase())
+      && strictlyAfter(r.sent_at, item.created_at)
+      && (strictlyAfter(r.opened_at, item.created_at) || strictlyAfter(r.clicked_at, item.created_at)));
+    if (hit) flag(item.id, 'email_engaged');
+  }
+}
+
+// caller_not_authorized → a HUMAN (admin or portal account holder — never
+// the call pipeline or a dedupe merge) added a service contact, or changed
+// one's PHONE, to a number ending in the caller's last four after the card
+// (service-contact-events writes the masked number, the source and the
+// changed fields to activity_log.metadata). The classifier additionally
+// requires the number to be on a slot NOW.
+async function loadContactEvidence(conn, items, flag) {
+  const authItems = items.filter((i) => i.reason_code === 'caller_not_authorized' && i.call_customer_id);
+  if (!authItems.length) return;
+  const rows = await conn('activity_log')
+    .whereIn('customer_id', [...new Set(authItems.map((i) => i.call_customer_id))])
+    .whereIn('action', ['service_contact_added', 'service_contact_updated'])
+    .select('customer_id', 'action', 'created_at', 'metadata');
+  for (const item of authItems) {
+    const last4 = phoneDigits(callerPhone(item)).slice(-4);
+    if (last4.length !== 4) continue;
+    const hit = rows.some((r) => {
+      if (String(r.customer_id) !== String(item.call_customer_id)) return false;
+      if (!strictlyAfter(r.created_at, item.created_at)) return false;
+      const meta = parseMaybeJson(r.metadata);
+      if (!HUMAN_CONTACT_SOURCES.has(String(meta?.source || ''))) return false;
+      // An update event also fires for name/email/role-only edits and still
+      // carries the unchanged phone — only a phone change is evidence.
+      if (r.action === 'service_contact_updated'
+        && !(Array.isArray(meta?.changed_fields) && meta.changed_fields.includes('phone'))) return false;
+      return String(meta?.phone || '').slice(-4) === last4;
+    });
+    if (hit) flag(item.id, 'caller_phone_added');
+  }
+}
+
+// POSITIVE linkage between a scheduled_services row and the card's on-file
+// address, or nothing: the row's effective address is its stamped
+// service_address_* when present, else the ACTIVE property row of this
+// customer it points at — street key AND locality must agree. A row with
+// neither is only associated with the customer and proves nothing about
+// where service happens.
+function visitAtOnFileAddress(item, visit, places) {
+  const onFile = addressKey(item.customer_address_line1);
+  if (!onFile) return false;
+  if (visit.service_address_line1) {
+    return addressKey(visit.service_address_line1) === onFile
+      && localityMatches(item, { city: visit.service_address_city, zip: visit.service_address_zip });
+  }
+  const place = visit.property_id ? places.get(String(visit.property_id)) : null;
+  return Boolean(place) && String(place.customer_id) === String(item.call_customer_id)
+    && place.key === onFile && localityMatches(item, place);
+}
+
+// not_confirmed → bookings created after the card that COLLECTIVELY cover
+// every service category the card snapshotted at filing. Booking
+// provenance is PARENT rows only (follow-up children are not the booking
+// the call asked for). Direct = this call's own booking; association =
+// same customer, single ACTIVE property, the call named no other address,
+// scheduled inside the requested days, positively linked to the on-file
+// address. Direct bookings are held to the snapshot too: a reprocess that
+// re-classified the call and minted a different-service booking must not
+// close the original ask. A card with no snapshot (filed before it
+// existed) is answered only by this call's own booking.
+function bookingCoversRequest(item, mine, { multiProperty, places }) {
+  const parents = mine.filter((v) => !v.parent_service_id && strictlyAfter(v.created_at, item.created_at));
+  const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id));
+  const categories = requestedServiceTokens(item);
+  if (!categories.length) return direct.length > 0;
+  let pool = direct;
+  const askIsOnFile = !callSuppliedAddress(item.call_extraction, item.call_extraction_v1) || heardAddressMatchesOnFile(item);
+  if (!multiProperty && askIsOnFile) {
+    const window = requestedWindow(item);
+    if (window) {
+      pool = pool.concat(parents.filter((v) => {
+        if (!toDate(v.scheduled_date)) return false;
+        const day = etCalendarDayOf(v.scheduled_date);
+        return day >= window.start && day <= window.end && visitAtOnFileAddress(item, v, places);
+      }));
+    }
+  }
+  return categories.every((tokens) => pool.some((v) => serviceTypeMatches(v.service_type, tokens)));
+}
+
+// Bookings and completed visits for the not_confirmed / address arms. With
+// `lock`, the scheduled_services rows are held FOR UPDATE until commit,
+// the same contract loadBookedCallIds applies.
+async function loadVisitEvidence(conn, items, flag, { lock = false } = {}) {
+  const visitItems = items.filter((i) => (i.reason_code === 'not_confirmed' || ADDRESS_MOOT_CODES.has(i.reason_code)) && i.call_customer_id);
+  if (!visitItems.length) return;
+  const customerIds = [...new Set(visitItems.map((i) => i.call_customer_id))];
+  // ACTIVE rows only — the uniqueness customer-properties'
+  // soleActivePropertyId defines; an inactive historical duplicate does
+  // not make an account multi-property.
+  const propRows = await conn('customer_properties')
+    .whereIn('customer_id', customerIds)
+    .where('active', true)
+    .select('id', 'customer_id', 'address_line1', 'city', 'zip');
+  const places = new Map();
+  const activeCount = new Map();
+  for (const r of propRows) {
+    places.set(String(r.id), { customer_id: r.customer_id, key: addressKey(r.address_line1), city: r.city, zip: r.zip });
+    activeCount.set(String(r.customer_id), (activeCount.get(String(r.customer_id)) || 0) + 1);
+  }
+  const multiProperty = (customerId) => (activeCount.get(String(customerId)) || 0) > 1;
+
+  // Positive allowlist: a live booking is one that is still going to happen
+  // or did happen. cancelled / rescheduled / skipped / no_show rows prove
+  // nothing. Children stay in: a completed follow-up child IS a visit at
+  // the address (the booking arm filters parents itself).
+  const q = conn('scheduled_services')
+    .whereIn('customer_id', customerIds)
+    .whereIn('status', [...LIVE_BOOKING_STATUSES])
+    .orderBy('id', 'asc')
+    .select('id', 'customer_id', 'source_call_log_id', 'parent_service_id', 'status', 'service_type', 'scheduled_date',
+      'created_at', 'completed_at', 'service_address_line1', 'service_address_city', 'service_address_zip', 'property_id');
+  if (lock) q.forUpdate();
+  const visits = await q;
+  // Indexed once — the backlog is cards × a customer's own visits, not
+  // cards × every fetched visit.
+  const visitsByCustomer = new Map();
+  for (const v of visits) {
+    const list = visitsByCustomer.get(String(v.customer_id)) || [];
+    list.push(v);
+    visitsByCustomer.set(String(v.customer_id), list);
+  }
+
+  for (const item of visitItems) {
+    const mine = visitsByCustomer.get(String(item.call_customer_id)) || [];
+    if (item.reason_code === 'not_confirmed') {
+      if (bookingCoversRequest(item, mine, { multiProperty: multiProperty(item.call_customer_id), places })) {
+        flag(item.id, 'booking_after_card');
+      }
+    } else if (!multiProperty(item.call_customer_id)) {
+      // Address cards: a visit COMPLETED after the card, positively at the
+      // on-file address, for a single-property customer. The classifier
+      // adds the heard-address ↔ on-file match.
+      const done = mine.some((v) => v.status === 'completed'
+        && strictlyAfter(v.completed_at, item.created_at)
+        && visitAtOnFileAddress(item, v, places));
+      if (done) flag(item.id, 'visit_completed_at_address');
+    }
+  }
+}
+
+// Per-item proof map for the evidence rules — the four arms above over the
+// open evidence-coded cards. Empty when the evidence gate is off.
 async function loadEvidence(conn, items, { lock = false } = {}) {
   const evidence = new Map();
   const { isEnabled } = require('../config/feature-gates');
@@ -640,183 +841,10 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
     cur[key] = true;
     evidence.set(id, cur);
   };
-
-  // quote_promised → an estimate DIRECTLY linked to this call, delivered
-  // after the CARD (call-commitments' batched direct routes — three queries
-  // for the whole backlog, each card its own boundary; association-strength
-  // matches — same customer, unlinked — are ignored on purpose).
-  const quoteItems = candidates.filter((i) => i.reason_code === 'quote_promised');
-  if (quoteItems.length) {
-    const { directEstimatesSentAfter } = require('./call-commitments');
-    try {
-      const proofs = await directEstimatesSentAfter(conn, quoteItems.map((item) => ({
-        key: item.id,
-        callId: item.call_log_id,
-        twilioCallSid: item.call_twilio_call_sid,
-        after: new Date(Math.max(toDate(item.created_at)?.getTime() || 0, toDate(item.call_created_at)?.getTime() || 0)),
-      })));
-      for (const item of quoteItems) {
-        const proof = proofs.get(item.id);
-        if (proof && strictlyAfter(proof.matched_at, item.created_at)) flag(item.id, 'estimate_direct');
-      }
-    } catch (err) {
-      logger.warn(`[triage-sweep] estimate evidence lookup failed: ${err.message}`);
-    }
-  }
-
-  // email_unverified → the card's release target ENGAGED (opened/clicked — a
-  // delivery alone only proves some mailbox exists) with a message SENT
-  // after the card (an older message opened later proves nothing about
-  // this call's capture), and never bounced/complained.
-  const emailItems = candidates.filter((i) => i.reason_code === 'email_unverified');
-  const emailsByItem = new Map(emailItems.map((i) => [i.id, capturedEmails(i)]));
-  const allEmails = [...new Set([...emailsByItem.values()].flat())];
-  if (allEmails.length) {
-    const rows = await conn('email_messages')
-      .whereRaw('LOWER(recipient_email_snapshot) IN (' + allEmails.map(() => '?').join(', ') + ')', allEmails)
-      .whereNotNull('sent_at')
-      .whereNull('bounced_at')
-      .whereNull('complained_at')
-      .whereNotIn('status', ['bounced', 'failed', 'complained', 'dropped'])
-      .where(function engaged() {
-        this.whereNotNull('opened_at').orWhereNotNull('clicked_at');
-      })
-      .select('recipient_email_snapshot', 'sent_at', 'opened_at', 'clicked_at');
-    for (const item of emailItems) {
-      const mine = new Set(emailsByItem.get(item.id));
-      const hit = rows.some((r) => mine.has(String(r.recipient_email_snapshot || '').toLowerCase())
-        && strictlyAfter(r.sent_at, item.created_at)
-        && (strictlyAfter(r.opened_at, item.created_at) || strictlyAfter(r.clicked_at, item.created_at)));
-      if (hit) flag(item.id, 'email_engaged');
-    }
-  }
-
-  // caller_not_authorized → a HUMAN (admin or portal account holder — never
-  // the call pipeline or a dedupe merge) added/updated a service contact
-  // whose number ends in the caller's last four after the card (service-
-  // contact-events writes the masked number and the source to
-  // activity_log.metadata). The classifier additionally requires the number
-  // to be on a slot NOW.
-  const authItems = candidates.filter((i) => i.reason_code === 'caller_not_authorized' && i.call_customer_id);
-  if (authItems.length) {
-    const rows = await conn('activity_log')
-      .whereIn('customer_id', [...new Set(authItems.map((i) => i.call_customer_id))])
-      .whereIn('action', ['service_contact_added', 'service_contact_updated'])
-      .select('customer_id', 'action', 'created_at', 'metadata');
-    for (const item of authItems) {
-      const last4 = phoneDigits(callerPhone(item)).slice(-4);
-      if (last4.length !== 4) continue;
-      const hit = rows.some((r) => {
-        if (String(r.customer_id) !== String(item.call_customer_id)) return false;
-        if (!strictlyAfter(r.created_at, item.created_at)) return false;
-        const meta = parseMaybeJson(r.metadata);
-        if (!HUMAN_CONTACT_SOURCES.has(String(meta?.source || ''))) return false;
-        // An update event also fires for name/email/role-only edits and still
-        // carries the unchanged phone — only a phone change is evidence.
-        if (r.action === 'service_contact_updated'
-          && !(Array.isArray(meta?.changed_fields) && meta.changed_fields.includes('phone'))) return false;
-        return String(meta?.phone || '').slice(-4) === last4;
-      });
-      if (hit) flag(item.id, 'caller_phone_added');
-    }
-  }
-
-  // Bookings and visits for the not_confirmed / address arms.
-  const visitItems = candidates.filter((i) => (i.reason_code === 'not_confirmed' || ADDRESS_MOOT_CODES.has(i.reason_code)) && i.call_customer_id);
-  if (visitItems.length) {
-    const customerIds = [...new Set(visitItems.map((i) => i.call_customer_id))];
-    const propertyIds = new Map();
-    const propertyPlaces = new Map();
-    const propRows = await conn('customer_properties')
-      .whereIn('customer_id', customerIds)
-      .select('id', 'customer_id', 'address_line1', 'city', 'zip');
-    for (const r of propRows) {
-      const list = propertyIds.get(String(r.customer_id)) || [];
-      list.push(String(r.id));
-      propertyIds.set(String(r.customer_id), list);
-      propertyPlaces.set(String(r.id), { key: addressKey(r.address_line1), city: r.city, zip: r.zip });
-    }
-    const multiProperty = (customerId) => (propertyIds.get(String(customerId)) || []).length > 1;
-
-    const q = conn('scheduled_services')
-      .whereIn('customer_id', customerIds)
-      .whereNull('parent_service_id')
-      // Positive allowlist: a live booking is one that is still going to
-      // happen or did happen. cancelled / rescheduled / skipped / no_show
-      // rows prove nothing.
-      .whereIn('status', [...LIVE_BOOKING_STATUSES])
-      .orderBy('id', 'asc')
-      .select('id', 'customer_id', 'source_call_log_id', 'status', 'service_type', 'scheduled_date', 'created_at', 'completed_at', 'service_address_line1', 'service_address_city', 'service_address_zip', 'property_id');
-    if (lock) q.forUpdate();
-    const visits = await q;
-    // Indexed once — the backlog is cards × a customer's own visits, not
-    // cards × every fetched visit.
-    const visitsByCustomer = new Map();
-    for (const v of visits) {
-      const list = visitsByCustomer.get(String(v.customer_id)) || [];
-      list.push(v);
-      visitsByCustomer.set(String(v.customer_id), list);
-    }
-
-    for (const item of visitItems) {
-      const mine = visitsByCustomer.get(String(item.call_customer_id)) || [];
-      if (item.reason_code === 'not_confirmed') {
-        // Direct: a live booking THIS call minted, created after the card
-        // (a booking that predates the card belongs to an earlier pass of
-        // the same call and is exactly the stale-provenance case the header
-        // refuses to trust).
-        const direct = mine.filter((v) => String(v.source_call_log_id) === String(item.call_log_id)
-          && strictlyAfter(v.created_at, item.created_at));
-        const categories = requestedServiceTokens(item);
-        // A single-service (or unsnapshotted) ask is answered by this
-        // call's own booking outright.
-        if (categories.length <= 1 && direct.length) {
-          flag(item.id, 'booking_after_card');
-          continue;
-        }
-        if (!categories.length) continue;
-        // Association: single-property customer, booking created after the
-        // card, inside the requested days exactly — no association horizon
-        // around them, or an unrelated recurring visit nearby would count.
-        const window = multiProperty(item.call_customer_id) ? null : requestedWindow(item);
-        const inWindow = window ? mine.filter((v) => {
-          if (!strictlyAfter(v.created_at, item.created_at) || !toDate(v.scheduled_date)) return false;
-          const day = etCalendarDayOf(v.scheduled_date);
-          return day >= window.start && day <= window.end;
-        }) : [];
-        // The bookings must COLLECTIVELY cover every requested category —
-        // a pest-only booking leaves a pest + lawn ask open.
-        const pool = [...direct, ...inWindow];
-        if (categories.every((tokens) => pool.some((v) => serviceTypeMatches(v.service_type, tokens)))) {
-          flag(item.id, 'booking_after_card');
-        }
-      } else {
-        // Address cards: a visit COMPLETED after the card for a
-        // single-property customer. The classifier adds the heard-address
-        // ↔ on-file street match.
-        if (multiProperty(item.call_customer_id)) continue;
-        const onFile = addressKey(item.customer_address_line1);
-        if (!onFile) continue;
-        const ownProperties = propertyIds.get(String(item.call_customer_id)) || [];
-        const done = mine.some((v) => {
-          if (v.status !== 'completed' || !strictlyAfter(v.completed_at, item.created_at)) return false;
-          // POSITIVE linkage to the on-file address, or nothing: the visit's
-          // effective address is its stamped service_address_* when present,
-          // else the address of the account's own property row it points
-          // at. A visit with neither is only associated with the customer
-          // and proves nothing about where service happened.
-          if (v.service_address_line1) {
-            return addressKey(v.service_address_line1) === onFile
-              && localityMatches(item, { city: v.service_address_city, zip: v.service_address_zip });
-          }
-          if (!v.property_id || !ownProperties.includes(String(v.property_id))) return false;
-          const place = propertyPlaces.get(String(v.property_id));
-          return Boolean(place) && place.key === onFile && localityMatches(item, place);
-        });
-        if (done) flag(item.id, 'visit_completed_at_address');
-      }
-    }
-  }
+  await loadEstimateEvidence(conn, candidates, flag);
+  await loadEmailEvidence(conn, candidates, flag);
+  await loadContactEvidence(conn, candidates, flag);
+  await loadVisitEvidence(conn, candidates, flag, { lock });
   return evidence;
 }
 

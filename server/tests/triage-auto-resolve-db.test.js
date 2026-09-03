@@ -15,7 +15,7 @@ const PHONE = '+15555550188';
 maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
   let db;
   let sweep;
-  const ids = { customers: [], calls: [], visits: [], estimates: [] };
+  const ids = { customers: [], calls: [], visits: [], estimates: [], properties: [] };
   const OLD_ENV = { base: process.env.GATE_TRIAGE_AUTO_RESOLVE, ev: process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE };
 
   beforeAll(async () => {
@@ -35,7 +35,12 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
       created_at: new Date(Date.now() - 30 * 86400000),
     }).returning('id');
     ids.customers.push(cust.id);
-    return cust.id;
+    // The sole ACTIVE property the schedule path stamps on new bookings.
+    const [prop] = await db('customer_properties').insert({
+      customer_id: cust.id, address_line1: '1234 Fixture Ave', zip: '34205', is_primary: true, active: true,
+    }).returning('id');
+    ids.properties.push(prop.id);
+    return { customerId: cust.id, propertyId: prop.id };
   }
 
   afterAll(async () => {
@@ -43,6 +48,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     if (ids.estimates.length) await db('estimates').whereIn('id', ids.estimates).del();
     if (ids.calls.length) await db('triage_items').whereIn('call_log_id', ids.calls).del();
     if (ids.calls.length) await db('call_log').whereIn('id', ids.calls).del();
+    if (ids.properties.length) await db('customer_properties').whereIn('id', ids.properties).del();
     if (ids.customers.length) await db('customers').whereIn('id', ids.customers).del();
     if (OLD_ENV.base === undefined) delete process.env.GATE_TRIAGE_AUTO_RESOLVE; else process.env.GATE_TRIAGE_AUTO_RESOLVE = OLD_ENV.base;
     if (OLD_ENV.ev === undefined) delete process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE; else process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE = OLD_ENV.ev;
@@ -50,7 +56,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
   });
 
   async function seedCall(sid, { cardAgeMin, bookingAgeMin, bookingStatus = 'confirmed', bookingDayOffset = 2, categories = ['pest_control'] }) {
-    const customerId = await seedCustomer(sid.slice(-2));
+    const { customerId, propertyId } = await seedCustomer(sid.slice(-2));
     const callAt = new Date(Date.now() - (cardAgeMin + 5) * 60000);
     const [call] = await db('call_log').insert({
       twilio_call_sid: sid, direction: 'inbound', from_phone: PHONE, to_phone: '+15555550100',
@@ -67,7 +73,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
       payload: JSON.stringify({ flag: 'not_confirmed', scheduling_window: { status: 'requested', requested_date_range_start: requestedDay, requested_service_categories: categories } }),
     }).returning('id');
     const [visit] = await db('scheduled_services').insert({
-      customer_id: customerId, service_type: 'Quarterly Pest Control', status: bookingStatus,
+      customer_id: customerId, property_id: propertyId, service_type: 'Quarterly Pest Control', status: bookingStatus,
       scheduled_date: new Date(Date.now() + bookingDayOffset * 86400000).toISOString().slice(0, 10),
       created_at: new Date(Date.now() - bookingAgeMin * 60000),
     }).returning('id');
@@ -78,7 +84,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
   // quote_promised: a card + an estimate stamped with the call's id
   // (estimator provenance), sent at the given age.
   async function seedQuoteCall(sid, { cardAgeMin, estimateAgeMin, deliveredAgeMin = estimateAgeMin }) {
-    const customerId = await seedCustomer(sid.slice(-2));
+    const { customerId } = await seedCustomer(sid.slice(-2));
     const callAt = new Date(Date.now() - (cardAgeMin + 5) * 60000);
     const [call] = await db('call_log').insert({
       twilio_call_sid: sid, direction: 'inbound', from_phone: PHONE, to_phone: '+15555550100',

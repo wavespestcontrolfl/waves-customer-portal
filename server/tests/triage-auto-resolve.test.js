@@ -410,6 +410,8 @@ describe('evidence helpers', () => {
     expect(heardAddressMatchesOnFile(located('77 Oak St', { city: 'Bradenton', zip: '34205-1234' }))).toBe(true);
     expect(heardAddressMatchesOnFile(located('77 Oak St', { city: 'Tampa' }))).toBe(false);
     expect(heardAddressMatchesOnFile(located('77 Oak St', { zip: '33601' }))).toBe(false);
+    // A reading that carries a locality the file LACKS cannot be established.
+    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: null, customer_zip: null, call_extraction_v1: JSON.stringify({ address_line1: '77 Oak St', city: 'Tampa' }), call_extraction: NO_ADDR_EXTRACTION, payload: {} }))).toBe(false);
     expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({}), call_extraction: NO_ADDR_EXTRACTION, payload: { address_as_heard: '77 Oak St, Tampa FL 33601' } }))).toBe(false);
     expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({}), call_extraction: NO_ADDR_EXTRACTION, payload: { address_as_heard: '77 Oak Street, Bradenton, FL 34205' } }))).toBe(true);
     expect(heardAddressMatchesOnFile(heard('77 Oak St Apt 4'))).toBe(true);
