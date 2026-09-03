@@ -72,9 +72,14 @@ export async function confirmCardHoldFeeChoice(serviceId) {
   if (!preview?.feeApplies) return { proceed: true, waiveCardHoldFee: false };
 
   const fee = fmtFee(preview.feeAmount);
-  if (!window.confirm(
-    `This one-time visit has a card on hold, and cancelling now is inside the late-cancel window — ${fee} will be charged.\n\nContinue with the cancellation?`,
-  )) {
+  // Prefer the server's rule sentence (sticky reschedules charge days
+  // outside the visit's own window — "inside the late-cancel window" would
+  // be wrong; Codex #3800 r4 P2). Older servers without `rule` keep the
+  // legacy copy.
+  const chargeCopy = preview.rule?.willCharge === true && preview.rule.text
+    ? preview.rule.text
+    : `This one-time visit has a card on hold, and cancelling now is inside the late-cancel window — ${fee} will be charged.`;
+  if (!window.confirm(`${chargeCopy}\n\nContinue with the cancellation?`)) {
     return { proceed: false, waiveCardHoldFee: false };
   }
   if (getAdminUser()?.role !== 'admin') return { proceed: true, waiveCardHoldFee: false };

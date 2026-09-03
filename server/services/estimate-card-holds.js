@@ -1328,6 +1328,8 @@ function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now
       return rule(false, 'A card was requested for this visit but never saved, so nothing will be charged.');
     case 'no_agreed_fee':
       return rule(false, 'A card is saved, but no late-cancel fee was agreed for this visit, so nothing will be charged.');
+    case 'secured_no_fee_terms':
+      return rule(false, 'This visit was secured without a late-cancel fee agreement (an existing saved card or prepaid coverage; no fee terms were shown), so nothing will be charged.');
     case 'payer_billed':
       return rule(false, 'A card is saved, but a third-party payer is billed for this visit, so the homeowner\'s card will not be charged.');
     case 'hold_parked':
@@ -1363,10 +1365,13 @@ function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now
       return rule(null, 'A fee charge for this visit is already in progress or under billing review. This cancel starts no new charge — check the visit\'s billing before promising the customer either way.');
     case 'unresolved':
     default:
-      return rule(null, `Couldn't verify the fee terms right now${detail ? ` (${detail})` : ''}. Nothing will be charged automatically — ${onFailure === 'release'
-        ? 'if the check still fails when you confirm, the hold is released free; check the visit\'s billing afterwards.'
+      // Genuinely indeterminate (Codex #3800 r4 P1): the check runs AGAIN
+      // at confirm time and a recovered lookup may charge, so never promise
+      // "nothing will be charged" here.
+      return rule(null, `Couldn't verify the fee terms right now${detail ? ` (${detail})` : ''}. The check runs again when you confirm and may charge the fee, release the card free, or park it for review — ${onFailure === 'release'
+        ? 'if it still can\'t verify then, the hold is released free; check the visit\'s billing afterwards.'
         : onFailure === 'review'
-          ? 'the cancel will be parked for billing review.'
+          ? 'if it still can\'t verify then, the cancel is parked for billing review.'
           : 'check the visit\'s billing after cancelling.'}`);
   }
 }

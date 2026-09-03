@@ -2183,7 +2183,7 @@ function skipRule(skipReason, requestStatus = null) {
   // 'satisfied' = secured by an existing saved card or prepaid coverage
   // WITHOUT the fee disclosure — exempt because no fee was agreed, not
   // because capture failed (Codex #3800 r3 P2).
-  if (reason === 'not_completed' && requestStatus === 'satisfied') return { code: 'no_agreed_fee' };
+  if (reason === 'not_completed' && requestStatus === 'satisfied') return { code: 'secured_no_fee_terms' };
   if (reason === 'not_completed' || reason === 'no_charge_target') return { code: 'not_secured' };
   if (reason === 'no_agreed_fee' || reason === 'no_fee_consent') return { code: 'no_agreed_fee' };
   if (reason === 'payer_billed') return { code: 'payer_billed' };
@@ -2775,7 +2775,25 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
   // Dark rail: no lookups, no fee-may-apply previews (Codex #3153 r11 P1)
   // — the disabled rail cannot charge, so the lane presents as absent.
   const { describeCancelFeeRule, freeCancelReason } = require('./estimate-card-holds');
-  if (!isApptCardFeeRailEnabled()) return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'rail_dark' }) };
+  if (!isApptCardFeeRailEnabled()) {
+    // Dark rail — but a row already in charging/charge_review is a
+    // PaymentIntent a gate-on worker may still land (the cancellation
+    // handler checks these states with the gate off too). Surface it
+    // before the dark verdict (Codex #3800 r4 P1); no other lookups.
+    try {
+      const row = await db('appointment_card_requests')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .first('fee_status', 'no_show_fee_amount');
+      if (row && (row.fee_status === 'charging' || row.fee_status === 'charge_review')) {
+        const feeAmount = Number(row.no_show_fee_amount) > 0 ? Number(row.no_show_fee_amount) : null;
+        return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describeCancelFeeRule({ code: 'charge_in_flight', feeAmount }) };
+      }
+    } catch (err) {
+      logger.warn(`[appt-card-request] fee-state lookup on the dark rail failed — reporting undetermined: ${err.message}`);
+      return { secured: false, feeApplies: false, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'unknown', detail: 'fee state lookup failed' }) };
+    }
+    return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'rail_dark' }) };
+  }
   const { request, unresolved, reason: skipReason, inFlight, status: requestStatus } = await feeEligibleRequestForVisit(scheduledServiceId);
   if (!request) {
     if (unresolved) {

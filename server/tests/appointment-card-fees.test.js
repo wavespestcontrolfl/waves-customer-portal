@@ -1002,6 +1002,12 @@ describe('appointmentCardCancelPreview', () => {
       rule: { code: 'in_window', willCharge: true, text: expect.stringMatching(/within the 24-hour late-cancel window\. The \$49 late-cancel fee will be charged/) },
     });
   });
+  test('gate off but a charge already in flight → in-flight verdict survives the dark rail', async () => {
+    mockGateOn = false;
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_status: 'charging' } });
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: true, feeApplies: true, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+  });
   test('gate off → feeApplies false (charge would no-op anyway)', async () => {
     mockGateOn = false;
     mockApptTime = new Date(Date.now() + 3 * HOUR);
@@ -1025,8 +1031,8 @@ describe('appointmentCardCancelPreview', () => {
     expect(res.rule.text).not.toMatch(/^No card is saved/);
     mockTableHandlers = handlersWith({ request: { ...REQUEST(), status: 'satisfied' } });
     res = await appointmentCardCancelPreview('svc-1');
-    expect(res.rule).toMatchObject({ code: 'no_agreed_fee', willCharge: false });
-    expect(res.rule.text).not.toMatch(/never saved/);
+    expect(res.rule).toMatchObject({ code: 'secured_no_fee_terms', willCharge: false });
+    expect(res.rule.text).not.toMatch(/never saved|A card is saved/);
     mockTableHandlers = handlersWith({ request: { ...REQUEST(), status: 'completing' } });
     res = await appointmentCardCancelPreview('svc-1');
     expect(res).toMatchObject({ secured: false, feeApplies: false, unresolved: true, rule: { code: 'capture_in_flight', willCharge: null } });
@@ -1060,6 +1066,7 @@ describe('appointmentCardCancelPreview', () => {
     require('../services/appointment-reminders').scheduledServiceApptTime.mockRejectedValueOnce(new Error('db blip'));
     const res = await appointmentCardCancelPreview('svc-1');
     expect(res).toMatchObject({ secured: true, feeApplies: true, unresolved: true, rule: { code: 'unresolved', willCharge: null } });
+    expect(res.rule.text).toMatch(/may charge the fee, release the card free, or park it for review/);
     expect(res.rule.text).toMatch(/parked for billing review/);
   });
 });
