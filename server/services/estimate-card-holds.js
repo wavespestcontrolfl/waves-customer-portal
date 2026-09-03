@@ -1838,7 +1838,29 @@ async function cardHoldReminderLine(scheduledServiceId) {
 // would no-op anyway.
 async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
   const hold = await heldCardForScheduledService(scheduledServiceId);
-  if (!hold) return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
+  if (!hold) {
+    // No HELD row — but a hold in 'charging' / 'charge_review' is a
+    // PaymentIntent that is running or may already have landed, and a
+    // released/charged row is a settled fee event. Neither may read as
+    // "no card saved" (Codex #3800 r1 P1). One extra read, only here.
+    let latest = null;
+    try {
+      latest = await db('estimate_card_holds')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .orderBy('held_at', 'desc')
+        .first();
+    } catch (err) {
+      logger.warn('[estimate-card-holds] hold-state lookup for cancel preview failed — reporting undetermined', { error: err.message });
+      return { held: false, feeApplies: false, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'release', detail: 'card hold lookup failed' }) };
+    }
+    if (!latest) return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
+    const state = String(latest.status || '');
+    const latestFee = Number(latest.no_show_fee_amount) > 0 ? Number(latest.no_show_fee_amount) : cardHoldNoShowFee();
+    if (state === 'charging' || state === 'charge_review') {
+      return { held: false, feeApplies: false, unresolved: true, rule: describeCancelFeeRule({ code: 'charge_in_flight', feeAmount: latestFee }) };
+    }
+    return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'fee_settled', feeAmount: latestFee, detail: state.replace(/_/g, ' ') || 'closed' }) };
+  }
   const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
   const windowHours = Number(hold.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
   // Every exit carries the operator-facing rule (code + sentence) so the

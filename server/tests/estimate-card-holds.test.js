@@ -764,6 +764,18 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     stubDb(null);
     expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: false, feeApplies: false, rule: expect.objectContaining({ code: 'no_card', willCharge: false }) });
   });
+  it('no HELD row but a charging/charge_review hold → undetermined in-flight verdict, never "no card"', async () => {
+    stubDb([null, { id: 'h1', status: 'charging', no_show_fee_amount: 49 }]);
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: false, feeApplies: false, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+    expect(res.rule.text).toMatch(/already in progress or under billing review/);
+  });
+  it('no HELD row but a released/charged hold → fee settled, with the state named', async () => {
+    stubDb([null, { id: 'h1', status: 'released', no_show_fee_amount: 49 }]);
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: false, feeApplies: false, rule: { code: 'fee_settled', willCharge: false } });
+    expect(res.rule.text).toMatch(/already settled \(released\)/);
+  });
   it('held + in-window start → fee applies with the hold\'s own fee amount', async () => {
     stubDb(holdRow);
     mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));

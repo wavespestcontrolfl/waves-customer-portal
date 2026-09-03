@@ -3449,7 +3449,10 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
   try {
     const CardHolds = require('../services/estimate-card-holds');
     const holdPreview = await CardHolds.cardHoldCancelPreview(req.params.serviceId);
-    if (holdPreview.held) return res.json(holdPreview);
+    // A held hold answers outright; so does a non-held hold STATE (charge in
+    // flight / fee settled) — the appointment rail would only restate it as
+    // "handled by the card hold" (Codex #3800 r1 P1).
+    if (holdPreview.held || holdPreview.rule?.code !== 'no_card') return res.json(holdPreview);
     const ApptCardRequests = require('../services/appointment-card-request');
     const apptPreview = await ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId);
     res.json({

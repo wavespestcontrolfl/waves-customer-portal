@@ -57,6 +57,7 @@ import {
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
+import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
 import {
   deleteCompletionResumeBody,
   getCompletionResumeBody,
@@ -1429,6 +1430,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // Cancel-appointment confirm overlay.
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelScope, setCancelScope] = useState("this_only");
+  // Will the saved card be charged by this cancel, and why — fetched only
+  // while the cancel dialog is open (Codex #3800 r1 P2: this retained V1
+  // modal is the common desktop Edit → cancel path).
+  const cancelFee = useCancelFeeNotice(service?.id, { enabled: cancelOpen, scope: cancelScope });
   const [cancelNotificationType, setCancelNotificationType] = useState("text");
   const [cancelling, setCancelling] = useState(false);
   const [serviceGroups, setServiceGroups] = useState(EDIT_FALLBACK_SERVICES);
@@ -4559,6 +4564,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 <option value="none">Don&rsquo;t send a notification</option>
               </select>{" "}
             </div>{" "}
+            <div
+              role="status"
+              aria-live="polite"
+              data-testid="cancel-fee-notice"
+              data-rule-code={cancelFee.code}
+              style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12, marginBottom: 18 }}
+            >
+              <div
+                style={{
+                  fontSize: 13,
+                  fontWeight: 500,
+                  letterSpacing: "0.04em",
+                  textTransform: "uppercase",
+                  color: cancelFee.tone === "charge" ? D.red : D.muted,
+                }}
+              >
+                {cancelFee.label}
+              </div>
+              <div style={{ fontSize: 14, lineHeight: "22px", color: D.text, marginTop: 4 }}>{cancelFee.text}</div>
+            </div>
             <div
               style={{
                 display: "flex",

@@ -570,7 +570,7 @@ export default function ScheduleCustomerSidebar({
                   This message is saved with the cancellation note. A cancellation text is sent when a reminder record exists.
                 </div>
               </div>
-              <CancelFeeNotice serviceId={service.id} />
+              <CancelFeeNotice serviceId={service.id} scope={cancelScope} />
             </div>
 
             <div className="border-t border-hairline border-zinc-200 px-6 py-4 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">

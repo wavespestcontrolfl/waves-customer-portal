@@ -57,6 +57,18 @@ export async function fetchCardHoldCancelPreview(serviceId) {
 export async function confirmCardHoldFeeChoice(serviceId) {
   const preview = await fetchCardHoldCancelPreview(serviceId);
 
+  // Undetermined verdict (lookup failed, or a charge already in flight):
+  // the in-window "will be charged" prompt and the waiver would both lie —
+  // the estimate rail releases free on a repeated failure, the appointment
+  // rail may already have a payment landing (Codex #3800 r1 P1). Show the
+  // rule's own neutral sentence and never offer a waiver.
+  if (preview?.rule && preview.rule.willCharge === null) {
+    if (!window.confirm(`${preview.rule.text}\n\nContinue with the cancellation?`)) {
+      return { proceed: false, waiveCardHoldFee: false };
+    }
+    return { proceed: true, waiveCardHoldFee: false };
+  }
+
   if (!preview?.feeApplies) return { proceed: true, waiveCardHoldFee: false };
 
   const fee = fmtFee(preview.feeAmount);
