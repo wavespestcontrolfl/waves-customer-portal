@@ -129,6 +129,18 @@ function fillVisits(str, visits) {
     .replace(/\{visits\}/g, n > 0 ? `${visitWord(n).toLowerCase()} visits` : 'multiple visits');
 }
 
+// Visit count for a row: the persisted field, else the flea two-visit offer
+// key, else the "— N Visit Program" tail a legacy roach label carries
+// (codex #3823 pre-push P1 — stored rows predate the visits field).
+function rowVisits(item = {}, key = null) {
+  const stored = Number(item.visits) || 0;
+  if (stored > 0) return stored;
+  if (key === 'flea' && String(item.offerKey || '').includes('two_visit')) return 2;
+  const label = [item.name, item.label, item.displayName].filter(Boolean).join(' ');
+  const m = /(\d+)\s*[- ]?visit/i.exec(label);
+  return m ? Number(m[1]) || 0 : 0;
+}
+
 function bedBugMethod(item = {}) {
   const text = searchText(item);
   if (/\bhybrid\b/.test(text)) return 'hybrid';
@@ -146,7 +158,7 @@ function resolveOneTimeServiceCopy(item = {}) {
   if (!key) return null;
   const entry = PACK[key];
   if (!entry) return null;
-  const visits = Number(item.visits) || (key === 'flea' && String(item.offerKey || '').includes('two_visit') ? 2 : 0);
+  const visits = rowVisits(item, key);
   const includes = [...(entry.includes || [])];
   if (entry.includesByVisits) {
     const variant = entry.includesByVisits[String(visits)] || entry.includesByVisits.default || [];
@@ -246,8 +258,7 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
   // Scope from EVERY row of the key, never an arbitrary first row (codex
   // pre-push P1): the largest visit count, and exterior priced if any row
   // says so.
-  const visits = rows.reduce((max, row) => Math.max(max,
-    Number(row.visits) || (key === 'flea' && String(row.offerKey || '').includes('two_visit') ? 2 : 0)), 0);
+  const visits = rows.reduce((max, row) => Math.max(max, rowVisits(row, key)), 0);
   // Flea hero subline follows the priced scope: exterior only when priced,
   // "follow-up built in" only on the two-visit package (codex pre-push P1).
   const fleaExteriorPriced = rows.some((row) => ['priced', 'requires_confirmation'].includes(String(row.exteriorStatus || '')));

@@ -100,6 +100,10 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(two.assurance).toMatch(/100% guaranteed with the Waves Guarantee/);
     expect(two.terms).toBe('Pay on service day. No recurring schedule, no contract.');
 
+    // A legacy row with no visits field reads the count from its label.
+    const legacyThree = resolveOneTimeServiceCopy({ name: 'German Roach Cleanout — 3 Visit Program', price: 450 });
+    expect(legacyThree.outcome).toMatch(/Three targeted visits/);
+    expect(oneTimeOnlyIntelligenceCopy([{ name: 'German Roach Cleanout — 3 Visit Program', price: 450 }]).hero.sub).toMatch(/^Three targeted visits/);
     const three = resolveOneTimeServiceCopy(roach3);
     expect(three.outcome).toMatch(/Three targeted visits/);
     expect(three.includes).toContain('Follow-up visits every 10–14 days — re-fog, re-bait, and confirm zero live activity — three visits in total');
