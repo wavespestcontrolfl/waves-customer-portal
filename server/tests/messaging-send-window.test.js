@@ -319,4 +319,27 @@ describe('sendCustomerMessage send-window integration', () => {
     expect(auditArgs.validatorsFailed).toEqual(['check_send_window_boundary']);
     expect(auditArgs.providerOutcome).toBeNull();
   });
+
+  test('an owned-number recipient block is recorded as a block, never PROVIDER_FAILURE', async () => {
+    jest.useFakeTimers({ now: MIDDAY_ET, doNotFake: ['nextTick', 'setImmediate'] });
+    sendViaTwilio.mockResolvedValueOnce({
+      sent: false,
+      provider: 'twilio',
+      blocked: true,
+      code: 'OWNED_NUMBER_RECIPIENT',
+      error: 'Recipient is a Waves-owned Twilio number, not a customer (would fail Twilio 21266)',
+      validator: 'check_owned_number_recipient',
+      retryable: false,
+      deferred: false,
+    });
+    const res = await sendCustomerMessage({ ...INPUT, to: '+19412975749' });
+    expect(res).toMatchObject({ sent: false, blocked: true, code: 'OWNED_NUMBER_RECIPIENT' });
+    expect(res.retryable).toBeFalsy();
+    expect(res.deferred).toBeFalsy();
+    const { persistAudit } = require('../services/messaging/audit');
+    const auditArgs = persistAudit.mock.calls.at(-1)[0];
+    expect(auditArgs.validatorsFailed).toEqual(['check_owned_number_recipient']);
+    expect(auditArgs.blockedBy.code).toBe('OWNED_NUMBER_RECIPIENT');
+    expect(auditArgs.providerOutcome).toBeNull();
+  });
 });
