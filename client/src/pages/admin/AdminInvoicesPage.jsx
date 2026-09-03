@@ -740,6 +740,9 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
       await load();
     } catch (err) {
       showToast(err.message || "Could not ignore the notice");
+      // Same as Apply: the server may have closed it before the response was
+      // lost, or another operator may have resolved it — show its state.
+      await load();
     } finally {
       setBusy(null);
     }
