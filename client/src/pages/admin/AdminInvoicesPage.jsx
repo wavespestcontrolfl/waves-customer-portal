@@ -529,6 +529,9 @@ export default function AdminInvoicesPage() {
     return () => window.removeEventListener("resize", handler);
   }, []);
 
+  // Bumped when something outside InvoiceList settles an invoice (the Zelle
+  // notice card) so the list refetches instead of showing it still open.
+  const [listRefreshKey, setListRefreshKey] = useState(0);
   const loadStats = useCallback(async () => {
     const s = await adminFetch("/admin/invoices/stats").catch(() => null);
     setStats(s);
@@ -570,12 +573,17 @@ export default function AdminInvoicesPage() {
         }}
       />
       {tab === "list" && (
-        <ZelleNoticesCard showToast={showToast} onRefresh={loadStats} isMobile={isMobile} />
+        <ZelleNoticesCard
+          showToast={showToast}
+          onRefresh={() => { loadStats(); setListRefreshKey((k) => k + 1); }}
+          isMobile={isMobile}
+        />
       )}
       {tab === "list" && (
         <InvoiceList
           showToast={showToast}
           onRefresh={loadStats}
+          refreshKey={listRefreshKey}
           onEdit={(inv) => {
             setEditInvoice(inv);
             setTab("create");
@@ -900,6 +908,7 @@ function FilterPill({ label, value, options, onChange, isMobile }) {
 function InvoiceList({
   showToast,
   onRefresh,
+  refreshKey = 0,
   onEdit,
   isMobile,
   stats,
@@ -981,7 +990,7 @@ function InvoiceList({
   );
   useEffect(() => {
     load();
-  }, [load]);
+  }, [load, refreshKey]);
 
   // Keep expanded invoice detail in the URL so notification links, mobile
   // back navigation, and refresh all restore the same row. A deep-linked
