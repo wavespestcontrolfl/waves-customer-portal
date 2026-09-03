@@ -136,24 +136,29 @@ const LANE_RUNTIME = {
   tree_shrub: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   treatment_zone: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement' },
   tech_caption_vision: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
-  satellite: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
+  // offline (Codex r17): satellite's Promise.allSettled fetches and turf OCR's Gemini leg carry no AbortSignal, and the OCR reading
+  // is a background enrichment left pending for a later retry — neither can honour an interactive hard timeout.
+  satellite: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
   property_trio: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
   property_v2_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
-  turf_ocr: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
+  turf_ocr: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   photo_scoring: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   vision_delta: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   // offline (Codex r16): lawn_quality_gate fails open on a miss and lawn_challenge falls to the caller's symptom downgrade — one Anthropic request each, no second provider.
   lawn_quality_gate: { side_effect_class: 'read_only', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
-  lawn_diag_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
+  // offline (Codex r17): runPerception / runWriter await unbounded raw Gemini + OpenAI fetches before either fallback can run.
+  lawn_diag_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   lawn_challenge: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'compliance_check' },
-  lawn_diag_writer: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'service_report' },
+  lawn_diag_writer: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'service_report' },
   wdo_project_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: null },
   // internal_write: a project-scoped lookup persists the answer to projects.wdo_history (admin-projects.js) — Codex r9.
   wdo_history: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'retrieval_qa' },
 
   // ── Estimates & sales ──
-  lead_triage: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
-  estimate_assistant: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa' },
+  // direct_sdk (Codex r17): lead-triage.js's Claude fallback is new Anthropic().messages.create — an OpenAI outage would record only the miss.
+  lead_triage: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'classification' },
+  // customer_visible + M3 (Codex r17): the public estimate ask handler returns the answer straight to the customer and audit-logs it.
+  estimate_assistant: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa', maturity: 'M3' },
   estimator_sms_signal: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   intent_composer: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', expected_duration_ms: 120_000 },
   commercial_proposal: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy' },
@@ -222,7 +227,9 @@ const LANE_RUNTIME = {
   // M3: the gated runner submits allowlisted listings with no per-item approval and records evidence in seo_link_attempts (Codex r12).
   signup_worker: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: null, maturity: 'M3', ...LONG_BATCH },
   link_investigator: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', ...LONG_BATCH },
-  mentions_prober: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'search', fallback_class: 'measurement', eval_family: null, expected_cadence: 'daily', ...LONG_BATCH },
+  // event, not daily (Codex r17): the 3am tick returns before the prober when GATE_SEO_INTELLIGENCE is off, and each provider
+  // skips without credentials — a dark or unconfigured lane must not page as gone-silent.
+  mentions_prober: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'search', fallback_class: 'measurement', eval_family: null, ...LONG_BATCH },
   // direct_sdk (Codex r16): classifySentiment builds its own Anthropic client (seo/llm-mention-prober.js), not llm/call.js.
   mentions_sentiment: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification' },
   image_gen: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'image', fallback_class: 'offline', eval_family: null, expected_duration_ms: 180_000 },
@@ -248,7 +255,8 @@ const LANE_RUNTIME = {
   chart_builder_sql: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool' },
   // internal_write: knowledge_qa's only caller writes lawn_assessments
   // ai_summary / recommendations; every WikiQA query logs to knowledge_queries.
-  knowledge_qa: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa' },
+  // direct_sdk (Codex r17): knowledge-bridge.js callClaude falls back through its own Anthropic client after an OpenAI miss.
+  knowledge_qa: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'retrieval_qa' },
   wiki_qa: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'retrieval_qa' },
   kb_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
   wiki_compiler: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', ...LONG_BATCH },
@@ -256,7 +264,8 @@ const LANE_RUNTIME = {
   extreme_tier: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: null, expected_duration_ms: 300_000 },
 
   // ── Customer portal ──
-  ask_waves: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa' },
+  // M3 (Codex r17): processIntakeMessage returns the reply to the public intake route and records it sent_to_customer with its session audit.
+  ask_waves: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa', maturity: 'M3' },
   // offline + M3: single Anthropic client, canned error copy; tools run without approval and every call is persisted to agent_messages (Codex r12).
   // direct_sdk: that client is the raw SDK — agent_messages is an audit trail, not the adapter call ledger (Codex r14).
   portal_assistant: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },

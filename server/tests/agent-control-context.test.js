@@ -62,6 +62,16 @@ describe('agent-control context', () => {
         expect([c.stepId, c.spanId, c.parentSpanId]).toEqual([null, null, null]);
         ctx.withStep('first', () => expect(ctx.current().parentSpanId).toBeNull());
       });
+      // A fresh trace started under an outer chain gets its own chain too:
+      // withChain keeps any ambient chain id, so the parent's must not leak in.
+      ctx.withChain(() => {
+        const outerChain = ctx.current().chainId;
+        ctx.runInRun({ runId: 'nested-chain' }, () => {
+          expect(ctx.current().chainId).toBeNull();
+          ctx.withChain(() => expect(ctx.current().chainId).not.toBe(outerChain));
+        });
+        ctx.runInRun({ runId: 'joined-chain', traceId: outer.traceId }, () => expect(ctx.current().chainId).toBe(outerChain));
+      });
       ctx.runInRun({ runId: 'joined', traceId: outer.traceId }, () => {
         expect(ctx.current().spanId).toBe(outer.spanId);
         ctx.withStep('child', () => expect(ctx.current().parentSpanId).toBe(outer.spanId));

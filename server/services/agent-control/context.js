@@ -86,8 +86,9 @@ function runInLane(laneId, fn) {
 }
 
 // A run whose trace differs from the ambient one — no traceId (fresh) or an
-// explicit one that is not the parent's — drops the outer step / span ids:
-// they belong to another trace and must not become the first step's parent.
+// explicit one that is not the parent's — drops the outer step / span / chain
+// ids: they belong to another trace and must not become the first step's
+// parent or the chain its calls attach to (withChain keeps any outer chain).
 // Joining the ambient trace keeps them.
 function runInRun({ runId = null, workItemId = null, attemptId = null, traceId = null, agentVersionId = null, workflowId = null } = {}, fn) {
   const parent = store.getStore() || EMPTY;
@@ -97,7 +98,7 @@ function runInRun({ runId = null, workItemId = null, attemptId = null, traceId =
     workItemId,
     attemptId,
     traceId: trace,
-    ...(parent.traceId && trace === parent.traceId ? {} : { stepId: null, spanId: null, parentSpanId: null }),
+    ...(parent.traceId && trace === parent.traceId ? {} : { stepId: null, spanId: null, parentSpanId: null, chainId: null }),
     agentVersionId,
     workflowId,
   }, fn);
