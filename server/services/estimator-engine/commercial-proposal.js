@@ -427,8 +427,8 @@ async function maybeBuildCommercialProposalDraft({
       // corrected lead addresses could both pass conflictingOpenEstimate
       // and insert two scaffolds for one call.
       if (call?.id) {
-        const existingForCall = await trx('estimates')
-          .select('id')
+        const sameCallRows = await trx('estimates')
+          .select('id', 'address')
           .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
           .whereNull('archived_at')
           // Marker-only invalidated terminals are not live drafts
@@ -443,8 +443,9 @@ async function maybeBuildCommercialProposalDraft({
               q.whereNot((held) => held.whereIn('id', supersedeEstimateIds)
                 .whereRaw("estimate_data->'estimatorEngine'->>'reprice_attempt' = ?", [String(context.supersedeAttempt)]));
             }
-          })
-          .first();
+          });
+        // Property-aware, like the residential creator (codex r4 P2 on #3796).
+        const existingForCall = conflictingOpenEstimate(sameCallRows || [], intent.address);
         if (existingForCall) return { duplicate: existingForCall };
         // LIVE call-linkage fence, same as the residential creator (codex
         // P1, PR #3304 GH r8): an older commercial composer could still

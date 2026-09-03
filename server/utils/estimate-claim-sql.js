@@ -203,7 +203,7 @@ async function callUnitAnswer(dbc, callLogId) {
 // with no building applies to every unitless or differing draft.
 function unitAnswerFenceReason(fence, { address = null } = {}) {
   if (!fence || !fence.unit) return null;
-  const { unitLineValueKey, splitStreetLineUnit } = require('./address-normalizer');
+  const { unitLineValueKey, unitAnywhereOnLine } = require('./address-normalizer');
   const fencedKey = unitLineValueKey(String(fence.unit));
   const line = String(address || '').trim();
   if (!line) return 'unit_answer_pending';
@@ -213,7 +213,9 @@ function unitAnswerFenceReason(fence, { address = null } = {}) {
     const buildingLine = [b.street_line_1, b.city, b.postal_code ? `FL ${b.postal_code}` : null].filter(Boolean).join(', ');
     if (!sameStreetAddress(line, buildingLine)) return null;
   }
-  const lineUnit = splitStreetLineUnit(line).unit;
+  // The unit in EITHER supported position — the composer may return the
+  // unit-first form the override deliberately preserves (codex r4 P2).
+  const lineUnit = unitAnywhereOnLine(line);
   if (lineUnit && unitLineValueKey(lineUnit) === fencedKey) return null;
   return 'unit_answer_pending';
 }

@@ -1080,8 +1080,8 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     // the early existing check and the address bypass then let the second
     // insert through — two drafts for one call.
     if (call?.id) {
-      const existingForCall = await trx('estimates')
-        .select('id', 'status')
+      const sameCallRows = await trx('estimates')
+        .select('id', 'status', 'address')
         .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
         .whereNull('archived_at')
         // A marker-only invalidated TERMINAL is not archived (codex P1,
@@ -1102,8 +1102,13 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
             q.whereNot((held) => held.whereIn('id', supersedeEstimateIds)
               .whereRaw("estimate_data->'estimatorEngine'->>'reprice_attempt' = ?", [String(context.supersedeAttempt)]));
           }
-        })
-        .first();
+        });
+      // A same-call row PROVEN to be for another building (a historical
+      // race's other-property draft) is not this draft's duplicate — the
+      // same property-aware rule the phone dedupe applies (codex r4 P2 on
+      // #3796); an unknown address on either side keeps the conservative
+      // block.
+      const existingForCall = conflictingOpenEstimate(sameCallRows || [], intent.address);
       if (existingForCall) {
         return {
           duplicateBlock: {

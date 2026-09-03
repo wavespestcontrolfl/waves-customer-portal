@@ -480,9 +480,12 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     expect(unitAnswerFenceReason(FENCE, { address: '5 Other Rd Apt 9, Venice, FL 34285' })).toBeNull();
     expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir Apt 9, Sarasota, FL 34232' })).toBe('unit_answer_pending');
     expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir, Apt 9, Sarasota, FL 34232' })).toBe('unit_answer_pending');
-    // The same unit in another spelling is the answer.
+    // The same unit in another spelling is the answer — in the unit-first form too (codex r4 P2).
     expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir, Unit 204, Sarasota, FL 34232' })).toBeNull();
     expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir #204, Sarasota, FL 34232' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: 'Apt 204, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '#204, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: 'Apt 9, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
   });
 
   test('no address at all did not see the answer — blocked; a fence with no building blocks any unitless draft', () => {
@@ -592,10 +595,15 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     const liftAt = persistence.indexOf('delete lockedEngine.reprice_pending_at;');
     expect(liftAt).toBeGreaterThan(-1);
     expect(persistence.indexOf('revisedFields.estimate_data = JSON.stringify(pendingData);')).toBeGreaterThan(liftAt);
-    // A guarded 'sending' target is not a same-call duplicate for the replacement insert.
+    // A guarded 'sending' target is not a same-call duplicate for the replacement insert, and a same-call
+    // row for ANOTHER building is judged by the property-aware rule (codex r4 P2).
     for (const rel of ['../services/estimator-engine/draft-builder.js', '../services/estimator-engine/commercial-proposal.js']) {
       expect(src(rel)).toContain("held.whereIn('id', supersedeEstimateIds)");
+      expect(src(rel)).toContain('conflictingOpenEstimate(sameCallRows || [], intent.address)');
     }
+    // The detached unit re-run adopts the call's settled generation (read under the call lock).
+    expect(clarify).toContain('ownerProcGeneration: unitRedraft.procGeneration');
+    expect(clarify.indexOf('callReprocessInFlight(row)')).toBeGreaterThan(-1);
     const lockAt = clarify.indexOf("unitCallLinkage(trx, flags.unit_call_log_id, { lock: true })");
     const stampAt = clarify.indexOf('stampCallUnitAnswer(trx, flags.unit_call_log_id');
     expect(lockAt).toBeGreaterThan(-1);

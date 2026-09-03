@@ -1961,6 +1961,47 @@ describe('unit re-draft (GATE_CLARIFY_UNIT_WRITEBACK — PR C2: fence + every-li
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateIds: ['est-sending'] }));
   });
 
+  test('a same-call draft that ALREADY names the answered unit (operator-corrected) is left intact: not guarded, not retired, no re-run when nothing else is stale', async () => {
+    await reply({ drafts: [{ id: 'est-correct', status: 'draft', address: '1048 Example Lakes Cir Apt 204, Sarasota, FL 34232' }] });
+    expect(guardUpdates()).toHaveLength(0);
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+    expect(stamps().some((f) => f.unit_draft_already_correct === 'est-correct')).toBe(true);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    // The unit-first form counts too; a stale building-level sibling is still guarded and the re-run supersedes only it.
+    jest.clearAllMocks(); mockState.updates = [];
+    await reply({ drafts: [{ id: 'est-correct', status: 'draft', address: 'Unit 204, 1048 Example Lakes Cir, Sarasota, FL 34232' }, { id: 'est-stale', status: 'draft', address: '1048 Example Lakes Cir, Sarasota, FL 34232' }] });
+    expect(guardUpdates()).toHaveLength(1);
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateIds: ['est-stale'] }));
+  });
+
+  test('a bedroom count answered EARLIER on the ask rides the later unit re-run when its draft is in the unit set; not when it was bound elsewhere', async () => {
+    await reply({ flags: { missing: ['unit_number'], answer_recorded: ['bedroom_count'], bedroom_count_answer: 2, bedroom_estimate_id: 'est-1' }, drafts: [{ id: 'est-1', status: 'draft' }] });
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ bedroomCountOverride: 2, supersedeEstimateIds: ['est-1'] }));
+    jest.clearAllMocks(); mockState.updates = [];
+    await reply({ flags: { missing: ['unit_number'], answer_recorded: ['bedroom_count'], bedroom_count_answer: 2, bedroom_estimate_id: 'est-other' }, drafts: [{ id: 'est-1', status: 'draft' }] });
+    expect(mockMaybeDraftEstimateForCall.mock.calls[0][0].bedroomCountOverride).toBeUndefined();
+    // Studio (0) is a real answer.
+    jest.clearAllMocks(); mockState.updates = [];
+    await reply({ flags: { missing: ['unit_number'], answer_recorded: ['bedroom_count'], bedroom_count_answer: 0 }, drafts: [{ id: 'est-1', status: 'draft' }] });
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ bedroomCountOverride: 0 }));
+  });
+
+  test('the detached unit re-run carries the call\'s SETTLED generation read under the call lock; an in-flight reprocess claim adopts none', async () => {
+    const settled = { id: 'call-1', customer_id: 'cust-1', processing_generation: 7, processing_status: 'completed', processing_token: null };
+    let a = AWAITING(); mockState.existingDraft = a;
+    mockState.firstQueue = [a, a, settled, { id: 'cust-1', address_line1: null }, settled, { id: 'lead-1', address: null }];
+    mockState.selectQueue = [[], [], []];
+    let r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ ownerProcGeneration: 7 }));
+    jest.clearAllMocks(); mockState.updates = [];
+    const inFlight = { ...settled, processing_status: 'processing', processing_token: 'tok-live', created_at: new Date().toISOString(), extraction_attempts: 1 };
+    a = AWAITING(); mockState.existingDraft = a;
+    mockState.firstQueue = [a, a, inFlight, { id: 'cust-1', address_line1: null }, inFlight, { id: 'lead-1', address: null }];
+    mockState.selectQueue = [[], [], []];
+    r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
+    expect(mockMaybeDraftEstimateForCall.mock.calls[0][0].ownerProcGeneration).toBeUndefined();
+  });
+
   test('the guarded/superseded set is limited to drafts AT the asked building: a same-call draft for another property is neither guarded nor retired; an addressless row is kept', async () => {
     await reply({ drafts: [
       { id: 'est-here', status: 'draft', address: '1048 Example Lakes Circle, Sarasota, FL 34232' },

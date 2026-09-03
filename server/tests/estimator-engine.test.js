@@ -790,6 +790,13 @@ describe('review fixes', () => {
     const unitFirstStale = { extraction: null, lead: { address: 'Apt 9, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
     expect(idxPriv.addressFromContext(unitFirstStale)).toBe('Apt 204, 5 Other Rd, Venice, FL 34285');
     expect(idxPriv.addressFromContext({ ...unitFirstStale, lead: { address: '#9, 5 Other Rd, Venice, FL 34285' } })).toBe('Apt 204, 5 Other Rd, Venice, FL 34285');
+    // The shared helper reads the unit in either position.
+    const { unitAnywhereOnLine, splitUnitFirstLine } = require('../utils/address-normalizer');
+    expect(unitAnywhereOnLine('Apt 204, 5 Other Rd, Venice, FL 34285')).toBe('Apt 204');
+    expect(unitAnywhereOnLine('5 Other Rd Apt 204, Venice, FL 34285')).toBe('Apt 204');
+    expect(unitAnywhereOnLine('5 Other Rd, Venice, FL 34285')).toBe('');
+    expect(splitUnitFirstLine('4501 Space Coast Blvd, Venice, FL')).toBeNull();
+    expect(splitUnitFirstLine('Apt 204')).toBeNull();
   });
 
   test('serviceAddressOverride (the item-bound building) outranks the extraction AND the lead/customer lines of an extraction-less fallback context', () => {

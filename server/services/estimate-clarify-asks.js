@@ -213,8 +213,16 @@ function customerAddressLine(row) {
 async function unitCallLinkage(trx, callLogId, { lock = false } = {}) {
   let q = trx('call_log').where({ id: String(callLogId) });
   if (lock) q = q.forUpdate();
-  const row = await q.first('customer_id', 'twilio_call_sid', 'metadata', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status');
+  const row = await q.first('customer_id', 'twilio_call_sid', 'metadata', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status',
+    'processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'processing_generation');
   if (!row) return null;
+  // The call's SETTLED generation — the pass identity a detached re-draft
+  // adopts (as the booking pre-draft does): valid exactly while no
+  // reprocess claim is in flight; an in-flight claim owns the identity, so
+  // nothing is adopted and the creators' generation fence stays legacy.
+  const { callReprocessInFlight } = require('../utils/estimate-claim-sql');
+  const procGeneration = !callReprocessInFlight(row) && row.processing_generation != null
+    ? Number(row.processing_generation) : null;
   const parse = (v) => { if (!v) return null; if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } } return v; };
   const meta = parse(row.metadata);
   const v1 = parse(row.ai_extraction) || {};
@@ -226,6 +234,7 @@ async function unitCallLinkage(trx, callLogId, { lock = false } = {}) {
     : {};
   return {
     customerId: row.customer_id ? String(row.customer_id) : null,
+    procGeneration,
     // The call's own quote signals — a legacy ask (parked before the item
     // carried them) recovers them from here.
     quotePromised: v1.quote_promised === true || svc.quote_promised === true,
@@ -318,8 +327,10 @@ async function unitTargets(trx, flags) {
 // customer/lead/call rows: the invalidation finalizer's order is estimates
 // → leads → call_log, and the creators' is estimates (supersede target) →
 // call_log (codex r4 P1 on #3785).
-async function unsentDraftsForCall(trx, callLogId, building) {
+async function unsentDraftsForCall(trx, callLogId, building, unitLine) {
   if (!callLogId) return [];
+  const { unitAnywhereOnLine, unitLineValueKey } = require('../utils/address-normalizer');
+  const answered = unitLineValueKey(String(unitLine || ''));
   const rows = await trx('estimates')
     .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(callLogId)])
     .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
@@ -338,7 +349,16 @@ async function unsentDraftsForCall(trx, callLogId, building) {
     .select('id', 'status', 'created_at', 'address');
   return (Array.isArray(rows) ? rows : []).filter((row) => {
     const line = String(row.address || '').trim();
-    return !line || sameBuilding(line, building);
+    if (!line) return true;
+    if (!sameBuilding(line, building)) return false;
+    // A draft that ALREADY names the answered unit (an operator corrected
+    // it after the ask went out) is not stale — archiving it would discard
+    // their pricing/scope for a rebuild from call evidence (codex r4 P1 on
+    // #3796). Left intact and unguarded; the caller sees it as
+    // `alreadyCorrect` and skips the re-run.
+    const lineUnit = unitAnywhereOnLine(line);
+    if (lineUnit && answered && unitLineValueKey(lineUnit) === answered) row.alreadyCorrect = true;
+    return true;
   });
 }
 
@@ -346,11 +366,12 @@ async function unsentDraftsForCall(trx, callLogId, building) {
 // draft for the call that is not guarded yet. Returns the FULL live set,
 // newest first — the first is the supersede primary.
 async function guardLiveDraftsForCall(trx, callLogId, redraft) {
-  const rows = await unsentDraftsForCall(trx, callLogId, redraft.building);
+  const rows = await unsentDraftsForCall(trx, callLogId, redraft.building, redraft.unitLine);
   const at = new Date().toISOString();
   const ids = [];
   for (const row of rows) {
     const id = String(row.id);
+    if (row.alreadyCorrect) { redraft.alreadyCorrectId = redraft.alreadyCorrectId || id; continue; }
     if (!redraft.guardedIds.has(id)) {
       const ok = await setEstimateRepricePending(trx, id, at, redraft.attempt);
       if (!ok) continue;
@@ -396,6 +417,7 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = 
       customerRow = null;
     }
     if (linkage) {
+      if (redraft) redraft.procGeneration = linkage.procGeneration;
       // The DURABLE call-level unit-answer fence, written under the call
       // row lock every draft creator also holds through its insert: a
       // composer that built a whole-building draft before this reply is
@@ -1324,8 +1346,14 @@ async function handleClarifyReply({ phone, body }) {
                 callLogId: String(freshFlags.unit_call_log_id),
                 quotePromised: targets.quotePromised === true,
                 attempt: require('crypto').randomUUID(),
+                unitLine,
                 guardedIds: new Set(),
                 supersedeEstimateIds: [],
+                alreadyCorrectId: null,
+                // The call's settled processing generation, read under the
+                // call-row lock in applyUnitWriteback — the detached re-run's
+                // pass identity (codex r4 P1 on #3796).
+                procGeneration: null,
                 // The item-bound building, not the call row's rolling extraction.
                 building: freshFlags.unit_ask_building || null,
               };
@@ -1358,6 +1386,19 @@ async function handleClarifyReply({ phone, body }) {
       // r3 P1 on #3785). Without a unit re-draft, the bedroom behavior stands.
       const lockedEstimateId = unitRedraft ? unitTargetId : bedroomTargetId;
       const extraBedroomTarget = unitRedraft && bedroomTargetId && !unitRedraft.guardedIds.has(bedroomTargetId) ? bedroomTargetId : null;
+      // The bedroom count the unit re-run carries: the one answered in THIS
+      // text when its target is in the unit set (codex r2 P1 on #3785), or
+      // one recorded EARLIER on this ask whose draft the unit run replaces
+      // — a bedroom-first, unit-later customer must not have the correctly
+      // priced draft rebuilt at the fallback price and be re-asked (codex
+      // r4 P1 on #3796).
+      let bedroomForUnitRun = null;
+      if (unitRedraft) {
+        const priorTarget = freshFlags.bedroom_estimate_id ? String(freshFlags.bedroom_estimate_id) : null;
+        const targetInSet = !priorTarget || unitRedraft.guardedIds.has(priorTarget);
+        if (recorded.includes('bedroom_count') && bedroomCount !== null && !extraBedroomTarget && unitTargetId) bedroomForUnitRun = bedroomCount;
+        else if (!recorded.includes('bedroom_count') && Number.isInteger(freshFlags.bedroom_count_answer) && targetInSet) bedroomForUnitRun = freshFlags.bedroom_count_answer;
+      }
       // Estimate-level send guard, stamped in the SAME locked phase that
       // records the answer: the linked draft's dollars are about to be
       // replaced, so admin send / schedule / public accept refuse it
@@ -1415,6 +1456,7 @@ async function handleClarifyReply({ phone, body }) {
         recorded, estimateId: lockedEstimateId, repriceGuarded, repriceAttempt,
         callOrigin: freshFlags.call_origin === true,
         unitRedraft,
+        bedroomForUnitRun,
         unitWriteback: freshFlags.unit_writeback || null,
         extraBedroomTarget: extraBedroomGuarded ? extraBedroomTarget : null,
         // The bedroom item's CURRENT target, for the re-point rule below.
@@ -1497,21 +1539,29 @@ async function handleClarifyReply({ phone, body }) {
           // fence (stamped in the locked phase) keeps a composer that never
           // saw the answer from inserting behind this run.
           const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
-          if (estimatorEngineEnabled()) {
+          if (unitRedraft.alreadyCorrectId && !unitSupersedeIds.length) {
+            // A live draft already names the answered unit (an operator
+            // corrected it after the ask went out): nothing to replace,
+            // nothing to rebuild (codex r4 P1 on #3796).
+            logger.info('[estimate-clarify] unit answer recorded — a draft already carries it, no re-draft', { draftId: awaiting.id, estimateId: unitRedraft.alreadyCorrectId });
+            await stampClarifyFlags(digits, awaiting.id, { unit_draft_already_correct: unitRedraft.alreadyCorrectId });
+          } else if (estimatorEngineEnabled()) {
             repriceOutcome = await maybeDraftEstimateForCall({
               callLogId: unitRedraft.callLogId,
               quotePromised: unitRedraft.quotePromised === true,
+              // The call's settled generation observed under the call lock —
+              // a force-reprocess that claims the call before this detached
+              // run inserts is fenced out by the creators (codex r4 P1).
+              ...(unitRedraft.procGeneration != null ? { ownerProcGeneration: unitRedraft.procGeneration } : {}),
               // The texted unit reaches the composer explicitly — the
               // original extraction and a drifted/absent lead line may still
               // describe the whole building (codex r1 P1 on #3785).
               unitLineOverride: unitLine,
               ...(unitRedraft.building?.street_line_1 ? { serviceAddressOverride: unitRedraft.building } : {}),
-              // The bedroom answer rides along ONLY when both items target the
-              // SAME estimate (codex r2 P1 on #3785) — a bedroom count bound
-              // to another property's draft never reaches this call's re-draft.
-              ...(recorded.includes('bedroom_count') && bedroomCount !== null && !locked.extraBedroomTarget
-                && locked.estimateId && unitSupersedeIds.includes(String(locked.estimateId))
-                ? { bedroomCountOverride: bedroomCount } : {}),
+              // The bedroom answer (this text's, or one recorded earlier on
+              // the ask) rides along ONLY when its draft is in the unit set.
+              ...(locked.bedroomForUnitRun !== null && locked.bedroomForUnitRun !== undefined
+                ? { bedroomCountOverride: locked.bedroomForUnitRun } : {}),
               ...(unitSupersedeIds.length ? {
                 supersedeEstimateIds: unitSupersedeIds,
                 supersedeReason: 'clarify_unit_reply',
