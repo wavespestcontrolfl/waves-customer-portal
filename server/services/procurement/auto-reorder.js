@@ -181,6 +181,13 @@ async function createRequestLocked(conn, p, scanPricing) {
     const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate()
       .first('inventory_on_hand', 'low_stock_threshold', 'auto_reorder_enabled', 'active', 'reorder_quantity', 'auto_reorder_vendor_id', 'inventory_unit');
     if (!fresh || !stillLow(fresh)) return { deduped: 'no_longer_low' };
+    // The live-request check again, UNDER the lock (pre-push P1): every
+    // creation path (staff, forecast, Intelligence Bar, the dispatcher's
+    // claim) locks this row first, so a request that committed between the
+    // scan and this lock is visible here — the partial unique index only
+    // spans auto rows, so without this read two live requests would survive.
+    const live = await trx('product_restock_requests').where({ product_id: p.id }).whereIn('status', LIVE_STATUSES).first('id', 'source');
+    if (live) return { deduped: live.source === SOURCE ? 'concurrent_auto_request' : 'concurrent_staff_request' };
     const qty = num(fresh.reorder_quantity);
     const unit = fresh.inventory_unit || p.inventory_unit;
     if (!unit) return { unconfigured: 'no_unit' };

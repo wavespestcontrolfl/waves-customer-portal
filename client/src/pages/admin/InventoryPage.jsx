@@ -2981,19 +2981,9 @@ const COMPLETION_SERVICE_LINES = [
   { id: "palm", label: "Palm" },
 ];
 
-function ExpandedProduct({
-  product,
-  vendors,
-  canAuthor = false,
-  onSave,
-  onInventoryChanged,
-  showToast,
-}) {
-  const [vendorId, setVendorId] = useState(vendors[0]?.id || "");
-  const [price, setPrice] = useState("");
-  const [qty, setQty] = useState("");
-  const [movements, setMovements] = useState([]);
-  const [movementLoading, setMovementLoading] = useState(true);
+// Auto-reorder + per-visit consumable authoring for one product: its own
+// form state and save path (PUT /admin/inventory/:id).
+function AutoReorderEditor({ product, vendors, showToast, onInventoryChanged }) {
   const [autoForm, setAutoForm] = useState({
     autoReorderEnabled: !!product.autoReorderEnabled,
     autoReorderVendorId: product.autoReorderVendorId || "",
@@ -3003,66 +2993,6 @@ function ExpandedProduct({
     perCompletionServiceLines: Array.isArray(product.perCompletionServiceLines) ? product.perCompletionServiceLines : null,
   });
   const [autoSaving, setAutoSaving] = useState(false);
-  const [adjustForm, setAdjustForm] = useState({
-    movementType: "restock",
-    quantity: "",
-    unit: product.inventoryUnit || "oz",
-    lotNumber: "",
-    reason: "",
-    note: "",
-  });
-
-  const loadMovements = useCallback(async () => {
-    setMovementLoading(true);
-    try {
-      // Movements are owner-only (rows carry costUsed) — a technician's
-      // expanded product just shows no history instead of erroring.
-      const data = await adminFetch(`/admin/inventory/${product.id}/movements`)
-        .catch(() => ({ movements: [] }));
-      setMovements(data.movements || []);
-    } catch {
-      setMovements([]);
-    } finally {
-      setMovementLoading(false);
-    }
-  }, [product.id]);
-
-  useEffect(() => {
-    loadMovements();
-    setAdjustForm((f) => ({
-      ...f,
-      unit: product.inventoryUnit || f.unit || "oz",
-    }));
-  }, [loadMovements, product.inventoryUnit]);
-
-  const submitAdjustment = async () => {
-    if (!adjustForm.quantity || !adjustForm.unit) {
-      showToast?.("Amount and unit required");
-      return;
-    }
-    try {
-      await adminFetch(`/admin/inventory/${product.id}/adjust`, {
-        method: "POST",
-        body: JSON.stringify({
-          ...adjustForm,
-          quantity: Number(adjustForm.quantity),
-        }),
-      });
-      showToast?.("Inventory adjusted");
-      setAdjustForm((f) => ({
-        ...f,
-        quantity: "",
-        lotNumber: "",
-        reason: "",
-        note: "",
-      }));
-      await loadMovements();
-      onInventoryChanged?.();
-    } catch (e) {
-      showToast?.(`Failed: ${e.message}`);
-    }
-  };
-
   const saveAutoReorder = async () => {
     setAutoSaving(true);
     try {
@@ -3085,70 +3015,7 @@ function ExpandedProduct({
     }
   };
 
-  const queueRefresh = async (vendorPricing) => {
-    try {
-      const data = await adminFetch(
-        `/admin/inventory/${product.id}/pricing/refresh`,
-        {
-          method: "POST",
-          body: JSON.stringify({ vendorId: vendorPricing.vendorId }),
-        },
-      );
-      showToast?.(data.message || "Refresh queued");
-    } catch (e) {
-      showToast?.(`Refresh failed: ${e.message}`);
-    }
-  };
-
   return (
-    <div style={{ padding: 12 }}>
-      {" "}
-      <div
-        style={{
-          display: "flex",
-          gap: 16,
-          marginBottom: 12,
-          flexWrap: "wrap",
-          fontSize: 12,
-        }}
-      >
-        {product.formulation && (
-          <span style={{ color: D.muted }}>
-            Formulation:{" "}
-            <span style={{ color: D.text }}>{product.formulation}</span>
-          </span>
-        )}
-        {product.unitSizeOz && (
-          <span style={{ color: D.muted }}>
-            Size (oz):{" "}
-            <span style={{ color: D.text }}>{product.unitSizeOz}</span>
-          </span>
-        )}
-        {product.sku && (
-          <span style={{ color: D.muted }}>
-            SKU: <span style={{ color: D.text }}>{product.sku}</span>
-          </span>
-        )}
-        <span style={{ color: D.muted }}>
-          Stock:{" "}
-          <span style={{ color: product.lowStock ? D.red : D.text }}>
-            {product.inventoryOnHand != null
-              ? `${product.inventoryOnHand} ${product.inventoryUnit || ""}`
-              : "not set"}
-          </span>
-        </span>
-        {product.lowStockThreshold != null && (
-          <span style={{ color: D.muted }}>
-            Low at:{" "}
-            <span style={{ color: D.text }}>
-              {product.lowStockThreshold} {product.inventoryUnit || ""}
-            </span>
-          </span>
-        )}
-      </div>
-      {/* Authoring only: PUT /admin/inventory/:id is requireAdmin, so a
-          technician would only ever see a 403 here. */}
-      {canAuthor && (
       <div style={{ marginBottom: 12 }}>
         <div
           style={{
@@ -3245,6 +3112,147 @@ function ExpandedProduct({
           })}
         </div>
       </div>
+  );
+}
+
+function ExpandedProduct({
+  product,
+  vendors,
+  canAuthor = false,
+  onSave,
+  onInventoryChanged,
+  showToast,
+}) {
+  const [vendorId, setVendorId] = useState(vendors[0]?.id || "");
+  const [price, setPrice] = useState("");
+  const [qty, setQty] = useState("");
+  const [movements, setMovements] = useState([]);
+  const [movementLoading, setMovementLoading] = useState(true);
+  const [adjustForm, setAdjustForm] = useState({
+    movementType: "restock",
+    quantity: "",
+    unit: product.inventoryUnit || "oz",
+    lotNumber: "",
+    reason: "",
+    note: "",
+  });
+
+  const loadMovements = useCallback(async () => {
+    setMovementLoading(true);
+    try {
+      // Movements are owner-only (rows carry costUsed) — a technician's
+      // expanded product just shows no history instead of erroring.
+      const data = await adminFetch(`/admin/inventory/${product.id}/movements`)
+        .catch(() => ({ movements: [] }));
+      setMovements(data.movements || []);
+    } catch {
+      setMovements([]);
+    } finally {
+      setMovementLoading(false);
+    }
+  }, [product.id]);
+
+  useEffect(() => {
+    loadMovements();
+    setAdjustForm((f) => ({
+      ...f,
+      unit: product.inventoryUnit || f.unit || "oz",
+    }));
+  }, [loadMovements, product.inventoryUnit]);
+
+  const submitAdjustment = async () => {
+    if (!adjustForm.quantity || !adjustForm.unit) {
+      showToast?.("Amount and unit required");
+      return;
+    }
+    try {
+      await adminFetch(`/admin/inventory/${product.id}/adjust`, {
+        method: "POST",
+        body: JSON.stringify({
+          ...adjustForm,
+          quantity: Number(adjustForm.quantity),
+        }),
+      });
+      showToast?.("Inventory adjusted");
+      setAdjustForm((f) => ({
+        ...f,
+        quantity: "",
+        lotNumber: "",
+        reason: "",
+        note: "",
+      }));
+      await loadMovements();
+      onInventoryChanged?.();
+    } catch (e) {
+      showToast?.(`Failed: ${e.message}`);
+    }
+  };
+
+  const queueRefresh = async (vendorPricing) => {
+    try {
+      const data = await adminFetch(
+        `/admin/inventory/${product.id}/pricing/refresh`,
+        {
+          method: "POST",
+          body: JSON.stringify({ vendorId: vendorPricing.vendorId }),
+        },
+      );
+      showToast?.(data.message || "Refresh queued");
+    } catch (e) {
+      showToast?.(`Refresh failed: ${e.message}`);
+    }
+  };
+
+  return (
+    <div style={{ padding: 12 }}>
+      {" "}
+      <div
+        style={{
+          display: "flex",
+          gap: 16,
+          marginBottom: 12,
+          flexWrap: "wrap",
+          fontSize: 12,
+        }}
+      >
+        {product.formulation && (
+          <span style={{ color: D.muted }}>
+            Formulation:{" "}
+            <span style={{ color: D.text }}>{product.formulation}</span>
+          </span>
+        )}
+        {product.unitSizeOz && (
+          <span style={{ color: D.muted }}>
+            Size (oz):{" "}
+            <span style={{ color: D.text }}>{product.unitSizeOz}</span>
+          </span>
+        )}
+        {product.sku && (
+          <span style={{ color: D.muted }}>
+            SKU: <span style={{ color: D.text }}>{product.sku}</span>
+          </span>
+        )}
+        <span style={{ color: D.muted }}>
+          Stock:{" "}
+          <span style={{ color: product.lowStock ? D.red : D.text }}>
+            {product.inventoryOnHand != null
+              ? `${product.inventoryOnHand} ${product.inventoryUnit || ""}`
+              : "not set"}
+          </span>
+        </span>
+        {product.lowStockThreshold != null && (
+          <span style={{ color: D.muted }}>
+            Low at:{" "}
+            <span style={{ color: D.text }}>
+              {product.lowStockThreshold} {product.inventoryUnit || ""}
+            </span>
+          </span>
+        )}
+      </div>
+      {/* Authoring only: PUT /admin/inventory/:id is requireAdmin, so a
+          technician would only ever see a 403 here. */}
+      {canAuthor && (
+        <AutoReorderEditor product={product} vendors={vendors} showToast={showToast} onInventoryChanged={onInventoryChanged} />
       )}
       {product.vendorPricing.length > 0 && (
         <div style={{ marginBottom: 12 }}>
