@@ -319,3 +319,19 @@ test('the episode is chosen from the row AS LOCKED — a stamp that landed betwe
     db.transaction = orig;
   }
 });
+
+test('gate OFF: the episode is still minted under the customers row lock', async () => {
+  seedCustomer();
+  const orig = db.transaction;
+  db.transaction = async (fn) => { db.__tables.customers[0].churn_episode_id = 'ep-race-legacy'; return orig(fn); };
+  try {
+    const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', requestId: 'req-4' });
+    expect(result.churned).toBe(true);
+    expect(db.__tables.customers[0].churn_episode_id).toBe('ep-race-legacy');
+    expect(result.churnEpisodeId).toBe('ep-race-legacy');
+    // H0 residue untouched: tier and rate stay (byte-identical wind-down).
+    expect(db.__tables.customers[0].waveguard_tier).toBe('Gold');
+  } finally {
+    db.transaction = orig;
+  }
+});

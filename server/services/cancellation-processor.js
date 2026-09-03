@@ -892,11 +892,17 @@ async function processCancellationRequest({
           await disarmPaymentRails(trx);
         });
       } else {
-        // Legacy (H0) path, byte-identical: sequential writes, and on failure
-        // the catch below records 'churn' and CONTINUES like H0 did. The
-        // episode read is unlocked here (no transaction to lock in).
-        await mintEpisode(db);
-        await db('customers').where({ id: customerId }).update(update);
+        // Legacy (H0) path: sequential writes, and on failure the catch
+        // below records 'churn' and CONTINUES like H0 did. The customers
+        // write is the one statement it always was, now under the row lock
+        // so the episode is minted from the row as locked here too (no
+        // rung 6: this transaction takes no other lock, so it cannot sit
+        // in a cycle with the writers that do).
+        await db.transaction(async (trx) => {
+          await trx('customers').where({ id: customerId }).forUpdate().first('id');
+          await mintEpisode(trx);
+          await trx('customers').where({ id: customerId }).update(update);
+        });
         await disarmPaymentRails(db);
       }
 
