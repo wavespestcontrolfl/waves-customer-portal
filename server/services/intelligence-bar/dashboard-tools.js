@@ -904,13 +904,18 @@ const REPORT_ACTION_EVENTS = [
   'report_question_asked',
 ];
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Shape AND calendar validity: Date.UTC normalizes 2026-02-31 to Mar 3, so a
+// shape-only check would run the query for a different day than echoed.
+function isRealEtDate(value) {
+  return ISO_DATE_RE.test(value) && etDateString(parseETDateTime(`${value}T12:00`)) === value;
+}
 
 async function getReportEngagement(input = {}) {
   const now = new Date();
   const from = input.date_from || etDateString(addETDays(now, -30));
   const to = input.date_to || etDateString(now);
-  if (!ISO_DATE_RE.test(from) || !ISO_DATE_RE.test(to)) {
-    return { error: 'date_from and date_to must be YYYY-MM-DD' };
+  if (!isRealEtDate(from) || !isRealEtDate(to)) {
+    return { error: 'date_from and date_to must be real YYYY-MM-DD dates' };
   }
   // ET wall-clock day bounds as real Dates — the send timestamps are
   // timestamptz, so a naive string here would shift the window 4-5 hours.
@@ -955,15 +960,16 @@ async function getReportEngagement(input = {}) {
       FROM service_report_events sre
       JOIN cohort rpt ON rpt.id = sre.service_record_id
       WHERE sre.event_name IN (${actionList})
+        AND sre.occurred_at >= rpt.first_sent_at
       GROUP BY sre.service_record_id
     )
     SELECT rpt.service_line,
            GROUPING(rpt.service_line) AS is_total,
            COUNT(*)::int AS sent,
-           (COUNT(*) FILTER (WHERE rpt.report_viewed_at IS NOT NULL))::int AS opened,
+           (COUNT(*) FILTER (WHERE rpt.report_viewed_at >= rpt.first_sent_at))::int AS opened,
            percentile_cont(0.5) WITHIN GROUP (
              ORDER BY EXTRACT(EPOCH FROM (rpt.report_viewed_at - rpt.first_sent_at)) / 60.0
-           ) FILTER (WHERE rpt.report_viewed_at IS NOT NULL AND rpt.report_viewed_at >= rpt.first_sent_at) AS median_minutes_to_open,
+           ) FILTER (WHERE rpt.report_viewed_at >= rpt.first_sent_at) AS median_minutes_to_open,
            ${actionCounts}
     FROM cohort rpt
     LEFT JOIN acts act ON act.service_record_id = rpt.id
@@ -992,9 +998,9 @@ async function getReportEngagement(input = {}) {
     total: totalRow ? shape(totalRow) : shape({ sent: 0, opened: 0 }),
     by_service_line: byLine.map((r) => ({ service_line: r.service_line, ...shape(r) })),
     notes: [
-      'opened = the report page was viewed at least once by the customer (first-view stamp; staff/static views do not count)',
-      'median_minutes_to_open counts opens that happened after the first send',
-      'action counts are distinct reports with at least one such event, any time after the send',
+      'opened = the customer first viewed the report page at or after the first send (staff/static views never stamp; a view that predates every send is not counted)',
+      'median_minutes_to_open is over those post-send first opens',
+      'action counts are distinct reports with at least one such event at or after the first send',
       "service_line 'unknown' = records completed before the line was stamped on the record",
     ],
   };

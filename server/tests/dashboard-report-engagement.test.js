@@ -50,6 +50,16 @@ describe('get_report_engagement', () => {
     expect(rawCalls[0].sql).toMatch(/first_sent_at >= \? AND snd\.first_sent_at < \?/);
   });
 
+  test('only counts opens and in-report actions that happened at or after the first send', async () => {
+    await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
+    const { sql } = rawCalls[0];
+    // A portal view or an event that predates every send is pre-send
+    // engagement, not a response to the report we sent.
+    expect(sql).toMatch(/AND sre\.occurred_at >= rpt\.first_sent_at/);
+    expect(sql).toMatch(/FILTER \(WHERE rpt\.report_viewed_at >= rpt\.first_sent_at\)\)::int AS opened/);
+    expect(sql).not.toMatch(/report_viewed_at IS NOT NULL/);
+  });
+
   test('defaults to the last 30 ET days ending today', async () => {
     const res = await executeDashboardTool('get_report_engagement', {});
     expect(res.period.to).toBe(etDateString(new Date()));
@@ -90,7 +100,11 @@ describe('get_report_engagement', () => {
   });
 
   test('rejects malformed or inverted dates before touching the DB', async () => {
-    expect(await executeDashboardTool('get_report_engagement', { date_from: 'last month' })).toEqual({ error: 'date_from and date_to must be YYYY-MM-DD' });
+    expect(await executeDashboardTool('get_report_engagement', { date_from: 'last month' })).toEqual({ error: 'date_from and date_to must be real YYYY-MM-DD dates' });
+    // Shape-valid but not a calendar date: Date.UTC would silently roll it
+    // to Mar 3 while the response echoed Feb 31.
+    expect(await executeDashboardTool('get_report_engagement', { date_from: '2026-02-31', date_to: '2026-03-31' })).toEqual({ error: 'date_from and date_to must be real YYYY-MM-DD dates' });
+    expect(await executeDashboardTool('get_report_engagement', { date_from: '2026-01-01', date_to: '2026-99-01' })).toEqual({ error: 'date_from and date_to must be real YYYY-MM-DD dates' });
     expect(await executeDashboardTool('get_report_engagement', { date_from: '2026-09-02', date_to: '2026-09-01' })).toEqual({ error: 'date_from must be on or before date_to' });
     expect(rawCalls).toHaveLength(0);
   });
