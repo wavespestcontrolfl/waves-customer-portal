@@ -398,7 +398,7 @@ describe('Google Business review sync', () => {
     mark.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); enrollReviewThankYou.mockRestore();
   });
 
-  test('three consecutive row-specific failures do NOT trip the breaker: every row is still visited and reconcile excludes the failed ones', async () => {
+  test('row-specific failures never trip the breaker: every row is still visited and reconcile excludes the failed ones', async () => {
     const reviews = Array.from({ length: 5 }, (_, i) => ({
       name: `accounts/1/locations/2/reviews/rev-${i}`, reviewer: { displayName: `Reviewer ${i}` }, starRating: 'FIVE', comment: 'ok', createTime: '2026-05-14T01:22:29Z',
     }));
@@ -424,7 +424,7 @@ describe('Google Business review sync', () => {
     upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
   });
 
-  test('three consecutive CONNECTION-class failures trip the breaker: the location aborts to the Places fallback with the error, not a row-by-row crawl', async () => {
+  test('three CONNECTION-class failures in a run trip the breaker (adjacent or not): the location aborts to the Places fallback with the error', async () => {
     const reviews = Array.from({ length: 6 }, (_, i) => ({
       name: `accounts/1/locations/2/reviews/rev-${i}`, reviewer: { displayName: `Reviewer ${i}` }, starRating: 'FIVE', comment: 'ok', createTime: '2026-05-14T01:22:29Z',
     }));
@@ -435,10 +435,12 @@ describe('Google Business review sync', () => {
       return jsonResponse({ reviews });
     });
     // A socket-level code (not a SQLSTATE) is connection-class too (pre-push audit r6);
-    // the first two rows store, then the connection dies.
+    // intermittent: fail, store, fail, store, fail → three systemic failures
+    // in the run trip the breaker even though none were adjacent (codex r4 P1).
     let calls = 0;
     const upsert = jest.spyOn(service, '_upsertGbpReview').mockImplementation(async () => {
-      if (++calls <= 2) return { id: `stored-${calls}`, inserted: calls === 1 };
+      calls++;
+      if (calls === 2 || calls === 4) return { id: `stored-${calls}`, inserted: calls === 2 };
       throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
     });
     const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
@@ -452,8 +454,8 @@ describe('Google Business review sync', () => {
     // The two rows stored before the trip are counted (codex r3 P2).
     expect(result.synced).toBe(2);
     expect(result.new).toBe(1);
-    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp', error: expect.stringMatching(/3 consecutive review rows failed on connection-class errors.*ECONNRESET/) })]);
-    expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/3 consecutive review rows failed/));
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp', error: expect.stringMatching(/3 review rows failed on connection-class errors this run.*ECONNRESET/) })]);
+    expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/3 review rows failed on connection-class errors/));
     expect(places).toHaveBeenCalledTimes(1);
     upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
   });

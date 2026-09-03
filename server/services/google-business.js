@@ -26,7 +26,7 @@ function firstDefined(...values) {
   return null;
 }
 
-// Consecutive CONNECTION-class row failures that abort a location's GBP
+// CONNECTION-class row failures in one run that abort a location's GBP
 // loop as systemic (see _storeGbpFeed).
 const GBP_ROW_FAILURE_BREAKER = 3;
 
@@ -1805,12 +1805,13 @@ class GoogleBusinessService {
    * that row and keeps the rest of the feed; the caller rings a dedicated
    * alert with the real error and reconciles around the failed rows.
    *
-   * Circuit breaker (codex r1 P1 / r2 P1): only CONNECTION-class failures
-   * trip it — a database that is down fails every row the same way, and
-   * walking a 100-review feed one pool timeout at a time would hold the
-   * location lock for the rest of the hour. Row-specific errors (integrity,
-   * data) never trip it: three adjacent unique-key conflicts are three bad
-   * rows, and aborting there would freeze every later review forever.
+   * Circuit breaker (codex r1 P1 / r2 P1 / r4 P1): only CONNECTION-class
+   * failures count, and they count for the whole run — a database that is
+   * down or saturated fails rows the same way whether or not one squeaks
+   * through in between, and walking a 100-review feed one pool timeout at a
+   * time would hold the location lock for the rest of the hour. Row-specific
+   * errors (integrity, data) never count: three unique-key conflicts are
+   * three bad rows, and aborting there would freeze every later review.
    *
    * Returns { stored, inserted, failedReviewNames, cause, errors } — throws
    * only when the breaker trips (the caller's location catch takes over).
@@ -1819,7 +1820,10 @@ class GoogleBusinessService {
     const errors = [];
     const rowFailures = [];
     let inserted = 0;
-    let consecutiveSystemic = 0;
+    // Counted for the whole run, not adjacently: under intermittent pool
+    // saturation one success between timeouts must not reset the budget
+    // (codex r4 P1) — three connection-class failures in a feed is systemic.
+    let systemicFailures = 0;
     for (const review of reviews) {
       const normalized = this._normalizeGbpReview(review, loc);
       const name = normalized.gbp_review_name || normalized.google_review_id || '?';
@@ -1830,13 +1834,12 @@ class GoogleBusinessService {
         // (no reconcile exclusion, no degraded alert) — it joins errors so
         // the run is not reported clean (pre-push audit r3).
         if (result.sideEffectError) errors.push({ error: `post-write side effect failed for ${name}: ${result.sideEffectError}`, source: 'gbp_side_effect' });
-        consecutiveSystemic = 0;
       } catch (rowErr) {
         rowFailures.push({ review: name, error: rowErr.message });
         logger.error(`[gbp] review upsert failed for ${loc.name} (${name}): ${rowErr.message}`);
-        if (!isSystemicDbFailure(rowErr)) { consecutiveSystemic = 0; continue; }
-        if (++consecutiveSystemic >= GBP_ROW_FAILURE_BREAKER) {
-          const abort = new Error(`${consecutiveSystemic} consecutive review rows failed on connection-class errors — aborting the location (last: ${rowErr.message})`);
+        if (!isSystemicDbFailure(rowErr)) continue;
+        if (++systemicFailures >= GBP_ROW_FAILURE_BREAKER) {
+          const abort = new Error(`${systemicFailures} review rows failed on connection-class errors this run — aborting the location (last: ${rowErr.message})`);
           // Rows stored before the trip are durable — hand the counts to the
           // caller so the run log and the manual sync response report them
           // (codex r3 P2).
