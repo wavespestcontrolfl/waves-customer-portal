@@ -426,8 +426,16 @@ function run(args, deps = {}) {
   const fetch = deps.fetchCodexComments || fetchCodexComments;
   const prs = list(args);
   const findings = [];
+  // AGENTS.md at the commit EACH COMMENT reviewed (original_commit_id) —
+  // AGENTS.md can change between rounds of one PR, so the final head would
+  // mis-file an older round's citation. Memoized per SHA for this run
+  // (agentsMdAt also caches on disk by SHA).
+  const linesAt = new Map();
+  const agentsLinesFor = (sha) => {
+    if (!linesAt.has(sha)) linesAt.set(sha, (deps.agentsMdAt || agentsMdAt)(args.repo, sha));
+    return linesAt.get(sha);
+  };
   for (const pr of prs) {
-    let prAgentsLines;
     for (const c of fetch(args.repo, pr.number)) {
       // Bot comments only, re-checked here so an injected fetcher (tests,
       // a cached dump) cannot smuggle human comments into the corpus.
@@ -435,11 +443,11 @@ function run(args, deps = {}) {
       const f = parseFinding(c, pr);
       if (!f) continue;
       if (f.agentsLines) {
-        // PR-head AGENTS.md only. When it cannot be fetched the citation
+        // Review-commit AGENTS.md only. When it cannot be fetched the citation
         // stays unresolved (null) — resolving against the CURRENT local file
         // is exactly the mis-filing this lookup exists to avoid (Codex r1).
-        if (prAgentsLines === undefined) prAgentsLines = (deps.agentsMdAt || agentsMdAt)(args.repo, pr.headRefOid);
-        f.agentsRule = prAgentsLines ? agentsRuleTitle(f.agentsLines, prAgentsLines) : null;
+        const lines = agentsLinesFor(c.original_commit_id || pr.headRefOid);
+        f.agentsRule = lines ? agentsRuleTitle(f.agentsLines, lines) : null;
       }
       findings.push(f);
     }

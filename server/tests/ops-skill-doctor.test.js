@@ -81,8 +81,11 @@ describe('run + clusterFindings', () => {
     expect(clusters.find((c) => c.kind === 'phrase' && /transaction/.test(c.label))).toBeUndefined();
   });
 
-  test('cited rules resolve against AGENTS.md at the PR head, not the local file', () => {
-    const { clusters } = runFixture();
+  test('cited rules resolve against AGENTS.md at each comment\'s review commit, not the local file or the final head', () => {
+    const seen = [];
+    const { clusters } = runFixture({ agentsMdAt: (_repo, sha) => { seen.push(sha); return AGENTS_AT_HEAD.split('\n'); } });
+    // Every fixture comment carries original_commit_id, so the PR head is never asked for.
+    expect(seen).toEqual(['abc1234567890']);
     const rule = clusters.find((c) => c.kind === 'rule');
     expect(rule.label).toBe('Public route surface');
     expect(rule.prs).toEqual([1, 3]);
