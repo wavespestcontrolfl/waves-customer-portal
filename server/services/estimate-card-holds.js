@@ -470,10 +470,18 @@ async function liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds, 
     'ss.id as service_id', 'ss.visit_id', 'ss.status as visit_status', 'ss.source_action', 'ss.customer_confirmed',
     'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.service_type', 'ss.reschedule_token',
   ];
-  const holdRows = await db('estimate_card_holds as h')
+  // Each rail contributes only while ITS kill switch is on (Codex #3828 r3
+  // P1): with a rail dark its charge entry point returns feature_disabled
+  // and the cancel previews report no collectible fee, so a notice would be
+  // a false money warning during a rollback or staggered rollout.
+  // Hold rail: read the customer's live holds WITHOUT the wallet filter and
+  // dedupe each visit to its newest row first (r3 P2) — the wallet filter
+  // applied inside the query would let an older card's hold survive when
+  // the newest hold (the one heldCardForScheduledService charges) points
+  // at a card no longer in the wallet.
+  const holdRows = !isCardHoldEnabled() ? [] : await db('estimate_card_holds as h')
     .join('scheduled_services as ss', 'ss.id', 'h.scheduled_service_id')
     .where({ 'h.customer_id': customerId, 'h.status': 'held' })
-    .whereIn('h.stripe_payment_method_id', ids)
     .whereNull('h.parked_at')
     .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
     // Newest hold first, so the first-seen dedupe below keeps the row the
@@ -481,12 +489,17 @@ async function liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds, 
     // ordering — Codex #3828 r2 P2).
     .orderByRaw('h.held_at DESC NULLS LAST, h.created_at DESC')
     .select([...visitCols, 'h.stripe_payment_method_id as pm_id', 'h.no_show_fee_amount']);
-  const apptRows = await db('appointment_card_requests as r')
+  // Appointment rail: the same frozen-terms bar feeEligibleRequestForVisit
+  // enforces (r3 P2) — a positive agreed amount AND window; a row that
+  // completed without chargeable terms never defaults to today's fee.
+  const apptRows = !require('../config/feature-gates').isEnabled('apptCardNoShowFee') ? [] : await db('appointment_card_requests as r')
     .join('scheduled_services as ss', 'ss.id', 'r.scheduled_service_id')
     .where({ 'r.customer_id': customerId, 'r.status': 'completed' })
     .whereIn('r.stripe_payment_method_id', ids)
     .whereNotNull('r.fee_agreed_at')
     .whereNull('r.fee_status')
+    .where('r.no_show_fee_amount', '>', 0)
+    .where('r.cancel_window_hours', '>', 0)
     .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
     // Lane exclusivity, same rule as feeEligibleRequestForVisit (r2 P2): a
     // hold row in ANY status owns the visit's one fee event, so the
@@ -500,13 +513,17 @@ async function liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds, 
   const live = [];
   for (const [lane, rows] of [['card_hold', holdRows], ['appointment_card', apptRows]]) {
     for (const row of rows) {
+      const serviceId = String(row.service_id);
+      if (seen.has(serviceId)) continue;
+      // Claim the visit for this (newest) row before any other filter: a
+      // hold on a card outside the wallet still owns the visit — no older
+      // card's hold may be flagged in its place.
+      seen.add(serviceId);
+      if (!ids.includes(row.pm_id)) continue;
       const start = composeScheduledApptTime(row);
       const startMs = start ? start.getTime() : NaN;
       if (!Number.isFinite(startMs) || startMs <= nowMs) continue;
-      const serviceId = String(row.service_id);
-      if (seen.has(serviceId)) continue;
       if (lane === 'appointment_card' && await appointmentRailPayerBilled({ customerId, scheduledServiceId: serviceId })) continue;
-      seen.add(serviceId);
       live.push({
         lane,
         pmId: row.pm_id,
@@ -514,6 +531,9 @@ async function liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds, 
         start,
         serviceType: row.service_type || null,
         rescheduleToken: row.reschedule_token || null,
+        // Hold rail: frozen amount, else the configured fee — the same
+        // precedence chargeNoShowFee bills. Appointment rail: frozen only
+        // (the query already required it positive).
         feeAmount: Number(row.no_show_fee_amount) > 0 ? Number(row.no_show_fee_amount) : cardHoldNoShowFee(),
         visit: {
           id: serviceId,

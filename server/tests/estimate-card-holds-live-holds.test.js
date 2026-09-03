@@ -14,7 +14,7 @@ jest.mock('../models/db', () => {
     mockCalls.push(call);
     const chain = {};
     chain.join = jest.fn(() => chain);
-    chain.where = jest.fn((c) => { call.where.push(c); return chain; });
+    chain.where = jest.fn((...args) => { call.where.push(args.length === 1 ? args[0] : args); return chain; });
     chain.whereIn = jest.fn((c, v) => { call.whereIn.push([c, v]); return chain; });
     chain.whereNull = jest.fn((c) => { call.whereNull.push(c); return chain; });
     chain.whereNotNull = jest.fn((c) => { call.whereNotNull.push(c); return chain; });
@@ -40,7 +40,8 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/stripe', () => ({}));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gates: {} }));
+let mockApptRailOn = true;
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((name) => name === 'apptCardNoShowFee' && mockApptRailOn), gates: {} }));
 jest.mock('../services/appointment-reminders', () => ({
   composeScheduledApptTime: (svc) => (svc.scheduled_date && svc.window_start
     ? new Date(`${svc.scheduled_date}T${svc.window_start}-04:00`)
@@ -61,7 +62,8 @@ const visit = (over) => ({
 const run = (ids = ['pm_1', 'pm_2']) => liveHoldsForPaymentMethods({ customerId: 'c1', stripePaymentMethodIds: ids, now });
 const flat = (map) => [...map.entries()].flatMap(([pm, holds]) => holds.map((h) => [pm, h.lane, h.scheduledServiceId, h.feeAmount]));
 
-beforeEach(() => { mockRows = {}; mockCalls = []; mockResolvePayer.mockClear().mockResolvedValue({ payerId: null }); logger.warn.mockClear(); });
+beforeEach(() => { mockRows = {}; mockCalls = []; mockApptRailOn = true; process.env.ONE_TIME_CARD_HOLD = 'true'; mockResolvePayer.mockClear().mockResolvedValue({ payerId: null }); logger.warn.mockClear(); });
+afterEach(() => { delete process.env.ONE_TIME_CARD_HOLD; });
 
 test('empty args: no read', async () => {
   expect((await liveHoldsForPaymentMethods({ customerId: null, stripePaymentMethodIds: ['pm_1'] })).size).toBe(0);
@@ -69,17 +71,23 @@ test('empty args: no read', async () => {
   expect(mockCalls).toHaveLength(0);
 });
 
-test('ONE read per rail carrying the live-row predicates and the whole (deduped) pm list', async () => {
+test('ONE read per rail carrying the live-row predicates; the hold read is customer-wide, the appointment read wallet-filtered with chargeable frozen terms', async () => {
   await run(['pm_1', 'pm_2', 'pm_1']);
   expect(mockCalls).toHaveLength(2);
   const [holds, appts] = mockCalls;
   expect(holds.table).toBe('estimate_card_holds as h');
-  expect(holds.where[0]).toEqual({ 'h.customer_id': 'c1', 'h.status': 'held' });
-  expect(holds.whereIn).toEqual([['h.stripe_payment_method_id', ['pm_1', 'pm_2']]]);
+  expect(holds.where).toEqual([{ 'h.customer_id': 'c1', 'h.status': 'held' }]);
+  // No wallet filter on the hold rail: the newest hold per visit is chosen
+  // across ALL cards first (r3 P2), then kept only if it is in the wallet.
+  expect(holds.whereIn).toEqual([]);
   expect(holds.whereNull).toEqual(['h.parked_at']);
   expect(holds.whereNotIn[0]).toEqual(['ss.status', ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show']]);
   expect(appts.table).toBe('appointment_card_requests as r');
-  expect(appts.where[0]).toEqual({ 'r.customer_id': 'c1', 'r.status': 'completed' });
+  expect(appts.where).toEqual([
+    { 'r.customer_id': 'c1', 'r.status': 'completed' },
+    ['r.no_show_fee_amount', '>', 0],
+    ['r.cancel_window_hours', '>', 0],
+  ]);
   expect(appts.whereIn).toEqual([['r.stripe_payment_method_id', ['pm_1', 'pm_2']]]);
   expect(appts.whereNotNull).toEqual(['r.fee_agreed_at']);
   expect(appts.whereNull).toEqual(['r.fee_status']);
@@ -98,16 +106,39 @@ test('duplicate held rows for one visit: the first (newest-ordered) row wins, th
   expect(flat(await run())).toEqual([['pm_2', 'card_hold', 'svc-a', 60]]);
 });
 
+test('the newest hold on a card OUTSIDE the wallet still owns the visit — the older in-wallet card is not flagged', async () => {
+  mockRows.estimate_card_holds = [visit({ service_id: 'svc-a', pm_id: 'pm_gone' }), visit({ service_id: 'svc-a', pm_id: 'pm_1' })];
+  expect((await run()).size).toBe(0);
+});
+
+test('rail kill switches: a dark rail contributes nothing and is not read', async () => {
+  mockRows.estimate_card_holds = [visit({ service_id: 'svc-hold' })];
+  mockRows.appointment_card_requests = [visit({ service_id: 'svc-appt', scheduled_date: '2026-09-06' })];
+  delete process.env.ONE_TIME_CARD_HOLD;
+  expect(flat(await run()).map((r) => r[2])).toEqual(['svc-appt']);
+  expect(mockCalls.map((c) => c.table)).toEqual(['appointment_card_requests as r']);
+  mockCalls = []; process.env.ONE_TIME_CARD_HOLD = 'true'; mockApptRailOn = false;
+  expect(flat(await run()).map((r) => r[2])).toEqual(['svc-hold']);
+  expect(mockCalls.map((c) => c.table)).toEqual(['estimate_card_holds as h']);
+  mockCalls = []; delete process.env.ONE_TIME_CARD_HOLD;
+  expect((await run()).size).toBe(0);
+  expect(mockCalls).toEqual([]);
+});
+
 test('grouped by pm, soonest first, frozen fee kept, default fee when blank, visit columns for eligibility', async () => {
-  mockRows.estimate_card_holds = [visit({ service_id: 'svc-late', scheduled_date: '2026-09-20', no_show_fee_amount: '75.00' })];
+  mockRows.estimate_card_holds = [
+    visit({ service_id: 'svc-late', scheduled_date: '2026-09-20', no_show_fee_amount: '75.00' }),
+    visit({ service_id: 'svc-blank', scheduled_date: '2026-09-25', no_show_fee_amount: null }),
+  ];
   mockRows.appointment_card_requests = [
-    visit({ service_id: 'svc-soon', scheduled_date: '2026-09-05', reschedule_token: null, no_show_fee_amount: null }),
+    visit({ service_id: 'svc-soon', scheduled_date: '2026-09-05', reschedule_token: null }),
     visit({ service_id: 'svc-other', pm_id: 'pm_2', scheduled_date: '2026-09-08' }),
   ];
   const map = await run();
   expect(flat(map)).toEqual([
-    ['pm_1', 'appointment_card', 'svc-soon', cardHoldNoShowFee()],
+    ['pm_1', 'appointment_card', 'svc-soon', 49],
     ['pm_1', 'card_hold', 'svc-late', 75],
+    ['pm_1', 'card_hold', 'svc-blank', cardHoldNoShowFee()],
     ['pm_2', 'appointment_card', 'svc-other', 49],
   ]);
   const late = map.get('pm_1')[1];
