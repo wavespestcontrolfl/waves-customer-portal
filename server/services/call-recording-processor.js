@@ -11229,13 +11229,22 @@ const CallRecordingProcessor = {
         // is deliberately not adopted, so the persisted lead is
         // addressless and the ask must fire (codex r1 P1).
         // Fail-soft — a clarify hiccup never breaks the call.
+        // Both DNC shapes gate it — the V2 consent object AND the legacy
+        // flat extractor field (V2 off / unavailable / schema-failed still
+        // sets the flat one) (codex r5 P1).
         if (leadId && !droppedMidIntake && !extracted.is_spam && !extracted.is_voicemail && !isOutboundCall(call)
-          && v2Result?.extraction?.consent?.do_not_contact_request !== true) {
+          && v2Result?.extraction?.consent?.do_not_contact_request !== true
+          && extracted.do_not_contact_request !== true) {
           try {
             const clarifyAni = firstExternalPhone(call.from_phone);
             const hasStreet = !!String(extracted.address_line1 || '').trim();
             const unitOwed = clarifyUnitOwed;
-            const clarifyMissing = unitOwed ? ['unit_number'] : (!hasStreet ? ['street_address'] : []);
+            // The street ask is a NEW-prospect ask (same posture as the
+            // dropped-call text): an existing customer's saved address
+            // would retire it at approval, and the second-property case
+            // belongs to the office callback.
+            const streetOwed = !hasStreet && (!customerId || createdCustomerFromCall === true);
+            const clarifyMissing = unitOwed ? ['unit_number'] : (streetOwed ? ['street_address'] : []);
             if (clarifyAni && clarifyMissing.length) {
               // A durable draft must not outlive a lost claim: a peer may
               // have reprocessed the call as spam/DNC meanwhile (codex r1
@@ -11255,12 +11264,6 @@ const CallRecordingProcessor = {
                 customerId: customerId || null,
                 leadId,
                 callLogId: call.id,
-                // The call's OWN quote signals ride with the ask so a reply
-                // resumes the estimator only when a quote was actually
-                // requested/promised, with the true promise value (codex
-                // r4 P2).
-                quotePromised: callQuotePromised === true,
-                quoteRequested: callQuoteRequested === true,
                 source: unitOwed ? 'call_missing_unit_number' : 'call_missing_service_address',
                 channelProvenance: 'voice',
                 unitAskBuilding,
