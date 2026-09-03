@@ -3241,6 +3241,10 @@ router.get('/restock-requests', async (req, res, next) => {
       .limit(Math.max(1, Math.min(200, Number(req.query.limit || 100))));
     if (status !== 'all') query = query.whereIn('prr.status', status === 'active' ? ['open', 'ordered'] : [status]);
     const rows = await query;
+    // Technicians see the order outcome (placed / needs review), never the
+    // spend: a single-product order total IS the unit cost — owner-only,
+    // like every other cost field on this router (Codex r1 P2).
+    const showSpend = req.techRole === 'admin';
     res.json({
       requests: rows.map((row) => ({
         id: row.id,
@@ -3267,8 +3271,10 @@ router.get('/restock-requests', async (req, res, next) => {
           status: row.order_status,
           adapter: row.order_adapter,
           externalOrderNumber: row.order_number || null,
-          amountCents: row.order_amount_cents != null ? Number(row.order_amount_cents) : null,
-          error: row.order_error || null,
+          amountCents: showSpend && row.order_amount_cents != null ? Number(row.order_amount_cents) : null,
+          // The parked message can quote the total (cap wording): techs get
+          // the reason code only.
+          error: !row.order_error ? null : showSpend ? row.order_error : String(row.order_error).split(':')[0],
           placedAt: row.order_placed_at || null,
         } : null,
         neededBy: row.needed_by,

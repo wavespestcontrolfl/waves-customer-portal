@@ -2,17 +2,27 @@
  * procurement/adapters/siteone.js — SiteOne (siteone.com) browser-bot adapter.
  *
  * SiteOne has no ordering API, so this is an in-process Playwright bot that
- * signs in with the vendor row's encrypted login, searches the product's
- * SKU, sets the quantity, reads the CART TOTAL (cap pre-check, dry-run stop),
- * then at checkout reads the FINAL total with tax + shipping and runs the
- * dispatcher's beforeSubmit(totalCents) cap check on it immediately before
- * the place-order click — only then, and only when SITEONE_BOT_DRY_RUN is
- * not set, does it submit a bill-to-account order.
+ * signs in with the vendor row's encrypted login, EMPTIES the cart, searches
+ * the product's SKU, sets the quantity (PACKAGES — the dispatcher converts
+ * the inventory-unit request through the price row's pack size), verifies
+ * the cart holds exactly that one line at that count, reads the CART TOTAL
+ * (cap pre-check, dry-run stop), then at checkout selects bill-to-account,
+ * VERIFIES it is selected, reads the FINAL total with tax + shipping and
+ * runs the dispatcher's beforeSubmit(totalCents) cap check on it immediately
+ * before the place-order click — only then, and only when SITEONE_BOT_DRY_RUN
+ * is not set, does it submit. Whatever it left in the cart without
+ * submitting (dry run, refusal) it clears again before closing.
  *
  * Hard rules (same boundary as the backlink signup runner):
  *   - the bot NEVER types payment data; a checkout that asks for a card,
  *     an MFA code, or a terms acceptance parks the request (needs_review)
- *     with a screenshot, no submit.
+ *     with a screenshot, no submit. Bill-to-account must be CONFIRMED
+ *     selected (a checked radio) before the click — a saved card that shows
+ *     no card field is otherwise invisible to the card check (Codex r1 P1).
+ *   - the cart is never trusted: leftovers from an earlier dry run or a
+ *     refused run would ride along under the aggregate total, so the bot
+ *     starts from an empty cart and refuses unless the cart is exactly
+ *     [this SKU × this package count] (Codex r1 P1).
  *   - credentials are only written on https + a siteone.com host, inside a
  *     single page.evaluate that re-checks the host (veseris.js pattern).
  *   - egress lock: Chromium's DNS is pinned to the verified public IPs of
@@ -27,6 +37,8 @@
  * Contract with order-dispatch.js:
  *   quotesAtPlace = true → there is no static quote; the cart total is the
  *     quote and the cap check runs through beforeSubmit.
+ *   packagedQuantity = true → `quantity` is a package count, not an
+ *     inventory-unit amount (order-dispatch.js vendorOrderQuantity).
  *   place({ vendorSku, quantity, credentials, beforeSubmit, dryRun }) →
  *     { externalOrderNumber, amountCents, evidence, dryRun }
  *   RefusedError (err.refuse) = parked, nothing submitted.
@@ -55,6 +67,10 @@ const SELECTORS = Object.freeze({
   addToCart: 'button.add-to-cart, button#addToCartButton, button[data-action="add-to-cart"], button:has-text("Add to Cart")',
   unavailable: '.out-of-stock, .unavailable, :has-text("Out of Stock"), :has-text("Not available")',
   cartUrl: 'https://www.siteone.com/en/cart',
+  cartLine: '.cart-item, .entry-item, .cart-entry, [data-test="cart-line"], tr.item',
+  cartLineSku: '[data-product-code], .product-code, .sku, .item-code, [itemprop="sku"]',
+  cartLineQty: 'input[name*="qty" i], input[name*="quantity" i], input.qty, input[type="number"], .qty-value, .quantity-value',
+  cartRemove: 'button.remove, a.remove, button[data-action="remove"], .remove-item, button:has-text("Remove"), a:has-text("Remove")',
   cartTotal: '.cart-totals .total, .order-total .value, [data-test="cart-total"], .grand-total .price, .cart-total-value',
   checkoutButton: 'a.checkout-button, button.checkout-button, a:has-text("Checkout"), button:has-text("Checkout")',
   cardField: 'input[autocomplete="cc-number"], input[name*="cardNumber"], input[name*="card_number"], iframe[src*="card"]',
@@ -62,6 +78,7 @@ const SELECTORS = Object.freeze({
   termsCheckbox: 'input[type="checkbox"][name*="terms"], input[type="checkbox"][name*="Terms"]',
   checkoutTotal: '.checkout-totals .total, .order-summary .grand-total, [data-test="order-total"], .order-total .value, .grand-total .price',
   billToAccount: 'input[type="radio"][value*="account"], input[type="radio"][value*="ACCOUNT"], label:has-text("Bill to account")',
+  billToAccountSelected: 'input[type="radio"][value*="account"]:checked, input[type="radio"][value*="ACCOUNT"]:checked, input[type="radio"][value*="Account"]:checked',
   placeOrder: 'button#placeOrder, button.place-order, button:has-text("Place Order")',
   orderNumber: '.order-number, [data-test="order-number"], .confirmation-number, :has-text("Order #")',
 });
@@ -118,6 +135,43 @@ async function shot(page, label, evidence, upload) {
 
 async function visible(page, selector) {
   try { return (await page.locator(selector).first().isVisible({ timeout: 1500 })); } catch { return false; }
+}
+
+async function gotoCart(page) {
+  await page.goto(SELECTORS.cartUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+  if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone bot: cart navigation left the trusted host');
+  await page.waitForTimeout(1500);
+}
+
+// Every line in the cart as { sku, qty }: an unreadable SKU or quantity is
+// returned as-is (empty / NaN) so the caller's exact-match check fails closed.
+async function cartLines(page) {
+  const lines = page.locator(SELECTORS.cartLine);
+  const n = await lines.count();
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    const line = lines.nth(i);
+    const sku = (await line.locator(SELECTORS.cartLineSku).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim();
+    const qtyEl = line.locator(SELECTORS.cartLineQty).first();
+    let qtyText = await qtyEl.inputValue().catch(() => null);
+    if (qtyText == null) qtyText = await qtyEl.textContent().catch(() => null);
+    const qty = Number(String(qtyText ?? '').replace(/[^\d.]/g, ''));
+    out.push({ sku, qty: qtyText == null || qtyText === '' ? NaN : qty });
+  }
+  return out;
+}
+
+// Remove every line (bounded) and return how many are left. 0 = empty.
+async function clearCart(page) {
+  await gotoCart(page);
+  for (let i = 0; i < 25; i += 1) {
+    if (!(await page.locator(SELECTORS.cartLine).count())) return 0;
+    const remove = page.locator(SELECTORS.cartRemove).first();
+    if (!(await remove.count())) break;
+    await remove.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+  }
+  return page.locator(SELECTORS.cartLine).count();
 }
 
 async function login(page, creds) {
@@ -185,11 +239,13 @@ async function place(
   if (!pinned.has('www.siteone.com')) throw runLevel('siteone bot: www.siteone.com did not resolve to a public IPv4');
 
   let browser;
+  let page = null;
+  let submitted = false; // the place-order click happened: the cart is the vendor's now
   try {
     try { browser = await launchBrowser({ hostResolverRules: rules.join(',') }); }
     catch (e) { throw runLevel(`siteone bot: browser launch failed: ${String(e.message).slice(0, 120)}`); }
     const context = await browser.newContext({ serviceWorkers: 'block' });
-    const page = await context.newPage();
+    page = await context.newPage();
     if (typeof context.route === 'function') {
       await context.route('**/*', (route) => {
         const url = route.request().url();
@@ -208,6 +264,11 @@ async function place(
     }
 
     await login(page, credentials);
+
+    // Start from an EMPTY cart: whatever an earlier dry run or refused run
+    // left behind must not ride along under this order's total.
+    const leftover = await clearCart(page);
+    if (leftover) { await shot(page, 'cart-leftover', evidence, upload); throw new RefusedError('cart_not_empty', `SiteOne cart still holds ${leftover} line(s) the bot could not remove — empty it by hand`, evidence); }
 
     // Search the SKU, open the first hit, confirm its code, set the quantity.
     await page.locator(SELECTORS.searchInput).first().fill(String(vendorSku));
@@ -229,10 +290,18 @@ async function place(
     await page.locator(SELECTORS.addToCart).first().click();
     await page.waitForTimeout(2000);
 
+    // The cart must be exactly [this SKU × qty packages] — one line, the
+    // right code, the right count — before its total means anything.
+    await gotoCart(page);
+    const lines = await cartLines(page);
+    const exact = lines.length === 1 && normalizeSku(lines[0].sku) === normalizeSku(vendorSku) && lines[0].qty === qty;
+    if (!exact) {
+      await shot(page, 'cart', evidence, upload);
+      evidence.cartLines = lines.map((l) => ({ sku: l.sku.slice(0, 60), qty: Number.isFinite(l.qty) ? l.qty : null }));
+      throw new RefusedError('cart_mismatch', `SiteOne cart is not exactly ${vendorSku} × ${qty}: ${lines.length ? lines.map((l) => `${l.sku || '?'} × ${Number.isFinite(l.qty) ? l.qty : '?'}`).join(', ') : 'empty'}`, evidence);
+    }
+
     // Cart total = the quote. Screenshot BEFORE anything is submitted.
-    await page.goto(SELECTORS.cartUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
-    if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone bot: cart navigation left the trusted host');
-    await page.waitForTimeout(1500);
     const totalText = await page.locator(SELECTORS.cartTotal).first().textContent().catch(() => '');
     const amountCents = parseMoney(totalText);
     await shot(page, 'cart', evidence, upload);
@@ -255,8 +324,16 @@ async function place(
     if ((await terms.count()) && !(await terms.isChecked().catch(() => true))) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('terms_required', 'SiteOne checkout requires accepting terms — owner action', evidence); }
     const bill = page.locator(SELECTORS.billToAccount).first();
     if (!(await bill.count())) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('no_bill_to_account', 'bill-to-account option not offered at checkout', evidence); }
-    await bill.click().catch(() => {});
+    try { await bill.click({ timeout: 5000 }); }
+    catch (e) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('bill_to_account_unselectable', `bill-to-account option could not be selected (${String(e.message).slice(0, 80)})`, evidence); }
     await page.waitForTimeout(1500);
+    // Fail CLOSED: the click is not proof. A checkout defaulting to a saved
+    // card shows no card field, so only a CHECKED bill-to-account control
+    // clears the tender rule.
+    const accountSelected = (await page.locator(SELECTORS.billToAccountSelected).count().catch(() => 0)) > 0
+      || (await bill.isChecked().catch(() => false)) === true;
+    if (!accountSelected) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('bill_to_account_unverified', 'bill-to-account is not confirmed selected at checkout — the bot never submits on another tender', evidence); }
+    evidence.billToAccountVerified = true;
     // The CHECKOUT total (tax + shipping applied) is the binding amount: the
     // cart pre-check above only screens; this is the cap that gates the click.
     const checkoutText = await page.locator(SELECTORS.checkoutTotal).first().textContent().catch(() => '');
@@ -269,6 +346,7 @@ async function place(
 
     const placeBtn = page.locator(SELECTORS.placeOrder).first();
     if (!(await placeBtn.count())) throw new RefusedError('no_place_order', 'place-order button not found', evidence);
+    submitted = true;
     try {
       await placeBtn.click();
       await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
@@ -288,6 +366,12 @@ async function place(
     }
     return { externalOrderNumber: m[1], amountCents: finalCents, evidence, dryRun: false };
   } finally {
+    // Nothing was submitted (dry run, refusal, error): leave no cart behind
+    // for the next run to find. Best effort — the next run clears it anyway.
+    if (page && !submitted) {
+      try { await Promise.race([clearCart(page), new Promise((resolve) => setTimeout(resolve, 20000))]); }
+      catch (e) { logger.warn(`[siteone-bot] post-run cart cleanup failed: ${String(e.message).slice(0, 120)}`); }
+    }
     if (browser) { try { await browser.close(); } catch { /* noop */ } }
   }
 }
@@ -295,6 +379,7 @@ async function place(
 module.exports = {
   key: 'siteone',
   quotesAtPlace: true,
+  packagedQuantity: true, // cart quantity = packages (pack size from the price row)
   preSubmitTotal: 'vendor', // the checkout total is read live, immediately before the click
   quote: () => null,
   place,

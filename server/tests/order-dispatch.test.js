@@ -17,19 +17,26 @@
  *   - run-level error → claim released (row deleted), error propagates
  *   - a request closed while the vendor call was in flight stays closed,
  *     the ledger is still placed, and ONE reconcile bell rings
- *   - canAutoOrder mirrors the gates + adapter map
+ *   - canAutoOrder mirrors the gates + adapter map + vendor active
+ *   - the claim re-checks the sweep's eligibility (active, enabled, still
+ *     low) and CANCELS a request the catalog no longer authorizes
+ *   - every adapter needs the eligible price row; the vendor quantity is
+ *     packages (SiteOne, pack size from the row) or a count (Sticker Mule)
+ *   - a bell that fails to send is persisted (evidence.bell, bellAt null),
+ *     reported, and re-rung by the next run
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/vendor-credentials', () => ({ getVendorLoginCredentials: jest.fn(async () => ({ email: 'a@b.c', password: 'x', accountNumber: '123' })) }));
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
 jest.mock('../services/procurement/auto-reorder', () => ({ vendorPricingFor: jest.fn(async () => mockState.pricing) }));
 
-const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [] };
+const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [] };
 
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
-    for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNot', 'whereNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify']) q[m] = () => q;
+    for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify']) q[m] = () => q;
+    q.whereIn = (col) => { if (col === 'vo.status') q._pendingBells = true; return q; };
     q.first = async (...cols) => {
       if (table === 'product_restock_requests') {
         if (cols[0] === 'status') return { status: mockState.freshRequestStatus };
@@ -52,7 +59,7 @@ jest.mock('../models/db', () => {
       return [saved];
     };
     q.insert = (r) => { row = r; return { onConflict: () => ({ ignore: () => ({ returning }) }), returning }; };
-    q.then = (ok, err) => Promise.resolve(table.startsWith('vendor_orders') ? mockState.stale : []).then(ok, err);
+    q.then = (ok, err) => Promise.resolve(table.startsWith('vendor_orders') ? (q._pendingBells ? mockState.pendingBells : mockState.stale) : []).then(ok, err);
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(String(table)));
@@ -67,7 +74,8 @@ const dispatch = require('../services/procurement/order-dispatch');
 const ENV = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true', GATE_AUTO_ORDER_SITEONE: 'true', AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '100000' };
 const baseRequest = () => ({ id: 'req-1', product_id: 'prod-sticker', status: 'open', source: 'auto_reorder', requested_quantity: '500', unit: 'each', metadata: { vendorId: 'vend-sm', vendorSku: '4242' } });
 const stickerMule = { id: 'vend-sm', name: 'Sticker Mule', code: 25, active: true };
-const sticker = { id: 'prod-sticker', name: 'Yard sign sticker', siteone_sku: null };
+const sticker = { id: 'prod-sticker', name: 'Yard sign sticker', active: true, auto_reorder_enabled: true, inventory_on_hand: '40', low_stock_threshold: '100' };
+const talstar = { id: 'prod-chem', name: 'Talstar', active: true, auto_reorder_enabled: true, inventory_on_hand: '20', low_stock_threshold: '64' };
 
 function mockAdapter(overrides = {}) {
   return { key: 'stickermule', preSubmitTotal: 'vendor', bindingQuote: jest.fn(async () => ({ cents: 31400, source: 'order SM-0' })), place: jest.fn(async () => ({ externalOrderNumber: 'SM-1', amountCents: 31400, response: { ok: 1 }, evidence: { itemId: 4242 } })), ...overrides };
@@ -75,7 +83,7 @@ function mockAdapter(overrides = {}) {
 
 let notify;
 beforeEach(() => {
-  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [] });
+  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [] });
   for (const k of Object.keys(ENV)) process.env[k] = ENV[k];
   notify = jest.fn(async () => ({ id: 'n1' }));
   auditVendorOrder.mockClear();
@@ -83,6 +91,8 @@ beforeEach(() => {
 afterAll(() => { for (const k of Object.keys(ENV)) delete process.env[k]; });
 
 const run = (adapter, opts = {}) => dispatch.dispatchRestockOrder('req-1', { notify, adapters: { stickermule: adapter, siteone: adapter }, ...opts });
+// The last ledger write with a status: the bellAt stamp that follows a bell is a separate evidence-only update.
+const lastLedgerPatch = () => mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status).pop().row;
 const ledgerStatus = () => mockState.updates.filter((u) => u.table === 'vendor_orders').map((u) => u.row.status).filter(Boolean).pop();
 const requestStatus = () => mockState.updates.filter((u) => u.table === 'product_restock_requests').map((u) => u.row.status).pop();
 
@@ -199,24 +209,86 @@ test('request closed mid-flight: ledger still placed, request untouched, one rec
 
 test('SiteOne: no static quote, the cap check runs through beforeSubmit and a dry run parks', async () => {
   mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
-  mockState.request = { ...baseRequest(), metadata: { vendorId: 'vend-s1' } };
-  mockState.product = { id: 'prod-chem', name: 'Talstar', siteone_sku: 'S1-77' };
-  mockState.pricing = null;
-  const place = jest.fn(async ({ beforeSubmit, vendorSku, credentials }) => {
+  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
+  mockState.product = talstar;
+  mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
+  const place = jest.fn(async ({ beforeSubmit, vendorSku, quantity, credentials }) => {
     expect(vendorSku).toBe('S1-77');
+    expect(quantity).toBe(2); // 256 fl oz of a 1 gal jug = 2 packages
     expect(credentials.password).toBe('x');
     expect(await beforeSubmit(9900)).toEqual({ ok: true });
     expect((await beforeSubmit(999900)).reason).toBe('over_per_order_cap');
     return { dryRun: true, amountCents: 9900, externalOrderNumber: null, evidence: {} };
   });
-  const r = await run({ key: 'siteone', quotesAtPlace: true, place });
+  const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, place });
   expect(r).toMatchObject({ status: 'needs_review', reason: 'dry_run' });
   expect(notify.mock.calls[0][1]).toMatch(/dry run/);
+  expect(JSON.parse(mockState.ledgerRows[0].request_payload)).toMatchObject({ vendorSku: 'S1-77', quantity: 256, unit: 'fl_oz', vendorQuantity: 2, packSize: '1 gal' });
 });
 
-test('canAutoOrder mirrors gates + adapter map', async () => {
+test('SiteOne with no eligible price row parks no_price even when the catalog carries a siteone_sku (r1 P1)', async () => {
+  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
+  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1', vendorSku: 'S1-77' } };
+  mockState.product = { ...talstar, siteone_sku: 'S1-77' };
+  mockState.pricing = null;
+  const place = jest.fn();
+  expect(await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, place })).toMatchObject({ status: 'needs_review', reason: 'no_price' });
+  expect(place).not.toHaveBeenCalled();
+});
+
+test('an unreadable pack size parks no_pack_size — never a raw inventory amount in the cart (r1 P1)', async () => {
+  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
+  mockState.request = { ...baseRequest(), requested_quantity: '128', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
+  mockState.product = talstar;
+  mockState.pricing = { vendor_sku: 'S1-77', quantity: null };
+  const place = jest.fn();
+  const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, place });
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'no_pack_size' });
+  expect(place).not.toHaveBeenCalled();
+  expect(notify.mock.calls[0][2]).toMatch(/pack size/);
+});
+
+test('vendorOrderQuantity: packages by pack size in the same dimension; counts for a count vendor', () => {
+  const s1 = { key: 'siteone', packagedQuantity: true };
+  const sm = { key: 'stickermule', packagedQuantity: false };
+  const q = (adapter, requested_quantity, unit, quantity) => dispatch.vendorOrderQuantity({ adapter, request: { requested_quantity, unit }, pricing: { quantity } });
+  expect(q(s1, '256', 'fl_oz', '1 gal')).toEqual({ quantity: 2, packSize: '1 gal' });
+  expect(q(s1, '100', 'fl_oz', '1 gal')).toEqual({ quantity: 1, packSize: '1 gal' });
+  expect(q(s1, '2.5', 'gal', '2.5 gal')).toEqual({ quantity: 1, packSize: '2.5 gal' });
+  expect(q(s1, '40', 'lb', '16 lb')).toEqual({ quantity: 3, packSize: '16 lb' });
+  expect(q(s1, '250', 'each', '100 each')).toEqual({ quantity: 3, packSize: '100 each' });
+  expect(q(s1, '250', 'each', '100')).toEqual({ quantity: 3, packSize: '100 each' });
+  expect(q(s1, '128', 'fl_oz', '16 lb').error).toBe('pack_unit_mismatch');
+  expect(q(s1, '128', 'fl_oz', '').error).toBe('no_pack_size');
+  expect(q(s1, '250', 'each', '1 gal').error).toBe('no_pack_size');
+  expect(q(sm, '500', 'each', '500')).toEqual({ quantity: 500, packSize: null });
+  expect(q(sm, '500', 'fl_oz', '500').error).toBe('count_unit_required');
+  expect(q(s1, '0', 'fl_oz', '1 gal').error).toBe('no_quantity');
+});
+
+test.each([
+  ['product_inactive', { active: false }],
+  ['auto_reorder_disabled', { auto_reorder_enabled: false }],
+  ['stock_no_longer_low', { inventory_on_hand: '150' }],
+  ['stock_untracked', { inventory_on_hand: null }],
+])('claim re-checks eligibility: %s → request cancelled, no claim, no bell (r1 P1)', async (reason, patch) => {
+  mockState.product = { ...sticker, ...patch };
+  const a = mockAdapter();
+  expect(await run(a)).toEqual({ requestId: 'req-1', skipped: reason, cancelled: true });
+  expect(mockState.ledgerRows).toHaveLength(0);
+  expect(a.place).not.toHaveBeenCalled();
+  expect(notify).not.toHaveBeenCalled();
+  const cancel = mockState.updates.find((u) => u.table === 'product_restock_requests').row;
+  expect(cancel.status).toBe('cancelled');
+  expect(JSON.parse(cancel.metadata)).toMatchObject({ vendorId: 'vend-sm', autoOrderCancelled: reason });
+});
+
+test('canAutoOrder mirrors gates + adapter map + vendor active', async () => {
   expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(true);
   expect(await dispatch.canAutoOrder({ vendor: { id: 'g', name: 'Gemplers', code: 24 } })).toBe(false);
+  expect(await dispatch.canAutoOrder({ vendor: { ...stickerMule, active: false } })).toBe(false);
+  mockState.vendor = { ...stickerMule, active: false };
+  expect(await dispatch.canAutoOrder({ vendorId: 'vend-sm' })).toBe(false);
   process.env.GATE_AUTO_ORDER_STICKERMULE = 'false';
   expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(false);
   process.env.GATE_AUTO_ORDER_STICKERMULE = 'true';
@@ -269,7 +341,7 @@ test('vendor total over cap after placement → needs_review, request ordered, b
   const r = await run(a);
   expect(r).toMatchObject({ status: 'needs_review', reason: 'over_cap_after_placement' });
   expect(requestStatus()).toBe('ordered');
-  const ledger = mockState.updates.filter((u) => u.table === 'vendor_orders').pop().row;
+  const ledger = lastLedgerPatch();
   expect(ledger).toMatchObject({ status: 'needs_review', external_order_number: 'SM-2', amount_cents: 60000 });
   expect(ledger.placed_at).toBeInstanceOf(Date);
   expect(notify).toHaveBeenCalledTimes(1);
@@ -287,7 +359,7 @@ test('a DB failure after the vendor call parks as persist_after_placement, never
     const r = await run(mockAdapter());
     expect(r).toMatchObject({ status: 'needs_review', reason: 'persist_after_placement' });
     expect(ledgerStatus()).toBe('needs_review');
-    const ledger = mockState.updates.filter((u) => u.table === 'vendor_orders').pop().row;
+    const ledger = lastLedgerPatch();
     expect(ledger.external_order_number).toBe('SM-1');
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify.mock.calls[0][2]).toMatch(/SM-1/);
@@ -310,14 +382,14 @@ test('a definite pre-submit failure still parks as failed with the manual-order 
 test('placed_at marks a dispatched vendor call: set on post-submit parks, never on pre-submit parks', async () => {
   const err = new Error('504 after POST'); err.ambiguous = true;
   await run(mockAdapter({ place: jest.fn(async () => { throw err; }) }));
-  const post = mockState.updates.filter((u) => u.table === 'vendor_orders').pop().row;
+  const post = lastLedgerPatch();
   expect(post.status).toBe('needs_review');
   expect(post.placed_at).toBeInstanceOf(Date);
 
   mockState.updates = [];
   process.env.AUTO_ORDER_MAX_PER_ORDER_CENTS = '10000';
   await run(mockAdapter());
-  const pre = mockState.updates.filter((u) => u.table === 'vendor_orders').pop().row;
+  const pre = lastLedgerPatch();
   expect(pre.status).toBe('needs_review');
   expect(pre.amount_cents).toBe(31400); // shown on the tab…
   expect(pre.placed_at).toBeUndefined(); // …but not counted against the month
@@ -327,7 +399,7 @@ test('monthly sum counts only placing reservations and dispatched rows', async (
   const dbFn = require('../models/db');
   const seen = [];
   const orig = dbFn.getMockImplementation();
-  dbFn.mockImplementation((table) => { const q = orig(table); if (table === 'vendor_orders') { const w = q.where; q.where = (...a) => { seen.push(a); if (typeof a[0] === 'function') { const inner = { where: (...b) => { seen.push(['inner', ...b]); return inner; }, orWhereNotNull: (...b) => { seen.push(['inner', 'orWhereNotNull', ...b]); return inner; } }; a[0].call(inner); } return q; }; } return q; });
+  dbFn.mockImplementation((table) => { const q = orig(table); if (table === 'vendor_orders') { q.where = (...a) => { seen.push(a); if (typeof a[0] === 'function') { const inner = { where: (...b) => { seen.push(['inner', ...b]); return inner; }, orWhereNotNull: (...b) => { seen.push(['inner', 'orWhereNotNull', ...b]); return inner; } }; a[0].call(inner); } return q; }; } return q; });
   try {
     await dispatch.monthlySpentCents(dbFn, { now: new Date(), excludeId: 'x' });
     expect(seen).toEqual(expect.arrayContaining([['inner', 'status', 'placing'], ['inner', 'orWhereNotNull', 'placed_at']]));
@@ -341,13 +413,43 @@ test('an adapter without a vendor-confirmed pre-submit total never auto-places: 
   expect(a.place).not.toHaveBeenCalled();
   expect(notify.mock.calls[0][2]).toMatch(/\$314\.00/);
   expect(notify.mock.calls[0][2]).toMatch(/item 4242 × 500/);
-  const ledger = mockState.updates.filter((u) => u.table === 'vendor_orders').pop().row;
+  const ledger = lastLedgerPatch();
   expect(ledger.placed_at).toBeUndefined();
 });
 
-test('the real Sticker Mule adapter is history-total; the real SiteOne adapter is vendor-total', () => {
-  expect(require('../services/procurement/adapters/stickermule').preSubmitTotal).toBe('history');
-  expect(require('../services/procurement/adapters/siteone').preSubmitTotal).toBe('vendor');
+test('the real Sticker Mule adapter is history-total + count quantity; the real SiteOne adapter is vendor-total + package quantity', () => {
+  expect(require('../services/procurement/adapters/stickermule')).toMatchObject({ preSubmitTotal: 'history', packagedQuantity: false });
+  expect(require('../services/procurement/adapters/siteone')).toMatchObject({ preSubmitTotal: 'vendor', packagedQuantity: true });
+});
+
+test('a bell that fails to send is persisted with the park, reported, and re-rung by the next run (r1 P1)', async () => {
+  notify.mockRejectedValueOnce(new Error('bell down'));
+  const err = new Error('timeout after POST'); err.ambiguous = true;
+  const r = await run(mockAdapter({ place: jest.fn(async () => { throw err; }) }));
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit', bellPending: true });
+  const parked = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review').pop().row;
+  const evidence = JSON.parse(parked.evidence);
+  expect(evidence.bell.title).toMatch(/needs review/);
+  expect(evidence.bell.body).toMatch(/Do NOT re-order/);
+  expect(evidence.bellAt).toBeUndefined();
+  // No bellAt stamp was written for the failed send.
+  expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.evidence && typeof u.row.evidence === 'string' && u.row.evidence.includes('bellAt'))).toHaveLength(0);
+
+  // Next run: the pending row is re-rung first and stamped.
+  mockState.updates = [];
+  mockState.pendingBells = [{ id: 'ledger-1', evidence, request_id: 'req-1', product_name: 'Yard sign sticker', vendor_name: 'Sticker Mule' }];
+  mockState.request = { ...baseRequest(), status: 'ordered' };
+  const run2 = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } });
+  expect(run2.bells).toEqual({ rung: ['ledger-1'], pending: [] });
+  expect(notify).toHaveBeenLastCalledWith('system', evidence.bell.title, evidence.bell.body, expect.objectContaining({ dedupeKey: 'auto-order:ledger-1' }));
+  expect(mockState.updates.some((u) => u.table === 'vendor_orders' && u.row.evidence)).toBe(true);
+});
+
+test('the run goes red while a bell is undelivered', async () => {
+  notify.mockRejectedValue(new Error('bell down'));
+  mockState.pendingBells = [{ id: 'ledger-9', evidence: { bell: { title: 'Auto-order needs review: x', body: 'y' } }, request_id: 'req-9', product_name: 'x', vendor_name: 'v' }];
+  mockState.request = { ...baseRequest(), status: 'ordered' };
+  await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-9/);
 });
 
 test('a live manual/forecast request for the same product blocks the claim — staff are ordering', async () => {

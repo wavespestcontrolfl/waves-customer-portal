@@ -159,4 +159,6 @@ async function place({ vendorSku, quantity, quoteCents = null }, { fetchImpl = f
 // POST — bindingQuote is the last identical charge, not a live quote. The
 // dispatcher does not auto-place for this class (parks with the figure) unless
 // the owner accepts that residual risk — see order-dispatch.js.
-module.exports = { key: 'stickermule', configured, preSubmitTotal: 'history', bindingQuote, place, RefusedError, _internals: { call, orderTotalCents, orderItems, listOf, BASE_URL } };
+// packagedQuantity false: `quantity` is the sticker COUNT (the request must be
+// stocked in each) — never a package count.
+module.exports = { key: 'stickermule', configured, preSubmitTotal: 'history', packagedQuantity: false, bindingQuote, place, RefusedError, _internals: { call, orderTotalCents, orderItems, listOf, BASE_URL } };

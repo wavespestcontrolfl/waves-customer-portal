@@ -163,3 +163,108 @@ describe('siteone internals', () => {
     for (const k of ['loginUser', 'loginPass', 'searchInput', 'qtyInput', 'addToCart', 'cartTotal', 'cardField', 'mfaField', 'billToAccount', 'placeOrder', 'orderNumber']) expect(typeof SELECTORS[k]).toBe('string');
   });
 });
+
+// A minimal fake Playwright page driven by the SELECTORS map: enough surface
+// for place() to walk login → cart reset → add → verify → checkout → submit.
+describe('siteone bot cart + tender rules (fake page)', () => {
+  const s1 = require('../services/procurement/adapters/siteone');
+  const S = s1._internals.SELECTORS;
+
+  function fakeSiteOne(opts = {}) {
+    const st = { cart: [], removable: true, accountSelectable: true, url: 'https://www.siteone.com/en/login', loggedIn: false, placeClicked: 0, addClicked: 0, qty: null, ...opts };
+    const el = (spec = {}) => ({
+      count: async () => spec.count ?? 0,
+      first() { return this; },
+      nth: (i) => spec.nth ? spec.nth(i) : el(spec),
+      textContent: async () => spec.text ?? null,
+      inputValue: async () => { if (spec.value == null) throw new Error('not an input'); return String(spec.value); },
+      isVisible: async () => !!spec.visible,
+      isChecked: async () => { if (spec.checked == null) throw new Error('n/a'); return spec.checked; },
+      click: async () => { if (spec.onClick) await spec.onClick(); },
+      fill: async (v) => { if (spec.onFill) spec.onFill(v); },
+      press: async () => {},
+      waitFor: async () => {},
+      locator: (sub) => (spec.sub ? spec.sub(sub) : el()),
+    });
+    const line = (l) => el({ count: 1, sub: (sub) => sub === S.cartLineSku ? el({ count: 1, text: l.sku }) : sub === S.cartLineQty ? el({ count: 1, value: l.qty }) : el() });
+    const resolve = (sel) => {
+      if (sel.startsWith(S.loginPass)) return el({ count: st.loggedIn ? 0 : 1 });
+      if (sel === S.loginSubmit) return el({ count: 1, onClick: () => { st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; } });
+      if (sel === S.loginError) return el();
+      if (sel === S.searchInput) return el({ count: 1 });
+      if (sel === S.productLink) return el({ count: 1 });
+      if (sel === S.productSku) return el({ count: 1, text: 'SKU: S1-77' });
+      if (sel === S.unavailable) return el();
+      if (sel === S.qtyInput) return el({ count: 1, onFill: (v) => { st.qty = Number(v); } });
+      if (sel === S.addToCart) return el({ count: 1, onClick: () => { st.addClicked += 1; st.cart.push({ sku: 'S1-77', qty: st.qty }); if (st.addExtra) st.cart.push(st.addExtra); } });
+      if (sel === S.cartLine) return el({ count: st.cart.length, nth: (i) => line(st.cart[i]) });
+      if (sel === S.cartRemove) return el({ count: st.cart.length && st.removable ? 1 : 0, onClick: () => { st.cart.shift(); } });
+      if (sel === S.cartTotal) return el({ count: 1, text: '$99.00' });
+      if (sel === S.checkoutButton) return el({ count: 1 });
+      if (sel === S.mfaField || sel === S.cardField) return el();
+      if (sel === S.termsCheckbox) return el();
+      if (sel === S.billToAccount) return el({ count: 1, checked: st.accountChecked === true, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } });
+      if (sel === S.billToAccountSelected) return el({ count: st.accountChecked ? 1 : 0 });
+      if (sel === S.checkoutTotal) return el({ count: 1, text: 'Order total $105.93' });
+      if (sel === S.placeOrder) return el({ count: 1, onClick: () => { st.placeClicked += 1; } });
+      if (sel === S.orderNumber) return el({ count: 1, text: 'Order # SO-778899' });
+      return el();
+    };
+    const page = {
+      goto: async (u) => { st.url = u; },
+      url: () => st.url,
+      evaluate: async () => 'ok',
+      waitForFunction: async () => {},
+      waitForTimeout: async () => {},
+      waitForLoadState: async () => {},
+      screenshot: async () => Buffer.from('png'),
+      locator: resolve,
+    };
+    const browser = { newContext: async () => ({ newPage: async () => page }), close: jest.fn(async () => {}) };
+    const deps = { launchBrowser: async () => browser, resolveHostIps: async () => ['203.0.113.10'], upload: async () => 'evidence-key' };
+    return { st, deps, browser };
+  }
+  const creds = { email: 'buyer@example.com', password: 'pw', accountNumber: '12345' };
+  const args = (extra = {}) => ({ vendorSku: 'S1-77', quantity: 2, credentials: creds, beforeSubmit: async () => ({ ok: true }), dryRun: false, ...extra });
+
+  test('a leftover cart the bot cannot empty refuses before anything is added (r1 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ cart: [{ sku: 'OLD-1', qty: 5 }], removable: false });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'cart_not_empty' });
+    expect(st.addClicked).toBe(0);
+  });
+
+  test('a leftover cart is emptied first; the cart must then be exactly [sku × packages]; a dry run leaves the cart empty', async () => {
+    const { st, deps } = fakeSiteOne({ cart: [{ sku: 'OLD-1', qty: 5 }] });
+    const r = await s1.place(args({ dryRun: true }), deps);
+    expect(r).toMatchObject({ dryRun: true, amountCents: 9900 });
+    expect(st.qty).toBe(2);
+    expect(st.cart).toEqual([]); // post-run cleanup: nothing left for the next run
+    expect(st.placeClicked).toBe(0);
+  });
+
+  test('an unexpected extra cart line refuses cart_mismatch with the lines in evidence (r1 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ addExtra: { sku: 'OTHER-9', qty: 1 } });
+    const err = await s1.place(args(), deps).catch((e) => e);
+    expect(err.refuse).toBe('cart_mismatch');
+    expect(err.evidence.cartLines).toEqual([{ sku: 'S1-77', qty: 2 }, { sku: 'OTHER-9', qty: 1 }]);
+    expect(st.placeClicked).toBe(0);
+    expect(st.cart).toEqual([]); // cleaned up after the refusal
+  });
+
+  test('bill-to-account must be CONFIRMED selected before the place-order click (r1 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ accountSelectable: false });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
+    expect(st.placeClicked).toBe(0);
+  });
+
+  test('bill-to-account confirmed → checkout total cap-checked → one place-order click, cart left to the vendor', async () => {
+    const { st, deps } = fakeSiteOne();
+    const totals = [];
+    const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
+    expect(r).toMatchObject({ externalOrderNumber: 'SO-778899', amountCents: 10593, dryRun: false });
+    expect(r.evidence.billToAccountVerified).toBe(true);
+    expect(totals).toEqual([9900, 10593]);
+    expect(st.placeClicked).toBe(1);
+    expect(st.cart).toEqual([{ sku: 'S1-77', qty: 2 }]); // submitted: never cleared
+  });
+});
