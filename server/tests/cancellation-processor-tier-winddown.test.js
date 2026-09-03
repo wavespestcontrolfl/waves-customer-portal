@@ -335,3 +335,42 @@ test('gate OFF: the episode is still minted under the customers row lock', async
     db.transaction = orig;
   }
 });
+
+test('churn facts follow the row AS LOCKED: a concurrent churn that landed after the entry read is a REPEAT churn (stamps preserved)', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  const orig = db.transaction;
+  db.transaction = async (fn) => {
+    Object.assign(db.__tables.customers[0], { pipeline_stage: 'churned', active: false, churned_at: '2026-08-01', churn_reason: 'moved', churn_mrr: 140, churn_episode_id: 'ep-first' });
+    return orig(fn);
+  };
+  try {
+    const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'too pricey', requestId: 'req-5' });
+    expect(result.churned).toBe(true);
+    const c = db.__tables.customers[0];
+    expect(c.churned_at).toBe('2026-08-01');
+    expect(c.churn_reason).toBe('moved');
+    expect(c.churn_episode_id).toBe('ep-first');
+    expect(result.churnEpisodeId).toBe('ep-first');
+  } finally { db.transaction = orig; }
+});
+
+test('churn facts follow the row AS LOCKED: a reactivation that landed after the entry read makes this a FRESH churn (new stamps, new episode)', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  Object.assign(db.__tables.customers[0], { pipeline_stage: 'churned', active: false, churned_at: '2026-08-01', churn_episode_id: 'ep-old' });
+  const orig = db.transaction;
+  db.transaction = async (fn) => {
+    Object.assign(db.__tables.customers[0], { pipeline_stage: 'active_customer', active: true, churned_at: null, churn_reason: null, churn_episode_id: null });
+    return orig(fn);
+  };
+  try {
+    const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'too pricey', requestId: 'req-6' });
+    expect(result.churned).toBe(true);
+    const c = db.__tables.customers[0];
+    expect(c.churned_at).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(c.churn_episode_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(c.churn_episode_id).not.toBe('ep-old');
+    expect(result.churnEpisodeId).toBe(c.churn_episode_id);
+  } finally { db.transaction = orig; }
+});
