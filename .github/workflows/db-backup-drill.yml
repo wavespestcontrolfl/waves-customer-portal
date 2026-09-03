@@ -6,9 +6,10 @@
 # workflow makes an independent, encrypted, offsite copy every night AND
 # proves that copy restores by loading it into a throwaway Postgres and
 # comparing row counts against the source. A failed drill fails the run AND
-# emails contact@ through SendGrid (rule 14: exceptions surface — GitHub's
-# own run-failure emails depend on per-user notification settings, so they
-# are a second channel, not the guarantee).
+# emails contact@ through SendGrid from a SEPARATE job, so a timeout or a
+# dead service container still alerts (rule 14: exceptions surface —
+# GitHub's own run-failure emails depend on per-user notification settings,
+# so they are a second channel, not the guarantee).
 #
 # Setup (one-time, owner): docs/db-backup-restore-drill-runbook.md.
 # Disaster restore procedure: same runbook + ops/backup/restore.sh.
@@ -118,6 +119,10 @@ jobs:
           SRC_URL: ${{ secrets.BACKUP_DATABASE_URL }}
         run: |
           set -euo pipefail
+          # The cutoff is stamped BEFORE pg_dump starts: rows committed during
+          # the dump may be absent from the snapshot, so recovery reconciles
+          # from this conservative time, not from when the dump finished.
+          date -u +%Y%m%dT%H%M%SZ > cutoff.txt
           # Custom format: compressed, restorable table-by-table, parallel-restorable.
           # --no-owner/--no-privileges: the restore target has different roles.
           pg_dump "$SRC_URL" --format=custom --compress=6 --no-owner --no-privileges \
@@ -131,15 +136,15 @@ jobs:
           BUCKET: ${{ secrets.R2_BACKUP_BUCKET }}
         run: |
           set -euo pipefail
-          stamp=$(date -u +%Y%m%dT%H%M%SZ)
-          key="waves-portal/$(date -u +%Y/%m)/waves-portal-${stamp}.dump.enc"
+          stamp=$(cat cutoff.txt)
+          key="waves-portal/${stamp:0:4}/${stamp:4:2}/waves-portal-${stamp}.dump.enc"
           openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
             -pass env:BACKUP_ENCRYPTION_KEY -in waves-portal.dump -out waves-portal.dump.enc
           aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors waves-portal.dump.enc "s3://$BUCKET/$key"
           {
             echo "{"
             echo "  \"key\": \"$key\","
-            echo "  \"taken_at\": \"$stamp\","
+            echo "  \"cutoff\": \"$stamp\","
             echo "  \"plaintext_sha256\": \"$(cut -d' ' -f1 dump.sha256)\","
             echo "  \"plaintext_bytes\": $(stat -c %s waves-portal.dump),"
             echo "  \"encrypted_bytes\": $(stat -c %s waves-portal.dump.enc),"
@@ -148,6 +153,9 @@ jobs:
             echo "  }"
             echo "}"
           } > latest.json
+          # Immutable per-object manifest, so an OLDER backup an operator picks
+          # still has its own hash and counts (latest.json only describes the newest).
+          aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors latest.json "s3://$BUCKET/${key%.dump.enc}.json"
           echo "$key" > uploaded-key.txt
           echo "Uploaded s3://$BUCKET/$key"
 
@@ -200,17 +208,23 @@ jobs:
         run: |
           aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors latest.json "s3://$BUCKET/waves-portal/latest.json"
 
-      - name: Email the owner on failure
-        # Runs whenever ANY step above failed (missing secrets included). The
-        # first-ever run is manual per the runbook, so a missing SendGrid key
-        # is seen in the Actions UI rather than lost.
-        if: failure()
+  alert-on-failure:
+    # A separate job: an inline `if: failure()` step never runs when the
+    # drill job hits its timeout or its service container dies before the
+    # steps start — precisely the hung-dump cases that matter most.
+    needs: backup-and-drill
+    if: ${{ always() && needs.backup-and-drill.result != 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Email the owner
         env:
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          RESULT: ${{ needs.backup-and-drill.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           [ -n "$SENDGRID_API_KEY" ] || { echo "::error::no SENDGRID_API_KEY — cannot email the failure"; exit 1; }
-          body=$(printf 'The nightly Postgres backup + restore drill FAILED on %s.\n\nUntil a run is green the business has no proven offsite backup.\n\nRun: %s\nRunbook: docs/db-backup-restore-drill-runbook.md\n' "$(date -u +%Y-%m-%dT%H:%MZ)" "$RUN_URL")
+          body=$(printf 'The nightly Postgres backup + restore drill did NOT succeed (result: %s) at %s.\n\nUntil a run is green the business has no proven offsite backup.\n\nRun: %s\nRunbook: docs/db-backup-restore-drill-runbook.md\n' "$RESULT" "$(date -u +%Y-%m-%dT%H:%MZ)" "$RUN_URL")
           payload=$(jq -n --arg body "$body" '{
             personalizations: [{ to: [{ email: "contact@wavespestcontrol.com" }] }],
             from: { email: "contact@wavespestcontrol.com", name: "Waves Portal backup drill" },

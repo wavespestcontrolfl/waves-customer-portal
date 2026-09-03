@@ -6,34 +6,48 @@
 #
 # Used by the nightly drill (target = throwaway CI container) and by a human
 # in a real disaster (target = a FRESH Railway Postgres, never the live one —
-# see docs/db-backup-restore-drill-runbook.md). Leaves the decrypted
-# <name>.dump beside the input for hash verification; delete it when done.
+# see docs/db-backup-restore-drill-runbook.md). Refuses a target that already
+# holds tables unless RESTORE_REPLACE_EXISTING=yes, and replace mode drops and
+# recreates the public schema first. Leaves the decrypted <name>.dump
+# (mode 0600) beside the input for hash verification; delete it when done.
 set -euo pipefail
 
 enc="${1:?usage: restore.sh <file.dump.enc> <target postgres url>}"
 target="${2:?usage: restore.sh <file.dump.enc> <target postgres url>}"
 : "${BACKUP_ENCRYPTION_KEY:?BACKUP_ENCRYPTION_KEY must be set in the environment}"
 
-# The only safe target is an EMPTY database. `pg_restore --clean` drops every
-# matching object, so a pasted live URL would erase production. Refuse any
-# target that already holds tables unless the caller states, explicitly, that
-# this database is meant to be replaced.
+# The only safe target is an EMPTY database — a pasted live URL would be
+# erased. Refuse any target that already holds tables unless the caller
+# states, explicitly, that this database is meant to be replaced. Replace mode
+# recreates the schema so nothing added after the backup survives as a hybrid
+# (`pg_restore --clean` alone only drops objects the archive knows about).
 existing=$(psql "$target" -Atqc "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema')" < /dev/null)
-if [ "$existing" != 0 ] && [ "${RESTORE_REPLACE_EXISTING:-}" != "yes" ]; then
-  echo "refusing: target already holds $existing table(s) — this may be a live database." >&2
-  echo "Restore into a FRESH instance, or set RESTORE_REPLACE_EXISTING=yes only for a database you intend to erase." >&2
-  exit 2
+if [ "$existing" != 0 ]; then
+  if [ "${RESTORE_REPLACE_EXISTING:-}" != "yes" ]; then
+    echo "refusing: target already holds $existing table(s) — this may be a live database." >&2
+    echo "Restore into a FRESH instance, or set RESTORE_REPLACE_EXISTING=yes only for a database you intend to erase." >&2
+    exit 2
+  fi
+  echo "RESTORE_REPLACE_EXISTING=yes: erasing $existing table(s) on target" >&2
+  # One table per transaction: a single DROP SCHEMA ... CASCADE over a
+  # ~600-table schema with its indexes and FKs exceeds the default
+  # max_locks_per_transaction and fails.
+  psql "$target" -Atqc "SELECT quote_ident(table_schema)||'.'||quote_ident(table_name) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema') AND table_type='BASE TABLE'" < /dev/null \
+    | while read -r t; do psql "$target" -v ON_ERROR_STOP=1 -Atqc "DROP TABLE IF EXISTS $t CASCADE" < /dev/null > /dev/null; done
+  # Then everything else (views, types, functions, sequences) in one sweep.
+  psql "$target" -v ON_ERROR_STOP=1 -Atqc "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" < /dev/null > /dev/null
 fi
 
+# The plaintext is the whole production database: never world-readable.
+umask 077
 plain="${enc%.enc}"
 openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
   -pass env:BACKUP_ENCRYPTION_KEY -in "$enc" -out "$plain"
 
-# The dump was taken with --no-owner/--no-privileges; --clean/--if-exists make
-# the restore idempotent on a target that already holds an older copy.
-# Extensions the dump references (vector, pgcrypto, uuid-ossp) are created by
-# the dump itself when the target image ships them.
-pg_restore --dbname="$target" --no-owner --no-privileges --clean --if-exists \
+# The dump was taken with --no-owner/--no-privileges. Extensions it references
+# (vector, pgcrypto, uuid-ossp) are created by the dump itself when the target
+# image ships them.
+pg_restore --dbname="$target" --no-owner --no-privileges \
   --jobs=4 --exit-on-error "$plain"
 
 echo "restored $plain into target"
