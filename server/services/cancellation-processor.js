@@ -99,17 +99,18 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
   // cancel the same still-current term again) or a repeat end-of-coverage
   // commit that opened a new request must not leave two identical
   // instructions. Supersession follows REQUEST CHRONOLOGY, never call
-  // order: the raise for the NEWEST request wins. An open row raised by a
-  // newer request means this raise is stale (a lost-task repair of an
-  // older acceptance, or a retry after a later correction) — it retires
-  // nothing and inserts nothing, and the newer instruction stays the one
-  // open task. Otherwise every other open row is retired, and this
-  // event's own row — read because a later instruction retired it, or
-  // acted on before a correction was reverted — is reopened so the winning
-  // instruction is the open one (notifyAdmin dedupes against it without
-  // reopening). Read rows are otherwise never touched: an instruction
-  // staff already acted on is history, not a duplicate. Rows without a
-  // request (portal no-request raises, legacy rows) count as oldest.
+  // order, and is judged over EVERY retrieval row of the account (read or
+  // not): the raise for the NEWEST request wins. Any row raised by a newer
+  // request — open, or already acted on — means this raise is stale (a
+  // lost-task repair of an older acceptance, or a retry after a later
+  // correction): it retires nothing and inserts nothing. Otherwise every
+  // other OPEN row is retired, and this event's own row — read because a
+  // later instruction retired it, or acted on before a correction was
+  // reverted — is reopened so the winning instruction is the open one
+  // (notifyAdmin dedupes against it without reopening). Read rows are
+  // otherwise never touched: an instruction staff already acted on is
+  // history, not a duplicate. Rows without a request (portal no-request
+  // raises, legacy rows) count as oldest.
   // Retire + raise are ONE transaction under an account-scoped advisory
   // lock (the same `admin:<key>` namespace notifyAdmin's per-key dedupe
   // lock uses): two concurrent raises for different requests would
@@ -138,13 +139,12 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
   await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:termite_station_retrieval:${customerId}`]);
     try {
-      const open = await trx('notifications')
+      const history = await trx('notifications')
         .where({ recipient_type: 'admin' })
-        .whereNull('read_at')
         .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
         .whereRaw("metadata->>'customerId' = ?", [String(customerId)])
-        .select('id', 'metadata');
-      const others = (open || []).map((row) => ({ row, meta: parseMeta(row) })).filter(({ meta }) => String(meta.dedupeKey || '') !== dedupeKey);
+        .select('id', 'read_at', 'metadata');
+      const others = (history || []).map((row) => ({ row, meta: parseMeta(row) })).filter(({ meta }) => String(meta.dedupeKey || '') !== dedupeKey);
       const requestIds = [...new Set([requestId, ...others.map(({ meta }) => rowRequestId(meta))].filter(Boolean).map(String))];
       const openedAt = new Map();
       if (requestIds.length) {
@@ -157,14 +157,15 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
         return !!rid && (openedAt.get(rid) || 0) > ownOpenedAt;
       });
       if (newer) { yieldedTo = rowRequestId(newer.meta); return; }
-      if (others.length) {
-        await trx('notifications').whereIn('id', others.map(({ row }) => row.id)).update({ read_at: new Date() });
-        superseded = { dated: others.some(({ meta }) => !!meta.retrieveAfter) };
-        const ownRead = await trx('notifications')
-          .where({ recipient_type: 'admin' })
-          .whereNotNull('read_at')
-          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-          .first('id');
+      // The body's supersession note is derived from the account's whole
+      // task HISTORY, not from what this call retired, so a routine retry
+      // of the same event renders the identical body (refreshOnDedupe
+      // compares content — a transient note would reopen an acted-on task).
+      if (others.length) superseded = { dated: others.some(({ meta }) => !!meta.retrieveAfter) };
+      const retire = others.filter(({ row }) => row.read_at == null);
+      if (retire.length) {
+        await trx('notifications').whereIn('id', retire.map(({ row }) => row.id)).update({ read_at: new Date() });
+        const ownRead = (history || []).find((row) => row.read_at != null && String(parseMeta(row).dedupeKey || '') === dedupeKey);
         if (ownRead) await trx('notifications').where({ id: ownRead.id }).update({ read_at: null });
       }
     } catch (supersedeErr) {
