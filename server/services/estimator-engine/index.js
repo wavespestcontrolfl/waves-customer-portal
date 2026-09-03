@@ -1342,7 +1342,13 @@ async function maybeDraftEstimateForCall({
           }
         }
       } catch (fenceErr) {
-        logger.warn(`[estimator-engine] unit-answer fence read failed (composing without it): ${fenceErr.message}`);
+        // FAIL the run (the outer catch reports it and the pipeline's
+        // retry/reconcile sees a failure) rather than compose without the
+        // unit: the creator's in-lock fence read could then succeed, return
+        // unit_answer_pending, and the pass would exit quietly with no
+        // replacement draft and nobody told (pre-push codex P1 on #3804).
+        fenceErr.message = `unit-answer fence read failed: ${fenceErr.message}`;
+        throw fenceErr;
       }
     }
     if (context && !context.error && (unitLineOverride || serviceAddressOverride?.street_line_1)) {
