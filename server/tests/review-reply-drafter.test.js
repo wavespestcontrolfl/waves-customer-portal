@@ -746,6 +746,10 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(Drafter.verifyReplyText(good('Hi Dana, bill did the ants with Marcus and they are gone from your kitchen.'), grounding(), { recentReplies: recent })).toBe('forbidden_name');
     expect(Drafter.verifyReplyText(good('Hi Dana, glad Marcus got the ants; frank did the follow-up and they are gone.'), grounding())).toBe('unlisted_name');
     expect(Drafter.verifyReplyText(good('Hi Dana, to be frank, Marcus earned this one, and the ants are gone from your kitchen.'), grounding())).toBeNull();
+    // A possessive or preposition is a name slot, not prose (GitHub r1): an unmentioned tech Pat must not be attributed.
+    const gp = grounding({ forbiddenNames: ['Pat'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana, our pat made sure the ants are gone from your kitchen with Marcus.'), gp)).toBe('forbidden_name');
+    expect(Drafter.verifyReplyText(good('Hi Dana, with pat on the job the ants are gone from your kitchen. Marcus says thanks.'), gp)).toBe('forbidden_name');
   });
   test('dual-use first names in prose are not treated as introduced names', () => {
     const g = grounding({ text: 'Adam was on time and helpful with my ant problems.', mentionedTechNames: ['Adam'], topics: ['technician'] });
@@ -753,11 +757,15 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(Drafter.verifyReplyText(good('Hi Dana, glad Adam was the right guy for the ant problems. We will pass that along.'), g)).toBeNull();
     expect(Drafter.verifyReplyText(good('Hi Dana, glad Adam helped with the ant problems. We will make sure kevin hears it.'), g)).toBe('unlisted_name');
   });
-  test('provider outage surfaces as provider_unavailable', async () => {
+  test('provider outage surfaces as provider_unavailable, carrying the verified safe copy for a 4-5 star review', async () => {
     mockDispatch.mockResolvedValueOnce({ ok: false, reason: 'all_failed' });
     const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('provider_unavailable');
+    expect(r.fallbackText).toBe(good('Hi Dana,\n\nThanks for the review. Glad to be your pest and lawn team.'));
+    mockDispatch.mockResolvedValueOnce({ ok: false, reason: 'all_failed' });
+    const low = await Drafter.draftReviewReply({ grounding: grounding({ rating: 3 }), recentReplies: [] });
+    expect(low.fallbackText).toBeNull();
   });
   test('a quoted draft is normalized before verification', async () => {
     mockDispatch.mockResolvedValueOnce({ ok: true, text: `"${CLEAN}"` });

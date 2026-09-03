@@ -345,11 +345,12 @@ const LEGACY_BRAND_RE = /\bwaves\s+lawn(?:\s*(?:&|and|\+|\/|-)\s*pest)?\b/i;
 // ordinary English words. Any occurrence, in any case, needs provenance.
 const COMMON_FIRST_NAMES = new Set(('kevin marcus james john robert michael william david richard joseph thomas charles christopher daniel matthew anthony donald steven paul andrew joshua kenneth brian george edward ronald timothy jason jeffrey ryan jacob gary nicholas eric jonathan stephen larry justin scott brandon benjamin samuel gregory alexander patrick raymond jack dennis jerry tyler aaron jose adam nathan henry douglas zachary peter kyle ethan walter noah jeremy christian keith roger terry austin sean gerald carl harold dylan arthur jordan jesse bryan billy bruce gabriel joe logan alan juan albert willie elijah wayne randy vincent ralph eugene russell bobby mason philip louis mary patricia jennifer linda elizabeth barbara susan jessica sarah karen lisa nancy betty sandra margaret ashley kimberly emily donna michelle carol amanda melissa deborah stephanie rebecca sharon laura cynthia kathleen amy angela shirley anna brenda pamela emma nicole helen samantha katherine christine debra rachel carolyn janet catherine maria heather diane olivia julie joyce victoria kelly christina lauren joan evelyn judith megan andrea cheryl hannah jacqueline martha gloria teresa ann sara madison frances kathryn janice jean abigail alice judy sophia julia denise amber danielle marilyn beverly charlotte natalie theresa diana brittany doris kayla alexis lori tiffany carlos luis miguel jorge ricardo eduardo fernando javier sergio roberto manuel pedro raul mario alejandro francisco antonio diego tony mike dave jim bob steve chris matt dan andy josh ben sam greg alex pat nick jon jeff tim jake tyler cody travis trevor shane chad derek dustin brett corey casey tanner colton hunter cole blake wyatt caleb connor evan garrett owen liam lucas oliver isaac levi carter jaxon grayson lincoln easton landon nolan hudson brooks brayden dominic jace jaden tristan kaden bryce marcos rafael ruben santiago hector oscar omar victor ivan cesar jesus angel gilbert lorenzo dean guy earl leo max sid ray ken don ron rick rich bill tom ed al lou pete art ted fred frank stan marty vince ernie chuck kim sue jan pam deb kate liz beth jen jess amy meg kay jo bea tina gina lena nina rosa ana luz ines elena sofia isabella mia ava ella chloe zoe lily grace layla nora aria ellie riley zoey hazel violet aurora savannah audrey bella claire skylar lucy paisley everly anna caroline nova genesis emilia kennedy maya willow kinsley naomi aaliyah elena sarah ariana allison gabriella alice madelyn cora ruby eva serenity autumn adeline hailey gianna valentina isla eliana quinn nevaeh ivy sadie piper lydia alexa josephine emery julia delilah arianna vivian kaylee sophie brielle madeline peyton rylee clara hadley melanie mackenzie reagan adalynn liliana aubrey jade katherine isabelle natalia raelynn maria athena ximena arya leilani taylor faith rose kylie alexandra mary margaret lyla ashley amaya eliza brianna bailey andrea khloe jocelyn angela cecilia leah').split(' '));
 // Common first names that are also ordinary English words. They are prose
-// only in a prose context — right after a determiner, possessive, quantifier,
-// adjective or preposition ("the right guy", "no surprise bill", "to be
-// frank", "in good faith"). "bill did a great job" is still a name.
+// only in a prose context — right after a determiner, quantifier, adjective
+// or intensifier ("the right guy", "no surprise bill", "to be frank", "in
+// good faith"). Possessives and prepositions are name slots ("our pat",
+// "with pat on the job"), so "bill did a great job" and "our pat" stay names.
 const DUAL_USE_FIRST_NAMES = new Set('guy art max grace faith rose hunter bill pat frank chuck jack rich summer joy'.split(' '));
-const PROSE_CONTEXT_RE = /(?:^|\s)(?:the|a|an|no|any|some|your|our|my|their|his|her|its|this|that|each|every|another|one|surprise|extra|final|first|last|next|right|good|nice|great|solid|be|to|too|so|very|really|pretty|quite|with|in|of|on|by|for|at|from|into|per)\s+$/i;
+const PROSE_CONTEXT_RE = /(?:^|\s)(?:the|a|an|no|any|some|this|that|each|every|another|one|surprise|extra|final|first|last|next|right|good|nice|great|solid|be|too|so|very|really|pretty|quite)\s+$/i;
 function inProseContext(body, idx) { return PROSE_CONTEXT_RE.test(body.slice(Math.max(0, idx - 24), idx)); }
 
 // Relationship / tenure wording an account's derived facts license. Shared by
@@ -880,8 +881,6 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
       const why = FEEDBACK_FOR[f.code] || f.code;
       lines.push(`- attempt ${i + 1}: ${why}${f.span ? ` (the words: "${f.span}")` : ''}`);
     });
-  } else if (feedback) {
-    lines.push('', `YOUR PREVIOUS ATTEMPT WAS REJECTED: ${feedback}. Write a new reply that fixes this.`);
   }
   lines.push('', 'Write the reply now.');
   return lines.join('\n');
@@ -975,7 +974,11 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
     const feedback = rejectionDetails.length ? rejectionDetails.map((d) => ({ code: d.code, span: d.promptSpan })) : null;
     const res = await requestDraft(grounding, mode, recentReplies, feedback, { reviewOnly: step.reviewOnly });
     if (!res.ok) {
-      return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: res.reason, error: res.error };
+      // Providers down. The runner retries on a backoff for a tailored reply;
+      // once its retries are exhausted it posts this provider-independent
+      // safe copy rather than parking a 4-5 star review as provider_down.
+      const fallbackText = safeCopyReply(grounding, mode, recentReplies);
+      return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: res.reason, error: res.error, fallbackText };
     }
     const normalized = splitReply(res.text, grounding.locationName).full;
     const verdict = verifyReplyDetailed(normalized, grounding, { recentReplies, mode });
