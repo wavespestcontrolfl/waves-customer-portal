@@ -370,14 +370,18 @@ function expectRodentBait({ homeSqFt, stories = 1 }) {
   return { footprint: fp, stations, perVisit, visits, annual, monthly: round2(annual / 12), extended, setupFee: R.baitSetupFee };
 }
 
-// TERMITE BAIT — perimeter from footprint, Trelona 15-ft spacing, 1.45× material markup, station-bracket monitoring
-function expectTermiteBait({ homeSqFt, stories = 1, complexity = 'standard' }) {
+// TERMITE BAIT — perimeter from footprint, the REQUESTED system's label spacing and
+// station cost (Trelona 15 ft is the menu default; Advance 10 ft stays priceable so
+// an existing estimate replays at its own system — codex r16 P2), 1.45× material
+// markup, station-bracket monitoring
+function expectTermiteBait({ homeSqFt, stories = 1, complexity = 'standard', system = constants.TERMITE.defaultSystem }) {
   const T = constants.TERMITE;
   const fp = footprintOf(homeSqFt, stories);
   const perimMult = complexity === 'standard' ? T.perimeterMultiplier.standard : T.perimeterMultiplier.complex;
   const perimeter = Math.round(4 * Math.sqrt(fp) * perimMult);
-  const sys = T.systems[T.defaultSystem];
-  const stations = Math.max(T.minStations, Math.ceil(perimeter / sys.spacingFt));
+  const sys = T.systems[system] || T.systems[T.defaultSystem];
+  const spacingFt = Number(sys.spacingFt) > 0 ? Number(sys.spacingFt) : T.stationSpacing;
+  const stations = Math.max(T.minStations, Math.ceil(perimeter / spacingFt));
   const installMaterial = stations * (sys.stationCost + sys.laborMaterial + sys.misc);
   const installLabor = stations * 0.083 * constants.GLOBAL.LABOR_RATE;
   const installPrice = Math.round(installMaterial * T.installMultiplier);
@@ -385,7 +389,7 @@ function expectTermiteBait({ homeSqFt, stories = 1, complexity = 'standard' }) {
   const monitoringMonthly = round2(T.monitoring.baseMonthly + steps * T.monitoring.stepMonthly);
   const monitoringAnnual = round2(monitoringMonthly * 12);
   const perApp = round2(monitoringAnnual / T.monitoringVisitsPerYear);
-  return { footprint: fp, perimeter, stations, installMaterial: round2(installMaterial), installLabor: round2(installLabor), installPrice, installMarkupOnMaterial: T.installMultiplier - 1, monitoringMonthly, monitoringAnnual, perApp, visits: T.monitoringVisitsPerYear };
+  return { system, spacingFt, footprint: fp, perimeter, stations, installMaterial: round2(installMaterial), installLabor: round2(installLabor), installPrice, installMarkupOnMaterial: T.installMultiplier - 1, monitoringMonthly, monitoringAnnual, perApp, visits: T.monitoringVisitsPerYear };
 }
 
 // ONE-TIME PEST — max(floor, round(quarterlyBase × 2.2)) × urgency; 15% perk; strict > visit-1 clamp
@@ -586,6 +590,12 @@ const line = (r, service) => (r && r.lineItems ? r.lineItems.find((l) => l.servi
 const BASE = { homeSqFt: 2000, stories: 1, lotSqFt: 8000, lawnSqFt: 4500, propertyType: 'single_family' };
 const findings = [];
 const scenarios = [];
+// A price that is NaN / ±Infinity / not a number on EITHER side is a discrepancy,
+// never a match: diff used to become null and Math.abs(null) === 0 passed the
+// tolerance, so a non-finite engine result recorded as 'match' and the audit
+// could exit 0 on an invalid price (codex r16 P1). Every tolerance comparison in
+// this file goes through this predicate.
+const offBy = (expected, actual, tol) => !(Number.isFinite(expected) && Number.isFinite(actual)) || Math.abs(actual - expected) > tol;
 function record(section, name, input, expected, actual, opts = {}) {
   const tol = opts.tolerance ?? 0.005;
   const diff = Number.isFinite(expected) && Number.isFinite(actual) ? round2(actual - expected) : null;
@@ -593,12 +603,12 @@ function record(section, name, input, expected, actual, opts = {}) {
   // returned none. It is a discrepancy like any other (a refused or errored
   // line where a price was expected) and is counted, listed and raised as a
   // finding — never silently dropped from the totals (codex P1 on PR #3792).
-  const status = expected === null || expected === undefined ? 'engine_only' : (actual === null || actual === undefined ? 'NO_PRICE' : (Math.abs(diff) <= tol ? 'match' : 'MISMATCH'));
+  const status = expected === null || expected === undefined ? 'engine_only' : (actual === null || actual === undefined ? 'NO_PRICE' : (offBy(expected, actual, tol) ? 'MISMATCH' : 'match'));
   // Scenario metadata stays under row.extra — the Markdown renderer prints
   // s.extra, so spreading it onto the row hid every observation (codex r2 P2).
   const row = { section, name, input, expected, actual, diff, status, extra: opts.extra || null };
   scenarios.push(row);
-  if (status === 'MISMATCH') findings.push({ severity: 'P1', section, name, detail: `independent ${expected} vs engine ${actual} (diff ${diff})` });
+  if (status === 'MISMATCH') findings.push({ severity: 'P1', section, name, detail: diff === null ? `non-finite price: independent ${expected} vs engine ${actual}` : `independent ${expected} vs engine ${actual} (diff ${diff})` });
   if (status === 'NO_PRICE') findings.push({ severity: 'P1', section, name, detail: `independent ${expected} but the engine returned no price for this line` });
   return row;
 }
@@ -616,7 +626,7 @@ function runPestMatrix() {
       const r = runEngine({ ...BASE, homeSqFt: sqft, services: { pest: { frequency } } });
       const li = line(r.result, 'pest_control');
       record(section, `footprint ${sqft} ${frequency}`, { homeSqFt: sqft, frequency }, exp.perApp, li ? li.perApp : null, { extra: { annualExpected: exp.annual, annualActual: li ? li.annual : null, review: li ? li.requiresManualReview : null } });
-      if (li) flagIf(Math.abs(li.annual - exp.annual) > 0.005, 'P1', section, `annual ${sqft} ${frequency}`, `annual ${li.annual} vs ${exp.annual}`);
+      if (li) flagIf(offBy(exp.annual, li.annual, 0.005), 'P1', section, `annual ${sqft} ${frequency}`, `annual ${li.annual} vs ${exp.annual}`);
     }
   }
   // feature modifiers
@@ -693,7 +703,7 @@ function runLawnMatrix() {
         const r = runEngine({ ...BASE, lawnSqFt: sqft, services: { lawn: { track, tier } } });
         const li = line(r.result, 'lawn_care');
         record(section, `[overlay floor=${overlay.useLawnCostFloor} min=${overlay.programMinimumMonthly}/mo] ${track} ${sqft}sf ${tier}`, { track, lawnSqFt: sqft, tier, overlay }, exp.perApp, li ? li.perApp : null, { extra: { annualExpected: exp.annual, annualActual: li ? li.annual : null, floorAnnual: exp.floorAnnual, floored: exp.floored, lifted: exp.lifted, engineBasis: li ? li.pricingBasis ?? null : null, engineLift: li ? li.cadenceLadderLiftApplied ?? null : null } });
-        if (li) flagIf(Math.abs(li.annual - exp.annual) > 0.005, 'P1', section, `[overlay] annual ${track} ${sqft} ${tier}`, `annual ${li.annual} vs ${exp.annual}`);
+        if (li) flagIf(offBy(exp.annual, li.annual, 0.005), 'P1', section, `[overlay] annual ${track} ${sqft} ${tier}`, `annual ${li.annual} vs ${exp.annual}`);
       }
     } finally { Object.assign(V, saved); }
   }
@@ -707,7 +717,7 @@ function runLawnMatrix() {
         const r = runEngine({ ...BASE, lawnSqFt: sqft, services: { lawn: { track, tier } } });
         const li = line(r.result, 'lawn_care');
         record(section, `${track} ${sqft}sf ${tier}`, { track, lawnSqFt: sqft, tier }, exp.perApp, li ? li.perApp : null, { extra: { annualExpected: exp.annual, annualActual: li ? li.annual : null, customQuote: li ? li.customQuoteFlag : null, basis: li ? li.pricingBasis : null } });
-        if (li) flagIf(Math.abs(li.annual - exp.annual) > 0.005, 'P1', section, `annual ${track} ${sqft} ${tier}`, `annual ${li.annual} vs ${exp.annual}`);
+        if (li) flagIf(offBy(exp.annual, li.annual, 0.005), 'P1', section, `annual ${track} ${sqft} ${tier}`, `annual ${li.annual} vs ${exp.annual}`);
       }
     }
   }
@@ -841,14 +851,23 @@ function runRodentMatrix() {
 
 function runTermiteMatrix() {
   const section = 'termite_bait';
-  for (const sqft of [800, 1200, 1600, 2000, 2500, 3200, 4000, 6000]) {
-    const exp = expectTermiteBait({ homeSqFt: sqft });
-    const r = runEngine({ ...BASE, homeSqFt: sqft, services: { termite: { system: 'trelona' } } });
-    const li = line(r.result, 'termite_bait');
-    const install = li ? (li.installation?.price ?? li.installPrice ?? null) : null;
-    const monthly = li ? (li.monitoring?.monthly ?? li.monthly ?? null) : null;
-    record(section, `install footprint ${sqft}`, { homeSqFt: sqft }, exp.installPrice, install, { extra: { stationsExpected: exp.stations, stationsActual: li ? (li.stations ?? li.stationCount) : null, perimeterExpected: exp.perimeter, installMarkupOnMaterialOnly: exp.installMarkupOnMaterial, installLaborNotBilled: exp.installLabor } });
-    record(section, `monitoring monthly footprint ${sqft}`, { homeSqFt: sqft }, exp.monitoringMonthly, monthly);
+  // Every system the live constants can price (codex r16 P2): the menu default
+  // (Trelona, 15 ft) AND the legacy Advance system (10 ft, its own station cost),
+  // which an existing estimate's replayable input still requests — the engine must
+  // honour the requested system, never silently reprice it at the default.
+  const systems = Object.keys(constants.TERMITE.systems);
+  for (const system of systems) {
+    const tag = system === constants.TERMITE.defaultSystem ? '' : ` [${system} replay]`;
+    for (const sqft of [800, 1200, 1600, 2000, 2500, 3200, 4000, 6000]) {
+      const exp = expectTermiteBait({ homeSqFt: sqft, system });
+      const r = runEngine({ ...BASE, homeSqFt: sqft, services: { termite: { system } } });
+      const li = line(r.result, 'termite_bait');
+      const install = li ? (li.installation?.price ?? li.installPrice ?? null) : null;
+      const monthly = li ? (li.monitoring?.monthly ?? li.monthly ?? null) : null;
+      record(section, `install footprint ${sqft}${tag}`, { homeSqFt: sqft, system }, exp.installPrice, install, { extra: { system: li ? li.selectedSystem ?? li.system ?? null : null, requestedSystem: li ? li.requestedSystem ?? null : null, spacingFt: exp.spacingFt, stationsExpected: exp.stations, stationsActual: li ? (li.stations ?? li.stationCount) : null, perimeterExpected: exp.perimeter, installMarkupOnMaterialOnly: exp.installMarkupOnMaterial, installLaborNotBilled: exp.installLabor } });
+      record(section, `monitoring monthly footprint ${sqft}${tag}`, { homeSqFt: sqft, system }, exp.monitoringMonthly, monthly);
+      flagIf(!!li && (li.selectedSystem ?? li.system) !== system, 'P1', section, `requested system honoured ${sqft}${tag}`, `requested ${system}, engine priced ${li ? (li.selectedSystem ?? li.system) : 'nothing'}`);
+    }
   }
 }
 
@@ -1032,6 +1051,38 @@ function runBundleAndDiscountMatrix() {
     record(section, `Platinum (no lawn) + manual ${c.name} → manualDiscount.recurringAmount`, { manualDiscount: c.md }, c.slice, r.summary.manualDiscount?.recurringAmount ?? null);
     record(section, `Platinum (no lawn) + manual ${c.name} → monthly = annual/12`, {}, round2(r.summary.recurringAnnualAfterDiscount / 12), r.summary.recurringMonthlyAfterDiscount, { tolerance: 0.006 });
   }
+  // Armed pest program floor (codex r16 P2): with PEST.enforceFloorPostDiscount=true
+  // the post-discount floor lifts ONLY the WaveGuard leg (estimate-engine.js:
+  // applyMarginGuard runs on the tier discount); the manual recurring slice is
+  // capped at the LAWN floors alone (estimate-engine.js manual-discount block), so
+  // the expectation is the same arithmetic on the ARMED engine's own after-WaveGuard
+  // lines. 800 sf puts the Platinum-discounted pest line under its floor, so the
+  // lift actually binds here (2,000 sf × 0.80 clears the $89 floor by 60¢).
+  // Simulated on the live constants object — read at call time, exactly what --db
+  // exercises — and restored after.
+  const pestConst = constants.PEST;
+  const savedPest = { enforceFloorPostDiscount: pestConst.enforceFloorPostDiscount };
+  pestConst.enforceFloorPostDiscount = true;
+  try {
+    const armedInput = { ...BASE, homeSqFt: 800, bedArea: 2000, services: noLawn };
+    const armed = runEngine(armedInput).result;
+    const armedPest = line(armed, 'pest_control');
+    const armedTierRow = { section, name: '[overlay pest floor armed] manual-discount base bundle (800 sf) tier', expected: 'platinum', actual: armed.waveGuard.tier, status: armed.waveGuard.tier === 'platinum' ? 'match' : 'MISMATCH', extra: null };
+    scenarios.push(armedTierRow);
+    if (armedTierRow.status === 'MISMATCH') findings.push({ severity: 'P1', section, name: armedTierRow.name, detail: `expected platinum got ${armed.waveGuard.tier}` });
+    // The floor must actually bind on the armed WaveGuard leg or this block proves nothing.
+    const liftRow = { section, name: '[overlay pest floor armed] pest line lifted to its cadence-adjusted program floor on the WaveGuard leg', expected: true, actual: armedPest ? armedPest.programFloorApplied === true : null, status: armedPest && armedPest.programFloorApplied === true ? 'match' : 'MISMATCH', extra: { programFloorAnnual: armedPest?.programFloorAnnual ?? null, annualBeforeDiscount: armedPest?.annualBeforeDiscount ?? null, annualAfterDiscount: armedPest?.annualAfterDiscount ?? null, actualDiscountPct: armedPest?.actualDiscountPct ?? null } };
+    scenarios.push(liftRow);
+    if (liftRow.status === 'MISMATCH') findings.push({ severity: 'P1', section, name: liftRow.name, detail: `programFloorApplied ${armedPest?.programFloorApplied ?? null} — the armed-floor premise no longer holds at 800 sf` });
+    const armedAfterWG = armed.summary.recurringAnnualAfterDiscount;
+    const armedEligible = round2(armed.lineItems.filter((l) => MANUAL_RECURRING_DISCOUNT_SERVICES.includes(l.service) && Number.isFinite(l.annualAfterDiscount)).reduce((sum, l) => sum + l.annualAfterDiscount, 0));
+    for (const c of [{ name: 'PERCENT 25%', md: { type: 'PERCENT', value: 25 }, slice: round2(armedEligible * 0.25) }, { name: 'FIXED $500', md: { type: 'FIXED', value: 500 }, slice: 500 }]) {
+      const r = runEngine({ ...armedInput, manualDiscount: { ...c.md, label: 'Audit test', internalReason: 'audit' } }).result;
+      const pestLi = line(r, 'pest_control');
+      record(section, `[overlay pest floor armed] Platinum (no lawn, 800 sf) + manual ${c.name} → recurringAnnualAfterDiscount (floor lifts the WaveGuard leg only; no pest cap on the manual slice)`, { manualDiscount: c.md }, round2(armedAfterWG - c.slice), r.summary.recurringAnnualAfterDiscount, { extra: { afterWaveGuard: armedAfterWG, discountableRecurring: armedEligible, pestProgramFloorAnnual: pestLi?.programFloorAnnual ?? null, pestProgramFloorApplied: pestLi?.programFloorApplied ?? null, pestAnnualAfterDiscount: pestLi?.annualAfterDiscount ?? null, capReason: r.summary.manualDiscount?.capReason ?? null } });
+      record(section, `[overlay pest floor armed] Platinum (no lawn, 800 sf) + manual ${c.name} → manualDiscount.recurringAmount`, { manualDiscount: c.md }, c.slice, r.summary.manualDiscount?.recurringAmount ?? null);
+    }
+  } finally { Object.assign(pestConst, savedPest); }
   // With lawn the recurring slice is capped at the lawn program / margin floor
   // (engine-owned lawnLineProtectedAnnual, not reproduced here). The independent
   // bound: a cap can only REDUCE the discount, so the total sits between the
@@ -1116,6 +1167,26 @@ function runCommercialMatrix() {
   }
 }
 
+// Independent annual-prepay total (mirrors resolveAnnualPrepayInvoiceTotal's
+// allocation, not its code): the mix's prepay % applies only to the base ABOVE the
+// protected floor = Σ non-discountable lines (foam_recurring — its cadence multiplier
+// is its only discount, owner directive) + the lawn program minimum × 12 per
+// recurring lawn line whenever a positive minimum is live (owner directive
+// 2026-07-09: prepay is not exempt from the floor — the --db overlay case, codex
+// r16 P2). `rate` is the caller's mix rule (solo fee mix ⇒ 0).
+const NON_DISCOUNTABLE = ['foam_recurring'];
+function expectPrepayTotal(rows, rate) {
+  const base = round2(rows.reduce((s, r) => s + r.annual, 0));
+  const nonDisc = round2(rows.filter((r) => NON_DISCOUNTABLE.includes(r.service)).reduce((s, r) => s + r.annual, 0));
+  const pmm = Number(constants.LAWN_PRICING_V2.programMinimumMonthly);
+  const lawnFloorAnnual = Number.isFinite(pmm) && pmm > 0 ? round2(pmm * 12) : 0;
+  const lawnProtected = round2(rows.filter((r) => r.service === 'lawn_care' && r.annual > 0).length * lawnFloorAnnual);
+  const protectedFloor = Math.min(base, round2(nonDisc + lawnProtected));
+  const discountable = Math.max(0, round2(base - protectedFloor));
+  const amount = round2(protectedFloor + discountable * (1 - rate));
+  return { base, nonDiscountable: nonDisc, lawnProtected, protectedFloor, discountable, rate, amount };
+}
+
 function runPrepayAndCadence() {
   const section = 'cadence_identities';
   const cases = [
@@ -1146,23 +1217,29 @@ function runPrepayAndCadence() {
     const identity = round2(perApp * visits);
     record(section, `${c.key} perApp × visits = annual (${c.visits})`, {}, identity, li.annual, { tolerance: visits * 0.005 + 0.01 });
     record(section, `${c.key} monthly × 12 = annual (${c.visits})`, {}, round2(li.monthly * 12), li.annual, { tolerance: 0.06 });
-    // Annual prepay through the converter's own resolver (codex r5 P1), with an
-    // independent expectation: a membership-fee mix (pest / mosquito) earns no
-    // prepay % — its incentive is the waived setup fee — everything else earns
-    // ANNUAL_PREPAY_DISCOUNT_PCT on the discountable base. estimateData is empty
-    // here, so the lawn program's protected floor is not exercised (that needs a
-    // stored estimate shape; noted, not claimed).
+    // Annual prepay through the converter's own resolver (codex r5 P1) against
+    // expectPrepayTotal: a SOLO membership-fee mix (pest / mosquito) earns no prepay %
+    // — its incentive is the waived setup fee — everything else earns
+    // ANNUAL_PREPAY_DISCOUNT_PCT on the base above the protected floor (foam_recurring
+    // at full price; lawn's program minimum when one is live). The converter finds
+    // both through the saved estimate's line items, so estimateData carries the priced
+    // line the way every production caller passes it (codex r14 + r16 P2).
     const feeMix = ['pest_control', 'mosquito'].includes(c.key);
-    // foam_recurring earns NO prepay % by owner directive (its cadence multiplier is
-    // its only discount); the converter finds it through the saved estimate's line
-    // items, so the estimateData carries the priced line (codex r14 P2).
-    const nonDiscountable = c.key === 'foam_recurring';
-    const prepayRate = feeMix || nonDiscountable ? 0 : PREPAY_PCT;
     const svc = { service: c.key, service_key: c.key, serviceKey: c.key, name: li.name || c.key, frequency: li.frequency || null, visits_per_year: visits, visitsPerYear: visits, annual: li.annual, perApp };
-    const estimateData = nonDiscountable ? { lineItems: [li] } : {};
+    const soloExp = expectPrepayTotal([svc], feeMix ? 0 : PREPAY_PCT);
     let resolved = null; let resolveErr = null;
-    try { resolved = converter.resolveAnnualPrepayInvoiceTotal({ baseAnnual: li.annual, recurringServices: [svc], estimateData }); } catch (e) { resolveErr = e.message; }
-    record(section, `${c.key} (${c.visits}/yr) annual prepay total (converter resolver, ${feeMix ? 'fee mix: 0%' : nonDiscountable ? 'non-discountable: 0%' : `${PREPAY_PCT * 100}%`})`, { key: c.key }, round2(li.annual * (1 - prepayRate)), resolved ? resolved.amount : null, { extra: { rate: resolved ? resolved.rate : null, discount: resolved ? resolved.discount : null, error: resolveErr, note: 'protected lawn floor not exercised (empty estimateData)' } });
+    try { resolved = converter.resolveAnnualPrepayInvoiceTotal({ baseAnnual: li.annual, recurringServices: [svc], estimateData: { lineItems: [li] } }); } catch (e) { resolveErr = e.message; }
+    record(section, `${c.key} (${c.visits}/yr) annual prepay total (converter resolver, ${feeMix ? 'solo fee mix: 0%' : `${PREPAY_PCT * 100}% above the protected floor`})`, { key: c.key }, soloExp.amount, resolved ? resolved.amount : null, { extra: { ...soloExp, resolvedRate: resolved ? resolved.rate : null, resolvedDiscount: resolved ? resolved.discount : null, error: resolveErr } });
+    // Operator-waived setup fee (owner ruling 2026-07-23; codex r16 P2): the waiver
+    // replaced the fee incentive, so a solo pest / mosquito plan converts to the
+    // standard prepay % — a regression that drops the customer's prepay discount
+    // after a waiver must not read as the ordinary 0 % solo path.
+    if (feeMix) {
+      const waivedExp = expectPrepayTotal([svc], PREPAY_PCT);
+      let waived = null; let waivedErr = null;
+      try { waived = converter.resolveAnnualPrepayInvoiceTotal({ baseAnnual: li.annual, recurringServices: [svc], estimateData: { lineItems: [li], operatorPriceAdjustment: { waiveSetupFee: true } } }); } catch (e) { waivedErr = e.message; }
+      record(section, `${c.key} (${c.visits}/yr) annual prepay total with operator-waived setup fee (solo fee mix ⇒ ${PREPAY_PCT * 100}%)`, { key: c.key, waiveSetupFee: true }, waivedExp.amount, waived ? waived.amount : null, { extra: { ...waivedExp, resolvedRate: waived ? waived.rate : null, resolvedDiscount: waived ? waived.discount : null, error: waivedErr } });
+    }
     let coverage = null; let coverageErr = null;
     try { coverage = converter.annualPrepayCoverageCadence(svc, li.frequency || null); } catch (e) { coverageErr = e.message; }
     // Independent expectation (codex r6 P1): the cadence whose shared coverage
@@ -1183,9 +1260,13 @@ function runPrepayAndCadence() {
   // Mixed bundles (codex r15 P2): the prepay rule is mix-dependent — a SOLO pest or
   // mosquito plan earns 0 % (fee-waiver incentive), any bundle of two or more
   // distinct services earns the % on its discountable lines, and foam_recurring is
-  // added back at full price whatever it is mixed with. Independent total =
-  // Σ non-discountable + Σ discountable × (1 − %).
-  const NON_DISCOUNTABLE = ['foam_recurring'];
+  // added back at full price whatever it is mixed with. Run at the live constants
+  // AND under a simulated lawn program minimum (the --db overlay case, codex r16
+  // P2): the engine lifts every lawn line to the minimum and the converter protects
+  // minimum × 12 per lawn line from the prepay %, so only lawn's headroom above the
+  // floor earns it. $150/mo is chosen so the engine's whole-per-application lift
+  // (1,800 ÷ 6, 9 and 12 are all integers) lands exactly on the minimum and the
+  // converter's saved-row inference equals the live value. Restored after.
   const bundles = [
     { name: 'pest + lawn', services: { pest: { frequency: 'quarterly' }, lawn: { tier: 'standard' } }, keys: ['pest_control', 'lawn_care'] },
     { name: 'pest + mosquito (two fee-mix services ⇒ not solo)', services: { pest: { frequency: 'quarterly' }, mosquito: { tier: 'seasonal9' } }, keys: ['pest_control', 'mosquito'] },
@@ -1193,17 +1274,24 @@ function runPrepayAndCadence() {
     { name: 'foam + pest', services: { foamRecurring: { points: 5, cadence: 'bimonthly' }, pest: { frequency: 'quarterly' } }, keys: ['foam_recurring', 'pest_control'] },
     { name: 'pest + lawn + mosquito + tree_shrub + foam', services: { pest: { frequency: 'quarterly' }, lawn: { tier: 'enhanced' }, mosquito: { tier: 'monthly12' }, treeShrub: { tier: 'standard', treeCount: 3 }, foamRecurring: { points: 5, cadence: 'monthly' } }, keys: ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'foam_recurring'] },
   ];
-  for (const b of bundles) {
-    const res = runEngine({ ...BASE, bedArea: 2000, services: b.services }).result;
-    const lis = b.keys.map((k) => line(res, k)).filter(Boolean);
-    if (lis.length !== b.keys.length) { findings.push({ severity: 'P1', section, name: `bundle ${b.name}`, detail: `engine returned ${lis.length} of ${b.keys.length} recurring lines` }); continue; }
-    const rows = lis.map((li) => ({ service: li.service, service_key: li.service, serviceKey: li.service, name: li.name || li.service, frequency: li.frequency || null, visits_per_year: li.visitsPerYear ?? li.visits ?? null, visitsPerYear: li.visitsPerYear ?? li.visits ?? null, annual: li.annualAfterDiscount ?? li.annual, perApp: li.perApp ?? li.perVisit }));
-    const base = round2(rows.reduce((s, r) => s + r.annual, 0));
-    const nonDisc = round2(rows.filter((r) => NON_DISCOUNTABLE.includes(r.service)).reduce((s, r) => s + r.annual, 0));
-    const expected = round2(nonDisc + (base - nonDisc) * (1 - PREPAY_PCT));
-    let resolved = null; let resolveErr = null;
-    try { resolved = converter.resolveAnnualPrepayInvoiceTotal({ baseAnnual: base, recurringServices: rows, estimateData: { lineItems: lis } }); } catch (e) { resolveErr = e.message; }
-    record(section, `bundle ${b.name}: annual prepay total (${PREPAY_PCT * 100}% on ${round2(base - nonDisc)}, ${nonDisc} at full price)`, { bundle: b.keys }, expected, resolved ? resolved.amount : null, { extra: { base, nonDiscountable: nonDisc, rate: resolved ? resolved.rate : null, discount: resolved ? resolved.discount : null, error: resolveErr, tier: res.waveGuard.tier } });
+  const V = constants.LAWN_PRICING_V2;
+  const savedMin = { programMinimumMonthly: V.programMinimumMonthly };
+  for (const overlay of [null, { programMinimumMonthly: 150 }]) {
+    if (overlay) Object.assign(V, overlay);
+    const tag = overlay ? ` [overlay lawn min=${overlay.programMinimumMonthly}/mo]` : '';
+    try {
+      for (const b of bundles) {
+        const res = runEngine({ ...BASE, bedArea: 2000, services: b.services }).result;
+        const lis = b.keys.map((k) => line(res, k)).filter(Boolean);
+        if (lis.length !== b.keys.length) { findings.push({ severity: 'P1', section, name: `bundle ${b.name}${tag}`, detail: `engine returned ${lis.length} of ${b.keys.length} recurring lines` }); continue; }
+        const rows = lis.map((li) => ({ service: li.service, service_key: li.service, serviceKey: li.service, name: li.name || li.service, frequency: li.frequency || null, visits_per_year: li.visitsPerYear ?? li.visits ?? null, visitsPerYear: li.visitsPerYear ?? li.visits ?? null, annual: li.annualAfterDiscount ?? li.annual, perApp: li.perApp ?? li.perVisit }));
+        const exp = expectPrepayTotal(rows, PREPAY_PCT);
+        let resolved = null; let resolveErr = null;
+        try { resolved = converter.resolveAnnualPrepayInvoiceTotal({ baseAnnual: exp.base, recurringServices: rows, estimateData: { lineItems: lis } }); } catch (e) { resolveErr = e.message; }
+        const lawnLi = lis.find((li) => li.service === 'lawn_care') || null;
+        record(section, `bundle ${b.name}${tag}: annual prepay total (${PREPAY_PCT * 100}% on ${exp.discountable}; ${exp.protectedFloor} protected)`, { bundle: b.keys, overlay }, exp.amount, resolved ? resolved.amount : null, { extra: { ...exp, resolvedRate: resolved ? resolved.rate : null, resolvedDiscount: resolved ? resolved.discount : null, error: resolveErr, tier: res.waveGuard.tier, lawnAnnual: lawnLi ? lawnLi.annualAfterDiscount ?? lawnLi.annual : null, lawnProgramMinimumApplied: lawnLi ? lawnLi.programMinimumGuardApplied ?? lawnLi.programMinimumApplied ?? null : null } });
+      }
+    } finally { Object.assign(V, savedMin); }
   }
 }
 
