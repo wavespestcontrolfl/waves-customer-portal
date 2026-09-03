@@ -45,15 +45,20 @@ Work the top clusters in order. For each one, before writing anything:
 - AGENTS.md has a 30 KB budget — run `npm run check:domain-rules` after
   every AGENTS.md edit and cut narration from the class you are extending
   rather than dropping a rule.
-- Never edit application code, tests that exercise behaviour, or CLAUDE.md
-  rules in this lane; skill files, AGENTS.md, docs/public-route-contracts.md
-  and scanner rules only.
+- Never edit application code or CLAUDE.md rules in this lane. What this
+  lane MAY ship: skill files, AGENTS.md, docs/public-route-contracts.md,
+  scanner rules (`check:domain-rules`, the route-surface allowlist), and a
+  NEW contract test that pins a recurring class (a test that only reads —
+  never one that changes application behaviour or edits an existing
+  behavioural test).
 
-## 3. Ship as a docs-only PR — never merge
+## 3. Ship as a rules-only PR — never merge
 
 Follow waves-ship §1–§4: worktree off `origin/main`, branch
 `docs/skill-doctor-<YYYY-MM-DD>`, commit from a message file, title
-`docs(skills): skill-doctor <YYYY-MM-DD>`. The PR body lists every proposed
+`docs(skills): skill-doctor <YYYY-MM-DD>` — or `test(contracts): skill-doctor
+<YYYY-MM-DD>` when the PR carries a contract test, so the title says what
+CI now enforces. The PR body lists every proposed
 rule with the cluster it came from (PR numbers + finding links from the
 report) so the reviewer sees the evidence, not the argument. Tag `@codex`,
 run `scripts/verify-pr-checks.sh`, work the rounds under the severity gate.

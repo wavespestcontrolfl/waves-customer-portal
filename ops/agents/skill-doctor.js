@@ -19,6 +19,8 @@
  *   node ops/agents/skill-doctor.js                  # last 14 days, markdown
  *   node ops/agents/skill-doctor.js --days 7 --json  # machine-readable
  *   node ops/agents/skill-doctor.js --repo wavespestcontrolfl/wavespestcontrol-astro
+ *     (candidate homes are read from ../wavespestcontrol-astro when it exists,
+ *      or from --root=<checkout>; with neither, "rule exists" is not checked)
  *   node ops/agents/skill-doctor.js --include-open   # also read open PRs
  *
  * The candidate-home heuristic mirrors `.claude/commands/lesson.md`'s
@@ -43,7 +45,7 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 // ---------------------------------------------------------------- args
 
 function parseArgs(argv) {
-  const args = { days: 14, repo: DEFAULT_REPO, json: false, includeOpen: false, minPrs: 2 };
+  const args = { days: 14, repo: DEFAULT_REPO, json: false, includeOpen: false, minPrs: 2, root: undefined };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => argv[++i];
@@ -55,13 +57,29 @@ function parseArgs(argv) {
     else if (a.startsWith('--repo=')) args.repo = a.slice(7);
     else if (a === '--min-prs') args.minPrs = Number(next());
     else if (a.startsWith('--min-prs=')) args.minPrs = Number(a.slice(10));
+    else if (a === '--root') args.root = next();
+    else if (a.startsWith('--root=')) args.root = a.slice(7);
     else if (a === '--help' || a === '-h') args.help = true;
     else throw new Error(`Unknown argument: ${a}`);
   }
   if (!Number.isInteger(args.days) || args.days < 1) throw new Error('--days must be a positive integer');
   if (!Number.isInteger(args.minPrs) || args.minPrs < 1) throw new Error('--min-prs must be a positive integer');
   if (!/^[\w.-]+\/[\w.-]+$/.test(args.repo)) throw new Error('--repo must be owner/name');
+  if (args.root === undefined) args.root = defaultRootFor(args.repo);
+  else if (!fs.existsSync(path.join(args.root, 'AGENTS.md'))) throw new Error(`--root has no AGENTS.md: ${args.root}`);
   return args;
+}
+
+// Candidate-home files are read from a checkout of the SELECTED repo, never
+// from this one: with --repo astro the PRs and the cited AGENTS.md are
+// Astro's, so "rule exists" must be judged against Astro's files (Codex r1
+// P1). Without a checkout the check is skipped (root null → ruleExists
+// null → the report says "not checked") rather than answered from the
+// wrong repo.
+function defaultRootFor(repo) {
+  if (repo === DEFAULT_REPO) return REPO_ROOT;
+  const sibling = path.resolve(REPO_ROOT, '..', repo.split('/')[1]);
+  return fs.existsSync(path.join(sibling, 'AGENTS.md')) ? sibling : null;
 }
 
 // ---------------------------------------------------------------- gh
@@ -142,7 +160,10 @@ function parseFinding(comment, pr) {
 function normalizePhrase(title, words = 8) {
   return title
     .toLowerCase()
-    .replace(/`[^`]*`/g, ' ')
+    // Inline-code identifiers are often the only term that separates two
+    // classes ("Preserve \`email\`…" vs "Preserve \`status\`…") — keep
+    // their text, drop only the backticks (Codex r3).
+    .replace(/`([^`]*)`/g, ' $1 ')
     .replace(/[a-z0-9_./-]+:\d+(-\d+)?/g, ' ')
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
@@ -256,21 +277,36 @@ function candidateHome(finding) {
 const homeTextCache = new Map();
 function homeText(home, root = REPO_ROOT) {
   const rel = HOME_FILES[home] || HOME_FILES['AGENTS.md'];
-  if (!homeTextCache.has(rel)) {
-    try { homeTextCache.set(rel, fs.readFileSync(path.join(root, rel), 'utf8').toLowerCase()); } catch (_) { homeTextCache.set(rel, ''); }
+  const key = `${root}:${rel}`;
+  if (!homeTextCache.has(key)) {
+    try { homeTextCache.set(key, fs.readFileSync(path.join(root, rel), 'utf8').toLowerCase()); } catch (_) { homeTextCache.set(key, ''); }
   }
-  return homeTextCache.get(rel);
+  return homeTextCache.get(key);
+}
+
+// The terms a cluster is looked up by. A phrase cluster's label IS the
+// finding phrase; a path cluster's label is a pathname whose tokens
+// ("server", "services", "content") match any skill that describes its own
+// scope, so path clusters use the most frequent terms across their finding
+// TITLES instead (Codex r3).
+function clusterTerms(cluster, max = 4) {
+  if (cluster.kind !== 'path') return keyTerms(cluster.label, max);
+  const freq = new Map();
+  for (const f of cluster.findings) for (const t of new Set(keyTerms(f.title, 6))) freq.set(t, (freq.get(t) || 0) + 1);
+  return [...freq.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, max).map(([t]) => t);
 }
 
 // "Rule exists" = the home file already carries at least two of the
 // cluster's key terms (or the cluster IS a cited AGENTS.md rule). A term
 // hit is not proof the rule covers this exact class — it is the prompt to
 // go read that rule before writing a new one.
+// null = not checked (no local checkout of the selected repo).
 function ruleExists(cluster, root = REPO_ROOT) {
   if (cluster.kind === 'rule') return true;
+  if (!root) return null;
   const text = homeText(cluster.home, root);
   if (!text) return false;
-  const terms = keyTerms(cluster.label, 4);
+  const terms = clusterTerms(cluster, 4);
   const hits = terms.filter((t) => text.includes(t));
   return terms.length > 0 && hits.length >= Math.min(2, terms.length);
 }
@@ -290,18 +326,28 @@ function clusterFindings(findings, { minPrs = 2, root = REPO_ROOT, agentsLines }
     add('rule', rule, f);
     add('path', topLevelPath(f.path), f);
     // A finding that cites a rule is evidence for THAT rule; it must not also
-    // surface as an "uncited" phrase class (Codex r1).
-    if (!rule) add('phrase', normalizePhrase(f.title), f);
+    // surface as an "uncited" phrase class (Codex r1) — and a citation whose
+    // rule could not be resolved (head AGENTS.md unfetchable) is still a
+    // citation, not a missing rule (Codex r3).
+    if (!rule && !f.agentsLines) add('phrase', normalizePhrase(f.title), f);
   }
   const clusters = [];
   for (const b of buckets.values()) {
     const prs = [...new Set(b.findings.map((f) => f.pr))].sort((a, c) => a - c);
     if (prs.length < minPrs) continue;
-    const score = b.findings.reduce((s, f) => s + (SEVERITY_WEIGHT[f.severity] || 1), 0);
     const worst = b.findings.map((f) => f.severity).sort()[0];
-    // Home = the most common candidate across the cluster's findings.
-    const homeVotes = new Map();
+    // Recurrence is defined across PRs, so score and home are computed from
+    // ONE representative per PR — a class repeated over twenty rounds of one
+    // noisy PR must not outrank (or out-vote) a class found once in each of
+    // ten PRs (Codex r3). Representative = the PR's worst finding.
+    const perPr = new Map();
     for (const f of b.findings) {
+      const cur = perPr.get(f.pr);
+      if (!cur || (SEVERITY_WEIGHT[f.severity] || 1) > (SEVERITY_WEIGHT[cur.severity] || 1)) perPr.set(f.pr, f);
+    }
+    const score = [...perPr.values()].reduce((s, f) => s + (SEVERITY_WEIGHT[f.severity] || 1), 0);
+    const homeVotes = new Map();
+    for (const f of perPr.values()) {
       const h = b.kind === 'rule' ? 'AGENTS.md' : candidateHome(f);
       homeVotes.set(h, (homeVotes.get(h) || 0) + 1);
     }
@@ -346,7 +392,9 @@ function renderMarkdown({ repo, days, prs, findings, clusters }) {
     lines.push(`## ${section.title}`);
     lines.push('');
     rows.forEach((c, i) => {
-      const flag = c.kind === 'rule' ? '' : (c.ruleExists ? ' — **rule exists but not followed**' : ' — no rule found in candidate home');
+      const flag = c.kind === 'rule' ? ''
+        : c.ruleExists === null ? ' — not checked (no local checkout of this repo; pass --root)'
+          : c.ruleExists ? ' — **rule exists but not followed**' : ' — no rule found in candidate home';
       const prList = c.prs.length > 12 ? `${c.prs.slice(0, 12).map((n) => `#${n}`).join(', ')} … (${c.prs.length} PRs)` : c.prs.map((n) => `#${n}`).join(', ');
       lines.push(`### ${i + 1}. ${c.label}`);
       lines.push(`score ${c.score} · ${c.count} findings across ${prList} · worst ${c.worst}`);
@@ -396,7 +444,7 @@ function run(args, deps = {}) {
       findings.push(f);
     }
   }
-  const clusters = clusterFindings(findings, { minPrs: args.minPrs });
+  const clusters = clusterFindings(findings, { minPrs: args.minPrs, root: args.root === undefined ? REPO_ROOT : args.root });
   return { repo: args.repo, days: args.days, prs, findings, clusters };
 }
 
@@ -409,7 +457,7 @@ function main() {
     process.exit(2);
   }
   if (args.help) {
-    console.log('usage: skill-doctor.js [--days N] [--repo owner/name] [--min-prs N] [--include-open] [--json]');
+    console.log('usage: skill-doctor.js [--days N] [--repo owner/name] [--root <checkout of --repo>] [--min-prs N] [--include-open] [--json]');
     return;
   }
   const result = run(args);
@@ -426,7 +474,7 @@ if (require.main === module) main();
 module.exports = {
   run,
   _internals: {
-    parseArgs, parseFinding, normalizePhrase, keyTerms, topLevelPath, agentsRuleTitle,
+    parseArgs, parseFinding, normalizePhrase, keyTerms, clusterTerms, topLevelPath, agentsRuleTitle, defaultRootFor,
     candidateHome, ruleExists, clusterFindings, renderMarkdown, SEVERITY_WEIGHT, HOME_FILES, SECTIONS, agentsMdAt,
   },
 };

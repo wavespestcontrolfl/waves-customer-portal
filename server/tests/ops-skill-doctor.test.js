@@ -104,6 +104,46 @@ describe('run + clusterFindings', () => {
     expect(clusters.find((c) => c.kind === 'rule')).toBeUndefined();
   });
 
+  test('score and home are one representative per PR — a noisy single PR cannot outrank or out-vote cross-PR recurrence', () => {
+    const noisy = Array.from({ length: 20 }, (_, i) => codexComment({ pr: 1, sev: 'P1', title: 'Wrap the backfill in a transaction', path: 'server/models/migrations/x.js', line: i + 1, body: 'knex migration without trx' }));
+    const { clusters } = runFixture({ fetchCodexComments: (_r, n) => (n === 1 ? [...COMMENTS[1], ...noisy] : COMMENTS[n] || []) });
+    const trx = clusters.find((c) => c.kind === 'phrase' && /transaction/.test(c.label));
+    // 21 findings, but PR 1 counts once (P1=4) and PR 2 once (P2=2).
+    expect(trx.count).toBe(21);
+    expect(trx.score).toBe(6);
+    const pii = clusters.find((c) => c.kind === 'phrase' && /remove customer pii/.test(c.label));
+    expect(pii.score).toBe(8);
+    expect(clusters.indexOf(pii)).toBeLessThan(clusters.indexOf(trx));
+    // Home vote: the noisy PR's 20 waves-db votes are one vote; PR 2 also says waves-db.
+    expect(trx.home).toBe('waves-db');
+  });
+
+  test('a citation whose head AGENTS.md could not be fetched stays out of the uncited phrase section', () => {
+    const { clusters } = runFixture({ agentsMdAt: () => null });
+    expect(clusters.find((c) => c.kind === 'phrase' && /(document the new public field|name the actual auth routes)/.test(c.label))).toBeUndefined();
+  });
+
+  test('normalizePhrase keeps inline-code identifiers so two classes do not merge', () => {
+    expect(_internals.normalizePhrase('Preserve `email` when updating customer')).not.toBe(_internals.normalizePhrase('Preserve `status` when updating customer'));
+    expect(_internals.normalizePhrase('Preserve `email` when updating customer')).toContain('email');
+  });
+
+  test('path clusters are looked up by their finding titles, not the path tokens; no checkout → not checked', () => {
+    const { clusters } = runFixture();
+    const pathCluster = { kind: 'path', label: 'server/services/content/content-guardrails.js', home: 'waves-content', findings: [{ title: 'Reject send-bound terms on non-outreach paths' }, { title: 'Reject send-bound terms in newsletter copy' }] };
+    expect(_internals.clusterTerms(pathCluster)).toEqual(expect.arrayContaining(['reject', 'send', 'bound', 'terms']));
+    expect(_internals.clusterTerms(pathCluster)).not.toContain('services');
+    expect(_internals.ruleExists(pathCluster, null)).toBeNull();
+    expect(clusters.every((c) => c.ruleExists !== null)).toBe(true);
+    expect(_internals.renderMarkdown({ ...runFixture(), clusters: clusters.map((c) => ({ ...c, ruleExists: c.kind === 'rule' ? true : null })) })).toContain('not checked');
+  });
+
+  test('--root defaults to this repo for the portal and to a sibling checkout (or null) for another repo', () => {
+    expect(_internals.defaultRootFor('wavespestcontrolfl/waves-customer-portal')).toBe(require('path').resolve(__dirname, '../..'));
+    expect(_internals.defaultRootFor('o/does-not-exist-anywhere')).toBeNull();
+    expect(() => _internals.parseArgs(['--root', '/nonexistent-dir'])).toThrow(/AGENTS\.md/);
+  });
+
   test('markdown report renders the three sections with one example per PR', () => {
     const result = runFixture();
     const md = _internals.renderMarkdown(result);
