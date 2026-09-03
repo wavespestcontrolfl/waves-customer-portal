@@ -2803,6 +2803,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : quoteRequiredReason === 'lot_size_requires_verification'
           ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
+          // A stale single-visit flea request (retired offer key) prices the
+          // two-visit package but parks for review — say so, never the
+          // commercial fallback (GH codex #3845 r5 P2).
+          : quoteRequiredReason === 'flea_single_visit_offer_retired'
+          ? 'Flea control is now our two-visit Flea Elimination Package rather than a single treatment — the Waves team will confirm your package price shortly.'
           : lowConfidenceForcesSiteQuote && !manualQuoteLine
             ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
             : 'Commercial properties require a manual quote. The Waves team has been notified.',
