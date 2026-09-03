@@ -147,6 +147,14 @@ const RULE_NOTES = {
 // Evidence window for the association booking arm (mirrors
 // call-commitments' ASSOCIATION_WINDOW_DAYS).
 const BOOKING_WINDOW_DAYS = 14;
+// scheduled_services statuses that are a booking still going to happen or
+// one that did (scheduled_services_status_check minus cancelled /
+// rescheduled / skipped / no_show).
+const LIVE_BOOKING_STATUSES = new Set(['pending', 'confirmed', 'en_route', 'on_site', 'completed']);
+// service-contact-events `source` values written by a person: the admin
+// customer PUT and the portal account-holder save. 'call' (pipeline) and
+// 'dedupe' / 'dedupe_undo' (merges) are automated.
+const HUMAN_CONTACT_SOURCES = new Set(['admin', 'portal']);
 // Category words too generic to prove a visit is for the requested service.
 const SERVICE_STOPWORDS = new Set(['control', 'care', 'service', 'services', 'treatment', 'general', 'and', 'the', 'of']);
 
@@ -171,12 +179,15 @@ function strictlyAfter(value, boundary) {
   return Boolean(a && b && a > b);
 }
 
-// House number + first street word — the minimum two tokens that make two
-// address strings the SAME street address. "1234 Palm Ave" vs
-// "1234 Palm Avenue Unit 2" agree; "1234 Palm" vs "1236 Palm" do not.
+// The shared suffix-canonical, unit-stripped street key (customer-properties):
+// "1234 Palm Ave" == "1234 Palm Avenue Unit 2", but != "1234 Palm St". Heard
+// addresses may carry a trailing ", City" — only the street segment keys.
+// Null unless it starts with a house number (a bare street proves nothing).
 function addressKey(text) {
-  const m = String(text || '').trim().toLowerCase().match(/^(\d+[a-z]?)\s+([a-z0-9]+)/);
-  return m ? `${m[1]} ${m[2]}` : null;
+  const { streetKey } = require('./customer-properties');
+  const street = String(text || '').split(',')[0].trim();
+  if (!/^\d/.test(street)) return null;
+  return streetKey(street) || null;
 }
 
 // Every address the CALL supplied (payload as-heard, V2 street/raw, V1
@@ -620,33 +631,38 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
   }
 
   // email_unverified → the captured address ENGAGED (opened/clicked — a
-  // delivery alone only proves some mailbox exists) with a message sent
-  // after the card, and never bounced/complained.
+  // delivery alone only proves some mailbox exists) with a message SENT
+  // after the card (an older message opened later proves nothing about
+  // this call's capture), and never bounced/complained.
   const emailItems = candidates.filter((i) => i.reason_code === 'email_unverified');
   const emailsByItem = new Map(emailItems.map((i) => [i.id, capturedEmails(i)]));
   const allEmails = [...new Set([...emailsByItem.values()].flat())];
   if (allEmails.length) {
     const rows = await conn('email_messages')
       .whereRaw('LOWER(recipient_email_snapshot) IN (' + allEmails.map(() => '?').join(', ') + ')', allEmails)
+      .whereNotNull('sent_at')
       .whereNull('bounced_at')
       .whereNull('complained_at')
       .whereNotIn('status', ['bounced', 'failed', 'complained', 'dropped'])
       .where(function engaged() {
         this.whereNotNull('opened_at').orWhereNotNull('clicked_at');
       })
-      .select('recipient_email_snapshot', 'opened_at', 'clicked_at');
+      .select('recipient_email_snapshot', 'sent_at', 'opened_at', 'clicked_at');
     for (const item of emailItems) {
       const mine = new Set(emailsByItem.get(item.id));
       const hit = rows.some((r) => mine.has(String(r.recipient_email_snapshot || '').toLowerCase())
+        && strictlyAfter(r.sent_at, item.created_at)
         && (strictlyAfter(r.opened_at, item.created_at) || strictlyAfter(r.clicked_at, item.created_at)));
       if (hit) flag(item.id, 'email_engaged');
     }
   }
 
-  // caller_not_authorized → a HUMAN added/updated a service contact whose
-  // number ends in the caller's last four after the card (service-contact-
-  // events writes the masked number to activity_log.metadata.phone). The
-  // classifier additionally requires the number to be on a slot NOW.
+  // caller_not_authorized → a HUMAN (admin or portal account holder — never
+  // the call pipeline or a dedupe merge) added/updated a service contact
+  // whose number ends in the caller's last four after the card (service-
+  // contact-events writes the masked number and the source to
+  // activity_log.metadata). The classifier additionally requires the number
+  // to be on a slot NOW.
   const authItems = candidates.filter((i) => i.reason_code === 'caller_not_authorized' && i.call_customer_id);
   if (authItems.length) {
     const rows = await conn('activity_log')
@@ -660,6 +676,7 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
         if (String(r.customer_id) !== String(item.call_customer_id)) return false;
         if (!strictlyAfter(r.created_at, item.created_at)) return false;
         const meta = parseMaybeJson(r.metadata);
+        if (!HUMAN_CONTACT_SOURCES.has(String(meta?.source || ''))) return false;
         return String(meta?.phone || '').slice(-4) === last4;
       });
       if (hit) flag(item.id, 'caller_phone_added');
@@ -682,7 +699,10 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
     const q = conn('scheduled_services')
       .whereIn('customer_id', customerIds)
       .whereNull('parent_service_id')
-      .whereNotIn('status', ['cancelled', 'rescheduled'])
+      // Positive allowlist: a live booking is one that is still going to
+      // happen or did happen. cancelled / rescheduled / skipped / no_show
+      // rows prove nothing.
+      .whereIn('status', [...LIVE_BOOKING_STATUSES])
       .orderBy('id', 'asc')
       .select('id', 'customer_id', 'source_call_log_id', 'status', 'service_type', 'scheduled_date', 'created_at', 'completed_at');
     if (lock) q.forUpdate();
@@ -875,6 +895,8 @@ module.exports = {
   requestedWindow,
   loadEvidence,
   EVIDENCE_CODES,
+  LIVE_BOOKING_STATUSES,
+  HUMAN_CONTACT_SOURCES,
   ADDRESS_MOOT_CODES,
   ADVISORY_AGE_CODES,
   RULE_NOTES,

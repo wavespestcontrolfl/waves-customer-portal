@@ -402,8 +402,15 @@ describe('evidence rules', () => {
 });
 
 describe('evidence helpers', () => {
-  test('heardAddressMatchesOnFile keys on house number + first street word, fails closed on unparseable input', () => {
-    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', call_extraction_v1: JSON.stringify({ address_line1: '77 oak street, bradenton' }), call_extraction: NO_ADDR_EXTRACTION, payload: {} }))).toBe(true);
+  test('heardAddressMatchesOnFile uses the shared suffix-aware street key, fails closed on unparseable input', () => {
+    const heard = (line) => item({ customer_address_line1: '77 Oak St', call_extraction_v1: JSON.stringify({ address_line1: line }), call_extraction: NO_ADDR_EXTRACTION, payload: {} });
+    expect(heardAddressMatchesOnFile(heard('77 oak street, bradenton'))).toBe(true);
+    expect(heardAddressMatchesOnFile(heard('77 Oak St Apt 4'))).toBe(true);
+    // Same number, different street type = a different street.
+    expect(heardAddressMatchesOnFile(heard('77 Oak Ave'))).toBe(false);
+    expect(heardAddressMatchesOnFile(heard('77 Oak'))).toBe(false);
+    // A bare street with no house number proves nothing.
+    expect(heardAddressMatchesOnFile(heard('Oak St'))).toBe(false);
     expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', call_extraction_v1: 'not-json{', call_extraction: NO_ADDR_EXTRACTION, payload: {} }))).toBe(false);
     expect(heardAddressMatchesOnFile(item({ customer_address_line1: null, call_extraction_v1: JSON.stringify({ address_line1: '77 Oak St' }), payload: {} }))).toBe(false);
   });
