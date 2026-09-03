@@ -59,3 +59,30 @@ describe('findPriorOpenWizardLeadId', () => {
     expect(dbh).not.toHaveBeenCalled();
   });
 });
+
+describe('duplicate ancestry follows the token the browser holds', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
+
+  test('duplicateOfFromExtracted reads the marker off parsed jsonb and legacy strings', () => {
+    expect(_internals.duplicateOfFromExtracted({ duplicate_of_lead_id: 'lead-1' })).toBe('lead-1');
+    expect(_internals.duplicateOfFromExtracted(JSON.stringify({ duplicate_of_lead_id: 'lead-2' }))).toBe('lead-2');
+    expect(_internals.duplicateOfFromExtracted({})).toBeNull();
+    expect(_internals.duplicateOfFromExtracted('not json')).toBeNull();
+    expect(_internals.duplicateOfFromExtracted(null)).toBeNull();
+  });
+
+  test('the token path re-derives duplicate state from the stored row, and attribution is skipped for duplicates', () => {
+    expect(src).toMatch(/returning\(\['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data'\]\)/);
+    expect(src).toMatch(/if \(lead && lead\.status === 'duplicate'\) duplicateOfLeadId = duplicateOfFromExtracted\(lead\.extracted_data\)/);
+    expect(src).toMatch(/if \(!duplicateOfLeadId\) await db\('ad_service_attribution'\)\.insert\(/);
+    // The replace path carries the marker forward.
+    expect(src).toMatch(/'duplicate_of_lead_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'duplicate_of_lead_id'/);
+  });
+
+  test('/upsell mirrors the added interest onto the OPEN original a duplicate points at', () => {
+    expect(src).toMatch(/const originalId = lead\.status === 'duplicate' \? duplicateOfFromExtracted\(lead\.extracted_data\) : null;/);
+    expect(src).toMatch(/\.where\(\{ id: originalId \}\)[\s\S]{0,300}\.whereIn\('status', OPEN_LEAD_STATUSES\)/);
+  });
+});

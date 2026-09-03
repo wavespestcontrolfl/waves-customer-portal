@@ -15,6 +15,14 @@ const WIZARD_LEAD_REUSE_DAYS = 30;
 // (the token path proves ownership with an unguessable leadId + email), so
 // an existing person's lead must never be mutated from here. A different
 // address is a different inquiry (a second property), never a duplicate.
+// extracted_data.duplicate_of_lead_id off a lead row (jsonb arrives parsed;
+// legacy rows may carry a string), or null.
+function duplicateOfFromExtracted(extractedData) {
+  let data = extractedData;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  return (data && data.duplicate_of_lead_id) || null;
+}
+
 async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKey } = {}, now = Date.now()) {
   const emailLc = String(email || '').trim().toLowerCase();
   const phoneDigits = String(phone || '').replace(/\D/g, '').slice(-10);
@@ -1674,6 +1682,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // two identical leads (three with the email lead), so the sweep, the
     // digest, and the office all counted one prospect three times.
     let lead;
+    // Repeat-run ancestry (see the tokenless branch below). Set from the
+    // stored row on the token path too: the browser's token after a repeat
+    // run IS the duplicate row's id, and everything keyed on this flag
+    // (attribution, bells) must see it on later stages (codex #3834 r3 P1).
+    let duplicateOfLeadId = null;
     if (leadId) {
       // OWNERSHIP (atomic): leadId is a client-supplied id on a public,
       // PII-accepting write surface, so prove ownership the same way /upsell
@@ -1726,8 +1739,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .whereNull('deleted_at')
         .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
         .update(updateFields)
-        .returning(['id', 'lead_source_id', 'lead_type']);
+        .returning(['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data']);
       lead = rows[0];
+      if (lead && lead.status === 'duplicate') duplicateOfLeadId = duplicateOfFromExtracted(lead.extracted_data);
       if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
         await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
       }
@@ -1739,7 +1753,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // count one prospect once. Non-destructive by design (hook P0): nothing
     // on the earlier lead changes. Two concurrent first runs can still both
     // land 'new' — the office merges those by hand, as before.
-    let duplicateOfLeadId = null;
     if (!lead) {
       duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey });
     }
@@ -1914,12 +1927,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       const attachedCallLead = ['voicemail', 'inbound_call'].includes(lead?.lead_type);
       if (attachedCallLead) {
         await backfillCallLeadAttribution({ leadId: lead.id, customerId, serviceInterest });
-      } else if (channelAttr && !duplicateOfLeadId) {
+      } else if (channelAttr) {
         // A repeat run is not a second marketing lead: the funnel and
         // service-line queries count attribution rows without excluding
         // duplicate lead statuses (codex #3834 r2 P1), and the original's
         // row already carries this prospect.
-        await db('ad_service_attribution').insert({
+        if (!duplicateOfLeadId) await db('ad_service_attribution').insert({
           customer_id: customerId,
           lead_id: lead.id,
           service_line: inferServiceLine(serviceInterest),
@@ -2906,6 +2919,32 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
       updated_at: new Date(),
     });
 
+    // A repeat-run duplicate is the token the widget holds, but the office
+    // works the OPEN original it duplicates — mirror the added interest
+    // there too (codex #3834 r3 P1). Same ownership evidence as this route
+    // (row id + the typed email, which the original shares by construction
+    // of the link), same open-status guard as the pipeline views.
+    const originalId = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
+    if (originalId) {
+      const original = await db('leads')
+        .where({ id: originalId })
+        .whereNull('deleted_at')
+        .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
+        .whereIn('status', OPEN_LEAD_STATUSES)
+        .first('id', 'service_interest', 'extracted_data');
+      if (original) {
+        const originalInterest = Array.from(new Set([...(original.service_interest || '').split(' + ').filter(Boolean), ...addLabels])).join(' + ');
+        let originalData = original.extracted_data && typeof original.extracted_data === 'object' ? original.extracted_data : {};
+        if (typeof original.extracted_data === 'string') { try { originalData = JSON.parse(original.extracted_data); } catch { originalData = {}; } }
+        const originalUpsells = Array.from(new Set([...(Array.isArray(originalData.upsell_interests) ? originalData.upsell_interests : []), ...valid]));
+        await db('leads').where({ id: original.id }).update({
+          service_interest: originalInterest,
+          extracted_data: JSON.stringify({ ...originalData, upsell_interests: originalUpsells, upsell_added_at: new Date().toISOString() }),
+          updated_at: new Date(),
+        });
+      }
+    }
+
     // Keep the quote_wizard estimate row in sync — admins viewing the pipeline
     // should see the merged service_interest after an upsell add, not the
     // original /calculate snapshot. Scope to status='draft' so a late upsell
@@ -2958,6 +2997,7 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 module.exports = router;
 module.exports._internals = {
   findPriorOpenWizardLeadId,
+  duplicateOfFromExtracted,
   WIZARD_LEAD_REUSE_DAYS,
   isPublicCommercialQuote,
   publicQuotePestLabel,
