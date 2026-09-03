@@ -222,6 +222,14 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     expect(witnessMerge).toBeTruthy();
     const patches = deliveryPatches();
     expect(patches.some((p) => p.deliveryState.firstDeliveredAt)).toBe(true);
+    // ...and the scope this send delivered rides along, merged UNDER
+    // sendSnapshot (the accepted row's bundle is not replaced) so the
+    // triage sweep can pair it with the witness (pre-push hook P1 on
+    // #3811 1b4240350).
+    const scopeMerge = db.raw.mock.calls.find(([sql, bindings]) => /'\{sendSnapshot\}'/.test(String(sql)) && Array.isArray(bindings) && bindings.length === 2);
+    expect(scopeMerge).toBeTruthy();
+    expect(JSON.parse(scopeMerge[1][0]).deliveryState.firstDeliveredAt).toBeTruthy();
+    expect(JSON.parse(scopeMerge[1][1])).toEqual({ scope: { lines: [{ names: [], recurring: true, oneTime: false }], address: null, property: null } });
   });
 });
 

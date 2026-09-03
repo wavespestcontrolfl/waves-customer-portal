@@ -2416,12 +2416,20 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // status, sent_at, or expiry, which are exactly what must not be
     // regressed here. Real deliveries only; a suppressed attempt leaves
     // the terminal row untouched. Fail-soft like every branch below.
+    // The scope THIS send delivered rides along — built from the
+    // PRE-DELIVERY claimed row (the accept handler rewrites result /
+    // totals) and merged UNDER sendSnapshot, never replacing the bundle
+    // the accepted row now carries — or the triage sweep, which reads the
+    // witness and the stamp together, could never close a quote_promised
+    // card on an estimate accepted mid-flight (pre-push hook P1 on
+    // 1b4240350).
     if (stampChannels.length) {
       try {
+        const scope = deliveredEstimateScope({ ...estimate, ...(await pricedPropertyAddress(estimate.property_id)) });
         await db('estimates').where({ id: estimate.id }).update({
           estimate_data: db.raw(
-            "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
-            [JSON.stringify(deliveryStatePatch)],
+            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb, '{sendSnapshot}', COALESCE(estimate_data -> 'sendSnapshot', '{}'::jsonb) || ?::jsonb, true)",
+            [JSON.stringify(deliveryStatePatch), JSON.stringify({ scope })],
           ),
           updated_at: db.fn.now(),
         });
