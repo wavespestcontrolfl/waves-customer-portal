@@ -2934,7 +2934,9 @@ const REGISTRY_STATES = [
 ];
 const LANE_OWNED_STATES = ["ready_to_acquire", "acquiring", "acquired"];
 
-function BacklinkRegistryCard() {
+// refreshKey / onMutated: the registry card and the owner queue below it read the same domains — a mutation in
+// either (Acquire anyway parks cards; Reject / Watch hide them) bumps the shared key and both reload.
+function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
   const [rows, setRows] = useState([]);
   const [stateFilter, setStateFilter] = useState("");
   const [search, setSearch] = useState("");
@@ -2975,8 +2977,9 @@ function BacklinkRegistryCard() {
     }
   };
   useEffect(() => {
-    load();
-  }, []);
+    const c = controlsRef.current;
+    load(c.stateFilter, c.search, c.page);
+  }, [refreshKey]);
 
   const toggleExpand = async (id) => {
     if (expandedId === id) {
@@ -3011,8 +3014,8 @@ function BacklinkRegistryCard() {
       });
       // refresh with the CURRENT controls — this closure's stateFilter/
       // search/page are from the render the action started on
-      const c = controlsRef.current;
-      await load(c.stateFilter, c.search, c.page);
+      if (onMutated) onMutated();
+      else await load(controlsRef.current.stateFilter, controlsRef.current.search, controlsRef.current.page);
     } catch (e) {
       setError(e?.message || `${action} failed`);
     } finally {
@@ -3036,11 +3039,13 @@ function BacklinkRegistryCard() {
             ? "recorded; GATE_LINK_AUTHORITY is off, so the bridge decides it when the gate is on"
             : r.bridge?.skipped
               ? "recorded; the nightly bridge decides it"
-              : `${r.awaiting} step${r.awaiting === 1 ? "" : "s"} now await your decision in the Owner queue`
+              : r.summary_unavailable
+                ? "recorded; the Owner queue below shows what now awaits your decision"
+                : `${r.awaiting} step${r.awaiting === 1 ? "" : "s"} now await your decision in the Owner queue`
         }`,
       });
-      const c = controlsRef.current;
-      await load(c.stateFilter, c.search, c.page);
+      if (onMutated) onMutated();
+      else await load(controlsRef.current.stateFilter, controlsRef.current.search, controlsRef.current.page);
     } catch (e) {
       setError(e?.message || "Acquire anyway failed");
     } finally {
@@ -3267,7 +3272,7 @@ function BacklinkRegistryCard() {
                             Reopen
                           </button>
                         )}
-                        {d.agent_state === "rejected" && d.best_path_id && (
+                        {d.agent_state === "rejected" && d.waivable === true && (
                           <button onClick={() => acquireAnyway(d.id)} disabled={busyId === d.id} style={smallBtn(busyId === d.id)} title="Waive the quality floors this domain fails (audited) and route it to the Owner queue">
                             Acquire anyway
                           </button>
@@ -3417,7 +3422,7 @@ function dollarsToCents(raw) {
 }
 const compact = (n) => (n == null ? "—" : n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
 
-function OwnerQueuePanel() {
+function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);
@@ -3440,7 +3445,7 @@ function OwnerQueuePanel() {
   };
   useEffect(() => {
     load();
-  }, []);
+  }, [refreshKey]);
 
   // what the inline bridge run did with the click — or why the nightly run will
   const bridgeNote = (b) => {
@@ -3476,7 +3481,7 @@ function OwnerQueuePanel() {
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/approve`, { method: "POST", body });
       setResult({ tone: D.green, text: `Approved ${DIMENSION_LABELS[row.dimension] || row.dimension} on ${card.domain.domain}${r.attached?.length > 1 ? ` (${r.attached.length} locations share the fee)` : ""} — ${bridgeNote(r.bridge)}` });
-      await load();
+      if (onMutated) onMutated(); else await load();
     } catch (e) {
       setError(e?.message || "Approve failed");
     } finally {
@@ -3491,7 +3496,7 @@ function OwnerQueuePanel() {
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/domains/${card.domain.id}/${action}`, { method: "POST", body: { note: notes[card.domain.id] || null } });
       setResult({ tone: D.text, text: `${card.domain.domain} → ${String(r.agent_state).replace(/_/g, " ")}${r.watch_recheck_at ? `, rechecked ${formatETDate(r.watch_recheck_at)}` : ""}` });
-      await load();
+      if (onMutated) onMutated(); else await load();
     } catch (e) {
       setError(e?.message || `${action} failed`);
     } finally {
@@ -3929,6 +3934,9 @@ function LinkPolicyPanel() {
 
 function BacklinkAgentPanel() {
   const [stats, setStats] = useState(null);
+  // one refresh key for the Registry card and the Owner queue: a mutation in either reloads both
+  const [linkRefresh, setLinkRefresh] = useState(0);
+  const bumpLinkRefresh = () => setLinkRefresh((n) => n + 1);
   const [queue, setQueue] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [targets, setTargets] = useState([]);
@@ -4395,9 +4403,9 @@ function BacklinkAgentPanel() {
           )}
         </Card>
         {/* Registry view + investigator (plan v2 step 3) */}
-        <BacklinkRegistryCard />
+        <BacklinkRegistryCard refreshKey={linkRefresh} onMutated={bumpLinkRefresh} />
         {/* Owner queue — the cards the authority bridge parked (plan v2 step 4 PR 2b) */}
-        <OwnerQueuePanel />
+        <OwnerQueuePanel refreshKey={linkRefresh} onMutated={bumpLinkRefresh} />
         {/* Acquisition authority policy (plan v2 step 4a) */}
         <LinkPolicyPanel />
         {/* Manual URL Input */}

@@ -266,6 +266,30 @@ describe('approveRow', () => {
     await expect(Q.approveRow(db, { authorityId: sibling.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/approved/) });
   });
 
+  test('account-wide fee: a stale-path sibling that sorts first never carries the button — the primary is a fresh best-path card', async () => {
+    const { db } = await parked({ make: paidPath, path: { fee_scope: 'account_wide' } });
+    const groupId = placements(db)[0].payment_group_id;
+    const anyPay = openRows(db, 'payment')[0];
+    // a parked sibling still bound to a superseded path whose id sorts before every current one
+    const stalePath = uid();
+    db._tables.seo_link_acquisition_paths.push({ ...storedPath(db), id: stalePath, superseded_by: storedPath(db).id });
+    const staleP = { id: '00000000-0000-0000-0000-000000000000', domain_id: db._tables.seo_link_domains[0].id, path_id: stalePath, target_domain: 'example.org', target_page: '/', location_key: 'stale', status: 'awaiting_owner', parked_from_status: 'prospect', payment_group_id: groupId, link_type: 'directory', updated_at: NOW };
+    placements(db).push(staleP);
+    rows(db).push({ ...anyPay, id: uid(), prospect_id: staleP.id, path_id: stalePath, approval_id: undefined });
+    const { cards } = await Q.listOwnerQueue(db);
+    const primaries = cards.filter((c) => c.rows.some((r) => r.dimension === 'payment' && r.approvable));
+    expect(primaries).toHaveLength(1);
+    expect(primaries[0].placement.id).not.toBe(staleP.id);
+    expect(primaries[0].path.on_best_path).toBe(true);
+    const stale = cards.find((c) => c.placement.id === staleP.id).rows.find((r) => r.dimension === 'payment');
+    expect(stale).toMatchObject({ approvable: false, why_not: expect.stringMatching(/not on the domain/) });
+    // the approval from the fresh primary attaches to the fresh siblings and skips the stale one
+    const pay = openRows(db, 'payment').find((r) => r.prospect_id === primaries[0].placement.id);
+    const r = await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: 4500, now: LATER, bridge: inline });
+    expect(r.attached).toHaveLength(N);
+    expect(rows(db).find((x) => x.prospect_id === staleP.id).approval_id).toBeUndefined();
+  });
+
   test('account-wide fee: a stale-path or in-flight sibling with an equal hash never inherits the approval', async () => {
     const { db, p } = await parked({ make: paidPath, path: { fee_scope: 'account_wide' } });
     const groupId = placements(db)[0].payment_group_id;
@@ -512,6 +536,24 @@ describe('acquireAnyway', () => {
       expect(waivers(s.db)).toHaveLength(0);
     }
     for (const s of [inv, ok, none]) expect(waivers(s.db)).toHaveLength(0);
+  });
+
+  test('a post-commit summary read failure keeps the recorded waiver: an unavailable summary, never a 500', async () => {
+    const s = scenario({ domain: { agent_state: 'rejected', score: 40 } });
+    s.db._beforeResolve = (table, db) => { if (table === 'seo_link_prospects' && waivers(db).length) throw new Error('connection reset'); };
+    const r = await Q.acquireAnyway(s.db, { domainId: s.d.id, actor: ACTOR, now: NOW, bridge: async () => ({ skipped: 'lease_held', gated: false, selected: 0, decided: 0, parked: 0, released: 0, aggregateChanges: 0, errors: [] }) });
+    expect(waivers(s.db)).toHaveLength(1);
+    expect(r).toMatchObject({ summary_unavailable: true, awaiting: null, agent_state: null, floors: [expect.objectContaining({ floor: 'score' })] });
+  });
+
+  test('waivableFloors: the registry flag matches what a click can waive', () => {
+    const ok = scenario({ domain: { agent_state: 'rejected', score: 40 } });
+    const { policy } = { policy: ok.db._tables.seo_link_policy[0] };
+    expect(Q.waivableFloors(ok.p, ok.d, policy).map((f) => f.floor)).toEqual(['score']);
+    expect(Q.waivableFloors({ ...ok.p, superseded_by: uid() }, ok.d, policy)).toEqual([]);
+    expect(Q.waivableFloors(null, ok.d, policy)).toEqual([]);
+    const passing = scenario({ domain: { agent_state: 'rejected' } });
+    expect(Q.waivableFloors(passing.p, passing.d, policy)).toEqual([]);
   });
 
   test('the owner\'s own registry Reject is lifted by the waiver too (the click is the owner\'s)', async () => {

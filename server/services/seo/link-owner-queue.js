@@ -120,6 +120,23 @@ async function activeWaiver(q, domainId, pathId, ctx) {
   return { waiver: w.decision_inputs_hash === P.floorInputsHash(ctx) ? { id: w.id } : null, row: w };
 }
 
+// The quality floors a domain's best path fails right now — what Acquire anyway waives. Empty ⇒ nothing to waive: the
+// registry row hides the button (`waivable: false`) and a click is refused. A superseded / baseline / invalid path is
+// never waivable (it is not actionable by anyone until re-investigated).
+function failingFloors(ctx) {
+  const f = P.floorInputs(ctx);
+  const failing = [];
+  if (num(f.spam_score) > f.max_spam_score) failing.push({ floor: 'spam_score', value: f.spam_score, threshold: f.max_spam_score });
+  if (num(f.confidence) < f.min_path_confidence) failing.push({ floor: 'confidence', value: f.confidence, threshold: f.min_path_confidence });
+  if (num(f.score) < f.min_score) failing.push({ floor: 'score', value: f.score, threshold: f.min_score });
+  return failing;
+}
+function waivableFloors(path, domain, policy) {
+  if (!path || path.superseded_by || path.baseline === true) return [];
+  if (P.validityFailure(path, domain, domain.score)) return [];
+  return failingFloors({ path, domain, policy, score: domain.score });
+}
+
 // The bridge run after a click is BEST-EFFORT and runs after the click's transaction committed: a failure here
 // (policy load, selection, the cron lock, a DB blip) must not turn a recorded decision into a 500 — the bumped
 // updated_at already guarantees the nightly run picks the domain up. Reported as skipped: 'failed'.
@@ -171,11 +188,21 @@ async function listOwnerQueue(db) {
     if (path && w && w.decision_inputs_hash === P.floorInputsHash({ path, domain: d, policy, score: d.score })) activeWaiverFor.set(`${d.id}|${path.id}`, { id: w.id });
   }
 
-  // account-wide fee: ONE payment approval covers the group — the lowest-id parked sibling carries the button
+  // account-wide fee: ONE payment approval covers the group — the button sits on the lowest-id sibling whose payment
+  // row can be approved NOW (on the domain's current best path, fresh); a stale sibling that merely sorts first would
+  // otherwise hide the button from the whole group until the nightly bridge rotates it. No such sibling ⇒ the lowest
+  // id, so the "approve it on the first card" pointer still names one card.
+  const freshPayment = (p) => {
+    const d = domainById.get(p.domain_id);
+    const path = pathById.get(p.path_id) || pathById.get(d.best_path_id) || null;
+    if (!path || path.id !== d.best_path_id) return false;
+    const ctx = { path, domain: d, policy, score: d.score };
+    return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && whyNotApprovable(r, path) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null).reason);
+  };
   const groupPrimary = new Map();
-  for (const p of [...cardsFor].sort((a, b) => String(a.id).localeCompare(String(b.id)))) {
-    if (p.payment_group_id && !groupPrimary.has(p.payment_group_id)) groupPrimary.set(p.payment_group_id, p.id);
-  }
+  const byId = [...cardsFor].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  for (const p of byId) if (p.payment_group_id && !groupPrimary.has(p.payment_group_id) && freshPayment(p)) groupPrimary.set(p.payment_group_id, p.id);
+  for (const p of byId) if (p.payment_group_id && !groupPrimary.has(p.payment_group_id)) groupPrimary.set(p.payment_group_id, p.id);
   const groupSize = new Map();
   for (const p of cardsFor) if (p.payment_group_id) groupSize.set(p.payment_group_id, (groupSize.get(p.payment_group_id) || 0) + 1);
 
@@ -397,11 +424,7 @@ async function acquireAnyway(db, { domainId, actor, note = null, now = new Date(
     const ctx = { path, domain, policy, score: domain.score };
     const invalid = P.validityFailure(path, domain, domain.score);
     if (invalid) refuse(409, `not actionable by anyone until re-investigated: ${invalid}`);
-    const f = P.floorInputs(ctx);
-    const failing = [];
-    if (num(f.spam_score) > f.max_spam_score) failing.push({ floor: 'spam_score', value: f.spam_score, threshold: f.max_spam_score });
-    if (num(f.confidence) < f.min_path_confidence) failing.push({ floor: 'confidence', value: f.confidence, threshold: f.min_path_confidence });
-    if (num(f.score) < f.min_score) failing.push({ floor: 'score', value: f.score, threshold: f.min_score });
+    const failing = failingFloors(ctx);
     if (!failing.length) refuse(409, 'every quality floor passes — there is nothing to waive; the nightly bridge decides it normally');
     const replaced = await trx('seo_link_floor_waivers').where({ domain_id: domain.id, path_id: path.id }).whereNull('invalidated_at')
       .update({ invalidated_at: now, invalidated_reason: 'replaced by a newer waiver', updated_at: now });
@@ -415,12 +438,20 @@ async function acquireAnyway(db, { domainId, actor, note = null, now = new Date(
   });
   const run = bridge || require('./link-authority-bridge').runAuthorityBridge;
   const ran = await bestEffortBridge(run, db, { domainIds: [result.domainId], notify: noop, now });
-  // what now awaits the owner on this domain (parked siblings park nothing new, so `parked` alone undercounts)
-  const ids = (await db('seo_link_prospects').where({ domain_id: result.domainId }).select('id')).map((p) => p.id);
-  const open = ids.length ? await loadApprovals(db, await db(AUTH).whereIn('prospect_id', ids).whereNull('ended_at').whereNull('satisfied_at')) : [];
-  const awaiting = open.filter((r) => typeof r.level === 'string' && r.level.startsWith('OWNER_') && !r.approved).length;
-  const state = (await db('seo_link_domains').where({ id: result.domainId }).first('agent_state'))?.agent_state || null;
-  return { ...result, bridge: ran, awaiting, agent_state: state };
+  // what now awaits the owner on this domain (parked siblings park nothing new, so `parked` alone undercounts). These
+  // reads run after the commit and are best-effort like the bridge: the waiver is recorded whatever they do, so a read
+  // failure reports an unavailable summary — never a failed click that invites a retry (which would only write an
+  // audited replacement waiver).
+  try {
+    const ids = (await db('seo_link_prospects').where({ domain_id: result.domainId }).select('id')).map((p) => p.id);
+    const open = ids.length ? await loadApprovals(db, await db(AUTH).whereIn('prospect_id', ids).whereNull('ended_at').whereNull('satisfied_at')) : [];
+    const awaiting = open.filter((r) => typeof r.level === 'string' && r.level.startsWith('OWNER_') && !r.approved).length;
+    const state = (await db('seo_link_domains').where({ id: result.domainId }).first('agent_state'))?.agent_state || null;
+    return { ...result, bridge: ran, awaiting, agent_state: state, summary_unavailable: false };
+  } catch (err) {
+    require('../logger').error(`[backlink-owner-queue] post-commit summary read failed for ${result.domain}: ${err.message}`);
+    return { ...result, bridge: ran, awaiting: null, agent_state: null, summary_unavailable: true };
+  }
 }
 
-module.exports = { listOwnerQueue, approveRow, decideDomain, acquireAnyway, whyNotApprovable, actionFor, OwnerQueueError, APPROVE_HERE };
+module.exports = { listOwnerQueue, approveRow, decideDomain, acquireAnyway, waivableFloors, whyNotApprovable, actionFor, OwnerQueueError, APPROVE_HERE };

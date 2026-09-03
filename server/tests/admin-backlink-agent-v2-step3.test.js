@@ -149,6 +149,22 @@ describe('GET /registry', () => {
     expect(r.body.items[0].best_path).toMatchObject({ id: 'p1', acquisition_type: 'paid_listing' });
     expect(r.body.items[1].best_path).toBeNull();
   });
+  test('a rejected row says whether Acquire anyway has a floor to waive; other rows carry no flag', async () => {
+    const path = (id, domainId) => ({
+      id, domain_id: domainId, acquisition_type: 'self_service_free', link_type: 'directory', submission_url: 'https://example.org/add',
+      account_required: false, email_verification: false, payment_required: false, legal_attestation: false, legal_terms_hash: null,
+      agent_completable: true, terms_accepted_by_send: false, execution_after_send: true, baseline: false, confidence: '0.80', currency: 'unknown',
+      expected_rel: 'dofollow', last_investigated_at: new Date('2026-09-01T00:00:00Z'), superseded_by: null,
+    });
+    mockState.domains = [
+      { id: 'd1', domain: 'low.com', agent_state: 'rejected', best_path_id: 'p1', score: 40, spam_score: 2 },
+      { id: 'd2', domain: 'fine.com', agent_state: 'rejected', best_path_id: 'p2', score: 75, spam_score: 2 },
+      { id: 'd3', domain: 'q.com', agent_state: 'qualified', best_path_id: 'p3', score: 40, spam_score: 2 },
+    ];
+    mockState.paths = [path('p1', 'd1'), path('p2', 'd2'), path('p3', 'd3')];
+    const r = await call(handler('get', '/registry'), {});
+    expect(r.body.items.map((d) => d.waivable)).toEqual([true, false, undefined]);
+  });
   test('no best paths at all ⇒ no path query, rows unchanged', async () => {
     mockState.domains = [{ id: 'd2', domain: 'b.com', best_path_id: null }];
     const r = await call(handler('get', '/registry'), {});

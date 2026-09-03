@@ -348,6 +348,15 @@ router.get('/registry', async (req, res, next) => {
       const byId = new Map(paths.map((p) => [p.id, p]));
       for (const d of items) d.best_path = byId.get(d.best_path_id) || null;
     }
+    // Acquire anyway applies only to a rejected domain whose best path fails a quality floor NOW — the row says so
+    // (`waivable`) so the button never offers a click the service refuses with 409
+    const rejected = items.filter((d) => d.agent_state === 'rejected' && d.best_path_id);
+    if (rejected.length) {
+      const { policy } = await linkPolicy.loadPolicy(db);
+      const full = await db('seo_link_acquisition_paths').whereIn('id', rejected.map((d) => d.best_path_id));
+      const fullById = new Map(full.map((p) => [p.id, p]));
+      for (const d of rejected) d.waivable = ownerQueue.waivableFloors(fullById.get(d.best_path_id) || null, d, policy).length > 0;
+    }
     res.json({ items });
   } catch (err) { next(err); }
 });
