@@ -794,12 +794,13 @@ function callEndedAt(call) {
 // against the window on its own (the later one may fall past `until`
 // while the earlier one qualifies).
 // A handoff stamp is JSON text the one writer (admin-estimates' delivery
-// state) sets to an ISO instant. Only ISO-shaped text is cast — a
-// hand-edited or legacy value must not abort the whole witness query and
-// hide every other estimate's proof in the batch (pre-push hook P1 on
-// bafc4c4ae). No "?" in the pattern: knex reads one as a binding.
-const ISO_INSTANT_RE = String.raw`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+){0,1}(Z|[+-]\d{2}:{0,1}\d{2})$`;
-const isoInstantSql = (text) => `(CASE WHEN ${text} ~ '${ISO_INSTANT_RE}' THEN (${text})::timestamptz END)`;
+// state) sets to an ISO instant. Only text Postgres itself accepts as a
+// timestamptz is cast (pg_input_is_valid — a non-throwing check, PG16+;
+// prod is 18): a hand-edited or legacy value — free text OR an ISO-shaped
+// impossible date — reads NULL instead of aborting the whole witness query
+// and hiding every other estimate's proof in the batch (pre-push hook P1
+// on bafc4c4ae, codex r20 P2).
+const isoInstantSql = (text) => `(CASE WHEN pg_input_is_valid(${text}, 'timestamptz') THEN (${text})::timestamptz END)`;
 const OWN_HANDOFF_SQL = isoInstantSql("estimates.estimate_data #>> '{deliveryState,lastDeliveredAt}'");
 // Acceptance is a witness only when the CUSTOMER accepted: a manual accept
 // (mark-accepted — an admin recording a verbal yes) stamps accepted_at and

@@ -586,6 +586,30 @@ describe('evidence helpers', () => {
     const wasp = (intent) => card({ requested_service_categories: ['pest_general'], requested_specific_service: 'Wasp', requested_service_intent: intent });
     expect(estimateCoversAsk(wasp('preventative_one_time'), onProgram)).toBe(false);
     expect(estimateCoversAsk(wasp('recurring_membership_inquiry'), onProgram)).toBe(true);
+    // A placeholder prices nothing (codex r20 P1): a quote-required or
+    // manual-review entry, or one with no positive amount, is not a line —
+    // even after the authoring route cleared its quote-required boolean.
+    const oneTimePestAsk = card(oneTimePest);
+    const withPlaceholder = (entry) => est({ estimate_data: { result: { recurring: { services: [{ name: 'Lawn Care Program', mo: 60 }] }, specItems: [entry] } } });
+    expect(estimateCoversAsk(oneTimePestAsk, withPlaceholder({ service: 'commercial_pest', quoteRequired: true, price: null }))).toBe(false);
+    expect(estimateCoversAsk(oneTimePestAsk, withPlaceholder({ service: 'commercial_pest', quoteRequired: false, requiresManualReview: true, price: null }))).toBe(false);
+    expect(estimateCoversAsk(oneTimePestAsk, withPlaceholder({ service: 'commercial_pest', quoteRequired: false, price: null }))).toBe(false);
+    expect(estimateCoversAsk(oneTimePestAsk, withPlaceholder({ service: 'One-Time Pest Treatment' }))).toBe(false);
+    expect(estimateCoversAsk(oneTimePestAsk, withPlaceholder({ service: 'One-Time Pest Treatment', price: 120 }))).toBe(true);
+    // An AUTHORED proposal is the quote: its programs / corrective work
+    // replace the engine lines (the cleared placeholder AND the engine's
+    // lawn program count for nothing) (codex r20 P1).
+    const authored = est({ estimate_data: {
+      proposal: { enabled: true, programs: [{ service: 'pest', label: 'Quarterly Pest Program', frequencyPerYear: 4, pricePerApplication: 100 }], correctiveWork: [{ label: 'Flea Treatment', amount: 150 }] },
+      result: { recurring: { services: [{ name: 'Lawn Care Program', mo: 60 }] }, specItems: [{ service: 'commercial_pest', quoteRequired: false, price: null }] },
+    } });
+    expect(estimateCoversAsk(card(plan), authored)).toBe(true);
+    expect(estimateCoversAsk(card({ requested_service_categories: ['pest_general'] }), authored)).toBe(true);
+    expect(estimateCoversAsk(card({ requested_service_categories: ['lawn_care'], requested_specific_service: null }), authored)).toBe(false);
+    expect(estimateCoversAsk(card({ ...plan, requested_service_categories: ['lawn_care'] }), authored)).toBe(false);
+    // ...an unpriced program is a placeholder too.
+    const unpricedProgram = est({ estimate_data: { proposal: { enabled: true, programs: [{ service: 'pest', label: 'Quarterly Pest Program', frequencyPerYear: 4, pricePerApplication: 0 }] } } });
+    expect(estimateCoversAsk(card(plan), unpricedProgram)).toBe(false);
     // Distinct requirements need distinct lines (codex r19 P1): a flea
     // treatment AND a separately requested general-pest quote are not both
     // answered by the one flea line, and the same entry persisted under both

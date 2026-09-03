@@ -227,9 +227,11 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const otherAddress = await seedQuoteCall(SID.replace(/e2$/, 'q7'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'other_address' });
     const lateSibling = await seedQuoteCall(SID.replace(/e2$/, 'q8'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'late_sibling' });
     const deliveredSibling = await seedQuoteCall(SID.replace(/e2$/, 'q9'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'delivered_sibling' });
-    // A hand-edited delivery stamp is no witness — and must not abort the
-    // batch query that carries every other card's proof (pre-push hook P1).
+    // A hand-edited delivery stamp — free text or an ISO-shaped impossible
+    // date — is no witness, and must not abort the batch query that carries
+    // every other card's proof (pre-push hook P1, codex r20 P2).
     const malformed = await seedQuoteCall(SID.replace(/e2$/, 'q0'), { cardAgeMin: 60, estimateAgeMin: 10, deliveredStamp: 'yesterday afternoon' });
+    const impossible = await seedQuoteCall(SID.replace(/e2$/, 'qa'), { cardAgeMin: 60, estimateAgeMin: 10, deliveredStamp: '2026-99-99T25:00:00Z' });
     const result = await sweep.runTriageAutoResolve({ now: new Date() });
     expect(result.skipped).toBe(false);
     const closed = await db('triage_items').where({ id: fresh.cardId }).first();
@@ -245,6 +247,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     expect((await db('triage_items').where({ id: lateSibling.cardId }).first()).status).toBe('open');
     expect((await db('triage_items').where({ id: deliveredSibling.cardId }).first()).status).toBe('resolved');
     expect((await db('triage_items').where({ id: malformed.cardId }).first()).status).toBe('open');
+    expect((await db('triage_items').where({ id: impossible.cardId }).first()).status).toBe('open');
     const open = await db('triage_items').where({ id: stale.cardId }).first();
     expect(open.status).toBe('open');
     const suppressedCard = await db('triage_items').where({ id: suppressed.cardId }).first();

@@ -1048,54 +1048,79 @@ function bookingCoversRequest(item, mine, { singleProperty, places }) {
 // The priced LINES an estimate carries, each with its own service words
 // and cadence — a delivered quote is judged line by line: distinct
 // requested services need distinct priced lines, and the line answering a
-// service must carry the asked cadence (codex r19 P1 ×2). Typed lines come
-// from the engine result's lists: recurring.services → recurring; the
+// service must carry the asked cadence (codex r19 P1 ×2). An AUTHORED
+// commercial proposal is the quote: its service programs (recurring),
+// building line items (per their frequency) and corrective work (one-time)
+// replace the engine lines entirely — the pricing audit's rule — because
+// the engine's manual-quote placeholders stay in the blob with their
+// quote-required booleans cleared and no price (codex r20 P1). Otherwise
+// the engine result's typed lists: recurring.services → recurring; the
 // one-time lists → one-time, except an item included ON the program, which
 // is priced into the recurring plan and quotes no standalone job;
-// commercial lineItems → recurring, and a manual-quote line prices nothing;
-// palm injection → recurring. Words per line: its own name fields plus the
-// service family the shared line reader's text patterns assign them. An
-// estimate with NO typed lines (a legacy or manual row) is ONE line — its
-// service_interest, the families the shared reader infers from its inputs
-// and text, and the engine's svc* input flags — at the cadence its totals
-// columns show. Never estimate_text (the rendered document's boilerplate
-// names services it does not price), never the category column
-// (RESIDENTIAL / COMMERCIAL), and never an input flag beside typed lines
-// (the flag selects a service; only a line prices it).
+// commercial lineItems → recurring; palm injection → recurring. A line is
+// one that PRICES something: a quote-required / manual-review entry or one
+// with no positive amount is a placeholder, not a quote (codex r20 P1).
+// Words per line: its own name fields plus the service family the shared
+// line reader's text patterns assign them. An estimate with NO typed lines
+// (a legacy or manual row) is ONE line — its service_interest, the families
+// the shared reader infers from its inputs and text, and the engine's svc*
+// input flags — at the cadence its totals columns show. Never estimate_text
+// (the rendered document's boilerplate names services it does not price),
+// never the category column (RESIDENTIAL / COMMERCIAL), and never an input
+// flag beside typed lines (the flag selects a service; only a line prices
+// it).
 function estimateLines(row) {
   const { inferEstimateServiceLines, serviceKeysFromText, SERVICE_LINE_LABELS, parseEstimateData } = require('./estimate-service-lines');
   const familyOf = (names) => serviceKeysFromText(...names).flatMap((k) => (k && k !== 'unknown' ? [k, SERVICE_LINE_LABELS[k]] : []));
-  const namesOf = (e) => [e.service, e.serviceKey, e.service_key, e.name, e.label, e.detail, e.det].filter((w) => typeof w === 'string');
+  const namesOf = (e) => [e.service, e.serviceKey, e.service_key, e.name, e.label, e.description, e.detail, e.det].filter((w) => typeof w === 'string');
+  const amountOf = (e, keys) => keys.map((k) => Number(e?.[k])).find((n) => Number.isFinite(n) && n > 0) || 0;
+  const placeholder = (e) => e.quoteRequired === true || e.requiresManualReview === true;
   const data = parseEstimateData(row.estimate_data) || {};
   const lines = [];
   const seen = new Set();
   // One line per priced entry; the same entry persisted under both result
   // roots is one line, not two (the line reader's identity rule).
-  const add = (e, names, cadence) => {
-    const identity = [...names, e?.price ?? e?.amount ?? e?.total ?? e?.mo ?? e?.monthly ?? '', cadence.recurring].join('|');
+  const add = (rawNames, cadence, priced) => {
+    if (!priced) return;
+    const names = rawNames.filter((w) => typeof w === 'string' && w.trim());
+    const identity = [...names, cadence.recurring].join('|');
     if (seen.has(identity)) return;
     seen.add(identity);
     lines.push({ words: [...names, ...familyOf(names)].join(' '), ...cadence });
   };
   const RECURRING = { recurring: true, oneTime: false };
   const ONE_TIME = { recurring: false, oneTime: true };
+  if (data.proposal?.enabled === true) {
+    const proposal = require('./estimate-proposal').normalizeProposal(row);
+    if (proposal.enabled === true) {
+      for (const program of proposal.programs || []) add([program.label, program.service], RECURRING, program.annual > 0);
+      for (const building of proposal.buildings || []) {
+        for (const item of building.lineItems || []) {
+          add([item.label, item.service, building.name], item.frequency === 'one_time' ? ONE_TIME : RECURRING, item.amount > 0);
+        }
+      }
+      for (const work of proposal.correctiveWork || []) add([work.label, work.service], ONE_TIME, work.amount > 0);
+      if (lines.length) return lines;
+    }
+  }
   for (const root of [data.result, data.engineResult]) {
     if (!root || typeof root !== 'object') continue;
     for (const e of (Array.isArray(root.recurring?.services) ? root.recurring.services : [])) {
-      if (e && typeof e === 'object') add(e, namesOf(e), RECURRING);
+      if (e && typeof e === 'object' && !placeholder(e)) add(namesOf(e), RECURRING, amountOf(e, ['mo', 'monthly', 'monthlyTotal', 'monthly_total', 'amount']) > 0);
     }
     for (const list of [root.oneTime?.items, root.oneTime?.specItems, root.specItems]) {
       for (const e of (Array.isArray(list) ? list : [])) {
-        if (e && typeof e === 'object') add(e, namesOf(e), (e.onProg === true || e.includedOnProgram === true) ? RECURRING : ONE_TIME);
+        if (!e || typeof e !== 'object' || placeholder(e)) continue;
+        const onProgram = e.onProg === true || e.includedOnProgram === true;
+        add(namesOf(e), onProgram ? RECURRING : ONE_TIME, onProgram || amountOf(e, ['price', 'amount', 'total']) > 0);
       }
     }
     for (const e of (Array.isArray(root.lineItems) ? root.lineItems : [])) {
-      if (e && typeof e === 'object' && e.quoteRequired !== true && e.requiresManualReview !== true) add(e, namesOf(e), RECURRING);
+      if (e && typeof e === 'object' && !placeholder(e)) add(namesOf(e), RECURRING, amountOf(e, ['monthly', 'mo', 'amount']) > 0);
     }
     const injection = root.results?.injection || root.injection || {};
-    if (Number(injection.mo ?? injection.monthly ?? root.recurring?.palmInjectionMo ?? root.recurring?.palm_injection_mo) > 0) {
-      add(injection, ['palm_injection', SERVICE_LINE_LABELS.palm_injection], RECURRING);
-    }
+    add(['palm_injection', SERVICE_LINE_LABELS.palm_injection], RECURRING,
+      amountOf(injection, ['mo', 'monthly']) > 0 || amountOf(root.recurring || {}, ['palmInjectionMo', 'palm_injection_mo']) > 0);
   }
   if (lines.length) return lines;
   const words = [row.service_interest];
