@@ -419,6 +419,16 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     err.statusCode = 400;
     throw err;
   }
+  // A clarify re-price hold: nothing customer-facing goes out for a held
+  // row — send, schedule, group publish AND the follow-up nudge, whose link
+  // the public renderer now refuses (codex r6 P2 on #3804). The claim and
+  // publication predicates re-assert it atomically.
+  if (siblingRepricePending(estimate)) {
+    const err = new Error('This estimate is held for a re-price (a customer clarify reply). Revise it with the answered unit before sending.');
+    err.statusCode = 409;
+    err.code = 'REPRICE_PENDING';
+    throw err;
+  }
   // One-tap purchase drafts are INTERNAL flow state, never a document to
   // publish (Codex #3395 r12 P2): sending one flips it to 'sent' — a state
   // the open purchase's confirm rejects and neither cleanup sweep reclaims

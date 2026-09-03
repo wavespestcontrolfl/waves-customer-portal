@@ -9103,6 +9103,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         return res.json({ success: true, alreadyAccepted: true });
       }
     }
+    // The documented re-price response first (codex r6 P0 on #3804): a
+    // browser opened before the hold landed must see the contract's 409
+    // copy, not the generic "no longer active" the accept-active preflight
+    // now returns for a held row. The locked read below re-checks it.
+    if (require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)) {
+      return res.status(409).json({ error: 'This estimate is being re-priced — please try again in a few minutes' });
+    }
     if (!isEstimateAcceptActive(estimate)) {
       return res.status(409).json({ error: 'Estimate is no longer active' });
     }

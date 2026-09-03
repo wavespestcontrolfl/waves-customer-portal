@@ -628,6 +628,12 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // decline + the five CAS whole-blob mutations (select-tier, bond, interior, service mix, preferences).
     expect((pub.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(6);
     expect(pub).toContain("return { ok: false, status: 409, error: 'This estimate is being re-priced — please try again in a few minutes' };");
+    // The accept preflight answers the documented re-price 409 BEFORE the generic accept-active refusal (codex r6 P0).
+    const acceptRepriceAt = pub.indexOf("return res.status(409).json({ error: 'This estimate is being re-priced — please try again in a few minutes' });");
+    expect(acceptRepriceAt).toBeGreaterThan(-1);
+    expect(pub.indexOf("if (!isEstimateAcceptActive(estimate)) {\n      return res.status(409).json({ error: 'Estimate is no longer active' });", acceptRepriceAt)).toBeGreaterThan(acceptRepriceAt);
+    // Every operator send surface (incl. the follow-up nudge) refuses a held row through the shared assertion (codex r6 P2).
+    expect(route).toContain("if (siblingRepricePending(estimate)) {\n    const err = new Error('This estimate is held for a re-price");
     expect(pub.indexOf('|| estimateLinkageInvalidated(estimate)\n      // A clarify re-price hold (isEstimateCustomerViewable parity)')).toBeGreaterThan(-1);
     expect(route).toContain("update({ status: 'send_failed', last_send_error: 'reprice_pending', scheduled_at: null, updated_at: db.fn.now() })");
     // The proposal save judges the EDITABLE proposal address.
