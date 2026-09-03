@@ -128,6 +128,7 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.whereIn = jest.fn(() => b);
   b.whereNull = jest.fn(() => b);
   b.whereNotNull = jest.fn(() => b);
+  b.whereRaw = jest.fn(() => b);
   b.join = jest.fn(() => b);
   b.orderBy = jest.fn(() => b);
   b.offset = jest.fn(() => b);
@@ -1055,6 +1056,13 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
   const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
   const expiringLinkSendCheck = immediateOnlyLinkSendCheck;
 
+  test('a service report link (long /report form, or the branded short form of kind service_report) is immediate-only', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`Here is your latest service report: portal.wavespestcontrol.com/report/${'b'.repeat(32)}`)).toEqual({ present: true, label: 'Service report' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'rep1', kind: 'service_report' } }) };
+    expect(await immediateOnlyLinkSendCheck('Here is your latest service report: wavespest.co/l/rep1')).toEqual({ present: true, label: 'Service report' });
+  });
+
   test('an appointment page link (branded short form of kind appointment, or the long /appointment form) is immediate-only', async () => {
     mockBuilders = { short_codes: chainBuilder({ firstRow: { kind: 'appointment' } }) };
     expect(await immediateOnlyLinkSendCheck('Everything about your visit: wavespest.co/l/Ab12cD')).toEqual({ present: true, label: 'Appointment page' });
@@ -1299,7 +1307,9 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     const prev = process.env.GATE_APPOINTMENT_PAGE;
     try {
       wire();
-      mockBuilders.short_codes = chainBuilder({ firstRow: { kind: 'appointment' } });
+      mockBuilders.short_codes = chainBuilder({ firstRow: { code: 'Ab12cD', kind: 'appointment', entity_type: 'scheduled_services', entity_id: 'v1' } });
+      mockBuilders.scheduled_services = chainBuilder({ firstRow: { id: 'v1', customer_id: 'c1' } });
+      mockBuilders.customers = chainBuilder({ firstRow: { id: 'c1', account_id: 'acct' }, rows: [{ id: 'c1', account_id: 'acct' }] });
       process.env.GATE_APPOINTMENT_PAGE = 'true';
       expect(await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
       delete process.env.GATE_APPOINTMENT_PAGE;
@@ -1307,6 +1317,65 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     } finally {
       if (prev === undefined) delete process.env.GATE_APPOINTMENT_PAGE; else process.env.GATE_APPOINTMENT_PAGE = prev;
     }
+  });
+
+  describe('appointment + service report links are bound to the recipient\'s ACCOUNT at the send (pre-push Codex P0)', () => {
+    const gate = process.env.GATE_APPOINTMENT_PAGE;
+    const RESCHEDULE = 'e'.repeat(64);
+    const REPORT = 'b'.repeat(32);
+    const acct = (id, account_id = 'acct') => ({ id, account_id });
+    function wireAccount({ recipientRows = [acct('c1')], linkCustomer = acct('c1'), visit = { id: 'v1', customer_id: 'c1' }, report = { id: 'r1', customer_id: 'c1', structured_notes: null }, shortRow = null } = {}) {
+      wire();
+      mockBuilders.customers = chainBuilder({ firstRow: linkCustomer, rows: recipientRows });
+      mockBuilders.scheduled_services = chainBuilder({ firstRow: visit });
+      mockBuilders.service_records = chainBuilder({ firstRow: report });
+      mockBuilders.short_codes = chainBuilder({ firstRow: shortRow });
+    }
+    beforeEach(() => { process.env.GATE_APPOINTMENT_PAGE = 'true'; });
+    afterEach(() => { if (gate === undefined) delete process.env.GATE_APPOINTMENT_PAGE; else process.env.GATE_APPOINTMENT_PAGE = gate; });
+
+    test('the long appointment form resolves by reschedule_token; a household sibling on the same account passes', async () => {
+      wireAccount({ recipientRows: [acct('c1')], linkCustomer: acct('c2'), visit: { id: 'v1', customer_id: 'c2' } });
+      expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
+      expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ reschedule_token: RESCHEDULE });
+      expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c2' });
+    });
+
+    test('the branded short form resolves through short_codes → scheduled_services', async () => {
+      wireAccount({ shortRow: { code: 'Ab12cD', kind: 'appointment', entity_type: 'scheduled_services', entity_id: 'v1' } });
+      expect(await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+      expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ id: 'v1' });
+    });
+
+    test('a visit on another account refuses; an unresolvable one refuses; a trusted customer off the account refuses', async () => {
+      wireAccount({ recipientRows: [acct('c1')], linkCustomer: acct('c9', 'other'), visit: { id: 'v1', customer_id: 'c9' } });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
+      wireAccount({ visit: null });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/no longer resolves/);
+      wireAccount();
+      mockBuilders.customers.first = jest.fn().mockResolvedValueOnce(acct('c1')).mockResolvedValueOnce(acct('c7', 'other'));
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: 'c7' })).error).toMatch(/not the selected customer/);
+    });
+
+    test('a service report link re-runs the builder\'s public predicate and binds to the account (long form, and the short form of kind service_report)', async () => {
+      wireAccount();
+      expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/${REPORT}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+      expect(mockBuilders.service_records.where).toHaveBeenCalledWith({ report_view_token: REPORT });
+      expect(mockBuilders.service_records.where).toHaveBeenCalledWith({ status: 'completed', report_template_version: 'service_report_v1' });
+      expect(mockBuilders.service_records.whereNotNull).toHaveBeenCalledWith('report_view_token');
+      wireAccount({ shortRow: { code: 'rep1', kind: 'service_report', entity_type: 'service_records', entity_id: 'r1' } });
+      expect(await bearerLinkSendCheck('Report: wavespest.co/l/rep1', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+      expect(mockBuilders.service_records.where).toHaveBeenCalledWith({ id: 'r1' });
+    });
+
+    test('a suppressed typed report, a vanished record, or another account\'s report refuses', async () => {
+      wireAccount({ report: { id: 'r1', customer_id: 'c1', structured_notes: JSON.stringify({ typedReportDelivery: 'internal_only' }) } });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/${REPORT}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+      wireAccount({ report: null });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/${REPORT}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+      wireAccount({ linkCustomer: acct('c9', 'other'), report: { id: 'r1', customer_id: 'c9', structured_notes: null } });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/${REPORT}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
+    });
   });
 
   test('markStatementsSent goes through the email delivery\'s own finalized → sent writer, per statement', async () => {

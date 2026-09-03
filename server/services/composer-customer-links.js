@@ -656,26 +656,38 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
   },
 ];
 
-// Appointment page links (GH Codex #3844 r2 P1): every /appointment route
-// 404s the moment GATE_APPOINTMENT_PAGE is off, and a queued message has no
-// delivery-time re-check — so they are immediate-only, and /sms re-reads the
-// gate. The composer inserts the branded short form ({short}/l/<code>, a
-// short_codes row of kind 'appointment'); the long /appointment/<token>
-// form is judged too.
-async function appointmentLinkPresent(runs, host) {
-  for (const run of linkRuns(runs, /\/appointment\//i)) {
-    if (canonicalPortalToken(run, host, /^\/appointment\/([A-Za-z0-9_-]{16,})$/i)) return true;
-  }
+// {short}/l/<code> runs → their short_codes rows. The composer inserts the
+// branded short form of appointment and service-report links; the long
+// forms are judged alongside.
+async function shortCodeRows(runs) {
   const shortRuns = linkRuns(runs, /\/l\//i);
-  if (!shortRuns.length) return false;
+  if (!shortRuns.length) return [];
   const shortHost = new URL(require('./short-url').shortLinkBaseUrl()).host.toLowerCase();
+  const rows = [];
   for (const run of shortRuns) {
     const code = canonicalPortalToken(run, shortHost, /^\/l\/([A-Za-z0-9_-]+)$/i);
     if (!code) continue;
-    const row = await db('short_codes').where({ code }).first('kind');
-    if (row?.kind === 'appointment') return true;
+    const row = await db('short_codes').where({ code }).first('code', 'kind', 'entity_type', 'entity_id');
+    if (row) rows.push(row);
   }
-  return false;
+  return rows;
+}
+
+const APPOINTMENT_TOKEN_RE = /^\/appointment\/([A-Za-z0-9_-]{16,})$/i;
+const REPORT_TOKEN_RE = /^\/report\/([A-Za-z0-9_-]{16,})$/i;
+
+// Appointment page links (GH Codex #3844 r2 P1): every /appointment route
+// 404s the moment GATE_APPOINTMENT_PAGE is off, and a queued message has no
+// delivery-time re-check — so they are immediate-only, and /sms re-reads the
+// gate. Service report links the same (pre-push Codex P0): only /sms binds
+// the page to the recipient. Long form or the branded short form.
+function appointmentLinkPresent(runs, host, shortRows) {
+  return linkRuns(runs, /\/appointment\//i).some((run) => canonicalPortalToken(run, host, APPOINTMENT_TOKEN_RE))
+    || shortRows.some((row) => row.kind === 'appointment');
+}
+function reportLinkPresent(runs, host, shortRows) {
+  return linkRuns(runs, /\/report\//i).some((run) => canonicalPortalToken(run, host, REPORT_TOKEN_RE))
+    || shortRows.some((row) => row.kind === 'service_report');
 }
 
 async function immediateOnlyLinkSendCheck(body) {
@@ -687,7 +699,9 @@ async function immediateOnlyLinkSendCheck(body) {
       if (token && await kind.applies(token)) return { present: true, label: kind.label };
     }
   }
-  if (await appointmentLinkPresent(runs, host)) return { present: true, label: 'Appointment page' };
+  const shortRows = await shortCodeRows(runs);
+  if (appointmentLinkPresent(runs, host, shortRows)) return { present: true, label: 'Appointment page' };
+  if (reportLinkPresent(runs, host, shortRows)) return { present: true, label: 'Service report' };
   return { present: false };
 }
 
@@ -716,7 +730,13 @@ async function immediateOnlyLinkSendCheck(body) {
  *               first-time customer, saved-card auto-secure all re-run at
  *               the send (GH Codex #3844 r2 P1).
  *   appointment — {short}/l/<code> (kind 'appointment') or /appointment/<token>:
- *               GATE_APPOINTMENT_PAGE must still be on (r2 P1).
+ *               GATE_APPOINTMENT_PAGE must still be on (r2 P1), the visit
+ *               must still resolve, and its customer must be on an account
+ *               the recipient number is on file for (pre-push Codex P0).
+ *   report    — {short}/l/<code> (kind 'service_report') or /report/<token>:
+ *               the builder's own public predicate (completed v1 record
+ *               with a token, typed delivery not suppressed) and the same
+ *               account binding (pre-push Codex P0).
  *   statement — /pay/statement/<token>: GATE_PAYER_STATEMENTS still on (the
  *               pay page 404s the moment it is off — GH Codex #3844 r1 P1),
  *               a payable payer_statements row whose ACTIVE payer's AP phone
@@ -825,8 +845,79 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, contract
     if (!statements.includes(stmt.id)) statements.push(stmt.id);
   }
 
-  if (await appointmentLinkPresent(runs, host) && process.env.GATE_APPOINTMENT_PAGE !== 'true') {
+  const shortRows = await shortCodeRows(runs);
+  if (appointmentLinkPresent(runs, host, shortRows) && process.env.GATE_APPOINTMENT_PAGE !== 'true') {
     return refuse('Appointment pages are switched off (GATE_APPOINTMENT_PAGE) — remove the appointment link before sending.');
+  }
+
+  // Appointment pages and service reports are ACCOUNT-scoped — their
+  // /customer-link rows search the whole account, a household shares its
+  // visits and reports — so the bar is the recipient's account rather than
+  // one row: the target must still resolve, its customer must be on an
+  // account the recipient number is on file for, and the trusted customer
+  // (when the route has one) must be on that account too. The client-side
+  // recipient-change strip is not authoritative (pre-push Codex P0).
+  const accountKey = (c) => String(c.account_id || c.id);
+  let recipientAccounts = null;
+  const onRecipientAccount = async (customerId, label) => {
+    if (!recipientAccounts) {
+      const rows = await db('customers')
+        .whereNull('deleted_at')
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(toLast10 || '')])
+        .select('id', 'account_id');
+      recipientAccounts = new Set(rows.map(accountKey));
+    }
+    const row = customerId ? await db('customers').where({ id: customerId }).first('id', 'account_id') : null;
+    if (!row || !recipientAccounts.has(accountKey(row))) {
+      return refuse(`This ${label} belongs to a different customer — remove it before sending.`);
+    }
+    if (trustedCustomerId) {
+      const trusted = await db('customers').where({ id: trustedCustomerId }).first('id', 'account_id');
+      if (!trusted || accountKey(trusted) !== accountKey(row)) {
+        return refuse(`This ${label} is not the selected customer's — remove it before sending.`);
+      }
+    }
+    return null;
+  };
+
+  const visitById = async (where) => db('scheduled_services').where(where).first('id', 'customer_id');
+  for (const run of linkRuns(runs, /\/appointment\//i)) {
+    const token = canonicalPortalToken(run, host, APPOINTMENT_TOKEN_RE);
+    if (!token) return refuse('An appointment link in this message is not on the Waves portal — remove it before sending.');
+    const visit = await visitById({ reschedule_token: token });
+    if (!visit) return refuse('This appointment link no longer resolves — remove it and insert a fresh one.');
+    const bad = await onRecipientAccount(visit.customer_id, 'appointment link');
+    if (bad) return bad;
+  }
+  for (const row of shortRows.filter((r) => r.kind === 'appointment')) {
+    const visit = row.entity_type === 'scheduled_services' && row.entity_id ? await visitById({ id: row.entity_id }) : null;
+    if (!visit) return refuse('This appointment link no longer resolves — remove it and insert a fresh one.');
+    const bad = await onRecipientAccount(visit.customer_id, 'appointment link');
+    if (bad) return bad;
+  }
+
+  const { suppressedTypedReport } = require('../routes/reports-public');
+  const publicReport = async (where) => {
+    const record = await db('service_records')
+      .where(where)
+      .where(PUBLIC_REPORT_WHERE)
+      .whereNotNull('report_view_token')
+      .first('id', 'customer_id', 'structured_notes');
+    return record && !suppressedTypedReport(record) ? record : null;
+  };
+  for (const run of linkRuns(runs, /\/report\//i)) {
+    const token = canonicalPortalToken(run, host, REPORT_TOKEN_RE);
+    if (!token) return refuse('A service report link in this message is not on the Waves portal — remove it before sending.');
+    const record = await publicReport({ report_view_token: token });
+    if (!record) return refuse('This service report is no longer viewable — remove the link before sending.');
+    const bad = await onRecipientAccount(record.customer_id, 'service report link');
+    if (bad) return bad;
+  }
+  for (const row of shortRows.filter((r) => r.kind === 'service_report')) {
+    const record = row.entity_type === 'service_records' && row.entity_id ? await publicReport({ id: row.entity_id }) : null;
+    if (!record) return refuse('This service report is no longer viewable — remove the link before sending.');
+    const bad = await onRecipientAccount(record.customer_id, 'service report link');
+    if (bad) return bad;
   }
 
   for (const run of secureLinkRuns(runs)) {
@@ -1104,6 +1195,11 @@ async function buildPrepGuideLink(customerIds) {
  * typed report 404s publicly, so those are skipped too (reports-public's
  * own predicate). Short-wrapped with the closeout text's idiom.
  */
+// The React report page reads /:token/data, which answers only for
+// service_report_v1 records — a legacy-template row with a token would
+// insert a link that 404s (pre-push Codex P1). Shared with the send seam.
+const PUBLIC_REPORT_WHERE = { status: 'completed', report_template_version: 'service_report_v1' };
+
 async function buildServiceReportLink(customerIds) {
   const { suppressedTypedReport } = require('../routes/reports-public');
   const PAGE = 15;
@@ -1111,10 +1207,7 @@ async function buildServiceReportLink(customerIds) {
   for (let offset = 0; ; offset += PAGE) {
     const rows = await db('service_records')
       .whereIn('customer_id', customerIds)
-      // The React report page reads /:token/data, which answers only for
-      // service_report_v1 records — a legacy-template row with a token
-      // would insert a link that 404s (pre-push Codex P1).
-      .where({ status: 'completed', report_template_version: 'service_report_v1' })
+      .where(PUBLIC_REPORT_WHERE)
       .whereNotNull('report_view_token')
       .orderBy([{ column: 'service_date', order: 'desc' }, { column: 'created_at', order: 'desc' }])
       .offset(offset)
@@ -1135,6 +1228,8 @@ async function buildServiceReportLink(customerIds) {
   return {
     url,
     line: `Here is your latest service report: ${url}\n\n`,
+    // Immediate sends only — /sms binds the report to the recipient's account.
+    immediateOnly: true,
     report: { id: record.id, serviceDate: dateOnly(record.service_date), serviceType: record.service_type || null },
   };
 }
