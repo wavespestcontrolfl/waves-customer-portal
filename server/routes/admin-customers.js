@@ -10,6 +10,7 @@ const logger = require('../services/logger');
 const { stageLifecycleStamps } = require('../services/customer-stages');
 const { etDateString } = require('../utils/datetime-et');
 const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
+const { findCustomersAtAddress } = require('../services/customer-address-match');
 const { recordAuditEvent } = require('../services/audit-log');
 const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
@@ -118,6 +119,9 @@ const TECH_360_STRIPPED_KEYS = [
   // Sibling properties on the account: authorization is per-customer, so an
   // assignment at ONE property must not expose the addresses of the others.
   'accountProperties',
+  // Other customers at the same street address (spouses, other units):
+  // cross-customer names/addresses — same per-customer authorization rule.
+  'addressNeighbors',
   // Estimate rows carry permanent public bearer tokens (customer-facing
   // accept/decline actions) plus decline data — office-only. No tech
   // surface reads estimates from the 360 payload.
@@ -2979,6 +2983,38 @@ router.get('/:id/latest-scheduled-service', async (req, res, next) => {
 });
 
 // GET /api/admin/customers/:id — full detail
+// Customers whose primary or property address is the same street address
+// (unit-aware — see services/customer-address-match.js). Feeds the estimate
+// builder's link suggestions. Office-only: the rows name other customers.
+// Registered above /:id so the literal path is not read as a customer id.
+// POST with the address in the body — a street address is PII and a GET
+// query string would land in the Morgan request log (AGENTS.md P1).
+router.post('/at-address', async (req, res, next) => {
+  try {
+    if (req.techRole === 'technician') return res.status(403).json({ error: 'Admin access required' });
+    const address = String(req.body?.address || '').trim();
+    const exclude = req.body?.excludeCustomerId ? String(req.body.excludeCustomerId) : null;
+    if (address.length < 6) return res.json({ customers: [] });
+    const rows = await findCustomersAtAddress(db, address, { excludeCustomerId: exclude });
+    res.json({
+      customers: rows.map((c) => ({
+        id: c.id,
+        firstName: c.first_name,
+        lastName: c.last_name,
+        phone: c.phone,
+        email: c.email,
+        tier: c.waveguard_tier,
+        monthlyRate: parseFloat(c.monthly_rate || 0),
+        address: formatAddress({ line1: c.address_line1, line2: c.address_line2, city: c.city, state: c.state, zip: c.zip }),
+        // Street + unit on one line for the suggestion row (formatAddress
+        // comma-separates line2, so a first-comma split would drop the unit).
+        streetLine: [c.address_line1, c.address_line2].filter(Boolean).join(" "),
+        matchedVia: c.matchedVia,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
 router.get('/:id', async (req, res, next) => {
   try {
     // The 360 payload below includes billing history, stored payment
@@ -3030,7 +3066,7 @@ router.get('/:id', async (req, res, next) => {
         : [])
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_consumed_estimates: ${e.message}`); return null; });
 
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans, addressNeighborRows] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -3136,6 +3172,12 @@ router.get('/:id', async (req, res, next) => {
       accountPropertySummary(c.account_id, c.id).catch(e => { logger.warn(`[customers:${c.id}] account_properties: ${e.message}`); return []; }),
       annualPrepayTermsPromise,
       listCustomerPrepaidPlans(db, c.id).catch(e => { logger.warn(`[customers:${c.id}] prepaid_plans: ${e.message}`); return []; }),
+      // Other customers at this street address (spouses quoting separately,
+      // other units). Same-account rows are the customer's own other
+      // profiles and already render under accountProperties.
+      findCustomersAtAddress(db, [c.address_line1, c.address_line2, c.city, c.zip].filter(Boolean).join(', '), { excludeCustomerId: c.id })
+        .then(rows => rows.filter(r => !(c.account_id && r.account_id === c.account_id)))
+        .catch(e => { logger.warn(`[customers:${c.id}] address_neighbors: ${e.message}`); return []; }),
     ]);
 
     // The invoices table stores the billed amount as `total`; the frontend reads
@@ -3226,6 +3268,15 @@ router.get('/:id', async (req, res, next) => {
         pipelineStage: p.pipeline_stage,
         monthlyRate: parseFloat(p.monthly_rate || 0),
         isPrimaryProfile: !!p.is_primary_profile,
+      })),
+      addressNeighbors: addressNeighborRows.map(n => ({
+        id: n.id,
+        firstName: n.first_name,
+        lastName: n.last_name,
+        phone: n.phone,
+        pipelineStage: n.pipeline_stage,
+        matchedVia: n.matchedVia,
+        address: { line1: n.address_line1, line2: n.address_line2, city: n.city, state: n.state, zip: n.zip },
       })),
       tags: tags.map(t => t.tag),
       interactions, preferences: prefs, services, estimates, payments, scheduled, upcomingScheduled, smsLog,

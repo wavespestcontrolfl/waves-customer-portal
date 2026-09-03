@@ -45,7 +45,12 @@ beforeEach(() => {
   fetchMock = vi.fn((url) => {
     const path = String(url);
     if (path.includes("/estimator/property-lookup")) return jsonResponse({ enriched: {}, errors: [] });
-    if (path.includes("/admin/customers")) {
+    // The server does the (unit-aware) address matching now; the client
+    // renders exactly what /customers/at-address returns.
+    if (path.includes("/admin/customers/at-address")) {
+      return jsonResponse({ customers: customersAtStreet });
+    }
+    if (path.includes("/admin/customers?")) {
       return jsonResponse({ customers: [...customersAtStreet, ELSEWHERE] });
     }
     return jsonResponse({});
@@ -91,7 +96,15 @@ describe("address match is a suggestion, never a silent link", () => {
     await lookUp();
 
     expect(screen.getByText("Jane Doe")).toBeInTheDocument();
-    // The non-matching street is filtered out of the suggestion.
+    // The candidate set is the server's (unit-aware) answer for the typed
+    // address, not a client-side street-substring pass over a search page.
+    // POST body, never the query string — a street address must not reach
+    // the request log.
+    const atAddress = fetchMock.mock.calls.filter(([u]) => String(u).includes("/customers/at-address"));
+    expect(atAddress).toHaveLength(1);
+    expect(atAddress[0][0]).toBe("/api/admin/customers/at-address");
+    expect(atAddress[0][1].method).toBe("POST");
+    expect(JSON.parse(atAddress[0][1].body)).toEqual({ address: ADDRESS });
     expect(screen.queryByText("Pat Other")).not.toBeInTheDocument();
     // No chip, no linked-customer spend request: customerId is still empty.
     expect(screen.queryByText(/Existing customer:/)).not.toBeInTheDocument();
