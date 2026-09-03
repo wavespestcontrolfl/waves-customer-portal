@@ -790,7 +790,8 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
   });
   it('closed-hold fallback orders held_at DESC NULLS LAST so a pending row never outranks the real closed hold', () => {
     const src = require('fs').readFileSync(require.resolve('../services/estimate-card-holds'), 'utf8');
-    expect(src).toMatch(/orderByRaw\('held_at DESC NULLS LAST, created_at DESC'\)/);
+    expect(src).toMatch(/const HELD_ROW_ORDER = 'held_at DESC NULLS LAST, created_at DESC'/);
+    expect(src).toMatch(/orderByRaw\(HELD_ROW_ORDER\)/);
   });
   it('no HELD row but a released/charged hold → fee settled, with the state named', async () => {
     stubDb([null, { id: 'h1', status: 'released', no_show_fee_amount: 49 }]);
