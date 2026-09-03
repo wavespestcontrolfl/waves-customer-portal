@@ -801,7 +801,12 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
   it('a THROWN appt-time lookup is unresolved fee-may-apply — never a silent "no fee" the commit could contradict', async () => {
     stubDb(holdRow);
     mockApptTime.mockRejectedValue(new Error('lookup down'));
-    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: true, feeAmount: 49, unresolved: true, rule: expect.objectContaining({ code: 'unresolved', willCharge: null }) });
+    const unresolvedRes = await cardHoldCancelPreview('svc1', now);
+    expect(unresolvedRes).toEqual({ held: true, feeApplies: true, feeAmount: 49, unresolved: true, rule: expect.objectContaining({ code: 'unresolved', willCharge: null }) });
+    // This rail's cancel handler releases FREE on a failed lookup — the
+    // copy must say so, not promise a billing-review park.
+    expect(unresolvedRes.rule.text).toMatch(/released free/);
+    expect(unresolvedRes.rule.text).not.toMatch(/billing review\.$/);
     // The helper asks for the thrown flavor — a fail-soft null would make
     // the unresolved branch unreachable and the preview lie fee-free.
     expect(mockApptTime).toHaveBeenCalledWith('svc1', { throwOnError: true });

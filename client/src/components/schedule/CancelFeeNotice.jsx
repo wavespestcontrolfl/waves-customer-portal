@@ -30,7 +30,9 @@ export default function CancelFeeNotice({ serviceId }) {
   if (state.status === 'loading') {
     text = 'Checking whether the saved card will be charged…';
   } else if (state.status === 'unavailable' || !rule) {
-    text = "Couldn't check the saved card right now. Nothing is charged automatically without a verified fee rule — the cancel is parked for billing review if a card is on file.";
+    // No verdict to relay — and the two rails handle a failed check
+    // differently (review park vs free release), so promise neither.
+    text = "Couldn't check the saved card right now. The confirmation step re-checks before anything is charged; if it still can't verify, check the visit's billing after cancelling.";
   } else {
     text = rule.text;
     if (rule.willCharge === true) { label = 'Card will be charged'; labelClass = 'text-alert-fg'; }

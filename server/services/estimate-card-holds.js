@@ -1307,7 +1307,11 @@ function freeCancelReason({ start, now = new Date(), windowHours, anchorAt = nul
   }
   return 'outside_window';
 }
-function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now = new Date(), anchorAt = null, sticky = null, detail = null }) {
+// `onFailure` — what the rail's cancel handler does when its own lookup
+// fails at commit time: the appointment rail parks review ('review'); the
+// estimate-hold rail releases the hold free ('release'). The unresolved
+// copy must state the rail's real outcome, not a shared guess.
+function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now = new Date(), anchorAt = null, sticky = null, detail = null, onFailure = 'review' }) {
   const fee = fmtFeeAmount(feeAmount);
   const hours = Number(windowHours) > 0 ? Number(windowHours) : cardHoldCancelWindowHours();
   const rule = (willCharge, text) => ({ code, willCharge, text });
@@ -1352,7 +1356,9 @@ function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now
       return rule(null, 'A fee charge for this visit is already in progress or under billing review. This cancel starts no new charge — check the visit\'s billing before promising the customer either way.');
     case 'unresolved':
     default:
-      return rule(null, `Couldn't verify the fee terms right now${detail ? ` (${detail})` : ''}. Nothing will be charged automatically — the cancel will be parked for billing review.`);
+      return rule(null, `Couldn't verify the fee terms right now${detail ? ` (${detail})` : ''}. Nothing will be charged automatically — ${onFailure === 'release'
+        ? 'if the check still fails when you confirm, the hold is released free; check the visit\'s billing afterwards.'
+        : 'the cancel will be parked for billing review.'}`);
   }
 }
 
@@ -1835,7 +1841,7 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
   const windowHours = Number(hold.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
   // Every exit carries the operator-facing rule (code + sentence) so the
   // cancel card can say whether the card WILL be charged and why.
-  const describe = (code, extra = {}) => describeCancelFeeRule({ code, feeAmount, windowHours, now, anchorAt: hold.held_at, ...extra });
+  const describe = (code, extra = {}) => describeCancelFeeRule({ code, feeAmount, windowHours, now, anchorAt: hold.held_at, onFailure: 'release', ...extra });
   // Rail OFF (ONE_TIME_CARD_HOLD kill switch) with a historical held row:
   // no fee can be collected, so nothing below may report one — including
   // the fee-may-apply posture of a FAILED time lookup, which would make the
