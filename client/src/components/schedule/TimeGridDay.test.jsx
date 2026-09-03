@@ -194,3 +194,42 @@ describe('TimeGridDay bulk move (date-only)', () => {
     expect(window.alert).not.toHaveBeenCalled();
   });
 });
+
+describe('TimeGridDay closeout-owed chip', () => {
+  it('marks a completed block, an all-day stop, and a rail item that still owe their closeout', () => {
+    const owedBlock = { ...SERVICES[0], id: 'svc-owed', status: 'completed' };
+    const owedAllDay = { id: 'svc-allday', customerName: 'All Day Customer', status: 'completed', technicianId: 'tech-1', technicianName: 'Alex Tech' };
+    const owedRail = { id: 'svc-rail', customerName: 'Rail Customer', status: 'completed', windowStart: '13:00', windowEnd: '14:00' };
+    const finished = { ...SERVICES[1], id: 'svc-done', status: 'completed' };
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[owedBlock, owedAllDay, owedRail, finished]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        owesCompletion={(svc) => ['svc-owed', 'svc-allday', 'svc-rail'].includes(svc.id)}
+      />,
+    );
+    expect(screen.getAllByText('Closeout owed')).toHaveLength(3);
+  });
+});
+
+describe('TimeGridDay all-day closeout-owed chip', () => {
+  it('routes the all-day chip through onEdit even though the stop button opens the customer profile', () => {
+    const onEdit = vi.fn();
+    const onViewCustomer = vi.fn();
+    const owedAllDay = { id: 'svc-allday', customerId: 'cust-1', customerName: 'All Day Customer', status: 'completed', technicianId: 'tech-1', technicianName: 'Alex Tech' };
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[owedAllDay]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        owesCompletion={(svc) => svc.id === 'svc-allday'}
+        onEdit={onEdit}
+        onViewCustomer={onViewCustomer}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Closeout owed' }));
+    expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-allday' }));
+    expect(onViewCustomer).not.toHaveBeenCalled();
+  });
+});

@@ -123,7 +123,7 @@ function headerLabel(dateStr) {
   });
 }
 
-function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
+function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
   const name = String(service.customerName || '').trim();
   const customerMissing = !name;
   const needsAttention =
@@ -201,6 +201,11 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
               {displayName}
             </span>
             {service.tier && <Badge tone="neutral">{service.tier}</Badge>}
+            {owesCompletion?.(service) && (
+              // Completed but the closeout (invoice / report / text) is still
+              // owed — tapping the row reopens the completion panel to resume.
+              <Badge tone="alert">Closeout owed</Badge>
+            )}
             {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
               <span
                 className="inline-flex items-center rounded-full uppercase tracking-label font-medium"
@@ -346,7 +351,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
   );
 }
 
-function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
+function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const today = isETToday(dateStr);
   return (
@@ -401,6 +406,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
             onProtocol={onProtocol}
             onTreatmentPlan={onTreatmentPlan}
             onViewAudit={onViewAudit}
+            owesCompletion={owesCompletion}
             technicians={technicians}
             onQuickAction={onQuickAction}
             onRefresh={onRefresh}
@@ -411,7 +417,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, rainChance, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
+export default function MobileDispatchList({ mode, date, services, rainChance, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -467,6 +473,7 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
           onProtocol={onProtocol}
           onTreatmentPlan={onTreatmentPlan}
           onViewAudit={onViewAudit}
+          owesCompletion={owesCompletion}
           technicians={technicians}
           onQuickAction={onQuickAction}
           onRefresh={onRefresh}
@@ -502,6 +509,7 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
           onProtocol={onProtocol}
           onTreatmentPlan={onTreatmentPlan}
           onViewAudit={onViewAudit}
+          owesCompletion={owesCompletion}
           technicians={technicians}
           onQuickAction={onQuickAction}
           onRefresh={onRefresh}
