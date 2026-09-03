@@ -1378,6 +1378,7 @@ class GoogleBusinessService {
     // missing_since stamps, so a stored-row count reads healthy forever —
     // codex #3298 r1).
     const pulledCounts = {};
+    const gbpFailures = {};
     // Unlinked-review notifications collected across the WHOLE run and fired
     // after every location's reviews are inserted/linked — the likely-reviewer
     // exclusion must see the full batch (codex #3264 r2).
@@ -1423,33 +1424,57 @@ class GoogleBusinessService {
             // pages regardless.
             const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id);
             pulledCounts[loc.id] = reviews.length;
+            // Per-review isolation (2026-09-03 Parrish): one row's upsert
+            // threw a unique-key violation on google_review_id, the whole
+            // location fell to the Places sample, and the escalation blamed
+            // "GBP credentials" — for a pull that had succeeded. A row
+            // failure now skips that row, keeps the rest of the feed, and
+            // rings its own degraded alert with the real error.
+            const rowFailures = [];
             for (const review of reviews) {
               const normalized = this._normalizeGbpReview(review, loc);
-              const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked, locRestored);
-              if (result.inserted) totalNew++;
-              totalSynced++;
+              try {
+                const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked, locRestored);
+                if (result.inserted) totalNew++;
+                totalSynced++;
+              } catch (rowErr) {
+                rowFailures.push({ review: normalized.gbp_review_name || normalized.google_review_id || '?', error: rowErr.message });
+                logger.error(`[gbp] review upsert failed for ${loc.name} (${normalized.gbp_review_name || normalized.google_review_id || '?'}): ${rowErr.message}`);
+              }
             }
             sources[loc.id] = 'gbp';
             usedGbp = true;
-            logger.info(`[gbp] Synced ${reviews.length} reviews for ${loc.name} via GBP Reviews API`);
-            // Authoritative full pull succeeded → anything we synced before
-            // that Google no longer returns has been removed/filtered.
-            // A failed reconcile must NOT hide behind the successful pull:
-            // it silently disables removal detection, so it joins
-            // result.errors and rings the degraded-sync alert (24h-deduped)
-            // — without falling back to Places (the pull itself was fine).
-            const reconcile = await this._reconcileMissingReviews(loc, locSyncStart);
-            if (reconcile && reconcile.ok === false) {
-              errors.push({ location: loc.name, error: reconcile.error, source: 'reconcile' });
-              await this._notifyDegradedSync(loc, `removal reconcile failed: ${reconcile.error}`);
+            logger.info(`[gbp] Synced ${reviews.length - rowFailures.length} of ${reviews.length} reviews for ${loc.name} via GBP Reviews API`);
+            if (rowFailures.length) {
+              // The failed rows never advanced synced_at, so the removal
+              // reconcile below would stamp them missing — skip it this
+              // run (the next successful run reconciles), and alert with
+              // the row error instead of a credentials story.
+              const cause = `${rowFailures.length} of ${reviews.length} review row(s) failed to store — first: ${rowFailures[0].error}`;
+              errors.push({ location: loc.name, error: cause, source: 'gbp_row' });
+              await this._notifyDegradedSync(loc, `review upsert failed: ${cause}`);
+            } else {
+              // Authoritative full pull succeeded → anything we synced before
+              // that Google no longer returns has been removed/filtered.
+              // A failed reconcile must NOT hide behind the successful pull:
+              // it silently disables removal detection, so it joins
+              // result.errors and rings the degraded-sync alert (24h-deduped)
+              // — without falling back to Places (the pull itself was fine).
+              const reconcile = await this._reconcileMissingReviews(loc, locSyncStart);
+              if (reconcile && reconcile.ok === false) {
+                errors.push({ location: loc.name, error: reconcile.error, source: 'reconcile' });
+                await this._notifyDegradedSync(loc, `removal reconcile failed: ${reconcile.error}`);
+              }
             }
           } catch (gbpErr) {
             gbpFailure = gbpErr.message;
+            gbpFailures[loc.id] = gbpErr.message;
             errors.push({ location: loc.name, error: gbpErr.message, source: 'gbp' });
             logger.warn(`[gbp] GBP Reviews sync failed for ${loc.name}; using Places fallback: ${gbpErr.message}`);
           }
         } else if (loc.googleLocationResourceName) {
           gbpFailure = 'no_client';
+          gbpFailures[loc.id] = 'no_client';
         }
 
         if (!usedGbp) {
@@ -1516,7 +1541,7 @@ class GoogleBusinessService {
     // class the 2026-08-08 manual review-status backfill fixed by hand.
     // Best-effort: health
     // reporting must never break the sync itself.
-    await this._assessReviewSyncHealth(sources, pulledCounts).catch((err) => {
+    await this._assessReviewSyncHealth(sources, pulledCounts, gbpFailures).catch((err) => {
       logger.warn(`[gbp] review sync health assessment failed: ${err.message}`);
     });
 
@@ -1538,7 +1563,7 @@ class GoogleBusinessService {
    *   stats_stale   ACT  no _stats row, or Places stats older than 7d — the
    *                      totals cross-check above is running blind
    */
-  _classifyLocationSyncHealth({ hasResource, source, pulledCount, rowCount, newestIngestAt, statsUpdatedAt, statsTotal, now = Date.now() }) {
+  _classifyLocationSyncHealth({ hasResource, source, pulledCount, gbpFailure, rowCount, newestIngestAt, statsUpdatedAt, statsTotal, now = Date.now() }) {
     if (!hasResource) return null;               // not a GBP-tracked location
     if (source === 'concurrent_skip') return null; // another runner owns this cycle
     const days = (ts) => (ts ? (now - new Date(ts).getTime()) / 86400000 : Infinity);
@@ -1547,7 +1572,14 @@ class GoogleBusinessService {
       return { cls: 'feed_down', severity: 'FIX', detail: 'nothing synced this run — GBP pull failed and no Places sample landed' };
     }
     if (source === 'places_fallback') {
-      return { cls: 'feed_degraded', severity: 'ACT', detail: 'GBP credentials are broken — running on the ~5-review Places sample; removals and most new reviews are invisible' };
+      // Say what actually failed: a 503 from Google, a pool timeout, or a
+      // row write is not a credentials problem, and "reconnect the GBP
+      // account" is the wrong remediation for all three. Only the missing
+      // client is a credentials story.
+      const why = !gbpFailure || gbpFailure === 'no_client'
+        ? 'GBP credentials are broken (client could not be initialized)'
+        : `the GBP pull failed: ${String(gbpFailure).replace(/\s+/g, ' ').slice(0, 200)}`;
+      return { cls: 'feed_degraded', severity: 'ACT', detail: `${why} — running on the ~5-review Places sample; removals and most new reviews are invisible` };
     }
     // Judged on the CURRENT pull, not retained rows: a wiped profile keeps
     // its historical rows (missing_since-stamped, never deleted), so a
@@ -1571,7 +1603,7 @@ class GoogleBusinessService {
    * backup channel, 24h-deduped via the notifications table. Kill switch:
    * REVIEW_SYNC_HEALTH_EMAIL=off (same convention as EMAIL_BOUNCE_RECOVERY).
    */
-  async _assessReviewSyncHealth(sources = {}, pulledCounts = {}) {
+  async _assessReviewSyncHealth(sources = {}, pulledCounts = {}, gbpFailures = {}) {
     if (String(process.env.REVIEW_SYNC_HEALTH_EMAIL || '').toLowerCase() === 'off') return { skipped: 'disabled' };
     // A cycle split across overlapping runners (per-location locks) gives
     // each runner a PARTIAL fleet view — two different signatures would both
@@ -1612,6 +1644,7 @@ class GoogleBusinessService {
         hasResource: !!loc.googleLocationResourceName,
         source: sources[loc.id],
         pulledCount: pulledCounts[loc.id],
+        gbpFailure: gbpFailures[loc.id],
         rowCount: Number(agg.row_count) || 0,
         newestIngestAt: agg.newest_ingest_at || null,
         statsUpdatedAt: agg.stats_updated_at || null,
@@ -1938,9 +1971,12 @@ class GoogleBusinessService {
       // suppress a reconcile-failure alert this afternoon — they have
       // different remediation and both mean removals go undetected.
       const reconcileFailure = String(cause || '').startsWith('removal reconcile failed');
+      const upsertFailure = String(cause || '').startsWith('review upsert failed');
       const title = reconcileFailure
         ? `Google review removal reconcile failing for ${loc.name}`
-        : `Google review sync degraded for ${loc.name}`;
+        : upsertFailure
+          ? `Google review rows failing to store for ${loc.name}`
+          : `Google review sync degraded for ${loc.name}`;
       // The advisory lock serializes the check-then-insert across the hourly
       // job, the manual admin sync, and overlapping deploy instances — a
       // plain read-then-insert here would double-notify. A held lock means
@@ -1970,7 +2006,9 @@ class GoogleBusinessService {
           : `is fully down — no Places fallback is available (GOOGLE_MAPS_API_KEY is not set)`;
         const body = reconcileFailure
           ? `Review sync for ${loc.name} pulled the GBP feed, but the ${cause}. New reviews are still syncing; REMOVALS will not be detected until the reconcile succeeds.`
-          : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
+          : upsertFailure
+            ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. The other reviews synced; the removal reconcile was skipped this run so the failed rows are not misreported as removed. This is a database write error, not a credentials problem — read the error and the code.`
+            : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
         await NotificationService.notifyAdmin(
           'review',
           title,

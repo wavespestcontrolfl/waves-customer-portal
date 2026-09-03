@@ -51,6 +51,15 @@ describe('_classifyLocationSyncHealth (pure classifier)', () => {
     expect(classify({ source: 'places_fallback' })).toMatchObject({ cls: 'feed_degraded', severity: 'ACT' });
   });
 
+  test('feed_degraded names the real GBP failure — only a missing client is a credentials story (Parrish 2026-09-03)', () => {
+    expect(classify({ source: 'places_fallback', gbpFailure: 'no_client' }).detail).toMatch(/^GBP credentials are broken/);
+    expect(classify({ source: 'places_fallback' }).detail).toMatch(/^GBP credentials are broken/);
+    const dbErr = classify({ source: 'places_fallback', gbpFailure: 'update "google_reviews" set ...\n duplicate key value violates unique constraint' });
+    expect(dbErr.detail).toMatch(/^the GBP pull failed: update "google_reviews" set \.\.\. duplicate key/);
+    expect(dbErr.detail).not.toMatch(/credentials/);
+    expect(classify({ source: 'places_fallback', gbpFailure: 'GBP getReviews 503: unavailable' }).detail).toContain('503');
+  });
+
   test('GBP pull succeeds on an EMPTY feed → silent_empty ACT (the Venice class)', () => {
     // Mechanically "healthy": source is gbp, no error — but the CURRENT pull
     // returned zero reviews. Judged on the pull, not retained rows: a wiped

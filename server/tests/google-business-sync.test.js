@@ -326,6 +326,43 @@ describe('Google Business review sync', () => {
     ]));
   });
 
+  test('one review row failing to store does not abort the location: the rest sync, reconcile is skipped, the alert names the row error (Parrish 2026-09-03)', async () => {
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [
+        { name: 'accounts/1/locations/2/reviews/rev-bad', reviewer: { displayName: 'G' }, starRating: 'FIVE', comment: 'Superb', createTime: '2026-08-26T19:52:51Z' },
+        { name: 'accounts/1/locations/2/reviews/rev-ok', reviewer: { displayName: 'Trent Ryals' }, starRating: 'FIVE', comment: 'Great', createTime: '2026-08-14T01:22:29Z' },
+      ] });
+    });
+    const realUpsert = service._upsertGbpReview.bind(service);
+    const upsert = jest.spyOn(service, '_upsertGbpReview').mockImplementation(async (normalized, ...rest) => {
+      if (normalized.gbp_review_name.endsWith('rev-bad')) {
+        throw new Error('update "google_reviews" set "google_review_id" = $1 - duplicate key value violates unique constraint "google_reviews_google_review_id_unique"');
+      }
+      return realUpsert(normalized, ...rest);
+    });
+    const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+    const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation');
+
+    const result = await service.syncAllReviews();
+
+    expect(result.sources).toEqual({ bradenton: 'gbp' });
+    expect(result.synced).toBe(1);
+    expect(db.__state.rows.google_reviews).toEqual(expect.arrayContaining([
+      expect.objectContaining({ gbp_review_name: 'accounts/1/locations/2/reviews/rev-ok', reviewer_name: 'Trent Ryals' }),
+    ]));
+    // No Places fallback: the pull itself succeeded.
+    expect(places).not.toHaveBeenCalled();
+    // The failed row never advanced synced_at — reconcile must not stamp it missing.
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_row', error: expect.stringContaining('1 of 2 review row(s) failed to store') })]);
+    expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^review upsert failed: 1 of 2 .*duplicate key value/));
+    upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
+  });
+
   test('upgrades a legacy Places row to the GBP review resource identity', async () => {
     db.__state.rows.google_reviews.push({
       id: 'legacy-1',
