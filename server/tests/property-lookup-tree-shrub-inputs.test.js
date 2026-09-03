@@ -7,6 +7,10 @@
 // the treeDensity fallback away.
 const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
 const { generateEstimate } = require('../services/pricing-engine');
+const {
+  treeShrubPalmProvenanceForReplay,
+  applyTreeShrubPalmReplay,
+} = require('../services/estimate-tree-shrub-knob-replay');
 
 function baseProfile(extra = {}) {
   return {
@@ -109,6 +113,14 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
     }
   });
 
+  test('a malformed tree count is inert while Tree & Shrub is NOT selected (hidden field never 400s another service)', () => {
+    for (const treeCount of ['abc', -3, 2.5]) {
+      const input = translateV2CallToV1Input(baseProfile({ treeCount }), ['PEST'], {});
+      expect(input.features).not.toHaveProperty('treeCount');
+    }
+    expect(translateV2CallToV1Input(baseProfile({ treeCount: 6 }), ['PEST'], {}).features.treeCount).toBe(6);
+  });
+
   test('commercial keeps the commercial pricer contract: zero is omitted, a positive count is passed through', () => {
     const commercial = (extra) => baseProfile({
       category: 'commercial', isCommercial: 'YES', propertyType: 'office', commercialSubtype: 'office', ...extra,
@@ -148,6 +160,62 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
       baseProfile({ estimatedPalmCount: 9, palmCountTrusted: false }), ['TREE_SHRUB'], {},
     );
     expect(untrusted.services.treeShrub).not.toHaveProperty('palmCount');
+  });
+
+  describe('replaying a persisted engineRequest keeps the sold palm terms (pre-push r2 P0)', () => {
+    const legacyRequest = () => ({
+      profile: baseProfile({ palmCount: 30 }),
+      selectedServices: ['TREE_SHRUB'],
+      options: {},
+    });
+    const stored = (tsMeta) => ({ engineRequest: legacyRequest(), result: { results: { ts: [{ tier: 'standard', selected: true }], tsMeta } } });
+
+    test('stored-result provenance: service_line keeps, anything else on a priced line is legacy, no line is null', () => {
+      expect(treeShrubPalmProvenanceForReplay(stored({ eb: 1200, et: 3, palmCount: 30, palmCountSource: 'service_line' }))).toBe('service_line');
+      expect(treeShrubPalmProvenanceForReplay(stored({ eb: 1200, et: 3, palmCount: 30, palmCountSource: 'property' }))).toBe('legacy');
+      expect(treeShrubPalmProvenanceForReplay(stored({ eb: 1200, et: 3, palmCount: 0, palmCountSource: 'none' }))).toBe('legacy');
+      // Pre-stamp tsMeta (no palm keys at all) is a legacy line.
+      expect(treeShrubPalmProvenanceForReplay(stored({ eb: 1200, et: 3 }))).toBe('legacy');
+      // Raw agent-draft line without a mapped envelope.
+      expect(treeShrubPalmProvenanceForReplay({ engineResult: { lineItems: [{ service: 'tree_shrub', palmCountSource: 'service_line' }] } })).toBe('service_line');
+      // No T&S sold at all → the translator output stands.
+      expect(treeShrubPalmProvenanceForReplay({ result: { results: { pestTiers: [] } } })).toBeNull();
+      expect(treeShrubPalmProvenanceForReplay({})).toBeNull();
+    });
+
+    test('applyTreeShrubPalmReplay strips ONLY the legacy-promoted count', () => {
+      const translated = () => translateV2CallToV1Input(baseProfile({ palmCount: 30 }), ['TREE_SHRUB'], {});
+      expect(applyTreeShrubPalmReplay(translated(), stored({ palmCountSource: 'property' })).services.treeShrub).not.toHaveProperty('palmCount');
+      expect(applyTreeShrubPalmReplay(translated(), stored({ palmCountSource: 'service_line' })).services.treeShrub.palmCount).toBe(30);
+      expect(applyTreeShrubPalmReplay(translated(), {}).services.treeShrub.palmCount).toBe(30);
+      // Tier, access and the property-level palm inventory are untouched.
+      const stripped = applyTreeShrubPalmReplay(translated(), stored({}));
+      expect(stripped.services.treeShrub).toMatchObject({ tier: 'standard', access: 'easy' });
+    });
+
+    test('the server-authoritative recompute strips it on a DECLARED replay and prices the legacy job unchanged', async () => {
+      const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+      const run = async (estData, replay) => {
+        let seenInput = null;
+        await serverRecomputeFromEstimateData(estData, {
+          needsSync: () => false,
+          generateEstimate: (input) => { seenInput = input; return { lineItems: [], totals: {} }; },
+          mapV1ToLegacyShape: () => ({ results: {} }),
+          ...(replay ? { replaySavedPricingKnobs: true } : {}),
+        });
+        return seenInput;
+      };
+      // Membership reconcile / opt-out / public mutation of a pre-v4.8 row.
+      const legacy = await run(stored({ eb: 1200, et: 3, palmCount: 30, palmCountSource: 'property' }), true);
+      expect(legacy.services.treeShrub).not.toHaveProperty('palmCount');
+      // A row sold WITH service-line palms keeps them.
+      const sold = await run(stored({ eb: 1200, et: 3, palmCount: 30, palmCountSource: 'service_line' }), true);
+      expect(sold.services.treeShrub.palmCount).toBe(30);
+      // A browser-posted save (not a declared replay) prices what the
+      // operator just regenerated and saw.
+      const fresh = await run(stored({ eb: 1200, et: 3, palmCount: 30, palmCountSource: 'service_line' }), false);
+      expect(fresh.services.treeShrub.palmCount).toBe(30);
+    });
   });
 
   test('a present-but-invalid palm count is refused under the 1–200 contract', () => {

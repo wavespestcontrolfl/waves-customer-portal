@@ -4147,7 +4147,18 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // priceTreeShrub's treeDensity fallback runs — the old
   // `Number(a || b) || 0` fabricated a 0 that priced the per-tree material
   // away (audit INP-002).
-  const typedTreeCountRaw = firstNonNegativeIntegerOrThrow('Tree count', p.treeCount);
+  // Validation bites only while Tree & Shrub is selected — the builder keeps
+  // a hidden, unvalidated value after the service is deselected, and a 400
+  // from an inert field would block every other service (pre-push r2 P1).
+  // Without the service the property block reads a lenient count: a
+  // non-negative integer, else absent.
+  const typedTreeCountRaw = sel.has('TREE_SHRUB')
+    ? firstNonNegativeIntegerOrThrow('Tree count', p.treeCount)
+    : (() => {
+      const n = Number(p.treeCount);
+      return p.treeCount !== undefined && p.treeCount !== null && String(p.treeCount).trim() !== ''
+        && Number.isInteger(n) && n >= 0 ? n : undefined;
+    })();
   // COMMERCIAL keeps the commercial pricer's own contract — a zero count is
   // "omitted" and the lot-density estimate prices the plant program
   // (priceCommercialTreeShrub, service-pricing.js). Every stored commercial

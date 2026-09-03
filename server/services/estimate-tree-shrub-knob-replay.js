@@ -64,4 +64,51 @@ function treeShrubKnobSignalForReplay(estData = {}) {
   };
 }
 
-module.exports = { treeShrubKnobSignalForReplay, NEUTRAL_TREE_SHRUB_KNOBS };
+// Stored-result palm provenance for translator-based replays (v4.8, pre-push
+// r2 P0). translateV2CallToV1Input now promotes a property-level palm count
+// (typed inventory, else a trusted vision estimate) onto services.treeShrub
+// so the per-palm terms price — but every persisted Admin-V2 engineRequest
+// saved before that carried palms at the PROPERTY level only, and its stored
+// T&S line priced NO service-line palms (tsMeta.palmCountSource 'property' /
+// 'none', or a pre-stamp tsMeta with no key at all). Replaying such a request
+// through the new translator would raise an already-sent quote and later bill
+// the new amount. Same evidence rule as resolveStoredPestPricingVersion: the
+// STORED RESULT says how the job was sold.
+//   'service_line' — the stored line priced service-line palms: keep them;
+//   'legacy'       — a stored T&S line with no service-line palms: strip the
+//                    promoted count so the replay reprices the SAME job;
+//   null           — no stored T&S line (fresh quote / service just added):
+//                    the translator output stands.
+function treeShrubPalmProvenanceForReplay(estData = {}) {
+  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
+  const lineItems = [
+    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
+    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
+  ];
+  const tsLine = lineItems.find((li) => (li?.service || '') === 'tree_shrub');
+  const tsMeta = (result?.results?.tsMeta && typeof result.results.tsMeta === 'object')
+    ? result.results.tsMeta
+    : (estData?.result?.results?.tsMeta || null);
+  const hasMappedTs = !!tsMeta || (Array.isArray(result?.results?.ts) && result.results.ts.length > 0);
+  if (!tsLine && !hasMappedTs) return null;
+  // The MAPPED stamp wins over a stale raw agent-draft line (see the knob
+  // signal above for why).
+  const source = (tsMeta && tsMeta.palmCountSource) || (tsLine && tsLine.palmCountSource) || null;
+  return source === 'service_line' ? 'service_line' : 'legacy';
+}
+
+// Mutates a TRANSLATED v1 input in place: drops the promoted service-line
+// palm count when the stored result proves the job was sold without one.
+function applyTreeShrubPalmReplay(v1Input, estData = {}) {
+  const treeShrub = v1Input?.services?.treeShrub;
+  if (!treeShrub || typeof treeShrub !== 'object' || treeShrub.palmCount === undefined) return v1Input;
+  if (treeShrubPalmProvenanceForReplay(estData) === 'legacy') delete treeShrub.palmCount;
+  return v1Input;
+}
+
+module.exports = {
+  treeShrubKnobSignalForReplay,
+  NEUTRAL_TREE_SHRUB_KNOBS,
+  treeShrubPalmProvenanceForReplay,
+  applyTreeShrubPalmReplay,
+};
