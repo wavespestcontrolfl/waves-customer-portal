@@ -564,7 +564,11 @@ async function fetchBackfillCandidates(limit, offset = 0, { callRecovery } = {})
     .limit(limit)
     .offset(offset);
   if (callRecovery) {
-    q.where('cp.source', 'call_pipeline')
+    // Both automated call-side sources: the pipeline's own inserts and the
+    // clarify unit reply's (its only enqueue is in-memory after commit, so
+    // a crash in that window would otherwise strand the row unenriched
+    // whenever the backfill gate is off — codex r1 P2 on #3788).
+    q.whereIn('cp.source', ['call_pipeline', 'clarify_unit_reply'])
       .whereRaw(`cp.created_at > NOW() - INTERVAL '${CALL_TIME_RECOVERY_WINDOW_DAYS} days'`);
   }
   return q;

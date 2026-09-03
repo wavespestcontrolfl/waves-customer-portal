@@ -163,8 +163,14 @@ function sameBuildingForWrite(addressLine, unitAskBuilding) {
   const storedZip = zipMatch && zipMatch.index > 0 ? zipMatch[1] : null;
   if (askedZip && storedZip) return storedZip === askedZip;
   if (askedCity) {
-    const cityRe = new RegExp(`\\b${askedCity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')}\\b`, 'i');
-    return cityRe.test(line);
+    // The stored line's LOCALITY segment only — "123 Venice Ave" with no
+    // locality must not pass as Venice because the street names the city
+    // (codex r1 P1 on #3788).
+    const { parseRawAddress } = require('../utils/address-normalizer');
+    const normCity = (c) => String(c || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
+      .filter((t) => t && t !== 'fl' && t !== 'florida' && !/^\d{5}(\d{4})?$/.test(t)).join(' ');
+    const stored = normCity(parseRawAddress(line).city);
+    return !!stored && stored === normCity(askedCity);
   }
   return false;
 }
@@ -219,7 +225,11 @@ async function legacyUnitTargets(trx, flags) {
   };
 }
 async function unitTargets(trx, flags) {
-  const legacy = flags.unit_lead_id === undefined && flags.unit_customer_id === undefined && flags.call_origin === true;
+  // A legacy row is recognized by its ABSENT target fields plus the unit
+  // item's own call id — never by the generic call_origin flag, which a
+  // later non-call merge on the same phone flips to false (codex r1 P0 on
+  // #3788).
+  const legacy = flags.unit_lead_id === undefined && flags.unit_customer_id === undefined && !!flags.unit_call_log_id;
   if (legacy) return legacyUnitTargets(trx, flags);
   return {
     leadId: flags.unit_lead_id || null,
@@ -260,7 +270,7 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
   }
   if (customerId) {
     if (customerRow) {
-      const { recordCallProperty, syncPrimaryAddress, addressKey } = require('./customer-properties');
+      const { recordCallProperty, syncPrimaryAddress, ensurePrimaryProperty } = require('./customer-properties');
       const { unitLineValueKey } = require('../utils/address-normalizer');
       const ownAddress = String(customerRow.address_line1 || '').trim();
       // The customer's active property rows AT the asked building, read
@@ -270,34 +280,21 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
       const wanted = unitLineValueKey(unitLine);
       const props = await trx('customer_properties')
         .where({ customer_id: customerId, active: true })
-        .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+        .select('id', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip');
       const propUnit = (p) => String(p.address_line2 || '').trim() || splitStreetLineUnit(String(p.address_line1 || '')).unit || '';
       const atBuilding = (props || []).filter((p) => sameBuildingForWrite(customerAddressLine(p), building));
       const unitAlreadyOnFile = atBuilding.some((p) => propUnit(p) && unitLineValueKey(propUnit(p)) === wanted);
-      // The building + replied unit as a property row on the account:
-      // an existing unitless placeholder for the building is upgraded in
-      // place, else a new row through the same function the call pipeline
-      // uses (which also makes it the primary and mirrors it when the
-      // customer has no address yet).
+      // The building + replied unit as its OWN property row on the account,
+      // through the same function the call pipeline uses (which also makes
+      // it the primary and mirrors it when the customer has no address
+      // yet). An existing building-level row at the address is PRESERVED,
+      // never rewritten into the unit: property rows carry no call linkage,
+      // so a unitless row cannot be proven to be this call's placeholder
+      // rather than a property manager's deliberate common-area property
+      // whose id visits and estimates already point at — and a reprocessed
+      // call would re-insert the building beside a rewritten row anyway
+      // (codex r1 P0 + P1 on #3788; supersedes the #3785 r4 upgrade).
       const recordUnitProperty = async () => {
-        // The call pipeline may already have persisted the building as an
-        // active UNITLESS secondary (a PREMISE missing only its subpremise
-        // is still a resolved building). Inserting the exact unit beside
-        // it would leave two active rows for one building and make the
-        // exactly-one-property selection ambiguous (codex r4 P1 on #3785)
-        // — upgrade that placeholder in place, recomputing its
-        // address_key; the coordinates still point at the building.
-        const unitless = atBuilding.find((p) => !propUnit(p));
-        if (unitless?.id) {
-          await trx('customer_properties').where({ id: unitless.id }).update({
-            address_line2: unitLine,
-            address_key: addressKey({ address_line1: unitless.address_line1, address_line2: unitLine, city: unitless.city, zip: unitless.zip }),
-            updated_at: new Date(),
-          });
-          out.customer = 'property_unit_added';
-          out.propertyId = String(unitless.id);
-          return;
-        }
         const rec = await recordCallProperty({
           customerId,
           address_line1: building.street_line_1,
@@ -318,7 +315,14 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
         // A legacy row may carry the unit INLINE on line 1 ("… Cir Apt 9")
         // with line 2 blank — that is a unit, never fill a second one
         // (codex r1 P1 on #3785; same guard as the lead branch).
-        const ownUnit = String(customerRow.address_line2 || '').trim() || splitStreetLineUnit(ownAddress).unit || '';
+        // The customer's own unit: line 2, INLINE on line 1, or — a
+        // supported legacy mirror — only on the active primary property
+        // row (syncPrimaryAddress preserves it for null-line2 callers).
+        // Ignoring that last shape would overwrite Apt 9 with Apt 204 on
+        // both the mirror and the primary (codex r1 P0 on #3788).
+        const primaryAtBuilding = atBuilding.find((p) => p.is_primary);
+        const ownUnit = String(customerRow.address_line2 || '').trim() || splitStreetLineUnit(ownAddress).unit
+          || (primaryAtBuilding ? propUnit(primaryAtBuilding) : '') || '';
         if (!ownUnit) {
           // A supported shape: unitless primary at the building PLUS an
           // active secondary property for this exact unit. Moving the
@@ -330,6 +334,11 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
             out.customer = 'property_exists';
           } else {
             await trx('customers').where({ id: customerId }).update({ address_line2: unitLine });
+            // A customer with no primary property row yet (lazy-backfill
+            // model, or property persistence gated/failed at call time)
+            // gets one from the mirror — WITH the unit — or the sync below
+            // would silently have nothing to update (codex r1 P2 on #3788).
+            await ensurePrimaryProperty({ ...customerRow, address_line2: unitLine }, { conn: trx });
             await syncPrimaryAddress({ ...customerRow, address_line2: unitLine }, trx, { explicitLine2: true, preserveCoords: true });
             out.customer = 'line2_filled';
           }
@@ -370,7 +379,10 @@ async function unitOnFileAtBuilding(trx, flags) {
   if (leadId) {
     const leadRow = await trx('leads').where({ id: leadId }).whereNull('deleted_at').first();
     const line = String(leadRow?.address || '').trim();
-    if (line && splitStreetLineUnit(line).unit && sameBuilding(line, building)) add(splitStreetLineUnit(line).unit);
+    // The unit item's OWN lead is definitive for this ask — a unit staff
+    // entered there answers it regardless of a property manager's other
+    // units on the account (codex r1 P2 on #3788).
+    if (line && splitStreetLineUnit(line).unit && sameBuilding(line, building)) return true;
   }
   if (customerId) {
     const customerRow = await trx('customers').where({ id: customerId }).whereNull('deleted_at').first();
@@ -856,13 +868,22 @@ const BARE_UNIT_REPLY_RE = new RegExp(`^\\s*(?:it'?s\\s+|its\\s+|number\\s+)?(${
 // customer, and property rows, so only exactly one unambiguous candidate
 // counts; anything else stays on the card for a human (codex r5 P1 on
 // #3785).
-const UNIT_NEGATION_RE = /\b(?:not|isn'?t|wasn'?t|wrong|no longer)\s+(?:apt|apartment|unit|#)/i;
+// Correction/negation vocabulary ANYWHERE in the text ("Apt 204 is wrong,
+// it's 205" corrects after the designator), a disjunction between two
+// values ("Unit 204 or 205"), or an undesignated alternate introduced
+// after the designated one ("… it's 205") — all fail closed (codex r1 P1
+// on #3788).
+const UNIT_NEGATION_RE = /\b(?:not|isn'?t|wasn'?t|wrong|incorrect|instead|actually|correction|no longer|rather)\b/i;
+const UNIT_ALTERNATE_RE = new RegExp(`\\b(?:or|it'?s|its|\\/)\\s*#?\\s*(${UNIT_VALUE})\\b`, 'gi');
 function unitReplyIsAmbiguous(text, normalizeUnitLine) {
-  const all = [
+  const norm = (v) => String(normalizeUnitLine(`apt ${v}`) || '').toLowerCase();
+  const designated = [
     ...text.matchAll(new RegExp(UNIT_REPLY_RE.source, 'gi')),
     ...text.matchAll(new RegExp(UNIT_HASH_REPLY_RE.source, 'gi')),
-  ].map((m) => normalizeUnitLine(`apt ${m[1]}`)).filter(Boolean);
-  return new Set(all.map((u) => u.toLowerCase())).size > 1 || UNIT_NEGATION_RE.test(text);
+  ].map((m) => norm(m[1])).filter(Boolean);
+  const candidates = new Set(designated);
+  for (const m of text.matchAll(UNIT_ALTERNATE_RE)) { const u = norm(m[1]); if (u) candidates.add(u); }
+  return candidates.size > 1 || UNIT_NEGATION_RE.test(text);
 }
 function extractUnitReply(body, { bareOk = false } = {}) {
   const text = String(body || '').trim();

@@ -597,7 +597,7 @@ describe('sweepUnenrichedProperties', () => {
     // behind the backfill gate.
     expect(res.mode).toBe('call_time_recovery');
     expect(res.skipped).toBeUndefined();
-    expect(cp.where).toHaveBeenCalledWith('cp.source', 'call_pipeline');
+    expect(cp.whereIn).toHaveBeenCalledWith('cp.source', ['call_pipeline', 'clarify_unit_reply']);
     const fence = cp.whereRaw.mock.calls.find((c) => String(c[0]).includes('cp.created_at > NOW()'));
     expect(String(fence[0])).toContain("INTERVAL '7 days'");
     // Empty candidate page → no spend.
