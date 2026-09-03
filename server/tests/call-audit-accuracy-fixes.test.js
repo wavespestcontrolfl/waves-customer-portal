@@ -208,7 +208,7 @@ describe('triage surfacing', () => {
       requested_service_categories: ['pest_control', 'mosquito_control'],
       requested_specific_service: 'Flea Treatment',
       requested_service_intent: 'preventative_one_time',
-      requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 1 },
+      requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 1, additional: [] },
       status: 'requested',
       confirmed_start_at: null,
       requested_date_range_start: '2026-07-14',
@@ -228,7 +228,7 @@ describe('triage surfacing', () => {
       requested_service_categories: ['pest_control', 'mosquito_control'],
       requested_specific_service: 'Flea Treatment',
       requested_service_intent: 'preventative_one_time',
-      requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 1 },
+      requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 1, additional: [] },
     });
     expect(payload.scheduling_window).toBeUndefined();
     expect(JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction: withService }).payload).quote_scope).toBeUndefined();

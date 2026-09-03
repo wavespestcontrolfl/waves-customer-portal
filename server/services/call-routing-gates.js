@@ -174,7 +174,14 @@ function askSnapshot(extraction) {
       city: address.city ?? null,
       postal_code: address.postal_code ?? null,
       raw_text: address.raw_text ?? null,
+      // The OTHER properties the call named: how many, and each one with a
+      // street as the sweep's readings — a two-property ask is judged
+      // property by property, and a named property the snapshot cannot
+      // read fails closed (codex r24 P2).
       additional_properties: list(extraction?.property?.additional_properties).length,
+      additional: list(extraction?.property?.additional_properties)
+        .filter((p) => p && typeof p === 'object' && text(p.street_line_1))
+        .map((p) => ({ street_line_1: text(p.street_line_1), street_line_2: p.street_line_2 ?? null, city: p.city ?? null, postal_code: p.postal_code ?? null, raw_text: p.raw_text ?? null })),
     },
   };
 }

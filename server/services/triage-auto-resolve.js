@@ -202,16 +202,14 @@ function addressKey(text) {
 const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
 const zip5 = (v) => (String(v || '').match(/\b\d{5}\b/) || [null])[0];
 
-// City / ZIP hints from a raw "123 Main St, Bradenton, FL 34205" reading:
-// the segment after the first comma (state tokens and digits stripped) and
-// any 5-digit group past the street segment.
+// City / ZIP hints from a raw "123 Main St, Bradenton, FL 34205" reading,
+// through the shared raw-address parser: a unit segment after the street
+// ("77 Oak St, Unit 4, Bradenton, FL 34205") belongs to the street, never
+// to the city (codex r24 P2).
 function localityOfRaw(text) {
-  const s = String(text || '');
-  const comma = s.indexOf(',');
-  if (comma === -1) return { city: null, zip: null };
-  const rest = s.slice(comma + 1);
-  const seg = rest.split(',')[0].replace(/\b(fl|florida)\b/i, '').replace(/\d/g, '').trim();
-  return { city: seg || null, zip: zip5(rest) };
+  const { parseRawAddress } = require('../utils/address-normalizer');
+  const parsed = parseRawAddress(text);
+  return { city: parsed.city || null, zip: zip5(parsed.zip) };
 }
 
 // Does a reading's locality agree with the on-file one? Only the fields the
@@ -278,14 +276,6 @@ function readingMatchesOnFile(item, reading) {
     && localityMatches(item, reading) && heardUnitMatches(item, reading);
 }
 
-// Did the CARD's filing-time ask (scheduling_window.requested_address —
-// never the call's rolling extraction) name no address at all, or exactly
-// the on-file one? Any other shape — a second property, a different
-// street, a locality/unit-only fragment, or no snapshot — is not an ask
-// the on-file address answers.
-// The readings of the card's filing-time ask, or null when the ask is not
-// one address (no snapshot, a second property, or a unit / city / ZIP
-// fragment with no street). An empty list = the ask named no address.
 // The card's filing-time ask: scheduling_window on the scheduling-shaped
 // cards, quote_scope on quote_promised — the same snapshot under two keys.
 function requestAsk(item) {
@@ -293,21 +283,54 @@ function requestAsk(item) {
   return payload?.scheduling_window || payload?.quote_scope || null;
 }
 
+// The readings of ONE named address: its structured street (unit, city,
+// ZIP beside it) and its raw text.
+const addressReadings = (a) => [
+  { text: a.street_line_1, line2: a.street_line_2, city: a.city, zip: a.postal_code },
+  { text: a.raw_text, ...localityOfRaw(a.raw_text) },
+].filter((r) => String(r.text || '').trim());
+
+// The readings of the PRIMARY address the card's filing-time ask
+// (requested_address — never the call's rolling extraction) named, or null
+// when it cannot be read (no snapshot, or a unit / city / ZIP fragment with
+// no street). An empty list = the ask named no address, i.e. the on-file one.
 function requestedAddressReadings(item) {
   const ask = requestAsk(item)?.requested_address;
   if (!ask || typeof ask !== 'object') return null;
-  if (Number(ask.additional_properties) > 0) return null;
-  const readings = [
-    { text: ask.street_line_1, line2: ask.street_line_2, city: ask.city, zip: ask.postal_code },
-    { text: ask.raw_text, ...localityOfRaw(ask.raw_text) },
-  ].filter((r) => String(r.text || '').trim());
+  const readings = addressReadings(ask);
   if (!readings.length && [ask.street_line_2, ask.city, ask.postal_code].some((v) => String(v || '').trim())) return null;
   return readings;
 }
 
+// The OTHER properties the call named, each as its readings — or null when
+// the snapshot says some were named but does not carry every one with a
+// street (a card filed before the list existed, or a property heard without
+// a street): an address that cannot be read cannot be proven served (codex
+// r24 P2). Empty when the call named one address.
+function additionalAddressReadings(item) {
+  const ask = requestAsk(item)?.requested_address;
+  const named = Number(ask?.additional_properties) || 0;
+  if (!named) return [];
+  const extra = Array.isArray(ask.additional) ? ask.additional.filter((a) => a && typeof a === 'object').map(addressReadings) : [];
+  return extra.length === named && extra.every((r) => r.length) ? extra : null;
+}
+
+// Every address the card asked for — the primary first — each as its
+// readings, or null when any of them cannot be read. Coverage is judged
+// address by address: a two-property ask is answered only when every
+// property is served.
+function requestedPlaces(item) {
+  const primary = requestedAddressReadings(item);
+  const extra = additionalAddressReadings(item);
+  return primary && extra ? [primary, ...extra] : null;
+}
+
+// Did the ask name no address at all, or exactly the on-file one — and
+// nothing else? A second property, a different street, or an unreadable
+// snapshot is not an ask the on-file address alone answers.
 function requestedAddressIsOnFile(item) {
   const readings = requestedAddressReadings(item);
-  if (!readings) return false;
+  if (!readings || additionalAddressReadings(item)?.length !== 0) return false;
   return readings.every((r) => readingMatchesOnFile(item, r));
 }
 
@@ -322,17 +345,14 @@ function bookingPlace(visit, places) {
   return visit.property_id ? places.get(String(visit.property_id)) || null : null;
 }
 
-// Is a booking at the address the CARD asked for? The ask named no address
-// or exactly the on-file one → the booking must be positively at the
-// on-file address. The ask named another address → the booking must be
+// Is a booking at ONE address the CARD asked for, given that address's
+// readings? None (the ask named no address) or exactly the on-file one →
+// the booking must be positively at the on-file address. Another address →
 // positively at THAT one (every reading keys to it, locality and unit
-// agreeing). Any other ask shape binds nothing, so nothing qualifies. A
-// reprocess that moved the extracted property and minted this call's own
-// booking elsewhere must not close the original ask.
-function bookingAtRequestedAddress(item, visit, places) {
-  if (requestedAddressIsOnFile(item)) return visitAtOnFileAddress(item, visit, places);
-  const readings = requestedAddressReadings(item);
-  if (!readings || !readings.length) return false;
+// agreeing). A reprocess that moved the extracted property and minted this
+// call's own booking elsewhere must not close the original ask.
+function bookingAtReadings(item, visit, places, readings) {
+  if (!readings.length || readings.every((r) => readingMatchesOnFile(item, r))) return visitAtOnFileAddress(item, visit, places);
   const place = bookingPlace(visit, places);
   if (!place || !place.key) return false;
   if (place.customer_id && String(place.customer_id) !== String(item.call_customer_id)) return false;
@@ -340,6 +360,12 @@ function bookingAtRequestedAddress(item, visit, places) {
     const unit = unitOf(r.text, r.line2);
     return addressKey(r.text) === place.key && (!unit || unit === place.unit) && localityAgrees(place, r);
   });
+}
+// ...at ANY address the card asked for; an ask that cannot be read in full
+// (a second property the snapshot did not record) binds nothing.
+function bookingAtRequestedAddress(item, visit, places) {
+  const asked = requestedPlaces(item);
+  return Boolean(asked) && asked.some((readings) => bookingAtReadings(item, visit, places, readings));
 }
 
 // The requested service categories the CARD snapshotted at filing time
@@ -428,10 +454,12 @@ const confirmedWallClock = (item) => confirmedWall(item)?.slice(11, 16) || null;
 // The part of day a booking lands in, from its window_start or its legacy
 // time_window band — the bands route-reorder and the IB booking tool
 // already define (morning 08:00–12:00, afternoon 12:00–17:00, evening
-// after). Null when the row carries no clock at all.
+// after), each legacy band read at its start. Null when the row carries no
+// clock at all.
+const LEGACY_BAND_START = { morning: '08:00', afternoon: '12:00', evening: '17:00' };
 function bookingPartOfDay(visit) {
   const band = String(visit.time_window || '').trim().toLowerCase();
-  const start = visit.window_start ? String(visit.window_start).slice(0, 5) : (band === 'morning' ? '08:00' : band === 'afternoon' ? '12:00' : null);
+  const start = visit.window_start ? String(visit.window_start).slice(0, 5) : LEGACY_BAND_START[band] || null;
   if (!start || !/^\d{2}:\d{2}$/.test(start)) return null;
   const hour = Number(start.slice(0, 2));
   return hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening';
@@ -448,22 +476,41 @@ function timeOfDayMatches(item, visit) {
   return bookingPartOfDay(visit) === pref;
 }
 
-// Does a booking's cadence answer the card's snapshotted service intent? A
-// recurring-plan ask is answered only by a recurring series — a one-time
-// visit in the same category is not the plan the caller asked for — and
-// an explicit one-time ask only by a single visit (the booking path keeps
-// the single service on an explicit "just one-time"; a series booked
-// instead is not that ask). Any other intent (an active infestation) is
-// answered by either. A snapshot without the intent binds nothing: fail
-// closed.
-const RECURRING_INTENT = 'recurring_membership_inquiry';
-const ONE_TIME_INTENT = 'preventative_one_time';
+// What answers each snapshotted service intent — ONE table for the booking
+// arm (a scheduled_services row) and the estimate arm (a priced line): the
+// cadences the record may carry, whether it must be an inspection, and
+// whether a booking can answer it at all. A recurring-plan ask is answered
+// only by a recurring series (a one-time visit in the same category is not
+// the plan the caller asked for); an explicit one-time ask and a follow-up
+// on existing service only by a single visit or a one-time line (a series
+// booked instead is not that ask); an active infestation by either; an
+// inspection ask only by an inspection — a termite TREATMENT booking or
+// quote is not the termite inspection the caller asked for, and an
+// inspection answers no treatment ask (codex r24 P1); a quote-only ask by a
+// delivered quote and never by a booking. A complaint, a callback or a
+// cancellation is not an ask a booking or a quote answers, and a snapshot
+// without an intent binds nothing: both fail closed.
+const INTENT_RULES = {
+  recurring_membership_inquiry: { recurring: true, oneTime: false, inspection: false, booking: true },
+  preventative_one_time: { recurring: false, oneTime: true, inspection: false, booking: true },
+  active_infestation_treatment: { recurring: true, oneTime: true, inspection: false, booking: true },
+  follow_up_existing_service: { recurring: false, oneTime: true, inspection: false, booking: true },
+  inspection_only: { recurring: true, oneTime: true, inspection: true, booking: true },
+  quote_only: { recurring: true, oneTime: true, inspection: false, booking: false },
+};
+const intentRule = (item) => INTENT_RULES[requestAsk(item)?.requested_service_intent] || null;
+const isInspection = (words) => /\binspections?\b/i.test(String(words || ''));
+// A record — a booking's service words and cadence, or an estimate line —
+// answers the intent when it carries a cadence the rule allows and is an
+// inspection exactly when the rule wants one.
+function intentAnswered(rule, { recurring, oneTime, words }) {
+  return Boolean(rule) && ((recurring && rule.recurring) || (oneTime && rule.oneTime)) && isInspection(words) === rule.inspection;
+}
 function cadenceMatches(item, visit) {
-  const intent = parseMaybeJson(item.payload)?.scheduling_window?.requested_service_intent;
-  if (intent == null) return false;
-  if (intent === RECURRING_INTENT) return visit.is_recurring === true;
-  if (intent === ONE_TIME_INTENT) return visit.is_recurring !== true;
-  return true;
+  const rule = intentRule(item);
+  if (!rule || !rule.booking) return false;
+  const recurring = visit.is_recurring === true;
+  return intentAnswered(rule, { recurring, oneTime: !recurring, words: `${visit.service_type || ''} ${visit.service_category_snapshot || ''}` });
 }
 
 // The calendar days (ET, YYYY-MM-DD) the caller asked for, from the card's
@@ -1050,12 +1097,18 @@ function bookingCoversRequest(item, mine, { singleProperty, places }) {
     const day = etCalendarDayOf(v.scheduled_date);
     return day >= window.start && day <= window.end;
   };
-  const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id) && inAsk(v) && bookingAtRequestedAddress(item, v, places));
-  let pool = direct;
-  if (singleProperty && requestedAddressIsOnFile(item) && window) {
-    pool = pool.concat(parents.filter((v) => inAsk(v) && visitAtOnFileAddress(item, v, places)));
-  }
-  return coveredByDistinct(categories, pool, (v) => `${v.service_type || ''} ${v.service_category_snapshot || ''}`);
+  const asked = requestedPlaces(item);
+  if (!asked) return false;
+  const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id) && inAsk(v));
+  const association = singleProperty && requestedAddressIsOnFile(item) && window
+    ? parents.filter((v) => inAsk(v) && visitAtOnFileAddress(item, v, places))
+    : [];
+  // Every address the call named needs its own covering bookings — a
+  // two-property ask is not answered by bookings at one of them (codex r24
+  // P2); the association pool applies only to a one-address on-file ask.
+  const words = (v) => `${v.service_type || ''} ${v.service_category_snapshot || ''}`;
+  return asked.every((readings, i) => coveredByDistinct(categories,
+    direct.filter((v) => bookingAtReadings(item, v, places, readings)).concat(i === 0 ? association : []), words));
 }
 
 // The priced LINES an estimate carries, each with its own service words
@@ -1204,13 +1257,16 @@ function estimateLines(row) {
 function estimateAsVisit(row) {
   const { parseEstimateAddress } = require('./estimate-property-linkage');
   const parsed = parseEstimateAddress(row.address);
-  if (parsed) {
-    return { service_address_line1: parsed.address_line1, service_address_line2: parsed.address_line2 || null, service_address_city: parsed.city || null, service_address_zip: parsed.zip || null };
-  }
-  if (row.property_address_line1) {
-    return { service_address_line1: row.property_address_line1, service_address_line2: row.property_address_line2 || null, service_address_city: row.property_city || null, service_address_zip: row.property_zip || null };
-  }
-  return null;
+  const property = row.property_address_line1
+    ? { service_address_line1: row.property_address_line1, service_address_line2: row.property_address_line2 || null, service_address_city: row.property_city || null, service_address_zip: row.property_zip || null }
+    : null;
+  // A street-only column (a legacy / manual row: no city, no ZIP) cannot
+  // prove WHICH street; the property row the estimate prices can (codex
+  // r24 P2). With neither locality nor property the street stands alone
+  // and fails the locality rule downstream.
+  if (parsed && !parsed.city && !parsed.zip && property) return property;
+  if (parsed) return { service_address_line1: parsed.address_line1, service_address_line2: parsed.address_line2 || null, service_address_city: parsed.city || null, service_address_zip: parsed.zip || null };
+  return property;
 }
 
 // Does a delivered estimate keep the quote THIS card recorded? Every
@@ -1218,12 +1274,12 @@ function estimateAsVisit(row) {
 // secondary) must be priced by its OWN line — of the estimate or of a
 // sibling in its group — at the cadence the ask carries, and each such
 // estimate must price the address the ask named (the on-file one when it
-// named none). Cadence is the booking arm's rule (cadenceMatches), applied
-// to the line that answers the service: a recurring-plan ask needs a
+// named none). Intent is the booking arm's rule (INTENT_RULES), applied to
+// the line that answers the service: a recurring-plan ask needs a
 // recurring line pricing THAT service (a one-time pest job beside a
 // recurring lawn program is not a recurring pest quote), an explicit
-// one-time ask a one-time line, any other intent a line at either cadence,
-// and a snapshot with no intent nothing (codex r18 + r19 P1). Distinct
+// one-time ask a one-time line, an inspection ask an inspection line, and a
+// snapshot with no intent nothing (codex r18 + r19 + r24 P1). Distinct
 // requirements need distinct lines, exactly as bookings do — one flea line
 // does not answer a flea treatment AND a separately requested general-pest
 // quote (codex r19 P1). A card with no quote_scope (filed before the
@@ -1231,21 +1287,25 @@ function estimateAsVisit(row) {
 function estimateCoversAsk(item, row, siblings = []) {
   const requirements = requestedServiceTokens(item);
   if (!requirements.length) return false;
-  const intent = requestAsk(item)?.requested_service_intent;
-  if (typeof intent !== 'string' || !intent) return false;
-  // Every service must be priced AT the asked address: a sibling pricing
-  // the other property in a multi-property proposal covers nothing here
-  // (codex r18 P1), and the cited estimate itself must be at the address.
-  const atAsk = (e) => {
+  const rule = intentRule(item);
+  if (!rule) return false;
+  const asked = requestedPlaces(item);
+  if (!asked) return false;
+  // Every service must be priced AT each asked address: a sibling pricing
+  // another property covers nothing for THIS one (codex r18 P1), the cited
+  // estimate itself must price one of the asked addresses, and a
+  // two-property ask is judged property by property — every named
+  // property served, by the estimate or a delivered sibling at it (codex
+  // r24 P2).
+  const cited = estimateAsVisit(row);
+  if (!cited || !bookingAtRequestedAddress(item, cited, new Map())) return false;
+  const at = (e, readings) => {
     const visit = estimateAsVisit(e);
-    return Boolean(visit) && bookingAtRequestedAddress(item, visit, new Map());
+    return Boolean(visit) && bookingAtReadings(item, visit, new Map(), readings);
   };
-  if (!atAsk(row)) return false;
-  const atCadence = intent === RECURRING_INTENT ? (l) => l.recurring
-    : intent === ONE_TIME_INTENT ? (l) => l.oneTime
-      : (l) => l.recurring || l.oneTime;
-  const lines = [row, ...siblings.filter(atAsk)].flatMap(estimateLines).filter(atCadence);
-  return coveredByDistinct(requirements, lines, (l) => l.words);
+  const group = [row, ...siblings];
+  return asked.every((readings) => coveredByDistinct(requirements,
+    group.filter((e) => at(e, readings)).flatMap(estimateLines).filter((l) => intentAnswered(rule, l)), (l) => l.words));
 }
 
 // Bookings and completed visits for the not_confirmed / address arms.

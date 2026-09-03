@@ -807,8 +807,18 @@ const OWN_HANDOFF_SQL = isoInstantSql("estimates.estimate_data #>> '{deliverySta
 // locks the price as 'manual_accept' with no document delivered, so it
 // proves nothing about the promised estimate going out (codex r18 P1).
 const ACCEPT_WITNESS_SQL = `CASE WHEN estimates.price_locked_by IS DISTINCT FROM 'manual_accept' THEN estimates.accepted_at END`;
+// A sibling inherits its anchor's handoff only while it is one the anchor's
+// send carries: admin-estimates' live-sibling group reconciliation re-stamps
+// groupPublishedByEstimateId and extends expiry for the siblings that are
+// sent / viewed, unarchived and unlocked — an archived, expired, declined or
+// price-locked sibling keeps its old pointer but was not in the public group
+// the resend delivered, so the anchor's new lastDeliveredAt is no witness
+// for it (codex r24 P1). Its own handoff and accept witnesses still stand.
+// Read at sweep time: a sibling retired since the resend loses the
+// inheritance — fail closed.
 const ANCHOR_HANDOFF_SQL = `(SELECT ${isoInstantSql("a.estimate_data #>> '{deliveryState,lastDeliveredAt}'")} FROM estimates a
-     WHERE a.id::text = estimates.estimate_data ->> 'groupPublishedByEstimateId')`;
+     WHERE a.id::text = estimates.estimate_data ->> 'groupPublishedByEstimateId'
+       AND estimates.archived_at IS NULL AND estimates.status IN ('sent', 'viewed') AND estimates.price_locked_at IS NULL)`;
 
 // Rows with a witness in (after, until]: the SQL form for a single query,
 // the row form for a batch fetched with the witness columns below. The

@@ -137,6 +137,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
       const [sib] = await db('estimates').insert({
         customer_id: ownerId, status: late ? 'draft' : 'sent', service_interest: 'Lawn Care', address: '1234 Fixture Ave, 34205',
         onetime_total: 90, estimate_group_id: groupId,
+        archived_at: estimateScope === 'archived_sibling' ? new Date() : null,
         created_at: late ? new Date() : new Date(Date.now() - (estimateAgeMin + 30) * 60000),
         estimate_data: JSON.stringify(late ? {} : { groupPublishedByEstimateId: est.id }),
       }).returning('id');
@@ -227,6 +228,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const otherAddress = await seedQuoteCall(SID.replace(/e2$/, 'q7'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'other_address' });
     const lateSibling = await seedQuoteCall(SID.replace(/e2$/, 'q8'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'late_sibling' });
     const deliveredSibling = await seedQuoteCall(SID.replace(/e2$/, 'q9'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'delivered_sibling' });
+    const archivedSibling = await seedQuoteCall(SID.replace(/e2$/, 'qz'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'archived_sibling' });
     // A hand-edited delivery stamp — free text or an ISO-shaped impossible
     // date — is no witness, and must not abort the batch query that carries
     // every other card's proof (pre-push hook P1, codex r20 P2).
@@ -246,6 +248,9 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     // published with the anchor was (codex r18 P1).
     expect((await db('triage_items').where({ id: lateSibling.cardId }).first()).status).toBe('open');
     expect((await db('triage_items').where({ id: deliveredSibling.cardId }).first()).status).toBe('resolved');
+    // ...an ARCHIVED sibling keeps its anchor pointer but was not in the
+    // group the anchor's send carried — no inheritance (codex r24 P1).
+    expect((await db('triage_items').where({ id: archivedSibling.cardId }).first()).status).toBe('open');
     expect((await db('triage_items').where({ id: malformed.cardId }).first()).status).toBe('open');
     expect((await db('triage_items').where({ id: impossible.cardId }).first()).status).toBe('open');
     const open = await db('triage_items').where({ id: stale.cardId }).first();

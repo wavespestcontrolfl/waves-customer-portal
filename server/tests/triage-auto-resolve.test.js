@@ -681,6 +681,34 @@ describe('evidence helpers', () => {
     expect(estimateCoversAsk(card({}), est({ address: '77 Oak Street' }))).toBe(false);
     expect(estimateCoversAsk(card({}), est({ address: null }))).toBe(false);
     expect(estimateCoversAsk(card({}), est({ address: null, property_address_line1: '77 Oak St', property_zip: '34205' }))).toBe(true);
+    // ...and for a street-only column too — the property row proves WHICH
+    // street (codex r24 P2); a street-only column with no property does not.
+    expect(estimateCoversAsk(card({}), est({ address: '77 Oak Street', property_address_line1: '77 Oak St', property_city: 'Bradenton', property_zip: '34205' }))).toBe(true);
+    expect(estimateCoversAsk(card({}), est({ address: '77 Oak Street', property_address_line1: '5 Pine Ave', property_city: 'Sarasota', property_zip: '34236' }))).toBe(false);
+    // Intent on the estimate arm (codex r24 P1): an inspection ask is
+    // answered only by an inspection line, a treatment ask never by one; a
+    // quote-only ask by a line at either cadence.
+    const termiteQuote = (intent) => card({ requested_service_categories: ['termite'], requested_specific_service: null, requested_service_intent: intent });
+    const inspectionLine = est({ estimate_data: { result: { oneTime: { items: [{ service: 'WDO Inspection (Termite Letter)', price: 125 }] } } } });
+    const treatmentLine = est({ estimate_data: { result: { oneTime: { items: [{ service: 'Termite Treatment', price: 900 }] } } } });
+    expect(estimateCoversAsk(termiteQuote('inspection_only'), inspectionLine)).toBe(true);
+    expect(estimateCoversAsk(termiteQuote('inspection_only'), treatmentLine)).toBe(false);
+    expect(estimateCoversAsk(termiteQuote('preventative_one_time'), inspectionLine)).toBe(false);
+    expect(estimateCoversAsk(termiteQuote('quote_only'), treatmentLine)).toBe(true);
+    expect(estimateCoversAsk(termiteQuote('quote_only'), est({ estimate_data: { result: { recurring: { services: [{ name: 'Termite Bond', annual: 300 }] } } } }))).toBe(true);
+    expect(estimateCoversAsk(termiteQuote('complaint_or_callback'), treatmentLine)).toBe(false);
+    // A call that named a second property is answered only when a delivered
+    // estimate at EVERY property prices the ask (codex r24 P2) — the cited
+    // row may be either property's; a second property the snapshot did not
+    // record binds nothing.
+    const pine = { street_line_1: '5 Pine Ave', street_line_2: null, city: 'Sarasota', postal_code: '34236', raw_text: null };
+    const twoHomes = card({ requested_address: { ...none, additional_properties: 1, additional: [pine] } });
+    const pineEstimate = est({ id: 'e2', address: '5 Pine Ave, Sarasota, FL 34236' });
+    expect(estimateCoversAsk(twoHomes, est({}), [pineEstimate])).toBe(true);
+    expect(estimateCoversAsk(twoHomes, pineEstimate, [est({})])).toBe(true);
+    expect(estimateCoversAsk(twoHomes, est({}), [])).toBe(false);
+    expect(estimateCoversAsk(twoHomes, est({}), [est({ id: 'e3', address: '9 Elm St, Venice, FL 34285' })])).toBe(false);
+    expect(estimateCoversAsk(card({ requested_address: { ...none, additional_properties: 1 } }), est({}), [pineEstimate])).toBe(false);
     // The ask named another address: the estimate must price THAT one.
     const named = { ...none, street_line_1: '5 Pine Ave', city: 'Sarasota', postal_code: '34236' };
     expect(estimateCoversAsk(card({ requested_address: named }), est({}))).toBe(false);
@@ -780,10 +808,36 @@ describe('evidence helpers', () => {
     const stingingAsk = card({ requested_date_range_start: '2026-07-30', requested_service_categories: ['stinging_insect'] });
     expect(bookingCoversRequest(stingingAsk, [waspVisit], ctx)).toBe(true);
     expect(bookingCoversRequest(stingingAsk, [genericVisit], ctx)).toBe(false);
+    // A call that named a second property is answered only when EVERY
+    // property has its covering booking (codex r24 P2); a card that counts
+    // a second property its snapshot did not record binds nothing.
+    const pine = { street_line_1: '5 Pine Ave', street_line_2: null, city: 'Sarasota', postal_code: '34236', raw_text: null };
+    const twoHomes = card({ requested_date_range_start: '2026-07-30', requested_address: { ...none, additional_properties: 1, additional: [pine] } });
+    const pineVisit = booking({ id: 'b4', service_address_line1: '5 Pine Ave', service_address_city: 'Sarasota', service_address_zip: '34236' });
+    expect(bookingCoversRequest(twoHomes, [booking({}), pineVisit], ctx)).toBe(true);
+    expect(bookingCoversRequest(twoHomes, [booking({})], ctx)).toBe(false);
+    expect(bookingCoversRequest(twoHomes, [pineVisit], ctx)).toBe(false);
+    expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30', requested_address: { ...none, additional_properties: 1 } }), [booking({}), pineVisit], ctx)).toBe(false);
     const infestation = card({ requested_date_range_start: '2026-07-30', requested_service_intent: 'active_infestation_treatment' });
     expect(bookingCoversRequest(infestation, [booking({ is_recurring: true })], ctx)).toBe(true);
     expect(bookingCoversRequest(infestation, [booking({})], ctx)).toBe(true);
     expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30', requested_service_intent: undefined }), [booking({})], ctx)).toBe(false);
+    // Intent is more than cadence (codex r24 P1): an inspection ask is
+    // answered only by an inspection, a treatment ask never by one; a
+    // follow-up by a single visit, not a new series; a quote-only ask by no
+    // booking; a complaint or a callback by nothing.
+    const termite = (intent, over) => card({ requested_date_range_start: '2026-07-30', requested_service_categories: ['termite'], requested_service_intent: intent, ...over });
+    const treatment = booking({ service_type: 'Termite Treatment', service_category_snapshot: 'termite' });
+    const inspection = booking({ service_type: 'WDO Inspection (Termite Letter)', service_category_snapshot: 'termite' });
+    expect(bookingCoversRequest(termite('inspection_only'), [treatment], ctx)).toBe(false);
+    expect(bookingCoversRequest(termite('inspection_only'), [inspection], ctx)).toBe(true);
+    expect(bookingCoversRequest(termite('preventative_one_time'), [inspection], ctx)).toBe(false);
+    expect(bookingCoversRequest(termite('active_infestation_treatment'), [inspection], ctx)).toBe(false);
+    expect(bookingCoversRequest(termite('follow_up_existing_service'), [treatment], ctx)).toBe(true);
+    expect(bookingCoversRequest(termite('follow_up_existing_service'), [booking({ service_type: 'Termite Treatment', service_category_snapshot: 'termite', is_recurring: true })], ctx)).toBe(false);
+    expect(bookingCoversRequest(termite('quote_only'), [treatment], ctx)).toBe(false);
+    expect(bookingCoversRequest(termite('complaint_or_callback'), [treatment], ctx)).toBe(false);
+    expect(bookingCoversRequest(termite('cancellation_request'), [treatment], ctx)).toBe(false);
   });
 
   test('a requested morning / afternoon / evening preference binds the booking’s band; any / unspecified / none bind nothing', () => {
@@ -800,6 +854,8 @@ describe('evidence helpers', () => {
     expect(bookingCoversRequest(card('morning'), [booking({ window_start: '14:00:00' })], ctx)).toBe(false);
     expect(bookingCoversRequest(card('morning'), [booking({})], ctx)).toBe(false);
     expect(bookingCoversRequest(card('morning'), [booking({ time_window: 'morning' })], ctx)).toBe(true);
+    expect(bookingCoversRequest(card('evening'), [booking({ time_window: 'evening' })], ctx)).toBe(true);
+    expect(bookingCoversRequest(card('evening'), [booking({ time_window: 'afternoon' })], ctx)).toBe(false);
     expect(bookingCoversRequest(card('afternoon'), [booking({ window_start: '12:00:00' })], ctx)).toBe(true);
     expect(bookingCoversRequest(card('afternoon'), [booking({ window_start: '17:00:00' })], ctx)).toBe(false);
     expect(bookingCoversRequest(card('evening'), [booking({ window_start: '17:30:00' })], ctx)).toBe(true);
