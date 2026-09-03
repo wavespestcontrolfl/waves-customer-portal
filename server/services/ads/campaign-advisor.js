@@ -229,12 +229,17 @@ ${JSON.stringify(gbpSummary, null, 2)}
 ` : '(No GBP data available)'}
 
 Analyze BOTH paid ads and organic SEO performance. Provide specific recommendations for each.`,
+      }, {
+        // The dispatcher's loose parse accepts any JSON value; the old
+        // utils/llm-json parser accepted only a non-array object. Keep that
+        // contract: a wrongly shaped answer is a rejected leg, not a stored row.
+        validate: (result) => (result.json && typeof result.json === 'object' && !Array.isArray(result.json) ? null : 'not_an_object'),
       });
 
-      // An unparseable answer is a rejected leg inside the dispatcher (the
-      // next provider gets a turn); a two-leg miss lands in the catch below
-      // and stores the deterministic fallback advice.
-      if (!res.ok || !res.json) throw new Error(`advice dispatch failed: ${res.reason}`);
+      // An unparseable or wrongly shaped answer is a rejected leg inside the
+      // dispatcher (the next provider gets a turn); a two-leg miss lands in
+      // the catch below and stores the deterministic fallback advice.
+      if (!res.ok) throw new Error(`advice dispatch failed: ${res.reason}`);
       const advice = res.json;
 
       advice.date = etDateString(now);

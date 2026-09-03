@@ -1901,7 +1901,11 @@ router.post('/wdo-intelligence', upload.single('previous_treatment_photo'), asyn
 // ---------------------------------------------------------------------------
 router.post('/wdo-treatment-photo', upload.single('previous_treatment_photo'), async (req, res, next) => {
   try {
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+    // visionAnalysis is two-provider: only bail when NEITHER key exists (same
+    // posture as /wdo-intelligence).
+    if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
+      return res.status(400).json({ error: 'AI not configured' });
+    }
     if (!req.file) return res.status(400).json({ error: 'Previous-treatment photo required' });
     if (req.file.buffer.length > AI_PHOTO_MAX_BYTES) {
       return res.status(400).json({ error: 'Prior-treatment photo is too large for AI review' });

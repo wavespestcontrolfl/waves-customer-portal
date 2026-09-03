@@ -125,9 +125,14 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`,
     // 3-minute human path and the 10-minute automatic one (codex #3677 P1).
     // Scoring is best-effort: failing after four minutes is strictly better
     // than pinning a call in 'processing'.
+    }, {
+      // The dispatcher's loose parse accepts any JSON value; the old
+      // utils/llm-json parser accepted only a non-array object. Keep that
+      // contract: a wrongly shaped answer is a rejected leg, not a stored row.
+      validate: (result) => (result.json && typeof result.json === 'object' && !Array.isArray(result.json) ? null : 'not_an_object'),
     });
 
-    if (!res.ok || !res.json) {
+    if (!res.ok) {
       return { error: `Failed to score call (${res.reason})` };
     }
     const score = res.json;
