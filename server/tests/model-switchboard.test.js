@@ -77,6 +77,8 @@ describe('model-switchboard', () => {
       expect(ib.primary.model).toBe('claude-sonnet-5');
       expect(ib.primary.pinned).toBe(true);
       expect(ib.primary.pinEnv).toBe('INTELLIGENCE_BAR_MODEL');
+      // Deleting the pin returns the lane to its selector (which is overridden here).
+      expect(ib.primary.unpinnedModel).toBe('claude-opus-5');
       // A pinned lane no longer follows its selector, so it is not counted there.
       const following = lanes.filter((l) => l.primary.selector === 'FLAGSHIP' && !l.primary.pinned).length;
       expect(flagship.laneCount).toBe(following);

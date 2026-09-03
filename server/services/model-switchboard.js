@@ -332,13 +332,15 @@ function resolveRef(ref) {
     }
     case 'env': {
       const pinned = !!process.env[ref.env];
+      // unpinnedModel = what the leg runs on once the env var is deleted, so
+      // the composer can offer "unpin" with an honest before/after.
       if (ref.literal !== undefined) {
         const model = process.env[ref.env] || ref.literal;
-        return { model, selector: null, via: `${ref.env}${pinned ? '' : ' (code default)'}`, pinEnv: ref.env, pinned, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
+        return { model, selector: null, via: `${ref.env}${pinned ? '' : ' (code default)'}`, pinEnv: ref.env, pinned, unpinnedModel: ref.literal, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
       }
       const base = resolveRef(ref.ref);
       const model = process.env[ref.env] || base.model;
-      return { model, selector: base.selector, via: pinned ? `${ref.env} (pinned)` : `${ref.env} → ${base.via}`, pinEnv: ref.env, pinned, live: ref.live, accepts: base.accepts };
+      return { model, selector: base.selector, via: pinned ? `${ref.env} (pinned)` : `${ref.env} → ${base.via}`, pinEnv: ref.env, pinned, unpinnedModel: base.model, live: ref.live, accepts: base.accepts };
     }
     default:
       return null;

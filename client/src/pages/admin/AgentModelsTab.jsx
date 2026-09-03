@@ -38,6 +38,10 @@ const FILTERS = [
   { key: "locked", label: "Locked" },
 ];
 
+// Draft value meaning "delete this env var in Railway" — a pinned leg then
+// falls back to its selector / code default (`process.env.PIN || …`).
+const UNPIN = "__unpin__";
+
 const PROVIDER_LABEL = {
   anthropic: "Anthropic",
   openai: "OpenAI",
@@ -126,6 +130,11 @@ export default function AgentModelsTab() {
   const effectiveLeg = useCallback(
     (lane, leg) => {
       if (!leg) return null;
+      if (leg.pinEnv && draft[leg.pinEnv] === UNPIN) {
+        // Unpinned: the selector's (possibly also drafted) value wins again.
+        const selEnv = leg.selector && selectorByKey[leg.selector]?.env;
+        return (selEnv && draft[selEnv]) || leg.unpinnedModel;
+      }
       if (leg.pinEnv && draft[leg.pinEnv]) return draft[leg.pinEnv];
       if (leg.pinEnv && leg.pinned) return leg.model; // pinned today; only the pin moves it
       if (leg.selector && draft[selectorByKey[leg.selector]?.env]) return draft[selectorByKey[leg.selector].env];
@@ -160,16 +169,21 @@ export default function AgentModelsTab() {
       for (const leg of [l.primary, l.fallback]) {
         const env = leg?.pinEnv;
         const next = env && draft[env];
-        if (!next || next === leg.model || byEnv.has(env)) continue;
+        if (!next || byEnv.has(env)) continue;
+        const unpin = next === UNPIN;
+        const to = unpin ? effectiveLeg(l, leg) : next;
+        if (to === leg.model) continue;
         const sharing = data.lanes.filter((x) => x.primary.pinEnv === env || x.fallback?.pinEnv === env);
         const label = sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : `${l.name}${leg === l.fallback ? " · fallback" : ""}`;
-        byEnv.set(env, { env, from: leg.model, to: next, label, lanes: sharing.length, restart: sharing.some((x) => x.applies !== "live") });
+        byEnv.set(env, { env, from: leg.model, to, unpin, label, lanes: sharing.length, restart: sharing.some((x) => x.applies !== "live") });
       }
     }
     return [...byEnv.values()];
-  }, [data, draft]);
+  }, [data, draft, effectiveLeg]);
 
-  const envBlock = changes.map((c) => `${c.env}=${c.to}`).join("\n");
+  // Unpins are deletions: Railway has no "unset" syntax, so the line is an
+  // instruction rather than an assignment.
+  const envBlock = changes.map((c) => (c.unpin ? `# delete ${c.env}  (unpin → ${modelLabel(catalog, c.to)})` : `${c.env}=${c.to}`)).join("\n");
   const restartCount = changes.filter((c) => c.restart).length;
   const affectedLanes = data ? data.lanes.filter(laneChanged).length : 0;
 
@@ -419,6 +433,11 @@ export default function AgentModelsTab() {
                                       <option value="">
                                         {leg.pinned ? `Pinned: ${modelLabel(catalog, leg.model)}` : `Follow ${leg.selector || "default"}`}
                                       </option>
+                                      {leg.pinned && (
+                                        <option value={UNPIN}>
+                                          Unpin · follow {leg.selector || "code default"} ({modelLabel(catalog, leg.unpinnedModel)})
+                                        </option>
+                                      )}
                                       {optionsFor(leg.accepts)
                                         .filter(([id]) => id !== leg.model)
                                         .map(([id, m]) => (
@@ -499,6 +518,7 @@ export default function AgentModelsTab() {
                 <li key={c.env} className="flex flex-col gap-0.5 text-13">
                   <span className="text-zinc-900">
                     <span className="font-medium">{c.label}</span>: {modelLabel(catalog, c.from)} → {modelLabel(catalog, c.to)}
+                    {c.unpin ? " · delete the variable" : ""}
                     {c.lanes > 1 ? ` · ${c.lanes} lanes` : ""}
                     {c.restart ? "" : " · next request"}
                   </span>
