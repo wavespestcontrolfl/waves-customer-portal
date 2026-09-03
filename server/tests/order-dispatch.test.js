@@ -41,6 +41,7 @@ jest.mock('../models/db', () => {
       if (cols[0] === 'vo.status') return mockState.liveAutoOrder; // assertNoLiveAutoOrder's aliased join
       if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
       if (cols[0] === 'request_payload') return mockState.dispatchedLedger; // orderedQuantityFor
+      if (cols[0] === 'evidence' && table === 'vendor_orders') return { evidence: mockState.parkedEvidence || {} }; // attachLatePlacement
       if (table === 'product_restock_requests') {
         if (cols[0] === 'status') return { status: mockState.freshRequestStatus };
         if (cols[0] === 'id') return mockState.sibling; // the sibling live-request probe
@@ -232,12 +233,27 @@ test('vendor call outlives stale recovery: the parked row keeps needs_review, ga
   const r = await run(a);
   expect(r).toMatchObject({ status: 'needs_review', reason: 'placed_after_stale_park', externalOrderNumber: 'SM-1' });
   expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'placed').length).toBe(1); // the conditional attempt only — returned 0 rows
-  const attach = mockState.updates.filter((u) => u.table === 'vendor_orders' && !u.row.status).pop().row;
+  const attach = mockState.updates.filter((u) => u.table === 'vendor_orders' && !u.row.status && u.row.external_order_number !== undefined).pop().row; // the order-facts attach (the later evidence-only write is the bellAt stamp)
   expect(attach.external_order_number).toBe('SM-1');
   expect(requestStatus()).toBe('ordered');
   expect(auditVendorOrder).toHaveBeenCalledTimes(1);
   expect(auditVendorOrder.mock.calls[0][0].outcome).toBe('placed_after_stale_park');
-  expect(notify).not.toHaveBeenCalled();
+  expect(notify).toHaveBeenCalledTimes(1); // the park's bell is superseded: the order exists
+  expect(notify.mock.calls[0][1]).toMatch(/landed after stale recovery/);
+});
+
+test('vendor call outlives a stale park the operator already REVOKED and cancelled: marker replaced, request back to ordered, bell says so (pre-push P0)', async () => {
+  mockState.parkedEvidence = { bell: { title: 'x', body: 'y' }, bellAt: '2026-09-03T10:00:00Z', revokedAt: '2026-09-03T10:05:00Z' };
+  const a = mockAdapter();
+  const inner = a.place;
+  a.place = jest.fn(async (...args) => { const out = await inner(...args); mockState.ledgerSettled = true; return out; });
+  const r = await run(a);
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'placed_after_stale_park' });
+  const reopen = mockState.updates.find((u) => u.table === 'product_restock_requests').row;
+  expect(reopen).toMatchObject({ status: 'ordered', closed_at: null });
+  expect(auditVendorOrder.mock.calls[0][0].reason).toMatch(/and revoked/);
+  expect(notify.mock.calls[0][1]).toMatch(/landed after revoke/);
+  expect(notify.mock.calls[0][2]).toMatch(/record the revoke again/);
 });
 
 test('request closed mid-flight: ledger still placed, request untouched, one reconcile bell', async () => {

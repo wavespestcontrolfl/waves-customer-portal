@@ -612,10 +612,39 @@ function parkForPlaceError(conn, err, { ctx, vendor, quoteCents }) {
 }
 
 /**
+ * A vendor call that finished AFTER stale recovery parked its row — and
+ * possibly after the operator revoked that park and cancelled the request.
+ * The order EXISTS now, so (pre-push P0): the revoke marker is REPLACED by a
+ * distinct late-placement state (a revoked marker would let the prior-order
+ * guard wave a fresh request through — a second purchase), the request goes
+ * back to 'ordered' from open OR cancelled (stock is coming; receive is the
+ * way to close it), the earlier park's bell is superseded by one saying so,
+ * and the outcome is audited placed_after_stale_park. Status stays
+ * needs_review: a human still has to look.
+ */
+async function attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCents, fresh }) {
+  const { ledger, request, product, vendor, adapterKey } = ctx;
+  const parked = await trx('vendor_orders').where({ id: ledger.id }).first('evidence');
+  const wasRevoked = !!meta(parked?.evidence).revokedAt;
+  const after = wasRevoked ? 'the operator revoked it' : `it was parked and the request marked ${fresh?.status || 'missing'}`;
+  const bell = {
+    title: `Auto-order landed after ${wasRevoked ? 'revoke' : 'stale recovery'}: ${product.name}`,
+    body: `${vendor.name} order ${placed.externalOrderNumber || '(number unknown)'} (${dollars(orderFacts.amount_cents ?? quoteCents)}) was confirmed after ${after}. The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke again.`,
+  };
+  await trx('vendor_orders').where({ id: ledger.id }).update({
+    ...orderFacts,
+    evidence: conn.raw("(COALESCE(evidence, '{}'::jsonb) - 'revokedAt' - 'bellAt') || ?::jsonb", [JSON.stringify({ bell, latePlacementAt: new Date().toISOString(), latePlacementAfterRevoke: wasRevoked })]),
+    error: conn.raw("COALESCE(error, '') || ?", [` | order confirmed placed after stale recovery${wasRevoked ? ' and revoke' : ''}: ${placed.externalOrderNumber || '?'}`]),
+  });
+  await trx('product_restock_requests').where({ id: request.id }).whereIn('status', ['open', 'cancelled']).update({ status: 'ordered', closed_at: null, updated_at: new Date() });
+  await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed_after_stale_park', amount_cents: orderFacts.amount_cents, external_order_number: placed.externalOrderNumber || null, reason: `the row was parked by stale recovery${wasRevoked ? ' and revoked' : ''} while the vendor call ran; the order exists`, trx });
+  return { bell, settledElsewhere: true };
+}
+
+/**
  * Green path: ledger placed + request ordered + audit in ONE transaction, no
  * bell — unless the office closed the request mid-flight (one reconcile
- * bell) or stale recovery already parked the row (the order facts attach to
- * the park, status stays needs_review, audited placed_after_stale_park).
+ * bell) or stale recovery already parked the row (attachLatePlacement).
  */
 async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
   const { ledger, request, product, vendor, adapterKey, notify } = ctx;
@@ -640,15 +669,8 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
       evidence: JSON.stringify({ ...(placed.evidence || {}), ...(bell ? { bell } : {}) }),
       error: stillOpen ? null : `request_state_changed: request was ${fresh?.status || 'missing'} when the order landed`,
     });
+    if (!n) return attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCents, fresh });
     if (stillOpen) await trx('product_restock_requests').where({ id: request.id }).update({ status: 'ordered', updated_at: new Date() });
-    if (!n) {
-      await trx('vendor_orders').where({ id: ledger.id }).update({
-        ...orderFacts,
-        error: conn.raw("COALESCE(error, '') || ?", [` | order confirmed placed after stale recovery: ${placed.externalOrderNumber || '?'}`]),
-      });
-      await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed_after_stale_park', amount_cents: finalCents, external_order_number: placed.externalOrderNumber || null, reason: 'the row was parked by stale recovery while the vendor call ran; the order exists', trx });
-      return { bell: null, settledElsewhere: true };
-    }
     await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed', amount_cents: finalCents, external_order_number: placed.externalOrderNumber || null, trx });
     return { bell };
   });
