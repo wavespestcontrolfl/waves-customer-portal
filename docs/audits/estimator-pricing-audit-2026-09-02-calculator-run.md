@@ -1,7 +1,7 @@
 # Independent estimator pricing audit — run output
 
-Generated 2026-09-03T20:02:01.784Z. Constants source: **constants.js (in-code defaults)**.
-Scenarios: 1279 · independent-vs-engine matches: 1235 · mismatches: 1 · expected a price but the engine returned none: 0 · engine-only observations: 43 (1235 + 1 + 0 + 43 = 1279) · commercial engine errors: 0
+Generated 2026-09-03T20:15:42.101Z. Constants source: **constants.js (in-code defaults)**.
+Scenarios: 1288 · independent-vs-engine matches: 1246 · mismatches: 1 · expected a price but the engine returned none: 0 · engine-only observations: 41 (1246 + 1 + 0 + 41 = 1288) · commercial engine errors: 0
 
 ## Findings raised by this run
 
@@ -17,7 +17,6 @@ Scenarios: 1279 · independent-vs-engine matches: 1235 · mismatches: 1 · expec
 - **P1** [tree_shrub] palm count ignored when supplied at property level — 30 palms at property level: 53.08/mo (source property); as service-line: 95.17/mo; no palms: 53.08/mo
 - **P2** [tree_shrub] explicit treeCount=0 suppresses density fallback without review — 0 trees → 45.25/mo vs density-estimated 10 trees → 58.75/mo
 - **P2** [specialty] german roach severity defaulted (undefined) to cheapest tier silently — price 350 (light)
-- **P2** [waveguard_discounts] FIXED manual discount can zero a Platinum estimate with no cap — year1Total 0, recurringAnnualAfterDiscount 0
 - **P1** [cadence_identities] tree_shrub (9/yr) annual-prepay coverage cadence — expected every_6_weeks, resolver returned bimonthly — the term would cover 6 of 9 prepaid visits
 
 ## Mismatches (independent formula vs engine)
@@ -99,8 +98,6 @@ Recorded span = check-in → check-out, which often includes driving to the next
 - [specialty] palm {"treatmentType":"nutrition","palmCount":-2}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"Palm count is required for palm injection pricing.","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"nutrition","palmCount":2.5}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"Palm count is required for palm injection pricing.","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"combo","palmCount":3}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"palmSize is required for this palm treatment","palmSizeUsed":null}
-- [waveguard_discounts] Platinum + 25% manual discount (stacked, uncapped by design): {"platinumAnnual":1883.2,"withManual":1412.4,"manualDiscount":{"amount":470.8,"capReason":null},"marginWarnings":[{"service":"lawn_care","type":"waveguard_discount_below_margin_floor","margin":0.133,"marginFloor":0.35,"finalAnnual":460.8,"annualCost":399.31,"message":"lawn_care WaveGuard discount drops collected margin to 13.3% (below the 35% review floor) — price stands as discounted"},{"service":"pest_control","type":"manual_discount_below_margin_floor","margin":0.237,"marginFloor":0.35,"finalAnnual":239.77,"annualCost":183,"manualDiscountShare":118.63,"message":"pest_control manual discount
-- [waveguard_discounts] Platinum + FIXED $99,999 manual discount (zeroes the estimate?): {"year1Total":0,"manualDiscount":{"amount":1883.2,"value":99999}}
 - [commercial] commercial pest office 5,000 sf: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_pest","annual":715.83,"price":null,"perApp":178.96,"visits":4,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":0.45,"review":false}]}
 - [commercial] commercial lawn 60,000 sf turf: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_lawn","annual":6231.52,"price":null,"perApp":778.94,"visits":8,"manualQuote":false,"taxable":false,"taxCategory":"lawn_spraying_or_treatment","margin":0.45,"review":false}]}
 - [commercial] commercial mosquito 40,000 sf lot: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_mosquito","annual":1321.09,"price":null,"perApp":146.79,"visits":9,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":0.45,"review":false}]}

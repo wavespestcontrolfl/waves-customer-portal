@@ -868,14 +868,49 @@ function runBundleAndDiscountMatrix() {
     record(section, `${combo.join('+')} summary recurringAnnualAfterDiscount vs Σ lines`, {}, sumAfter, res.summary.recurringAnnualAfterDiscount, { tolerance: afterLines.length * 0.005 + 0.001 });
     record(section, `${combo.join('+')} monthly = annual/12`, {}, round2(res.summary.recurringAnnualAfterDiscount / 12), res.summary.recurringMonthlyAfterDiscount, { tolerance: 0.006 });
   }
-  // Manual discount on top of Platinum (deepest permitted discount)
+  // Manual discount on top of Platinum (deepest permitted discount), reproduced
+  // independently (codex r12 P2): the recurring slice of a manual discount applies
+  // AFTER WaveGuard to the recurring lines in MANUAL_RECURRING_DISCOUNT_SERVICES
+  // (frozen mirror of discount-engine.js — rodent_bait is NOT in it), and
+  // summary.recurringAnnualAfterDiscount = Σ after-WaveGuard annuals − that slice.
+  // The bundle below is Platinum WITHOUT lawn so no lawn-floor cap can bind and
+  // the expectation is pure arithmetic; the with-lawn case is bounded separately.
+  const MANUAL_RECURRING_DISCOUNT_SERVICES = ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito'];
+  const noLawn = { pest: { frequency: 'quarterly' }, mosquito: { tier: 'seasonal9' }, treeShrub: { tier: 'standard', treeCount: 6 }, rodentBait: {} };
+  const platNL = runEngine({ ...BASE, bedArea: 2000, services: noLawn }).result;
+  const nlTierRow = { section, name: 'manual-discount base bundle (pest+mosquito+treeShrub+rodentBait) tier', expected: 'platinum', actual: platNL.waveGuard.tier, status: platNL.waveGuard.tier === 'platinum' ? 'match' : 'MISMATCH', extra: null };
+  scenarios.push(nlTierRow);
+  if (nlTierRow.status === 'MISMATCH') findings.push({ severity: 'P1', section, name: nlTierRow.name, detail: `expected platinum got ${platNL.waveGuard.tier}` });
+  const nlAfterWG = platNL.summary.recurringAnnualAfterDiscount;
+  const nlEligible = round2(platNL.lineItems.filter((l) => MANUAL_RECURRING_DISCOUNT_SERVICES.includes(l.service) && Number.isFinite(l.annualAfterDiscount)).reduce((sum, l) => sum + l.annualAfterDiscount, 0));
+  const nlExcluded = round2(nlAfterWG - nlEligible); // the rodent line survives every manual discount
+  const manualCases = [
+    { name: 'PERCENT 25%', md: { type: 'PERCENT', value: 25 }, slice: round2(nlEligible * 0.25) },
+    { name: 'FIXED $500', md: { type: 'FIXED', value: 500 }, slice: 500 },
+    { name: 'FIXED $99,999 (capped at the discountable recurring total; rodent line untouched)', md: { type: 'FIXED', value: 99999 }, slice: nlEligible },
+  ];
+  if (nlEligible <= 500) findings.push({ severity: 'P1', section, name: 'manual FIXED $500 premise', detail: `discountable recurring total ${nlEligible} ≤ 500 — the partial FIXED case no longer exercises a partial discount` });
+  for (const c of manualCases) {
+    const r = runEngine({ ...BASE, bedArea: 2000, services: noLawn, manualDiscount: { ...c.md, label: 'Audit test', internalReason: 'audit' } }).result;
+    record(section, `Platinum (no lawn) + manual ${c.name} → recurringAnnualAfterDiscount`, { manualDiscount: c.md }, round2(nlAfterWG - c.slice), r.summary.recurringAnnualAfterDiscount, { extra: { afterWaveGuard: nlAfterWG, discountableRecurring: nlEligible, excludedRecurring: nlExcluded, capReason: r.summary.manualDiscount?.capReason ?? null } });
+    record(section, `Platinum (no lawn) + manual ${c.name} → manualDiscount.recurringAmount`, { manualDiscount: c.md }, c.slice, r.summary.manualDiscount?.recurringAmount ?? null);
+    record(section, `Platinum (no lawn) + manual ${c.name} → monthly = annual/12`, {}, round2(r.summary.recurringAnnualAfterDiscount / 12), r.summary.recurringMonthlyAfterDiscount, { tolerance: 0.006 });
+  }
+  // With lawn the recurring slice is capped at the lawn program / margin floor
+  // (engine-owned lawnLineProtectedAnnual, not reproduced here). The independent
+  // bound: a cap can only REDUCE the discount, so the total sits between the
+  // uncapped 25% result and the WaveGuard-only total.
   const full = { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', tier: 'enhanced' }, mosquito: { tier: 'seasonal9' }, treeShrub: { tier: 'standard', treeCount: 6 } };
   const plat = runEngine({ ...BASE, bedArea: 2000, services: full }).result;
   const md = runEngine({ ...BASE, bedArea: 2000, services: full, manualDiscount: { type: 'PERCENT', value: 25, label: 'Audit test', internalReason: 'audit' } }).result;
-  scenarios.push({ section, name: 'Platinum + 25% manual discount (stacked, uncapped by design)', expected: null, actual: null, status: 'engine_only', extra: { platinumAnnual: plat.summary.recurringAnnualAfterDiscount, withManual: md.summary.recurringAnnualAfterDiscount, manualDiscount: md.summary.manualDiscount ? { amount: md.summary.manualDiscount.amount, capReason: md.summary.manualDiscount.capReason ?? md.summary.manualDiscount.lawnCapReason ?? null } : null, marginWarnings: md.marginWarnings } });
-  const fixedBig = runEngine({ ...BASE, bedArea: 2000, services: full, manualDiscount: { type: 'FIXED', value: 99999, label: 'Audit test', internalReason: 'audit' } }).result;
-  scenarios.push({ section, name: 'Platinum + FIXED $99,999 manual discount (zeroes the estimate?)', expected: null, actual: fixedBig.summary.recurringAnnualAfterDiscount, status: 'engine_only', extra: { year1Total: fixedBig.summary.year1Total, manualDiscount: fixedBig.summary.manualDiscount && { amount: fixedBig.summary.manualDiscount.amount, value: fixedBig.summary.manualDiscount.value } } });
-  flagIf(fixedBig.summary.recurringAnnualAfterDiscount <= 0.01, 'P2', section, 'FIXED manual discount can zero a Platinum estimate with no cap', `year1Total ${fixedBig.summary.year1Total}, recurringAnnualAfterDiscount ${fixedBig.summary.recurringAnnualAfterDiscount}`);
+  const fullEligible = round2(plat.lineItems.filter((l) => MANUAL_RECURRING_DISCOUNT_SERVICES.includes(l.service) && Number.isFinite(l.annualAfterDiscount)).reduce((sum, l) => sum + l.annualAfterDiscount, 0));
+  const uncapped = round2(plat.summary.recurringAnnualAfterDiscount - round2(fullEligible * 0.25));
+  const withManual = md.summary.recurringAnnualAfterDiscount;
+  const capReason = md.summary.manualDiscount?.capReason ?? md.summary.manualDiscount?.lawnCapReason ?? null;
+  const inBounds = Number.isFinite(withManual) && withManual >= uncapped - 0.005 && withManual <= plat.summary.recurringAnnualAfterDiscount + 0.005 && (capReason ? withManual > uncapped : Math.abs(withManual - uncapped) <= 0.005);
+  const boundRow = { section, name: 'Platinum (with lawn) + 25% manual discount: uncapped 25% ≤ total ≤ WaveGuard-only, equality iff no lawn-floor cap', expected: uncapped, actual: withManual, status: inBounds ? 'match' : 'MISMATCH', extra: { platinumAnnual: plat.summary.recurringAnnualAfterDiscount, capReason, marginWarnings: md.marginWarnings } };
+  scenarios.push(boundRow);
+  if (boundRow.status === 'MISMATCH') findings.push({ severity: 'P1', section, name: boundRow.name, detail: `uncapped ${uncapped}, engine ${withManual}, capReason ${capReason}` });
 }
 
 function runAnnualEconomics() {
@@ -1035,8 +1070,10 @@ function hardCodedRateInventory() {
     materials: { pestChemPerVisit: { talak: 1.3, taurus: 4.87, surfactant: 0.5 }, mosquito: constants.MOSQUITO.productCosts, mosquitoUsage: constants.MOSQUITO.productUsage, tsMaterialModel: constants.TREE_SHRUB.materialModel, termiteSystems: constants.TERMITE.systems, boraCare: { galCost: constants.SPECIALTY.boraCare.galCost, coverage: constants.SPECIALTY.boraCare.coverage }, preSlab: Object.fromEntries(Object.entries(constants.SPECIALTY.preSlabTermiticide.products).map(([k, v]) => [k, { containerCost: v.containerCost, containerOz: v.containerOz, ozPer10SqFt: v.productOzPer10SqFt }])), trenching: Object.fromEntries(Object.entries(constants.SPECIALTY.trenching.products).map(([k, v]) => [k, { containerCost: v.containerCost, containerOz: v.containerOz }])), foamCan: constants.SPECIALTY.foamDrill.canCost, plugCost: constants.SPECIALTY.plugging.costPerPlug, topDressSand: constants.SPECIALTY.topDressing.eighth.sandRate, dethatchPer1K: constants.SPECIALTY.dethatching.materialPer1K, bedBugPerRoom: constants.BED_BUG.chemical.materialPerRoomVisit1, palmInternalCost: constants.PALM.internalCostBasis, termiteCartridgeModel: TERMITE_CARTRIDGE_MODEL },
     prices: { pest: constants.PEST, oneTime: constants.ONE_TIME, // the whole mosquito family: pressure factors/cap, lot buckets, the 500-sf interpolation step and tier visit counts all move the price (codex r7 P2)
       mosquito: { basePrices: constants.MOSQUITO.basePrices, tierVisits: constants.MOSQUITO.tierVisits, priceStepSqFt: constants.MOSQUITO.priceStepSqFt, lotCategories: constants.MOSQUITO.lotCategories.map((c) => ({ ...c, maxSqFt: Number.isFinite(c.maxSqFt) ? c.maxSqFt : 'Infinity' })), grossLotGuardrailMaxDrop: constants.MOSQUITO.grossLotGuardrailMaxDrop, pressureFactors: constants.MOSQUITO.pressureFactors, pressureCap: constants.MOSQUITO.pressureCap, addOns: constants.MOSQUITO.addOns },
-      // treatable-area derivation: HARDSCAPE is a per-property-type function family, recorded as source text so a slope change is visible
-      property: { hardscape: Object.fromEntries(Object.entries(constants.HARDSCAPE).map(([k, f]) => [k, typeof f === 'function' ? f.toString() : f])), hardscapeAdditions: constants.HARDSCAPE_ADDITIONS }, rodent: constants.RODENT, termite: constants.TERMITE, wdo: constants.SPECIALTY.wdo.brackets, germanRoach: constants.SPECIALTY.germanRoach.tiers, palm: constants.PALM, lawnBrackets: constants.LAWN_BRACKETS, propertyTypeAdj: constants.PROPERTY_TYPE_ADJ, lawnFreqs: constants.LAWN_FREQS, lawnCadenceDiscount: constants.LAWN_CADENCE_DISCOUNT, lawnPricingV2: constants.LAWN_PRICING_V2, bedBug: constants.BED_BUG, specialty: constants.SPECIALTY, achDiscount: constants.ACH_DISCOUNT, processingAdjustment: constants.PROCESSING_ADJUSTMENT, commercial: { lawn: constants.COMMERCIAL_LAWN, treeShrub: constants.COMMERCIAL_TREE_SHRUB, pest: constants.COMMERCIAL_PEST, mosquito: constants.COMMERCIAL_MOSQUITO, termiteBait: constants.COMMERCIAL_TERMITE_BAIT, rodentBait: constants.COMMERCIAL_RODENT_BAIT }, waveguard: constants.WAVEGUARD.tiers, oneTimePerk: constants.WAVEGUARD.recurringCustomerOneTimePerk, prepayDiscount: constants.ANNUAL_PREPAY_DISCOUNT_PCT, deposit: constants.DEPOSIT, cardHold: constants.CARD_HOLD, inspectionCredit: constants.INSPECTION_CREDIT, urgency: constants.URGENCY, treeShrub: constants.TREE_SHRUB, lawnTiers: constants.LAWN_TIERS },
+      // treatable-area derivation: HARDSCAPE is a per-property-type function family, recorded as source text so a slope change is visible;
+      // TURF_FACTORS / BED_DENSITY derive the priced lawn and bed areas in property-calculator.js (codex r12 P2)
+      property: { hardscape: Object.fromEntries(Object.entries(constants.HARDSCAPE).map(([k, f]) => [k, typeof f === 'function' ? f.toString() : f])), hardscapeAdditions: constants.HARDSCAPE_ADDITIONS, turfFactors: constants.TURF_FACTORS, bedDensity: constants.BED_DENSITY, bedAreaReviewSqFt: constants.BED_AREA_REVIEW_SQFT }, rodent: constants.RODENT, termite: constants.TERMITE, wdo: constants.SPECIALTY.wdo.brackets, germanRoach: constants.SPECIALTY.germanRoach.tiers, palm: constants.PALM, lawnBrackets: constants.LAWN_BRACKETS, propertyTypeAdj: constants.PROPERTY_TYPE_ADJ, lawnFreqs: constants.LAWN_FREQS, lawnCadenceDiscount: constants.LAWN_CADENCE_DISCOUNT, lawnPricingV2: constants.LAWN_PRICING_V2, bedBug: constants.BED_BUG, specialty: constants.SPECIALTY, achDiscount: constants.ACH_DISCOUNT, processingAdjustment: constants.PROCESSING_ADJUSTMENT, commercial: { lawn: constants.COMMERCIAL_LAWN, treeShrub: constants.COMMERCIAL_TREE_SHRUB, pest: constants.COMMERCIAL_PEST, mosquito: constants.COMMERCIAL_MOSQUITO, termiteBait: constants.COMMERCIAL_TERMITE_BAIT, rodentBait: constants.COMMERCIAL_RODENT_BAIT }, // the whole WAVEGUARD family: tiers, the qualifying-service list and the percent-exclusion map decide which lines receive the tier % (codex r12 P2)
+      waveguard: constants.WAVEGUARD, prepayDiscount: constants.ANNUAL_PREPAY_DISCOUNT_PCT, deposit: constants.DEPOSIT, cardHold: constants.CARD_HOLD, inspectionCredit: constants.INSPECTION_CREDIT, urgency: constants.URGENCY, treeShrub: constants.TREE_SHRUB, lawnTiers: constants.LAWN_TIERS },
     marginDivisors: { plugging: constants.SPECIALTY.plugging.marginDivisor, topDressingEighth: constants.SPECIALTY.topDressing.eighth.marginDivisor, topDressingQuarter: constants.SPECIALTY.topDressing.quarter.marginDivisor, dethatching: constants.SPECIALTY.dethatching.marginDivisor, boraCare: constants.SPECIALTY.boraCare.marginDivisor, foamDrill: constants.SPECIALTY.foamDrill.marginDivisor, preSlabTermidor: constants.SPECIALTY.preSlabTermiticide.products.termidor_sc.marginDivisor, bedBugCostRatio: constants.BED_BUG.chemical.targetCostRatio, tsMarginTarget: constants.TREE_SHRUB.marginTarget, commercialTargetGrossMargin: constants.COMMERCIAL_PEST.targetGrossMargin, termiteInstallMarkup: constants.TERMITE.installMultiplier, trenchingProductPremiumMarkup: constants.SPECIALTY.trenching.productPremiumMultiplier },
   };
 }
