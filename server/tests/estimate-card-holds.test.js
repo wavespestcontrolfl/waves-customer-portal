@@ -850,6 +850,17 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     const res = await cardHoldCancelPreview('svc1', now);
     expect(res).toMatchObject({ held: true, feeApplies: false, parked: true, rule: { code: 'hold_parked', willCharge: false } });
   });
+  it('rail OFF: a consent-only /secure row beside the hold → rail_off (neither rail can charge), but a fee event already running still reports (pre-push P1)', async () => {
+    delete process.env.ONE_TIME_CARD_HOLD;
+    try {
+      stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: null } });
+      let res = await cardHoldCancelPreview('svc1', now);
+      expect(res).toMatchObject({ held: true, feeApplies: false, rule: { code: 'rail_off', willCharge: false } });
+      stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'charging', no_show_fee_amount: 75 } });
+      res = await cardHoldCancelPreview('svc1', now);
+      expect(res).toMatchObject({ held: true, feeApplies: true, feeAmount: 75, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+    } finally { process.env.ONE_TIME_CARD_HOLD = 'true'; }
+  });
   it('in-window hold beside a /secure row whose fee was waived/released → still competing_consent (the charge path refuses any lane row)', async () => {
     stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'waived' } });
     mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));

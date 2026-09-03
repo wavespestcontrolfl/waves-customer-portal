@@ -1966,13 +1966,17 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
   // charge (pre-push Codex P1). Decided before the rail gate — parking is
   // durable state, not a fee decision.
   if (hold.parked_at) return { held: true, feeApplies: false, feeAmount, parked: true, rule: describe('hold_parked') };
-  if (laneCode) return { held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: describe('competing_consent') };
   // Rail OFF (ONE_TIME_CARD_HOLD kill switch) with a historical held row:
   // no fee can be collected, so nothing below may report one — including
   // the fee-may-apply posture of a FAILED time lookup, which would make the
   // cancel card warn of, fingerprint, and invite a waiver for a charge the
-  // disabled rail never makes (codex GH r31 P2).
+  // disabled rail never makes (codex GH r31 P2) — and including a LIVE
+  // competing consent (pre-push P1): chargeNoShowFee returns
+  // feature_disabled before its lane check, and the appointment rail defers
+  // to the hold row, so neither rail can charge. Fee events already
+  // running or landed are reported above regardless of the switch.
   if (!isCardHoldEnabled()) return { held: true, feeApplies: false, feeAmount, rule: describe('rail_off') };
+  if (laneCode) return { held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: describe('competing_consent') };
   let start = null;
   try {
     const { scheduledServiceApptTime } = require('./appointment-reminders');
