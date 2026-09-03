@@ -1,9 +1,10 @@
 // GET /api/billing/cards under GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE (owner
 // ruling 2026-09-03): a card holding a future secured visit carries
 // holdsAppointment (soonest visit, fee, reschedule link); gate off, no live
-// hold, or a failed lookup → the field is ABSENT (payload unchanged). The
-// reschedule link follows GET /schedule's grouped-stop posture: grouped or
-// unknown membership → null.
+// hold, or a failed lookup → the field is ABSENT (payload unchanged). ONE
+// batched lookup per request (Codex #3828 r1 P1). The reschedule link is
+// offered only when reschedule-public's own eligibilityAsync says the page
+// would honor it (r1 P1) — any failure = no link.
 
 let mockGateOn = true;
 jest.mock('../config/feature-gates', () => ({
@@ -21,9 +22,9 @@ jest.mock('../services/payment-router', () => ({ getServiceForCustomer: jest.fn(
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
 jest.mock('../services/payment-lifecycle-email', () => ({}));
 const mockLiveHolds = jest.fn();
-jest.mock('../services/estimate-card-holds', () => ({ liveHoldsForPaymentMethod: (...a) => mockLiveHolds(...a) }));
-const mockGrouped = jest.fn();
-jest.mock('../routes/reschedule-public', () => ({ groupedVisit: (...a) => mockGrouped(...a) }));
+jest.mock('../services/estimate-card-holds', () => ({ liveHoldsForPaymentMethods: (...a) => mockLiveHolds(...a) }));
+const mockEligibility = jest.fn();
+jest.mock('../routes/reschedule-public', () => ({ eligibilityAsync: (...a) => mockEligibility(...a) }));
 jest.mock('../utils/service-normalizer', () => ({ normalizeServiceType: (raw) => `norm:${raw}` }));
 
 const express = require('express');
@@ -37,8 +38,8 @@ const cardRows = [
 
 beforeEach(() => {
   mockGateOn = true;
-  mockLiveHolds.mockReset();
-  mockGrouped.mockReset().mockResolvedValue(false);
+  mockLiveHolds.mockReset().mockResolvedValue(new Map());
+  mockEligibility.mockReset().mockResolvedValue({ ok: true });
   logger.warn.mockClear();
   db.mockImplementation(() => {
     const chain = {};
@@ -62,7 +63,9 @@ async function getCards() {
 }
 
 const start = new Date('2026-09-12T13:00:00.000Z');
-const liveHold = { lane: 'card_hold', scheduledServiceId: 'svc-9', groupVisitId: 'vg-1', start, serviceType: 'Pest Control', rescheduleToken: 'tok-9', feeAmount: 49 };
+const visit = { id: 'svc-9', visit_id: 'vg-1', status: 'confirmed', source_action: null, customer_confirmed: true, scheduled_date: '2026-09-12', window_start: '09:00:00', window_end: '10:00:00' };
+const liveHold = { lane: 'card_hold', pmId: 'pm_stripe_2', scheduledServiceId: 'svc-9', start, serviceType: 'Pest Control', rescheduleToken: 'tok-9', feeAmount: 49, visit };
+const holdsOn = (pmId, holds) => new Map([[pmId, holds]]);
 
 test('gate off: no lookup, no field', async () => {
   mockGateOn = false;
@@ -72,10 +75,11 @@ test('gate off: no lookup, no field', async () => {
   expect(body.cards.map((c) => 'holdsAppointment' in c)).toEqual([false, false]);
 });
 
-test('gate on: the holding card carries the soonest visit; the other card stays bare', async () => {
-  mockLiveHolds.mockImplementation(async ({ stripePaymentMethodId }) => (stripePaymentMethodId === 'pm_stripe_2' ? [liveHold] : []));
+test('gate on: ONE batched lookup; the holding card carries the soonest visit, the other stays bare', async () => {
+  mockLiveHolds.mockResolvedValue(holdsOn('pm_stripe_2', [liveHold, { ...liveHold, scheduledServiceId: 'svc-later' }]));
   const { body } = await getCards();
-  expect(mockLiveHolds).toHaveBeenCalledWith({ customerId: 'cust-1', stripePaymentMethodId: 'pm_stripe_1' });
+  expect(mockLiveHolds).toHaveBeenCalledTimes(1);
+  expect(mockLiveHolds).toHaveBeenCalledWith({ customerId: 'cust-1', stripePaymentMethodIds: ['pm_stripe_1', 'pm_stripe_2'] });
   expect(body.cards[0].holdsAppointment).toBeUndefined();
   expect(body.cards[1].holdsAppointment).toEqual({
     serviceId: 'svc-9',
@@ -84,38 +88,41 @@ test('gate on: the holding card carries the soonest visit; the other card stays 
     feeAmount: 49,
     rescheduleUrl: '/reschedule/tok-9',
   });
-  expect(mockGrouped).toHaveBeenCalledWith({ id: 'svc-9', visit_id: 'vg-1' });
+  // The link comes from the reschedule page's OWN verdict on the visit row.
+  expect(mockEligibility).toHaveBeenCalledWith(visit);
 });
 
-test.each([[true], ['unknown']])('grouped verdict %p: no reschedule link', async (verdict) => {
-  mockLiveHolds.mockResolvedValue([liveHold]);
-  mockGrouped.mockResolvedValue(verdict);
+test.each([
+  ['in_progress', { ok: false, reason: 'in_progress' }],
+  ['dispatch-owned pending', { ok: false, reason: 'not_available' }],
+  ['grouped', { ok: false, reason: 'grouped' }],
+])('reschedule page would refuse (%s): no link, notice still shown', async (_label, verdict) => {
+  mockLiveHolds.mockResolvedValue(holdsOn('pm_stripe_1', [liveHold]));
+  mockEligibility.mockResolvedValue(verdict);
   const { body } = await getCards();
+  expect(body.cards[0].holdsAppointment.rescheduleUrl).toBeNull();
+  expect(body.cards[0].holdsAppointment.serviceId).toBe('svc-9');
+});
+
+test('eligibility lookup failure: no link (fail closed), notice still shown', async () => {
+  mockLiveHolds.mockResolvedValue(holdsOn('pm_stripe_1', [liveHold]));
+  mockEligibility.mockRejectedValue(new Error('db down'));
+  const { body } = await getCards();
+  expect(body.cards[0].holdsAppointment.rescheduleUrl).toBeNull();
+  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('reschedule eligibility failed for visit svc-9'));
+});
+
+test('no reschedule token: eligibility skipped, link null', async () => {
+  mockLiveHolds.mockResolvedValue(holdsOn('pm_stripe_1', [{ ...liveHold, rescheduleToken: null }]));
+  const { body } = await getCards();
+  expect(mockEligibility).not.toHaveBeenCalled();
   expect(body.cards[0].holdsAppointment.rescheduleUrl).toBeNull();
 });
 
-test('no reschedule token: grouped lookup skipped, link null', async () => {
-  mockLiveHolds.mockResolvedValue([{ ...liveHold, rescheduleToken: null }]);
-  const { body } = await getCards();
-  expect(mockGrouped).not.toHaveBeenCalled();
-  expect(body.cards[0].holdsAppointment.rescheduleUrl).toBeNull();
-});
-
-test('no group id (solo stop): grouped lookup skipped, link kept — same as GET /schedule', async () => {
-  mockLiveHolds.mockResolvedValue([{ ...liveHold, groupVisitId: null }]);
-  const { body } = await getCards();
-  expect(mockGrouped).not.toHaveBeenCalled();
-  expect(body.cards[0].holdsAppointment.rescheduleUrl).toBe('/reschedule/tok-9');
-});
-
-test('lookup failure on one card: that card is bare, the list still renders, warning logged', async () => {
-  mockLiveHolds.mockImplementation(async ({ stripePaymentMethodId }) => {
-    if (stripePaymentMethodId === 'pm_stripe_1') throw new Error('db down');
-    return [liveHold];
-  });
+test('hold lookup failure: every card bare, the list still renders, warning logged', async () => {
+  mockLiveHolds.mockRejectedValue(new Error('db down'));
   const { status, body } = await getCards();
   expect(status).toBe(200);
-  expect(body.cards[0].holdsAppointment).toBeUndefined();
-  expect(body.cards[1].holdsAppointment.serviceId).toBe('svc-9');
-  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('card-hold notice lookup failed for method pm-1'));
+  expect(body.cards.map((c) => 'holdsAppointment' in c)).toEqual([false, false]);
+  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('card-hold notice lookup failed for customer cust-1'));
 });

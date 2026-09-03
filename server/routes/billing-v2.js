@@ -289,6 +289,58 @@ router.get('/', async (req, res, next) => {
   }
 });
 
+// GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE (owner ruling 2026-09-03): a card
+// holding a FUTURE secured visit carries the soonest one on GET /cards, so
+// the portal's Remove opens the call-us disclaimer instead of the plain
+// confirm. Gate off → empty map → field absent → payload byte-identical to
+// today. ONE batched lookup for the whole wallet (Codex #3828 r1 P1), and
+// best-effort: a failed lookup logs and omits the field for every card
+// (the customer sees the legacy confirm; the charge paths keep their own
+// revocation handling) rather than breaking the wallet. Lazy requires,
+// same as GET /schedule's reschedule-public read: the wallet route must not
+// pull the card-fee rails into every boot path. Returns Map<cardRowId, notice>.
+async function cardHoldNotices(customerId, cards) {
+  const notices = new Map();
+  if (!isEnabled('portalCardRemovalHoldNotice')) return notices;
+  const { liveHoldsForPaymentMethods } = require('../services/estimate-card-holds');
+  const { normalizeServiceType } = require('../utils/service-normalizer');
+  let byMethod;
+  try {
+    byMethod = await liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds: cards.map((c) => c.stripe_payment_method_id) });
+  } catch (err) {
+    logger.warn(`[billing-v2] card-hold notice lookup failed for customer ${customerId}: ${err.message}`);
+    return notices;
+  }
+  for (const c of cards) {
+    const [soonest] = byMethod.get(c.stripe_payment_method_id) || [];
+    if (!soonest) continue;
+    notices.set(c.id, {
+      serviceId: soonest.scheduledServiceId,
+      start: soonest.start.toISOString(),
+      serviceType: normalizeServiceType(soonest.serviceType),
+      feeAmount: soonest.feeAmount,
+      rescheduleUrl: await holdRescheduleUrl(soonest),
+    });
+  }
+  return notices;
+}
+
+// The link is advertised only when the tokenized reschedule page would honor
+// it (Codex #3828 r1 P1): the SAME eligibilityAsync verdict that page runs —
+// status, dispatch-owned pending, missed/past, grouped or unknown-membership
+// stop. Any failure fails closed to no link.
+async function holdRescheduleUrl(hold) {
+  if (!hold.rescheduleToken) return null;
+  try {
+    const { eligibilityAsync } = require('./reschedule-public');
+    const verdict = await eligibilityAsync(hold.visit);
+    return verdict?.ok ? `/reschedule/${hold.rescheduleToken}` : null;
+  } catch (err) {
+    logger.warn(`[billing-v2] reschedule eligibility failed for visit ${hold.scheduledServiceId} — no link: ${err.message}`);
+    return null;
+  }
+}
+
 // =========================================================================
 // GET /api/billing/cards — All payment methods (both processors)
 // =========================================================================
@@ -299,43 +351,7 @@ router.get('/cards', async (req, res, next) => {
       .orderBy('is_default', 'desc')
       .orderBy('created_at', 'desc');
 
-    // GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE (owner ruling 2026-09-03): a
-    // card holding a FUTURE secured visit carries the soonest one, so the
-    // portal's Remove opens the call-us disclaimer instead of the plain
-    // confirm. Gate off → field absent → payload byte-identical to today.
-    // Best-effort: a failed lookup omits the field (the customer sees the
-    // legacy confirm; the charge paths keep their own revocation handling)
-    // rather than breaking the wallet.
-    const holdsByCard = new Map();
-    if (isEnabled('portalCardRemovalHoldNotice')) {
-      // Lazy, same as GET /schedule's reschedule-public read: the wallet
-      // route must not pull the card-fee rails into every boot path.
-      const { liveHoldsForPaymentMethod } = require('../services/estimate-card-holds');
-      const { groupedVisit } = require('./reschedule-public');
-      const { normalizeServiceType } = require('../utils/service-normalizer');
-      for (const c of cards) {
-        if (!c.stripe_payment_method_id) continue;
-        try {
-          const [soonest] = await liveHoldsForPaymentMethod({ customerId: req.customerId, stripePaymentMethodId: c.stripe_payment_method_id });
-          if (!soonest) continue;
-          // Same posture as GET /schedule: a grouped (or unknown-membership)
-          // stop is not customer self-reschedulable, so no link; a row with
-          // no group id is a solo stop and keeps its link (schedule.js skips
-          // the grouped lookup for those too).
-          const grouped = !soonest.rescheduleToken
-            || (soonest.groupVisitId ? await groupedVisit({ id: soonest.scheduledServiceId, visit_id: soonest.groupVisitId }) : false);
-          holdsByCard.set(c.id, {
-            serviceId: soonest.scheduledServiceId,
-            start: soonest.start.toISOString(),
-            serviceType: normalizeServiceType(soonest.serviceType),
-            feeAmount: soonest.feeAmount,
-            rescheduleUrl: grouped ? null : `/reschedule/${soonest.rescheduleToken}`,
-          });
-        } catch (err) {
-          logger.warn(`[billing-v2] card-hold notice lookup failed for method ${c.id}: ${err.message}`);
-        }
-      }
-    }
+    const holdsByCard = await cardHoldNotices(req.customerId, cards);
 
     res.json({
       cards: cards.map(c => ({

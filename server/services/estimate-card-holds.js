@@ -444,35 +444,47 @@ async function heldCardForScheduledService(scheduledServiceId) {
     .first();
 }
 
-// Live secured visits a saved card is holding (portal card-removal notice,
-// owner ruling 2026-09-03). Read-only, keyed by the customer + Stripe pm
-// the portal is about to detach. "Live" on the hold rail = status 'held',
-// not parked, visit not closed, start still ahead; on the appointment rail
-// = a 'completed' capture that actually agreed fee terms (fee_agreed_at —
-// a 'satisfied' auto-secure never saw the disclosure and never fee-charges)
-// with no fee event yet. Rows the start cannot be composed for are skipped:
-// the notice describes a dated visit, and the charge paths keep their own
-// fail-closed handling of an unresolvable start. Visit liveness is the
-// service's NON_LIVE_VISIT_STATUSES (a 'rescheduled' row is a replaced
-// booking, never a live hold — pre-push P1). Throws on a failed read — the
-// caller decides how to fail. Ordered soonest first.
-async function liveHoldsForPaymentMethod({ customerId, stripePaymentMethodId, now = new Date() }) {
-  if (!customerId || !stripePaymentMethodId) return [];
+// Live secured visits the customer's saved cards are holding (portal
+// card-removal notice, owner ruling 2026-09-03). Read-only, ONE pass for
+// every Stripe pm the wallet lists (Codex #3828 r1 P1: never a per-card
+// scan) — returns Map<stripePaymentMethodId, holds[]>, each list soonest
+// first. "Live" on the hold rail = status 'held', not parked, visit not
+// closed (NON_LIVE_VISIT_STATUSES — a 'rescheduled' row is a replaced
+// booking), start still ahead; on the appointment rail = a 'completed'
+// capture that agreed fee terms (fee_agreed_at — a 'satisfied' auto-secure
+// never saw the disclosure and never fee-charges), no fee event yet, and
+// NOT payer-billed (r1 P2: the fee rail exempts a visit a third-party
+// payer took over — same PayerService resolve, same fail-closed posture:
+// an unresolvable payer means the rail will not charge, so no notice).
+// Rows whose start cannot be composed are skipped: the notice describes a
+// dated visit, and the charge paths keep their own fail-closed handling of
+// an unresolvable start. Throws on a failed rail read — the caller decides
+// how to fail. `visit` carries the columns reschedule-public's eligibility
+// reads, so the link the portal offers is one its target will honor.
+async function liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds, now = new Date() }) {
+  const byMethod = new Map();
+  const ids = [...new Set((stripePaymentMethodIds || []).filter(Boolean))];
+  if (!customerId || !ids.length) return byMethod;
   const { composeScheduledApptTime } = require('./appointment-reminders');
-  const visitCols = ['ss.id as service_id', 'ss.visit_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.reschedule_token'];
+  const visitCols = [
+    'ss.id as service_id', 'ss.visit_id', 'ss.status as visit_status', 'ss.source_action', 'ss.customer_confirmed',
+    'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.service_type', 'ss.reschedule_token',
+  ];
   const holdRows = await db('estimate_card_holds as h')
     .join('scheduled_services as ss', 'ss.id', 'h.scheduled_service_id')
-    .where({ 'h.customer_id': customerId, 'h.stripe_payment_method_id': stripePaymentMethodId, 'h.status': 'held' })
+    .where({ 'h.customer_id': customerId, 'h.status': 'held' })
+    .whereIn('h.stripe_payment_method_id', ids)
     .whereNull('h.parked_at')
     .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
-    .select([...visitCols, 'h.no_show_fee_amount']);
+    .select([...visitCols, 'h.stripe_payment_method_id as pm_id', 'h.no_show_fee_amount']);
   const apptRows = await db('appointment_card_requests as r')
     .join('scheduled_services as ss', 'ss.id', 'r.scheduled_service_id')
-    .where({ 'r.customer_id': customerId, 'r.stripe_payment_method_id': stripePaymentMethodId, 'r.status': 'completed' })
+    .where({ 'r.customer_id': customerId, 'r.status': 'completed' })
+    .whereIn('r.stripe_payment_method_id', ids)
     .whereNotNull('r.fee_agreed_at')
     .whereNull('r.fee_status')
     .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
-    .select([...visitCols, 'r.no_show_fee_amount']);
+    .select([...visitCols, 'r.stripe_payment_method_id as pm_id', 'r.no_show_fee_amount']);
   const nowMs = now.getTime();
   const seen = new Set();
   const live = [];
@@ -483,20 +495,49 @@ async function liveHoldsForPaymentMethod({ customerId, stripePaymentMethodId, no
       if (!Number.isFinite(startMs) || startMs <= nowMs) continue;
       const serviceId = String(row.service_id);
       if (seen.has(serviceId)) continue;
+      if (lane === 'appointment_card' && await appointmentRailPayerBilled({ customerId, scheduledServiceId: serviceId })) continue;
       seen.add(serviceId);
       live.push({
         lane,
+        pmId: row.pm_id,
         scheduledServiceId: serviceId,
-        // scheduled_services.visit_id = the stop's group id (groupedVisit reads it).
-        groupVisitId: row.visit_id || null,
         start,
         serviceType: row.service_type || null,
         rescheduleToken: row.reschedule_token || null,
         feeAmount: Number(row.no_show_fee_amount) > 0 ? Number(row.no_show_fee_amount) : cardHoldNoShowFee(),
+        visit: {
+          id: serviceId,
+          visit_id: row.visit_id || null,
+          status: row.visit_status,
+          source_action: row.source_action || null,
+          customer_confirmed: row.customer_confirmed,
+          scheduled_date: row.scheduled_date,
+          window_start: row.window_start,
+          window_end: row.window_end,
+        },
       });
     }
   }
-  return live.sort((a, b) => a.start - b.start);
+  live.sort((a, b) => a.start - b.start);
+  for (const hold of live) {
+    if (!byMethod.has(hold.pmId)) byMethod.set(hold.pmId, []);
+    byMethod.get(hold.pmId).push(hold);
+  }
+  return byMethod;
+}
+
+// The appointment rail's payer exemption (appointment-card-request.js
+// resolveFeeRequest): a third-party payer assigned after the capture means
+// the rail will not charge the homeowner's card. true = drop the row. A
+// failed resolve is treated the same (the rail fails closed there too).
+async function appointmentRailPayerBilled({ customerId, scheduledServiceId }) {
+  try {
+    const resolved = await require('./payer').resolveForInvoice({ customerId: String(customerId), scheduledServiceId, throwOnError: true });
+    return !!resolved?.payerId;
+  } catch (err) {
+    logger.warn(`[estimate-card-holds] payer resolve failed for visit ${scheduledServiceId} — no card-hold notice: ${err.message}`);
+    return true;
+  }
 }
 
 // Reschedule-orphan DETECTION (owner lane 2026-08-25, prod incident): an
@@ -2351,7 +2392,7 @@ module.exports = {
   handleCardHoldSetupIntentSucceeded,
   heldCardForScheduledService,
   hasHeldCard,
-  liveHoldsForPaymentMethod,
+  liveHoldsForPaymentMethods,
   chargeCardHoldOnCompletion,
   chargeCardHoldForRecapCompletion,
   resolveOrMintRecapCompletionInvoice,

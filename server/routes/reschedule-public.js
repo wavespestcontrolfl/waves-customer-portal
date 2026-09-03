@@ -957,3 +957,6 @@ module.exports = router;
 // grouped verdict that makes this page refuse, so the portal never advertises
 // a self-serve link this route will turn away.
 module.exports.groupedVisit = groupedVisit;
+// The portal's card-removal notice (billing-v2) offers a reschedule link only
+// when THIS page would honor it — one eligibility verdict, never a mirror.
+module.exports.eligibilityAsync = eligibilityAsync;
