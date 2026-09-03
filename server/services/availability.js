@@ -507,6 +507,9 @@ class AvailabilityEngine {
         windowStart: startTime,
         windowEnd: endTime,
         excludeServiceIds: occupancyExcludes,
+        // Travel gap (GATE_SLOT_TRAVEL_GAP): the customer's pin; the zone
+        // engine's offers are city-only, so this is the only drive check.
+        travel: { lat: customer.latitude ?? null, lng: customer.longitude ?? null },
       });
       if (occupancyClash.length) {
         throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');

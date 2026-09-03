@@ -56,6 +56,7 @@
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
+ *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
@@ -1792,6 +1793,16 @@ const gates = {
   // with the scheduler — with a bare === 'true' a value of `1`/`on`/`TRUE`
   // would calibrate the estimator while logGateStatus reported it disabled.
   driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
+
+  // Slot Travel Gap — the customer-facing pickers (estimate, one-tap, /book,
+  // reschedule, re-service, voice, rain-out, AI assistant) and every commit
+  // gate behind them require modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES
+  // (default 15) between a candidate window and its neighbouring stops. Off →
+  // pure half-open overlap, byte for byte (back-to-back windows across a
+  // 30-minute drive were offered and reserved — 2026-09-03 field report).
+  // Consumers read gateEnvValue at CALL time (services/scheduling/travel-gap.js)
+  // so a flip needs no redeploy; kill switch: unset GATE_SLOT_TRAVEL_GAP.
+  slotTravelGap: gateEnvValue('GATE_SLOT_TRAVEL_GAP'),
 
   // Vision Delta Scoring — one VISION-tier call per treatment outcome's best
   // before/after photo pair (server/services/vision-delta.js); the verdict

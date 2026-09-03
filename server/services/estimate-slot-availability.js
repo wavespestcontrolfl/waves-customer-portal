@@ -29,6 +29,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
+const { guardedCoordSelects } = require('./scheduling/day-stops');
+const { violatesTravelGap, travelGapEnabled, travelBufferMinutes } = require('./scheduling/travel-gap');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
@@ -1359,7 +1361,15 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
 //      still showed the same slot (dead-end loop, found live 2026-07-13).
 // This filter must mirror reserveSlot's conflict checks; the shared zone
 // resolution lives in slot-zone.js so the two sides can't drift.
-async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = null }) {
+//   3. (GATE_SLOT_TRAVEL_GAP) A window that merely TOUCHES a stop across a
+//      real drive — the ASAP capacity lane and spreadWindowsAcrossDay are
+//      not route-aware, so a 9–10 AM Palmetto window was offered against a
+//      10–11 AM Bradenton stop 32 modeled minutes away (2026-09-03). The
+//      tech-blind travel-gap rule (scheduling/travel-gap.js) drops it here,
+//      the same predicate reserveSlot/commitReservation enforce via
+//      findConflictingVisits' `travel` option. `coords` = the estimate's pin
+//      (null on the no-coords branch → buffer-only).
+async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = null, coords = null }) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
   const rows = await db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -1376,7 +1386,10 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
       'scheduled_services.estimated_duration_minutes',
       'scheduled_services.zone',
       'customers.city as customer_city',
+      // Gate off → the legacy select, byte for byte (no coordinate raws).
+      ...(travelGapEnabled() ? guardedCoordSelects(db) : []),
     );
+  const candidatePin = { lat: coords?.lat ?? null, lng: coords?.lng ?? null };
 
   const zoneSlug = zoneSlugOf(estimateZone);
   const zoneCities = new Set(
@@ -1405,6 +1418,8 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
     const busy = {
       startMin,
       endMin: explicitEndMin ?? (startMin != null ? startMin + fallbackDuration : null),
+      lat: row.lat ?? null,
+      lng: row.lng ?? null,
     };
     const key = `${row.technician_id || 'unassigned'}|${date}`;
     if (!byTechDate.has(key)) byTechDate.set(key, []);
@@ -1435,7 +1450,12 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
       ? (byTechDate.get(`${s.techId}|${s.date}`) || [])
       : (allByDate.get(s.date) || []);
     if (overlapsAny(techBusy, slotStart, slotEnd)) return false;
-    return !overlapsAny(zoneByDate.get(s.date) || [], slotStart, slotEnd);
+    if (overlapsAny(zoneByDate.get(s.date) || [], slotStart, slotEnd)) return false;
+    // Travel gap is tech-blind (one field tech) — every live row that day.
+    return !violatesTravelGap(
+      { startMin: slotStart, endMin: slotEnd, ...candidatePin },
+      allByDate.get(s.date) || [],
+    );
   });
 }
 
@@ -1694,9 +1714,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       maxCandidates: Math.max(TARGET_TOTAL * 6, 24),
       minimumLeadMinutes: opts.minimumLeadMinutes,
     })))).flat();
-    const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone });
+    const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords });
     const spread = dedupeSlots(spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes }));
-    const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo, estimateZone });
+    const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo, estimateZone, coords });
     const bookable = filterSeasonalSlots(
       filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
       serviceProfile,
@@ -1769,12 +1789,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes));
   // Drop candidates whose rounded display window collides with a real
   // existing booking on the same tech/date — see filterCollidingSlots.
-  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone });
+  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords });
 
   // Target: always show the soonest upcoming customer-facing windows first,
   // even when those windows are not route-optimal. Route-optimality remains
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
-  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone });
+  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords });
   const sortedPool = dedupeSlots([...asap, ...classified]).sort(compareCustomerFacingSlots);
   // Re-dedupe after spreading: a re-windowed ASAP slot can land on the same
   // slotId as a preserved route slot; dedupeSlots keeps the route/nearby one.
@@ -1782,7 +1802,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // spreadWindowsAcrossDay re-assigns windowStart for non-route-optimal
   // slots; that can land them on an existing booking, so re-filter once
   // more before choosing the final customer-facing list.
-  const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo, estimateZone });
+  const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo, estimateZone, coords });
   // Trim any window that has already passed (or is inside the booking lead
   // time) on today's date — covers route-aware and spread-reassigned slots
   // that buildAsapCapacitySlots' own guard never saw.
@@ -1987,6 +2007,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
       customerId: estimate.customer_id,
     },
     coords,
+    travelGap: { enabled: travelGapEnabled(), bufferMinutes: travelBufferMinutes() },
     window: { dateFrom, dateTo, durationMinutes: serviceProfile.durationMinutes },
     serviceProfile,
     proximityDriveMinutes: opts.proximityDriveMinutes,

@@ -1025,6 +1025,9 @@ async function reserveSlot({
         windowStart,
         windowEnd,
         includeHolds: false,
+        // Travel gap (GATE_SLOT_TRAVEL_GAP): the hold's own pin, resolved
+        // above; null → buffer-only, never a skipped check.
+        travel: holdCoords || { lat: null, lng: null },
       });
       if (committedClash.length) {
         const err = new Error('slot no longer available');
@@ -1315,6 +1318,8 @@ async function commitReservation({
         windowEnd: probeWindowEnd,
         excludeServiceIds: [scheduledServiceId],
         includeHolds: false,
+        // Travel gap: the pin reserveSlot stamped on the hold row.
+        travel: { lat: row.lat ?? null, lng: row.lng ?? null },
       });
       if (committedClash.length) {
         const err = new Error('slot no longer available');

@@ -36,6 +36,8 @@
  * onto this module — possible follow-up, not this lane.
  */
 const defaultDb = require('../../models/db');
+const { guardedCoordSelects } = require('./day-stops');
+const { travelGapEnabled, travelGapViolation } = require('./travel-gap');
 
 const DEFAULT_DURATION_MINUTES = 60;
 
@@ -88,6 +90,10 @@ const DEFAULT_DURATION_MINUTES = 60;
 // same relative order). Multi-date callers take their rung-1 keys in ascending
 // date order — use acquireOccupancyLocks(). pg_advisory_xact_lock auto-releases
 // at commit/rollback.
+//
+// The `travel` variant of findConflictingVisits is a plain SELECT with a
+// customers LEFT JOIN — it takes no row locks, so it sits under rung 1 exactly
+// where the overlap probe already runs and changes nothing in this order.
 //
 // ROW LOCKS COME AFTER RUNG 1 — the advisory-vs-row-lock half of the order:
 // within a writer's txn, rung 1 precedes EVERY row lock the writer takes
@@ -321,6 +327,18 @@ const CONFLICT_COLUMNS = [
  *                                          reservation_expires_at) from the
  *                                          result; default true — holds
  *                                          occupy real route time.
+ * @param {{lat:number|null,lng:number|null}} [args.travel]
+ *                                          The NEW stop's pin. When given AND
+ *                                          GATE_SLOT_TRAVEL_GAP is on, a row
+ *                                          also conflicts when the free time
+ *                                          between it and the window is below
+ *                                          modeled drive + buffer
+ *                                          (scheduling/travel-gap.js); rows
+ *                                          carry `conflict_reason`
+ *                                          ('overlap' | 'travel_gap'). Nulls
+ *                                          are fine (buffer-only). Omitted or
+ *                                          gate off → the overlap SQL below,
+ *                                          byte for byte.
  * @returns {Promise<Array>} overlapping rows (chronological), [] if none.
  */
 async function findConflictingVisits({
@@ -332,9 +350,16 @@ async function findConflictingVisits({
   excludeCustomerId = null,
   excludeStatuses = DEFAULT_EXCLUDE_STATUSES,
   includeHolds = true,
+  travel,
 } = {}) {
   if (!date || !windowStart || !windowEnd) return [];
   const excludeIds = (excludeServiceIds || []).filter(Boolean).map(String);
+
+  if (travel !== undefined && travelGapEnabled()) {
+    return findConflictingVisitsWithTravel({
+      db, date, windowStart, windowEnd, excludeIds, excludeCustomerId, excludeStatuses, includeHolds, travel,
+    });
+  }
 
   const query = db('scheduled_services')
     .where('scheduled_date', String(date).split('T')[0])
@@ -372,12 +397,73 @@ async function findConflictingVisits({
 }
 
 /**
+ * Travel-gap variant (GATE_SLOT_TRAVEL_GAP): every occupying row on the date,
+ * with divergence-guarded coordinates, filtered in JS to the rows that either
+ * overlap the window (same half-open predicate as the SQL path) or sit closer
+ * than modeled drive + buffer. Same status / hold / exclusion conventions as
+ * the SQL path; windowless placeholder rows stay inert (whereNotNull).
+ */
+async function findConflictingVisitsWithTravel({
+  db, date, windowStart, windowEnd, excludeIds, excludeCustomerId, excludeStatuses, includeHolds, travel,
+}) {
+  const candStart = timeToMinutes(windowStart);
+  const candEnd = timeToMinutes(windowEnd);
+  if (candStart == null || candEnd == null) return [];
+  const candidate = { startMin: candStart, endMin: candEnd, lat: travel?.lat ?? null, lng: travel?.lng ?? null };
+
+  const query = db('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .where('scheduled_services.scheduled_date', String(date).split('T')[0])
+    .whereNotIn('scheduled_services.status', excludeStatuses)
+    .where((q) => {
+      q.whereNull('scheduled_services.reservation_expires_at')
+        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+    })
+    .whereNotNull('scheduled_services.window_start');
+  if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
+  if (excludeCustomerId) {
+    query.where((q) => {
+      q.whereNull('scheduled_services.customer_id').orWhereNot('scheduled_services.customer_id', excludeCustomerId);
+    });
+  }
+  if (!includeHolds) {
+    query.where((q) => {
+      q.whereNotNull('scheduled_services.customer_id').orWhereNull('scheduled_services.reservation_expires_at');
+    });
+  }
+  const rows = await query
+    .select(...CONFLICT_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(db))
+    .orderBy('scheduled_services.window_start', 'asc');
+  if (!Array.isArray(rows)) return [];
+
+  const out = [];
+  for (const row of rows) {
+    const startMin = timeToMinutes(row.window_start);
+    if (startMin == null) continue;
+    const explicitEnd = timeToMinutes(row.window_end);
+    const durationMin = Number(row.estimated_duration_minutes) > 0
+      ? Number(row.estimated_duration_minutes)
+      : DEFAULT_DURATION_MINUTES;
+    const stop = { startMin, endMin: explicitEnd != null ? explicitEnd : startMin + durationMin, lat: row.lat, lng: row.lng };
+    if (windowsOverlap(candStart, candEnd, stop.startMin, stop.endMin)) {
+      out.push({ ...row, conflict_reason: 'overlap' });
+    } else if (travelGapViolation(candidate, stop)) {
+      out.push({ ...row, conflict_reason: 'travel_gap' });
+    }
+  }
+  return out;
+}
+
+/**
  * Range variant for offer builders: every occupying row (same status/hold/
  * windowless conventions as findConflictingVisits) across [dateFrom, dateTo],
  * for JS-side overlap filtering of many candidate slots in one query.
  * Returns rows with a normalized `date` ('YYYY-MM-DD') plus `startMin` /
  * `endMin` (minutes from midnight, window_end defaulted from
  * estimated_duration_minutes or 60 — same fallback as the SQL predicate).
+ * withCoords:true adds the divergence-guarded `lat`/`lng` (customers LEFT
+ * JOIN) so offer builders can apply the travel-gap rule; default false keeps
+ * the legacy query byte for byte.
  */
 async function listOccupiedWindows({
   db = defaultDb,
@@ -385,21 +471,37 @@ async function listOccupiedWindows({
   dateTo,
   excludeServiceIds = [],
   excludeStatuses = DEFAULT_EXCLUDE_STATUSES,
+  withCoords = false,
 } = {}) {
   if (!dateFrom || !dateTo) return [];
   const excludeIds = (excludeServiceIds || []).filter(Boolean).map(String);
 
-  const query = db('scheduled_services')
-    .whereBetween('scheduled_date', [dateFrom, dateTo])
-    .whereNotIn('status', excludeStatuses)
-    .where((q) => {
-      q.whereNull('reservation_expires_at')
-        .orWhereRaw('reservation_expires_at > NOW()');
-    })
-    // Windowless placeholder rows are inert to conflicts (see header).
-    .whereNotNull('window_start');
-  if (excludeIds.length) query.whereNotIn('id', excludeIds);
-  const rows = await query.select(CONFLICT_COLUMNS);
+  let rows;
+  if (withCoords) {
+    const query = db('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
+      .whereNotIn('scheduled_services.status', excludeStatuses)
+      .where((q) => {
+        q.whereNull('scheduled_services.reservation_expires_at')
+          .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+      })
+      .whereNotNull('scheduled_services.window_start');
+    if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
+    rows = await query.select(...CONFLICT_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(db));
+  } else {
+    const query = db('scheduled_services')
+      .whereBetween('scheduled_date', [dateFrom, dateTo])
+      .whereNotIn('status', excludeStatuses)
+      .where((q) => {
+        q.whereNull('reservation_expires_at')
+          .orWhereRaw('reservation_expires_at > NOW()');
+      })
+      // Windowless placeholder rows are inert to conflicts (see header).
+      .whereNotNull('window_start');
+    if (excludeIds.length) query.whereNotIn('id', excludeIds);
+    rows = await query.select(CONFLICT_COLUMNS);
+  }
   if (!Array.isArray(rows)) return [];
 
   const out = [];

@@ -7,6 +7,7 @@ const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { violatesTravelGap } = require('../services/scheduling/travel-gap');
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
@@ -1010,6 +1011,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // Public self-reschedule: the moving row must not block the slot it
       // is vacating — same exclusion findAvailableSlots already applies.
       excludeServiceIds,
+      // Guarded lat/lng for the travel-gap mirror below.
+      withCoords: true,
     });
     occupiedByDate = new Map();
     for (const row of occupiedRows) {
@@ -1043,6 +1046,11 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     if (occupiedByDate) {
       const dayOccupied = occupiedByDate.get(slot.date);
       if (dayOccupied && dayOccupied.some((b) => startMin < b.endMin && endMin > b.startMin)) return;
+      // Travel-gap mirror (GATE_SLOT_TRAVEL_GAP): the commit gate's
+      // findConflictingVisits `travel` probe rejects a window that merely
+      // touches a stop across a real drive; drop it here so it is never
+      // offered. Same soft-degrade as the overlap mirror (no map → skip).
+      if (dayOccupied && violatesTravelGap({ startMin, endMin, lat, lng }, dayOccupied)) return;
     }
     const startTime = fmt(startMin);
     if (!inTimeOfDay(startTime, timeOfDay)) return;
@@ -2589,6 +2597,12 @@ async function createSelfBooking(payload = {}) {
         date: slotDateStr,
         windowStart: slot_start,
         windowEnd: endTime,
+        // Travel gap (GATE_SLOT_TRAVEL_GAP): the booking's own pin, resolved
+        // for the offer location key above; NaN → null → buffer-only.
+        travel: {
+          lat: Number.isFinite(offerLat) ? offerLat : null,
+          lng: Number.isFinite(offerLng) ? offerLng : null,
+        },
       });
       if (globalClash.length) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {

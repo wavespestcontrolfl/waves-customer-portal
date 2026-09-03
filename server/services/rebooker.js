@@ -6,6 +6,8 @@ const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./scheduling/occupancy');
+const { resolveStopCoords } = require('./scheduling/travel-gap');
+const { guardedCoordSelects } = require('./scheduling/day-stops');
 const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
@@ -799,7 +801,10 @@ class SmartRebooker {
       .where('scheduled_services.id', serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .select('scheduled_services.*', 'customers.first_name', 'customers.last_name',
-        'customers.city', 'customers.zip', 'customers.waveguard_tier')
+        'customers.city', 'customers.zip', 'customers.waveguard_tier',
+        // Divergence-guarded pin (overrides the raw lat/lng of the `*`) for
+        // the travel-gap probe below.
+        ...guardedCoordSelects(db))
       .first();
 
     if (!service) throw new Error('Service not found');
@@ -901,6 +906,8 @@ class SmartRebooker {
           windowEnd: candidateEnd,
           excludeServiceIds: [String(serviceId)],
           excludeStatuses: ['cancelled', 'completed'],
+          // Travel gap: a day option must survive the commit's own probe.
+          travel: { lat: service.lat ?? null, lng: service.lng ?? null },
         });
         if (clash.length) continue;
       } catch (err) {
@@ -1354,6 +1361,8 @@ class SmartRebooker {
           windowEnd: occupancyGateEnd,
           excludeServiceIds: [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))],
           excludeStatuses: ['cancelled', 'completed'],
+          // Travel gap (GATE_SLOT_TRAVEL_GAP): the moving row's own pin.
+          travel: await resolveStopCoords(trx, serviceId),
         });
         if (occupancyClash.length) {
           if (!overlapAdvisory) {
@@ -1873,6 +1882,9 @@ class SmartRebooker {
         .slice(startIdx)
         .filter((s) => RESCHEDULABLE.has(s.status) || (wasLive && String(s.id) === String(serviceId)))
         .map((s) => s.id);
+      // Travel gap (GATE_SLOT_TRAVEL_GAP): one pin for the whole sweep —
+      // siblings of a series share the anchor's property.
+      const seriesTravel = await resolveStopCoords(trx, serviceId);
 
       // Same-series same-DATE collisions are hard-blocked regardless of
       // tech/time (auto-dispatch candidate-slots does the same): a plan must
@@ -2317,6 +2329,7 @@ class SmartRebooker {
             windowEnd: anchorOccEnd,
             excludeServiceIds: sweptIds,
             excludeStatuses: TERMINAL,
+            travel: seriesTravel,
           });
           if (anchorOccClash.length) {
             if (!overlapAdvisory) {
@@ -2397,6 +2410,7 @@ class SmartRebooker {
             windowEnd: occEnd,
             excludeServiceIds: sweptIds,
             excludeStatuses: TERMINAL,
+            travel: seriesTravel,
           });
           if (occClash.length) {
             if (overlapAdvisory) {
@@ -2803,6 +2817,7 @@ class SmartRebooker {
     const movable = swept.filter((row, idx) => RESCHEDULABLE_STATUSES.has(row.status)
       || (idx === 0 && LIVE_OVERRIDE_STATUSES.has(row.status)));
     const sweptIds = movable.map((row) => String(row.id));
+    const seriesTravel = await resolveStopCoords(db, serviceId);
     const dates = [];
     let conflictCount = 0;
     for (let i = 0; i < swept.length; i++) {
@@ -2823,6 +2838,7 @@ class SmartRebooker {
         windowEnd: occupancyProbeEnd(row.window_start, row.window_end, row.estimated_duration_minutes),
         excludeServiceIds: sweptIds,
         excludeStatuses: TERMINAL,
+        travel: seriesTravel,
       });
       if (clash.length) conflictCount += 1;
     }

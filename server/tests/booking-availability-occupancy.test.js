@@ -75,6 +75,45 @@ async function build() {
   });
 }
 
+describe('buildBookingAvailability — travel-gap mirror (GATE_SLOT_TRAVEL_GAP)', () => {
+  const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_DRIVE_TIME_CALIBRATION'];
+  const saved = {};
+  beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    for (const k of ENV_KEYS) delete process.env[k];
+    wireDayCapCounts([]);
+    findAvailableSlots.mockResolvedValue({ slots: [slot('09:00', 1), slot('14:00', 2)], total_feasible: 2 });
+    // Bradenton stop 10:00–11:00 with a guarded pin — touches the 09:00 hour
+    // across ~33 modeled minutes; 14:00 is three hours clear.
+    listOccupiedWindows.mockResolvedValue([
+      { id: 'row-1', technician_id: 'tech-1', customer_id: 'cust-2', date: D, startMin: 600, endMin: 660, lat: 27.425, lng: -82.41 },
+    ]);
+  });
+  afterAll(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  // Palmetto request.
+  const buildPalmetto = () => buildBookingAvailability({
+    lat: 27.545, lng: -82.545, duration: 60, rangeFrom: D, rangeTo: D, config: CONFIG, today: new Date(),
+  });
+
+  const dayStarts = (result) => (result.days.find((d) => d.date === D)?.slots || []).map((s) => s.start_time);
+
+  test('gate off: the touching 09:00 hour is still offered (legacy overlap-only mirror)', async () => {
+    expect(dayStarts(await buildPalmetto())).toEqual(['09:00', '14:00']);
+  });
+
+  test('gate on: the touching hour is dropped, the clear one survives', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    expect(dayStarts(await buildPalmetto())).toEqual(['14:00']);
+  });
+});
+
 describe('buildBookingAvailability — commit-gate occupancy mirror', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -102,6 +141,8 @@ describe('buildBookingAvailability — commit-gate occupancy mirror', () => {
     // public-reschedule exclusion (default []).
     expect(listOccupiedWindows).toHaveBeenCalledWith({
       dateFrom: D, dateTo: D, excludeServiceIds: [],
+      // Guarded lat/lng ride along for the travel-gap mirror.
+      withCoords: true,
     });
   });
 
