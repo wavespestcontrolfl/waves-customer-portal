@@ -791,6 +791,11 @@ function customerEmailBellEligible({ customerId, classification, listUnsubscribe
   // second line for incremental syncs that replay old messages.
   if (backfill) return false;
   if (!customerId || classification || listUnsubscribe) return false;
+  // One of our OWN addresses never rings, whatever customer_id the row
+  // carries — a row linked before the guard (or by an older pod during a
+  // rolling deploy) is re-offered by the existing-row recovery and the
+  // sweep BEFORE the resync unlinks it (pre-push codex P1).
+  if (isInternalEmailRecipient(fromAddress)) return false;
   if (!(labelIds || []).includes('INBOX')) return false;
   // Only NEW arrivals ring: a full mailbox backfill (first connect, empty
   // table) inserts history and must never bell/push for it (hook P1).

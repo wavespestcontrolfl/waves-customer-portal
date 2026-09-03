@@ -24,7 +24,7 @@ jest.mock('../services/zelle-notice-reconciler', () => ({
 jest.mock('../services/zelle-notice', () => ({ isZelleNoticeCandidate: () => false }));
 
 const db = require('../models/db');
-const { upsertEmail } = require('../services/email/email-sync');
+const { upsertEmail, customerEmailBellEligible } = require('../services/email/email-sync');
 
 // Recording knex stand-in: every builder call is logged per table; awaiting
 // a chain resolves from that table's scripted result.
@@ -109,5 +109,22 @@ describe('upsertEmail — owned-sender guard', () => {
     const [lookup] = customerLookups();
     expect(lookup.ops).toEqual(expect.arrayContaining([['whereRaw', ['LOWER(email) = ?', ['jane@example.com']]]]));
     expect(insertedRow().customer_id).toBe('cust-jane');
+  });
+});
+
+describe('customerEmailBellEligible — an owned sender never rings', () => {
+  // A row linked before the guard, or by an older pod mid-deploy, still
+  // carries a customer_id when the existing-row recovery and the sweep
+  // re-offer it; the bell must refuse it on the address alone.
+  const aligned = {
+    customerId: 'cust-with-our-address', classification: null, listUnsubscribe: null, labelIds: ['INBOX'],
+    receivedAt: new Date(), authenticationResults: 'mx.google.com; dkim=pass header.d=wavespestcontrol.com; spf=pass smtp.mailfrom=wavespestcontrol.com',
+  };
+  test('authenticated mail from our own address, linked to a customer, is not a bell candidate', () => {
+    expect(customerEmailBellEligible({ ...aligned, fromAddress: 'contact@wavespestcontrol.com' })).toBe(false);
+    expect(customerEmailBellEligible({ ...aligned, fromAddress: 'Contact@WavesPestControl.com' })).toBe(false);
+  });
+  test('the same shape from a customer domain still rings', () => {
+    expect(customerEmailBellEligible({ ...aligned, fromAddress: 'jane@example.com', authenticationResults: 'mx.google.com; dkim=pass header.d=example.com; spf=pass smtp.mailfrom=example.com' })).toBe(true);
   });
 });
