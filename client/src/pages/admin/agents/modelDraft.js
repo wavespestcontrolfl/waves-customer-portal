@@ -258,6 +258,14 @@ export function buildMigrationSet({ data, catalog, fromId, toId }) {
     }
     push({ env: s.env, kind: "selector", label: `${s.key} selector`, lanes, accepts: s.accepts });
   }
+  // A leg the code hardcodes (no env, no selector) cannot move at all — it is
+  // listed as blocked so "everything on X" really is everything.
+  for (const l of data.lanes) {
+    for (const leg of legsOf(l)) {
+      if (leg.model !== fromId || leg.pinEnv || leg.selector) continue;
+      groups.blocked.push({ env: null, kind: "fixed", label: `${l.name}${leg === l.primary ? "" : " · backup"}`, lanes: [l], accepts: leg.accepts, reasons: ["fixed in code"] });
+    }
+  }
   // Per-lane envs: set pins, plus unset envs whose code default is the source
   // (LAWN_WRITER_MODEL unset → gpt-5.5 still moves by setting it). An unset
   // env over a SELECTOR is not listed — that leg moves through its selector.

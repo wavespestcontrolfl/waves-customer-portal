@@ -126,7 +126,7 @@ export default function MigrationSetDialog({ data, catalog, onClose, onDraft }) 
                 {envCount(g.key) > 0 && (
                   <ul className="m-0 flex list-none flex-col divide-y divide-zinc-200 border-hairline border-zinc-200 p-0">
                     {set[g.key].map((e) => (
-                      <li key={e.env} className="flex flex-col gap-0.5 px-3 py-2 text-13">
+                      <li key={e.env || `fixed:${e.label}`} className="flex flex-col gap-0.5 px-3 py-2 text-13">
                         <span className="text-zinc-900">
                           {e.lanes.length === 1 ? e.lanes[0].name : `${e.lanes.length} lanes`}
                           {e.kind === "selector" && e.lanes.length > 1 ? " sharing one setting" : ""}

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { UNPIN, buildMigrationSet, computeChanges, discoveredEntry, effectiveLegFor, envBlockOf, holdsFor, modelsInUse, selectorDraftFor, sourceLabel } from "./modelDraft";
 import { CATALOG, makeData } from "./modelDraft.fixture";
 
+const text = (providers) => ({ providers, cap: "text", deep: false });
+
 const resolve = (data, draft) => {
   const byKey = Object.fromEntries(data.selectors.map((s) => [s.key, s]));
   const selectorDraft = selectorDraftFor(byKey, draft);
@@ -154,6 +156,14 @@ describe("buildMigrationSet", () => {
     const pin = set.approval.find((e) => e.env === "PIN_REPORT");
     expect(pin.reasons).toEqual(["also moves WDO history off GPT-5.6 Terra"]);
     expect(pin.collateral).toBeUndefined();
+  });
+
+  it("a leg the code hardcodes on the source model is blocked, not silently dropped", () => {
+    const data = makeData();
+    data.lanes.push({ id: "wdo_history", name: "WDO history", describe: "Prior history", area: "reports", continuity: "verified", inbound: false, lock: null, fanout: false, applies: "restart", primary: { model: "m3", selector: null, pinEnv: "PIN_WDO", setEnv: "PIN_WDO", pinned: true, unpinnedModel: "m3", accepts: text(["openai"]), live: false }, fallback: { model: "m1", selector: null, pinEnv: null, setEnv: null, pinned: false, unpinnedModel: "m1", accepts: text(["anthropic"]), live: false }, retry: null, also: [] });
+    const set = buildMigrationSet({ data, catalog: CATALOG, fromId: "m1", toId: "m2" });
+    expect(set.blocked).toContainEqual(expect.objectContaining({ env: null, kind: "fixed", label: "WDO history · backup", reasons: ["fixed in code"] }));
+    expect(set.eligible.map((e) => e.env)).toEqual(["PIN_REPORT"]);
   });
 
   it("a judged lane on its own env is a shadow candidate; no source model → empty groups", () => {

@@ -106,6 +106,36 @@ describe("AgentModelsTab", () => {
     expect(screen.queryByText(/Every moving lane keeps its backup/)).toBeNull();
   });
 
+  it("an unverified draft keeps its warning until THAT draft is replaced or discarded", async () => {
+    adminFetch.mockImplementation(async (path, init) => {
+      if (path === "/admin/agents/models") return makeData();
+      if (path.startsWith("/admin/agents/models/search")) return { newest: [], results: [], unavailable: [] };
+      if (path === "/admin/agents/models/probe") {
+        const body = JSON.parse(init.body);
+        return body.id === "m2" ? { ok: false, reason: "no_key" } : { ok: true, provider: body.provider, id: body.id }; // only Opus 5 is unverifiable here
+      }
+      return {};
+    });
+    renderTab();
+    const sms = (await screen.findByText("SMS intent")).closest(".p-4");
+    fireEvent.click(within(sms).getByRole("button", { name: /Change/ }));
+    let dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]); // Claude Opus 5 (m2) → cannot be checked here → unverified
+    expect(await screen.findByText(/Drafted UNVERIFIED/)).toHaveTextContent(/Claude Opus 5 \(MODEL_FLAGSHIP\)/);
+    // A later VERIFIED pick on another env must not clear it.
+    const ib = screen.getAllByText("Intelligence Bar").map((e) => e.closest(".p-4")).find(Boolean);
+    fireEvent.click(within(ib).getByRole("button", { name: "Show details for Intelligence Bar" }));
+    const change = within(ib).getAllByRole("button", { name: "Change" });
+    fireEvent.click(change[change.length - 1]);
+    dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]);
+    await waitFor(() => expect(adminFetch.mock.calls.filter((c) => c[0] === "/admin/agents/models/probe")).toHaveLength(2));
+    expect(screen.getByText(/Drafted UNVERIFIED/)).toHaveTextContent(/MODEL_FLAGSHIP/);
+    // Discarding the unverified draft clears its warning.
+    fireEvent.click(screen.getByRole("button", { name: "Discard change to SMS intent" }));
+    await waitFor(() => expect(screen.queryByText(/Drafted UNVERIFIED/)).toBeNull());
+  });
+
   it("a fan-out lane shows its second model as running alongside, not as a backup", async () => {
     adminFetch.mockImplementation(async (path) => {
       if (path === "/admin/agents/models") {

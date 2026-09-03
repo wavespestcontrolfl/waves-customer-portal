@@ -49,7 +49,10 @@ export default function AgentModelsTab({ setRefreshHandler }) {
   // Picker dialog target: { envs, accepts, title, subtitle, current, canUnpin, unpinLabel }.
   const [find, setFind] = useState(null);
   const [migrating, setMigrating] = useState(false);
-  const [pickProblem, setPickProblem] = useState(null);
+  // env → model label for drafts whose provider check could not run here
+  // (no key on this server). Per env: cleared only when THAT draft is
+  // replaced or discarded, so an earlier unverified line keeps its warning.
+  const [unverified, setUnverified] = useState({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -107,13 +110,24 @@ export default function AgentModelsTab({ setRefreshHandler }) {
       .map((l) => l.name);
   }, [data, laneChanged, effectiveLeg, catalog]);
 
-  const setDraftValue = (env, value) => {
+  const setDraftValue = (env, value, unverifiedLabel = null) => {
     setDraft((prev) => {
       const next = { ...prev };
       if (value) next[env] = value;
       else delete next[env];
       return next;
     });
+    setUnverified((prev) => {
+      const next = { ...prev };
+      if (value && unverifiedLabel) next[env] = unverifiedLabel;
+      else delete next[env];
+      return next;
+    });
+  };
+  const unverifiedDrafts = Object.entries(unverified).filter(([env]) => draft[env]).map(([env, label]) => `${label} (${env})`).join(", ");
+  const discardAll = () => {
+    setDraft({});
+    setUnverified({});
   };
 
   // Open the picker for a leg. The dialog probes the pick before it lands.
@@ -144,12 +158,10 @@ export default function AgentModelsTab({ setRefreshHandler }) {
   };
 
   const onFound = (envs, model) => {
-    setPickProblem(null);
     if (model.id !== UNPIN) {
       setDiscovered((prev) => ({ ...prev, [model.id]: discoveredEntry(model, prev[model.id] || catalog[model.id], model.cap || find?.accepts?.cap) }));
     }
-    if (model.unverified) setPickProblem(`${model.label || model.id} drafted UNVERIFIED: the provider check could not run on this server. Confirm the id is enabled for the prod account before applying.`);
-    envs.forEach((env) => setDraftValue(env, model.id));
+    envs.forEach((env) => setDraftValue(env, model.id, model.unverified ? model.label || model.id : null));
     // A locked lane that follows a drafted selector through its own unset env
     // is held where it is (the hold is a pin line in the env block).
     for (const env of envs) {
@@ -222,9 +234,9 @@ export default function AgentModelsTab({ setRefreshHandler }) {
           Move a model…
         </Button>
       </div>
-      {pickProblem && (
+      {unverifiedDrafts.length > 0 && (
         <div className="text-14 text-alert-fg" role="alert">
-          {pickProblem}
+          Drafted UNVERIFIED — the provider check could not run on this server: {unverifiedDrafts}. Confirm each id is enabled for the prod account before applying.
         </div>
       )}
 
@@ -289,7 +301,7 @@ export default function AgentModelsTab({ setRefreshHandler }) {
               {uncheckedMoving > 0 ? ` · ${uncheckedMoving} unchecked` : ""}
             </span>
             <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={() => setDraft({})}>
+              <Button size="sm" variant="secondary" onClick={discardAll}>
                 Discard
               </Button>
               <Button size="sm" onClick={() => setReview(true)}>
@@ -310,6 +322,11 @@ export default function AgentModelsTab({ setRefreshHandler }) {
               ? " Every moving lane keeps its backup, so a bad model id degrades to the backup instead of failing."
               : ""}
           </p>
+          {unverifiedDrafts.length > 0 && (
+            <div className="mt-2 text-13 text-alert-fg" role="alert">
+              Unverified on this server: {unverifiedDrafts}.
+            </div>
+          )}
           {noBackupMoving.length > 0 && (
             <div className="mt-2 text-13 text-alert-fg" role="alert">
               No backup for {noBackupMoving.join(", ")}: if the new model rejects this lane's requests, the lane fails instead of degrading.

@@ -122,6 +122,8 @@ describe('model-switchboard', () => {
     expect(lanes.find((l) => l.id === 'sms_canary_save_sale').primary.model).toBe(MODELS.ROUTES.smsDraftSaveSale.model);
     // lead triage maps the JSON without validating it → nothing catches a regression.
     expect(lanes.find((l) => l.id === 'lead_triage').continuity).toBe('unchecked');
+    // The fact-check gate passes `{}` (missing findings = none), so nothing deterministic catches a regression.
+    expect(lanes.find((l) => l.id === 'fact_check_gate').continuity).toBe('unchecked');
   });
 
   it('reflects an env override as the running model and as a pin', () => {
