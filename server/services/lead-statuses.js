@@ -17,18 +17,43 @@ const NON_ENGAGED_LEAD_STATUSES = ['cancelled', 'spam', 'duplicate'];
 const OPEN_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
 
 // Rows counted as prospects by every lead-volume denominator (the leads
-// analytics overview, its rolling median, calculateSourceROI): not a
-// non-engaged status, and not a SECOND WIN — a wizard repeat that took the
-// booking or accept win keeps its ancestry marker (lead-estimate-link.js),
-// and when its original is ALSO won that is one deal credited twice
-// (pre-push P1 on #3834 r13). A won repeat whose original is anything else
-// (lost by staff, another customer's, vanished) is the only won row the
-// deal has and counts (codex #3834 r14 P2); a suppressed repeat is already
-// out by status. NULL-safe: no marker, or a marker naming nothing, never
-// excludes. Applied through knex .modify() on an unaliased `leads` query.
-const SECOND_WIN_SQL = "(leads.status IS DISTINCT FROM 'won' OR NOT EXISTS (SELECT 1 FROM leads o WHERE o.id::text = leads.extracted_data->>'duplicate_of_lead_id' AND o.status = 'won' AND o.deleted_at IS NULL))";
+// analytics overview and its rolling median, the dashboard lead KPIs, the
+// unattributed-leads nag, calculateSourceROI): not a non-engaged status,
+// and not a SECOND WIN — a wizard repeat that took the booking or accept
+// win keeps its ancestry marker (lead-estimate-link.js), and when the root
+// of that ancestry is ALSO won that is one deal credited twice (pre-push P1
+// on #3834 r13). A won repeat whose root is anything else (lost by staff,
+// another customer's, vanished) is the only won row the deal has and counts
+// (codex #3834 r14 P2); a suppressed repeat is already out by status.
+// The marker can chain (B → A → O when two repeats raced), so the walk is
+// the same bounded, cycle-safe hop-by-hop resolution followDuplicateLink
+// does: through live 'duplicate' hops only — a deleted hop or a dead
+// marker ends it with no root (pre-push P1 on r14). NULL-safe: no marker,
+// or a marker naming nothing, never excludes; a malformed marker fails the
+// uuid guard rather than the cast. Applied through knex .modify() on an
+// unaliased `leads` query.
+const UUID_RE = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+const markerUuid = (extracted) => `(CASE WHEN ${extracted}->>'duplicate_of_lead_id' ~ '${UUID_RE}' THEN (${extracted}->>'duplicate_of_lead_id')::uuid END)`;
+const SECOND_WIN_SQL = `(leads.status IS DISTINCT FROM 'won' OR NOT EXISTS (
+  WITH RECURSIVE chain AS (
+    SELECT o.status, o.deleted_at, ${markerUuid('o.extracted_data')} AS parent_id, 1 AS depth
+    FROM leads o
+    WHERE o.id = ${markerUuid('leads.extracted_data')}
+    UNION ALL
+    SELECT p.status, p.deleted_at, ${markerUuid('p.extracted_data')}, chain.depth + 1
+    FROM chain JOIN leads p ON p.id = chain.parent_id
+    WHERE chain.status = 'duplicate' AND chain.deleted_at IS NULL AND chain.depth < 8
+  )
+  SELECT 1 FROM chain WHERE chain.status = 'won' AND chain.deleted_at IS NULL
+))`;
 function scopeToProspects(qb) {
   return qb.whereNotIn('status', NON_ENGAGED_LEAD_STATUSES).whereRaw(SECOND_WIN_SQL);
 }
 
-module.exports = { NON_ENGAGED_LEAD_STATUSES, OPEN_LEAD_STATUSES, scopeToProspects };
+module.exports = {
+  NON_ENGAGED_LEAD_STATUSES,
+  OPEN_LEAD_STATUSES,
+  scopeToProspects,
+  // exported for tests
+  SECOND_WIN_SQL,
+};

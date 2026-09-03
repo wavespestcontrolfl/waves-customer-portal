@@ -87,8 +87,14 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     // SECOND win — when its original is won too (pre-push r13); a won repeat
     // whose original is lost / foreign / gone is the deal's only won row and
     // counts (codex r14 P2).
+    const { SECOND_WIN_SQL } = require('../services/lead-statuses');
     const secondWin = mockWhereCalls.find((c) => c[0] === 'leads' && c[1] === 'whereRaw' && /duplicate_of_lead_id/.test(c[2]));
-    expect(secondWin[2]).toMatch(/leads\.status IS DISTINCT FROM 'won' OR NOT EXISTS \(SELECT 1 FROM leads o WHERE o\.id::text = leads\.extracted_data->>'duplicate_of_lead_id' AND o\.status = 'won' AND o\.deleted_at IS NULL\)/);
+    expect(secondWin[2]).toBe(SECOND_WIN_SQL);
+    // The walk resolves the whole marker chain (B → A → O), bounded and
+    // through live duplicate hops only, on the uuid primary key.
+    expect(SECOND_WIN_SQL).toMatch(/WITH RECURSIVE chain AS/);
+    expect(SECOND_WIN_SQL).toMatch(/WHERE chain\.status = 'duplicate' AND chain\.deleted_at IS NULL AND chain\.depth < 8/);
+    expect(SECOND_WIN_SQL).toMatch(/SELECT 1 FROM chain WHERE chain\.status = 'won' AND chain\.deleted_at IS NULL/);
     expect(statusExclusion[3]).toEqual(expect.arrayContaining(['duplicate', 'spam', 'cancelled']));
   });
 

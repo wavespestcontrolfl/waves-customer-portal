@@ -16,7 +16,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
-const { NON_ENGAGED_LEAD_STATUSES, OPEN_LEAD_STATUSES } = require('./lead-statuses');
+const { scopeToProspects, OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { listAtRiskMrrAccounts } = require('./mrr-breakdown');
 const { whereLiveCustomer } = require('./customer-stages');
@@ -785,7 +785,9 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         // that would land in the 'Unattributed' row count here. COALESCE keeps
         // null-channel rows counted (NULL NOT IN (...) is never true).
         .whereRaw("COALESCE(first_contact_channel, '') NOT IN ('email', 'referral')")
-        .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
+        // The same prospect population every lead denominator counts: a
+        // non-engaged row or a second win is not a gap to nag about.
+        .modify(scopeToProspects)
         .whereRaw("(first_contact_at AT TIME ZONE 'America/New_York') >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '6 days')"),
     )
       .count('* as count')
