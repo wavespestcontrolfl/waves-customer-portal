@@ -1774,8 +1774,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // original is written.
         const stored = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
         duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
+        // Scoped to the status just read: a staff transition landing in
+        // between (won / lost / contacted) wins, and this public retry
+        // updates 0 rows instead of regressing it (codex #3834 r9 P1).
         if (duplicateOfLeadId !== stored) {
-          await db('leads').where({ id: lead.id }).update(duplicateOfLeadId
+          await db('leads').where({ id: lead.id, status: lead.status }).update(duplicateOfLeadId
             ? { status: 'duplicate', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ duplicate_of_lead_id: duplicateOfLeadId })]), updated_at: new Date() }
             : { status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
         }

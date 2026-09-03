@@ -114,7 +114,9 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     expect(block.length).toBeGreaterThan(200);
     expect(block).toMatch(/duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead\.id, beforeCreatedAt: lead\.created_at \}\)/);
     expect(block).toMatch(/if \(duplicateOfLeadId !== stored\)/);
-    expect(block).toMatch(/await db\('leads'\)\.where\(\{ id: lead\.id \}\)\.update\(/);
+    // The relabel is scoped to the status just read (codex r9 P1): a staff
+    // transition in between wins and this public retry updates 0 rows.
+    expect(block).toMatch(/await db\('leads'\)\.where\(\{ id: lead\.id, status: lead\.status \}\)\.update\(/);
     expect(block).toMatch(/\? \{ status: 'duplicate', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) \|\| \?::jsonb"/);
     expect(block).toMatch(/status: 'new', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) - 'duplicate_of_lead_id'"\)/);
   });
