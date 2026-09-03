@@ -27,7 +27,7 @@ const { createLeadFromExtraction } = require('../lead-from-extraction');
 const { syncVoiceMessageForCall } = require('../conversations');
 const { activeTools } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
-const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice } = require('./relay-protocol');
+const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
 
 // Monotonic clock for every duration (a wall clock can step; this cannot).
 const now = () => performance.now();
@@ -467,7 +467,9 @@ class RelayConversation {
     // active relay profile and the voice it rendered) — stamped into the
     // version record, never acted on.
     this._relayProfileId = relayProfileId ? String(relayProfileId).slice(0, 64) : null;
-    this._ttsVoice = ttsVoice ? String(ttsVoice).slice(0, 128) : null;
+    // null = no parameter arrived (the env default voice was rendered);
+    // '' = the TwiML rendered NO voice attribute (Twilio's own default).
+    this._ttsVoice = typeof ttsVoice === 'string' ? ttsVoice.slice(0, 128) : null;
     // Hashes of what the model was actually given, frozen with the system
     // prompt (see _runLoop) so a bake-off or an audit can tell two calls'
     // prompts apart without storing them.
@@ -723,7 +725,7 @@ class RelayConversation {
    */
   _versionStamps() {
     const { parseTtsVoice } = require('./relay-profiles');
-    const voice = this._ttsVoice || defaultTtsVoice();
+    const voice = this._ttsVoice != null ? this._ttsVoice : defaultTtsVoice();
     const tts = parseTtsVoice(voice, DEFAULT_TTS_PROVIDER);
     const language = this.language || DEFAULT_LANGUAGE;
     return {
@@ -1560,7 +1562,11 @@ class RelayConversation {
         });
         const reconcileQuery = db('call_log')
           .where('twilio_call_sid', this.callSid)
-          .where((q) => q.whereNull('call_outcome').orWhereNot('call_outcome', 'voicemail'));
+          // NULL OR not terminal: a relay-failure row that /relay-complete
+          // already stamped (voicemail in production, relay_failed on the
+          // sandbox) is never retro-fitted as an AI-handled call, whichever
+          // callback lands last.
+          .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', RELAY_TERMINAL_OUTCOMES));
         // ⭐ THE OWNER FENCE RIDES THE SAME STATEMENT. The pre-close
         // supersession check is check-then-act — a reconnect can take the
         // claim between it and this UPDATE. For a keyed session the write

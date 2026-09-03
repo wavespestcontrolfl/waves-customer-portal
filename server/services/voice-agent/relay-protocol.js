@@ -39,6 +39,14 @@ const RELAY_WS_PATH = '/ws/voice-agent';
 // inbox or the calls tab as a customer call.
 const VOICE_RELAY_SANDBOX_SOURCE = 'voice_relay_sandbox';
 
+// call_outcome values that are TERMINAL for a relay call: the session's
+// close-time reconcile (relay-conversation end()) never overwrites them with
+// 'ai_handled', whichever of Twilio's action callback and the socket close
+// lands last. 'voicemail' = the production failover recorded a message;
+// 'relay_failed' = a sandbox session failed (no voicemail on the sandbox).
+const RELAY_FAILED_OUTCOME = 'relay_failed';
+const RELAY_TERMINAL_OUTCOMES = Object.freeze(['voicemail', RELAY_FAILED_OUTCOME]);
+
 // The frame types the relay loop handles by name; anything else is an event
 // notification (or a future frame) and goes through classifyRelayEvent.
 const KNOWN_FRAME_TYPES = new Set(['setup', 'prompt', 'dtmf', 'interrupt', 'error']);
@@ -434,9 +442,14 @@ function buildRelayTwiML({
   // or fails (e.g. a rejected upgrade or transient WS error) instead of
   // stranding the call — the live backstop points it at /relay-complete.
   const connectAttrs = action ? ` action="${escapeXmlAttr(action)}" method="POST"` : '';
-  const telemetryParams = relayProfileId
-    ? { relay_profile: String(relayProfileId), tts_voice: voice || '' }
-    : {};
+  // The stamps assume the env default voice when no parameter arrives, so
+  // the parameter is emitted whenever that assumption would be WRONG (a
+  // Spanish leg's configured voice, or none at all = Twilio's default) and
+  // whenever a profile is active. An untuned English leg on the default
+  // voice therefore stays the exact self-closing element it always was.
+  const telemetryParams = {};
+  if (relayProfileId) telemetryParams.relay_profile = String(relayProfileId);
+  if (relayProfileId || (voice || '') !== defaultTtsVoice()) telemetryParams.tts_voice = voice || '';
   const mergedParams = { ...telemetryParams, ...(parameters && typeof parameters === 'object' ? parameters : {}) };
   const paramEntries = Object.entries(mergedParams).filter(([k, v]) => k && v != null);
   const relayElement = paramEntries.length
@@ -457,6 +470,8 @@ function buildRelayTwiML({
 module.exports = {
   RELAY_WS_PATH,
   VOICE_RELAY_SANDBOX_SOURCE,
+  RELAY_FAILED_OUTCOME,
+  RELAY_TERMINAL_OUTCOMES,
   KNOWN_FRAME_TYPES,
   classifyRelayEvent,
   DEFAULT_WELCOME_GREETING,

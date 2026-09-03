@@ -30,7 +30,7 @@ const FROM = '+19415550142';
 // The end() reconcile builder: captures the fenced guard calls and the final
 // update payload so both the guard and the transcript can be asserted.
 function primeCallLog({ rows = 1, updateImpl } = {}) {
-  const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNot: jest.fn().mockReturnThis() };
+  const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
   const update = updateImpl || jest.fn().mockResolvedValue(rows);
   const builder = {
     update,
@@ -213,7 +213,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     expect(syncVoiceMessageForCall).toHaveBeenCalledWith('CA-transcript-1');
     // The guard is still in place around the whole update.
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
-    expect(guardQ.orWhereNot).toHaveBeenCalledWith('call_outcome', 'voicemail');
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed']);
   });
 
   // ⭐ THE VOICEMAIL-EATING ORDERING, end to end.
@@ -245,7 +245,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     const convo = conversationWithTurns('CA-already-voicemail');
     await convo.end('ws_close');
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
-    expect(guardQ.orWhereNot).toHaveBeenCalledWith('call_outcome', 'voicemail');
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed']);
     expect(update).toHaveBeenCalledTimes(1); // one statement, not two
   });
 
@@ -311,7 +311,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     expect(update).toHaveBeenCalledTimes(1);
     expect(db).toHaveBeenCalledTimes(1);
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
-    expect(guardQ.orWhereNot).toHaveBeenCalledWith('call_outcome', 'voicemail');
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed']);
     expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/transcript NOT persisted/i));
   });
 

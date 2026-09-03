@@ -60,7 +60,7 @@ describe('RelayConversation — explicit end after capture', () => {
     // guard must match NULL too (NULL <> 'voicemail' is NULL in SQL) — else
     // successful calls never finalize. Verify the guard is "NULL OR not voicemail".
     const update = jest.fn().mockResolvedValue(1);
-    const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNot: jest.fn().mockReturnThis() };
+    const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
     const builder = {
       update,
       where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
@@ -73,9 +73,10 @@ describe('RelayConversation — explicit end after capture', () => {
 
     expect(db).toHaveBeenCalledWith('call_log');
     expect(builder.where).toHaveBeenCalledWith('twilio_call_sid', 'CA9');
-    // the guard callback ran whereNull('call_outcome') OR orWhereNot(...,'voicemail')
+    // the guard callback ran whereNull('call_outcome') OR orWhereNotIn(..., the
+    // terminal outcomes — voicemail, and relay_failed on the sandbox)
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
-    expect(guardQ.orWhereNot).toHaveBeenCalledWith('call_outcome', 'voicemail');
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed']);
     expect(update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'completed', answered_by: 'ai_agent', call_outcome: 'ai_handled',
     }));
@@ -715,7 +716,7 @@ describe('RelayConversation — explicit end after capture', () => {
     const builder = {};
     builder.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(builder, builder); return builder; });
     builder.whereNull = jest.fn(() => builder);
-    builder.orWhereNot = jest.fn(() => builder);
+    builder.orWhereNotIn = jest.fn(() => builder);
     builder.whereRaw = jest.fn(() => builder);
     // Owner read (supersession pre-check): our own nonce — not superseded.
     builder.first = jest.fn(async () => ({ metadata: { relay_session_claim_owner: 'nonce-MINE' } }));

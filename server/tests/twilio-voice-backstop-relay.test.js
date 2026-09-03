@@ -387,3 +387,30 @@ describe('buildRelayTwiML — relay profile tuning attrs (relay-profiles is the 
     expect(xml).toContain('hints="a&amp;b&quot;c"');
   });
 });
+
+describe('buildRelayTwiML — the voice stamp parameter follows the RENDERED voice', () => {
+  let saved;
+  beforeEach(() => { saved = process.env.VOICE_RELAY_WS_SECRET; delete process.env.VOICE_RELAY_WS_SECRET; delete process.env.VOICE_RELAY_TTS_VOICE; });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.VOICE_RELAY_WS_SECRET;
+    else process.env.VOICE_RELAY_WS_SECRET = saved;
+  });
+
+  test('a non-default voice with no profile still rides a tts_voice parameter (the stamps must not assume the English default)', () => {
+    const xml = buildRelayTwiML({ wsUrl: RELAY_URL, callSid: 'CA-tv-1', voice: 'CaJslL1xziwefCeTNzHv', parameters: { lang: 'es' } });
+    expect(xml).toContain('<Parameter name="tts_voice" value="CaJslL1xziwefCeTNzHv" />');
+    expect(xml).not.toContain('relay_profile');
+  });
+
+  test('no voice attribute at all (Twilio default) rides an EMPTY tts_voice', () => {
+    const xml = buildRelayTwiML({ wsUrl: RELAY_URL, callSid: 'CA-tv-2', voice: null, parameters: { lang: 'es' } });
+    expect(xml).not.toMatch(/<ConversationRelay [^>]*voice=/);
+    expect(xml).toContain('<Parameter name="tts_voice" value="" />');
+  });
+
+  test('the env default voice with no profile adds nothing (byte-identical)', () => {
+    const xml = buildRelayTwiML({ wsUrl: RELAY_URL, callSid: 'CA-tv-3' });
+    expect(xml).not.toContain('tts_voice');
+    expect(xml).toMatch(/<ConversationRelay [^>]*\/><\/Connect>/);
+  });
+});

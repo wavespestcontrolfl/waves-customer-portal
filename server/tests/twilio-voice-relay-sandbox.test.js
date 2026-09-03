@@ -178,7 +178,9 @@ describe('POST /relay-complete?sandbox=1', () => {
     await handlerFor('/relay-complete')({ body: { CallSid: 'CA-sb-10', ErrorCode: '64105' }, query: { sandbox: '1' } }, res);
     expect(res.body).toContain('<Hangup/>');
     expect(res.body).not.toContain('<Record');
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+    // relay_failed is a TERMINAL outcome the session's end() reconcile
+    // excludes — a late socket close cannot rewrite it as ai_handled.
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', call_outcome: 'relay_failed' }));
     const metaRaw = update.mock.calls[0][0].metadata;
     expect(metaRaw.sql).toContain("COALESCE(metadata, '{}'::jsonb) ||");
     expect(JSON.parse(metaRaw.bindings[0])).toEqual({ relay_sandbox_failed: '64105' });

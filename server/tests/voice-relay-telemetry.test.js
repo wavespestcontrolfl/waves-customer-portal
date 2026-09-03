@@ -245,6 +245,13 @@ describe('version stamps', () => {
     expect(stamps.stt_language).toBe('en-US');
   });
 
+  test('an empty tts_voice parameter (the Spanish leg with no configured voice) stamps NO voice, not the English default', () => {
+    const stamps = new RelayConversation({ callSid: 'CA-v-5', from: '+19415551234', send: jest.fn(), ttsVoice: '', language: 'es-US' })._versionStamps();
+    expect(stamps.voice_id).toBeNull();
+    expect(stamps.tts_model).toBeNull();
+    expect(stamps.tts_language).toBe('es-US');
+  });
+
   test('the prompt hash is frozen with the system prompt and excludes the caller block', async () => {
     const a = new RelayConversation({ callSid: 'CA-v-3', from: '+19415551234', send: jest.fn() });
     const b = new RelayConversation({ callSid: 'CA-v-4', from: '+19415551234', send: jest.fn() });
@@ -262,7 +269,7 @@ describe('version stamps', () => {
 describe('end() persists latency + versions in transcription_metadata', () => {
   test('the reconcile UPDATE carries the summary and the stamps', async () => {
     const update = jest.fn().mockResolvedValue(1);
-    const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNot: jest.fn().mockReturnThis() };
+    const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
     const builder = { update, whereRaw: jest.fn().mockReturnThis(), where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }) };
     db.mockReturnValue(builder);
     const { convo } = convoWithSpokenTurn({ callSid: 'CA-end-1' });

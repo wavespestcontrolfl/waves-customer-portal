@@ -1469,9 +1469,14 @@ router.post('/relay-complete', async (req, res) => {
   if (failed && req.query && req.query.sandbox === '1') {
     logger.warn(`[relay-complete] sandbox relay session failed (${errorCode || sessionStatus || 'unknown'}) for ${maskSid(callSid)} — hanging up (no voicemail on the sandbox)`);
     if (callSid) {
+      // call_outcome='relay_failed' is TERMINAL: the session's close-time
+      // reconcile (end()) excludes it, so a socket close that lands after
+      // this callback cannot rewrite the failure as an AI-handled call.
+      const { RELAY_FAILED_OUTCOME } = require('../services/voice-agent/relay-protocol');
       await db('call_log').where('twilio_call_sid', callSid)
         .update({
           status: 'failed',
+          call_outcome: RELAY_FAILED_OUTCOME,
           metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_sandbox_failed: String(errorCode || sessionStatus || 'unknown').slice(0, 64) })]),
           updated_at: new Date(),
         })
