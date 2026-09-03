@@ -287,7 +287,18 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
     // Every clicker in the window, linked ones included — the confident
     // matcher's proximity rung needs each competing click's offset, not
     // just the count.
-    if (_meta) _meta.allCandidates = all;
+    if (_meta) {
+      _meta.allCandidates = all;
+      // The location filter above drops a clicker whose EVERY pair is
+      // stamped for another GBP — right for suggestions and for the
+      // location-gated rungs, but the surname rung must know that a second
+      // same-surname customer tapped ANY location's link in the window
+      // (pre-push r4 P1): two "Northgate" clickers = a human decides, no
+      // matter which form each landed on. Auto-link path only.
+      _meta.surnameClickerElsewhere = surnames.length > 0 && reviewLocationId
+        ? await surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames, byCustomer })
+        : false;
+    }
 
     // A customer already linked to a synced review is attributed — excluded
     // from the SUGGESTION list so it only holds open questions (codex #3264).
@@ -303,6 +314,43 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
   }
 }
 
+/**
+ * Whether any OTHER customer with the reviewer's surname clicked a review
+ * link in the window whose recorded pairs are all for a different location
+ * — rows the main scan's location filter excludes. True on a truncated scan
+ * (the window can't be proven clean). The location and surname predicates
+ * repeat JS-side, as in the main scan.
+ */
+async function surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames, byCustomer }) {
+  const rows = await conn('review_requests as rr')
+    .join('customers as c', 'rr.customer_id', 'c.id')
+    .whereNull('c.deleted_at')
+    .whereNotNull('rr.redirected_at')
+    .where('rr.google_review_clicked', true)
+    .whereRaw(
+      '((rr.redirected_at >= ? AND rr.redirected_at <= ?) OR (rr.last_redirected_at >= ? AND rr.last_redirected_at <= ?))',
+      [windowStart, windowEnd, windowStart, windowEnd],
+    )
+    .whereNotNull('rr.google_location')
+    .where('rr.google_location', '!=', reviewLocationId)
+    .where(function latestElsewhere() {
+      this.whereNull('rr.last_google_location').orWhere('rr.last_google_location', '!=', reviewLocationId);
+    })
+    .limit(SCAN_LIMIT)
+    .select('rr.customer_id', 'rr.redirected_at', 'rr.last_redirected_at', 'rr.google_location', 'rr.last_google_location', 'rr.google_review_clicked', 'c.last_name');
+  if (rows.length >= SCAN_LIMIT) return true;
+  const inWindow = (ts) => {
+    const at = ts ? new Date(ts) : null;
+    return Boolean(at) && !Number.isNaN(at.getTime()) && at >= windowStart && at <= windowEnd;
+  };
+  return rows.some((row) => row.google_review_clicked === true
+    && !byCustomer.has(row.customer_id)
+    && row.google_location && row.google_location !== reviewLocationId
+    && (!row.last_google_location || row.last_google_location !== reviewLocationId)
+    && (inWindow(row.redirected_at) || inWindow(row.last_redirected_at))
+    && surnames.includes(normalizeName(row.last_name)));
+}
+
 // ── Confident auto-link (GATE_REVIEW_CLICK_AUTOLINK) ────────────────────────
 //
 // The suggestion list above tolerates ambiguity because a person reads it.
@@ -316,10 +364,10 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
 //     location-unstamped second clicker means a human decides) AND a
 //     post-migration location pair that MATCHES the review's;
 //   click_name — exactly one in-window clicker whose complete last name
-//     ends the reviewer's display name. The surname is the corroboration
-//     the post-migration stamp stands in for, so a legacy pair qualifies;
-//     any of the customer's pairs stamped with a DIFFERENT location
-//     refuses;
+//     ends the reviewer's display name — counted across EVERY location's
+//     link, not just this GBP's. The surname is the corroboration the
+//     post-migration stamp stands in for, so a legacy pair qualifies; any
+//     of the customer's pairs stamped with a DIFFERENT location refuses;
 //   click_near — the nearest click is within minutes of the review, its
 //     pair is trusted and location-matched, and every other clicker in the
 //     window (linked ones included) is hours away or after the review.
@@ -379,7 +427,9 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     // click_name — exactly one clicker in the RAW window carries the
     // reviewer's complete surname (a linked same-surname clicker still
     // competes — their click may aim at another location's profile;
-    // pre-push P1), and that one must be an unlinked candidate. Two
+    // pre-push P1 — and so does one whose clicks all went to ANOTHER
+    // location's form, which the location-filtered scan never returns;
+    // pre-push r4 P1), and that one must be an unlinked candidate. Two
     // surname matches ("Cruz" and "De La Cruz" both end "Maria De La
     // Cruz") = a human decides. A legacy pair is fine (the surname
     // corroborates); a customer with ANY pair stamped for a different
@@ -387,7 +437,9 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     // while their newer tap went elsewhere (GH codex r1 P1).
     const all = meta.allCandidates || [];
     const namedAll = all.filter((c) => c.nameMatch === true);
-    const named = namedAll.length === 1 ? candidates.find((c) => c.customerId === namedAll[0].customerId) : null;
+    const named = namedAll.length === 1 && meta.surnameClickerElsewhere !== true
+      ? candidates.find((c) => c.customerId === namedAll[0].customerId)
+      : null;
     if (named && eligible(named) && named.locationConflict !== true) {
       return decision(named, 'click_name');
     }

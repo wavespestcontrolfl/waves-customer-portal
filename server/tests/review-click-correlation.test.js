@@ -385,6 +385,37 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
   });
 
+  test('refuses when a second same-surname customer clicked ONLY another location\'s link in the window (pre-push r4 P1)', async () => {
+    // Both of the third customer's pairs are stamped Parrish: the
+    // location-filtered scan never lists them, so the surname rung runs a
+    // second, inverse-location scan and finds them there. Auto-link path only.
+    // The primary clicker holds a legacy (untrusted) pair — the case only
+    // the surname rung can link; click_near stays location-gated as before.
+    const legacy = { last_redirected_at: null, last_google_location: null };
+    const elsewhere = northgate({
+      customer_id: 'cust-northgate-3', first_name: 'Blake',
+      google_location: 'parrish', last_google_location: 'parrish',
+      redirected_at: '2026-08-07T16:00:00.000Z',
+    });
+    const conn = makeConn({ clickRows: [northgate(legacy), elsewhere, other()] });
+    let clickScans = 0;
+    const counting = (table) => { if (String(table).startsWith('review_requests')) clickScans += 1; return conn(table); };
+    const list = await findLikelyReviewers(REVIEW, { conn: counting });
+    expect(list.map((c) => c.customerId)).toEqual(['cust-northgate', 'cust-riverside']);
+    expect(clickScans).toBe(1); // suggestions never pay for the second scan
+    expect(await findConfidentClickMatch(REVIEW, { conn: counting })).toBeNull();
+    expect(clickScans).toBe(3); // the auto-link path adds exactly one inverse-location scan
+    expect(conn.captured.where).toContainEqual(['rr.google_location', '!=', 'bradenton']);
+    // The same third clicker at THIS location is an ordinary second surname
+    // match (already refused by the raw-window rule); one whose pairs are
+    // unstamped is listed by the main scan and refuses the same way.
+    const unstamped = makeConn({ clickRows: [northgate(legacy), northgate({ customer_id: 'cust-northgate-3', google_location: null, last_google_location: null, redirected_at: '2026-08-07T16:00:00.000Z' }), other()] });
+    expect(await findConfidentClickMatch(REVIEW, { conn: unstamped })).toBeNull();
+    // A different-surname clicker elsewhere is no ambiguity: the surname links.
+    const stranger = makeConn({ clickRows: [northgate(legacy), other({ customer_id: 'cust-riverside-2', google_location: 'parrish', last_google_location: 'parrish' }), other()] });
+    expect((await findConfidentClickMatch(REVIEW, { conn: stranger }))?.rung).toBe('click_name');
+  });
+
   test('refuses a surname match whose NEWER tap is stamped for a different location, even with an older first-click pair at this one (GH codex r1 P1)', async () => {
     // First click 45s before the review at Bradenton (untrusted first pair);
     // the post-migration latest click routed to Parrish. The Parrish pair is
