@@ -18,6 +18,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const MODELS = require('../config/models');
 const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
+const { isInServiceAreaBox } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
 const {
@@ -66,8 +67,6 @@ const DEFAULT_IMAGE_TIMEOUT_MS = 8000;
 const DEFAULT_VISION_PROVIDER_TIMEOUT_MS = 25000;
 const DEFAULT_VISION_MIN_REMAINING_MS = 10000;
 
-// SWFL bounding box — reject addresses outside service area
-const SWFL_BOUNDS = { latMin: 26.3, latMax: 27.8, lngMin: -82.9, lngMax: -81.5 };
 const TURF_REVIEW_THRESHOLD_SQFT = 15000;
 const TURF_MANUAL_CONFIRMATION_SQFT = 20000;
 const TURF_HIGH_LOT_RATIO = 0.55;
@@ -595,8 +594,7 @@ async function performPropertyLookupCore(address, options = {}) {
     lng = geo.lng;
 
     // Validate within SWFL service area
-    if (lat < SWFL_BOUNDS.latMin || lat > SWFL_BOUNDS.latMax ||
-        lng < SWFL_BOUNDS.lngMin || lng > SWFL_BOUNDS.lngMax) {
+    if (!isInServiceAreaBox(lat, lng)) {
       result.errors.push({ source: 'geo', message: 'Outside SWFL service area' });
     }
 
@@ -646,8 +644,7 @@ async function performPropertyLookupCore(address, options = {}) {
         superCloseUrl,
         closeUrl: closeUrlWithKey,
         wideUrl: wideUrlWithKey,
-        inServiceArea: !(lat < SWFL_BOUNDS.latMin || lat > SWFL_BOUNDS.latMax ||
-                         lng < SWFL_BOUNDS.lngMin || lng > SWFL_BOUNDS.lngMax),
+        inServiceArea: isInServiceAreaBox(lat, lng),
         _microCloseB64: microCloseB64,
         _ultraCloseB64: ultraCloseB64,
         _superCloseB64: superCloseB64,
@@ -992,8 +989,7 @@ function buildSatelliteUrlSet(lat, lng) {
     superCloseUrl: urlAtZoom(20),
     closeUrl: urlAtZoom(19),
     wideUrl: urlAtZoom(18),
-    inServiceArea: !(lat < SWFL_BOUNDS.latMin || lat > SWFL_BOUNDS.latMax ||
-                     lng < SWFL_BOUNDS.lngMin || lng > SWFL_BOUNDS.lngMax),
+    inServiceArea: isInServiceAreaBox(lat, lng),
   };
 }
 
