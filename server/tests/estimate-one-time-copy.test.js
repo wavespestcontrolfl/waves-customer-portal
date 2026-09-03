@@ -115,6 +115,10 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(one.includes.join(' ')).not.toMatch(/guarantee/i);
     expect(one.outcome).toBe('Fleas out of the house, with the egg cycle broken so they don’t come back.');
     expect(one.terms).toMatch(/no retreat warranty/);
+    // A legacy row with no warrantyType fails closed: no guarantee line, default terms.
+    const legacy = resolveOneTimeServiceCopy({ service: 'flea_package', label: 'Flea Elimination Package', visits: 2 });
+    expect(legacy.assurance).toBeNull();
+    expect(legacy.terms).toBe('Pay on service day. No recurring schedule, no contract.');
     // Hero subline follows the same scope.
     expect(oneTimeOnlyIntelligenceCopy([{ ...one, service: 'flea_knockdown_single', amount: 200, exteriorStatus: 'not_included' }]).hero.sub).toMatch(/^Interior treatment/);
   });
@@ -133,6 +137,8 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(fipronil.outcome).toMatch(/carry it back to the colony/);
     const pyrethroid = resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching', chemistryType: 'repellent_pyrethroid' });
     expect(pyrethroid.outcome).toBe('A continuous liquid barrier around your foundation — a treated zone termites will not cross.');
+    // Unknown chemistry fails closed to the barrier wording.
+    expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching' }).outcome).toBe(pyrethroid.outcome);
   });
 
   test('bed bug: the treatment-method bullet leads and follows the priced method', () => {

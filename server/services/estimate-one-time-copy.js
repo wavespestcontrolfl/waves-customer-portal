@@ -168,16 +168,21 @@ function resolveOneTimeServiceCopy(item = {}) {
       lines = lines.filter((line) => line !== entry.yardBullet);
       outcome = entry.outcomeInteriorOnly || outcome;
     }
-    if (String(item.warrantyType || '').toLowerCase() === 'none') {
+    // Fail closed: the guarantee line rides ONLY a row that carries the
+    // conditional-retreat warranty; a missing/unknown warrantyType (legacy
+    // row) gets no promise (codex pre-push P1).
+    if (String(item.warrantyType || '').toLowerCase() !== 'conditional_retreat') {
       assurance = null;
-      terms = entry.termsNoWarranty || terms;
+      if (String(item.warrantyType || '').toLowerCase() === 'none') terms = entry.termsNoWarranty || terms;
     }
   }
   if (key === 'wasp' && item.nestRemovalSelected !== true) {
     lines = lines.map((line) => (line === entry.removalBullet ? entry.noRemovalBullet : line));
     outcome = entry.outcomeNoRemoval || outcome;
   }
-  if (key === 'termite_trenching' && String(item.chemistryType || '') === 'repellent_pyrethroid') {
+  // Fail closed: the colony-transfer claim rides ONLY a row whose chemistry
+  // is known to be non-repellent; missing chemistry gets the barrier wording.
+  if (key === 'termite_trenching' && String(item.chemistryType || '') !== 'non_repellent') {
     outcome = entry.outcomeRepellent || outcome;
   }
   return {
