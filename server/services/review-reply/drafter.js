@@ -344,10 +344,13 @@ const LEGACY_BRAND_RE = /\bwaves\s+lawn(?:\s*(?:&|and|\+|\/|-)\s*pest)?\b/i;
 // Lowercase-name backstop (codex r66): common first names that are not also
 // ordinary English words. Any occurrence, in any case, needs provenance.
 const COMMON_FIRST_NAMES = new Set(('kevin marcus james john robert michael william david richard joseph thomas charles christopher daniel matthew anthony donald steven paul andrew joshua kenneth brian george edward ronald timothy jason jeffrey ryan jacob gary nicholas eric jonathan stephen larry justin scott brandon benjamin samuel gregory alexander patrick raymond jack dennis jerry tyler aaron jose adam nathan henry douglas zachary peter kyle ethan walter noah jeremy christian keith roger terry austin sean gerald carl harold dylan arthur jordan jesse bryan billy bruce gabriel joe logan alan juan albert willie elijah wayne randy vincent ralph eugene russell bobby mason philip louis mary patricia jennifer linda elizabeth barbara susan jessica sarah karen lisa nancy betty sandra margaret ashley kimberly emily donna michelle carol amanda melissa deborah stephanie rebecca sharon laura cynthia kathleen amy angela shirley anna brenda pamela emma nicole helen samantha katherine christine debra rachel carolyn janet catherine maria heather diane olivia julie joyce victoria kelly christina lauren joan evelyn judith megan andrea cheryl hannah jacqueline martha gloria teresa ann sara madison frances kathryn janice jean abigail alice judy sophia julia denise amber danielle marilyn beverly charlotte natalie theresa diana brittany doris kayla alexis lori tiffany carlos luis miguel jorge ricardo eduardo fernando javier sergio roberto manuel pedro raul mario alejandro francisco antonio diego tony mike dave jim bob steve chris matt dan andy josh ben sam greg alex pat nick jon jeff tim jake tyler cody travis trevor shane chad derek dustin brett corey casey tanner colton hunter cole blake wyatt caleb connor evan garrett owen liam lucas oliver isaac levi carter jaxon grayson lincoln easton landon nolan hudson brooks brayden dominic jace jaden tristan kaden bryce marcos rafael ruben santiago hector oscar omar victor ivan cesar jesus angel gilbert lorenzo dean guy earl leo max sid ray ken don ron rick rich bill tom ed al lou pete art ted fred frank stan marty vince ernie chuck kim sue jan pam deb kate liz beth jen jess amy meg kay jo bea tina gina lena nina rosa ana luz ines elena sofia isabella mia ava ella chloe zoe lily grace layla nora aria ellie riley zoey hazel violet aurora savannah audrey bella claire skylar lucy paisley everly anna caroline nova genesis emilia kennedy maya willow kinsley naomi aaliyah elena sarah ariana allison gabriella alice madelyn cora ruby eva serenity autumn adeline hailey gianna valentina isla eliana quinn nevaeh ivy sadie piper lydia alexa josephine emery julia delilah arianna vivian kaylee sophie brielle madeline peyton rylee clara hadley melanie mackenzie reagan adalynn liliana aubrey jade katherine isabelle natalia raelynn maria athena ximena arya leilani taylor faith rose kylie alexandra mary margaret lyla ashley amaya eliza brianna bailey andrea khloe jocelyn angela cecilia leah').split(' '));
-// Common first names that are also ordinary English words. Outside a name
-// slot (after a role noun, in an attribution) they are prose and get no
-// provenance check; inside a slot the slot rules above still apply.
-const DUAL_USE_FIRST_NAMES = new Set('don guy art max grace faith rose hunter carter brooks ivy sue kay jo bea ray dean earl bill pat frank chuck jack rich stan ken ed al tom sid lily violet hazel autumn ruby victor angel christian ana nova skylar quinn piper sadie nick bob rick pete ted fred marty vince ernie dan sam ben matt josh jim dave mike tony lead head master senior mark grant will may june august summer joy hope eve'.split(' '));
+// Common first names that are also ordinary English words. They are prose
+// only in a prose context — right after a determiner, possessive, quantifier,
+// adjective or preposition ("the right guy", "no surprise bill", "to be
+// frank", "in good faith"). "bill did a great job" is still a name.
+const DUAL_USE_FIRST_NAMES = new Set('guy art max grace faith rose hunter bill pat frank chuck jack rich summer joy'.split(' '));
+const PROSE_CONTEXT_RE = /(?:^|\s)(?:the|a|an|no|any|some|your|our|my|their|his|her|its|this|that|each|every|another|one|surprise|extra|final|first|last|next|right|good|nice|great|solid|be|to|too|so|very|really|pretty|quite|with|in|of|on|by|for|at|from|into|per)\s+$/i;
+function inProseContext(body, idx) { return PROSE_CONTEXT_RE.test(body.slice(Math.max(0, idx - 24), idx)); }
 
 // Relationship / tenure wording an account's derived facts license. Shared by
 // the verifier and the prompt so the model is told the same rule it is
@@ -560,8 +563,9 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     const hit = body.match(new RegExp(`\\b${escapeRe(name)}\\b`, 'i'));
     if (!hit) continue;
     // A prior reviewer greeted as "Bill" is a leak only as a name: lowercase
-    // "no surprise bill" is prose (span capture found this on a real review).
-    if (DUAL_USE_FIRST_NAMES.has(name) && hit[0] === hit[0].toLowerCase()) continue;
+    // "no surprise bill" is prose (span capture found this on a real review);
+    // "bill did a great job" is not.
+    if (DUAL_USE_FIRST_NAMES.has(name) && hit[0] === hit[0].toLowerCase() && inProseContext(body, hit.index)) continue;
     return reject('forbidden_name', name);
   }
   // Allowlist provenance for ANY introduced proper noun: a capitalized word
@@ -609,12 +613,15 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     if (!/ing$/.test(w) && !COMMON_ENGLISH_AFTER_ATTRIBUTION.test(w)) return reject('unlisted_name', an[0]);
   }
   // A bare lowercase first name outside a name slot still needs provenance,
-  // but only when the word cannot be ordinary English: "the guy", "the bill",
-  // "to be frank" are prose, not people (every name in DUAL_USE_FIRST_NAMES
-  // parked a real review as unlisted_name before this exemption).
-  for (const w of normalizeWords(body)) {
-    if (!COMMON_FIRST_NAMES.has(w) || DUAL_USE_FIRST_NAMES.has(w)) continue;
+  // unless it is ordinary English in a prose context: "the right guy", "no
+  // surprise bill", "to be frank" are not people.
+  const bareWordRe = /(?:^|[^\p{L}'])([a-z][a-z']*)(?![\p{L}'])/gu;
+  let bw;
+  while ((bw = bareWordRe.exec(body)) !== null) {
+    const w = bw[1];
+    if (!COMMON_FIRST_NAMES.has(w)) continue;
     if (allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || cityWords.has(w)) continue;
+    if (DUAL_USE_FIRST_NAMES.has(w) && inProseContext(body, bw.index + bw[0].length - w.length)) continue;
     return reject('unlisted_name', w);
   }
   // Title-case words AND all-caps words ("KEVIN") both need provenance.

@@ -733,6 +733,10 @@ describe('draftReviewReply — fallback ladder', () => {
     const recent = [good('Hi Bill, glad the wasps are handled.')];
     expect(Drafter.verifyReplyText(good('Hi Dana, no surprise bill from Marcus, and the ants are gone from your kitchen.'), grounding(), { recentReplies: recent })).toBeNull();
     expect(Drafter.verifyReplyText(good('Hi Dana, Bill and Marcus are glad the ants are gone from your kitchen.'), grounding(), { recentReplies: recent })).toBe('forbidden_name');
+    // Outside a prose context a lowercase dual-use word is still a name (pre-push r2).
+    expect(Drafter.verifyReplyText(good('Hi Dana, bill did the ants with Marcus and they are gone from your kitchen.'), grounding(), { recentReplies: recent })).toBe('forbidden_name');
+    expect(Drafter.verifyReplyText(good('Hi Dana, glad Marcus got the ants; frank did the follow-up and they are gone.'), grounding())).toBe('unlisted_name');
+    expect(Drafter.verifyReplyText(good('Hi Dana, to be frank, Marcus earned this one, and the ants are gone from your kitchen.'), grounding())).toBeNull();
   });
   test('dual-use first names in prose are not treated as introduced names', () => {
     const g = grounding({ text: 'Adam was on time and helpful with my ant problems.', mentionedTechNames: ['Adam'], topics: ['technician'] });
