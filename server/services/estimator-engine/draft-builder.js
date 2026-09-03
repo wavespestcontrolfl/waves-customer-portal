@@ -1141,10 +1141,11 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       // unit, is untouched.
       {
         const { callUnitAnswerFence } = require('../../utils/estimate-claim-sql');
-        const fenceReason = await callUnitAnswerFence(trx, call.id, {
-          address: intent.address,
-          unitLineOverride: context?.unitLineOverride || null,
-        });
+        // The FINAL address is what is judged — never a context flag: the
+        // engine applies the texted unit to the composer's address
+        // deterministically, so a draft that would persist the whole
+        // building (or the stale unit) is blocked (codex r1 P1 on #3796).
+        const fenceReason = await callUnitAnswerFence(trx, call.id, { address: intent.address });
         if (fenceReason) {
           return {
             duplicateBlock: {

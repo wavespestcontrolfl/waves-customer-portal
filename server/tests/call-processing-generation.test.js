@@ -469,9 +469,9 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     expect(unitAnswerFenceReason({}, { address: '1048 Example Lakes Cir' })).toBeNull();
   });
 
-  test('a whole-building draft at the asked building is blocked; one carrying the answer passes', () => {
+  test('a whole-building draft at the asked building is blocked; only a FINAL address carrying the answer passes (a context flag proves nothing)', () => {
     expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Circle, Sarasota, FL 34232' })).toBe('unit_answer_pending');
-    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir, Sarasota, FL 34232', unitLineOverride: 'Apt 204' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir, Sarasota, FL 34232', unitLineOverride: 'Apt 204' })).toBe('unit_answer_pending');
     expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir Apt 204, Sarasota, FL 34232' })).toBeNull();
   });
 
@@ -479,7 +479,7 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     expect(unitAnswerFenceReason(FENCE, { address: '5 Other Rd, Venice, FL 34285' })).toBeNull();
     expect(unitAnswerFenceReason(FENCE, { address: '5 Other Rd Apt 9, Venice, FL 34285' })).toBeNull();
     expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir Apt 9, Sarasota, FL 34232' })).toBe('unit_answer_pending');
-    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir, Apt 9, Sarasota, FL 34232', unitLineOverride: 'Apt 9' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir, Apt 9, Sarasota, FL 34232' })).toBe('unit_answer_pending');
     // The same unit in another spelling is the answer.
     expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir, Unit 204, Sarasota, FL 34232' })).toBeNull();
     expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir #204, Sarasota, FL 34232' })).toBeNull();
@@ -550,8 +550,14 @@ describe('generation fence + call-lock wiring (source pins)', () => {
       expect(source.indexOf('callRejectedForDrafting(trx, call.id')).toBeLessThan(unitFenceAt);
       expect(source.indexOf('callPassStillOwned(trx, call.id', unitFenceAt)).toBeGreaterThan(unitFenceAt);
     }
-    // The engine neither bells "an estimate already covers this" nor retries a fenced insert.
-    expect(src('../services/estimator-engine/index.js')).toContain("draft.duplicateBlock?.reason === 'unit_answer_pending'");
+    // The engine neither bells "an estimate already covers this" nor retries a fenced insert — residential AND commercial.
+    const engine = src('../services/estimator-engine/index.js');
+    expect(engine).toContain("draft.duplicateBlock?.reason === 'unit_answer_pending'");
+    expect(engine).toContain("commercialOutcome.reason === 'unit_answer_pending'");
+    expect(src('../services/estimator-engine/commercial-proposal.js')).toContain("creation.staleLinkage === 'unit_answer_pending'");
+    // The texted unit is applied to the composer's FINAL address deterministically, before any creator judges it.
+    expect(engine.indexOf('intent.address = withUnitOverride(intent.address, context)')).toBeGreaterThan(engine.indexOf('const { intent, model } = composed;'));
+    expect(engine.indexOf('intent.address = withUnitOverride(intent.address, context)')).toBeLessThan(engine.indexOf('let draft = await createDraftEstimate('));
   });
 
   test('the residential creator supersedes a SET: every locked target is excluded from the call recheck and archived after the insert', () => {

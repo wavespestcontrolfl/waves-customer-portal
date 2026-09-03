@@ -460,10 +460,7 @@ async function maybeBuildCommercialProposalDraft({
         // replacement.
         {
           const { callUnitAnswerFence } = require('../../utils/estimate-claim-sql');
-          const fenceReason = await callUnitAnswerFence(trx, call.id, {
-            address: intent.address,
-            unitLineOverride: context?.unitLineOverride || null,
-          });
+          const fenceReason = await callUnitAnswerFence(trx, call.id, { address: intent.address });
           if (fenceReason) return { staleLinkage: fenceReason };
         }
         // GENERATION fence for EVERY call-origin insert — commercial
@@ -574,6 +571,13 @@ async function maybeBuildCommercialProposalDraft({
       return { estimate, supersededEstimateIds };
     });
 
+    if (creation.staleLinkage === 'unit_answer_pending') {
+      // Preserved, not collapsed into stale_call_linkage: the engine exits
+      // quietly on this reason instead of the "existing estimate covers
+      // this prospect" bell (codex r1 P2 on #3796).
+      logger.info('[commercial-proposal] scaffold abandoned — the caller answered the unit after this run composed; the unit re-draft replaces it');
+      return { created: false, blocked: true, reason: 'unit_answer_pending' };
+    }
     if (creation.staleLinkage) {
       logger.info(`[commercial-proposal] scaffold abandoned — the call's lead linkage changed while composing (${creation.staleLinkage}); the corrected run rebuilds it`);
       return { created: false, blocked: true, reason: 'stale_call_linkage' };

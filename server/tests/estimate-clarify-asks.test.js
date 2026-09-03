@@ -2037,9 +2037,19 @@ describe('unit re-draft (GATE_CLARIFY_UNIT_WRITEBACK — PR C2: fence + every-li
     expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', 'Bedroom count received — re-price the unit draft', expect.any(String), expect.anything());
   });
 
-  test('unit answered first on a combined ask: the still-open bedroom item re-points to the replacement draft', async () => {
+  test('unit answered first on a combined ask: the still-open bedroom item re-points to the replacement draft ONLY when its prior target was retired (or it had none)', async () => {
     await reply({ flags: { missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-1' }, drafts: [{ id: 'est-1', status: 'draft' }] });
     expect(stamps().some((f) => f.repriced_estimate_id === 'est-new' && f.bedroom_estimate_id === 'est-new')).toBe(true);
+    // A merged same-phone ask whose bedroom item is bound to ANOTHER call's draft keeps that target.
+    jest.clearAllMocks(); mockState.updates = [];
+    await reply({ flags: { missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-other-call' }, drafts: [{ id: 'est-1', status: 'draft' }] });
+    const last = stamps().at(-1);
+    expect(last.repriced_estimate_id).toBe('est-new');
+    expect(last.bedroom_estimate_id).toBe('est-other-call');
+    // No prior target: the replacement becomes it.
+    jest.clearAllMocks(); mockState.updates = [];
+    await reply({ flags: { missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: undefined }, drafts: [{ id: 'est-1', status: 'draft' }] });
+    expect(stamps().at(-1).bedroom_estimate_id).toBe('est-new');
   });
 
   test('estimator engine gated off: the answer and the guard stand, the operator is belled to re-draft, nothing crashes', async () => {

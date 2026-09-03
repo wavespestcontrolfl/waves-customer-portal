@@ -1585,6 +1585,20 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     }
     const { intent, model } = composed;
     result.intent = intent;
+    // Clarify write-back: the customer's texted unit is applied to the
+    // composer's FINAL address deterministically — a model that returns
+    // the whole building, or repeats the call's stale unit, must not
+    // persist that on the replacement (codex r1 P1 on #3796). Only at the
+    // asked building; a composer that quoted another property keeps it.
+    if (context.unitLineOverride && intent.address) {
+      const ov = context.serviceAddressOverride;
+      const buildingLine = ov?.street_line_1
+        ? [ov.street_line_1, ov.city, ov.postal_code ? `FL ${ov.postal_code}` : null].filter(Boolean).join(', ')
+        : null;
+      if (!buildingLine || sameStreetAddress(intent.address, buildingLine)) {
+        intent.address = withUnitOverride(intent.address, context);
+      }
+    }
 
     // The composer establishes the FINAL service address (spelled-out
     // corrections, quote-for-a-different-property, transcript-only addresses
@@ -2091,6 +2105,14 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             return result;
           }
           let commercialOutcome = proposalOutcome;
+          if (commercialOutcome?.blocked && commercialOutcome.reason === 'unit_answer_pending') {
+            // Same quiet exit as the residential creator: the unit re-run
+            // owns the replacement and its bell (codex r1 P2 on #3796).
+            result.blocked = true;
+            result.reasons = ['unit_answer_pending'];
+            logger.info('[estimator-engine] commercial scaffold blocked — the caller answered the unit after this run composed; the unit re-draft replaces it', { callLogId: context?.call?.id || null });
+            return result;
+          }
           if (commercialOutcome?.blocked && !dryRun && context?.call?.id) {
             // Same late-race handling as the residential path (codex P1,
             // PR #3304 r10): a stale composer committing after the

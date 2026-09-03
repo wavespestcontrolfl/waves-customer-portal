@@ -1386,6 +1386,8 @@ async function handleClarifyReply({ phone, body }) {
         unitRedraft,
         unitWriteback: freshFlags.unit_writeback || null,
         extraBedroomTarget: extraBedroomGuarded ? extraBedroomTarget : null,
+        // The bedroom item's CURRENT target, for the re-point rule below.
+        bedroomEstimateId: freshFlags.bedroom_estimate_id ? String(freshFlags.bedroom_estimate_id) : null,
       };
     });
     if (!locked.recorded.length) return { handled: false };
@@ -1551,8 +1553,13 @@ async function handleClarifyReply({ phone, body }) {
         // their guards are moot. The ask row records the outcome — and a
         // bedroom item still OPEN on the same ask re-points to the
         // replacement, or its later answer would guard the archived row
-        // (codex r2 P1 on #3785).
-        const bedroomStillOpen = !recorded.includes('bedroom_count') && repriceReason === 'clarify_unit_reply';
+        // (codex r2 P1 on #3785) — but ONLY when its prior target was one
+        // of the rows just retired (or it had none): a merged same-phone
+        // ask whose bedroom item is bound to ANOTHER call's draft keeps
+        // that target, or that fallback-priced draft would be left
+        // unguarded and sendable (codex r1 P1 on #3796).
+        const bedroomStillOpen = !recorded.includes('bedroom_count') && repriceReason === 'clarify_unit_reply'
+          && (!locked.bedroomEstimateId || unitSupersedeIds.includes(locked.bedroomEstimateId));
         // A guarded row the supersede could NOT retire — a row already in
         // 'sending' (lockSupersededDraftInTx never takes one; its delivery
         // verdict aborts on the marker), or one an operator revision

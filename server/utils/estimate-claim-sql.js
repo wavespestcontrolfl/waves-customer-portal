@@ -192,19 +192,19 @@ async function callUnitAnswer(dbc, callLogId) {
   return fence && typeof fence === 'object' && fence.unit ? fence : null;
 }
 
-// The decision, pure. A draft passes when it CARRIES the answer — its
-// override is the fenced unit, or its address at the asked building names
-// exactly that unit — or when it is for a DIFFERENT building than the one
-// the ask was about. At the asked building, a whole-building draft AND one
-// naming a different unit (a stale or misheard extraction — exactly what
-// the customer's answer corrects) are blocked; so is a draft with no
-// address at all. A fence with no building applies to every unitless or
-// differing draft.
-function unitAnswerFenceReason(fence, { address = null, unitLineOverride = null } = {}) {
+// The decision, pure, on the draft's FINAL address (what the row will
+// persist — never a context flag, which proves nothing about the address
+// the composer returned; codex r1 P1 on #3796). A draft passes when that
+// address names exactly the fenced unit at the asked building, or is for a
+// DIFFERENT building than the one the ask was about. At the asked
+// building, a whole-building draft AND one naming a different unit (a
+// stale or misheard extraction — exactly what the customer's answer
+// corrects) are blocked; so is a draft with no address at all. A fence
+// with no building applies to every unitless or differing draft.
+function unitAnswerFenceReason(fence, { address = null } = {}) {
   if (!fence || !fence.unit) return null;
   const { unitLineValueKey, splitStreetLineUnit } = require('./address-normalizer');
   const fencedKey = unitLineValueKey(String(fence.unit));
-  if (unitLineOverride && unitLineValueKey(String(unitLineOverride)) === fencedKey) return null;
   const line = String(address || '').trim();
   if (!line) return 'unit_answer_pending';
   const b = fence.building;
@@ -220,9 +220,9 @@ function unitAnswerFenceReason(fence, { address = null, unitLineOverride = null 
 
 // Read + decide, for the creators' in-lock check. Callers hold the call
 // row lock through their insert (same contract as callPassStillOwned).
-async function callUnitAnswerFence(dbc, callLogId, { address = null, unitLineOverride = null } = {}) {
+async function callUnitAnswerFence(dbc, callLogId, { address = null } = {}) {
   const fence = await callUnitAnswer(dbc, callLogId);
-  return unitAnswerFenceReason(fence, { address, unitLineOverride });
+  return unitAnswerFenceReason(fence, { address });
 }
 
 module.exports = {
