@@ -154,7 +154,7 @@ describe('siteone internals', () => {
 
   test('www.siteone.com not resolving public → run-level, no launch', async () => {
     const launchBrowser = jest.fn();
-    await expect(s1.place({ vendorSku: 'X', quantity: 1, credentials: { email: 'a', password: 'b', accountNumber: '1' } }, { launchBrowser, resolveHostIps: async () => [] })).rejects.toMatchObject({ runLevel: true });
+    await expect(s1.place({ vendorSku: 'X', quantity: 1, credentials: { email: 'a', password: 'b', accountNumber: '1' }, approvedShipTo: '1 x' }, { launchBrowser, resolveHostIps: async () => [] })).rejects.toMatchObject({ runLevel: true });
     expect(launchBrowser).not.toHaveBeenCalled();
   });
 
@@ -205,6 +205,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.termsCheckbox) return el();
       if (sel === S.billToAccount) return el({ count: 1, checked: st.accountChecked === true, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } });
       if (sel === S.billToAccountSelected) return el({ count: st.accountChecked ? 1 : 0 });
+      if (sel === S.checkoutAccount) return el({ count: 1, text: st.accountText === undefined ? 'Account # 12345' : st.accountText });
+      if (sel === S.checkoutShipTo) return el({ count: 1, text: st.shipToText === undefined ? 'Ship to: Waves Pest Control\n 123 Example Ave\n Bradenton, FL 34205' : st.shipToText });
       if (sel === S.checkoutTotal) return el({ count: 1, text: 'Order total $105.93' });
       if (sel === S.placeOrder) return el({ count: 1, onClick: () => { st.placeClicked += 1; } });
       if (sel === S.orderNumber) return el({ count: 1, text: 'Order # SO-778899' });
@@ -225,7 +227,25 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     return { st, deps, browser };
   }
   const creds = { email: 'buyer@example.com', password: 'pw', accountNumber: '12345' };
-  const args = (extra = {}) => ({ vendorSku: 'S1-77', quantity: 2, credentials: creds, beforeSubmit: async () => ({ ok: true }), dryRun: false, ...extra });
+  const args = (extra = {}) => ({ vendorSku: 'S1-77', quantity: 2, credentials: creds, beforeSubmit: async () => ({ ok: true }), dryRun: false, approvedShipTo: '123 Example Ave, 34205', ...extra });
+
+  test('no approved ship-to configured → refused before the browser launches (pre-push P0)', async () => {
+    const { st, deps } = fakeSiteOne();
+    await expect(s1.place(args({ approvedShipTo: '' }), deps).catch((e) => e)).resolves.toMatchObject({ refuse: 'ship_to_unconfigured' });
+    expect(st.loggedIn).toBe(false);
+  });
+
+  test.each([
+    ['account_mismatch', { accountText: 'Account # 99999' }],
+    ['account_unverified', { accountText: '' }],
+    ['ship_to_mismatch', { shipToText: 'Ship to: 9 Other Rd, Venice, FL 34285' }],
+    ['ship_to_unverified', { shipToText: null }],
+  ])('checkout %s → refused, no place-order click, cart cleaned (pre-push P0)', async (reason, patch) => {
+    const { st, deps } = fakeSiteOne(patch);
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: reason });
+    expect(st.placeClicked).toBe(0);
+    expect(st.cart).toEqual([]);
+  });
 
   test('a leftover cart the bot cannot empty refuses before anything is added (r1 P1)', async () => {
     const { st, deps } = fakeSiteOne({ cart: [{ sku: 'OLD-1', qty: 5 }], removable: false });
@@ -263,6 +283,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
     expect(r).toMatchObject({ externalOrderNumber: 'SO-778899', amountCents: 10593, dryRun: false });
     expect(r.evidence.billToAccountVerified).toBe(true);
+    expect(r.evidence.accountVerified).toBe(true);
+    expect(r.evidence.shipToVerified).toMatch(/123 example ave/);
     expect(totals).toEqual([9900, 10593]);
     expect(st.placeClicked).toBe(1);
     expect(st.cart).toEqual([{ sku: 'S1-77', qty: 2 }]); // submitted: never cleared

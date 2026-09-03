@@ -23,6 +23,13 @@
  *     refused run would ride along under the aggregate total, so the bot
  *     starts from an empty cart and refuses unless the cart is exactly
  *     [this SKU × this package count] (Codex r1 P1).
+ *   - the checkout's DISPLAYED billing account and ship-to are read and
+ *     compared before the click (pre-push P0): the account digits must
+ *     contain the vendor row's account_number, and every CSV token of
+ *     SITEONE_APPROVED_SHIP_TO (e.g. "123 Example Ave,34205") must appear in
+ *     the ship-to text. Unset, unreadable, or mismatched → refused, no
+ *     submit. A stale default account or address never receives an
+ *     unattended order.
  *   - credentials are only written on https + a siteone.com host, inside a
  *     single page.evaluate that re-checks the host (veseris.js pattern).
  *   - egress lock: Chromium's DNS is pinned to the verified public IPs of
@@ -79,6 +86,8 @@ const SELECTORS = Object.freeze({
   checkoutTotal: '.checkout-totals .total, .order-summary .grand-total, [data-test="order-total"], .order-total .value, .grand-total .price',
   billToAccount: 'input[type="radio"][value*="account"], input[type="radio"][value*="ACCOUNT"], label:has-text("Bill to account")',
   billToAccountSelected: 'input[type="radio"][value*="account"]:checked, input[type="radio"][value*="ACCOUNT"]:checked, input[type="radio"][value*="Account"]:checked',
+  checkoutAccount: '[data-test="account-number"], .account-number, .billing-account, .bill-to-account .account, :has-text("Account #"), :has-text("Account Number")',
+  checkoutShipTo: '[data-test="ship-to"], .ship-to, .shipping-address, .delivery-address, .checkout-shipping address, address',
   placeOrder: 'button#placeOrder, button.place-order, button:has-text("Place Order")',
   orderNumber: '.order-number, [data-test="order-number"], .confirmation-number, :has-text("Order #")',
 });
@@ -136,6 +145,9 @@ async function shot(page, label, evidence, upload) {
 async function visible(page, selector) {
   try { return (await page.locator(selector).first().isVisible({ timeout: 1500 })); } catch { return false; }
 }
+
+// Case- and whitespace-insensitive comparison text for checkout labels.
+const normalizeText = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
 async function gotoCart(page) {
   await page.goto(SELECTORS.cartUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
@@ -217,7 +229,7 @@ async function login(page, creds) {
 }
 
 async function place(
-  { vendorSku, quantity, credentials, beforeSubmit, dryRun = String(process.env.SITEONE_BOT_DRY_RUN || '').toLowerCase() === 'true' },
+  { vendorSku, quantity, credentials, beforeSubmit, dryRun = String(process.env.SITEONE_BOT_DRY_RUN || '').toLowerCase() === 'true', approvedShipTo = process.env.SITEONE_APPROVED_SHIP_TO },
   { launchBrowser = chromium ? defaultLaunch : null, resolveHostIps = filler.resolvePublicIps, upload = uploadEvidence } = {},
 ) {
   if (!launchBrowser) throw runLevel('siteone bot: playwright unavailable');
@@ -226,6 +238,8 @@ async function place(
   const qty = Math.round(Number(quantity));
   if (!Number.isFinite(qty) || qty <= 0) throw new RefusedError('bad_quantity', `quantity ${quantity} is not a positive count`);
   if (!vendorSku) throw new RefusedError('no_sku', 'product has no SiteOne SKU');
+  const shipToTokens = String(approvedShipTo || '').split(',').map((t) => normalizeText(t)).filter(Boolean);
+  if (!shipToTokens.length) throw new RefusedError('ship_to_unconfigured', 'SITEONE_APPROVED_SHIP_TO is not set — the bot never submits to an unverified address');
 
   const evidence = { blockedHosts: {}, dryRun };
   const rules = [];
@@ -334,6 +348,19 @@ async function place(
       || (await bill.isChecked().catch(() => false)) === true;
     if (!accountSelected) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('bill_to_account_unverified', 'bill-to-account is not confirmed selected at checkout — the bot never submits on another tender', evidence); }
     evidence.billToAccountVerified = true;
+    // WHICH account, and WHERE to: the displayed values, compared to what the
+    // owner configured — a saved default that drifted (another branch
+    // account, an old address) is exactly the unattended order this refuses.
+    const accountText = normalizeText(await page.locator(SELECTORS.checkoutAccount).first().textContent().catch(() => ''));
+    const wantDigits = String(credentials.accountNumber).replace(/\D/g, '');
+    if (!accountText) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('account_unverified', 'could not read the billing account shown at checkout', evidence); }
+    if (!wantDigits || !accountText.replace(/\D/g, '').includes(wantDigits)) { await shot(page, 'checkout', evidence, upload); evidence.checkoutAccount = accountText.slice(0, 60); throw new RefusedError('account_mismatch', `checkout bills account "${accountText.slice(0, 40)}", not the vendor row's ${credentials.accountNumber}`, evidence); }
+    const shipToText = normalizeText(await page.locator(SELECTORS.checkoutShipTo).first().textContent().catch(() => ''));
+    if (!shipToText) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('ship_to_unverified', 'could not read the ship-to address shown at checkout', evidence); }
+    const missing = shipToTokens.filter((t) => !shipToText.includes(t));
+    if (missing.length) { await shot(page, 'checkout', evidence, upload); evidence.checkoutShipTo = shipToText.slice(0, 120); throw new RefusedError('ship_to_mismatch', `checkout ships to "${shipToText.slice(0, 80)}" — approved ship-to token(s) not found: ${missing.join(', ')}`, evidence); }
+    evidence.accountVerified = true;
+    evidence.shipToVerified = shipToText.slice(0, 120);
     // The CHECKOUT total (tax + shipping applied) is the binding amount: the
     // cart pre-check above only screens; this is the cap that gates the click.
     const checkoutText = await page.locator(SELECTORS.checkoutTotal).first().textContent().catch(() => '');
