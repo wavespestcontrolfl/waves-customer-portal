@@ -527,10 +527,9 @@ function isEstimateAskAnswerable(estimate = {}, now = new Date()) {
   // invalidation_pending_at the row is not yet archived, and this endpoint
   // would keep answering questions about — and disclosing — the wrong
   // lead's estimate content.
-  if (estimateLinkageInvalidated(estimate)) return false;
   // Same for a clarify re-price hold: the held row is off the customer
   // surface, so its ask token answers nothing about it either.
-  if (require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)) return false;
+  if (estimateOffCustomerSurface(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
@@ -8566,12 +8565,11 @@ async function handleEstimateView(req, res, next) {
     if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
       || estimate.archived_at
       || estimate.status === 'send_failed'
-      || estimateLinkageInvalidated(estimate)
-      // A clarify re-price hold (isEstimateCustomerViewable parity): a
-      // V1/holdback link opened while the hold sits on a 'sending' row
-      // would otherwise render the stale whole-building quote (codex r4
-      // P1 on #3804).
-      || require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)
+      // Linkage markers AND the clarify re-price hold (isEstimateCustomerViewable
+      // parity): a V1/holdback link opened while the hold sits on a
+      // 'sending' row would otherwise render the stale whole-building
+      // quote (codex r4 P1 on #3804).
+      || estimateOffCustomerSurface(estimate)
       // The DURABLE call-side verdict too (codex P1, PR #3304 GH r9):
       // when the estimate-side marker could not be written, the block
       // lives on the CALL — and this page would otherwise keep serving a
@@ -16056,6 +16054,11 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       .where({ id: estimate.id })
       .whereNull('extension_auto_granted_at')
       .where(DEDUPE_OPEN)
+      // A clarify re-price hold that landed after the eligibility read
+      // must not burn the grant (codex r7 P0 on #3804): the zero-row
+      // falls through to the notify-office path — a human hears, no link
+      // goes out.
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .update({
         extension_requested_at: db.fn.now(),
         extension_auto_granted_at: db.fn.now(),
@@ -18154,13 +18157,12 @@ function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   // A pending or full linkage invalidation kills acceptance the moment the
   // marker lands — accepting wrong-lead content creates the money-bearing
   // terminal state the deferred-invalidation finalizer must then preserve.
-  if (estimateLinkageInvalidated(estimate)) return false;
-  // A clarify re-price hold: the row is off the customer surface, so no
-  // public mutation (tier / bond / interior / preferences / service mix)
-  // may run on it either — their whole-blob writes would otherwise erase
-  // the marker (pre-push codex P0 on #3804). Accept refuses it again under
-  // its locked read.
-  if (require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)) return false;
+  // A clarify re-price hold is the same verdict: the row is off the customer
+  // surface, so no public mutation (tier / bond / interior / preferences /
+  // service mix) may run on it either — their whole-blob writes would
+  // otherwise erase the marker (pre-push codex P0 on #3804). Accept refuses
+  // it again under its locked read.
+  if (estimateOffCustomerSurface(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   // An unpublished estimate (draft / scheduled-but-not-yet-sent) must never be
   // acceptable through the public link. The legacy server-HTML page short-
@@ -18194,18 +18196,28 @@ function estimateLinkageInvalidated(estimate = {}) {
   return !!(eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at));
 }
 
+// THE "off the customer surface" verdict every public predicate shares —
+// a linkage marker OR a clarify re-price hold (estimate-clarify-asks:
+// the row's dollars or address are known stale; a link that slipped out
+// while the hold landed — a reply on a 'sending' row, by design — renders
+// nothing until the operator's correction lifts it). One predicate, one
+// call site per surface (view, SSR, accept-active, ask, extension
+// eligibility, the pinned document render): a surface that checked the
+// linkage markers but not the hold was how the extension request kept
+// auto-granting a held row (codex r7 P0 on #3804) — a predicate added
+// later inherits both by calling this, never the pieces.
+function estimateOffCustomerSurface(estimate = {}) {
+  if (estimateLinkageInvalidated(estimate)) return true;
+  return require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine);
+}
+
 function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
   // Before the accepted/declined early-allow: acceptance does not change
-  // whose data the row was composed from — an invalidated row never renders.
-  if (estimateLinkageInvalidated(estimate)) return false;
-  // A clarify re-price hold (estimate-clarify-asks): the row's dollars or
-  // address are known stale — a link that slipped out while the hold
-  // landed (a reply on a 'sending' row, by design) renders nothing until
-  // the operator's correction lifts it; the accept path refuses it too
-  // (pre-push codex P0 on #3804). BEFORE the terminal early-allow: a held
-  // row staff flip to 'declined' must not render again (codex r5 P0).
-  if (require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)) return false;
+  // whose data the row was composed from — an invalidated row never
+  // renders, and a held row staff flip to 'declined' must not render again
+  // (codex r5 P0 on #3804).
+  if (estimateOffCustomerSurface(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return true;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (['expired', 'send_failed'].includes(estimate.status)) return false;
@@ -18234,7 +18246,11 @@ function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   // auto-extension would revive the expired token's frozen dollars with no
   // recompute in the loop.
   if (String(estimate.source || '') === 'plan_restart') return false;
-  if (estimateLinkageInvalidated(estimate)) return false;
+  // A held row (clarify re-price) is ineligible too — the renderer refuses
+  // it, so an auto-grant would re-send a link that 404s (codex r7 P0 on
+  // #3804); the extension writes carry the same predicate for the window
+  // between this read and the claim.
+  if (estimateOffCustomerSurface(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return false;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (!estimate.sent_at && !estimate.viewed_at) return false;
@@ -24980,7 +24996,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const docPinViewBypass = docRenderPin !== null
       && !estimate.archived_at
       && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
-      && !estimateLinkageInvalidated(estimate);
+      && !estimateOffCustomerSurface(estimate);
     // Call-side verdict check runs alongside the estimate-side gate (codex
     // P1, PR #3304 GH r9) and overrides EVERY bypass — a staff preview or
     // a pinned document render of a blocked estimate is the same
@@ -26051,6 +26067,7 @@ module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmen
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
 module.exports.estimateLinkageInvalidated = estimateLinkageInvalidated;
+module.exports.estimateOffCustomerSurface = estimateOffCustomerSurface;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;

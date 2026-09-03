@@ -566,7 +566,11 @@ pricing mutations (`/select-tier`, `/bond`, `/interior-service`,
 `/service-opt-out`, `/preferences`) and the ask endpoint treat a held
 row as not accept-active / not answerable at the pre-read, and the five
 mutations predicate their whole-blob writes on the marker's absence, so
-none of them can overwrite the hold off the row. A
+none of them can overwrite the hold off the row; `/extension-request`
+treats a held row as ineligible (the generic 404), and the auto-grant
+claim, the guarded expiry write, and the sibling revive all carry the
+marker predicate — a hold that lands after the eligibility read never
+burns the grant or texts a link the renderer refuses. A
 group's held siblings are skipped at preflight, claim and publication;
 a held ANCHOR parks as `send_failed`. No enumeration signal: the hold
 is unobservable from outside beyond the accept/decline 409, which a held

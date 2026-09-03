@@ -3,10 +3,44 @@ const {
   isEstimateAcceptActive,
   adminDraftPreviewEligible,
   isEstimateExtensionRequestEligible,
+  estimateOffCustomerSurface,
 } = require('../routes/estimate-public');
 
 const FUTURE = new Date(Date.now() + 86400000).toISOString();
 const PAST = new Date(Date.now() - 86400000).toISOString();
+
+describe('estimateOffCustomerSurface (the one verdict every public predicate shares)', () => {
+  const held = JSON.stringify({ estimatorEngine: { reprice_pending_at: '2026-09-03T12:00:00Z' } });
+  const invalidated = JSON.stringify({ estimatorEngine: { linkage_invalidated_at: '2026-09-03T12:00:00Z' } });
+  const pending = JSON.stringify({ estimatorEngine: { invalidation_pending_at: '2026-09-03T12:00:00Z' } });
+  it('is true for a linkage marker OR a clarify re-price hold, false otherwise', () => {
+    expect(estimateOffCustomerSurface({ estimate_data: held })).toBe(true);
+    expect(estimateOffCustomerSurface({ estimate_data: invalidated })).toBe(true);
+    expect(estimateOffCustomerSurface({ estimate_data: pending })).toBe(true);
+    expect(estimateOffCustomerSurface({ estimate_data: JSON.stringify({ estimatorEngine: {} }) })).toBe(false);
+    expect(estimateOffCustomerSurface({ estimate_data: null })).toBe(false);
+    expect(estimateOffCustomerSurface({})).toBe(false);
+  });
+  it('is the ONLY hold read on the public predicates — a surface that reads the linkage markers alone is the r7 regression shape', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    const predicates = ['function isEstimateAskAnswerable', 'function isEstimateAcceptActive', 'function isEstimateCustomerViewable', 'function isEstimateExtensionRequestEligible'];
+    for (const name of predicates) {
+      const start = src.indexOf(name);
+      expect(start).toBeGreaterThan(-1);
+      const body = src.slice(start, src.indexOf('\n}\n', start));
+      expect(body).toContain('estimateOffCustomerSurface(estimate)');
+      expect(body).not.toContain('estimateLinkageInvalidated(');
+      expect(body).not.toContain('repricePendingActive(');
+    }
+    // The decline guard is the one split read: linkage → 404, hold → the documented 409.
+    const decline = src.slice(src.indexOf('function resolveEstimateDeclineGuard'), src.indexOf('function buildAcceptSuccessPayload'));
+    expect(decline).toContain('estimateLinkageInvalidated(estimate)');
+    expect(decline).toContain('repricePendingActive(');
+    // The pinned document render and the legacy SSR gate share the verdict too.
+    expect(src).toContain('&& !estimateOffCustomerSurface(estimate);');
+    expect(src).toContain('|| estimateOffCustomerSurface(estimate)');
+  });
+});
 
 describe('isEstimateCustomerViewable (React /:token/data security gate)', () => {
   it('serves a published, unexpired estimate', () => {
@@ -165,6 +199,16 @@ describe('isEstimateExtensionRequestEligible (expired-page "Request an extension
     // A date-expired send_failed row qualifies only when some channel actually
     // delivered enough to stamp sent_at — then the customer really has the link.
     expect(isEstimateExtensionRequestEligible({ status: 'send_failed', sent_at: PAST, expires_at: PAST })).toBe(true);
+  });
+
+  it('refuses a row under a clarify re-price hold, whatever its status — the renderer refuses it, so an auto-grant would re-send a dead link (codex r7 P0 on #3804)', () => {
+    const held = JSON.stringify({ estimatorEngine: { reprice_pending_at: '2026-09-03T12:00:00Z', reprice_attempt: 'att-1' } });
+    // The r7 shape: a held row parked send_failed that once had a view, past its expiry.
+    expect(isEstimateExtensionRequestEligible({ status: 'send_failed', viewed_at: PAST, expires_at: PAST, estimate_data: held })).toBe(false);
+    expect(isEstimateExtensionRequestEligible({ status: 'expired', sent_at: PAST, expires_at: PAST, estimate_data: held })).toBe(false);
+    expect(isEstimateExtensionRequestEligible({ status: 'viewed', viewed_at: PAST, expires_at: PAST, estimate_data: held })).toBe(false);
+    // Same row without the marker is the eligible baseline.
+    expect(isEstimateExtensionRequestEligible({ status: 'send_failed', viewed_at: PAST, expires_at: PAST, estimate_data: JSON.stringify({ estimatorEngine: {} }) })).toBe(true);
   });
 
   it('rejects estimates that still render in full (nothing to extend from the expired screen)', () => {

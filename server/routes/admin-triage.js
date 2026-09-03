@@ -621,6 +621,17 @@ router.post('/:id/verdict', async (req, res) => {
       emailCardResolved = resolvedRows
         .some((r) => ['email_unverified', 'email_invalid'].includes(r?.reason_code));
       if (resolved === 0) return;
+      if (verdict === 'deny' && resolvedRows.some((r) => r?.reason_code === 'missing_unit_number')) {
+        // The call-level Deny is the same human verdict the card's Dismiss
+        // is (transitionCore above): the texted unit is rejected, so the
+        // call-level fence the clarify write-back stamped retires with the
+        // card — otherwise a later reprocess adopts the rejected unit and a
+        // building-level correction can never lift the hold (codex r7 P1
+        // on #3804). Keyed on what this transaction ACTUALLY resolved,
+        // under the same call lock.
+        const { clearCallUnitAnswer } = require('../utils/estimate-claim-sql');
+        await clearCallUnitAnswer(trx, item.call_log_id);
+      }
       if (emailCardResolved && holdsTable) {
         const now = new Date();
         if (verdict === 'deny' && !denyClearsEmailEarly) {

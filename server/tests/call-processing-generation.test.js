@@ -530,6 +530,22 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     const triage = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-triage.js'), 'utf8');
     expect(triage).toContain("item.reason_code === 'missing_unit_number' && nextStatus === 'dismissed'");
     expect(triage).toContain('clearCallUnitAnswer(trx, item.call_log_id)');
+    // …AND the call-level Deny verdict, keyed on the rows the bulk update
+    // actually resolved (codex r7 P1 on #3804).
+    expect(triage).toContain("verdict === 'deny' && resolvedRows.some((r) => r?.reason_code === 'missing_unit_number')");
+    expect(triage.split('clearCallUnitAnswer(trx, item.call_log_id)').length - 1).toBe(2);
+  });
+
+  test('the extension writes carry the hold predicate: the public auto-grant claim, the guarded expiry update, and the sibling revive (codex r7 P0 on #3804)', () => {
+    const fs = require('fs'); const path = require('path');
+    const pub = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    const claim = pub.slice(pub.indexOf('const autoClaimed = await db(\'estimates\')'), pub.indexOf('extension_auto_granted_at: db.fn.now()'));
+    expect(claim).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
+    const ext = fs.readFileSync(path.join(__dirname, '../services/estimate-extension.js'), 'utf8');
+    expect(ext).toContain("const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');");
+    expect(ext.split('.whereRaw(REPRICE_PENDING_ABSENT_SQL)').length - 1).toBe(2);
+    const guarded = ext.slice(ext.indexOf('const updated = await db(\'estimates\')'), ext.indexOf('.update(updates);'));
+    expect(guarded).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
   });
 });
 
@@ -625,8 +641,8 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // The customer DECLINE carries the hold predicate on its UPDATE too, and its guard answers the
     // accept path's 409; the legacy SSR renderer checks the hold beside the linkage markers (codex r4 P1).
     const pub = src('../routes/estimate-public.js');
-    // decline + the five CAS whole-blob mutations (select-tier, bond, interior, service mix, preferences).
-    expect((pub.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(6);
+    // decline + the five CAS whole-blob mutations (select-tier, bond, interior, service mix, preferences) + the extension auto-grant claim (r7).
+    expect((pub.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(7);
     expect(pub).toContain("return { ok: false, status: 409, error: 'This estimate is being re-priced — please try again in a few minutes' };");
     // The accept preflight answers the documented re-price 409 BEFORE the generic accept-active refusal (codex r6 P0).
     const acceptRepriceAt = pub.indexOf("return res.status(409).json({ error: 'This estimate is being re-priced — please try again in a few minutes' });");
@@ -634,7 +650,8 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     expect(pub.indexOf("if (!isEstimateAcceptActive(estimate)) {\n      return res.status(409).json({ error: 'Estimate is no longer active' });", acceptRepriceAt)).toBeGreaterThan(acceptRepriceAt);
     // Every operator send surface (incl. the follow-up nudge) refuses a held row through the shared assertion (codex r6 P2).
     expect(route).toContain("if (siblingRepricePending(estimate)) {\n    const err = new Error('This estimate is held for a re-price");
-    expect(pub.indexOf('|| estimateLinkageInvalidated(estimate)\n      // A clarify re-price hold (isEstimateCustomerViewable parity)')).toBeGreaterThan(-1);
+    // The SSR gate reads the ONE shared verdict (linkage markers + hold) since r7.
+    expect(pub.indexOf("|| estimate.status === 'send_failed'\n      // Linkage markers AND the clarify re-price hold")).toBeGreaterThan(-1);
     expect(route).toContain("update({ status: 'send_failed', last_send_error: 'reprice_pending', scheduled_at: null, updated_at: db.fn.now() })");
     // The proposal save judges the EDITABLE proposal address.
     expect(route).toContain("unitHoldSatisfied(trx, nextEngine.callLogId || null, normalized?.propertyAddress || locked.address)");
