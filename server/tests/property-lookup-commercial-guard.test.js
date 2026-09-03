@@ -1309,13 +1309,15 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     expect(profile.residentialUnitLookup).toBeNull();
   });
 
-  test('unit address on a mixed-use record (multifamily type + retail land use) stays commercial', () => {
-    const profile = buildEnrichedProfile(
-      rentalComplexRecord({ _raw: { landUse: 'Retail Store' }, _source: 'county' }),
-      null, null, null, null, null, unit,
-    );
-    expect(profile.isCommercial).toBe(true);
-    expect(profile.residentialUnitLookup).toBeNull();
+  test('unit address on a mixed-use record (multifamily type + a specific commercial use) stays commercial', () => {
+    for (const landUse of ['Retail Store', 'Business Park', 'Office Condominium']) {
+      const profile = buildEnrichedProfile(
+        rentalComplexRecord({ _raw: { landUse }, _source: 'county' }),
+        null, null, null, null, null, unit,
+      );
+      expect({ landUse, isCommercial: profile.isCommercial, audit: profile.residentialUnitLookup })
+        .toEqual({ landUse, isCommercial: true, audit: null });
+    }
   });
 
   test('unit address on a record labeled "Commercial Apartments" is still one residential unit (generic token is not a use)', () => {
