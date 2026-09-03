@@ -803,6 +803,15 @@ describe('review fixes', () => {
     expect(unitAnywhereOnLine('Floor 2, 123 Main St')).toBe('Floor 2');
     const multiStale = { extraction: null, lead: { address: 'Bldg 9 Apt 9, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
     expect(idxPriv.addressFromContext(multiStale)).toBe('Apt 204, 5 Other Rd, Venice, FL 34285');
+    // The comma-free unit-first forms the canonical matcher supports (codex r1 P2 on #3804).
+    expect(splitUnitFirstLine('Apt 204 at 123 Main St, Sarasota, FL 34232')).toEqual({ unit: 'Apt 204', rest: '123 Main St, Sarasota, FL 34232' });
+    expect(splitUnitFirstLine('Unit 204 123 Main St')).toEqual({ unit: 'Unit 204', rest: '123 Main St' });
+    expect(splitUnitFirstLine('#204 900 Bayview Ter, Venice')).toEqual({ unit: 'Unit 204', rest: '900 Bayview Ter, Venice' });
+    expect(splitUnitFirstLine('123 Main St Apt 204')).toBeNull();
+    const inlineSame = { extraction: null, lead: { address: 'Apt 204 at 123 Main St, Sarasota, FL 34232' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(inlineSame)).toBe('Apt 204 at 123 Main St, Sarasota, FL 34232');
+    const inlineStale = { extraction: null, lead: { address: 'Unit 9 123 Main St, Sarasota, FL 34232' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(inlineStale)).toBe('Apt 204, 123 Main St, Sarasota, FL 34232');
   });
 
   test('serviceAddressOverride (the item-bound building) outranks the extraction AND the lead/customer lines of an extraction-less fallback context', () => {

@@ -27,6 +27,10 @@ const DELIVERY_CLAIM_NOT_LIVE_SQL = `(
 )`;
 
 const LINKAGE_INVALIDATION_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''";
+// The clarify re-price hold (estimate-clarify-asks): a draft whose dollars
+// or address are about to be corrected is not publishable — anchor OR
+// grouped sibling (codex r1 P1 on #3804).
+const REPRICE_PENDING_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngine'->>'reprice_pending_at', '') = ''";
 const INVALIDATION_PENDING_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''";
 
 // The ONE in-flight verdict for a call's processing state — lives here
@@ -229,12 +233,24 @@ async function callUnitAnswerFence(dbc, callLogId, { address = null } = {}) {
   return unitAnswerFenceReason(fence, { address });
 }
 
+// Whether an operator edit may LIFT a unit hold: only once the row's
+// address carries the answered unit. A revision that changed pricing or
+// services but kept the whole-building address has not incorporated the
+// answer, and the hold stays (codex r1 P1 on #3804). No call or no fence =
+// an ordinary re-price guard, lifted by the observing edit as before.
+async function unitHoldSatisfied(dbc, callLogId, address) {
+  if (!callLogId) return true;
+  const fence = await callUnitAnswer(dbc, callLogId);
+  return unitAnswerFenceReason(fence, { address }) === null;
+}
+
 module.exports = {
   ESTIMATE_DELIVERY_CLAIM_TTL_MS,
   CALL_EXTRACTION_RETRY_WINDOW_MS,
   DELIVERY_CLAIM_NOT_LIVE_SQL,
   LINKAGE_INVALIDATION_ABSENT_SQL,
   INVALIDATION_PENDING_ABSENT_SQL,
+  REPRICE_PENDING_ABSENT_SQL,
   callReprocessInFlight,
   callPassStillOwned,
   callSideBlockForEstimateData,
@@ -242,4 +258,5 @@ module.exports = {
   callUnitAnswer,
   unitAnswerFenceReason,
   callUnitAnswerFence,
+  unitHoldSatisfied,
 };

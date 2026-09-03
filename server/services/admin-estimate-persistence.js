@@ -2938,8 +2938,15 @@ async function reviseAdminEstimate({
           const lockedEngine = pendingData.estimatorEngine && typeof pendingData.estimatorEngine === 'object' ? pendingData.estimatorEngine : null;
           if (lockedEngine && observedRepriceAttempt !== null && lockedEngine.reprice_pending_at
             && String(lockedEngine.reprice_attempt || '') === observedRepriceAttempt) {
-            delete lockedEngine.reprice_pending_at;
-            delete lockedEngine.reprice_attempt;
+            // A UNIT hold is lifted only once the revised address carries the
+            // answered unit — a pricing-only edit keeps the whole-building
+            // quote held (codex r1 P1 on #3804).
+            const { unitHoldSatisfied } = require('../utils/estimate-claim-sql');
+            const revisedAddress = revisedFields.address !== undefined ? revisedFields.address : lockedPrior.address;
+            if (await unitHoldSatisfied(trx, lockedEngine.callLogId || null, revisedAddress)) {
+              delete lockedEngine.reprice_pending_at;
+              delete lockedEngine.reprice_attempt;
+            }
           }
           revisedFields.estimate_data = JSON.stringify(pendingData);
         }

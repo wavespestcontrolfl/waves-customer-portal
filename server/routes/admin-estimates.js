@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -1497,6 +1497,15 @@ async function revertLeadServiceForSend(estimateId, serviceKey, parkId = null) {
 // row a concurrent send already claimed is never stolen or released by this
 // one) — two concurrent sends of different group members serialize, the loser
 // aborts pre-delivery. Returns the claimed rows for later publish/release.
+// Sibling rows are read whole inside the claim transaction; the marker
+// lives in estimate_data (see estimate-clarify-asks.repricePendingActive).
+function siblingRepricePending(row) {
+  try {
+    const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+    return require('../services/estimate-clarify-asks').repricePendingActive(data?.estimatorEngine);
+  } catch { return false; }
+}
+
 async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false, autoSend = false } = {}) {
   // Mid-send check, sibling enumeration, and the claims run in ONE
   // transaction under a group-scoped advisory xact lock (codex #3244 r8):
@@ -1592,6 +1601,14 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       assertEstimateSendable(sibling, {
         engineReviewAcknowledged: ['scheduled', 'sending'].includes(String(sibling.status || '')),
       });
+      // A sibling under a clarify re-price hold is not publishable either
+      // — the anchor's verdict never inspects sibling markers (codex r1 P1
+      // on #3804); the claim below re-asserts this atomically.
+      if (siblingRepricePending(sibling)) {
+        const held = new Error('it is held for a re-price (a clarify answer replaces its dollars or address) — re-draft or revise it first');
+        held.statusCode = 409;
+        throw held;
+      }
       // Automation policy (pre-push codex P0): the gate-dependent check
       // above lets a CLIENT_FALLBACK sibling through while the gate is off;
       // an auto-send never publishes one.
@@ -1616,6 +1633,7 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       const won = await trx('estimates')
         .where({ id: sibling.id, status: sibling.status, updated_at: sibling.updated_at })
         .whereNull('price_locked_at')
+        .whereRaw(REPRICE_PENDING_ABSENT_SQL)
         // Same atomic re-assertion as the anchor claims: the preflight above
         // read the sibling before this lock; a fallback stamp landing in
         // between loses the race here.
@@ -2504,6 +2522,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           const updated = await db('estimates')
             .where({ id: sibling.id, status: 'sending' })
             .whereNull('price_locked_at')
+            // A hold stamped after the claim (a clarify reply lands on a
+            // 'sending' row by design) fails the publication; the sibling
+            // is released for the operator (codex r1 P1 on #3804).
+            .whereRaw(REPRICE_PENDING_ABSENT_SQL)
             .update({
               // A customer can open the anchor link instantly and view this
               // sibling while it's still under the pre-delivery claim — the
@@ -3573,7 +3595,7 @@ router.put('/:id/proposal', async (req, res, next) => {
         ['estimate-group-send', String(groupId)],
       );
     }
-    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'estimate_group_id', 'status', 'estimate_data');
+    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'estimate_group_id', 'status', 'estimate_data', 'address');
     if (!locked || (locked.estimate_group_id || null) !== groupId) {
       throw retry('This estimate changed groups while you were editing — reload and retry.');
     }
@@ -3592,8 +3614,14 @@ router.put('/:id/proposal', async (req, res, next) => {
         const observedEngine = existingData.estimatorEngine && typeof existingData.estimatorEngine === 'object' ? existingData.estimatorEngine : {};
         if (observedEngine.reprice_pending_at && nextEngine.reprice_pending_at
           && String(nextEngine.reprice_attempt || '') === String(observedEngine.reprice_attempt || '')) {
-          delete nextEngine.reprice_pending_at;
-          delete nextEngine.reprice_attempt;
+          // A UNIT hold is lifted only once the row's address carries the
+          // answered unit (the proposal save never edits the address column;
+          // the operator corrects it first) — codex r1 P1 on #3804.
+          const { unitHoldSatisfied } = require('../utils/estimate-claim-sql');
+          if (await unitHoldSatisfied(trx, nextEngine.callLogId || null, locked.address)) {
+            delete nextEngine.reprice_pending_at;
+            delete nextEngine.reprice_attempt;
+          }
         }
         nextData.estimatorEngine = nextEngine;
       }

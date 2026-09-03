@@ -579,8 +579,29 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     const liftAt = persistence.indexOf('delete lockedEngine.reprice_pending_at;');
     expect(liftAt).toBeGreaterThan(-1);
     expect(persistence.indexOf('revisedFields.estimate_data = JSON.stringify(pendingData);')).toBeGreaterThan(liftAt);
-    // …and the commercial proposal save lifts its observed marker the same way.
-    expect(src('../routes/admin-estimates.js')).toContain('delete nextEngine.reprice_pending_at;');
+    // …and the commercial proposal save lifts its observed marker the same way — both only once the
+    // address carries the answered unit (codex r1 P1 on #3804).
+    const route = src('../routes/admin-estimates.js');
+    expect(route).toContain('delete nextEngine.reprice_pending_at;');
+    expect(route).toContain('unitHoldSatisfied(trx, nextEngine.callLogId || null, locked.address)');
+    expect(persistence).toContain('unitHoldSatisfied(trx, lockedEngine.callLogId || null, revisedAddress)');
+    // Grouped siblings honor the hold at preflight, at the claim, and at publication.
+    expect(route).toContain('if (siblingRepricePending(sibling)) {');
+    expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(2);
+    // A force-reprocess whose adopted answer meets the held whole-building draft supersedes it.
+    expect(engine).toContain("context.supersedeReason = 'unit_answer_adopted';");
+    expect(engine).toContain('sameStreetAddress(splitUnitFirstLine(own)?.rest || own, buildingLine)');
+  });
+
+  test('unitHoldSatisfied: no call or no fence lifts as before; a fenced call lifts only for an address carrying the unit', async () => {
+    const { unitHoldSatisfied } = require('../utils/estimate-claim-sql');
+    const FENCE = { unit: 'Apt 204', building: { street_line_1: '1048 Example Lakes Cir', city: 'Sarasota', postal_code: '34232' } };
+    const dbcFor = (metadata) => (table) => ({ where: () => ({ first: async () => (table === 'call_log' ? { metadata } : null) }) });
+    expect(await unitHoldSatisfied(dbcFor({ unit_answer: FENCE }), null, '1048 Example Lakes Cir, Sarasota, FL 34232')).toBe(true);
+    expect(await unitHoldSatisfied(dbcFor({}), 'call-1', '1048 Example Lakes Cir, Sarasota, FL 34232')).toBe(true);
+    expect(await unitHoldSatisfied(dbcFor({ unit_answer: FENCE }), 'call-1', '1048 Example Lakes Cir, Sarasota, FL 34232')).toBe(false);
+    expect(await unitHoldSatisfied(dbcFor({ unit_answer: FENCE }), 'call-1', '1048 Example Lakes Cir Apt 204, Sarasota, FL 34232')).toBe(true);
+    expect(await unitHoldSatisfied(dbcFor({ unit_answer: FENCE }), 'call-1', '5 Other Rd, Venice, FL 34285')).toBe(true);
   });
 
   test('slot reservation locks the call row FOR UPDATE before its verdict and holds it through the commit', () => {

@@ -1324,7 +1324,10 @@ async function maybeDraftEstimateForCall({
           const buildingLine = b?.street_line_1
             ? [b.street_line_1, b.city, b.postal_code ? `FL ${b.postal_code}` : null].filter(Boolean).join(', ')
             : null;
-          if (!own || !buildingLine || sameStreetAddress(own, buildingLine)) {
+          const { splitUnitFirstLine } = require('../../utils/address-normalizer');
+          // Compared on the STREET — a structural unit-first line ("Bldg 9,
+          // 123 Main St") is at the building (codex r1 P2 on #3804).
+          if (!own || !buildingLine || sameStreetAddress(splitUnitFirstLine(own)?.rest || own, buildingLine)) {
             unitLineOverride = fence.unit;
             if (!serviceAddressOverride?.street_line_1 && b?.street_line_1) serviceAddressOverride = b;
             result.unitAnswerAdopted = true;
@@ -1432,6 +1435,27 @@ async function maybeDraftEstimateForCall({
 
     if (!dryRun) {
       const existing = await existingDraftForCall(callLogId);
+      // An adopted unit answer whose existing draft is the HELD whole-building
+      // row (the clarify hold: reprice marker + an address the fence
+      // rejects) makes that row this run's supersede target — otherwise a
+      // force-reprocess would return it as `existing` and never compose the
+      // unit (codex r1 P2 on #3804). Same attempt token, so the creator's
+      // lock takes it and archives it after the replacement insert.
+      if (result.unitAnswerAdopted && existing && !supersedeEstimateId) {
+        try {
+          const exData = typeof existing.estimate_data === 'string' ? JSON.parse(existing.estimate_data) : (existing.estimate_data || {});
+          const exEngine = exData?.estimatorEngine || {};
+          const { unitAnswerFenceReason } = require('../../utils/estimate-claim-sql');
+          if (exEngine.reprice_pending_at && unitAnswerFenceReason({ unit: unitLineOverride, building: serviceAddressOverride || null }, { address: existing.address })) {
+            supersedeEstimateId = String(existing.id);
+            context.supersedeEstimateId = supersedeEstimateId;
+            context.supersedeReason = 'unit_answer_adopted';
+            context.supersedeAttempt = exEngine.reprice_attempt || null;
+          }
+        } catch (exErr) {
+          logger.warn(`[estimator-engine] held-draft read failed (composing without a supersede target): ${exErr.message}`);
+        }
+      }
       // The draft a re-run supersedes IS the existing draft for this call —
       // it is replaced inside the dedupe transaction, not returned as-is.
       const supersedesExisting = existing && supersedeEstimateId
