@@ -36,6 +36,7 @@ const { resolveCallLeadSource, referrerNameFromExtracted } = require('../../util
 // hasWorkableLeadSignal (concrete service intent + reachability), so the
 // successor mirror must re-judge it, not just the content veto.
 const { hasWorkableLeadSignal } = require('../../utils/workable-lead-signal');
+const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../../utils/call-link-override');
 
 // Map a lead_sources.source_type to the ad_service_attribution channel key +
 // paid flag, so inbound CALLS bucket into the SAME channels as web-form leads
@@ -1073,6 +1074,10 @@ async function findSettledSuccessorCall(dbc, leadId, rejectedCallId) {
     // carries). Both are excluded on durable columns; the content gate on
     // ai_extraction is applied in JS below.
     .whereRaw("LOWER(COALESCE(direction, '')) NOT LIKE 'outbound%'")
+    // An operator's EXPLICIT unlink is a durable dissent too (Codex #3764
+    // r2 P2): the office said this call belongs to no customer, so it can
+    // never be the successor that carries a lead's attribution.
+    .whereRaw(NOT_EXPLICITLY_UNLINKED_SQL)
     .whereNotExists(function sidLinkedToAnotherLead() {
       this.select(1).from('leads as lo')
         .whereRaw('lo.twilio_call_sid = call_log.twilio_call_sid')

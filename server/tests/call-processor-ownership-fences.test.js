@@ -81,6 +81,30 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(body.slice(aiValidationAt - 200, aiValidationAt)).toContain(".where('processing_token', procToken)");
   });
 
+  test('the customer checkpoint honours the LATEST operator link, read inside the write', () => {
+    // A relink made while the pass runs must not be overwritten by the
+    // pass's snapshot of the override taken at claim time.
+    const at = body.indexOf("'customer_link_override')\"\n        + \" THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE ?::uuid END\"");
+    expect(at).toBeGreaterThan(-1);
+    expect(body.slice(at - 400, at + 200)).toContain("jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')");
+    // The phantom-customer unlink never clears a person's link either.
+    const unlinkAt = body.indexOf(".update({ customer_id: null, updated_at: new Date() });");
+    expect(unlinkAt).toBeGreaterThan(-1);
+    expect(body.slice(unlinkAt - 300, unlinkAt)).toContain("NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')");
+  });
+
+  test('an explicit operator unlink stops the pass from finding or minting a customer, not only from writing the link back', () => {
+    expect(body).toContain("const explicitUnlink = !!customerLinkOverride && !customerLinkOverride.customer_id;");
+    // The one branch that finds-or-creates a customer from the caller's
+    // phone/name is guarded by it; the name-reconciliation branch already
+    // skips any override.
+    expect(body).toContain('if (!customerId && phone && !explicitUnlink) {');
+    expect(body).toContain('if (customerId && extracted.first_name && phone && !customerLinkOverride) {');
+    // …and a customer-less result under an explicit unlink is intentional,
+    // never customer_creation_failed.
+    expect(body).toContain("!v2NonCustomerCallNature && !explicitUnlink);");
+  });
+
   test('the customer timeline entry is exactly-once per call in Postgres, not by a check-then-insert', () => {
     // One statement: the insert is fenced on the processing token AND
     // exactly-once on the call_log_id partial unique index — a stale pass
@@ -211,6 +235,32 @@ describe('processRecording re-reads the recording it is accountable for after th
   });
 });
 
+// An operator adopting a recording claims FOR that recording: both claim
+// writes (automatic and force) carry the expected-recording predicate, and a
+// refused claim whose recording moved reports recording_changed rather than
+// already_processing (codex #3736 gh-r6).
+describe('processRecording claims are fenced to the expected recording when one is given', () => {
+  const { body } = processRecordingBody();
+  test('both claim writes carry the expectedRecordingSid predicate', () => {
+    const fence = "if (opts.expectedRecordingSid) this.where('recording_sid', opts.expectedRecordingSid);";
+    const first = body.indexOf(fence);
+    const second = body.indexOf(fence, first + 1);
+    expect(first).toBeGreaterThan(-1);
+    expect(second).toBeGreaterThan(first);
+    // Each fence sits inside a claim chain: the next .update( after it sets processing_token.
+    for (const at of [first, second]) {
+      const upd = body.indexOf('.update(', at);
+      expect(body.slice(upd, upd + 300)).toContain('processing_token: procToken');
+    }
+  });
+  test('a blocked claim re-reads the recording and reports recording_changed when it moved', () => {
+    const blocked = body.indexOf('if (claimBlocked) {');
+    const branch = body.slice(blocked, blocked + 900);
+    expect(branch).toContain("first('recording_sid')");
+    expect(branch).toContain("reason: 'recording_changed'");
+  });
+});
+
 // A replaced recording's pass must write its OWN route decision: the audit
 // key includes the recording, both inserts target that key, and the same-run
 // outcome update addresses this recording's row only (codex #3736 gh-r7).
@@ -229,3 +279,32 @@ describe('route decisions are keyed on the recording they were derived from', ()
   });
 });
 
+// An explicit operator unlink covers the lead as well as the customer: a
+// reprocess must not mint or reuse a customer-less lead from the call's
+// phone (codex #3736 gh-r8).
+describe('an explicit unlink gates lead creation', () => {
+  const { body } = processRecordingBody();
+  test('the known-caller hint follows the operator link — the override target, or none after an explicit unlink (codex #3764 gh-r2 P1)', () => {
+    const at = body.indexOf('const knownCustomer = customerLinkOverride');
+    expect(at).toBeGreaterThan(-1);
+    const site = body.slice(at, at + 400);
+    expect(site).toContain("await db('customers').where({ id: customerLinkOverride.customer_id }).whereNull('deleted_at').first()");
+    expect(site).toContain(': null)');
+    expect(site).toContain(': await findCustomerForCallContact(contactPhone, {});');
+    // The override is resolved BEFORE Step 2 reads it.
+    expect(body.indexOf('const customerLinkOverride = (() => {')).toBeLessThan(at);
+  });
+
+  test('an adoption carries the pre-swap completed state into the lead first-contact clamp through the row stamp, so the sweep\'s retries see it too (codex #3764 gh-r2 + gh-r4 P2)', () => {
+    expect(body).toContain("COMPLETED_STATUSES.has(adoptedStamp.previous_processing_status)");
+    expect(body).toContain("adoptedStamp.recording_sid === (call.recording_sid || null)");
+    expect(body).toContain("const wasAlreadyProcessed = COMPLETED_STATUSES.has(call.processing_status) || adoptedOverCompleted;");
+    expect(body).not.toContain('opts.reprocessOfProcessed');
+  });
+
+  test('workableUnnamedLead consults explicitUnlink', () => {
+    const at = body.indexOf('const workableUnnamedLead = ');
+    expect(at).toBeGreaterThan(-1);
+    expect(body.slice(at, at + 200)).toContain('!explicitUnlink');
+  });
+});

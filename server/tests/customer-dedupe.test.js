@@ -1043,6 +1043,37 @@ describe('executeMerge', () => {
     expect(JSON.parse(state.journal.repointed_ids).irrigation_trigger_ids).toEqual(['em1']);
   });
 
+  it("rewrites an operator's call link (call_log.metadata.customer_link_override) from the loser to the winner and journals the call ids (codex #3736 gh-r5)", async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };
+    const { trx, state } = buildTrx({ winner, loser, fkRows: [{ table_name: 'leads', column_name: 'customer_id' }] });
+    const base = trx.getMockImplementation();
+    state.overrideRewrites = [];
+    trx.mockImplementation((table) => {
+      if (table !== 'call_log') return base(table);
+      return makeChain(table, (q) => {
+        expect(q.args('whereRaw')).toEqual(["metadata -> 'customer_link_override' ->> 'customer_id' = ?", [LOSER]]);
+        if (q.called('select')) return [{ id: 'cl1' }];
+        if (q.called('update')) { state.overrideRewrites.push(q.args('update')[0]); return 1; }
+        return 1;
+      });
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.overrideRewrites).toHaveLength(1);
+    expect(state.overrideRewrites[0].updated_at).toBe('NOW()');
+    // The rewrite is a one-key jsonb_set of the embedded id, never a blob written back.
+    const rewrite = trx.raw.mock.calls.find(([sql]) => String(sql).includes("'{customer_link_override,customer_id}'"));
+    // …plus this merge's stamp, so the undo can tell the rewrite from a later relink to the same winner (codex #3764 gh-r1 P2).
+    // The stamp is PUSHED onto merge_stamps (a stack), never a scalar overwrite: a chained merge's undo pops only its own.
+    expect(rewrite).toEqual([expect.stringContaining("'{customer_link_override,merge_stamps}', COALESCE(metadata -> 'customer_link_override' -> 'merge_stamps', '[]'::jsonb) || ?::jsonb"), [JSON.stringify(WINNER), expect.any(String)]]);
+    expect(rewrite[0]).toContain('jsonb_set(jsonb_set(metadata');
+    expect(result.repointed['call_log.customer_link_override']).toBe(1);
+    const ids = JSON.parse(state.journal.repointed_ids);
+    expect(ids.customer_link_override_call_ids).toEqual(['cl1']);
+    expect(JSON.parse(rewrite[1][1])).toEqual([ids.customer_link_override_merged_at]);
+  });
+
   it('merging DIFFERENT homes marks the surviving sprinkler settings moved (stamp + confirmation reset); the same home does not (codex #3565 gh-r22)', async () => {
     const run = async (loserAddr) => {
       const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', address_line1: '100 Main St', city: 'Bradenton', zip: '34205' };

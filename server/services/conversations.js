@@ -296,6 +296,14 @@ async function syncVoiceMessageForCall(callSid, extraPatch = {}) {
     const ourEndpointId = direction === 'outbound' ? call.from_phone : call.to_phone;
     const contactPhone = direction === 'outbound' ? call.to_phone : call.from_phone;
     const createdAt = call.created_at || new Date();
+    // An operator's explicit unlink (metadata.customer_link_override with a
+    // null customer_id) has to move the message OUT of the previous
+    // customer's thread, or the recording and transcript stay in that
+    // customer's history (Codex #3764 r1 P1). A plain NULL link — never
+    // attributed, or cleared by the processor — is left where it is; the
+    // relink sweep and the customer-linked branch below own those.
+    const override = parseMetadata(call.metadata).customer_link_override;
+    const explicitUnlink = !call.customer_id && !!override && typeof override === 'object' && override.customer_id === null;
 
     return await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`message:voice:${call.twilio_call_sid}`]);
@@ -318,6 +326,18 @@ async function syncVoiceMessageForCall(callSid, extraPatch = {}) {
             patch.conversation_id = targetThread.id;
             sourceConversationId = existing.conversation_id;
             targetConversationId = targetThread.id;
+          }
+        } else if (explicitUnlink && contactPhone) {
+          const contactThread = await findOrCreateThreadWith(trx, {
+            customerId: null,
+            channel: 'voice',
+            ourEndpointId: ourEndpointId || null,
+            contactPhone,
+          });
+          if (contactThread && contactThread.id !== existing.conversation_id) {
+            patch.conversation_id = contactThread.id;
+            sourceConversationId = existing.conversation_id;
+            targetConversationId = contactThread.id;
           }
         }
 
