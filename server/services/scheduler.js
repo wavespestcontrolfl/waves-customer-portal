@@ -6421,7 +6421,10 @@ function initScheduledJobs() {
   // when the answer is never / past the limit. 23 is coprime with 10 so the
   // sample walks through every phase offset (the '*/7' reasoning above).
   // Dark behind GATE_HERMES_WATCHDOG (the service reads the gate itself).
-  // See server/services/agent-watchdog-liveness.js.
+  // Like every registration below the cronJobs early return, this never runs
+  // while GATE_CRON_JOBS is off — the snapshot then reports
+  // scheduler:disabled so Hermes pages instead of waiting on a bell that
+  // cannot ring. See server/services/agent-watchdog-liveness.js.
   // =========================================================================
   cron.schedule('*/23 * * * *', async () => {
     try {

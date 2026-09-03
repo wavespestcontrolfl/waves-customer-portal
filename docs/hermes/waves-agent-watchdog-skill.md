@@ -58,6 +58,9 @@ then the only remedy is a human.
 ## Prerequisites (operator/Adam sets these; not the agent)
 
 Portal (Railway):
+- `GATE_CRON_JOBS=true` (global cron gate — already set). The reciprocal
+  "watchdog silent" bell is a cron; with this off it never runs, and the
+  snapshot reports `scheduler:disabled` on the first poll so you are told.
 - `GATE_HERMES_WORKER=true` (shared worker-auth gate — already set).
 - `GATE_HERMES_WATCHDOG=true` — this lane's switch. Unset = kill.
 - `LINK_WORKER_SECRET_HERMES_WATCHDOG=<random 32+ bytes>` — the watchdog's OWN

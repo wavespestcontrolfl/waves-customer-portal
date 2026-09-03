@@ -164,6 +164,8 @@ def describe(reason, snap):
                     bits.append(f"{j['consecutive_failures']} failures in a row")
                 return " · ".join(bits)
         return f"{name} is {state}"
+    if reason == "scheduler:disabled":
+        return "portal crons are DISABLED (GATE_CRON_JOBS off) — nothing scheduled runs, including the portal's own reciprocal 'watchdog silent' bell"
     if reason == "scheduler:silent":
         s = snap.get("scheduler", {})
         age = s.get("age_minutes")

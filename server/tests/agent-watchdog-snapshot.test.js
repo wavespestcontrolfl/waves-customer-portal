@@ -22,12 +22,12 @@ mockDb.raw = jest.fn();
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
 jest.mock('../config', () => ({ nodeEnv: 'test' }));
-jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => true), isEnabled: jest.fn(() => true) }));
 jest.mock('../utils/db-health', () => ({ isDatabaseReady: jest.fn(async () => true) }));
 jest.mock('../services/intelligence-bar/job-health-tools', () => ({ getScheduledJobHealth: jest.fn() }));
 jest.mock('../services/ops-queue', () => ({ getOpsQueue: jest.fn() }));
 
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, isEnabled } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { isDatabaseReady } = require('../utils/db-health');
 const { getScheduledJobHealth } = require('../services/intelligence-bar/job-health-tools');
@@ -49,6 +49,7 @@ const quietQueue = () => ({
 beforeEach(() => {
   jest.clearAllMocks();
   gateEnvValue.mockReturnValue(true);
+  isEnabled.mockReset().mockReturnValue(true);
   isDatabaseReady.mockResolvedValue(true);
   getScheduledJobHealth.mockResolvedValue(healthyJobs());
   getOpsQueue.mockResolvedValue(quietQueue());
@@ -64,7 +65,7 @@ describe('buildWatchdogSnapshot', () => {
     expect(snap.reasons).toEqual([]);
     expect(snap.database).toEqual({ ok: true, latency_ms: expect.any(Number) });
     expect(snap.jobs).toEqual({ available: true, total: 2, unhealthy: 0, items: [] });
-    expect(snap.scheduler).toMatchObject({ available: true, heartbeat_job: SCHEDULER_HEARTBEAT_JOB, age_minutes: 5, ok: true });
+    expect(snap.scheduler).toMatchObject({ available: true, crons_enabled: true, heartbeat_job: SCHEDULER_HEARTBEAT_JOB, age_minutes: 5, ok: true });
     expect(snap.ops_queue.lanes[0]).toEqual({ key: 'calls', pending: 3, parked: 4, failed: 0, error: false });
     expect(JSON.stringify(snap)).not.toContain('Call processing');
     expect(JSON.stringify(snap)).not.toContain('Jane Customer');
@@ -148,6 +149,14 @@ describe('buildWatchdogSnapshot', () => {
     expect(snap.reasons).toEqual(['jobs:unavailable', 'link_worker:unavailable']);
     expect(snap.verdict).toBe('attention');
     expect(snap.database.ok).toBe(true);
+  });
+
+  test('the global cron gate off is scheduler:disabled on the FIRST poll — no cron (the liveness bell included) will ever run', async () => {
+    isEnabled.mockImplementation((g) => g !== 'cronJobs');
+    const snap = await buildWatchdogSnapshot();
+    expect(snap.scheduler).toMatchObject({ available: true, crons_enabled: false, age_minutes: 5, ok: false });
+    expect(snap.reasons).toEqual(['scheduler:disabled']);
+    expect(snap.verdict).toBe('attention');
   });
 
   test('a scheduler whose heartbeat job last ticked over an hour ago is silent — even though every job still classifies healthy', async () => {

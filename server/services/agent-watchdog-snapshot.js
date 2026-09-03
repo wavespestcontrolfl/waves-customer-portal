@@ -22,7 +22,8 @@
  * reports a fixed `unavailable` marker, never its message.
  *
  * `reasons` are stable string keys (job:<name>:<state>, ops:<lane>:failed,
- * db:degraded, scheduler:silent, link_worker:stale_leases, <read>:unavailable) so the Hermes side
+ * db:degraded, scheduler:disabled, scheduler:silent, link_worker:stale_leases,
+ * <read>:unavailable) so the Hermes side
  * diffs them against its last poll without a model call and pages only on
  * CHANGE. Keys carry NO counts — a worsening or draining incident keeps one
  * identity; the current numbers sit in the snapshot body next to it.
@@ -36,6 +37,7 @@
 const db = require('../models/db');
 const config = require('../config');
 const logger = require('./logger');
+const { isEnabled } = require('../config/feature-gates');
 const { isDatabaseReady } = require('../utils/db-health');
 const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools');
 const { getOpsQueue } = require('./ops-queue');
@@ -81,17 +83,22 @@ async function readDatabase() {
 // A fresh deployment has no row until the first tick; give the process one
 // silence window before a missing row counts as a dead scheduler.
 async function readScheduler() {
+  // initScheduledJobs() returns before registering ANY cron (the liveness
+  // bell included) while the global cron gate is off — say so outright
+  // instead of waiting for the heartbeat row to age past the limit.
+  const cronsEnabled = isEnabled('cronJobs');
   const row = await db('job_health').where({ job_name: SCHEDULER_HEARTBEAT_JOB }).first();
   const lastTick = row && row.last_started_at ? new Date(row.last_started_at) : null;
   const ageMinutes = lastTick ? Math.round((Date.now() - lastTick.getTime()) / 60000) : null;
   const warming = !lastTick && process.uptime() < SCHEDULER_SILENT_AFTER_MINUTES * 60;
   return {
     available: true,
+    crons_enabled: cronsEnabled,
     heartbeat_job: SCHEDULER_HEARTBEAT_JOB,
     last_tick_at: lastTick ? lastTick.toISOString() : null,
     age_minutes: ageMinutes,
     silent_after_minutes: SCHEDULER_SILENT_AFTER_MINUTES,
-    ok: warming || (ageMinutes !== null && ageMinutes <= SCHEDULER_SILENT_AFTER_MINUTES),
+    ok: cronsEnabled && (warming || (ageMinutes !== null && ageMinutes <= SCHEDULER_SILENT_AFTER_MINUTES)),
   };
 }
 
@@ -161,6 +168,7 @@ function judge({ database, scheduler, jobs, ops_queue: ops, link_worker: lw }) {
   const reasons = [];
   if (database && database.ok === false) reasons.push('db:degraded');
   if (scheduler && scheduler.available === false) reasons.push('scheduler:unavailable');
+  else if (scheduler && scheduler.crons_enabled === false) reasons.push('scheduler:disabled');
   else if (scheduler && scheduler.ok === false) reasons.push('scheduler:silent');
   if (jobs && jobs.available === false) reasons.push('jobs:unavailable');
   for (const j of (jobs && jobs.items) || []) reasons.push(`job:${j.job}:${j.state}`);
@@ -179,7 +187,7 @@ function judge({ database, scheduler, jobs, ops_queue: ops, link_worker: lw }) {
 async function buildWatchdogSnapshot() {
   const [database, scheduler, jobs, opsQueue, linkWorker] = await Promise.all([
     contain('database', readDatabase, { ok: false, latency_ms: null }),
-    contain('scheduler', readScheduler, { heartbeat_job: SCHEDULER_HEARTBEAT_JOB, last_tick_at: null, age_minutes: null, silent_after_minutes: SCHEDULER_SILENT_AFTER_MINUTES, ok: false }),
+    contain('scheduler', readScheduler, { crons_enabled: null, heartbeat_job: SCHEDULER_HEARTBEAT_JOB, last_tick_at: null, age_minutes: null, silent_after_minutes: SCHEDULER_SILENT_AFTER_MINUTES, ok: false }),
     contain('jobs', readJobs, { total: 0, unhealthy: 0, items: [] }),
     contain('ops_queue', readOpsQueue, { pending: 0, parked: 0, failed: 0, lanes: [] }),
     contain('link_worker', readLinkWorker, { last_claim_at: null, last_report_at: null, open_leases: 0, stale_leases: 0 }),
