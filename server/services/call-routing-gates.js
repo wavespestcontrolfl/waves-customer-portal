@@ -151,38 +151,30 @@ function buildRouteDecision({
 // ai_extraction_enriched: a force-reprocess overwrites that while the open
 // card keeps its original ask.
 function askSnapshot(extraction) {
+  const request = extraction?.service_request || {};
+  const address = extraction?.property?.service_address || {};
+  const text = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const list = (v) => (Array.isArray(v) ? v : []);
   return {
-    // Filing-time snapshot of the requested service: the evidence sweep
-    // matches a later booking against THIS, never the call's rolling
-    // ai_extraction_enriched (a force-reprocess overwrites that while the
-    // open card keeps its original ask).
-    requested_service_categories: [
-      extraction?.service_request?.primary_service_category,
-      ...(Array.isArray(extraction?.service_request?.secondary_categories) ? extraction.service_request.secondary_categories : []),
-    ].filter((c) => typeof c === 'string' && c.trim()),
-    // The specific catalog service the caller named, when the model
-    // picked one: a coarse category (pest_general for a flea treatment)
-    // is not the ask, and a generic booking in that category must not
-    // answer it.
-    requested_specific_service: typeof extraction?.service_request?.specific_service_name === 'string' && extraction.service_request.specific_service_name.trim()
-      ? extraction.service_request.specific_service_name.trim()
-      : null,
-    // The cadence the caller asked for: a recurring-plan inquiry and a
-    // one-time request both reduce to the same category, and a one-time
-    // booking must never answer the plan ask.
-    requested_service_intent: typeof extraction?.service_request?.service_intent === 'string' && extraction.service_request.service_intent
-      ? extraction.service_request.service_intent
-      : null,
-    // Filing-time snapshot of WHERE the caller asked for service, for the
-    // same reason: the sweep's same-customer booking arm applies only
-    // when the ask named no address or exactly the on-file one.
+    // The requested categories (primary + secondaries), the specific
+    // catalog service the caller named (a coarse category — pest_general
+    // for a flea treatment — is not the ask, and a generic booking in that
+    // category must not answer it), and the cadence asked for (a recurring-
+    // plan inquiry and a one-time request both reduce to the same category,
+    // and a one-time booking must never answer the plan ask).
+    requested_service_categories: [request.primary_service_category, ...list(request.secondary_categories)].filter((c) => text(c)),
+    requested_specific_service: text(request.specific_service_name),
+    requested_service_intent: text(request.service_intent),
+    // WHERE the caller asked for service: the sweep's same-customer booking
+    // arm applies only when the ask named no address or exactly the on-file
+    // one.
     requested_address: {
-      street_line_1: extraction?.property?.service_address?.street_line_1 ?? null,
-      street_line_2: extraction?.property?.service_address?.street_line_2 ?? null,
-      city: extraction?.property?.service_address?.city ?? null,
-      postal_code: extraction?.property?.service_address?.postal_code ?? null,
-      raw_text: extraction?.property?.service_address?.raw_text ?? null,
-      additional_properties: Array.isArray(extraction?.property?.additional_properties) ? extraction.property.additional_properties.length : 0,
+      street_line_1: address.street_line_1 ?? null,
+      street_line_2: address.street_line_2 ?? null,
+      city: address.city ?? null,
+      postal_code: address.postal_code ?? null,
+      raw_text: address.raw_text ?? null,
+      additional_properties: list(extraction?.property?.additional_properties).length,
     },
   };
 }

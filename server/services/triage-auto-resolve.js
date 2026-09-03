@@ -459,15 +459,19 @@ function cadenceMatches(item, visit) {
 
 // The calendar days (ET, YYYY-MM-DD) the caller asked for, from the card's
 // scheduling payload. Inclusive; a single requested date is a one-day window.
-// A confirmed start is the day of the confirmed wall clock above; only the
-// requested range is read as instants.
+// A confirmed start pins BOTH bounds to the day of the confirmed wall clock
+// above — a residual requested range beside it ("Tuesday to Thursday, then
+// confirmed Tuesday at 10") is not the ask any more, and a Thursday booking
+// must not close a Tuesday confirmation (codex r21 P1). Only the requested
+// range is read as instants.
 function requestedWindow(item) {
   const payload = parseMaybeJson(item.payload);
   const w = payload?.scheduling_window || {};
   const wall = confirmedWall(item);
-  const startRaw = wall ? null : w.requested_date_range_start;
-  if (!wall && (!startRaw || !toDate(startRaw))) return null;
-  const start = wall ? wall.slice(0, 10) : etCalendarDayOf(startRaw);
+  if (wall) return { start: wall.slice(0, 10), end: wall.slice(0, 10) };
+  const startRaw = w.requested_date_range_start;
+  if (!startRaw || !toDate(startRaw)) return null;
+  const start = etCalendarDayOf(startRaw);
   const end = w.requested_date_range_end && toDate(w.requested_date_range_end) ? etCalendarDayOf(w.requested_date_range_end) : start;
   return end >= start ? { start, end } : { start: end, end: start };
 }
@@ -1048,96 +1052,118 @@ function bookingCoversRequest(item, mine, { singleProperty, places }) {
 // The priced LINES an estimate carries, each with its own service words
 // and cadence — a delivered quote is judged line by line: distinct
 // requested services need distinct priced lines, and the line answering a
-// service must carry the asked cadence (codex r19 P1 ×2). An AUTHORED
-// commercial proposal is the quote: its service programs (recurring),
-// building line items (per their frequency) and corrective work (one-time)
-// replace the engine lines entirely — the pricing audit's rule — because
-// the engine's manual-quote placeholders stay in the blob with their
-// quote-required booleans cleared and no price (codex r20 P1). Otherwise
-// the engine result's typed lists: recurring.services → recurring; the
-// one-time lists → one-time, except an item included ON the program, which
-// is priced into the recurring plan and quotes no standalone job;
-// commercial lineItems → recurring; palm injection → recurring. A line is
-// one that PRICES something: a quote-required / manual-review entry or one
-// with no positive amount is a placeholder, not a quote (codex r20 P1).
-// Words per line: its own name fields plus the service family the shared
-// line reader's text patterns assign them. An estimate with NO typed lines
-// (a legacy or manual row) is ONE line — its service_interest, the families
-// the shared reader infers from its inputs and text, and the engine's svc*
-// input flags — at the cadence its totals columns show. Never estimate_text
-// (the rendered document's boilerplate names services it does not price),
-// never the category column (RESIDENTIAL / COMMERCIAL), and never an input
-// flag beside typed lines (the flag selects a service; only a line prices
-// it).
-function estimateLines(row) {
-  const { inferEstimateServiceLines, serviceKeysFromText, SERVICE_LINE_LABELS, parseEstimateData } = require('./estimate-service-lines');
-  const familyOf = (names) => serviceKeysFromText(...names).flatMap((k) => (k && k !== 'unknown' ? [k, SERVICE_LINE_LABELS[k]] : []));
-  const namesOf = (e) => [e.service, e.serviceKey, e.service_key, e.name, e.label, e.description, e.detail, e.det].filter((w) => typeof w === 'string');
-  const amountOf = (e, keys) => keys.map((k) => Number(e?.[k])).find((n) => Number.isFinite(n) && n > 0) || 0;
-  const placeholder = (e) => e.quoteRequired === true || e.requiresManualReview === true;
-  const data = parseEstimateData(row.estimate_data) || {};
+// service must carry the asked cadence (codex r19 P1 ×2). Three sources,
+// in order: an AUTHORED commercial proposal is the quote (its lines replace
+// the engine's entirely — the pricing audit's rule — because the engine's
+// manual-quote placeholders stay in the blob with their quote-required
+// booleans cleared and no price, codex r20 P1); else the engine result's
+// typed lists; else, for a legacy or manual row with no typed lines, ONE
+// line at the cadence its totals columns show. A line is one that PRICES
+// something: a quote-required / manual-review entry or one with no positive
+// amount is a placeholder, not a quote. Never estimate_text (the rendered
+// document's boilerplate names services it does not price), never the
+// category column (RESIDENTIAL / COMMERCIAL), and never an input flag
+// beside typed lines (the flag selects a service; only a line prices it).
+const RECURRING = { recurring: true, oneTime: false };
+const ONE_TIME = { recurring: false, oneTime: true };
+// Where the engine result prices its lines and which field carries the
+// price: recurring programs (monthly — or annual / per-application for a
+// termite bond or a per-visit program, codex r21 P2), the one-time job
+// lists, commercial lineItems. An item included ON the program is priced
+// into the recurring plan and quotes no standalone job.
+const RECURRING_AMOUNT_KEYS = ['mo', 'monthly', 'monthlyTotal', 'monthly_total', 'annual', 'annualTotal', 'annual_total', 'perApplication', 'pricePerApplication', 'amount'];
+const ONE_TIME_AMOUNT_KEYS = ['price', 'amount', 'total'];
+const ENGINE_LINE_SOURCES = [
+  { list: (root) => root.recurring?.services, cadence: RECURRING, amountKeys: RECURRING_AMOUNT_KEYS },
+  { list: (root) => root.oneTime?.items, cadence: ONE_TIME, amountKeys: ONE_TIME_AMOUNT_KEYS },
+  { list: (root) => root.oneTime?.specItems, cadence: ONE_TIME, amountKeys: ONE_TIME_AMOUNT_KEYS },
+  { list: (root) => root.specItems, cadence: ONE_TIME, amountKeys: ONE_TIME_AMOUNT_KEYS },
+  { list: (root) => root.lineItems, cadence: RECURRING, amountKeys: ['monthly', 'mo', 'amount'] },
+];
+const amountOf = (entry, keys) => keys.map((k) => Number(entry?.[k])).find((n) => Number.isFinite(n) && n > 0) || 0;
+const isPlaceholder = (entry) => entry.quoteRequired === true || entry.requiresManualReview === true;
+const entryNames = (entry) => [entry.service, entry.serviceKey, entry.service_key, entry.name, entry.label, entry.description, entry.detail, entry.det];
+
+// One line per priced entry — its own name fields plus the service family
+// the shared line reader's text patterns assign them; the same entry
+// persisted under both result roots is one line, not two.
+function lineCollector() {
+  const { serviceKeysFromText, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
   const lines = [];
   const seen = new Set();
-  // One line per priced entry; the same entry persisted under both result
-  // roots is one line, not two (the line reader's identity rule).
   const add = (rawNames, cadence, priced) => {
     if (!priced) return;
     const names = rawNames.filter((w) => typeof w === 'string' && w.trim());
     const identity = [...names, cadence.recurring].join('|');
     if (seen.has(identity)) return;
     seen.add(identity);
-    lines.push({ words: [...names, ...familyOf(names)].join(' '), ...cadence });
+    const families = serviceKeysFromText(...names).flatMap((k) => (k && k !== 'unknown' ? [k, SERVICE_LINE_LABELS[k]] : []));
+    lines.push({ words: [...names, ...families].join(' '), ...cadence });
   };
-  const RECURRING = { recurring: true, oneTime: false };
-  const ONE_TIME = { recurring: false, oneTime: true };
-  if (data.proposal?.enabled === true) {
-    const proposal = require('./estimate-proposal').normalizeProposal(row);
-    if (proposal.enabled === true) {
-      for (const program of proposal.programs || []) add([program.label, program.service], RECURRING, program.annual > 0);
-      for (const building of proposal.buildings || []) {
-        for (const item of building.lineItems || []) {
-          add([item.label, item.service, building.name], item.frequency === 'one_time' ? ONE_TIME : RECURRING, item.amount > 0);
-        }
-      }
-      for (const work of proposal.correctiveWork || []) add([work.label, work.service], ONE_TIME, work.amount > 0);
-      if (lines.length) return lines;
+  return { lines, add };
+}
+
+// An authored proposal's lines from the CANONICAL normalizer (the shape
+// the PDF, billing and the pricing audit read): programs → recurring,
+// building line items per their frequency, corrective work → one-time.
+function proposalLines(row, add) {
+  const proposal = require('./estimate-proposal').normalizeProposal(row);
+  if (proposal.enabled !== true) return;
+  for (const program of proposal.programs || []) add([program.label, program.service], RECURRING, program.annual > 0);
+  for (const building of proposal.buildings || []) {
+    for (const item of building.lineItems || []) {
+      add([item.label, item.service, building.name], item.frequency === 'one_time' ? ONE_TIME : RECURRING, item.amount > 0);
     }
   }
-  for (const root of [data.result, data.engineResult]) {
-    if (!root || typeof root !== 'object') continue;
-    for (const e of (Array.isArray(root.recurring?.services) ? root.recurring.services : [])) {
-      if (e && typeof e === 'object' && !placeholder(e)) add(namesOf(e), RECURRING, amountOf(e, ['mo', 'monthly', 'monthlyTotal', 'monthly_total', 'amount']) > 0);
-    }
-    for (const list of [root.oneTime?.items, root.oneTime?.specItems, root.specItems]) {
-      for (const e of (Array.isArray(list) ? list : [])) {
-        if (!e || typeof e !== 'object' || placeholder(e)) continue;
-        const onProgram = e.onProg === true || e.includedOnProgram === true;
-        add(namesOf(e), onProgram ? RECURRING : ONE_TIME, onProgram || amountOf(e, ['price', 'amount', 'total']) > 0);
+  for (const work of proposal.correctiveWork || []) add([work.label, work.service], ONE_TIME, work.amount > 0);
+}
+
+// The engine result's typed lines, from both persisted roots.
+function engineLines(data, add) {
+  const { SERVICE_LINE_LABELS } = require('./estimate-service-lines');
+  for (const root of [data.result, data.engineResult].filter((r) => r && typeof r === 'object')) {
+    for (const source of ENGINE_LINE_SOURCES) {
+      const entries = source.list(root);
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        if (!entry || typeof entry !== 'object' || isPlaceholder(entry)) continue;
+        const onProgram = entry.onProg === true || entry.includedOnProgram === true;
+        add(entryNames(entry), onProgram ? RECURRING : source.cadence, onProgram || amountOf(entry, source.amountKeys) > 0);
       }
-    }
-    for (const e of (Array.isArray(root.lineItems) ? root.lineItems : [])) {
-      if (e && typeof e === 'object' && !placeholder(e)) add(namesOf(e), RECURRING, amountOf(e, ['monthly', 'mo', 'amount']) > 0);
     }
     const injection = root.results?.injection || root.injection || {};
     add(['palm_injection', SERVICE_LINE_LABELS.palm_injection], RECURRING,
       amountOf(injection, ['mo', 'monthly']) > 0 || amountOf(root.recurring || {}, ['palmInjectionMo', 'palm_injection_mo']) > 0);
   }
-  if (lines.length) return lines;
+}
+
+// A legacy or manual row with no typed lines: service_interest, the
+// families the shared reader infers from its inputs and text, and the
+// engine's svc* input flags — at the cadence its totals columns show.
+function legacyLine(row, data) {
+  const { inferEstimateServiceLines, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
   const words = [row.service_interest];
   for (const line of inferEstimateServiceLines(row)) {
     if (line.key && line.key !== 'unknown') words.push(line.key, SERVICE_LINE_LABELS[line.key]);
   }
-  for (const inputs of [data.inputs, data.engineInputs]) {
-    if (!inputs || typeof inputs !== 'object') continue;
+  for (const inputs of [data.inputs, data.engineInputs].filter((i) => i && typeof i === 'object')) {
     for (const [k, v] of Object.entries(inputs)) {
       if (k.startsWith('svc') && v) words.push(k.slice(3).replace(/([a-z])([A-Z])/g, '$1 $2'));
     }
   }
-  return [{
+  return {
     words: words.filter((w) => typeof w === 'string').join(' '),
     recurring: Number(row.monthly_total) > 0 || Number(row.annual_total) > 0,
     oneTime: Number(row.onetime_total) > 0,
-  }];
+  };
+}
+
+function estimateLines(row) {
+  const data = require('./estimate-service-lines').parseEstimateData(row.estimate_data) || {};
+  const { lines, add } = lineCollector();
+  if (data.proposal?.enabled === true) proposalLines(row, add);
+  if (!lines.length) engineLines(data, add);
+  return lines.length ? lines : [legacyLine(row, data)];
 }
 
 // An estimate as the address-bearing record the booking rules understand:

@@ -607,6 +607,11 @@ describe('evidence helpers', () => {
     expect(estimateCoversAsk(card({ requested_service_categories: ['pest_general'] }), authored)).toBe(true);
     expect(estimateCoversAsk(card({ requested_service_categories: ['lawn_care'], requested_specific_service: null }), authored)).toBe(false);
     expect(estimateCoversAsk(card({ ...plan, requested_service_categories: ['lawn_care'] }), authored)).toBe(false);
+    // An annual-only recurring row (a termite bond: annual set, mo zero) is
+    // a priced recurring line (codex r21 P2).
+    const bond = est({ estimate_data: { result: { recurring: { services: [{ name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5', mo: 0, annual: 300 }, { name: 'Pest Control', mo: 40 }] } } } });
+    expect(estimateCoversAsk(card({ ...plan, requested_service_categories: ['termite'] }), bond)).toBe(true);
+    expect(estimateCoversAsk(card({ ...plan, requested_service_categories: ['termite'] }), est({ estimate_data: { result: { recurring: { services: [{ name: 'Termite Bond (5-Year Term)', mo: 0, annual: 0 }, { name: 'Pest Control', mo: 40 }] } } } }))).toBe(false);
     // ...an unpriced program is a placeholder too.
     const unpricedProgram = est({ estimate_data: { proposal: { enabled: true, programs: [{ service: 'pest', label: 'Quarterly Pest Program', frequencyPerYear: 4, pricePerApplication: 0 }] } } });
     expect(estimateCoversAsk(card(plan), unpricedProgram)).toBe(false);
@@ -755,6 +760,9 @@ describe('evidence helpers', () => {
     // August is still the 4th, not the instant's 5th.
     expect(requestedWindow(item({ payload: { scheduling_window: { confirmed_start_at: '2026-08-04T23:30:00-05:00' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-04' });
     expect(requestedWindow(item({ payload: { scheduling_window: { requested_date_range_start: '2026-08-04', requested_date_range_end: '2026-08-06' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-06' });
+    // A confirmed start pins BOTH bounds to its day: a residual requested
+    // range beside it is not the ask any more (codex r21 P1).
+    expect(requestedWindow(item({ payload: { scheduling_window: { confirmed_start_at: '2026-08-04T14:00:00Z', requested_date_range_start: '2026-08-03', requested_date_range_end: '2026-08-06' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-04' });
     expect(requestedWindow(item({ payload: { scheduling_window: { status: 'requested' } } }))).toBeNull();
   });
 
