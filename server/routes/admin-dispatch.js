@@ -11493,6 +11493,63 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           });
         }
         logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
+        // Exception-based (CLAUDE.md rule 14): a LIVE mint failure used to
+        // be a log line only — the visit completed, the customer got the
+        // report-only text, and the office found out when nobody paid
+        // (2026-08-31→09-01: four priced completions, one still unbilled
+        // two days later). Bell once per visit; the office bills by hand.
+        // This catch covers the WHOLE invoicing block, so `invoice` may
+        // already hold a committed row when a later step (prepaid credit,
+        // back-link) threw — then the office must RECONCILE that invoice,
+        // never mint a second one (GH r1 P1). No amount in the copy: the
+        // base amount here is not the total the mint would have produced
+        // (add-ons, discounts, setup fee, tax — GH r1 P1). The SMS path runs
+        // AFTER this bell and can skip or fail on its own, so the copy does
+        // not claim the text was delivered (GH r1 P2). Fail-soft — the
+        // completion is already committed.
+        try {
+          const NotificationService = require('../services/notification-service');
+          const visitLabel = `${svc.service_type || 'this visit'} on ${String(svc.scheduled_date).slice(0, 10)}`;
+          const bell = invoice?.id
+            ? await NotificationService.notifyAdmin(
+              'billing',
+              'Completion invoice needs review — a post-mint step failed',
+              `The completion for ${visitLabel} committed and invoice ${invoice.invoice_number || invoice.id} was created, but a later invoicing step failed. Review that invoice on the customer page before it is sent — do NOT create a second invoice for this visit.`,
+              {
+                link: `/admin/customers/${svc.customer_id}`,
+                bell: true,
+                dedupeKey: `live_invoice_postmint_failed:${svc.id}`,
+                metadata: {
+                  customerId: svc.customer_id,
+                  scheduledServiceId: svc.id,
+                  serviceRecordId: record.id,
+                  invoiceId: invoice.id,
+                  error: String(invErr?.message || '').slice(0, 200),
+                },
+              },
+            )
+            : await NotificationService.notifyAdmin(
+              'billing',
+              'Completion invoice not created — bill this visit by hand',
+              `The completion for ${visitLabel} committed, but its invoice could not be created; any completion text that sends will carry no pay link. Create and send the invoice from the customer page at the visit's price plus any add-ons or setup fee.`,
+              {
+                link: `/admin/customers/${svc.customer_id}`,
+                bell: true,
+                dedupeKey: `live_invoice_mint_failed:${svc.id}`,
+                metadata: {
+                  customerId: svc.customer_id,
+                  scheduledServiceId: svc.id,
+                  serviceRecordId: record.id,
+                  error: String(invErr?.message || '').slice(0, 200),
+                },
+              },
+            );
+          // notifyAdmin returns null (no throw) when its dedupe lock/insert
+          // fails — log that too, or a lost bell reads as delivered.
+          if (!bell) logger.error(`[dispatch] live invoice-mint-failed bell NOT recorded for ${svc.id} (notifyAdmin returned null)`);
+        } catch (bellErr) {
+          logger.error(`[dispatch] live invoice-mint-failed bell FAILED for ${svc.id}: ${bellErr.message}`);
+        }
       }
     } else if (preMintedInvoice) {
       // Back-link the pre-minted invoice to the freshly created service_record
