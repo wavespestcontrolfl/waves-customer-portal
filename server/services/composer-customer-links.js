@@ -764,11 +764,14 @@ async function buildCardRequestLink(visit) {
 async function buildPrepGuideLink(customerIds) {
   const { PREP_CONFIG, nextUpcomingVisit } = require('./prep-guide-sender');
   const { ensureServicePrepToken } = require('./project-email');
+  // Soonest across families by date THEN arrival window (two same-day
+  // visits of different families must not pick arbitrarily), id last.
+  const sortKey = (v) => `${dateOnly(v.scheduled_date)} ${String(v.window_start || '').padStart(8, '0')} ${v.id}`;
   let pick = null;
   for (const [pestType, config] of Object.entries(PREP_CONFIG)) {
     const visit = await nextUpcomingVisit(customerIds, config.serviceKeyword);
     if (!visit) continue;
-    if (!pick || dateOnly(visit.scheduled_date) < dateOnly(pick.visit.scheduled_date)) pick = { visit, config, pestType };
+    if (!pick || sortKey(visit) < sortKey(pick.visit)) pick = { visit, config, pestType };
   }
   if (!pick) {
     return { url: null, line: '', reason: 'No upcoming flea, bed bug, or cockroach visit on this account' };
@@ -868,16 +871,21 @@ async function buildContractSigningLink(customerIds, req) {
       .whereIn('status', CONTRACT_LINKABLE_STATUSES)
       .orWhere({ status: 'expired', contract_type: 'document_template' }))
     .orderBy('created_at', 'desc')
-    .first('id', 'title', 'status', 'contract_type', 'share_token_hash');
+    .first('id', 'title', 'status', 'contract_type', 'share_token_hash', 'requires_signature_snapshot');
   if (!row) return { url: null, line: '', reason: 'No contract awaiting signature on this account' };
   const { createShareLink } = require('../routes/admin-contracts');
   const result = await createShareLink(row.id, req);
   if (result?.error) return { url: null, line: '', reason: result.error.message };
   const title = String(row.title || '').trim() || 'agreement';
+  // A document request whose template needs no signature is review-only —
+  // the text must not ask for one (pre-push Codex P1). contracts.js's own
+  // predicate: the creation-time snapshot, defaulting to signature required.
+  const { documentRequiresSignature } = require('./contracts');
+  const needsSignature = documentRequiresSignature(row);
   return {
     url: result.signingUrl,
-    line: `Please review and sign your ${title} here: ${result.signingUrl}\n\n`,
-    contract: { id: row.id, title, rotated: !!row.share_token_hash },
+    line: `Please review${needsSignature ? ' and sign' : ''} your ${title} here: ${result.signingUrl}\n\n`,
+    contract: { id: row.id, title, rotated: !!row.share_token_hash, requiresSignature: needsSignature },
     expiresAt: result.expiresAt || null,
   };
 }

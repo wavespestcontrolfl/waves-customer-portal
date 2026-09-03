@@ -843,11 +843,11 @@ describe('buildPrepGuideLink', () => {
     expect(ensureServicePrepToken).not.toHaveBeenCalled();
   });
 
-  test('picks the soonest visit across pest families and mints that visit\'s token with its family key', async () => {
+  test('picks the soonest visit across pest families (date, then window) and mints that visit\'s token with its family key', async () => {
     nextUpcomingVisit.mockImplementation(async (_ids, keyword) => (
       keyword === 'flea'
-        ? { id: 'v-flea', customer_id: 'c2', scheduled_date: '2026-09-20', service_type: 'Flea Treatment', prep_expires_at: null }
-        : { id: 'v-bb', customer_id: 'c1', scheduled_date: '2026-09-10', service_type: 'Bed Bug Treatment', prep_expires_at: null }
+        ? { id: 'v-flea', customer_id: 'c2', scheduled_date: '2026-09-10', window_start: '13:00:00', service_type: 'Flea Treatment', prep_expires_at: null }
+        : { id: 'v-bb', customer_id: 'c1', scheduled_date: '2026-09-10', window_start: '09:00:00', service_type: 'Bed Bug Treatment', prep_expires_at: null }
     ));
     const r = await buildPrepGuideLink(['c1', 'c2']);
     expect(ensureServicePrepToken).toHaveBeenCalledWith('v-bb', 'prep.bed_bug');
@@ -943,8 +943,16 @@ describe('buildContractSigningLink', () => {
     expect(createShareLink).toHaveBeenCalledWith('k1', req);
     expect(r.url).toBe('https://portal.wavespestcontrol.com/contract/tokX');
     expect(r.line).toBe('Please review and sign your Auto Pay Authorization here: https://portal.wavespestcontrol.com/contract/tokX\n\n');
-    expect(r.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', rotated: true });
+    expect(r.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', rotated: true, requiresSignature: true });
     expect(r.expiresAt).toBe(expiresAt);
+  });
+
+  test('a review-only document request (no signature) does not ask for one', async () => {
+    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k2', title: 'Service Guide', status: 'sent', contract_type: 'document_template', share_token_hash: null, requires_signature_snapshot: false } }) };
+    createShareLink.mockResolvedValue({ signingUrl: 'https://portal.wavespestcontrol.com/contract/tokY', expiresAt: new Date(), contract: { id: 'k2' } });
+    const r = await buildContractSigningLink(['c1'], req);
+    expect(r.line).toBe('Please review your Service Guide here: https://portal.wavespestcontrol.com/contract/tokY\n\n');
+    expect(r.contract.requiresSignature).toBe(false);
   });
 
   test('a share-link refusal (status drift) becomes the reason', async () => {

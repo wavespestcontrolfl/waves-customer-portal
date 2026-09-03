@@ -83,7 +83,7 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
         { column: 'window_start', order: 'asc' },
         { column: 'id', order: 'asc' },
       ])
-      .first('id', 'customer_id', 'scheduled_date', 'service_type', 'prep_template_key', 'prep_expires_at');
+      .first('id', 'customer_id', 'scheduled_date', 'window_start', 'service_type', 'prep_template_key', 'prep_expires_at');
     return row || null;
   } catch (err) {
     logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${ids.join(',')}: ${err.message}`);
