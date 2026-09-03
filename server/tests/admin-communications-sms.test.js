@@ -443,6 +443,19 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    test('schedule-sms refuses a body carrying a contract signing link — the same immediate-only fence', async () => {
+      wireAutopayDb({ row: null });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Please sign: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY', messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/^Contract signing links expire/);
+      });
+    });
+
     test('a send without the resolved owner as customerId is refused — the link must ride the owner policy', async () => {
       wireAutopayDb({ row: { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() + 86400e3), customer_id: 'cust-A' } });
       await withServer(async (baseUrl) => {

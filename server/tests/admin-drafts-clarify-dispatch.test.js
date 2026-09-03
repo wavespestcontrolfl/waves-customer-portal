@@ -43,7 +43,10 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => mockGates[gate] !== false),
 }));
 const mockPreDispatchCheck = jest.fn(async () => ({ ok: true }));
-jest.mock('../services/composer-customer-links', () => ({ autopayLinkSendCheck: jest.fn(async () => ({ present: false })) }));
+jest.mock('../services/composer-customer-links', () => ({
+  autopayLinkSendCheck: jest.fn(async () => ({ present: false })),
+  expiringLinkSendCheck: jest.fn(async () => ({ present: false })),
+}));
 jest.mock('../services/estimate-clarify-asks', () => ({
   claimClarifyDispatch: jest.fn(),
   clarifyPreDispatchCheck: jest.fn(() => mockPreDispatchCheck),
@@ -381,6 +384,21 @@ describe('Auto Pay setup links never ride draft approval (GH Codex #3812 r3 P1)'
       expect((await res.json()).error).toMatch(/send them from the composer/);
     });
     expect(updates).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('revise with a contract signing link → 409 through the same fence (expiring bearers are immediate-send only)', async () => {
+    const { expiringLinkSendCheck } = require('../services/composer-customer-links');
+    expiringLinkSendCheck.mockResolvedValueOnce({ present: true, label: 'Contract signing' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-9/revise`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Sign here: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/^Contract signing links cannot go out through draft approval/);
+    });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 

@@ -1005,3 +1005,24 @@ describe('buildStatementLink', () => {
     expect(r.statement).toEqual({ id: 31, number: 'S-31', total: 412.5, payerName: 'Gulf Coast PM' });
   });
 });
+
+describe('expiringLinkSendCheck (schedule + draft fence)', () => {
+  const { expiringLinkSendCheck } = require('../services/composer-customer-links');
+  const PREP = 'a'.repeat(32);
+
+  test('a canonical contract link is present; a look-alike host or a nested URL is not', async () => {
+    expect(await expiringLinkSendCheck('Sign here: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY')).toEqual({ present: true, label: 'Contract signing' });
+    expect(await expiringLinkSendCheck('https://portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY.')).toEqual({ present: true, label: 'Contract signing' });
+    expect(await expiringLinkSendCheck('portal.wavespestcontrol.com.evil.example/contract/abcDEF123_-xyz789QWERTY')).toEqual({ present: false });
+    expect(await expiringLinkSendCheck('https://evil.example/?next=portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY')).toEqual({ present: false });
+    expect(await expiringLinkSendCheck('Nothing to see')).toEqual({ present: false });
+  });
+
+  test('a prep link is present only when its row carries an expiry', async () => {
+    mockBuilders = { scheduled_services: chainBuilder({ firstRow: { prep_expires_at: '2026-10-01T00:00:00Z' } }) };
+    expect(await expiringLinkSendCheck(`Checklist: portal.wavespestcontrol.com/prep/${PREP}`)).toEqual({ present: true, label: 'Prep guide' });
+    expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ prep_token: PREP });
+    mockBuilders = { scheduled_services: chainBuilder({ firstRow: { prep_expires_at: null } }) };
+    expect(await expiringLinkSendCheck(`Checklist: portal.wavespestcontrol.com/prep/${PREP}`)).toEqual({ present: false });
+  });
+});

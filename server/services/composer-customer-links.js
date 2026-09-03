@@ -489,16 +489,19 @@ const TOKEN_RUN_RE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{20,64}(?![A-Za-z0-9_-])/g;
 function decodedRuns(body) {
   return String(body || '').split(/\s+/).filter(Boolean).map(decodeLinkText);
 }
-function secureLinkRuns(runs) {
+function linkRuns(runs, fragmentRe) {
   return runs
-    .filter((run) => /\/secure\//i.test(run))
+    .filter((run) => fragmentRe.test(run))
     .map((run) => run.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, ''))
     // A bare label glued to the link ("Link:", "now,") is shed — but only a
     // slash-free prefix, so an outer URL's own path/query is never cut away.
     .map((run) => run.replace(/^[^/]*?(?=https?:\/\/)/i, ''))
     .map((run) => (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : run.replace(/^[^/:,;]*[:,;]/, '')));
 }
-function canonicalSecureToken(run, host) {
+function secureLinkRuns(runs) {
+  return linkRuns(runs, /\/secure\//i);
+}
+function canonicalPortalToken(run, host, pathRe) {
   let url;
   try {
     url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`);
@@ -509,8 +512,11 @@ function canonicalSecureToken(run, host) {
   // expose the 30-day bearer before any redirect reaches HTTPS.
   if (url.protocol !== 'https:') return null;
   if (url.host.toLowerCase() !== host) return null;
-  const m = /^\/secure\/([A-Za-z0-9_-]{16,})$/i.exec(url.pathname);
+  const m = pathRe.exec(url.pathname);
   return m ? m[1] : null;
+}
+function canonicalSecureToken(run, host) {
+  return canonicalPortalToken(run, host, /^\/secure\/([A-Za-z0-9_-]{16,})$/i);
 }
 
 /**
@@ -602,6 +608,44 @@ async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) 
     }
   }
   return { present: true, ok: true, tokens: live.map((l) => l.token) };
+}
+
+// Immediate-send-only bearer links beyond Auto Pay (pre-push Codex P1 on
+// the step-2 rows: the composer's client-side refusal is transient state,
+// a loaded draft or a scheduled body has none). Contract signing links are
+// always time-boxed; a prep page is only when the row carries an expiry.
+// Presence-only — the callers (/schedule-sms, draft approve/revise) refuse
+// on any hit; the immediate /sms path is untouched (the link is live now).
+// Canonical portal host + path only, like the Auto Pay seam: a look-alike
+// host is not a Waves bearer and is simply not this seam's business.
+const EXPIRING_LINK_KINDS = [
+  {
+    label: 'Contract signing',
+    fragment: /\/contract\//i,
+    path: /^\/contract\/([A-Za-z0-9_-]{16,})$/i,
+    expires: async () => true,
+  },
+  {
+    label: 'Prep guide',
+    fragment: /\/prep\//i,
+    path: /^\/prep\/([a-f0-9]{32})$/i,
+    expires: async (token) => {
+      const row = await db('scheduled_services').where({ prep_token: token }).first('prep_expires_at');
+      return !!row?.prep_expires_at;
+    },
+  },
+];
+
+async function expiringLinkSendCheck(body) {
+  const runs = decodedRuns(body);
+  const host = new URL(publicPortalUrl()).host.toLowerCase();
+  for (const kind of EXPIRING_LINK_KINDS) {
+    for (const run of linkRuns(runs, kind.fragment)) {
+      const token = canonicalPortalToken(run, host, kind.path);
+      if (token && await kind.expires(token)) return { present: true, label: kind.label };
+    }
+  }
+  return { present: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -892,6 +936,7 @@ module.exports = {
   AUTOPAY_SKIP_REASONS,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
+  expiringLinkSendCheck,
   buildAppointmentPageLink,
   CARD_REQUEST_SKIP_REASONS,
   buildCardRequestLink,

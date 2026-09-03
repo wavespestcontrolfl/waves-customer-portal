@@ -2125,6 +2125,14 @@ router.post('/schedule-sms', async (req, res, next) => {
       if (autopayCheck.present) {
         return res.status(400).json({ error: 'Auto Pay setup links expire — send them now, or remove the link before scheduling' });
       }
+      // Same fence for the other time-boxed bearers the composer inserts
+      // (contract signing, expiring prep pages) — the client refusal is
+      // transient state; this is the authoritative one.
+      const { expiringLinkSendCheck } = require('../services/composer-customer-links');
+      const expiring = await expiringLinkSendCheck(cleanBody);
+      if (expiring.present) {
+        return res.status(400).json({ error: `${expiring.label} links expire — send them now, or remove the link before scheduling` });
+      }
     }
 
     // ET wall-clock parse — datetime-local strings without offset are
