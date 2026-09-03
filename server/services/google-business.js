@@ -553,9 +553,10 @@ class GoogleBusinessService {
       return flipped > 0;
     } catch (err) {
       logger.warn(`[gbp] Auto-mark left-review failed for customer ${customerId}: ${err.message}`);
-      // null = the write FAILED (distinct from false = nothing to flip), so
-      // the sync's side-effect guard can report it.
-      return null;
+      // A failure marker (distinct from false = nothing to flip) carrying
+      // the original error, so the sync's side-effect guard can report it
+      // AND classify it for the breaker (pre-push audit, codex r5 P1).
+      return { failed: true, error: err };
     }
   }
 
@@ -1046,21 +1047,27 @@ class GoogleBusinessService {
     // suppression mark cannot skip the attribution-moment thank-you, which
     // is never retried (existing.customer_id is set on the next sync).
     // `failed(outcome)` inspects a RESOLVED result: the helpers self-catch
-    // and resolve a failure marker instead of throwing (suppression mark →
-    // null, thank-you enrollment → { reason: 'error' }); ordinary no-ops
-    // (nothing to flip, gate off, deduped) are not failures.
+    // and resolve a failure marker carrying the original error instead of
+    // throwing (suppression mark → { failed, error }, thank-you enrollment
+    // → { reason: 'error', error }); ordinary no-ops (nothing to flip, gate
+    // off, deduped) are not failures.
     const sideEffect = async (label, fn, failed = () => false) => {
       try {
         const outcome = await fn();
-        if (failed(outcome)) throw new Error(`${label} resolved a failure (${typeof outcome === 'object' && outcome ? outcome.reason || 'failed' : String(outcome)})`);
+        if (failed(outcome)) {
+          const original = outcome && typeof outcome === 'object' ? outcome.error : null;
+          throw Object.assign(new Error(`${label} resolved a failure (${original ? original.message : (outcome && outcome.reason) || 'failed'})`), { cause: original || undefined });
+        }
       } catch (sideErr) {
         logger.error(`[gbp] post-write ${label} failed for review row ${result.id} (${normalized.gbp_review_name || normalized.google_review_id || '?'}): ${sideErr.message}`);
         result.sideEffectError = result.sideEffectError || sideErr.message;
         // The row is stored, but a dead or saturated database fails a
         // post-write step the same way it fails an upsert — the caller's
         // breaker must count it or a large feed waits one timeout per row
-        // (codex r5 P1).
-        if (isSystemicDbFailure(sideErr)) result.systemicError = result.systemicError || sideErr;
+        // (codex r5 P1). Classify the ORIGINAL error when a self-catching
+        // helper resolved a marker: the synthetic wrapper has no SQLSTATE.
+        const original = sideErr.cause || sideErr;
+        if (isSystemicDbFailure(original)) result.systemicError = result.systemicError || original;
       }
     };
     if (!result.inserted) {
@@ -1094,7 +1101,7 @@ class GoogleBusinessService {
     }
     if (row.customer_id) {
       // A matched review means the customer left one — stop asking them.
-      await sideEffect('suppression mark', () => this._markCustomerLeftReview(row.customer_id), (flipped) => flipped === null);
+      await sideEffect('suppression mark', () => this._markCustomerLeftReview(row.customer_id), (flipped) => !!(flipped && flipped.failed));
       // Thank-you sequence on the ATTRIBUTION moment only (a new review, or
       // an existing one that just matched a customer) — not on every hourly
       // re-sync; the helper's once-ever dedupe backstops replays anyway.

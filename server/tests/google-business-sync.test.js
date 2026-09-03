@@ -515,6 +515,25 @@ describe('Google Business review sync', () => {
     const untagged = await run(rowErr);
     expect(untagged.sideEffectError).toBe(rowErr.message);
     expect(untagged.systemicError).toBeUndefined();
+
+    // Self-catching helpers resolve a marker: the ORIGINAL error is what gets
+    // classified (pre-push audit on codex r5 P1) — for both the suppression
+    // mark and the thank-you enrollment.
+    const canceled = Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+    const mark = jest.spyOn(service, '_markCustomerLeftReview').mockResolvedValue({ failed: true, error: canceled });
+    const marked = { id: 'r2', inserted: true };
+    await service._applyPostWriteSideEffects({ result: marked, row: { customer_id: 'cust-1' }, normalized: { gbp_review_name: 'n' }, existing: null, syncStart: new Date(), pendingRestoredNotifications: [], pendingUnlinkedNotifications: [] });
+    expect(marked.sideEffectError).toMatch(/suppression mark resolved a failure \(canceling statement/);
+    expect(marked.systemicError).toBe(canceled);
+    mark.mockRestore();
+
+    const poolTimeout = Object.assign(new Error('Knex: Timeout acquiring a connection'), { name: 'KnexTimeoutError' });
+    const markOk = jest.spyOn(service, '_markCustomerLeftReview').mockResolvedValue(true);
+    const enroll = jest.spyOn(require('../services/automation-enroll'), 'enrollReviewThankYou').mockResolvedValue({ enrolled: false, reason: 'error', error: poolTimeout });
+    const enrolled = { id: 'r3', inserted: true };
+    await service._applyPostWriteSideEffects({ result: enrolled, row: { customer_id: 'cust-1', location_id: 'bradenton', star_rating: 5 }, normalized: { gbp_review_name: 'n' }, existing: null, syncStart: new Date(), pendingRestoredNotifications: [], pendingUnlinkedNotifications: [] });
+    expect(enrolled.systemicError).toBe(poolTimeout);
+    markOk.mockRestore(); enroll.mockRestore();
   });
 
   test('a null client after a FAILED stored-token lookup is reported as that failure, never as missing credentials', async () => {
