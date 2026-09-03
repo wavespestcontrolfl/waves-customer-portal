@@ -803,14 +803,16 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     stubDb(holdRow, { laneRows: { id: 'lane-row' } });
     mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
     const res = await cardHoldCancelPreview('svc1', now);
-    expect(res).toMatchObject({ held: true, feeApplies: true, unresolved: true, rule: { code: 'competing_consent', willCharge: null } });
+    // Amount UNKNOWN (Codex #3800 r8 P1): neither rail auto-charges, so the
+    // plan-cancel total must not promise the hold's $49.
+    expect(res).toMatchObject({ held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: { code: 'competing_consent', willCharge: null } });
     expect(res.rule.text).toMatch(/two card agreements/);
   });
-  it('in-window hold beside a /secure row already mid-charge → charge_in_flight, not competing_consent', async () => {
-    stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'charging' } });
+  it('in-window hold beside a /secure row already mid-charge → charge_in_flight carrying THAT row\'s frozen fee, not the hold\'s', async () => {
+    stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'charging', no_show_fee_amount: 75 } });
     mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
     const res = await cardHoldCancelPreview('svc1', now);
-    expect(res).toMatchObject({ held: true, feeApplies: true, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+    expect(res).toMatchObject({ held: true, feeApplies: true, feeAmount: 75, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
   });
   it('in-window hold beside a /secure row whose fee already CHARGED → fee settled on the appointment card, never "bill by hand" (Codex #3800 r7 P1)', async () => {
     stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'charged' } });

@@ -1008,6 +1008,14 @@ describe('appointmentCardCancelPreview', () => {
     const res = await appointmentCardCancelPreview('svc-1');
     expect(res).toMatchObject({ secured: true, feeApplies: true, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
   });
+  test('gate off and the fee-state lookup FAILS → undetermined in the exposure shape (previewVisitFees keeps it; the handler parks review)', async () => {
+    mockGateOn = false;
+    mockTableHandlers = handlersWith();
+    mockTableHandlers.appointment_card_requests.first = () => { throw new Error('db blip'); };
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toEqual({ secured: true, feeApplies: true, feeAmount: null, unresolved: true, rule: expect.objectContaining({ code: 'unresolved', willCharge: null }) });
+    expect(res.rule.text).toMatch(/check the visit's billing after cancelling/);
+  });
   test('gate off → feeApplies false (charge would no-op anyway)', async () => {
     mockGateOn = false;
     mockApptTime = new Date(Date.now() + 3 * HOUR);

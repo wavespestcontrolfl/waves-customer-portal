@@ -1917,11 +1917,15 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
   // rebooked visit). Fail toward undetermined on an unreadable table, same
   // as the charge path.
   let laneCode = null;
+  let laneFee = null;
   try {
     const laneRow = await db('appointment_card_requests')
       .where({ scheduled_service_id: scheduledServiceId })
-      .first('id', 'fee_status');
-    if (laneRow) laneCode = COMPETING_LANE_RULE[laneRow.fee_status] || 'competing_consent';
+      .first('id', 'fee_status', 'no_show_fee_amount');
+    if (laneRow) {
+      laneCode = COMPETING_LANE_RULE[laneRow.fee_status] || 'competing_consent';
+      laneFee = Number(laneRow.no_show_fee_amount) > 0 ? Number(laneRow.no_show_fee_amount) : null;
+    }
   } catch (err) {
     logger.warn('[estimate-card-holds] competing-consent lookup for cancel preview failed — reporting undetermined', { error: err.message });
     return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'card consent lookup failed', onFailure: 'unknown' }) };
@@ -1932,14 +1936,18 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
     // invites a double charge.
     return { held: true, feeApplies: false, feeAmount, rule: describe('fee_settled', { detail: 'charged on the appointment card' }) };
   }
-  if (laneCode === 'charge_in_flight') return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('charge_in_flight') };
+  // Indeterminate competing verdicts never carry the HOLD's amount (Codex
+  // #3800 r8 P1): previewVisitFees totals feeAmount into a definite "will
+  // be charged" figure. An in-flight appointment charge draws that row's
+  // own frozen fee; a live competing consent auto-charges nothing.
+  if (laneCode === 'charge_in_flight') return { held: true, feeApplies: true, feeAmount: laneFee, unresolved: true, rule: describe('charge_in_flight', { feeAmount: laneFee }) };
   // A parked hold (status still 'held', parked_at set) follows the rebooked
   // visit: handleCardHoldCancellation returns already_parked without
   // charging, so the preview must not run the window math and promise a
   // charge (pre-push Codex P1). Decided before the rail gate — parking is
   // durable state, not a fee decision.
   if (hold.parked_at) return { held: true, feeApplies: false, feeAmount, parked: true, rule: describe('hold_parked') };
-  if (laneCode) return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('competing_consent') };
+  if (laneCode) return { held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: describe('competing_consent') };
   // Rail OFF (ONE_TIME_CARD_HOLD kill switch) with a historical held row:
   // no fee can be collected, so nothing below may report one — including
   // the fee-may-apply posture of a FAILED time lookup, which would make the

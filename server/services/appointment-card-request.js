@@ -2825,7 +2825,12 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
       }
     } catch (err) {
       logger.warn(`[appt-card-request] fee-state lookup on the dark rail failed — reporting undetermined: ${err.message}`);
-      return { secured: false, feeApplies: false, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'unknown', detail: 'fee state lookup failed' }) };
+      // Exposure shape (secured + feeApplies + unresolved, amount unknown):
+      // the cancellation handler parks charge_review on this failure, and
+      // admin-cancellation's previewVisitFees keeps only secured, fee-
+      // applying appointment previews — a secured:false verdict would drop
+      // the review warning from the plan-cancel preview (pre-push P1).
+      return { secured: true, feeApplies: true, feeAmount: null, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'unknown', detail: 'fee state lookup failed' }) };
     }
     return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'rail_dark' }) };
   }
