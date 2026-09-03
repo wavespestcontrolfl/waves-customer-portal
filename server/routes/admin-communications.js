@@ -622,20 +622,35 @@ router.post('/sms', async (req, res, next) => {
     const bodyIsUnchangedAgentDraft =
       !!verifiedAgentDraft &&
       normalizeReplyForComparison(cleanBody) === normalizeReplyForComparison(verifiedAgentDraft);
+    // A composer-carried card request link makes this the visit's card
+    // request text itself: the canonical purpose (its policy allows the 3
+    // segments a reused legacy 64-hex token reaches; the customer id and
+    // phone-matched trust it requires are already enforced by the seam), the
+    // template key the funnel stamps (reporting groups it with the funnel's
+    // own sends) and the operator-initiated flag the funnel's admin trigger
+    // carries. Under the conversational policy's 2-segment cap the send was
+    // blocked — and the claim released — where the funnel accepts it (GH
+    // Codex #3844 r5 P1). The composer inserts the BASE template copy.
+    const cardVisitIds = cardClaim ? cardClaim.cards.map((c) => c.scheduledServiceId) : [];
     const result = await sendCustomerMessage({
       to,
       body: cleanBody,
       channel: 'sms',
       audience: trustedCustomerId ? 'customer' : 'lead',
-      purpose: 'conversational',
+      purpose: cardClaim ? 'card_request' : 'conversational',
       customerId: trustedCustomerId || undefined,
       identityTrustLevel: trustedCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
       entryPoint: 'admin_communications_manual_sms',
+      ...(cardClaim ? { operatorInitiated: true } : {}),
       metadata: {
         // An Auto Pay setup link makes this an Auto Pay customer SMS whatever
-        // the composer called it — the classifier keys on this prefix.
-        original_message_type: autopayLinkTokens ? 'autopay_setup_link' : (messageType || 'manual'),
+        // the composer called it — the classifier keys on this prefix; a
+        // card request link, the funnel's own template key.
+        original_message_type: autopayLinkTokens ? 'autopay_setup_link'
+          : cardClaim ? require('../services/appointment-card-request').TEMPLATE_KEY
+            : (messageType || 'manual'),
         ...(autopayLinkTokens ? { autopay_setup_tokens: autopayLinkTokens } : {}),
+        ...(cardClaim ? { scheduled_service_id: cardVisitIds[0], trigger: 'admin', ...(cardVisitIds.length > 1 ? { scheduled_service_ids: cardVisitIds } : {}) } : {}),
         adminUserId: req.technicianId,
         agentDecisionId: verifiedAgentDecision?.id || undefined,
         // Parked ids ride into the provider-created sms_log row (same as

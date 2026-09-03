@@ -35,6 +35,8 @@ jest.mock('../services/autopay-setup-link', () => ({ KIND: 'customer', setupLink
 // The card funnel + its marker finalizer, re-run / invoked by the composer send.
 jest.mock('../services/appointment-card-request', () => ({
   LIVE_VISIT_STATUSES: ['pending', 'confirmed'],
+  TEMPLATE_KEY: 'secure_appointment_card',
+  startInvitationEmailLeg: jest.fn(),
   requestCardForAppointment: jest.fn(async () => ({ requested: false, action: 'link_created', reason: 'request_exists', secureUrl: 'https://portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY' })),
   markCardLinkSendOutcome: jest.fn(async () => true),
   // The service claim, observed through the route: NULL → stamp on the db mock.
@@ -463,6 +465,7 @@ describe('admin communications SMS route', () => {
         const first = jest.fn();
         if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
         else if (table === 'appointment_card_requests') first.mockResolvedValue(CARD);
+        else if (table === 'scheduled_services') first.mockResolvedValue({ id: 'v-77', customer_id: 'cust-A', service_type: 'Flea Treatment', scheduled_date: '2026-09-08' });
         // The Auto Pay seam's token lookup sees the same visit-lane row and leaves it alone.
         const select = jest.fn(async () => (table === 'appointment_card_requests' ? [{ token: 'abcDEF123_-xyz789QWERTY', ...CARD }] : []));
         const update = jest.fn(async (payload) => {
@@ -473,15 +476,26 @@ describe('admin communications SMS route', () => {
       });
     }
 
-    test('a live visit-lane card request link: the visit is claimed BEFORE the provider call and the request marked after a real send', async () => {
+    test('a live visit-lane card request link: the visit is claimed BEFORE the provider call, the send is the card request itself (purpose, template key, operator-initiated — GH Codex #3844 r5 P1), the request marked and the email twin started after a real send', async () => {
       sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM2' });
+      const { startInvitationEmailLeg } = require('../services/appointment-card-request');
+      startInvitationEmailLeg.mockClear();
       wireCardDb();
       await withServer(async (baseUrl) => {
         const res = await send(baseUrl);
         expect(res.status).toBe(200);
         expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
-          metadata: expect.objectContaining({ original_message_type: 'manual' }),
+          purpose: 'card_request',
+          customerId: 'cust-A',
+          identityTrustLevel: 'phone_matches_customer',
+          operatorInitiated: true,
+          metadata: expect.objectContaining({ original_message_type: 'secure_appointment_card', scheduled_service_id: 'v-77', trigger: 'admin' }),
         }));
+        expect(startInvitationEmailLeg).toHaveBeenCalledWith({
+          visit: expect.objectContaining({ id: 'v-77', customer_id: 'cust-A' }),
+          secureUrl: expect.stringMatching(/\/secure\/abcDEF123_-xyz789QWERTY$/),
+          planChoice: false,
+        });
         const claim = stamps.find((s) => s.table === 'scheduled_services');
         expect(Object.keys(claim.payload).sort()).toEqual(['card_link_sent_at', 'updated_at']);
         expect(claim.sent).toBe(0); // claimed before dispatch
@@ -540,12 +554,15 @@ describe('admin communications SMS route', () => {
       });
     });
 
-    test('a suppressed (non-provider) send releases the claim and never marks the request', async () => {
+    test('a suppressed (non-provider) send releases the claim, never marks the request and starts no email twin', async () => {
       sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, suppressed: true });
+      const { startInvitationEmailLeg } = require('../services/appointment-card-request');
+      startInvitationEmailLeg.mockClear();
       wireCardDb();
       await withServer(async (baseUrl) => {
         const res = await send(baseUrl);
         expect(res.status).toBe(200);
+        expect(startInvitationEmailLeg).not.toHaveBeenCalled();
         const visitWrites = stamps.filter((s) => s.table === 'scheduled_services');
         expect(visitWrites).toHaveLength(2);
         expect(visitWrites[1].payload.card_link_sent_at).toBeNull();

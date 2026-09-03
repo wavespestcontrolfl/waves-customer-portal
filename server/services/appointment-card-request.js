@@ -1188,22 +1188,30 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // email can never outrun the one-text rails or reach a visit the
     // funnel skipped. (The window-held path is the one exception: its
     // queued SMS row owns the text, and the deferred-replay finalize runs
-    // this same helper after that SMS delivers.) Best-effort
-    // fire-and-forget: the gate being off, no email on file, or a
-    // SendGrid failure never changes the funnel result.
-    try {
-      runInvitationEmailLeg({ visit, secureUrl, planChoice: usedTemplateKey === PLAN_TEMPLATE_KEY })
-        .catch((emailErr) => {
-          logger.warn(`[appt-card-request] invitation email leg failed for visit ${visit.id}: ${emailErr.message}`);
-        });
-    } catch (emailErr) {
-      logger.warn(`[appt-card-request] invitation email leg failed to start for visit ${visit.id}: ${emailErr.message}`);
-    }
+    // this same helper after that SMS delivers.)
+    startInvitationEmailLeg({ visit, secureUrl, planChoice: usedTemplateKey === PLAN_TEMPLATE_KEY });
     logger.info(`[appt-card-request] secure-card link sent for visit ${visit.id} (trigger ${trigger})`);
     return { requested: true, action: 'sent', reason: 'sent' };
   } catch (err) {
     logger.error(`[appt-card-request] request failed for visit ${scheduledServiceId}: ${err.message}`);
     return skip(`error:${err.message}`);
+  }
+}
+
+// Best-effort, fire-and-forget start of the email twin after a CONFIRMED
+// card text: the gate being off, no email on file, or a SendGrid failure
+// never changes the caller's result. Shared by the funnel's own SMS success
+// path above and the composer's /sms send (composer-customer-links
+// markCardRequestSends), so a card text always travels with its email
+// (GH Codex #3844 r5 P1).
+function startInvitationEmailLeg({ visit, secureUrl, planChoice }) {
+  try {
+    runInvitationEmailLeg({ visit, secureUrl, planChoice })
+      .catch((emailErr) => {
+        logger.warn(`[appt-card-request] invitation email leg failed for visit ${visit.id}: ${emailErr.message}`);
+      });
+  } catch (emailErr) {
+    logger.warn(`[appt-card-request] invitation email leg failed to start for visit ${visit.id}: ${emailErr.message}`);
   }
 }
 
@@ -3496,8 +3504,10 @@ module.exports = {
   dateLineFor,
   cancelFeeLine,
   LIVE_VISIT_STATUSES,
+  TEMPLATE_KEY,
   claimCardLinkSend,
   markCardLinkSendOutcome,
+  startInvitationEmailLeg,
   _test: {
     dateLineFor,
     resolveExemption,

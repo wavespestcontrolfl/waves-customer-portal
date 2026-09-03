@@ -1222,7 +1222,11 @@ async function markStatementsSent(statementIds) {
  *     finalizer (markCardLinkSendOutcome — bounded retries, and a marker
  *     that cannot land PARKS the claim + alerts the office) stamps the
  *     request row's sent_at, the durable outcome marker the stale-claim
- *     lease reads. Returns false when any marker did not land.
+ *     lease reads, then starts the invite's EMAIL twin exactly as the
+ *     service does after its own text (owner delivery rule: both
+ *     channels; GH Codex #3844 r5 P1) — the composer inserts the base
+ *     template copy, so the email follows the base variant. Returns
+ *     false when any marker did not land.
  */
 async function claimCardRequestSends(cards) {
   const { claimCardLinkSend } = require('./appointment-card-request');
@@ -1245,10 +1249,14 @@ async function releaseCardRequestSends(claim) {
 }
 
 async function markCardRequestSends(claim) {
-  const { markCardLinkSendOutcome } = require('./appointment-card-request');
+  const card = require('./appointment-card-request');
   let allMarked = true;
-  for (const { scheduledServiceId } of claim.cards) {
-    if (!await markCardLinkSendOutcome(scheduledServiceId, claim.stamp)) allMarked = false;
+  for (const { scheduledServiceId, token } of claim.cards) {
+    if (!await card.markCardLinkSendOutcome(scheduledServiceId, claim.stamp)) allMarked = false;
+    const visit = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('id', 'customer_id', 'service_type', 'scheduled_date');
+    if (visit) card.startInvitationEmailLeg({ visit, secureUrl: `${publicPortalUrl()}/secure/${token}`, planChoice: false });
   }
   return allMarked;
 }

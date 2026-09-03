@@ -36,6 +36,8 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => g === 'a
 jest.mock('../services/appointment-card-request', () => ({
   claimCardLinkSend: jest.fn(),
   markCardLinkSendOutcome: jest.fn(),
+  startInvitationEmailLeg: jest.fn(),
+  TEMPLATE_KEY: 'secure_appointment_card',
   renderTemplate: jest.fn(),
   requestCardForAppointment: jest.fn(),
   dateLineFor: jest.fn(() => ' on Tue, Sep 8'),
@@ -97,7 +99,7 @@ const { resolvePromoter, getLiveSettings } = require('../services/referral-engin
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
 const { requestAutopaySetupLink, setupLinkIneligibility } = require('../services/autopay-setup-link');
 const { isEnabled } = require('../config/feature-gates');
-const { renderTemplate, requestCardForAppointment, claimCardLinkSend, markCardLinkSendOutcome } = require('../services/appointment-card-request');
+const { renderTemplate, requestCardForAppointment, claimCardLinkSend, markCardLinkSendOutcome, startInvitationEmailLeg } = require('../services/appointment-card-request');
 const { buildAppointmentLink } = require('../services/appointment-link');
 const { nextUpcomingVisit } = require('../services/prep-guide-sender');
 const { ensureServicePrepToken } = require('../services/project-email');
@@ -1768,15 +1770,26 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect(mockBuilders.scheduled_services.update.mock.calls[0][0]).toEqual(expect.objectContaining({ card_link_sent_at: null }));
     });
 
-    test('mark: delegates every visit to the service\'s own finalizer (retries + park + office alert live there) and reports a marker that did not land', async () => {
+    test('mark: delegates every visit to the service\'s own finalizer (retries + park + office alert live there), starts the email twin the way the service does, and reports a marker that did not land', async () => {
       const stamp = new Date();
+      const visits = { v1: { id: 'v1', customer_id: 'c1', service_type: 'Flea Treatment', scheduled_date: '2026-09-08' }, v2: { id: 'v2', customer_id: 'c1', service_type: 'Bed Bug Treatment', scheduled_date: '2026-09-09' } };
+      const visitsBuilder = chainBuilder();
+      visitsBuilder.first = jest.fn(async () => visits[visitsBuilder.where.mock.calls.at(-1)[0].id]);
+      mockBuilders = { scheduled_services: visitsBuilder };
       markCardLinkSendOutcome.mockReset().mockResolvedValue(true);
+      startInvitationEmailLeg.mockReset();
       expect(await markCardRequestSends({ stamp, cards })).toBe(true);
       expect(markCardLinkSendOutcome).toHaveBeenCalledWith('v1', stamp);
       expect(markCardLinkSendOutcome).toHaveBeenCalledWith('v2', stamp);
+      // The email twin (owner delivery rule: both channels — GH Codex #3844
+      // r5 P1): the funnel's own leg, the base variant the composer inserted.
+      expect(startInvitationEmailLeg).toHaveBeenCalledWith({ visit: visits.v1, secureUrl: `https://portal.wavespestcontrol.com/secure/${TOKEN}`, planChoice: false });
+      expect(startInvitationEmailLeg).toHaveBeenCalledWith({ visit: visits.v2, secureUrl: `https://portal.wavespestcontrol.com/secure/${cards[1].token}`, planChoice: false });
       markCardLinkSendOutcome.mockReset().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      startInvitationEmailLeg.mockReset();
       expect(await markCardRequestSends({ stamp, cards })).toBe(false);
       expect(markCardLinkSendOutcome).toHaveBeenCalledTimes(2); // never short-circuits — every claimed visit is finalized
+      expect(startInvitationEmailLeg).toHaveBeenCalledTimes(2); // the text went out either way — so does its twin
     });
   });
 });
