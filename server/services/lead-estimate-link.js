@@ -962,18 +962,33 @@ async function convertLeadFromEvent({
         // customer (shared household contact) is not ours to convert, so the
         // authenticated repeat row itself takes the booking win — as it did
         // before the label existed.
+        // Every duplicate row is resolved and the distinct opportunities
+        // counted — the single-candidate rule holds here too (pre-push P1):
+        // two repeats of ONE root are one opportunity; two different roots
+        // (or a root plus a foreign-original repeat) are ambiguous.
         if (!linked.length) {
-          const repeat = await database('leads')
+          const repeats = await database('leads')
             .where({ customer_id: resolvedCustomerId, lead_type: 'quote_wizard', status: 'duplicate' })
             .whereNull('deleted_at')
-            .orderBy('created_at', 'desc')
-            .first();
-          if (repeat) {
+            .orderBy('created_at', 'desc');
+          const picks = new Map();
+          for (const repeat of repeats) {
             const root = await followDuplicateLink(database, repeat);
             const rootIsOurs = root.id !== repeat.id && !CLOSED_LEAD_STATUSES.has(root.status) && !root.deleted_at
               && (!root.customer_id || String(root.customer_id) === String(resolvedCustomerId));
-            duplicateWinner = rootIsOurs ? null : repeat;
-            linked = [rootIsOurs ? root : repeat];
+            const pick = rootIsOurs ? root : repeat;
+            if (!picks.has(pick.id)) picks.set(pick.id, { pick, winner: rootIsOurs ? null : repeat });
+          }
+          if (picks.size > 1) {
+            logger.warn(`[lead-trigger] ${source} customer-link skip — ${picks.size} distinct opportunities behind duplicate rows (ambiguous)`, {
+              source, customerId: resolvedCustomerId, leadIds: [...picks.keys()],
+            });
+            return { converted: false, reason: 'ambiguous_customer_link' };
+          }
+          if (picks.size === 1) {
+            const [{ pick, winner }] = picks.values();
+            duplicateWinner = winner;
+            linked = [pick];
           }
         }
         // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
@@ -1054,7 +1069,12 @@ async function convertLeadFromEvent({
         conversion.initialServiceValue = valueHints.initialServiceValue;
         conversion.waveguardTier = valueHints.waveguardTier;
       }
-      await leadAttributionService.markConverted(lead.id, conversion);
+      // The repeat row taking the win is claimed on the label it was read
+      // with: a staff transition in between wins, and this event converts
+      // nothing (pre-push P1).
+      if (lead === duplicateWinner) conversion.onlyIfStatusIn = ['duplicate'];
+      const converted = await leadAttributionService.markConverted(lead.id, conversion);
+      if (lead === duplicateWinner && !converted) return { converted: false, reason: 'duplicate_claim_lost' };
     }
     return { converted: true, count: open.length, leadIds: open.map((lead) => lead.id) };
   } catch (err) {

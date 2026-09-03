@@ -572,7 +572,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
           // the tier-2 duplicate-repeat lookup: .where({ customer_id, lead_type, status: 'duplicate' })
           // .whereNull('deleted_at').orderBy(...).first()
           if (table === 'leads' && clause && 'lead_type' in clause) {
-            const rep = { whereNull: () => rep, orderBy: () => rep, first: async () => opts.customerDuplicateLead || null };
+            const rep = { whereNull: () => rep, orderBy: () => Promise.resolve(opts.customerDuplicateLeads || (opts.customerDuplicateLead ? [opts.customerDuplicateLead] : [])) };
             return rep;
           }
           // customerHasWonLead: .where({ customer_id, status: 'won' })
@@ -950,8 +950,45 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     });
     const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c2', enforceOriginating: true, database, leadAttributionService: { markConverted } });
     expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-rep2'] });
-    expect(markConverted).toHaveBeenCalledWith('L-rep2', expect.objectContaining({ customerId: 'c2' }));
+    // The repeat row is claimed on its label, so a staff transition in
+    // between can never be overwritten.
+    expect(markConverted).toHaveBeenCalledWith('L-rep2', expect.objectContaining({ customerId: 'c2', onlyIfStatusIn: ['duplicate'] }));
     expect(markConverted).not.toHaveBeenCalledWith('L-other', expect.anything());
+  });
+
+  test('self-booking: a repeat row whose label was changed by staff before the claim converts nothing', async () => {
+    const markConverted = jest.fn().mockResolvedValue(false);
+    const database = makeConvertDb({
+      customer: { id: 'c2', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [],
+      customerDuplicateLead: { id: 'L-rep3', status: 'duplicate', customer_id: 'c2', extracted_data: { duplicate_of_lead_id: 'L-other3' }, first_contact_at: '2026-09-01T12:00:00Z' },
+      leadsById: { 'L-other3': { id: 'L-other3', status: 'new', customer_id: 'c-OTHER' } },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c2', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: false, reason: 'duplicate_claim_lost' });
+  });
+
+  test('self-booking: duplicate rows behind two DIFFERENT opportunities are ambiguous — nothing converts', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const database = makeConvertDb({
+      customer: { id: 'c3', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [],
+      customerDuplicateLeads: [
+        { id: 'L-repA', status: 'duplicate', customer_id: 'c3', extracted_data: { duplicate_of_lead_id: 'L-rootA' } },
+        { id: 'L-repB', status: 'duplicate', customer_id: 'c3', extracted_data: { duplicate_of_lead_id: 'L-rootB' } },
+      ],
+      leadsById: {
+        'L-rootA': { id: 'L-rootA', status: 'new', customer_id: 'c3' },
+        'L-rootB': { id: 'L-rootB', status: 'new', customer_id: 'c3' },
+      },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c3', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: false, reason: 'ambiguous_customer_link' });
+    expect(markConverted).not.toHaveBeenCalled();
   });
 
   test('for an estimate-scoped event, does NOT convert a lead tied to a DIFFERENT estimate', async () => {
