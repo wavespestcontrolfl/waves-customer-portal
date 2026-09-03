@@ -12,7 +12,7 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const state = { candidates: [], existing: null, pricing: null, inserted: [], insertThrows: false, insertConflict: false };
+const state = { candidates: [], existing: null, pricing: null, inserted: [], updates: [], insertThrows: false, insertConflict: false };
 
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
@@ -23,6 +23,7 @@ jest.mock('../models/db', () => {
       if (table === 'vendor_pricing') return state.pricing;
       return null;
     };
+    q.update = async (row) => { state.updates.push({ table, row }); return 1; };
     const returning = async () => {
       if (state.insertThrows) throw new Error('insert boom');
       if (state.insertConflict) return [];
@@ -53,6 +54,7 @@ beforeEach(() => {
   state.existing = null;
   state.pricing = null;
   state.inserted = [];
+  state.updates = [];
   state.insertThrows = false;
   state.insertConflict = false;
 });
@@ -111,6 +113,19 @@ test('an existing OPEN auto_reorder request re-rings its deduped bell (failed-be
   expect(res.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
   expect(notify).toHaveBeenCalledTimes(1);
   expect(notify.mock.calls[0][3].dedupeKey).toBe('auto-reorder:req-auto');
+});
+
+test('vendor pricing learned after the request was raised → request refreshed + bell refreshOnDedupe', async () => {
+  state.candidates = [lowSign];
+  state.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: null, metadata: { vendorSku: null } };
+  state.pricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/x' };
+  const notify = jest.fn(async () => ({}));
+  const res = await runSuppliesAutoReorderSweep({ notify });
+  expect(res.refreshed).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
+  expect(state.updates).toHaveLength(1);
+  expect(JSON.parse(state.updates[0].row.metadata)).toMatchObject({ vendorSku: '127544', vendorProductUrl: 'https://gemplers.com/x' });
+  expect(state.updates[0].row.vendor).toBe('Gemplers');
+  expect(notify.mock.calls[0][3].refreshOnDedupe).toBe(true);
 });
 
 test('an existing ORDERED auto request does not re-ring', async () => {

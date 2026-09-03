@@ -78,6 +78,9 @@ async function ringRestockBell({ notify, product, request, pricing, onHand, reor
       bell: true,
       link: '/admin/inventory?tab=restock',
       dedupeKey: `auto-reorder:${request.id}`,
+      // A later sweep that learned the vendor/price rewrites the standing
+      // bell (title/body/metadata) instead of leaving the linkless original.
+      refreshOnDedupe: true,
       metadata: { restockRequestId: request.id, productId: product.id, vendorId: product.auto_reorder_vendor_id || null, vendorSku: pricing?.vendor_sku || null, vendorProductUrl: pricing?.vendor_product_url || null },
     },
   );
@@ -85,7 +88,7 @@ async function ringRestockBell({ notify, product, request, pricing, onHand, reor
 
 async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
   if (!gateEnvValue(GATE)) return { skipped: 'gated', created: [], deduped: [], unconfigured: [] };
-  const result = { created: [], deduped: [], unconfigured: [], errors: [], renotified: [] };
+  const result = { created: [], deduped: [], unconfigured: [], errors: [], renotified: [], refreshed: [] };
 
   const candidates = await findLowStockCandidates(conn);
   for (const p of candidates) {
@@ -108,6 +111,19 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
         // sit unworked forever: re-ring (the request-id dedupeKey makes a
         // landed bell a no-op).
         if (existing.source === SOURCE && existing.status === 'open') {
+          // Vendor configured after the request was raised (the seeded
+          // sticker starts unpriced): carry the new vendor/SKU/URL onto the
+          // open request so the tab and the refreshed bell show it.
+          const meta = (typeof existing.metadata === 'string' ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })() : existing.metadata) || {};
+          const learned = (pricing?.vendor_sku && !meta.vendorSku) || (pricing?.vendor_product_url && !meta.vendorProductUrl) || (p.vendor_name && !existing.vendor);
+          if (learned) {
+            await conn('product_restock_requests').where({ id: existing.id }).update({
+              vendor: p.vendor_name || existing.vendor || null,
+              metadata: JSON.stringify({ ...meta, vendorId: p.auto_reorder_vendor_id || meta.vendorId || null, vendorSku: pricing?.vendor_sku || meta.vendorSku || null, vendorProductUrl: pricing?.vendor_product_url || meta.vendorProductUrl || null }),
+              updated_at: new Date(),
+            });
+            result.refreshed.push({ productId: p.id, requestId: existing.id });
+          }
           try {
             await ringRestockBell({ notify, product: p, request: existing, pricing, onHand, reorderQty });
             result.renotified.push({ productId: p.id, requestId: existing.id });

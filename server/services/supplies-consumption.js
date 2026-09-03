@@ -15,6 +15,12 @@
  *     visit was performed (inspection_only / customer_declined) — no sign
  *     is left either way.
  *   - retired products (active = false) are never consumed.
+ *   - a kit item the technician ALSO logged in the completion product picker
+ *     (an ordinary usage movement for the same product + visit already
+ *     exists) is not consumed again — the picker deduction wins.
+ *   - movements carry unit_cost / cost_used from products_catalog
+ *     .cost_per_unit when the cost unit is the inventory unit, so job
+ *     costing sees the kit's material cost.
  *   - a product with per_completion_service_lines set is consumed only when
  *     the visit's service line (detectServiceLine id) is in that list;
  *     null = every line. A visit with no resolvable line consumes nothing
@@ -85,6 +91,17 @@ async function consumeCompletionSupplies(db, {
         const after = Number((before - usage).toFixed(4));
         const unit = locked.inventory_unit || 'each';
 
+        const alreadyLogged = await trx('product_inventory_movements')
+          .where({ product_id: locked.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' })
+          .whereRaw("coalesce(metadata->>'source', '') <> ?", [SOURCE])
+          .first('id');
+        if (alreadyLogged) return { skipped: 'already_logged_by_tech' };
+
+        const costPerUnit = locked.cost_per_unit != null ? Number(locked.cost_per_unit) : null;
+        const costUnitMatches = !locked.cost_unit || String(locked.cost_unit).toLowerCase() === String(unit).toLowerCase();
+        const unitCost = Number.isFinite(costPerUnit) && costPerUnit >= 0 && costUnitMatches ? costPerUnit : null;
+        const costUsed = unitCost != null ? Number((usage * unitCost).toFixed(4)) : null;
+
         const inserted = await trx('product_inventory_movements')
           .insert({
             product_id: locked.id,
@@ -97,6 +114,8 @@ async function consumeCompletionSupplies(db, {
             unit,
             stock_before: before,
             stock_after: after,
+            unit_cost: unitCost,
+            cost_used: costUsed,
             metadata: { source: SOURCE, reason: 'Completed visit consumable' },
           })
           .onConflict(trx.raw("(product_id, scheduled_service_id) WHERE (metadata->>'source') = 'completion_consumable'"))
@@ -105,7 +124,7 @@ async function consumeCompletionSupplies(db, {
         if (!inserted || inserted.length === 0) return { skipped: 'already_consumed' };
 
         await trx('products_catalog').where({ id: locked.id }).update({ inventory_on_hand: after, updated_at: new Date() });
-        return { consumed: { productId: locked.id, name: locked.name, usage, unit, before, after } };
+        return { consumed: { productId: locked.id, name: locked.name, usage, unit, before, after, costUsed } };
       });
       if (outcome.consumed) result.consumed.push(outcome.consumed);
       else result.skipped.push({ productId: product.id, reason: outcome.skipped });

@@ -20,14 +20,15 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { consumeCompletionSupplies, appliesToLine } = require('../services/supplies-consumption');
 
-function fakeDb({ products, duplicate = false, throwOnInsert = false }) {
+function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false }) {
   const updates = [];
   const inserts = [];
   const trx = (table) => {
     const q = {};
     q.where = () => q;
+    q.whereRaw = () => q;
     q.forUpdate = () => q;
-    q.first = async () => products.find((p) => p.id === q._id) || products[0];
+    q.first = async () => (table === 'product_inventory_movements' ? (techLogged ? { id: 'mv-tech' } : null) : products[0]);
     q.update = async (row) => { updates.push({ table, row }); return 1; };
     q.insert = (row) => ({
       onConflict: () => ({
@@ -76,10 +77,28 @@ test('inspection_only / customer_declined closeout (visitPerformed=false) → sk
 test('consumable with a count → one usage movement and a decrement', async () => {
   const { db, updates, inserts } = fakeDb({ products: [sign] });
   const res = await consumeCompletionSupplies(db, args);
-  expect(res.consumed).toEqual([{ productId: 'prod-sign', name: 'Sign card', usage: 1, unit: 'each', before: 640, after: 639 }]);
+  expect(res.consumed).toEqual([{ productId: 'prod-sign', name: 'Sign card', usage: 1, unit: 'each', before: 640, after: 639, costUsed: null }]);
   expect(inserts).toHaveLength(1);
   expect(inserts[0]).toMatchObject({ scheduled_service_id: 'svc-1', movement_type: 'usage', quantity: 1, stock_before: 640, stock_after: 639, metadata: { source: 'completion_consumable' } });
   expect(updates).toEqual([{ table: 'products_catalog', row: expect.objectContaining({ inventory_on_hand: 639 }) }]);
+});
+
+test('a kit item the tech logged in the picker is not consumed again', async () => {
+  const { db, updates, inserts } = fakeDb({ products: [sign], techLogged: true });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'already_logged_by_tech' }]);
+  expect(inserts).toHaveLength(0);
+  expect(updates).toHaveLength(0);
+});
+
+test('movement carries unit_cost / cost_used from cost_per_unit in the inventory unit', async () => {
+  const { db, inserts } = fakeDb({ products: [{ ...sign, cost_per_unit: '0.5356', cost_unit: 'each' }] });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(inserts[0]).toMatchObject({ unit_cost: 0.5356, cost_used: 0.5356 });
+  expect(res.consumed[0].costUsed).toBe(0.5356);
+  const { inserts: noCost } = fakeDb({ products: [{ ...sign, cost_per_unit: '12', cost_unit: 'gal' }] });
+  await consumeCompletionSupplies(fakeDb({ products: [{ ...sign, cost_per_unit: '12', cost_unit: 'gal' }] }).db, args);
+  expect(noCost).toHaveLength(0);
 });
 
 test('duplicate (index ignored the insert) → no decrement', async () => {

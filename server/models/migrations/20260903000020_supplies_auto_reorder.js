@@ -90,12 +90,21 @@ exports.up = async function up(knex) {
 
   if (!(await knex.schema.hasTable('vendors'))) return;
 
+  const hasCode = await knex.schema.hasColumn('vendors', 'code');
   let gemplers = await knex('vendors').whereRaw('LOWER(name) = ?', [GEMPLERS.name.toLowerCase()]).first();
   if (!gemplers) {
-    const hasCode = await knex.schema.hasColumn('vendors', 'code');
     const row = { ...GEMPLERS };
     if (!hasCode) delete row.code;
     [gemplers] = await knex('vendors').insert(row).returning('*');
+  } else if (hasCode) {
+    // A hand-created Gemplers row must still carry the reserved code so
+    // code-based vendor lookups (.claude/vendor-codes.md) find it; a
+    // conflicting non-null code is a real inconsistency — fail loudly.
+    if (gemplers.code == null) {
+      await knex('vendors').where({ id: gemplers.id }).update({ code: GEMPLERS.code });
+    } else if (Number(gemplers.code) !== GEMPLERS.code) {
+      throw new Error(`vendors row "${gemplers.name}" has code ${gemplers.code}; expected ${GEMPLERS.code} (.claude/vendor-codes.md)`);
+    }
   }
 
   const hasPricing = await knex.schema.hasTable('vendor_pricing');
@@ -112,6 +121,7 @@ exports.up = async function up(knex) {
       if (existing.per_completion_usage == null) fill.per_completion_usage = 1;
       if (existing.per_completion_service_lines == null) fill.per_completion_service_lines = JSON.stringify(KIT_SERVICE_LINES);
       if (existing.auto_reorder_vendor_id == null && item.pricing) fill.auto_reorder_vendor_id = gemplers.id;
+      if (existing.cost_per_unit == null && item.pricing) { fill.cost_per_unit = Number((item.pricing.price / Number(item.pricing.quantity)).toFixed(4)); fill.cost_unit = 'each'; }
       if (Object.keys(fill).length) await knex('products_catalog').where({ id: existing.id }).update(fill);
       continue;
     }
@@ -126,7 +136,12 @@ exports.up = async function up(knex) {
       per_completion_service_lines: JSON.stringify(KIT_SERVICE_LINES),
       auto_reorder_enabled: true,
       auto_reorder_vendor_id: item.pricing ? gemplers.id : null,
-      needs_pricing: false,
+      // Priced kit items leave the pricing queue; the sticker (no vendor,
+      // no price until PR 2) stays in it.
+      needs_pricing: !item.pricing,
+      // Per-unit cost so completion movements carry cost_used for job
+      // costing (pack price / pack size).
+      ...(item.pricing ? { cost_per_unit: Number((item.pricing.price / Number(item.pricing.quantity)).toFixed(4)), cost_unit: 'each' } : {}),
       customer_visibility: 'internal_only',
     }).returning('*');
 

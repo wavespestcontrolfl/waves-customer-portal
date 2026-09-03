@@ -14080,6 +14080,23 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       clientPestRating: clientPestRating == null ? null : clientPestRating,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
+    // Yard-sign kit consumption — the recap is the second production
+    // completion path for pest visits (GH codex r2 P1); same hook as
+    // /:serviceId/complete, same at-most-once index, never throws. A recap
+    // always records a performed pest visit (no inspection_only outcome).
+    try {
+      const { consumeCompletionSupplies } = require('../services/supplies-consumption');
+      const svcRow = await db('scheduled_services').where({ id: req.params.serviceId }).first('customer_id', 'technician_id', 'service_type');
+      await consumeCompletionSupplies(db, {
+        scheduledServiceId: req.params.serviceId,
+        serviceRecordId: result.recordId || null,
+        customerId: svcRow?.customer_id || null,
+        technicianId: svcRow?.technician_id || null,
+        isIncompleteVisit: false,
+        visitPerformed: true,
+        serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
+      });
+    } catch (e) { logger.error(`[dispatch] recap supplies consumption failed: ${e.message}`); }
     res.json(result);
   } catch (err) { next(err); }
 });
