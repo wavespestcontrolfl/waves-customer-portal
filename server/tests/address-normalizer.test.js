@@ -382,6 +382,14 @@ describe('normalizeUnitLine', () => {
     expect(splitUnitFirstLine('Bldg 9 #204, 1048 Example Lakes Cir, Sarasota, FL 34232')).toEqual({ unit: normalizeUnitLine('Bldg 9 Unit 204'), rest: '1048 Example Lakes Cir, Sarasota, FL 34232' });
     expect(splitUnitFirstLine('Bldg 9 #204 1048 Example Lakes Cir, Sarasota, FL 34232')).toEqual({ unit: normalizeUnitLine('Bldg 9 Unit 204'), rest: '1048 Example Lakes Cir, Sarasota, FL 34232' });
     expect(dwellingUnitOnLine('Bldg 9 #204, 1048 Example Lakes Cir, Sarasota, FL 34232')).toBe(normalizeUnitLine('Unit 204'));
+  });
+
+  test('lot and space are DWELLING designators — a park reply ("Lot 12", "Space 7") is the unit, building/floor stay structural (pre-push codex P1 on #3804 r15)', () => {
+    expect(dwellingUnitOnLine('900 Bayview Ter Lot 12, Venice, FL 34285')).toBe(normalizeUnitLine('Lot 12'));
+    expect(dwellingUnitOnLine('Space 7, 900 Bayview Ter, Venice, FL 34285')).toBe(normalizeUnitLine('Space 7'));
+    expect(dwellingUnitOnLine('900 Bayview Ter Bldg 2, Venice, FL 34285')).toBe('');
+    expect(dwellingUnitOnLine('900 Bayview Ter Floor 2, Venice, FL 34285')).toBe('');
+    expect(unitLineValueKey(normalizeUnitLine('Lot 12'))).toBe('lot 12');
     // A hash right after a bare designator or a leading hash is unchanged.
     expect(normalizeUnitLine('Apt #4')).toBe('Apt 4');
     expect(normalizeUnitLine('#204')).toBe(normalizeUnitLine('Unit 204'));

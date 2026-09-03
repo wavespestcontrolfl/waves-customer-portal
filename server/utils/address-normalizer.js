@@ -449,7 +449,11 @@ function unitDesignatorPairs(unitLine) {
   }
   return pairs;
 }
-const DWELLING_DESIGNATORS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite']);
+// Lot / space are the dwelling of a mobile-home or RV park ("Lot 12",
+// "Space 7") — subpremises a customer answers WITH, never structural
+// (pre-push codex P1 on #3804 r15): excluded, a "Lot 12" reply could never
+// satisfy the fence or lift the hold. Building / floor stay structural.
+const DWELLING_DESIGNATORS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite', 'lot', 'spc', 'space']);
 // The DWELLING (subpremise) part of the unit a line carries, or '' — a
 // structural component alone ("Bldg 9", "Floor 2") is a resolved
 // building, not the apartment the customer was asked for; it is
