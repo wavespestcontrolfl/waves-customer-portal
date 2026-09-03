@@ -31,6 +31,7 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
+jest.mock('../services/autopay-setup-link', () => ({ KIND: 'customer' }));
 jest.mock('../services/sms-media', () => ({
   mediaFromOutboundAttachments: jest.fn(() => []),
   signMediaForClient: jest.fn(async (media) => media),
@@ -385,6 +386,74 @@ describe('admin communications SMS route', () => {
           adminUserId: 'admin-1',
         }),
       }));
+    });
+  });
+
+  describe('Auto Pay setup link in the body (delivery seam)', () => {
+    const SECURE_BODY = 'Set it up here: https://portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY';
+    function wireAutopayDb({ row, owner = { id: 'cust-A', phone: '+15551234567' } }) {
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'appointment_card_requests') first.mockResolvedValue(row);
+        else if (table === 'customers') first.mockResolvedValue(owner);
+        else if (table === 'sms_templates') first.mockResolvedValue({ is_active: true });
+        return { where: jest.fn(function () { return this; }), first };
+      });
+    }
+    const send = (baseUrl) => fetch(`${baseUrl}/admin/communications/sms`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: '+15551234567', body: SECURE_BODY, messageType: 'manual' }),
+    });
+
+    test('a live link reclassifies the send as an Auto Pay customer SMS', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM1' });
+      wireAutopayDb({ row: { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() + 86400e3), customer_id: 'cust-A' } });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(200);
+        expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+          metadata: expect.objectContaining({
+            original_message_type: 'autopay_setup_link',
+            autopay_setup_tokens: ['abcDEF123_-xyz789QWERTY'],
+          }),
+        }));
+      });
+    });
+
+    test('schedule-sms refuses a body carrying a live Auto Pay link — immediate sends only', async () => {
+      wireAutopayDb({ row: { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() + 86400e3), customer_id: 'cust-A' } });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: SECURE_BODY, messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/send them now/);
+      });
+    });
+
+    test('an expired link aborts the send before the provider call', async () => {
+      wireAutopayDb({ row: { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() - 1000), customer_id: 'cust-A' } });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/expired or no longer live/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a link owned by a different customer aborts the send (fail closed)', async () => {
+      wireAutopayDb({
+        row: { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() + 86400e3), customer_id: 'cust-B' },
+        owner: { id: 'cust-B', phone: '+19998887777' },
+      });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(409);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
     });
   });
 

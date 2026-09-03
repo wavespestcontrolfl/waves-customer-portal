@@ -337,8 +337,10 @@ async function buildAutopaySetupLink(customerId) {
   if (lever) return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS[lever] };
   const { requestAutopaySetupLink } = require('./autopay-setup-link');
   const result = await requestAutopaySetupLink({ customerId, delivery: 'inline', trigger: 'admin' });
+  // A successful mutation, not a missing link (GH Codex #3812 r2 P2): the
+  // route answers 200 with autoSecured so the composer reports it as done.
   if (result?.action === 'auto_secured') {
-    return { url: null, line: '', reason: 'A consented card was already on file — Auto Pay is now enrolled, no link needed' };
+    return { url: null, line: '', autoSecured: true };
   }
   if (result?.action === 'link_created' && result.secureUrl) {
     return {
@@ -348,12 +350,63 @@ async function buildAutopaySetupLink(customerId) {
       // — the composer's recipient-change strip removes newline-delimited
       // lines carrying the tracked URL, so the whole clause must ride with
       // it (GH Codex #3812 r1 P2).
-      line: `Save a payment method for Auto Pay and each visit is paid automatically after it is completed - nothing is charged today. Set it up here: ${result.secureUrl}\n\n`,
+      // Lane-neutral charge unit: billingLaneSupported admits per-visit AND
+      // per-application customers (GH Codex #3812 r2 P1).
+      line: `Save a payment method for Auto Pay and each completed service is paid automatically - nothing is charged today. Set it up here: ${result.secureUrl}\n\n`,
       expiresAt: result.expiresAt || null,
     };
   }
   const reason = String(result?.reason || '');
   return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS[reason] || `Could not build an Auto Pay setup link (${reason || 'unknown'})` };
+}
+
+// The /secure/:token bearer the composer inserts (autopay-setup-link mints
+// 16 random bytes base64url = 22 chars; the visit lane's card requests share
+// the page and the table).
+const SECURE_LINK_RE = /\/secure\/([A-Za-z0-9_-]{16,})/g;
+
+/**
+ * Delivery-seam check for a composer body carrying Auto Pay setup links
+ * (GH Codex #3812 r2 P1/P2). The composer posts every send as
+ * original_message_type 'manual', so the canonical Auto Pay classifier in
+ * send-customer-message never sees it and the insert-time lever check goes
+ * stale while a draft sits open. EVERY /secure token in the body is judged
+ * (pre-push Codex P0 — a visit link first must not shadow an Auto Pay link
+ * after it). Called by /sms and /schedule-sms with the recipient's last-10:
+ *   { present: false }                       — no customer-kind Auto Pay link in the body
+ *   { present: true, ok: true, tokens }      — every Auto Pay link is live, pending and
+ *                                              owned by the recipient; the caller reclassifies
+ *   { present: true, ok: false, error }      — refuse the send with this message
+ * Visit-lane card requests (kind 'visit') use the same page but their own
+ * gates — they are neither judged nor reclassified here.
+ */
+async function autopayLinkSendCheck(body, toLast10) {
+  const tokens = [...new Set([...String(body || '').matchAll(SECURE_LINK_RE)].map((m) => m[1]))];
+  if (!tokens.length) return { present: false };
+  const { KIND } = require('./autopay-setup-link');
+  const refuse = (error) => ({ present: true, ok: false, error });
+  const live = [];
+  for (const token of tokens) {
+    const row = await db('appointment_card_requests')
+      .where({ token })
+      .first('id', 'kind', 'status', 'expires_at', 'customer_id');
+    if (row && row.kind !== KIND) continue;
+    if (!row || row.status !== 'pending' || (row.expires_at && new Date(row.expires_at).getTime() <= Date.now())) {
+      return refuse('This Auto Pay setup link is expired or no longer live — remove it and insert a fresh one.');
+    }
+    live.push({ token, customerId: row.customer_id });
+  }
+  if (!live.length) return { present: false };
+  const lever = await autopaySmsLever();
+  if (lever) return refuse(`${AUTOPAY_SKIP_REASONS[lever]} — remove the Auto Pay link before sending.`);
+  for (const { customerId } of live) {
+    const owner = await db('customers').where({ id: customerId }).first('phone');
+    const ownerLast10 = String(owner?.phone || '').replace(/\D/g, '').slice(-10);
+    if (!ownerLast10 || ownerLast10 !== String(toLast10 || '')) {
+      return refuse('This Auto Pay setup link belongs to a different customer — remove it before sending.');
+    }
+  }
+  return { present: true, ok: true, tokens: live.map((l) => l.token) };
 }
 
 module.exports = {
@@ -365,4 +418,5 @@ module.exports = {
   buildReferralLink,
   AUTOPAY_SKIP_REASONS,
   buildAutopaySetupLink,
+  autopayLinkSendCheck,
 };

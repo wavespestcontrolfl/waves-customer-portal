@@ -1765,6 +1765,12 @@ function SmsTab() {
         // shared pending row stays reusable (see the withdrawal note above).
         return;
       }
+      if (d.autoSecured) {
+        // A consented saved card covered the ask and Auto Pay was enrolled —
+        // a successful outcome with nothing to insert.
+        setSendResult({ ok: true, text: "A consented card was already on file — Auto Pay is now enrolled, no link needed." });
+        return;
+      }
       const clause = String(d.line || "").trim() || `${d.url}`;
       const prefill = buildCustomerLinkPrefill({ firstName: d.firstName, clause });
       // Replace-don't-stack per kind (same rule as the reschedule insert).

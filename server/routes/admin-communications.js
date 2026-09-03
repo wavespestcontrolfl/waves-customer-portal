@@ -411,15 +411,16 @@ router.post('/sms', async (req, res, next) => {
     // mismatched recipient must never receive it, and an unverifiable state
     // must never send untracked. Only a request with NO reviewRequestId
     // sends unclaimed.
+    // Shared by the review-link and Auto Pay-link pre-send seams below.
+    const abortUnsent = async (status, error) => {
+      await clearManualReservation();
+      await reopenScheduledSuggestions({
+        decisionIds: [claimedDecisionId, ...parkedThreadIds],
+        reason: 'Send was not attempted — suggestion reopened.',
+      });
+      return res.status(status).json({ error });
+    };
     if (reviewRequestId) {
-      const abortUnsent = async (status, error) => {
-        await clearManualReservation();
-        await reopenScheduledSuggestions({
-          decisionIds: [claimedDecisionId, ...parkedThreadIds],
-          reason: 'Send was not attempted — suggestion reopened.',
-        });
-        return res.status(status).json({ error });
-      };
       try {
         const ReviewService = require('../services/review-request');
         const rr = await db('review_requests')
@@ -515,6 +516,22 @@ router.post('/sms', async (req, res, next) => {
       }
     }
 
+    // Composer-inserted Auto Pay setup link (or a pasted one): re-run the
+    // canonical levers + row liveness + ownership NOW (the insert-time check
+    // is stale once a draft sits open) and reclassify the send so
+    // send-customer-message's Auto Pay gate applies at delivery. FAIL CLOSED
+    // on any miss (GH Codex #3812 r2 P1/P2).
+    let autopayLinkTokens = null;
+    try {
+      const { autopayLinkSendCheck } = require('../services/composer-customer-links');
+      const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to));
+      if (autopayCheck.present && !autopayCheck.ok) return abortUnsent(409, autopayCheck.error);
+      if (autopayCheck.present) autopayLinkTokens = autopayCheck.tokens;
+    } catch (autopayErr) {
+      logger.warn(`[communications] Auto Pay link pre-send check failed — aborting send: ${autopayErr.message}`);
+      return abortUnsent(503, 'Could not verify the inserted Auto Pay setup link — try again in a moment.');
+    }
+
     const sendStartedAt = new Date();
     // Human-authored only when the operator typed the body, not when an
     // unedited AI suggestion is being sent through. The stale-month guard
@@ -534,7 +551,10 @@ router.post('/sms', async (req, res, next) => {
       identityTrustLevel: trustedCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
       entryPoint: 'admin_communications_manual_sms',
       metadata: {
-        original_message_type: messageType || 'manual',
+        // An Auto Pay setup link makes this an Auto Pay customer SMS whatever
+        // the composer called it — the classifier keys on this prefix.
+        original_message_type: autopayLinkTokens ? 'autopay_setup_link' : (messageType || 'manual'),
+        ...(autopayLinkTokens ? { autopay_setup_tokens: autopayLinkTokens } : {}),
         adminUserId: req.technicianId,
         agentDecisionId: verifiedAgentDecision?.id || undefined,
         // Parked ids ride into the provider-created sms_log row (same as
@@ -1712,6 +1732,11 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     }
 
     const result = await builderByKind[kind](customerIds, primaryId);
+    // Auto Pay auto-secure: a consented saved card was enrolled instead of a
+    // link being minted — a successful outcome with nothing to insert.
+    if (result?.autoSecured) {
+      return res.json({ kind, url: null, line: '', autoSecured: true, firstName: recipientFirstName });
+    }
     if (!result?.url) {
       return res.status(404).json({ error: result?.reason || 'Nothing to link for this customer' });
     }
@@ -1723,6 +1748,7 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       requestId: result.requestId || undefined,
       balance: result.balance || undefined,
       estimate: result.estimate || undefined,
+      expiresAt: result.expiresAt || undefined,
     });
   } catch (err) {
     logger.error(`customer-link lookup failed: ${err.message}`);
@@ -2026,6 +2052,16 @@ router.post('/schedule-sms', async (req, res, next) => {
     }
     if (messageType && BLOCKED_SCHEDULED_PURPOSES.has(purposeForScheduledMessageType(messageType))) {
       return res.status(400).json({ error: 'marketing/retention sends are not allowed on this endpoint' });
+    }
+    // An Auto Pay setup link is a 30-day bearer credential with no
+    // schedule-time re-check — immediate sends only (the composer refuses
+    // client-side; this is the authoritative fence).
+    {
+      const { autopayLinkSendCheck } = require('../services/composer-customer-links');
+      const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to));
+      if (autopayCheck.present) {
+        return res.status(400).json({ error: 'Auto Pay setup links expire — send them now, or remove the link before scheduling' });
+      }
     }
 
     // ET wall-clock parse — datetime-local strings without offset are

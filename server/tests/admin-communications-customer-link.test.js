@@ -269,6 +269,17 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
+  test('autopay_setup: auto_secured answers 200 with autoSecured and no url — a success, not a 404', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildAutopaySetupLink.mockResolvedValue({ url: null, line: '', autoSecured: true });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'autopay_setup' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ kind: 'autopay_setup', url: null, autoSecured: true, firstName: 'PersonA' });
+    });
+  });
+
   test('estimate + pay_balance: dispatch the whole account id set', async () => {
     wireDb({ customers: soloCustomer() });
     builders.buildLatestEstimateLink.mockResolvedValue({
