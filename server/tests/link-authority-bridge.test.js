@@ -228,6 +228,31 @@ describe('outreach-lane paths', () => {
     expect(r2.errors).toEqual([{ domain: 'example.org', skipped: 'outreach conversation in flight on another path (contacted)' }]);
     expect(placements(db)).toHaveLength(1);
   });
+  test('an exact homepage outreach row left UNBOUND by the manual endpoint is adopted, never stuck behind a null path', async () => {
+    const { db, d, p } = scenario({ make: outreachPath });
+    const manual = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: null, path_id: null, status: 'prospect', link_type: null, source: 'manual', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(manual);
+    const r = await run(db);
+    expect(r).toMatchObject({ decided: 1, placementsCreated: 0, rowsWritten: 1, skippedLeased: 0, errors: [] });
+    expect(placements(db)).toHaveLength(1);
+    expect(placements(db)[0]).toMatchObject({ id: manual.id, domain_id: d.id, path_id: p.id, link_type: 'resource', authority: 'OWNER_OUTREACH' });
+    expect(rows(db)[0]).toMatchObject({ prospect_id: manual.id, path_id: p.id, dimension: 'communication' });
+  });
+  test('an approved send with the fee DEFERRED to checkout reads ready_to_acquire — the deferred payment row holds nothing back', async () => {
+    const { db, p } = scenario({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: 20000, currency: 'USD', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
+    await run(db);
+    expect(domainState(db)).toBe('qualified');
+    const send = rows(db).find((x) => x.dimension === 'communication');
+    const approval = { id: uid(), prospect_id: send.prospect_id, path_id: p.id, decision: 'approved', authority: 'OWNER_OUTREACH', dimension: 'communication', instance_key: '-:1', invalidated_at: null };
+    db._tables.seo_link_approvals.push(approval);
+    send.approval_id = approval.id;
+    db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 1000);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r.parked).toBe(0);
+    const fee = rows(db).find((x) => x.dimension === 'payment');
+    expect([fee.level, fee.approval_id || null, fee.satisfied_at || null]).toEqual(['OWNER_PAYMENT', null, null]); // still pending, still deferred
+    expect(domainState(db)).toBe('ready_to_acquire');
+  });
   test('legal attestation adds the accept_terms execution instance at OWNER_LEGAL', async () => {
     const { db } = scenario({ make: outreachPath, path: { acquisition_type: 'resource_outreach', link_type: 'resource', submission_url: null, legal_attestation: true, legal_terms_hash: HASH } });
     await run(db);
@@ -345,6 +370,42 @@ describe('re-decision', () => {
     const moved = placements(db).find((x) => x.id === pl.id);
     expect(moved).toMatchObject({ path_id: p.id, target_url: 'https://example.org/add', automation_policy: null }); // settleRetiredPlacements synced URL + cleared the classification
   });
+  test('a supersession the mover applied AFTER the bridge ran (at the lease release) is still rotated: the row remembers its path', async () => {
+    const { db, d, p } = scenario();
+    const old = pathRow(d, { superseded_by: p.id });
+    db._tables.seo_link_acquisition_paths.push(old);
+    // the placement already sits on the best path (moved by the worker on release); its instance was decided on the old one
+    const pl = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: p.id, status: 'prospect', link_type: 'directory', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(pl);
+    db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: pl.id, path_id: old.id, dimension: 'execution', instance_kind: '-', instance_key: '-:1', level: 'OWNER_FREE', decision_inputs_hash: P.decisionInputsHash('execution', { path: p, domain: d, policy: P.normalizePolicyRow(null), score: 75 }), path_revision: 1, decided_at: NOW, ended_at: null, satisfied_at: null });
+    db._tables.seo_link_domains[0].agent_state = 'ready_to_acquire';
+    expect(await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([{ id: d.id, domain: 'example.org', why: 'stale' }]);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r.ended).toBe(1);
+    const mine = rows(db).filter((x) => x.prospect_id === pl.id);
+    expect(mine.filter((x) => x.ended_at).map((x) => [x.instance_key, x.end_outcome])).toEqual([['-:1', 'superseded']]);
+    expect(mine.filter((x) => !x.ended_at).map((x) => [x.instance_key, x.path_id])).toEqual([['-:2', p.id]]);
+  });
+  test('a changed agreement reopens a SATISFIED accept_terms instance: ended terms_changed, approval invalidated, terms:2 opened and parked', async () => {
+    const { db, p } = scenario({ make: outreachPath, path: { legal_attestation: true, legal_terms_hash: HASH } });
+    await run(db);
+    const terms = rows(db).find((x) => x.instance_kind === 'terms');
+    const approval = { id: uid(), prospect_id: terms.prospect_id, path_id: p.id, decision: 'approved', authority: 'OWNER_LEGAL', dimension: 'execution', instance_key: 'terms:1', invalidated_at: null };
+    db._tables.seo_link_approvals.push(approval);
+    Object.assign(terms, { approval_id: approval.id, satisfied_at: NOW, satisfied_reason: 'human_step_done', accepted_terms_hash: HASH });
+    Object.assign(placements(db)[0], { status: 'prospect' });
+    // an unchanged agreement is final: nothing is selected
+    expect(await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+    Object.assign(db._tables.seo_link_acquisition_paths[0], { legal_terms_hash: 'b'.repeat(64), revision_execution: 2, updated_at: new Date(NOW.getTime() + 1000) });
+    const later = new Date(NOW.getTime() + 60000);
+    expect((await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['stale']);
+    const r = await run(db, { now: later });
+    expect(r).toMatchObject({ ended: 1, invalidatedApprovals: 1, rowsWritten: 1, parked: 1 });
+    expect(rows(db).find((x) => x.id === terms.id)).toMatchObject({ ended_at: later, end_outcome: 'terms_changed', satisfied_at: NOW, accepted_terms_hash: HASH });
+    expect(approval).toMatchObject({ invalidated_at: later, invalidated_reason: 'terms_changed' });
+    expect(rows(db).filter((x) => x.instance_kind === 'terms' && !x.ended_at).map((x) => [x.instance_key, x.level, x.satisfied_at])).toEqual([['terms:2', 'OWNER_LEGAL', undefined]]);
+    expect(placements(db)[0].status).toBe('awaiting_owner');
+  });
   test('a placement still LEASED on its old path is left alone this run (the registry mover waits for claimed_at IS NULL)', async () => {
     const { db, d, p } = scenario();
     const old = pathRow(d, { superseded_by: p.id });
@@ -399,6 +460,8 @@ describe('aggregateState (§3.1)', () => {
     ['investigating when every placement is INVALID', [{ status: 'prospect', rows: [A('INVALID')] }, { status: 'prospect', rows: [A('INVALID'), A('INVALID')] }], 'investigating'],
     ['rejected only when every placement is DENY', [{ status: 'prospect', rows: [A('DENY')] }], 'rejected'],
     ['a DENY beside an INVALID is not a rejection', [{ status: 'prospect', rows: [A('DENY')] }, { status: 'prospect', rows: [A('INVALID')] }], 'qualified'],
+    ['a deferred outreach payment does not hold an authorized send back', [{ status: 'prospect', outreach: true, rows: [A('AUTO_OUTREACH'), { ...A('OWNER_PAYMENT'), dimension: 'payment' }] }], 'ready_to_acquire'],
+    ['the same payment row on a non-outreach placement is pending', [{ status: 'prospect', rows: [A('AUTO_FREE'), { ...A('OWNER_PAYMENT'), dimension: 'payment' }] }], 'qualified'],
     ['no rows ⇒ qualified', [{ status: 'prospect', rows: [] }], 'qualified'],
   ])('%s', (_, placementsIn, expected) => { expect(bridge.aggregateState(placementsIn)).toBe(expected); });
 });
@@ -474,6 +537,19 @@ describe('selection', () => {
     expect(new Set(placements(db).map((x) => x.target_domain))).toEqual(new Set(['example.org', 'two.example']));
     const r3 = await run(db, { limit: 1, now: new Date(NOW.getTime() + 120000) });
     expect(r3.selected).toBe(0); // both current: nothing to do
+  });
+  test('a GBP location added after the bridge ran makes the qualified domain unbridged again — only the missing placement is created', async () => {
+    const { db, d } = scenario();
+    await run(db);
+    expect(placements(db)).toHaveLength(WAVES_LOCATIONS.length);
+    expect(await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+    // simulate the config change: the last location's placement never existed
+    const gone = placements(db).pop();
+    db._tables.seo_link_placement_authorities = db._tables.seo_link_placement_authorities.filter((x) => x.prospect_id !== gone.id);
+    expect(await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([{ id: d.id, domain: 'example.org', why: 'unbridged' }]);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r).toMatchObject({ placementsCreated: 1, rowsWritten: 1, redecided: 0 });
+    expect(placements(db).map((x) => x.location_key).sort()).toEqual(WAVES_LOCATIONS.map((l) => l.id).sort());
   });
   test('limit caps and dedupes across the sources; domainIds narrows', async () => {
     const { db, d } = scenario();

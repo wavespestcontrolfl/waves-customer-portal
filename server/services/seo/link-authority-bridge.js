@@ -4,16 +4,22 @@
  *
  * How an investigated domain becomes a stamped placement. Per run:
  *   (a) every `qualified` domain with a `best_path_id`, and
- *   (b) every domain owning an OPEN, UNSATISFIED authority row that is stale —
- *       decided before the policy / path / domain last changed, or whose
- *       placement still points at a superseded path —
+ *   (b) every domain owning an OPEN authority row that is stale — an
+ *       unsatisfied one decided before the policy / path / domain last changed
+ *       or decided on a path that is no longer the domain's best, a satisfied
+ *       accept_terms one bound to an agreement hash the path no longer carries,
+ *       or one whose placement still points at a superseded path — and every
+ *       `qualified` domain missing a placement for a GBP location —
  * each processed in ONE transaction under the shared per-domain lock
  * (prospect-domain-lock): choose the Waves page (homepage — see the note in
  * the plan), create the placement rows if missing (one per GBP location for a
  * signup lane, one unscoped row for an outreach lane), run the PURE §6.3
- * decision, write/refresh one authority row per required instance (a satisfied
- * instance is never re-decided; an approval whose frozen inputs no longer
- * match is invalidated), stamp the placement's display level, park an
+ * decision, rotate the instances that outlived their path or agreement (each
+ * row records the path it was decided on, so a supersession the registry mover
+ * applied at a lease release — after the bridge's own run — still ends the old
+ * generation and opens the next), write/refresh one authority row per required
+ * instance (a satisfied instance is never re-decided; an approval whose frozen
+ * inputs no longer match is invalidated), stamp the placement's display level, park an
  * owner-gated placement `awaiting_owner` (or release one a loosened policy no
  * longer gates), and recompute the domain's aggregate `agent_state`.
  *
@@ -76,35 +82,43 @@ const defaultNotify = (title, body, opts) => require('../notification-service').
 // ---------------------------------------------------------------------------
 async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const forced = new Set(domainIds || []);
-  // candidates: qualified, or owning an open unsatisfied row, or carrying an active waiver, or explicitly requested
+  // candidates: qualified, or owning an open row (satisfied or not), or carrying an active waiver, or explicitly requested
   const qualified = await db('seo_link_domains').where({ agent_state: 'qualified' }).whereNotNull('best_path_id').orderBy('updated_at', 'asc').select('id');
-  const open = await db(AUTH).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'decided_at');
-  const openProspects = open.length ? await db('seo_link_prospects').whereIn('id', [...new Set(open.map((r) => r.prospect_id))]).whereNotNull('domain_id').select('id', 'domain_id', 'path_id') : [];
+  const open = await db(AUTH).whereNull('ended_at').select('prospect_id', 'path_id', 'decided_at', 'satisfied_at', 'instance_kind', 'accepted_terms_hash');
+  const owners = open.length ? await db('seo_link_prospects').whereIn('id', [...new Set(open.map((r) => r.prospect_id))]).whereNotNull('domain_id').select('id', 'domain_id') : [];
   const waivers = await db('seo_link_floor_waivers').whereNull('invalidated_at').select('domain_id', 'path_id', 'approved_at');
-  const candidateIds = [...new Set([...qualified.map((d) => d.id), ...openProspects.map((p) => p.domain_id), ...waivers.map((w) => w.domain_id), ...forced])]
+  const candidateIds = [...new Set([...qualified.map((d) => d.id), ...owners.map((p) => p.domain_id), ...waivers.map((w) => w.domain_id), ...forced])]
     .filter((id) => !forced.size || forced.has(id));
   if (!candidateIds.length) return [];
   const domains = await db('seo_link_domains').whereIn('id', candidateIds).whereNotNull('best_path_id').select('id', 'domain', 'agent_state', 'best_path_id', 'updated_at');
-  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id))]).select('id', 'updated_at');
-  const pathAt = new Map(paths.map((p) => [p.id, ts(p.updated_at)]));
-  const oldestByProspect = new Map();
-  for (const r of open) oldestByProspect.set(r.prospect_id, Math.min(oldestByProspect.get(r.prospect_id) ?? Infinity, ts(r.decided_at)));
+  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id))]).select('id', 'updated_at', 'link_type', 'legal_terms_hash');
+  const pathById = new Map(paths.map((p) => [p.id, p]));
+  // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
+  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key');
   const byDomain = new Map();
-  for (const p of openProspects) byDomain.set(p.domain_id, [...(byDomain.get(p.domain_id) || []), p]);
+  for (const p of placements) byDomain.set(p.domain_id, [...(byDomain.get(p.domain_id) || []), p]);
+  const rowsByProspect = new Map();
+  for (const r of open) rowsByProspect.set(r.prospect_id, [...(rowsByProspect.get(r.prospect_id) || []), r]);
   const waiverAt = new Map();
   for (const w of waivers) waiverAt.set(`${w.domain_id}|${w.path_id}`, Math.max(waiverAt.get(`${w.domain_id}|${w.path_id}`) || 0, ts(w.approved_at)));
 
   const picked = [];
   const rank = { forced: 0, unbridged: 1, stale: 2 };
   for (const d of domains) {
-    const rows = byDomain.get(d.id) || [];
-    const onBest = rows.filter((p) => p.path_id === d.best_path_id);
-    const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), pathAt.get(d.best_path_id) || 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
+    const best = pathById.get(d.best_path_id) || null;
+    const mine = byDomain.get(d.id) || [];
+    const onBest = mine.filter((p) => p.path_id === d.best_path_id);
+    const expected = expectedLocations(best);
+    const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), best ? ts(best.updated_at) : 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
+    const staleRow = (r) => (r.satisfied_at
+      ? termsChanged(r, best) // a satisfied instance is final — except an acceptance of an agreement the path no longer carries
+      : r.path_id !== d.best_path_id || ts(r.decided_at) < cutoff);
+    const owned = mine.filter((p) => rowsByProspect.has(p.id));
     let why = null;
     if (forced.has(d.id)) why = 'forced';
-    else if (d.agent_state === 'qualified' && !onBest.length) why = 'unbridged';
-    else if (rows.some((p) => p.path_id !== d.best_path_id || oldestByProspect.get(p.id) < cutoff)) why = 'stale';
-    else if (waiverAt.has(`${d.id}|${d.best_path_id}`) && !rows.length && !BRIDGE_STATES.includes(d.agent_state)) why = 'stale'; // a waiver on a rejected domain whose rows were all ended
+    else if (d.agent_state === 'qualified' && expected.some((l) => !onBest.some((p) => p.location_key === l && rowsByProspect.has(p.id)))) why = 'unbridged';
+    else if (owned.some((p) => p.path_id !== d.best_path_id || rowsByProspect.get(p.id).some(staleRow))) why = 'stale';
+    else if (waiverAt.has(`${d.id}|${d.best_path_id}`) && !owned.length && !BRIDGE_STATES.includes(d.agent_state)) why = 'stale'; // a waiver on a rejected domain whose rows were all ended
     if (why) picked.push({ id: d.id, domain: d.domain, why, at: ts(d.updated_at) });
   }
   picked.sort((a, b) => rank[a.why] - rank[b.why] || a.at - b.at);
@@ -122,6 +136,17 @@ async function annotateApprovals(trx, rows) {
   return rows;
 }
 const authorized = (r) => Boolean(r.satisfied_at) || isAuto(r.level) || (isOwner(r.level) && r.approved === true);
+// payment on an outreach path is DEFERRED until the publisher exposes a checkout
+// (ready_for_payment, §3.3b): it neither parks the placement nor holds the
+// domain back from ready_to_acquire — the initial send claims on communication
+// authority alone (the claim predicate, plan §6.4, accepts nothing below ready_to_acquire).
+const deferred = (r, outreach) => outreach === true && r.dimension === 'payment';
+// a SATISFIED accept_terms instance is bound to the hash it accepted: an
+// agreement the path no longer carries reopens it (§3.3b — acceptance of an old
+// agreement never satisfies a newly discovered one)
+const termsChanged = (r, path) => r.instance_kind === 'terms' && (r.accepted_terms_hash || null) !== ((path && path.legal_terms_hash) || null);
+// placements per lane: one per GBP location for a signup lane, one unscoped row otherwise
+const expectedLocations = (path) => (path && SIGNUP_LINK_TYPES.includes(path.link_type) ? WAVES_LOCATIONS.map((l) => l.id) : ['-']);
 
 const freshCounters = () => ({ placementsCreated: 0, rowsWritten: 0, redecided: 0, ended: 0, parked: 0, released: 0, invalidatedApprovals: 0, invalidatedWaivers: 0, aggregateChanges: 0, skippedLeased: 0, parkedDomains: [] });
 
@@ -155,24 +180,24 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   const decision = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: false, waiver });
   const outreachPath = OUTREACH_ACQUISITION_TYPES.includes(path.acquisition_type);
 
-  // placements: one per GBP location for a signup lane, one unscoped row otherwise
-  const locations = SIGNUP_LINK_TYPES.includes(path.link_type) ? WAVES_LOCATIONS.map((l) => l.id) : ['-'];
   let placements = [];
-  for (const location of locations) {
+  for (const location of expectedLocations(path)) {
     let row = await findPlacementRow(trx, domain.domain, HOMEPAGE, { location, columns: ['*'] });
     if (!row && location === '-' && inFlight) {
       // an outreach conversation already exists for this inbox (a manual or
-      // strategy-agent row on another page): ADOPT it as the placement rather
-      // than open a second one. A row already bound to a different live path
-      // is that path's placement — nothing is created this run.
-      const existing = await trx('seo_link_prospects').where({ id: inFlight.id }).first();
-      if (!existing || (existing.path_id && existing.path_id !== path.id)) return { skipped: `outreach conversation in flight on another path (${inFlight.status})`, out };
-      if (!existing.path_id) {
-        const adopt = { domain_id: domain.id, path_id: path.id, updated_at: now, ...(existing.link_type ? {} : { link_type: path.link_type }) };
-        await trx('seo_link_prospects').where({ id: existing.id }).update(adopt);
-        Object.assign(existing, adopt);
-      }
-      row = existing;
+      // strategy-agent row on another page): that row IS the placement rather
+      // than a second one. A row already bound to a different live path is
+      // that path's placement — nothing is created this run.
+      row = await trx('seo_link_prospects').where({ id: inFlight.id }).first();
+      if (!row || (row.path_id && row.path_id !== path.id)) return { skipped: `outreach conversation in flight on another path (${inFlight.status})`, out };
+    }
+    if (row && !row.path_id) {
+      // an UNBOUND row — exact homepage match or the in-flight conversation;
+      // the manual prospect endpoint assigns no registry ids — is ADOPTED:
+      // bound to the domain and its best path (the mover cannot follow a null path)
+      const adopt = { domain_id: domain.id, path_id: path.id, updated_at: now, ...(row.link_type ? {} : { link_type: path.link_type }) };
+      await trx('seo_link_prospects').where({ id: row.id }).update(adopt);
+      Object.assign(row, adopt);
     }
     if (!row) {
       const [created] = await trx('seo_link_prospects').insert({
@@ -191,19 +216,15 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   // settleRetiredPlacements: waits for an unleased row, follows the chain,
   // syncs lane/URL, clears a stale draft + classification). A placement still
   // leased on its old path, or on a live path that is not the domain's best,
-  // is left alone this run.
+  // is left alone this run. The mover never touches authority rows: the
+  // rotation below reads each row's own path_id, so a move it applies later
+  // (at the lease release) is rotated on the next run all the same.
   const behind = placements.filter((p) => p.path_id !== path.id);
   if (behind.length) {
     await settleRetiredPlacements(trx, { prospectIds: behind.map((p) => p.id), now });
     const moved = await trx('seo_link_prospects').whereIn('id', behind.map((p) => p.id)).select('*');
     const byId = new Map(moved.map((p) => [p.id, p]));
     placements = placements.map((p) => byId.get(p.id) || p);
-    for (const p of placements) {
-      if (p.path_id === path.id && behind.some((b) => b.id === p.id)) {
-        // the rows were decided on the old path: the unsatisfied instances end, fresh generations are decided below
-        out.ended += await trx(AUTH).where({ prospect_id: p.id }).whereNull('ended_at').whereNull('satisfied_at').update({ ended_at: now, end_outcome: 'superseded', updated_at: now });
-      }
-    }
     const stuck = placements.filter((p) => p.path_id !== path.id);
     out.skippedLeased += stuck.length;
     placements = placements.filter((p) => p.path_id === path.id);
@@ -229,6 +250,22 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     // instance_key) keeps history, so a replacement instance takes the next
     // generation (`${kind}:${n+1}`, §3.3b) — never the ended row's key.
     const history = await annotateApprovals(trx, await trx(AUTH).where({ prospect_id: placement.id }).select('*'));
+    // rotation: an unsatisfied instance decided on another path ends
+    // `superseded`; a satisfied accept_terms instance whose accepted hash the
+    // path no longer carries ends `terms_changed` (its approval invalidated,
+    // §3.2) — every other satisfied instance is path-independent and stays.
+    // The next generation of each is decided below.
+    for (const r of history) {
+      if (r.ended_at) continue;
+      const outcome = r.satisfied_at ? (termsChanged(r, path) ? 'terms_changed' : null) : (r.path_id !== path.id ? 'superseded' : null);
+      if (!outcome) continue;
+      if (r.approval_id) {
+        out.invalidatedApprovals += await trx('seo_link_approvals').where({ id: r.approval_id }).whereNull('invalidated_at').update({ invalidated_at: now, invalidated_reason: outcome === 'terms_changed' ? 'terms_changed' : 'path_superseded', updated_at: now });
+      }
+      await trx(AUTH).where({ id: r.id }).update({ ended_at: now, end_outcome: outcome, updated_at: now });
+      Object.assign(r, { ended_at: now, end_outcome: outcome });
+      out.ended += 1;
+    }
     const open = history.filter((r) => !r.ended_at);
     const key = (r) => `${r.dimension}|${r.instance_kind}`;
     const nextGeneration = (inst) => 1 + history.filter((r) => key(r) === key(inst)).reduce((m, r) => Math.max(m, Number(String(r.instance_key).split(':').pop()) || 0), 0);
@@ -242,7 +279,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       const floorWaiverId = waiver ? waiver.id : null;
       if (!existing) {
         const [row] = await trx(AUTH).insert({
-          prospect_id: placement.id, dimension: inst.dimension, instance_kind: inst.instance_kind, instance_key: `${inst.instance_kind}:${nextGeneration(inst)}`,
+          prospect_id: placement.id, path_id: path.id, dimension: inst.dimension, instance_kind: inst.instance_kind, instance_key: `${inst.instance_kind}:${nextGeneration(inst)}`,
           level: inst.level, reason: inst.reason, decision_inputs_hash: hash, path_revision: pathRevision,
           floor_waiver_id: floorWaiverId, decided_at: now, created_at: now, updated_at: now,
         }).returning('*');
@@ -287,8 +324,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       if (!isOwner(r.level)) return false;
       // an owner-gated send with no draft yet: the draft lease (mode=draft) must run first; the card binds the draft
       if (r.dimension === 'communication' && noDraft && (r.level === 'OWNER_OUTREACH' || r.level === 'OWNER_LEGAL')) return false;
-      // payment on an outreach path is DEFERRED until the publisher exposes a checkout (ready_for_payment, §3.3b)
-      if (r.dimension === 'payment' && outreachPath) return false;
+      if (deferred(r, outreachPath)) return false;
       return true;
     };
     const ownerGated = live.some(gates);
@@ -304,7 +340,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       out.released += 1;
     }
     if (Object.keys(patch).length) await trx('seo_link_prospects').where({ id: placement.id }).update({ ...patch, updated_at: now });
-    summaries.push({ id: placement.id, status, authority, rows: live });
+    summaries.push({ id: placement.id, status, authority, rows: live, outreach: outreachPath });
   }
 
   // informational stamp on the path — that column only, never the revision or updated_at
@@ -315,11 +351,14 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   // now. `rejected` is left only on the owner's explicit "Acquire anyway" (a
   // valid waiver) — the bridge cannot tell its own rejection from the owner's.
   if (BRIDGE_STATES.includes(domain.agent_state) || (domain.agent_state === 'rejected' && waiver)) {
-    const all = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status');
+    const all = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status', 'path_id');
     const seen = new Map(summaries.map((s) => [s.id, s]));
     const others = all.filter((p) => !seen.has(p.id));
     const otherRows = others.length ? await annotateApprovals(trx, await trx(AUTH).whereIn('prospect_id', others.map((p) => p.id)).whereNull('ended_at').select('*')) : [];
-    for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id) });
+    const otherPathIds = [...new Set(others.map((p) => p.path_id).filter(Boolean))];
+    const otherPaths = otherPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', otherPathIds).select('id', 'acquisition_type') : [];
+    const outreachById = new Map(otherPaths.map((p) => [p.id, OUTREACH_ACQUISITION_TYPES.includes(p.acquisition_type)]));
+    for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id), outreach: outreachById.get(p.path_id) === true });
     const next = aggregateState([...seen.values()]);
     if (next !== domain.agent_state) {
       const moved = await trx('seo_link_domains').where({ id: domain.id, agent_state: domain.agent_state }).update({ agent_state: next, updated_at: now });
@@ -334,11 +373,14 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
 // qualified while the owner (or a deferred owner decision) holds it; back to
 // investigating when EVERY placement is INVALID; rejected ONLY when every
 // placement is DENY (a single DENY beside a pending sibling never rejects).
-// "authorized" = satisfied, AUTO_*, or OWNER_* with a valid approval.
+// "authorized" = satisfied, AUTO_*, or OWNER_* with a valid approval; a
+// DEFERRED row (payment on an outreach placement, `outreach: true`) is not
+// pending — it is settled at checkout, after the send.
 function aggregateState(placements) {
   const rows = (p) => p.rows || [];
-  const authorizedPending = (p) => p.status === PARKABLE && rows(p).length > 0 && rows(p).every(authorized);
-  const ownerPending = (p) => p.status === PARKABLE && rows(p).some((r) => !authorized(r) && isOwner(r.level));
+  const pending = (p) => rows(p).filter((r) => !deferred(r, p.outreach));
+  const authorizedPending = (p) => p.status === PARKABLE && pending(p).length > 0 && pending(p).every(authorized);
+  const ownerPending = (p) => p.status === PARKABLE && pending(p).some((r) => !authorized(r) && isOwner(r.level));
   const every = (level) => placements.length > 0 && placements.every((p) => rows(p).length > 0 && rows(p).every((r) => r.level === level));
   if (placements.some(authorizedPending)) return 'ready_to_acquire';
   if (placements.some((p) => ['live', 'indexed'].includes(p.status))) return 'acquired';

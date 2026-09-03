@@ -84,8 +84,9 @@ describe('up()', () => {
     expect(knex._raws.find((r) => r.includes('seo_link_approvals_money_action_check'))).toContain("money_action = (dimension = 'payment')");
     expect(knex._raws.find((r) => r.includes('seo_link_approvals_money_terms_check'))).toContain('max_payable_cents >= approved_amount_cents');
     const auth = knex._altered.seo_link_placement_authorities.map((c) => c.args[0]);
-    expect(auth).toEqual(['instance_kind', 'reason', 'satisfied_reason', 'ended_at', 'end_outcome', 'accepted_terms_hash']);
+    expect(auth).toEqual(['instance_kind', 'reason', 'satisfied_reason', 'ended_at', 'end_outcome', 'accepted_terms_hash', 'path_id']);
     expect(knex._raws.some((r) => r.includes("split_part(instance_key, ':', 1)"))).toBe(true);
+    expect(knex._raws.some((r) => r.includes('SET path_id = p.path_id FROM seo_link_prospects p WHERE p.id = a.prospect_id AND a.path_id IS NULL'))).toBe(true);
     for (const name of ['satisfied_check', 'satisfied_reason_check', 'ended_check', 'end_outcome_check', 'accepted_terms_check', 'approval_id_fkey', 'floor_waiver_id_fkey']) {
       expect(knex._raws.some((r) => r.includes(`seo_link_placement_authorities_${name}`))).toBe(true);
     }
@@ -94,7 +95,7 @@ describe('up()', () => {
     expect(knex._altered.seo_link_prospects.map((c) => c.args[0])).toEqual(['payment_group_id', ['payment_group_id']]);
   });
   test('idempotent: existing tables/columns are left alone, the partial unique is still asserted', async () => {
-    const knex = fakeKnex({ existing: ['seo_link_floor_waivers', 'seo_link_approvals'], columns: { seo_link_placement_authorities: ['instance_kind'], seo_link_prospects: ['payment_group_id'] } });
+    const knex = fakeKnex({ existing: ['seo_link_floor_waivers', 'seo_link_approvals'], columns: { seo_link_placement_authorities: ['instance_kind', 'path_id'], seo_link_prospects: ['payment_group_id'] } });
     await migration.up(knex);
     expect(knex.schema.createTable).not.toHaveBeenCalled();
     expect(knex.schema.alterTable).not.toHaveBeenCalled();
@@ -104,13 +105,13 @@ describe('up()', () => {
 });
 
 describe('down()', () => {
-  test('drops payment_group_id, the partial unique, the instance columns + constraints, both tables', async () => {
-    const knex = fakeKnex({ columns: { seo_link_placement_authorities: ['instance_kind'], seo_link_prospects: ['payment_group_id'] } });
+  test('drops payment_group_id, the partial unique, path_id, the instance columns + constraints, both tables', async () => {
+    const knex = fakeKnex({ columns: { seo_link_placement_authorities: ['instance_kind', 'path_id'], seo_link_prospects: ['payment_group_id'] } });
     await migration.down(knex);
     expect(knex._altered.seo_link_prospects.map((c) => c.args[0])).toEqual(['payment_group_id']);
     expect(knex._raws.some((r) => r.includes('DROP INDEX IF EXISTS seo_link_placement_authorities_open_instance_uniq'))).toBe(true);
     expect(knex._raws.filter((r) => r.includes('DROP CONSTRAINT IF EXISTS seo_link_placement_authorities_'))).toHaveLength(7);
-    expect(knex._altered.seo_link_placement_authorities.map((c) => c.args[0])).toEqual(['instance_kind', 'reason', 'satisfied_reason', 'ended_at', 'end_outcome', 'accepted_terms_hash']);
+    expect(knex._altered.seo_link_placement_authorities.map((c) => c.args[0])).toEqual(['path_id', 'instance_kind', 'reason', 'satisfied_reason', 'ended_at', 'end_outcome', 'accepted_terms_hash']);
     expect(knex._dropped).toEqual(['seo_link_approvals', 'seo_link_floor_waivers']);
   });
   test('down on a never-migrated schema drops only what exists', async () => {

@@ -15,7 +15,9 @@
  *    bridge writes (instance_kind, reason, satisfied_reason, ended_at /
  *    end_outcome, accepted_terms_hash), FKs to the two new tables, and the
  *    ONE-OPEN-INSTANCE rule: partial UNIQUE (prospect_id, dimension,
- *    instance_kind) WHERE ended_at IS NULL.
+ *    instance_kind) WHERE ended_at IS NULL — and `path_id`, the path the
+ *    instance was decided on (backfilled from the placement), so the bridge
+ *    can rotate a generation the registry mover superseded after its run.
  *  - `seo_link_prospects.payment_group_id` (§3.3 / bridge): account_wide fee
  *    siblings share one group whose anchor is the first placement's id.
  *
@@ -125,6 +127,15 @@ exports.up = async function up(knex) {
   }
   // exactly ONE open (current) instance per (prospect, dimension, kind)
   await knex.raw(`CREATE UNIQUE INDEX IF NOT EXISTS ${OPEN_INSTANCE_INDEX} ON ${AUTH} (prospect_id, dimension, instance_kind) WHERE ended_at IS NULL`);
+  // the path each instance was decided on — an unsatisfied instance outlives its
+  // path only until the bridge's next run (ended `superseded`, next generation
+  // opened); a satisfied one is path-independent and keeps its path for audit
+  if (!(await has('path_id'))) {
+    await knex.schema.alterTable(AUTH, (t) => {
+      t.uuid('path_id').references('id').inTable('seo_link_acquisition_paths').onDelete('SET NULL');
+    });
+    await knex.raw(`UPDATE ${AUTH} a SET path_id = p.path_id FROM seo_link_prospects p WHERE p.id = a.prospect_id AND a.path_id IS NULL AND p.path_id IS NOT NULL`);
+  }
 
   // ---- payment group on placements --------------------------------------------
   if (!(await knex.schema.hasColumn('seo_link_prospects', 'payment_group_id'))) {
@@ -140,6 +151,9 @@ exports.down = async function down(knex) {
     await knex.schema.alterTable('seo_link_prospects', (t) => { t.dropColumn('payment_group_id'); });
   }
   await knex.raw(`DROP INDEX IF EXISTS ${OPEN_INSTANCE_INDEX}`);
+  if (await knex.schema.hasColumn(AUTH, 'path_id')) {
+    await knex.schema.alterTable(AUTH, (t) => { t.dropColumn('path_id'); });
+  }
   if (await knex.schema.hasColumn(AUTH, 'instance_kind')) {
     for (const c of ['satisfied_check', 'satisfied_reason_check', 'ended_check', 'end_outcome_check', 'accepted_terms_check', 'approval_id_fkey', 'floor_waiver_id_fkey']) {
       await knex.raw(`ALTER TABLE ${AUTH} DROP CONSTRAINT IF EXISTS seo_link_placement_authorities_${c}`);
