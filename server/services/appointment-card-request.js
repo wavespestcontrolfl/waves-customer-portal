@@ -2768,6 +2768,34 @@ async function alertUnresolvedCancellationFee({ scheduledServiceId, outcome }) {
   }
 }
 
+// Lane state unverifiable (Codex #3153 r9 P1): reporting "no fee" while a
+// recovered lookup could charge one on the very next request makes the
+// operator's confirm prompt lie — surface a fee-may-apply preview so the
+// cancel path shows the waiver choice. Fee amount is best-effort from the
+// row (the prompt copy degrades gracefully).
+async function unresolvedEligibilityPreview(scheduledServiceId, skipReason) {
+  const { describeCancelFeeRule } = require('./estimate-card-holds');
+  let feeAmount = null;
+  try {
+    const row = await db('appointment_card_requests')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('no_show_fee_amount');
+    feeAmount = Number(row?.no_show_fee_amount) > 0 ? Number(row.no_show_fee_amount) : null;
+  } catch (err) { /* best-effort */ }
+  return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', feeAmount, detail: String(skipReason || 'lookup failed').replace(/_/g, ' ') }) };
+}
+
+// Card removal is revocation on the charge path (Codex #3342 r5 P2; #3800
+// r2 P2 extends it to the direct in-window verdict, not only sticky): a
+// removed card means the charge leg closes released. Throws on a failed
+// lookup — the caller treats that as unresolved.
+async function savedCardRevoked(request) {
+  const pmRow = await db('payment_methods')
+    .where({ customer_id: request.customer_id, stripe_payment_method_id: request.stripe_payment_method_id })
+    .first('id');
+  return !pmRow;
+}
+
 // Read-only preview for the admin cancel UIs — merged into the existing
 // GET /admin/dispatch/:serviceId/card-hold response so the client confirm
 // prompts cover both lanes unchanged.
@@ -2778,21 +2806,7 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
   if (!isApptCardFeeRailEnabled()) return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'rail_dark' }) };
   const { request, unresolved, reason: skipReason, status: requestStatus } = await feeEligibleRequestForVisit(scheduledServiceId);
   if (!request) {
-    if (unresolved) {
-      // Lane state unverifiable (Codex #3153 r9 P1): reporting "no fee"
-      // while a recovered lookup could charge one on the very next request
-      // makes the operator's confirm prompt lie — surface a fee-may-apply
-      // preview so the cancel path shows the waiver choice. Fee amount is
-      // best-effort from the row (the prompt copy degrades gracefully).
-      let feeAmount = null;
-      try {
-        const row = await db('appointment_card_requests')
-          .where({ scheduled_service_id: scheduledServiceId })
-          .first('no_show_fee_amount');
-        feeAmount = Number(row?.no_show_fee_amount) > 0 ? Number(row.no_show_fee_amount) : null;
-      } catch (err) { /* best-effort */ }
-      return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', feeAmount, detail: String(skipReason || 'lookup failed').replace(/_/g, ' ') }) };
-    }
+    if (unresolved) return unresolvedEligibilityPreview(scheduledServiceId, skipReason);
     // A secured-but-exempt card must not read as "no card saved" (pre-push
     // Codex P1): map each eligibility exclusion to its truthful rule.
     return { secured: false, feeApplies: false, rule: describeCancelFeeRule(skipRule(skipReason, requestStatus)) };
@@ -2818,13 +2832,14 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
     logger.warn(`[appt-card-request] appt-time resolution for cancel preview failed — reporting fee-may-apply: ${err.message}`);
     return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'appointment time lookup failed' }) };
   }
-  let feeApplies = isApptCardFeeRailEnabled() && !!start && isWithinApptCancelWindow({ request, serviceStart: start, now });
+  // The rail gate already returned above; only the time and the window decide here.
+  let feeApplies = !!start && isWithinApptCancelWindow({ request, serviceStart: start, now });
   let ruleCode = feeApplies ? 'in_window' : freeCancelReason({ start, now, windowHours, anchorAt: request.fee_agreed_at });
   let sticky = null;
   const { CARD_HOLD_POST_START_GRACE_MS: PREVIEW_GRACE_MS } = require('./estimate-card-holds');
   const previewStartMs = start ? new Date(start).getTime() : NaN;
   const previewStartLive = Number.isFinite(previewStartMs) && (previewStartMs - now.getTime()) > -PREVIEW_GRACE_MS;
-  if (!feeApplies && isApptCardFeeRailEnabled() && previewStartLive && request.sticky_window_disclosed) {
+  if (!feeApplies && previewStartLive && request.sticky_window_disclosed) {
     // Sticky window — the preview must agree with the cancellation handler
     // (same enforcement gate, same evidence). A THROWN lookup is
     // unresolved, not fee-free (same posture as the time-resolution catch
@@ -2836,7 +2851,7 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
         scheduledServiceId,
         isWithinWindow: (s, at) => isWithinApptCancelWindow({ request, serviceStart: s, now: at }),
         notBefore: request.fee_agreed_at,
-        currentStart: previewStartLive ? new Date(previewStartMs) : null,
+        currentStart: new Date(previewStartMs),
       });
       feeApplies = !!sticky;
       if (feeApplies) ruleCode = 'sticky';
@@ -2846,15 +2861,8 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
     }
   }
   if (feeApplies) {
-    // Card removal is revocation on the charge path — the preview must
-    // agree (Codex #3342 r5 P2; #3800 r2 P2 extends it to the direct
-    // in-window verdict, not only sticky): a removed card means the charge
-    // leg closes released, so no fee prompt. A THROWN lookup is unresolved.
     try {
-      const pmRow = await db('payment_methods')
-        .where({ customer_id: request.customer_id, stripe_payment_method_id: request.stripe_payment_method_id })
-        .first('id');
-      if (!pmRow) { feeApplies = false; ruleCode = 'card_removed'; }
+      if (await savedCardRevoked(request)) { feeApplies = false; ruleCode = 'card_removed'; }
     } catch (err) {
       logger.warn(`[appt-card-request] card-revocation lookup for cancel preview failed — reporting fee-may-apply: ${err.message}`);
       return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'saved card lookup failed' }) };
