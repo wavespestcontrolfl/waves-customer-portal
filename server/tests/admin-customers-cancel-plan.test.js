@@ -768,6 +768,191 @@ describe('POST /:id/cancel-plan', () => {
     expect(meta).toEqual(expect.objectContaining({ waiveLateFee: true, churnEpisodeId: 'ep-1', sendConfirmation: true }));
   }));
 
+  test('a resolved run inside 24h does NOT echo for a WON-BACK customer — a live row outside that churn episode processes fresh', () => withServer(async (baseUrl) => {
+    mockState.annual_prepay_terms = [{
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+      status: 'active', renewal_decision: 'cancel',
+    }];
+    mockState.scheduled_services = [
+      { id: 'cv1', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-08-01' },
+      { id: 'cv2', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
+      { id: 'cv3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-12-01' },
+      { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
+    ];
+    // Run 1 resolved an hour ago under ep-1; the customer was won back
+    // since (live stage, stamp cleared) and cancels the same term.
+    mockState.customers[0].pipeline_stage = 'active_customer';
+    mockState.customers[0].churn_episode_id = null;
+    mockState.service_requests = [{
+      id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, churnEpisodeId: 'ep-1' } }),
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+    }];
+    mockState.cancellation_cases = [{
+      id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed',
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+      snapshot: JSON.stringify({
+        prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term', churnEpisodeId: 'ep-1',
+        outcome: { visitsPulled: 4, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'] },
+      }),
+    }];
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', churnEpisodeId: 'ep-2' });
+    const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+    expect(body.duplicate).toBeUndefined();
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect(body.prepayTermOutcome).toBe('decision_already_recorded');
+    expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(1);
+  }));
+
+  test('a resolved run inside 24h STILL echoes while the customer is churned in that episode on the same boundary — a lost-response retry re-runs nothing', () => withServer(async (baseUrl) => {
+    mockState.annual_prepay_terms = [{
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+      status: 'active', renewal_decision: 'cancel',
+    }];
+    mockState.scheduled_services = [
+      { id: 'cv1', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-08-01' },
+      { id: 'cv2', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
+      { id: 'cv3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-12-01' },
+      { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
+    ];
+    mockState.customers[0].pipeline_stage = 'churned';
+    mockState.customers[0].churn_episode_id = 'ep-1';
+    mockState.service_requests = [{
+      id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, churnEpisodeId: 'ep-1' } }),
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+    }];
+    mockState.cancellation_cases = [{
+      id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed',
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+      snapshot: JSON.stringify({
+        prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term', churnEpisodeId: 'ep-1',
+        outcome: { visitsPulled: 4, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'] },
+      }),
+    }];
+    const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+    expect(body).toEqual(expect.objectContaining({ duplicate: true, requestId: 'req-old', caseId: 'case-old' }));
+    expect(mockProcess).not.toHaveBeenCalled();
+    expect(mockState.inserted).toBeUndefined();
+    expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+  }));
+
+  test('an UNSTAMPED resolved run (pre-episode / failed stamp) keeps the 24h window as its episode proxy — but only while the row reads churned', () => withServer(async (baseUrl) => {
+    mockState.annual_prepay_terms = [{
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+      status: 'active', renewal_decision: 'cancel',
+    }];
+    mockState.scheduled_services = [
+      { id: 'cv1', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-08-01' },
+      { id: 'cv2', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
+      { id: 'cv3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-12-01' },
+      { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
+    ];
+    // Won back: live row → fresh, even inside the window.
+    mockState.customers[0].pipeline_stage = 'active_customer';
+    mockState.customers[0].churn_episode_id = null;
+    mockState.service_requests = [{
+      id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+    }];
+    mockState.cancellation_cases = [{
+      id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed',
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+      snapshot: JSON.stringify({
+        prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term',
+        outcome: { visitsPulled: 4, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'] },
+      }),
+    }];
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', churnEpisodeId: 'ep-2' });
+    const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+    expect(body.duplicate).toBeUndefined();
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect(body.prepayTermOutcome).toBe('decision_already_recorded');
+    expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(1);
+  }));
+
+  test('an UNSTAMPED resolved run inside 24h echoes while the row still reads churned', () => withServer(async (baseUrl) => {
+    mockState.annual_prepay_terms = [{
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+      status: 'active', renewal_decision: 'cancel',
+    }];
+    mockState.scheduled_services = [
+      { id: 'cv1', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-08-01' },
+      { id: 'cv2', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
+      { id: 'cv3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-12-01' },
+      { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
+    ];
+    mockState.customers[0].pipeline_stage = 'churned';
+    mockState.customers[0].churn_episode_id = 'ep-1';
+    mockState.service_requests = [{
+      id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+    }];
+    mockState.cancellation_cases = [{
+      id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed',
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+      snapshot: JSON.stringify({
+        prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term',
+        outcome: { visitsPulled: 4, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'] },
+      }),
+    }];
+    const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+    expect(body).toEqual(expect.objectContaining({ duplicate: true, requestId: 'req-old', caseId: 'case-old' }));
+    expect(mockProcess).not.toHaveBeenCalled();
+    expect(mockState.inserted).toBeUndefined();
+    expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+  }));
+
+  test('a corrected coverage boundary inside 24h is a NEW instruction, not a retry — the task and the confirmation re-key on the new date', () => withServer(async (baseUrl) => {
+    mockState.annual_prepay_terms = [{
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+      status: 'active', renewal_decision: 'cancel',
+    }];
+    mockState.scheduled_services = [
+      { id: 'cv1', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-08-01' },
+      { id: 'cv2', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
+      { id: 'cv3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-12-01' },
+      { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
+    ];
+    // Run 1 told the customer 2027-01-31; the office then corrected the
+    // term to end 2027-02-28 and repeated the cancel, same episode.
+    mockState.customers[0].pipeline_stage = 'churned';
+    mockState.customers[0].churn_episode_id = 'ep-1';
+    mockState.service_requests = [{
+      id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, churnEpisodeId: 'ep-1' } }),
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+    }];
+    mockState.cancellation_cases = [{
+      id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed',
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+      snapshot: JSON.stringify({
+        prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-01-31', prepayDisposition: 'end_at_term', churnEpisodeId: 'ep-1',
+        outcome: { visitsPulled: 4, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'] },
+      }),
+    }];
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', churnEpisodeId: 'ep-1', termiteRetrievalPending: { retrieveAfter: '2027-02-28' } });
+    const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+    expect(body.duplicate).toBeUndefined();
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect(body.prepayTermOutcome).toBe('decision_already_recorded');
+    expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(1);
+    expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', body.requestId, { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: 'ep-1' });
+    expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ keptThrough: true, prepayTermId: 'term-1', termEpisodeKey: 'ep-1:2027-02-28' }));
+  }));
+
   test('an end-of-coverage commit keys the dated task and the end-of-term confirmation on the processor\'s churn EPISODE, and stamps it on the request + case', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
       id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
@@ -1525,6 +1710,8 @@ describe('POST /:id/cancel-plan', () => {
     test('retry after a decided cancel reuses the recorded case — no second request, processor run, or customer text', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.annual_prepay_terms[0].status = 'cancelled';
+      // A resolved churn leaves the row churned — the retry identity.
+      mockState.customers[0].pipeline_stage = 'churned';
       mockState.service_requests = [{
         id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
         subject: 'Cancel plan (Admin (user admin-1))', description: '',
@@ -1782,6 +1969,7 @@ describe('POST /:id/cancel-plan', () => {
     test('a duplicate answers with the FIRST run\'s recorded errors — a belled run never re-reads as "Done"', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.customers[0].pipeline_stage = 'churned';
       mockState.service_requests = [{
         id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
         subject: 'Cancel plan (Admin (user admin-1))', description: '',

@@ -1266,24 +1266,46 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       prior = hit ? hit.c : null;
       if (hit) priorSnap = hit.snap;
       // The echo is only for RETRIES of that run — proven by its acceptance
-      // being still open, or resolved within the echo window (codex r16
-      // P0). A historical case whose acceptance closed long ago must not
-      // swallow a NEW cancellation: a re-won-back account with the same
-      // decided term still current would read "cancelled" while billing
-      // stays live. No provable tie → fall through and process fresh (the
-      // decided term reads 'decision_already_recorded'; the refund recounts
-      // from the live rows).
+      // being still OPEN (the run owes follow-ups; its repair identity is
+      // the request's own stamp + snapshot boundary), or RESOLVED with the
+      // SAME IDENTITY: the customer is still churned, in the churn episode
+      // that run recorded, and the coverage boundary it told the customer
+      // still stands. A historical case, a won-back account cancelling the
+      // same still-current term (even inside a day — the live account would
+      // otherwise stay billable behind the echo), or an office correction
+      // of term_end (the customer must be re-told the new date; the dated
+      // task carries it in its key and #3767 retires the stale one) is a
+      // NEW cancellation: fall through and process fresh (the decided term
+      // reads 'decision_already_recorded'; the refund recounts from the
+      // live rows). A resolved run with no episode stamp (pre-episode, or
+      // a stamp that failed) keeps the 24h created_at window as its episode
+      // proxy — still only while the row reads churned.
       if (prior) {
         let tied = false;
         let openTie = false;
         try {
           const priorReq = prior.service_request_id
-            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at')
+            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at', 'metadata')
             : null;
           openTie = !!priorReq && priorReq.status === 'new';
-          tied = openTie
-            || (!!priorReq && priorReq.status === 'resolved'
-              && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000);
+          let resolvedTie = false;
+          if (!openTie && priorReq && priorReq.status === 'resolved') {
+            const live = await db('customers').where({ id: customerId }).first('pipeline_stage', 'churn_episode_id');
+            const stillChurned = !!live && live.pipeline_stage === 'churned';
+            const stamped = (requestCancelPlanMeta(priorReq) || {}).churnEpisodeId || null;
+            const sameEpisode = stamped
+              ? String((live && live.churn_episode_id) || '') === String(stamped)
+              : new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000;
+            // Boundary compared only when both sides carry one (a legacy
+            // snapshot without effectiveOn has no date to contradict).
+            const priorBoundary = priorSnap && priorSnap.effectiveOn ? String(priorSnap.effectiveOn) : null;
+            const sameBoundary = !prepayPlan.keepThrough || !priorBoundary || priorBoundary === prepayPlan.keepThrough;
+            resolvedTie = stillChurned && sameEpisode && sameBoundary;
+            if (!resolvedTie) {
+              logger.info(`[admin-cancellation] resolved case ${prior.id} is not this run's identity (churned=${stillChurned} episode=${sameEpisode} boundary=${sameBoundary})`);
+            }
+          }
+          tied = openTie || resolvedTie;
         } catch (tieErr) {
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
         }
