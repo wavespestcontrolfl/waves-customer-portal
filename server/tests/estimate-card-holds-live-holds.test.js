@@ -53,7 +53,8 @@ test('queries carry the live-row predicates on both rails', async () => {
   expect(holds.table).toBe('estimate_card_holds as h');
   expect(holds.where[0]).toEqual({ 'h.customer_id': 'c1', 'h.stripe_payment_method_id': 'pm_1', 'h.status': 'held' });
   expect(holds.whereNull).toEqual(['h.parked_at']);
-  expect(holds.whereNotIn[0]).toEqual(['ss.status', ['cancelled', 'completed', 'no_show', 'skipped']]);
+  expect(holds.whereNotIn[0]).toEqual(['ss.status', ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show']]);
+  expect(appts.whereNotIn[0]).toEqual(holds.whereNotIn[0]);
   expect(appts.table).toBe('appointment_card_requests as r');
   expect(appts.where[0]).toEqual({ 'r.customer_id': 'c1', 'r.stripe_payment_method_id': 'pm_1', 'r.status': 'completed' });
   expect(appts.whereNotNull).toEqual(['r.fee_agreed_at']);

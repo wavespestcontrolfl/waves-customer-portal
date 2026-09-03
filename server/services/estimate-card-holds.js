@@ -452,9 +452,10 @@ async function heldCardForScheduledService(scheduledServiceId) {
 // a 'satisfied' auto-secure never saw the disclosure and never fee-charges)
 // with no fee event yet. Rows the start cannot be composed for are skipped:
 // the notice describes a dated visit, and the charge paths keep their own
-// fail-closed handling of an unresolvable start. Throws on a failed read —
-// the caller decides how to fail. Ordered soonest first.
-const LIVE_VISIT_CLOSED_STATUSES = ['cancelled', 'completed', 'no_show', 'skipped'];
+// fail-closed handling of an unresolvable start. Visit liveness is the
+// service's NON_LIVE_VISIT_STATUSES (a 'rescheduled' row is a replaced
+// booking, never a live hold — pre-push P1). Throws on a failed read — the
+// caller decides how to fail. Ordered soonest first.
 async function liveHoldsForPaymentMethod({ customerId, stripePaymentMethodId, now = new Date() }) {
   if (!customerId || !stripePaymentMethodId) return [];
   const { composeScheduledApptTime } = require('./appointment-reminders');
@@ -463,14 +464,14 @@ async function liveHoldsForPaymentMethod({ customerId, stripePaymentMethodId, no
     .join('scheduled_services as ss', 'ss.id', 'h.scheduled_service_id')
     .where({ 'h.customer_id': customerId, 'h.stripe_payment_method_id': stripePaymentMethodId, 'h.status': 'held' })
     .whereNull('h.parked_at')
-    .whereNotIn('ss.status', LIVE_VISIT_CLOSED_STATUSES)
+    .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
     .select([...visitCols, 'h.no_show_fee_amount']);
   const apptRows = await db('appointment_card_requests as r')
     .join('scheduled_services as ss', 'ss.id', 'r.scheduled_service_id')
     .where({ 'r.customer_id': customerId, 'r.stripe_payment_method_id': stripePaymentMethodId, 'r.status': 'completed' })
     .whereNotNull('r.fee_agreed_at')
     .whereNull('r.fee_status')
-    .whereNotIn('ss.status', LIVE_VISIT_CLOSED_STATUSES)
+    .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
     .select([...visitCols, 'r.no_show_fee_amount']);
   const nowMs = now.getTime();
   const seen = new Set();
