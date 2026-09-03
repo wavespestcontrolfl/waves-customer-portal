@@ -479,16 +479,27 @@ async function liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds, 
   // applied inside the query would let an older card's hold survive when
   // the newest hold (the one heldCardForScheduledService charges) points
   // at a card no longer in the wallet.
+  // parked_at is NOT filtered in the query (r4 P2): a parked newest hold
+  // still owns the visit (the charge paths stop on it), so it must claim
+  // the visit in the dedupe below and then be discarded — never let an
+  // older unparked row surface in its place.
   const holdRows = !isCardHoldEnabled() ? [] : await db('estimate_card_holds as h')
     .join('scheduled_services as ss', 'ss.id', 'h.scheduled_service_id')
     .where({ 'h.customer_id': customerId, 'h.status': 'held' })
-    .whereNull('h.parked_at')
     .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
+    // Competing consent (r4 P1): a visit that ALSO carries an
+    // appointment_card_requests row is the cross-lane conflict the charge
+    // paths refuse to settle (chargeNoShowFee → competing_consent_review;
+    // cardHoldCancelPreview → unresolved) — no card is "the" holding card,
+    // so the notice omits the visit. Mirrors the appointment-side exclusion.
+    .whereNotExists(function competingAppointmentConsent() {
+      this.select(db.raw('1')).from('appointment_card_requests as a').whereRaw('a.scheduled_service_id = h.scheduled_service_id');
+    })
     // Newest hold first, so the first-seen dedupe below keeps the row the
     // charge paths use (heldCardForScheduledService / cardHoldCancelPreview
     // ordering — Codex #3828 r2 P2).
     .orderByRaw('h.held_at DESC NULLS LAST, h.created_at DESC')
-    .select([...visitCols, 'h.stripe_payment_method_id as pm_id', 'h.no_show_fee_amount']);
+    .select([...visitCols, 'h.stripe_payment_method_id as pm_id', 'h.no_show_fee_amount', 'h.parked_at']);
   // Appointment rail: the same frozen-terms bar feeEligibleRequestForVisit
   // enforces (r3 P2) — a positive agreed amount AND window; a row that
   // completed without chargeable terms never defaults to today's fee.
@@ -519,6 +530,7 @@ async function liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds, 
       // hold on a card outside the wallet still owns the visit — no older
       // card's hold may be flagged in its place.
       seen.add(serviceId);
+      if (row.parked_at) continue;
       if (!ids.includes(row.pm_id)) continue;
       const start = composeScheduledApptTime(row);
       const startMs = start ? start.getTime() : NaN;

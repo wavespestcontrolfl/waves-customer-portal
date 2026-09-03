@@ -80,7 +80,8 @@ test('ONE read per rail carrying the live-row predicates; the hold read is custo
   // No wallet filter on the hold rail: the newest hold per visit is chosen
   // across ALL cards first (r3 P2), then kept only if it is in the wallet.
   expect(holds.whereIn).toEqual([]);
-  expect(holds.whereNull).toEqual(['h.parked_at']);
+  // parked_at is judged AFTER the newest-row claim (r4 P2), not in the query.
+  expect(holds.whereNull).toEqual([]);
   expect(holds.whereNotIn[0]).toEqual(['ss.status', ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show']]);
   expect(appts.table).toBe('appointment_card_requests as r');
   expect(appts.where).toEqual([
@@ -96,7 +97,9 @@ test('ONE read per rail carrying the live-row predicates; the hold read is custo
   expect(holds.orderByRaw).toEqual(['h.held_at DESC NULLS LAST, h.created_at DESC']);
   // Lane exclusivity: a hold row in ANY status owns the visit.
   expect(appts.whereNotExists).toEqual([{ from: 'estimate_card_holds as x', whereRaw: 'x.scheduled_service_id = r.scheduled_service_id' }]);
-  expect(holds.whereNotExists).toEqual([]);
+  // Competing consent (r4 P1): a hold whose visit also carries an
+  // appointment-card row is omitted — mirror exclusion on the hold side.
+  expect(holds.whereNotExists).toEqual([{ from: 'appointment_card_requests as a', whereRaw: 'a.scheduled_service_id = h.scheduled_service_id' }]);
 });
 
 test('duplicate held rows for one visit: the first (newest-ordered) row wins, the older card is not flagged', async () => {
@@ -108,6 +111,11 @@ test('duplicate held rows for one visit: the first (newest-ordered) row wins, th
 
 test('the newest hold on a card OUTSIDE the wallet still owns the visit — the older in-wallet card is not flagged', async () => {
   mockRows.estimate_card_holds = [visit({ service_id: 'svc-a', pm_id: 'pm_gone' }), visit({ service_id: 'svc-a', pm_id: 'pm_1' })];
+  expect((await run()).size).toBe(0);
+});
+
+test('a PARKED newest hold still claims the visit — the older unparked card is not flagged', async () => {
+  mockRows.estimate_card_holds = [visit({ service_id: 'svc-a', pm_id: 'pm_2', parked_at: '2026-09-02T10:00:00Z' }), visit({ service_id: 'svc-a', pm_id: 'pm_1' })];
   expect((await run()).size).toBe(0);
 });
 
