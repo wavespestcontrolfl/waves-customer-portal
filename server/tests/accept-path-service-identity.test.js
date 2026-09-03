@@ -263,7 +263,8 @@ describe('catalogLinkForProfile — verified catalog key on the line', () => {
   test('resolves by the exact key ahead of engine-key containment', async () => {
     let containment = 0;
     const link = await catalogLinkForProfile(
-      makeKeyConn((w) => (w.service_key === 'cockroach_control' && w.is_active === true ? [{ id: 'svc-roach', name: 'Cockroach Treatment', service_key: 'cockroach_control' }] : []), () => { containment += 1; }),
+      // No is_active filter: a row archived after the quote still names the promised product.
+      makeKeyConn((w) => (w.service_key === 'cockroach_control' && w.is_active === undefined ? [{ id: 'svc-roach', name: 'Cockroach Treatment', service_key: 'cockroach_control' }] : []), () => { containment += 1; }),
       profile({ catalogServiceKey: 'cockroach_control' }),
     );
     expect(link).toEqual({ id: 'svc-roach', name: 'Cockroach Treatment', service_key: 'cockroach_control' });

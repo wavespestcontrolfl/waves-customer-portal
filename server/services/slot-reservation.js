@@ -367,14 +367,18 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
   // included second treatment). Exact key, same exactly-one rule, and NO
   // fall-through to containment on a miss: the key named a product the
   // catalog no longer carries, and a guessed identity is worse than none
-  // (codex #3842 r3 P1).
+  // (codex #3842 r3 P1). Resolved WITHOUT an is_active filter: the key was
+  // verified selectable when the quote was made, and a row staff archive
+  // between the quote and the acceptance still names the product the
+  // customer was promised — dropping the identity there would silently
+  // lose the included second treatment (pre-push codex P0).
   const catalogKey = String(primary?.catalogServiceKey || '').trim();
   if (catalogKey) {
     let byKey = null;
     try {
       await conn.transaction(async (sp) => {
         const rows = await sp('services')
-          .where({ service_key: catalogKey, is_active: true })
+          .where({ service_key: catalogKey })
           .limit(2)
           .select('id', 'name', 'service_key');
         if (rows.length === 1) byKey = rows[0];
