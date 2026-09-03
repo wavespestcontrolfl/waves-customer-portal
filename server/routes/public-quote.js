@@ -911,11 +911,22 @@ const PUBLIC_QUOTE_SERVICE_KEYS = [
   // One-time mosquito: priced by treatable lot area from the lookup
   // (service-menu phase 2, 2026-09-03).
   'oneTimeMosquito',
-  // Standalone cockroach treatment (catalog cockroach_control): the
-  // two-treatment package priced as one regular_standalone knockdown
-  // (owner ruling 2026-09-03).
-  'pestInitialRoach',
 ];
+// Engine keys a keyed catalog request expands to but the site may NEVER
+// compose directly: the standalone cockroach package (cockroach_control →
+// pestInitialRoach, owner ruling 2026-09-03) is instant only while the
+// catalog row AND the live display count still describe the two-treatment
+// package, and only the keyed path runs those checks
+// (publicSelectableService → requestMatchesCatalogRow). A direct body is
+// stripped of them before anything reads `services` (pre-push codex P0).
+const KEYED_ONLY_SERVICE_KEYS = ['pestInitialRoach'];
+function dropKeyedOnlyServices(bodyServices) {
+  if (!bodyServices || typeof bodyServices !== 'object') return bodyServices;
+  if (!KEYED_ONLY_SERVICE_KEYS.some((k) => k in bodyServices)) return bodyServices;
+  const out = { ...bodyServices };
+  for (const k of KEYED_ONLY_SERVICE_KEYS) delete out[k];
+  return out;
+}
 
 const quoteLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
@@ -958,7 +969,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // the standard manual-quote lifecycle on a synthetic quote-required estimate.
     const keyedQuoteOnRequest = !!(keyedService && !keyedInstant);
     const services = keyedInstant ? mergeKeyedRequestOptions(quoteServicesForKey(requestedServiceKey), bodyServices)
-      : (keyedQuoteOnRequest ? {} : bodyServices);
+      : (keyedQuoteOnRequest ? {} : dropKeyedOnlyServices(bodyServices));
     const normalizedAddress = normalizeLeadAddress({
       raw: address,
       line1: req.body.address_line1 || req.body.addressLine1,
@@ -1000,7 +1011,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (!contactFirstName || !contactLastName || !contactEmail || !contactPhone || !quoteAddress) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
     }
-    if (!keyedQuoteOnRequest && (!services || !PUBLIC_QUOTE_SERVICE_KEYS.some(k => services[k]))) {
+    // A keyed request always carries its product (quoteServicesForKey, or the
+    // synthetic quote-on-request line) — only a site-composed body must name
+    // at least one site-composable key.
+    if (!keyedService && (!services || !PUBLIC_QUOTE_SERVICE_KEYS.some(k => services[k]))) {
       return res.status(400).json({ error: 'Select at least one service.' });
     }
 
@@ -2941,6 +2955,7 @@ module.exports._internals = {
   estimateBlocksBookingHandoff,
   estimateBlocksSelfBookLink,
   keyedLeadLabel,
+  dropKeyedOnlyServices,
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   quoteOnRequestEstimate,
@@ -2961,3 +2976,4 @@ module.exports._internals = {
   lotPricedServiceRequested,
 };
 module.exports.PUBLIC_QUOTE_SERVICE_KEYS = PUBLIC_QUOTE_SERVICE_KEYS;
+module.exports.KEYED_ONLY_SERVICE_KEYS = KEYED_ONLY_SERVICE_KEYS;

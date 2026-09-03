@@ -74,16 +74,18 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
-  const audit = await knex('pricing_config_audit')
-    .where({ config_key: CONFIG_KEY, changed_by: MIGRATION_TAG })
-    .orderBy('changed_at', 'desc')
-    .first();
-  if (!audit) return;
   await knex.transaction(async (trx) => {
     const data = await loadRow(trx);
     if (!data) return;
-    // Only restore when the value is still what up() wrote — a later admin
-    // edit wins.
+    // Under the row lock: restore only when this migration's up() is the
+    // LATEST audit entry for the row. Any later change — an admin edit, even
+    // one that deliberately put the value back to 2 — is a decision that
+    // wins over the rollback (pre-push codex P1).
+    const latest = await trx('pricing_config_audit')
+      .where({ config_key: CONFIG_KEY })
+      .orderBy([{ column: 'changed_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+      .first();
+    if (!latest || latest.changed_by !== MIGRATION_TAG || latest.reason !== UP_REASON) return;
     if (Number(data.initial_roach?.display?.[SCALE_KEY]?.treatments) !== TREATMENTS) return;
     await saveTreatments(trx, data, 1, `rollback of ${MIGRATION_TAG}`);
   });

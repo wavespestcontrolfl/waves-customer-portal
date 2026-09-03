@@ -9,16 +9,23 @@ const { generateEstimate } = require('../services/pricing-engine');
 const { PEST } = require('../services/pricing-engine/constants');
 const { _internals, PUBLIC_QUOTE_SERVICE_KEYS } = require('../routes/public-quote');
 const { quoteServicesForKey, PUBLIC_INSTANT_QUOTE_KEYS, COCKROACH_PACKAGE_VISITS } = require('../services/public-services-menu');
-const { buildPublicQuoteServiceInterest, buildCompactPublicQuoteServiceInterest, derivePerApplication, isManualQuoteLine, estimateBlocksSelfBookLink, keyedLeadLabel } = _internals;
+const { buildPublicQuoteServiceInterest, buildCompactPublicQuoteServiceInterest, derivePerApplication, isManualQuoteLine, estimateBlocksSelfBookLink, keyedLeadLabel, dropKeyedOnlyServices } = _internals;
 
 const BASE_PROPERTY = { homeSqFt: 1800, lotSqFt: 8783, stories: 1, yearBuilt: 2005 };
 const roachLine = (input) => generateEstimate(input).lineItems.find((l) => l.service === 'pest_initial_roach');
 
 describe('cockroach_control as a public instant quote', () => {
-  test('is advertised instant and the engine key is accepted by the route', () => {
+  test('is advertised instant and reachable ONLY through the verified catalog key', () => {
     expect(PUBLIC_INSTANT_QUOTE_KEYS.has('cockroach_control')).toBe(true);
-    expect(PUBLIC_QUOTE_SERVICE_KEYS).toContain('pestInitialRoach');
     expect(quoteServicesForKey('cockroach_control')).toEqual({ pestInitialRoach: { roachType: 'regular' } });
+    // A site-composed body cannot name the engine key: it would skip the
+    // catalog-row + live-display eligibility checks (pre-push codex P0).
+    expect(PUBLIC_QUOTE_SERVICE_KEYS).not.toContain('pestInitialRoach');
+    expect(dropKeyedOnlyServices({ pest: { frequency: 'quarterly' }, pestInitialRoach: { roachType: 'german' } })).toEqual({ pest: { frequency: 'quarterly' } });
+    expect(dropKeyedOnlyServices({ pestInitialRoach: {} })).toEqual({});
+    const untouched = { pest: { frequency: 'quarterly' } };
+    expect(dropKeyedOnlyServices(untouched)).toBe(untouched);
+    expect(dropKeyedOnlyServices(undefined)).toBeUndefined();
   });
   test('labels carry the STANDALONE scale\'s configured display name; compact label stays short', () => {
     expect(buildPublicQuoteServiceInterest({ pestInitialRoach: {} })).toBe('Cockroach Treatment Service');

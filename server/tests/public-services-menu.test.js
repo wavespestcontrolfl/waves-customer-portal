@@ -89,7 +89,7 @@ describe('keyed leads', () => {
 });
 
 describe('instant-quote set stays in step with the public quote engine', () => {
-  const { PUBLIC_QUOTE_SERVICE_KEYS } = require('../routes/public-quote');
+  const { PUBLIC_QUOTE_SERVICE_KEYS, KEYED_ONLY_SERVICE_KEYS } = require('../routes/public-quote');
   const { generateEstimate } = require('../services/pricing-engine');
   const BASE = { homeSqFt: 1800, lotSqFt: 8783, stories: 1, yearBuilt: 2005 };
   test('every instant service_key expands to a /calculate request the route accepts', () => {
@@ -97,7 +97,9 @@ describe('instant-quote set stays in step with the public quote engine', () => {
       const services = quoteServicesForKey(key);
       const paths = Object.keys(services);
       expect({ key, paths }).toEqual({ key, paths: [expect.any(String)] });
-      expect({ key, accepted: PUBLIC_QUOTE_SERVICE_KEYS.includes(paths[0]) }).toEqual({ key, accepted: true });
+      // Site-composable, or keyed-only (the route strips those from a direct
+      // body and reaches them solely through the verified catalog key).
+      expect({ key, accepted: PUBLIC_QUOTE_SERVICE_KEYS.includes(paths[0]) || KEYED_ONLY_SERVICE_KEYS.includes(paths[0]) }).toEqual({ key, accepted: true });
     }
   });
   test('the expansion is lossless: cadence/tier keys select exactly that product', () => {
