@@ -3911,6 +3911,47 @@ function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
 
 // Bermuda suppression is dark until GATE_BERMUDA_SUPPRESSION is flipped.
 // Requested-while-dark fails CLOSED with a 400 the builder surfaces verbatim.
+// Tree & shrub service-line inputs from the admin builder (audit
+// INP-001..005). A present-but-malformed value is REJECTED at the API
+// boundary — never silently dropped, defaulted, or clamped into a confident
+// price; an absent value stays absent so the pricer's own fallbacks run.
+const TREE_SHRUB_TIERS = new Set(['light', 'standard', 'enhanced']);
+const TREE_SHRUB_ACCESS = new Set(['easy', 'moderate', 'difficult']);
+function treeShrubInputError(message) {
+  const err = new Error(message);
+  err.statusCode = 400;
+  err.code = 'TREE_SHRUB_INPUT_INVALID';
+  // Input rejection, not engine breakage: the save-time replay
+  // (serverRecomputeFromEstimateData) fails OPEN to the browser preview on
+  // engine errors, but a malformed tree & shrub input must never ride that
+  // fallback into a persisted price — persistence rethrows this marker and
+  // the save 400s, exactly like the Bermuda gate (codex #3272 r1).
+  err.failClosed = true;
+  return err;
+}
+// Strict whole-number SHAPE: a safe non-negative integer number, or a string
+// of plain digits (whitespace-trimmed). Number() alone would admit true, [],
+// '1e2', '0x10' and imprecise magnitudes through a boundary that promises to
+// reject malformed input (pre-push r6 P1). Returns NaN for anything else.
+function strictWholeNumber(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 ? value : NaN;
+  if (typeof value === 'string' && /^\s*\d{1,9}\s*$/.test(value)) return Number(value.trim());
+  return NaN;
+}
+const isBlankInput = (value) => value === undefined || value === null
+  || (typeof value === 'string' && value.trim() === '');
+// First PRESENT value wins: a non-negative integer (an explicit 0 is a real
+// answer) is returned, a malformed one throws, undefined/null/'' are skipped.
+function firstNonNegativeIntegerOrThrow(label, ...values) {
+  for (const value of values) {
+    if (isBlankInput(value)) continue;
+    const n = strictWholeNumber(value);
+    if (Number.isNaN(n)) throw treeShrubInputError(`${label} must be a whole number of 0 or more.`);
+    return n;
+  }
+  return undefined;
+}
+
 function requireBermudaSuppressionGate() {
   if (require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) return true;
   const err = new Error('Bermudagrass suppression is not enabled on this environment (GATE_BERMUDA_SUPPRESSION) — uncheck the add-on or flip the gate.');
@@ -4111,7 +4152,81 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       ...(commercialProfile && commercialSubtype ? { commercialSubtype } : {}),
     };
   }
-  if (sel.has('TREE_SHRUB')) services.treeShrub = { tier: 'standard' };
+  // Tree count for the property features AND the tree & shrub service line:
+  // the operator's typed value (an explicit 0 included) wins, a positive
+  // vision estimate backstops, and nothing at all stays ABSENT so
+  // priceTreeShrub's treeDensity fallback runs — the old
+  // `Number(a || b) || 0` fabricated a 0 that priced the per-tree material
+  // away (audit INP-002).
+  // Validation bites only while Tree & Shrub is selected — the builder keeps
+  // a hidden, unvalidated value after the service is deselected, and a 400
+  // from an inert field would block every other service (pre-push r2 P1).
+  // Without the service the property block reads a lenient count: a
+  // non-negative integer, else absent.
+  const typedTreeCountRaw = sel.has('TREE_SHRUB')
+    ? firstNonNegativeIntegerOrThrow('Tree count', p.treeCount)
+    : (() => {
+      const n = strictWholeNumber(p.treeCount);
+      return Number.isNaN(n) ? undefined : n;
+    })();
+  // COMMERCIAL keeps the commercial pricer's own contract — a zero count is
+  // "omitted" and the lot-density estimate prices the plant program
+  // (priceCommercialTreeShrub, service-pricing.js). Every stored commercial
+  // engineRequest carries profile.treeCount: 0 for a blank field (the
+  // pre-v4.8 builder fabricated it), so honouring zero there would reprice
+  // those replays to zero plants at the next save. Explicit-zero semantics
+  // are residential-only; the builder hides the residential controls on
+  // commercial estimates.
+  const typedTreeCount = commercialProfile && typedTreeCountRaw === 0 ? undefined : typedTreeCountRaw;
+  const estimatedTreeCount = Number(p.estimatedTreeCount);
+  const resolvedTreeCount = typedTreeCount
+    ?? (Number.isInteger(estimatedTreeCount) && estimatedTreeCount > 0 ? estimatedTreeCount : undefined);
+  if (sel.has('TREE_SHRUB')) {
+    // v4.8 (audit INP-001..004): the builder's tree & shrub inputs ride the
+    // SERVICE line exactly like the public quote's (public-quote.js). The
+    // line used to be the literal { tier: 'standard' }, so program and
+    // access were never selectable and property-level palms only reached the
+    // disarmed palm reserve — 30 palms priced $0 here and $505/yr on the
+    // website form for the same home.
+    // Default only when genuinely absent/blank; every PRESENT value is
+    // validated — `|| default` would wave false / 0 through (pre-push r7 P1).
+    const enumInput = (value, fallback) => (isBlankInput(value) ? fallback
+      : (typeof value === 'string' ? value.trim().toLowerCase() : value));
+    const tsTier = enumInput(o.treeShrubTier, 'standard');
+    if (!TREE_SHRUB_TIERS.has(tsTier)) throw treeShrubInputError('Tree & Shrub program must be light, standard, or enhanced.');
+    const tsAccess = enumInput(o.treeShrubAccess, 'easy');
+    if (!TREE_SHRUB_ACCESS.has(tsAccess)) throw treeShrubInputError('Tree & Shrub access must be easy, moderate, or difficult.');
+    // Palms: the same resolution the property block uses below — the
+    // operator's count, else a stored inventory count, else the vision
+    // estimate when its trust verdict allows it. Only the OPERATOR count is
+    // validated (whole number 0–200 — the public-quote / intent-schema
+    // 1–200 contract, with a zero reading as "no palms" exactly like a
+    // cleared field); the fallback legs are lookup sentinels, never
+    // contracts — the lookup stores estimatedPalmCount: 0 when no palms
+    // were found, so a non-positive fallback is simply ABSENT (pre-push r3
+    // P0), the same way the palmInventory block below reads it.
+    let tsPalmCount;
+    if (!isBlankInput(p.palmCount)) {
+      const n = strictWholeNumber(p.palmCount);
+      if (!(n >= 0 && n <= 200)) throw treeShrubInputError('Palm count must be a whole number between 1 and 200.');
+      // An operator zero is "no palms" and ends the resolution here — a
+      // positive vision estimate must never resurrect a count the operator
+      // rejected (pre-push r4 P0).
+      tsPalmCount = n > 0 ? n : undefined;
+    } else {
+      const fallbackPalm = positiveIntegerValue(
+        p.palmInventory?.palmCount,
+        p.palmCountTrusted === false ? undefined : p.estimatedPalmCount,
+      );
+      if (Number.isInteger(fallbackPalm) && fallbackPalm > 0 && fallbackPalm <= 200) tsPalmCount = fallbackPalm;
+    }
+    services.treeShrub = {
+      tier: tsTier,
+      access: tsAccess,
+      ...(resolvedTreeCount !== undefined ? { treeCount: resolvedTreeCount } : {}),
+      ...(tsPalmCount !== undefined ? { palmCount: tsPalmCount } : {}),
+    };
+  }
   if (sel.has('PALM_INJECTION')) {
     const requestedPalmSize = String(palmRequest.palmSize || o.palmSize || p.palmSize || 'medium').toLowerCase();
     const palmSize = ['small', 'medium', 'large'].includes(requestedPalmSize)
@@ -4483,7 +4598,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     complexity: (p.landscapeComplexity || 'SIMPLE').toLowerCase(),
     nearWater: p.nearWater === 'YES',
     irrigation: !!p.irrigation,
-    treeCount: Number(p.treeCount || p.estimatedTreeCount) || 0,
+    // Absent when nothing was typed or estimated (see resolvedTreeCount).
+    ...(resolvedTreeCount !== undefined ? { treeCount: resolvedTreeCount } : {}),
   };
 
   const perimeterLF = p.perimeterLF ?? p.perimeterLf;

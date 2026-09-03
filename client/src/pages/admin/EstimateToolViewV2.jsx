@@ -2266,6 +2266,8 @@ export default function EstimateToolViewV2({
     palmProduct: "Tree-Age G-4",
     palmLicensedApplicator: false,
     treeCount: "",
+    tsTier: "standard",
+    tsAccess: "easy",
     roachModifier: "NONE",
     roachFeeOverride: "",
     standaloneRoachFeeOverride: "",
@@ -4407,6 +4409,14 @@ export default function EstimateToolViewV2({
         alert("Palm count must be a whole number between 1 and 200.");
         return null;
       }
+      // Tree count: a typed value must be a whole number (0 allowed — an
+      // explicit zero is a real answer); the server rejects anything else
+      // with a 400, so surface it here before the request.
+      if (form.svcTs && String(form.treeCount || "").trim() !== ""
+        && !/^\d+$/.test(String(form.treeCount).trim())) {
+        alert("Tree count must be a whole number (0 or more).");
+        return null;
+      }
       if (form.svcInjection) {
         if (hasInvalidPositiveInteger(form.palmCount) || hasInvalidPositiveInteger(form.palmTreatmentCount)) {
           alert("Palm count must be a positive whole number.");
@@ -4600,6 +4610,10 @@ export default function EstimateToolViewV2({
         commercialInteriorService: formIsCommercial ? form.commercialInteriorService || "" : "",
         commercialLawnCadence: formIsCommercial ? form.commercialLawnCadence || "" : "",
         treeShrubDensity: formIsCommercial ? form.treeShrubDensity || "" : "",
+        // Tree & shrub program + access ride the service line (server
+        // translator builds services.treeShrub from these — audit INP-004).
+        treeShrubTier: form.svcTs ? form.tsTier || "standard" : undefined,
+        treeShrubAccess: form.svcTs ? form.tsAccess || "easy" : undefined,
         mosquitoPressure: formIsCommercial ? form.mosquitoPressure || "" : "",
         fleaOfferKey: form.fleaOfferKey || "flea_elimination_two_visit",
         fleaComplexity: form.fleaComplexity || "light",
@@ -4641,19 +4655,22 @@ export default function EstimateToolViewV2({
         };
       }
 
-      const manualNumber = (value, fallback = 0) => {
-        const n = parseInt(value, 10);
-        return Number.isFinite(n) ? n : fallback;
-      };
       const optionalNumber = (value) => {
         const n = parseInt(value, 10);
         return Number.isFinite(n) && n >= 0 ? n : undefined;
       };
       const baseProfile = enrichedProfile || {};
-      const treeCount = manualNumber(
-        form.treeCount,
-        Number(baseProfile.treeCount || baseProfile.estimatedTreeCount) || 0,
-      );
+      // Tree count: a typed value (an explicit 0 included) wins; otherwise the
+      // lookup's positive estimate; otherwise ABSENT — the translator and the
+      // pricer treat absence as "unknown" and fall back to the treeDensity
+      // estimate, where the old `|| 0` fabricated a zero that priced the
+      // per-tree material away (audit INP-002).
+      const typedTreeCount = String(form.treeCount ?? "").trim() === ""
+        ? undefined
+        : parseInt(form.treeCount, 10);
+      const estimatedTreeCount = parseInt(baseProfile.treeCount || baseProfile.estimatedTreeCount, 10);
+      const treeCount = typedTreeCount
+        ?? (Number.isFinite(estimatedTreeCount) && estimatedTreeCount > 0 ? estimatedTreeCount : undefined);
       const measuredTurfSf = optionalNumber(form.measuredTurfSf);
       // Turf-relevant transforms (dims, bed area, footprint, pool/cage,
       // densities, type) live in buildTurfRequestProfile, SHARED with the
@@ -4708,8 +4725,13 @@ export default function EstimateToolViewV2({
           }
         }
       }
-      profile.estimatedTreeCount = treeCount;
-      profile.treeCount = treeCount;
+      if (treeCount !== undefined) {
+        profile.estimatedTreeCount = treeCount;
+        profile.treeCount = treeCount;
+      } else {
+        delete profile.treeCount;
+        delete profile.estimatedTreeCount;
+      }
       if (measuredTurfSf !== undefined) {
         profile.measuredTurfSf = measuredTurfSf;
       } else {
@@ -5208,6 +5230,8 @@ export default function EstimateToolViewV2({
       palmProduct: "Tree-Age G-4",
       palmLicensedApplicator: false,
       treeCount: "",
+      tsTier: "standard",
+      tsAccess: "easy",
       measuredTurfSf: "",
       topDressArea: "",
       // Per-estimate dollar overrides never carry into the next customer's
@@ -5991,6 +6015,11 @@ export default function EstimateToolViewV2({
                       palmProduct: "Tree-Age G-4",
                       palmLicensedApplicator: false,
                       treeCount: "",
+                      // Billable per-property T&S choices — a 9x / difficult
+                      // pick must not ride into the next property's quote
+                      // (pre-push r8 P1).
+                      tsTier: "standard",
+                      tsAccess: "easy",
                       measuredTurfSf: "",
                       // Structure-specific measurements must clear with the
                       // property — leaving them meant house B could be quoted
@@ -6688,6 +6717,37 @@ export default function EstimateToolViewV2({
                     <FieldV2 label="Tree Count">
                       <InputV2 k="treeCount" type="number" placeholder="Auto" />
                     </FieldV2>
+                  )}{" "}
+                  {form.svcTs && !commercialDetected && (
+                    <div className="grid grid-cols-2 gap-3">
+                      {/* Residential only: the commercial ornamental pricer
+                          has a fixed cadence and no access term, so these
+                          would be inert there. Tier names are application
+                          counts (owner directive 2026-08-04) and the 9x
+                          program is sellable here — the builder used to
+                          hardcode standard (audit INP-004). Keys stay
+                          light/standard/enhanced. */}
+                      <FieldV2 label="Program">
+                        <SelectV2
+                          k="tsTier"
+                          options={[
+                            { value: "light", label: "4x applications/yr" },
+                            { value: "standard", label: "6x applications/yr" },
+                            { value: "enhanced", label: "9x applications/yr" },
+                          ]}
+                        />
+                      </FieldV2>
+                      <FieldV2 label="Access">
+                        <SelectV2
+                          k="tsAccess"
+                          options={[
+                            { value: "easy", label: "Easy" },
+                            { value: "moderate", label: "Moderate (+8m)" },
+                            { value: "difficult", label: "Difficult (+15m)" },
+                          ]}
+                        />
+                      </FieldV2>
+                    </div>
                   )}{" "}
                 </>
               )}

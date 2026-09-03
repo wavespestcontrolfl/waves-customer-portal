@@ -118,10 +118,52 @@ function deltaPctNonnegativeActual(estimated, actual) {
 function extractTreeShrubEstimate(estimateData) {
   if (!estimateData || typeof estimateData !== 'object') return null;
 
+  const engineRequest = estimateData.engineRequest && typeof estimateData.engineRequest === 'object'
+    ? estimateData.engineRequest : null;
+  const requestOptions = engineRequest?.options && typeof engineRequest.options === 'object'
+    ? engineRequest.options : {};
+  // Authoritative mapped evidence. An admin revision replaces result and
+  // engineRequest but keeps an agent draft's original raw engineResult, so
+  // a revised 9x / difficult quote must not be recorded off the stale raw
+  // line's tier and access (pre-push r6 P1): the mapped selected tier row
+  // and the replayed service-line access outrank the raw values whenever a
+  // mapped T&S result exists.
+  const tierRows = estimateData.result?.results?.ts;
+  const mappedSelected = Array.isArray(tierRows) ? tierRows.find((row) => row?.selected) : null;
+  const mappedTier = normalizedEnum(mappedSelected?.tier);
+  const optionAccess = normalizedEnum(requestOptions.treeShrubAccess);
+
+  // Raw vs mapped: server-authoritative admin saves store the FRESH raw
+  // engineResult next to the mapped result (resolveServerAuthoritativePricing
+  // writes both), so the raw line normally carries the exact bedAreaSource
+  // and onSiteMin the mapped envelope loses — keep them. It is stale only
+  // when a revision replaced the mapped result but left an agent draft's
+  // original engineResult behind; the tell is DISAGREEMENT with the mapped
+  // evidence on every field the two share — bed area, tree count, the
+  // bed-provenance boolean and the priced access (a revision that changed
+  // only access keeps eb/et but the raw onSiteMin no longer describes the
+  // job) — and then the mapped record wins with the raw-only fields null
+  // rather than wrong (GH #3801 P1 + pre-push r7/r9 P1s).
+  const tsMeta = estimateData.result?.results?.tsMeta;
+  const hasMappedTs = !!(tsMeta && typeof tsMeta === 'object');
+  const agreesWithMapped = (quote) => {
+    if (!hasMappedTs) return true;
+    const rawBed = positiveNumber(quote.bedAreaUsed ?? quote.bedArea);
+    const rawTrees = nonnegativeCount(quote.treeCount);
+    if ((rawBed ?? null) !== (positiveNumber(tsMeta.eb) ?? null)) return false;
+    if ((rawTrees ?? null) !== (nonnegativeCount(tsMeta.et) ?? null)) return false;
+    const rawSource = normalizedEnum(quote.bedAreaSource);
+    if (rawSource && typeof tsMeta.bedAreaIsEstimated === 'boolean'
+      && (rawSource === 'lot_based' || rawSource === 'fallback') !== tsMeta.bedAreaIsEstimated) return false;
+    const rawAccess = normalizedEnum(quote.access);
+    if (rawAccess && optionAccess && rawAccess !== optionAccess) return false;
+    return true;
+  };
+
   const lineItems = estimateData.engineResult?.lineItems;
   if (Array.isArray(lineItems)) {
     const quote = lineItems.find((item) => item?.service === 'tree_shrub');
-    if (quote) {
+    if (quote && agreesWithMapped(quote)) {
       const bedAreaSource = normalizedEnum(quote.bedAreaSource);
       const extracted = {
         bedSqFt: positiveNumber(quote.bedAreaUsed ?? quote.bedArea),
@@ -134,8 +176,8 @@ function extractTreeShrubEstimate(estimateData) {
           ? (bedAreaSource === 'lot_based' || bedAreaSource === 'fallback')
           : null,
         treeCount: nonnegativeCount(quote.treeCount),
-        access: normalizedEnum(quote.access),
-        tier: normalizedEnum(quote.tier),
+        access: optionAccess || normalizedEnum(quote.access),
+        tier: mappedTier || normalizedEnum(quote.tier),
         onSiteMin: positiveNumber(quote.onSiteMin),
       };
       // Quote-wizard and lead-automation drafts whitelist the lineItem down
@@ -145,12 +187,8 @@ function extractTreeShrubEstimate(estimateData) {
     }
   }
 
-  const tsMeta = estimateData.result?.results?.tsMeta;
-  if (tsMeta && (positiveNumber(tsMeta.eb) || positiveNumber(tsMeta.et))) {
-    const profile = (estimateData.engineRequest && typeof estimateData.engineRequest === 'object'
-      ? estimateData.engineRequest.profile : null) || {};
-    const tierRows = estimateData.result?.results?.ts;
-    const selected = Array.isArray(tierRows) ? tierRows.find((row) => row?.selected) : null;
+  if (hasMappedTs && (positiveNumber(tsMeta.eb) || positiveNumber(tsMeta.et))) {
+    const profile = engineRequest?.profile || {};
     return {
       bedSqFt: positiveNumber(tsMeta.eb),
       // The legacy mapping collapses the four-value source enum to ONE
@@ -162,14 +200,16 @@ function extractTreeShrubEstimate(estimateData) {
         ? tsMeta.bedAreaIsEstimated : null,
       treeCount: nonnegativeCount(tsMeta.et),
       // Every writer that produces this mapped shape prices T&S through
-      // translateV2CallToV1Input's services.treeShrub = { tier } — the
-      // engine then receives access: 'easy' explicitly (estimate-engine
-      // :839). 'easy' IS the priced access here, so null would defeat the
-      // priced-vs-observed access calibration (pre-push P1 r4). The
-      // profile reads stay first for any future writer that persists a
-      // real access on the replay profile.
-      access: normalizedEnum(profile.access || profile.features?.access) || 'easy',
-      tier: normalizedEnum(selected?.tier),
+      // translateV2CallToV1Input's services.treeShrub — since v4.8 the
+      // admin builder's Access select rides engineRequest.options
+      // .treeShrubAccess (audit INP-004), which is THE priced access when
+      // present; the older { tier } shape priced 'easy' explicitly
+      // (estimate-engine :839), so 'easy' stays the fallback — null would
+      // defeat the priced-vs-observed access calibration (pre-push P1 r4).
+      access: optionAccess
+        || normalizedEnum(profile.access || profile.features?.access)
+        || 'easy',
+      tier: mappedTier,
       onSiteMin: null,
     };
   }
