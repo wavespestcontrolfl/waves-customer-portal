@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const logger = require('../services/logger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { logAutopay } = require('../services/autopay-log');
@@ -397,10 +398,24 @@ const NOT_LIVE = 'This contract signing link is no longer live — remove it and
  * pasted from the Contracts page, `delivered`) is re-verified and needs
  * no write. Returns { ok: true, activations } for restorePreparedShareLinks
  * (a send that never left) or recordPreparedShareLinkSends (a real one),
- * else { ok: false, error } with every activation this call made undone.
+ * else { ok: false, error } with every activation this call made undone —
+ * and a throw part-way (a later link's lock, template read or event write
+ * failing) undoes them too before it surfaces, so no signing credential
+ * this call committed outlives a send that never happened (pre-push P0).
  */
 async function activatePreparedShareLinks(links, req) {
   const activations = [];
+  try {
+    return await activateEachPreparedShareLink(links, req, activations);
+  } catch (err) {
+    await restorePreparedShareLinks(activations, req, { reason: `Activation failed: ${err.message}` }).catch((restoreErr) => {
+      logger.error(`[contracts] prepared link restore after an activation throw failed (contracts ${activations.map((a) => a.id).join(', ')} keep their activated link until it expires): ${restoreErr.message}`);
+    });
+    throw err;
+  }
+}
+
+async function activateEachPreparedShareLink(links, req, activations) {
   for (const link of links) {
     let refusal = null;
     await db.transaction(async (trx) => {

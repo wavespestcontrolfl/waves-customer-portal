@@ -33,6 +33,7 @@ jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn() 
 jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: (_q, _s, n) => n(), requireAdmin: (_q, _s, n) => n() }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
 jest.mock('../services/document-contract-delivery', () => ({}));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { hashContractToken } = require('../services/contracts');
 const {
@@ -126,6 +127,17 @@ describe('activatePreparedShareLinks (the /sms send, before the provider call)',
     mockRows = { customer_contracts: { ...base, ...row } };
     expect(await activatePreparedShareLinks([{ id: 'k1', tokenHash: HASH, delivered }], req)).toEqual({ ok: false, error: expect.stringMatching(msg) });
     expect(updates('customer_contracts')).toHaveLength(0);
+  });
+
+  test('a later link THROWING undoes the earlier activation before the error surfaces (pre-push Codex P0)', async () => {
+    const H2 = hashContractToken('tok-2');
+    mockRows = { customer_contracts: (b) => { if (b.filters.some((f) => f?.id === 'k2')) throw new Error('lock timeout'); return base; } };
+    await expect(activatePreparedShareLinks([{ id: 'k1', tokenHash: HASH, delivered: false }, { id: 'k2', tokenHash: H2, delivered: false }], req)).rejects.toThrow('lock timeout');
+    const [activate, restore] = updates('customer_contracts');
+    expect(activate.payload.share_token_hash).toBe(HASH);
+    expect(restore.filters).toContainEqual({ id: 'k1', share_token_hash: HASH });
+    expect(restore.payload).toEqual({ status: 'draft', share_token_hash: null, share_token_expires_at: null, shared_at: null, updated_at: expect.any(Date) });
+    expect(events().map((e) => e.type)).toEqual(['share_link_created', 'delivery_failed']);
   });
 
   test('a later link refusing undoes the earlier activation (all or nothing)', async () => {
