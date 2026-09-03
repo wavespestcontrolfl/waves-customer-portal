@@ -114,10 +114,11 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
   // episode's dated row (cancel at term end, win-back before the date,
   // cancel the same still-current term again) or a repeat end-of-coverage
   // commit that opened a new request must not leave two identical
-  // instructions. Only this event's OWN row is exempt — a retry of the
-  // same request dedupes against it below and must not retire it. Read
-  // rows are never touched: an instruction staff already acted on is
-  // history, not a duplicate.
+  // instructions. A RETRY of an event that already holds a row (read or
+  // not) retires nothing: notifyAdmin dedupes it against that row and
+  // inserts none, so retiring a later event's unread row here would leave
+  // staff with NO open instruction. Read rows are never touched: an
+  // instruction staff already acted on is history, not a duplicate.
   // Retire + raise are ONE transaction under an account-scoped advisory
   // lock (the same `admin:<key>` namespace notifyAdmin's per-key dedupe
   // lock uses): two concurrent raises for different requests would
@@ -130,7 +131,11 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
   await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:termite_station_retrieval:${customerId}`]);
     try {
-      const stale = await trx('notifications')
+      const own = await trx('notifications')
+        .where({ recipient_type: 'admin' })
+        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+        .first('id');
+      const stale = own ? [] : await trx('notifications')
         .where({ recipient_type: 'admin' })
         .whereNull('read_at')
         .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
