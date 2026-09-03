@@ -3451,7 +3451,9 @@ function OwnerQueuePanel() {
   };
 
   // what the payment field SHOWS: the owner's edit (even a cleared one), else the quote
-  const displayedAmount = (card, row) => (amounts[row.id] !== undefined ? amounts[row.id] : card.path && card.path.estimated_cost_cents != null ? (card.path.estimated_cost_cents / 100).toFixed(2) : "");
+  // (the server picks the quote THIS row authorizes — a renewal row shows the renewal price, never the initial fee;
+  // no applicable quote ⇒ blank ⇒ the click is refused until the owner types the amount)
+  const displayedAmount = (card, row) => (amounts[row.id] !== undefined ? amounts[row.id] : row.quote_cents != null ? (row.quote_cents / 100).toFixed(2) : "");
 
   const approve = async (card, row) => {
     setBusy(row.id);

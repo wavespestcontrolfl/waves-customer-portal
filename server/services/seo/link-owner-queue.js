@@ -168,6 +168,8 @@ async function listOwnerQueue(db) {
         id: r.id, dimension: r.dimension, instance_kind: r.instance_kind, instance_key: r.instance_key, level: r.level, reason: r.reason,
         decided_at: r.decided_at, satisfied_at: r.satisfied_at, satisfied_reason: r.satisfied_reason,
         action: actionFor(r), approved: r.approved, approval: r.approval,
+        // the quote THIS row authorizes: a renewal instance is the renewal price, never the initial fee; null fails closed
+        quote_cents: r.dimension === 'payment' && path ? (actionFor(r) === 'renewal' ? (Number.isSafeInteger(path.renewal_cost_cents) && path.renewal_cost_cents > 0 ? path.renewal_cost_cents : null) : (Number.isSafeInteger(path.estimated_cost_cents) && path.estimated_cost_cents > 0 ? path.estimated_cost_cents : null)) : null,
         approvable: whyNot === null && primary,
         why_not: whyNot || (primary ? null : `one approval covers the ${groupSize.get(p.payment_group_id)} locations sharing this fee — approve it on the first card`),
         shared_fee: sharedFee ? { group_id: p.payment_group_id, placements: groupSize.get(p.payment_group_id) } : null,
@@ -243,7 +245,10 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     if (hash !== row.decision_inputs_hash || Number(row.path_revision) !== pathRevision) refuse(409, 'inputs changed since the card — the nightly bridge re-decides it; refresh the queue');
     const { waiver } = await activeWaiver(trx, domain.id, path.id, ctx);
     const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: false, waiver });
-    const inst = decided.instances.find((i) => i.dimension === row.dimension && i.instance_kind === row.instance_kind);
+    // a renewal instance (`2027:1`, `annual:1`) is opened by the renewal claim, not by the decision function — it takes
+    // the payment dimension's current verdict (plan §6.3: the ordinary route), so it is checked against the `-` instance
+    const renewal = row.dimension === 'payment' && R.RENEWAL_KIND_RE.test(String(row.instance_kind));
+    const inst = decided.instances.find((i) => i.dimension === row.dimension && i.instance_kind === (renewal ? '-' : row.instance_kind));
     if (!inst || inst.level !== row.level) refuse(409, `the policy now yields ${inst ? inst.level : 'no instance'} for this step, not ${row.level} — the nightly bridge re-decides it`);
 
     const money = row.dimension === 'payment';

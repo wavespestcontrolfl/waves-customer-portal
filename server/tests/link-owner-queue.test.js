@@ -90,7 +90,7 @@ describe('listOwnerQueue', () => {
     expect(c.price_tolerance_cents).toBe(0);
     const byDim = Object.fromEntries(c.rows.map((r) => [r.dimension, r]));
     expect(byDim.execution).toMatchObject({ level: 'OWNER_FREE', action: 'acquire', approvable: true, why_not: null, shared_fee: null });
-    expect(byDim.payment).toMatchObject({ level: 'OWNER_PAYMENT', action: 'purchase', approvable: true, shared_fee: null });
+    expect(byDim.payment).toMatchObject({ level: 'OWNER_PAYMENT', action: 'purchase', approvable: true, shared_fee: null, quote_cents: 4500 });
     expect(c.decidable).toBe(true);
     // a sibling approved ⇒ the domain is lane-owned ⇒ the remaining cards say so instead of offering Reject / Watch
     await Q.approveRow(db, { authorityId: byDim.execution.id, actor: ACTOR, now: NOW, bridge: inline });
@@ -285,6 +285,29 @@ describe('approveRow', () => {
     expect(staleRow.approval_id).toBeUndefined();
     expect(leasedRow.approval_id).toBeUndefined();
     expect(p.id).toBe(pay.path_id);
+  });
+
+  test('a renewal row quotes the renewal price, never the initial fee; no renewal price ⇒ no quote (fail closed)', async () => {
+    const { db } = await parked({ make: paidPath, path: { renewal_cost_cents: 3900, renewal_period: 'annual' } });
+    // a renewal instance beside the settled initial purchase (kept satisfied so the card is the renewal's)
+    const first = openRows(db, 'payment')[0];
+    Object.assign(first, { satisfied_at: NOW, satisfied_reason: 'charged' });
+    // the hash binds the instance key (§3.6b): the renewal row carries its OWN hash
+    const renewalHash = P.decisionInputsHash('payment', { path: storedPath(db), domain: storedDomain(db), policy: P.normalizePolicyRow(null), score: storedDomain(db).score, instanceKey: '2027:1' });
+    rows(db).push({ ...first, id: uid(), instance_kind: '2027', instance_key: '2027:1', decision_inputs_hash: renewalHash, satisfied_at: undefined, satisfied_reason: undefined, approval_id: undefined });
+    const card = (await Q.listOwnerQueue(db)).cards.find((x) => x.placement.id === first.prospect_id);
+    const renewal = card.rows.find((r) => r.action === 'renewal');
+    expect(renewal).toMatchObject({ instance_key: '2027:1', quote_cents: 3900, approvable: true });
+    expect(card.rows.find((r) => r.action === 'purchase').quote_cents).toBe(4500);
+    const r = await Q.approveRow(db, { authorityId: renewal.id, actor: ACTOR, approvedAmountCents: 3900, now: NOW, bridge: inline });
+    expect(r.approval).toMatchObject({ action: 'renewal', action_hash: '2027', approved_amount_cents: 3900 });
+    // no renewal price on the path ⇒ the renewal row carries no quote
+    const none = await parked({ make: paidPath, path: { renewal_cost_cents: null, renewal_period: 'annual' } });
+    const f2 = openRows(none.db, 'payment')[0];
+    Object.assign(f2, { satisfied_at: NOW, satisfied_reason: 'charged' });
+    rows(none.db).push({ ...f2, id: uid(), instance_kind: '2027', instance_key: '2027:1', satisfied_at: undefined, satisfied_reason: undefined, approval_id: undefined });
+    const card2 = (await Q.listOwnerQueue(none.db)).cards.find((x) => x.placement.id === f2.prospect_id);
+    expect(card2.rows.find((r) => r.action === 'renewal').quote_cents).toBeNull();
   });
 
   test('a payment approval on an attested path freezes the agreement url too (never only accept_terms)', async () => {
