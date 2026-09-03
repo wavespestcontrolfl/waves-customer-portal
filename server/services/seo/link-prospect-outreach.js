@@ -280,7 +280,7 @@ async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', 
     // draft to the same mailbox is the same inbox
     const inboxHost = inbox.slice(inbox.lastIndexOf('@') + 1);
     const hosts = M.GOOGLE_HOSTS.includes(inboxHost) ? [...M.GOOGLE_HOSTS] : [inboxHost];
-    const others = (await trx('seo_link_prospects').whereRaw("LOWER(split_part(TRIM(??), '@', 2)) = ANY(?)", ['outreach_to_email', hosts]).where('id', '<>', prospectId).select('id', 'status', 'parked_from_status', 'outreach_status', 'outreach_sent_at', 'outreach_to_email'))
+    const others = (await trx('seo_link_prospects').whereRaw(`split_part(${M.STORED_SQL}, '@', 2) = ANY(?)`, ['outreach_to_email', hosts]).where('id', '<>', prospectId).select('id', 'status', 'parked_from_status', 'outreach_status', 'outreach_sent_at', 'outreach_to_email'))
       .filter((o) => M.normalizeEmail(o.outreach_to_email) === inbox);
     const open = others.find(CONVERSATION_OPEN);
     if (open) return { ok: false, code: 'inbox_in_flight', error: `another placement already has a conversation with this recipient (${open.status}${open.outreach_status ? ` / ${open.outreach_status}` : ''}) — one conversation per inbox` };

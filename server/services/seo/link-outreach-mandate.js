@@ -84,7 +84,10 @@ const sha256 = (o) => crypto.createHash('sha256').update(JSON.stringify(o)).dige
 const normalizeEmail = (e) => (canonicalEmail(e) || String(e || '').trim().toLowerCase()).replace(/@googlemail\.com$/, '@gmail.com'); // googlemail IS gmail
 const GOOGLE_HOSTS = Object.freeze(['gmail.com', 'googlemail.com']);
 // the stored column in the recipient's canonical form: gmail hosts compare the dot-less, tag-less local part
-const GMAIL_CANONICAL_SQL = "/* gmail-canonical */ LOWER(split_part(TRIM(??), '@', 2)) = ANY(?) AND REPLACE(split_part(split_part(LOWER(TRIM(??)), '@', 1), '+', 1), '.', '') = ANY(?)";
+// the stored column in the recipient's form: lower-cased with EVERY whitespace character removed (the recipient side
+// strips them all — a stored "first last@x.com" is the same address), never TRIM alone
+const STORED_SQL = "LOWER(REGEXP_REPLACE(??, '\\s', '', 'g'))";
+const GMAIL_CANONICAL_SQL = `/* gmail-canonical */ split_part(${STORED_SQL}, '@', 2) = ANY(?) AND REPLACE(split_part(split_part(${STORED_SQL}, '@', 1), '+', 1), '.', '') = ANY(?)`;
 const domainOf = (e) => { const s = normalizeEmail(e); const i = s.lastIndexOf('@'); return i === -1 ? '' : s.slice(i + 1); };
 
 /** sha256(recipient, subject, body) — the outreach_send action hash (§3.6b). */
@@ -125,14 +128,14 @@ async function recipientReviews(q, emails) {
     const idCol = src.idColumn || 'id';
     // stored addresses are normalized the same way as the recipient (case + surrounding whitespace); the
     // stored value comes back so each hit lands on its own recipient
-    const hits = await q(src.table).whereRaw('LOWER(TRIM(??)) = ANY(?)', [src.column, recipients]).select(`${idCol} as id`, `${src.column} as email`);
+    const hits = await q(src.table).whereRaw(`${STORED_SQL} = ANY(?)`, [src.column, recipients]).select(`${idCol} as id`, `${src.column} as email`);
     for (const h of hits) { const r = normalizeEmail(h.email); if (exact.has(r)) exact.get(r).push({ source: src.source, id: h.id }); }
     if (googleLocals.length) {
       const canon = await q(src.table).whereRaw(GMAIL_CANONICAL_SQL, [src.column, GOOGLE_HOSTS, src.column, googleLocals]).select(`${idCol} as id`, `${src.column} as email`);
       for (const h of canon) { const r = normalizeEmail(h.email); if (exact.has(r) && !exact.get(r).some((e) => e.source === src.source && e.id === h.id)) exact.get(r).push({ source: src.source, id: h.id }); }
     }
     if (domains.length) {
-      const byDomain = await q(src.table).whereRaw("LOWER(split_part(TRIM(??), '@', 2)) = ANY(?)", [src.column, domains]).select(`${idCol} as id`, `${src.column} as email`);
+      const byDomain = await q(src.table).whereRaw(`split_part(${STORED_SQL}, '@', 2) = ANY(?)`, [src.column, domains]).select(`${idCol} as id`, `${src.column} as email`);
       for (const h of byDomain) {
         const d = domainOf(h.email);
         for (const r of recipients) if (domainOf(r) === d && !exact.get(r).some((e) => e.source === src.source && e.id === h.id)) shared.get(r).push({ source: src.source, id: h.id });
@@ -158,4 +161,4 @@ async function reviewByEmail(q, emails) {
   return new Map((emails || []).filter(Boolean).map((e) => [e, byCanonical.get(normalizeEmail(e)) || null]));
 }
 
-module.exports = { draftReview, classifyDraft, lintDraft, draftHash, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
+module.exports = { draftReview, classifyDraft, lintDraft, draftHash, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };

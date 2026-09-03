@@ -46,10 +46,11 @@ function makeDb(seed = {}) {
       whereIn(col, arr) { st.preds.push((r) => arr.includes(r[col])); return q; },
       whereNotIn(col, arr) { st.preds.push((r) => !arr.includes(r[col])); return q; },
       whereRaw(sql, bindings = []) {
-        const lower = (v) => String(v == null ? '' : v).trim().toLowerCase();
-        if (/^LOWER\(TRIM\(\?\?\)\) = \?$/.test(sql)) st.preds.push((r) => lower(r[bindings[0]]) === bindings[1]);
-        else if (/^LOWER\(TRIM\(\?\?\)\) = ANY\(\?\)$/.test(sql)) st.preds.push((r) => bindings[1].includes(lower(r[bindings[0]])));
-        else if (/^LOWER\(split_part\(TRIM\(\?\?\), '@', 2\)\) = ANY\(\?\)$/.test(sql)) st.preds.push((r) => bindings[1].includes(lower(r[bindings[0]]).split('@')[1]));
+        // the stored-address form link-outreach-mandate compares in: lower-cased, every whitespace character removed
+        const lower = (v) => String(v == null ? '' : v).replace(/\s+/g, '').toLowerCase();
+        const STORED = "LOWER\\(REGEXP_REPLACE\\(\\?\\?, '\\\\s', '', 'g'\\)\\)";
+        if (new RegExp(`^${STORED} = ANY\\(\\?\\)$`).test(sql)) st.preds.push((r) => bindings[1].includes(lower(r[bindings[0]])));
+        else if (new RegExp(`^split_part\\(${STORED}, '@', 2\\) = ANY\\(\\?\\)$`).test(sql)) st.preds.push((r) => bindings[1].includes(lower(r[bindings[0]]).split('@')[1]));
         else if (/gmail-canonical/.test(sql)) st.preds.push((r) => { const c = canonicalEmail(r[bindings[0]]); return Boolean(c) && bindings[1].includes(c.split('@')[1]) && bindings[3].includes(c.split('@')[0]); });
         else if (/split_part/.test(sql)) st.preds.push((r) => canonicalProspectDomain(r.target_domain) === bindings[0]);
         // the sender's trailing-24h attempt count (link-prospect-outreach dailySendCount): rows attempted since `since`

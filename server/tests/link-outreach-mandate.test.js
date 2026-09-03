@@ -77,7 +77,7 @@ describe('recipientReview (§13)', () => {
     expect(r.lookup_hash).toMatch(/^[0-9a-f]{64}$/);
   });
   test('customers.email — an exact match (case-insensitive) is a customer', async () => {
-    const c = customer({ email: '  Editor@BradentonHerald.com ' }); // stored with the case and whitespace it was typed with
+    const c = customer({ email: '  Editor@Bradenton Herald.com ' }); // stored with the case and whitespace it was typed with — inside too
     const r = await M.recipientReview(seed({ customers: [c] }), 'editor@bradentonherald.com');
     expect(r).toMatchObject({ kind: 'customer', matched: [{ source: 'customers.email', id: c.id }] });
   });
