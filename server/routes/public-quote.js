@@ -254,6 +254,16 @@ function buildQuoteRequiredEstimateResult(estimate = {}, manualQuoteLines = []) 
 // BOTH signals: a unit line on the address AND parcel unitCount > 1 — a
 // bare unit line (no enrichment) or a multi-unit parcel with no unit
 // (a genuine whole-building/association request, #2721) prices normally.
+// Services whose price is a function of the LOT (treatable area) — a lot the
+// lookup flagged verify-first must park these instead of pricing the
+// synthetic sqft×4 fallback. One-time mosquito joins the recurring program
+// here (service-menu phase 2; pre-push codex P0): resolveMosquitoTreatableArea
+// grades any positive lot MEDIUM, so an unguarded flagged lot would have
+// persisted a bookable price built from a made-up area.
+function lotPricedServiceRequested(services = {}) {
+  return !!(services.mosquito || services.oneTimeMosquito || services.treeShrub);
+}
+
 function unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress = {}, enrichedProps = {}) {
   // The top-level unitCount keeps the shaped 1 on non-aggregated parcels
   // (promotion would move commercial per-unit pricing), so the county's own
@@ -1522,7 +1532,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // property.footprint — residential and commercial alike — so weak or
     // conflicting LOT evidence cannot change its result and must not force
     // lot_size_requires_verification over an instant quote.
-    const lotPricedRequested = !!(services.mosquito || services.treeShrub);
+    const lotPricedRequested = lotPricedServiceRequested(services);
     const lotFlagForcesSiteQuote = !lotSizeMeasured && (
       ((condoScopeLotFlag || (wizardShaped && lotVerifyFlagged)) && lotPricedRequested)
       || (condoScopeLotFlag && !!(services.lawn || services.oneTimeLawn || services.lawnPestControl
@@ -2912,5 +2922,6 @@ module.exports._internals = {
   resolveRealLotSqFt,
   resolveEntryChannel,
   unitOnMultiUnitParcelForcesSiteQuote,
+  lotPricedServiceRequested,
 };
 module.exports.PUBLIC_QUOTE_SERVICE_KEYS = PUBLIC_QUOTE_SERVICE_KEYS;

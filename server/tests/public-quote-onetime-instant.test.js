@@ -8,7 +8,9 @@
 const { generateEstimate } = require('../services/pricing-engine');
 const { _internals, PUBLIC_QUOTE_SERVICE_KEYS } = require('../routes/public-quote');
 const { quoteServicesForKey, mergeKeyedRequestOptions } = require('../services/public-services-menu');
-const { buildPublicQuoteServiceInterest, buildCompactPublicQuoteServiceInterest, derivePerApplication } = _internals;
+const {
+  buildPublicQuoteServiceInterest, buildCompactPublicQuoteServiceInterest, derivePerApplication, lotPricedServiceRequested,
+} = _internals;
 
 const BASE_PROPERTY = { homeSqFt: 1800, lotSqFt: 8783, stories: 1, yearBuilt: 2005, estimatedTurfSf: 4500 };
 
@@ -31,6 +33,16 @@ describe('oneTimeMosquito as a public quote service', () => {
     // Larger treatable area, higher price — the lot drives it, not the home.
     const bigLot = generateEstimate({ ...BASE_PROPERTY, lotSqFt: 30000, services: quoteServicesForKey('mosquito_one_time') });
     expect(Number(bigLot.lineItems.find((l) => l.service === 'one_time_mosquito').price)).toBeGreaterThan(Number(line.price));
+  });
+  test('a lot the lookup flagged verify-first parks it like the recurring program', () => {
+    // The route's lot-flag park (lot_size_requires_verification) reads this
+    // predicate; without it a flagged lot priced the synthetic sqft×4 area.
+    expect(lotPricedServiceRequested({ oneTimeMosquito: {} })).toBe(true);
+    expect(lotPricedServiceRequested({ mosquito: { tier: 'silver' } })).toBe(true);
+    expect(lotPricedServiceRequested({ treeShrub: {} })).toBe(true);
+    expect(lotPricedServiceRequested({ rodentInspection: {} })).toBe(false);
+    expect(lotPricedServiceRequested({ lawnPestControl: {} })).toBe(false);
+    expect(lotPricedServiceRequested({})).toBe(false);
   });
 });
 
