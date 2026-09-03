@@ -387,9 +387,9 @@ function recordDispatchOutcome(policy, outcome) {
 
 // Direct-SDK Anthropic create for the sites that bypass the policy dispatcher
 // (vision scorers, OCR, commitments). Callers never send sampling controls —
-// current Anthropic models reject them — so there is no retry here; this is
-// the one seam those sites share, which is where the per-call ledger
-// (agent-control S2a, GATE_LLM_CALL_LEDGER) records direct usage.
+// current Anthropic models reject them — so there is no retry here. Kept as
+// the one seam those sites share so any per-call observability (the in-flight
+// agent-control call ledger) can wrap direct calls in one place.
 async function anthropicCreate(client, request) {
   return client.messages.create(request);
 }

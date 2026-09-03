@@ -36,7 +36,7 @@ never from docs, which go stale.
 | `WORKHORSE` | Drafting + content generation |
 | `FAST` | High-volume classification, tagging, signals |
 | `VOICE` | Customer-facing copy where warm/natural beats raw reasoning: SMS replies, service recaps, social posts. High-stakes messages (cancellations, complaints) escalate to FLAGSHIP at the call site |
-| `VISION` | Image scoring. Direct SDK sites call `anthropicCreate` (`llm/call.js`) so the spend row is written; no Anthropic call sends `temperature` (current models 400 on sampling controls — the Gemini scorer keeps its own) |
+| `VISION` | Image scoring. Direct SDK sites go through `anthropicCreate` (`llm/call.js`), the shared seam for direct calls; no Anthropic call sends `temperature` (current models 400 on sampling controls — the Gemini scorer keeps its own) |
 
 ## 3. DEEP call sites — the helper is mandatory
 
