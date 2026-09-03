@@ -158,8 +158,13 @@ function expectedCadenceForRequest(request) {
 // still say two, or the instant quote advertises a package the obligation
 // does not deliver (pre-push codex P1; codex #3842 r1 P1).
 const COCKROACH_PACKAGE_VISITS = 2;
-function liveCockroachPackageTreatments() {
-  return Number(pricingConstants.PEST?.pestInitialRoach?.display?.regular_standalone?.treatments);
+// Live-count half of the gate, exported because the admin pricing-config
+// save resyncs the mutable constants at any time: the /calculate handler
+// re-runs it synchronously before generateEstimate so a resync that lands
+// during its awaited lookups cannot render a count the obligation does not
+// deliver (codex #3842 r2 P1).
+function cockroachPackageDisplayCurrent() {
+  return Number(pricingConstants.PEST?.pestInitialRoach?.display?.regular_standalone?.treatments) === COCKROACH_PACKAGE_VISITS;
 }
 function requestMatchesCatalogRow(serviceKey, row) {
   const request = PUBLIC_QUOTE_REQUESTS[serviceKey];
@@ -167,7 +172,7 @@ function requestMatchesCatalogRow(serviceKey, row) {
   if (request.pestInitialRoach) {
     return row.billing_type !== 'recurring'
       && Number(row.visits_per_year) === COCKROACH_PACKAGE_VISITS
-      && liveCockroachPackageTreatments() === COCKROACH_PACKAGE_VISITS;
+      && cockroachPackageDisplayCurrent();
   }
   const expected = expectedCadenceForRequest(request);
   if (expected == null) return row.billing_type !== 'recurring';
@@ -279,4 +284,4 @@ async function isPublicSelectableServiceKey(serviceKey, conn = db) {
 }
 
 module.exports = {
-  COCKROACH_PACKAGE_VISITS, LAWN_TRACKS, loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FORMERLY_PUBLIC_KEYS, FAMILY_LABELS };
+  COCKROACH_PACKAGE_VISITS, cockroachPackageDisplayCurrent, LAWN_TRACKS, loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FORMERLY_PUBLIC_KEYS, FAMILY_LABELS };

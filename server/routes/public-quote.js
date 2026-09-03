@@ -2,7 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
-const { publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
+const { cockroachPackageDisplayCurrent, publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
 const logger = require('../services/logger');
 const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
@@ -845,7 +845,9 @@ function buildCompactPublicQuoteServiceInterest(services = {}) {
     services.topDressing ? 'Top Dressing' : null,
     services.lawnPestControl ? 'Lawn Pest' : null,
     services.oneTimeMosquito ? 'One-Time Mosquito' : null,
-    services.pestInitialRoach ? 'Roach' : null,
+    // Through the compactor, so the 32-char customer interest follows the
+    // configured standalone name like the full label does (codex #3842 r2 P2).
+    services.pestInitialRoach ? compactServiceInterestPart(publicQuoteRoachDisplayName('regular_standalone')) : null,
     services.bedBug ? 'Bed Bug' : null,
     services.rodentInspection ? 'Rodent Inspection' : null,
   ]);
@@ -967,8 +969,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const keyedInstant = !!(keyedService && keyedService.instant && quoteServicesForKey(requestedServiceKey));
     // Keyed but not instant: no engine services — the request flows through
     // the standard manual-quote lifecycle on a synthetic quote-required estimate.
-    const keyedQuoteOnRequest = !!(keyedService && !keyedInstant);
-    const services = keyedInstant ? mergeKeyedRequestOptions(quoteServicesForKey(requestedServiceKey), bodyServices)
+    // `let`: the standalone cockroach package demotes to quote-on-request
+    // right before generateEstimate when the live display count moved
+    // during the awaited lookups (see the re-check there).
+    let keyedQuoteOnRequest = !!(keyedService && !keyedInstant);
+    let services = keyedInstant ? mergeKeyedRequestOptions(quoteServicesForKey(requestedServiceKey), bodyServices)
       : (keyedQuoteOnRequest ? {} : dropKeyedOnlyServices(bodyServices));
     const normalizedAddress = normalizeLeadAddress({
       raw: address,
@@ -1524,6 +1529,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         logger.error(`[public-quote] rodent setup-waiver account lookup failed: ${lookupErr.message}`);
         return res.status(503).json({ error: 'Account lookup is temporarily unavailable — please retry in a moment.' });
       }
+    }
+    // Standalone cockroach package: publicSelectableService passed the live
+    // display-count gate before the property / account lookups above
+    // yielded; an admin pricing-config save in that window resyncs the
+    // mutable constants, and generateEstimate would render "Includes 3
+    // treatment visits" for a package the obligation stops after visit 2.
+    // Re-check synchronously — nothing yields between here and the engine —
+    // and demote to the quote-on-request lifecycle (codex #3842 r2 P1).
+    if (engineInput.services?.pestInitialRoach && !cockroachPackageDisplayCurrent()) {
+      keyedQuoteOnRequest = true;
+      services = {};
+      engineInput.services = {};
     }
     const estimate = keyedQuoteOnRequest ? quoteOnRequestEstimate(keyedService, engineInput) : generateEstimate(engineInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter((line) =>
@@ -2143,6 +2160,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // (price + persisted costs) — the audit splits it into its own
             // row (GH codex on #3628).
             installation: item.installation ?? null,
+            // Package presentation the customer was quoted (standalone
+            // cockroach: treatments = 2, "Includes 2 treatment visits."):
+            // the saved-estimate renderer reads detail off this mirror and
+            // the one-time fee card reads treatments (codex #3842 r2 P2).
+            treatments: item.treatments ?? null,
+            detail: item.detail ?? null,
             // Residential T&S has no bed-area INPUT — the engine resolves a
             // lot-derived area and stores it on the line; the audit's
             // dimension picker reads it from here (GH codex on #3628).
@@ -2956,6 +2979,7 @@ module.exports._internals = {
   estimateBlocksSelfBookLink,
   keyedLeadLabel,
   dropKeyedOnlyServices,
+  compactServiceInterestPart,
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   quoteOnRequestEstimate,
