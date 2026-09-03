@@ -1,7 +1,7 @@
 const {
   normalizeLeadAddress, parseRawAddress, formatAddress,
   normalizeUnitLine, unitLineValueKey, splitStreetLineUnit,
-  dwellingUnitOnLine, splitUnitFirstLine,
+  dwellingUnitOnLine, dwellingUnitOfUnitLine, splitUnitFirstLine,
 } = require('../utils/address-normalizer');
 
 describe('address normalizer', () => {
@@ -390,6 +390,18 @@ describe('normalizeUnitLine', () => {
     expect(dwellingUnitOnLine('900 Bayview Ter Bldg 2, Venice, FL 34285')).toBe('');
     expect(dwellingUnitOnLine('900 Bayview Ter Floor 2, Venice, FL 34285')).toBe('');
     expect(unitLineValueKey(normalizeUnitLine('Lot 12'))).toBe('lot 12');
+  });
+
+  test('dwellingUnitOfUnitLine reads a dedicated line 2: the dwelling it carries, or nothing for a structural-only value (codex r17 P1 on #3804)', () => {
+    expect(dwellingUnitOfUnitLine('204')).toBe(normalizeUnitLine('Unit 204'));
+    expect(dwellingUnitOfUnitLine('Apt 204')).toBe('Apt 204');
+    expect(dwellingUnitOfUnitLine('#204')).toBe(normalizeUnitLine('Unit 204'));
+    expect(dwellingUnitOfUnitLine('Bldg 9 Apt 204')).toBe('Apt 204');
+    expect(dwellingUnitOfUnitLine('Lot 12')).toBe('Lot 12');
+    expect(dwellingUnitOfUnitLine('Bldg 9')).toBe('');
+    expect(dwellingUnitOfUnitLine('Floor 2')).toBe('');
+    expect(dwellingUnitOfUnitLine('')).toBe('');
+    expect(dwellingUnitOfUnitLine(null)).toBe('');
     // A hash right after a bare designator or a leading hash is unchanged.
     expect(normalizeUnitLine('Apt #4')).toBe('Apt 4');
     expect(normalizeUnitLine('#204')).toBe(normalizeUnitLine('Unit 204'));

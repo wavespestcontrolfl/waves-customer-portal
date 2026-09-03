@@ -461,8 +461,14 @@ const DWELLING_DESIGNATORS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite'
 // codex P1 on #3804).
 function dwellingUnitOnLine(value) {
   const unit = unitAnywhereOnLine(value);
-  if (!unit) return '';
-  const pair = unitDesignatorPairs(unit).find((p) => DWELLING_DESIGNATORS.has(p.designator));
+  return unit ? dwellingUnitOfUnitLine(unit) : '';
+}
+// The same verdict for a value that IS a unit line already — a dedicated
+// line 2 ("204", "Apt 204", "Bldg 9 Apt 204", or a structural-only "Bldg
+// 9" → ''): the raw column is never unit evidence on its own (codex r17
+// P1 on #3804).
+function dwellingUnitOfUnitLine(unitLine) {
+  const pair = unitDesignatorPairs(unitLine).find((p) => DWELLING_DESIGNATORS.has(p.designator));
   return pair ? normalizeUnitLine(`${pair.designator} ${pair.value}`) : '';
 }
 // The structural (non-dwelling) part of a unit line, kept when the
@@ -729,6 +735,7 @@ module.exports = {
   splitUnitFirstLine,
   unitAnywhereOnLine,
   dwellingUnitOnLine,
+  dwellingUnitOfUnitLine,
   structuralUnitPart,
   splitStreetAndCity,
   titleCaseWords,

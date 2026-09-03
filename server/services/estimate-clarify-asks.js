@@ -437,7 +437,7 @@ async function writeLeadUnit(trx, { leadId, linkage, building, unitLine }) {
 // property row, or the evidence that it is already on file. Mutates out
 // (customer, propertyId, propertyCreated, primaryEnsuredId).
 async function writeCustomerUnit(trx, { customerId, customerRow, building, unitLine, out }) {
-  const { dwellingUnitOnLine } = require('../utils/address-normalizer');
+  const { dwellingUnitOnLine, dwellingUnitOfUnitLine } = require('../utils/address-normalizer');
   const { recordCallProperty, syncPrimaryAddress, ensurePrimaryProperty } = require('./customer-properties');
   const { unitLineValueKey } = require('../utils/address-normalizer');
   const ownAddress = String(customerRow.address_line1 || '').trim();
@@ -449,7 +449,9 @@ async function writeCustomerUnit(trx, { customerId, customerRow, building, unitL
   const props = await trx('customer_properties')
     .where({ customer_id: customerId, active: true })
     .select('id', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip');
-  const propUnit = (p) => String(p.address_line2 || '').trim() || dwellingUnitOnLine(String(p.address_line1 || '')) || '';
+  // A dedicated line 2 is unit evidence only for the DWELLING it carries — a
+  // structural-only "Bldg 9" there is not the apartment (codex r17 P1 on #3804).
+  const propUnit = (p) => dwellingUnitOfUnitLine(String(p.address_line2 || '')) || dwellingUnitOnLine(String(p.address_line1 || '')) || '';
   const atBuilding = (props || []).filter((p) => sameBuildingForWrite(customerAddressLine(p), building));
   const unitAlreadyOnFile = atBuilding.some((p) => propUnit(p) && unitLineValueKey(propUnit(p)) === wanted);
   // The building + replied unit as its OWN property row on the account,
@@ -498,7 +500,7 @@ async function writeCustomerUnit(trx, { customerId, customerRow, building, unitL
     // Ignoring that last shape would overwrite Apt 9 with Apt 204 on
     // both the mirror and the primary (codex r1 P0 on #3788).
     const primaryAtBuilding = atBuilding.find((p) => p.is_primary);
-    const ownUnit = String(customerRow.address_line2 || '').trim() || dwellingUnitOnLine(ownAddress)
+    const ownUnit = dwellingUnitOfUnitLine(String(customerRow.address_line2 || '')) || dwellingUnitOnLine(ownAddress)
       || (primaryAtBuilding ? propUnit(primaryAtBuilding) : '') || '';
     if (!ownUnit) {
       // A supported shape: unitless primary at the building PLUS an
@@ -589,7 +591,7 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = 
 async function unitOnFileAtBuilding(trx, flags) {
   const building = flags.unit_ask_building || null;
   if (!building?.street_line_1) return false;
-  const { dwellingUnitOnLine, unitLineValueKey } = require('../utils/address-normalizer');
+  const { dwellingUnitOnLine, dwellingUnitOfUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
   const { leadId, customerId, linkage } = await unitTargets(trx, flags);
   const units = new Set();
   const add = (unit) => { const key = unitLineValueKey(String(unit || '')); if (key) units.add(key); };
@@ -608,14 +610,17 @@ async function unitOnFileAtBuilding(trx, flags) {
     // no city/ZIP is not evidence that THIS building's unit is on file
     // (codex r2 P1 on #3788).
     if (customerRow && sameBuildingForWrite(customerAddressLine(customerRow), building)) {
-      const own = String(customerRow.address_line2 || '').trim() || dwellingUnitOnLine(String(customerRow.address_line1 || ''));
+      // Line 2 counts only for the DWELLING it carries — a structural-only
+      // "Bldg 9" / "Floor 2" there is not evidence the apartment is on file,
+      // exactly as it is not on line 1 (codex r17 P1 on #3804).
+      const own = dwellingUnitOfUnitLine(String(customerRow.address_line2 || '')) || dwellingUnitOnLine(String(customerRow.address_line1 || ''));
       if (own) add(own);
     }
     const props = await trx('customer_properties')
       .where({ customer_id: customerId, active: true })
       .select('address_line1', 'address_line2', 'city', 'zip');
     for (const p of props || []) {
-      const unit = String(p.address_line2 || '').trim() || dwellingUnitOnLine(String(p.address_line1 || ''));
+      const unit = dwellingUnitOfUnitLine(String(p.address_line2 || '')) || dwellingUnitOnLine(String(p.address_line1 || ''));
       if (unit && sameBuildingForWrite(customerAddressLine(p), building)) add(unit);
     }
   }
@@ -1105,12 +1110,16 @@ function unitReplyIsAmbiguous(text, normalizeUnitLine) {
     if (!/\d/.test(m[1])) continue; // a lone letter ("a", "in") is only a unit when designated
     const u = norm(m[1]); if (u) values.add(u);
   }
-  const designated = [
-    ...[...text.matchAll(new RegExp(UNIT_REPLY_RE.source, 'gi'))].map((m) => m[2]),
-    ...[...text.matchAll(new RegExp(UNIT_HASH_REPLY_RE.source, 'gi'))].map((m) => m[1]),
-  ].map(norm).filter(Boolean);
-  for (const d of designated) values.add(d);
-  return values.size > 1;
+  const worded = [...text.matchAll(new RegExp(UNIT_REPLY_RE.source, 'gi'))];
+  const hashed = [...text.matchAll(new RegExp(UNIT_HASH_REPLY_RE.source, 'gi'))];
+  for (const v of [...worded.map((m) => m[2]), ...hashed.map((m) => m[1])].map(norm)) if (v) values.add(v);
+  if (values.size > 1) return true;
+  // One value under TWO different designators ("Lot 12 or Apt 12") names
+  // two premises (codex r17 P1 on #3804); apt / apartment / unit and the
+  // hash form are one designator.
+  const designators = new Set(worded.map((m) => (/^(?:apt|apartment|unit)$/i.test(m[1]) ? 'apt' : m[1].toLowerCase())));
+  if (hashed.length) designators.add('apt');
+  return designators.size > 1;
 }
 function extractUnitReply(body, { bareOk = false } = {}) {
   const text = String(body || '').trim();

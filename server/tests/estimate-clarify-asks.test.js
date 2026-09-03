@@ -1320,6 +1320,11 @@ describe('unit_number ask (call pipeline lane)', () => {
     expect(extractUnitReply('Suite 210')).toBe('Suite 210');
     expect(extractUnitReply('Lot 12, 2 bedrooms')).toBe('Lot 12');
     expect(extractUnitReply('Lot 12 or lot 13')).toBeNull();
+    // Two DIFFERENT designators on the same value name two premises — ambiguous (codex r17 P1 on #3804).
+    expect(extractUnitReply('Lot 12 or Apt 12')).toBeNull();
+    expect(extractUnitReply('Space 7, apt 7')).toBeNull();
+    // The same interchangeable designator twice is still one answer.
+    expect(extractUnitReply('Unit 204, apt 204')).toBe('Apt 204');
     expect(extractUnitReply('#204')).toBe('Apt 204');
     // Structural designators are not a unit answer.
     expect(extractUnitReply('Bldg 9')).toBeNull();
@@ -1802,6 +1807,19 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
       mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, { id: 'call-1', customer_id: 'cust-1' }, lead, cust];
       mockState.selectQueue = [[{ address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 204', city: null, zip: null }]];
       expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('send');
+    });
+
+    test('a STRUCTURAL-only line 2 ("Bldg 9", "Floor 2") on the customer or a property row is not unit evidence — the ask stands; a bare "204" line 2 still is (codex r17 P1 on #3804)', async () => {
+      const lead = { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir', first_name: 'Pat' };
+      const cust = { id: 'cust-1', first_name: 'Pat', address_line1: '1048 Example Lakes Cir', address_line2: 'Bldg 9', city: 'Sarasota', zip: '34232' };
+      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, { id: 'call-1', customer_id: 'cust-1' }, lead, cust];
+      mockState.selectQueue = [[{ address_line1: '1048 Example Lakes Cir', address_line2: 'Floor 2', city: 'Sarasota', zip: '34232' }]];
+      expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('send');
+      mockState.updates = [];
+      const bare = { ...cust, address_line2: '204' };
+      mockState.firstQueue = [freshRow(), lead, bare, { id: 'card-1' }, { id: 'call-1', customer_id: 'cust-1' }, lead, bare];
+      mockState.selectQueue = [[]];
+      expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('retired');
     });
 
     test('a lead the operator detached from the call (unlink) is not evidence for this ask — the ask stands', async () => {
