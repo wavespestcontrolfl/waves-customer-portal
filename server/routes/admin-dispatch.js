@@ -14133,9 +14133,11 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
           void JobCosting.calculateJobCost(req.params.serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
         }
         // The kit is settled (consumed, or skipped for a deterministic reason
-        // that a retry would repeat): clear the owed marker. A failed clear
-        // leaves it set — the next retry re-runs the at-most-once consume.
-        if (result.recordId) await db('service_records').where({ id: result.recordId }).update({ field_flags: db.raw("COALESCE(field_flags, '{}'::jsonb) - 'completion_supplies_owed'") });
+        // a retry would repeat): clear the owed marker. A consumption that
+        // ERRORED (a deduction failed and rang its bell) keeps the marker so
+        // the next retry re-runs the at-most-once consume (pre-push P1); a
+        // failed clear leaves it set for the same reason.
+        if (result.recordId && !consumption?.errors?.length) await db('service_records').where({ id: result.recordId }).update({ field_flags: db.raw("COALESCE(field_flags, '{}'::jsonb) - 'completion_supplies_owed'") });
       } catch (e) { logger.error(`[dispatch] recap supplies consumption failed: ${e.message}`); }
     }
     res.json(result);

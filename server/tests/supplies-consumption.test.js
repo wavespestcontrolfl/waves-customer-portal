@@ -288,6 +288,7 @@ describe('recap consumption hook — retry window (source contract)', () => {
     expect(hook).toMatch(/let consumeNow = result\.priorCompleted !== true;/);
     expect(hook).toMatch(/db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('field_flags'\)/);
     expect(hook).toMatch(/if \(flags\.completion_supplies_owed === true\) consumeNow = true;/);
+    expect(hook).toMatch(/if \(result\.recordId && !consumption\?\.errors\?\.length\) await db\('service_records'\)/); // cleared only when nothing errored
     expect(hook).toMatch(/- 'completion_supplies_owed'/); // cleared after the at-most-once consume
     expect(hook).not.toMatch(/RECAP_RETRY_WINDOW_MS|created_at/);
     expect(hook).toMatch(/if \(consumeNow\) \{/);
