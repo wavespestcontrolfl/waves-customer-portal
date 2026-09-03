@@ -17,15 +17,15 @@ export const AREAS = [
 ];
 
 const onSelector = (selector, model) => ({ model, selector, pinEnv: null, pinned: false, unpinnedModel: model, accepts: text(["anthropic"]), live: false });
-const pinned = (pinEnv, model, accepts = text(["anthropic"])) => ({ model, selector: "FLAGSHIP", pinEnv, pinned: true, unpinnedModel: "m1", accepts, live: false });
+const pinned = (pinEnv, model, accepts = text(["anthropic"])) => ({ model, selector: "FLAGSHIP", pinEnv, setEnv: pinEnv, pinned: true, unpinnedModel: "m1", accepts, live: false });
 
 export function makeData() {
   return {
     models: { ...CATALOG },
     areas: AREAS.map((a) => ({ ...a })),
     selectors: [
-      { key: "FLAGSHIP", env: "MODEL_FLAGSHIP", current: "m1", derived: false, derivesFrom: null, lock: null, overridden: false, codeDefault: "m1", accepts: text(["anthropic"]) },
-      { key: "OPENAI_FAST", env: "MODEL_OPENAI_FAST", current: "m4", derived: false, derivesFrom: null, lock: null, overridden: false, codeDefault: "m4", accepts: text(["openai"]) },
+      { key: "FLAGSHIP", env: "MODEL_FLAGSHIP", current: "m1", derived: false, derivesFrom: null, lock: null, overridden: false, overrideEnv: null, codeDefault: "m1", unpinnedModel: null, accepts: text(["anthropic"]) },
+      { key: "OPENAI_FAST", env: "MODEL_OPENAI_FAST", current: "m4", derived: false, derivesFrom: null, lock: null, overridden: false, overrideEnv: null, codeDefault: "m4", unpinnedModel: null, accepts: text(["openai"]) },
     ],
     lanes: [
       { id: "sms_intent", name: "SMS intent", describe: "Works out what a text asks for", area: "sms", continuity: "verified", inbound: false, lock: null, fanout: false, applies: "restart", primary: onSelector("FLAGSHIP", "m1"), fallback: onSelector("OPENAI_FAST", "m4"), retry: null, also: [] },

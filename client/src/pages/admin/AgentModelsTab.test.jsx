@@ -75,7 +75,7 @@ describe("AgentModelsTab", () => {
     adminFetch.mockImplementation(async (path) => {
       if (path === "/admin/agents/models") {
         const data = makeData();
-        Object.assign(data.selectors[0], { overridden: true, codeDefault: "m2" });
+        Object.assign(data.selectors[0], { overridden: true, overrideEnv: "MODEL_FLAGSHIP", codeDefault: "m2", unpinnedModel: "m2" });
         return data;
       }
       if (path.startsWith("/admin/agents/models/search")) return { newest: [], results: [], unavailable: [] };

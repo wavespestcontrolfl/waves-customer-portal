@@ -612,7 +612,12 @@ function selectorEnvNames(sel) {
 function resolveSelectors() {
   return SELECTORS.map((sel) => {
     const current = MODELS[sel.key];
-    const overrideEnv = firstSetEnv(selectorEnvNames(sel));
+    const names = selectorEnvNames(sel);
+    const overrideEnv = firstSetEnv(names);
+    // What the selector returns to once the ACTIVE override is deleted: the
+    // next set alias in the chain (MODEL_OPENAI_BEST behind MODEL_OPENAI_BALANCED),
+    // else the registry default (null for a derived selector — it follows its parent).
+    const afterUnpin = overrideEnv ? names.slice(names.indexOf(overrideEnv) + 1).map((n) => process.env[n]).find(Boolean) || null : null;
     return {
       key: sel.key,
       env: sel.env,
@@ -626,6 +631,7 @@ function resolveSelectors() {
       // What the selector returns to when its override is deleted (null for
       // a selector that derives from another — it follows that one instead).
       codeDefault: MODELS.DEFAULTS[sel.key] || null,
+      unpinnedModel: overrideEnv ? afterUnpin || MODELS.DEFAULTS[sel.key] || null : null,
       // `derivesFrom`: config/models.js defaults this selector to another one
       // (OPENAI_SMS_DRAFT = MODEL_OPENAI_SMS_DRAFT || OPENAI_FAST), so while
       // it is not set in env, a change to the parent moves it too.
@@ -670,15 +676,17 @@ function resolveRef(ref) {
       // unpinnedModel = what the leg runs on once the env var is deleted, so
       // the composer can offer "unpin" with an honest before/after. With an
       // alias chain that is the next set alias, then the literal / base.
-      const afterUnpin = names.slice(1).map((n) => process.env[n]).find(Boolean) || null;
+      // `setEnv` is the name to DELETE (the active alias, not the canonical
+      // first name); `afterUnpin` is the next lower-priority alias still set.
+      const afterUnpin = setName ? names.slice(names.indexOf(setName) + 1).map((n) => process.env[n]).find(Boolean) || null : null;
       if (ref.literal !== undefined) {
         const model = (setName && process.env[setName]) || ref.literal;
         const via = setName ? `${setName}${setName !== primaryName ? ' (alias)' : ''}` : `${primaryName} (code default)`;
-        return { model, selector: null, via, pinEnv: primaryName, pinned, unpinnedModel: afterUnpin || ref.literal, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
+        return { model, selector: null, via, pinEnv: primaryName, setEnv: setName, pinned, unpinnedModel: afterUnpin || ref.literal, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
       }
       const base = resolveRef(ref.ref);
       const model = (setName && process.env[setName]) || base.model;
-      return { model, selector: base.selector, via: setName ? `${setName} (pinned)` : `${primaryName} → ${base.via}`, pinEnv: primaryName, pinned, unpinnedModel: afterUnpin || base.model, live: ref.live, accepts: base.accepts };
+      return { model, selector: base.selector, via: setName ? `${setName} (pinned)` : `${primaryName} → ${base.via}`, pinEnv: primaryName, setEnv: setName, pinned, unpinnedModel: afterUnpin || base.model, live: ref.live, accepts: base.accepts };
     }
     default:
       return null;

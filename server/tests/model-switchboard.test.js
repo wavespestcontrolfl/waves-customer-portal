@@ -67,6 +67,36 @@ describe('model-switchboard', () => {
     expect(MODELS.DEFAULTS.FLAGSHIP).toMatch(/^claude-/);
   });
 
+  it('an override set through a legacy alias is deleted by its own name, and the next alias takes over', () => {
+    const prev = { MODEL_OPENAI_BALANCED: process.env.MODEL_OPENAI_BALANCED, MODEL_OPENAI_BEST: process.env.MODEL_OPENAI_BEST, OPENAI_VISION_MODEL: process.env.OPENAI_VISION_MODEL, OPENAI_MODEL: process.env.OPENAI_MODEL };
+    try {
+      delete process.env.MODEL_OPENAI_BALANCED;
+      process.env.MODEL_OPENAI_BEST = 'gpt-9.9-alias';
+      process.env.OPENAI_VISION_MODEL = 'gpt-9.9-vision';
+      process.env.OPENAI_MODEL = 'gpt-9.9-generic';
+      jest.resetModules();
+      const { selectors, lanes } = require('../services/model-switchboard').getSwitchboard();
+      const balanced = selectors.find((s) => s.key === 'OPENAI_BALANCED');
+      expect(balanced.overridden).toBe(true);
+      expect(balanced.overrideEnv).toBe('MODEL_OPENAI_BEST');
+      expect(balanced.current).toBe('gpt-9.9-alias');
+      expect(balanced.unpinnedModel).toBe(require('../config/models').DEFAULTS.OPENAI_BALANCED);
+      // Both aliases set: deleting the active one lands on the next, not the code default.
+      const sat = lanes.find((l) => l.id === 'satellite').also[0];
+      expect(sat.pinEnv).toBe('OPENAI_VISION_MODEL');
+      expect(sat.setEnv).toBe('OPENAI_VISION_MODEL');
+      expect(sat.unpinnedModel).toBe('gpt-9.9-generic');
+      delete process.env.OPENAI_VISION_MODEL;
+      jest.resetModules();
+      const sat2 = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'satellite').also[0];
+      expect(sat2.pinned).toBe(true);
+      expect(sat2.setEnv).toBe('OPENAI_MODEL');
+      expect(sat2.unpinnedModel).toBe('gpt-5-mini');
+    } finally {
+      for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+  });
+
   it('managed agents are registration-locked: not counted in a selector blast radius, applies at re-registration', () => {
     const { selectors, lanes } = sb.getSwitchboard();
     const agents = lanes.filter((l) => l.policy === 'agents');

@@ -49,7 +49,7 @@ describe("computeChanges", () => {
   it("deleting a selector override returns every follower to the registry default; no override → nothing to delete", () => {
     const data = makeData();
     // Railway pins FLAGSHIP at m1 while the registry default has moved to m2.
-    Object.assign(data.selectors[0], { overridden: true, codeDefault: "m2" });
+    Object.assign(data.selectors[0], { overridden: true, overrideEnv: "MODEL_FLAGSHIP", codeDefault: "m2", unpinnedModel: "m2" });
     const draft = { MODEL_FLAGSHIP: UNPIN };
     const { selectorDraft, effectiveLeg } = resolve(data, draft);
     const changes = computeChanges({ data, draft, selectorDraft });
@@ -57,6 +57,14 @@ describe("computeChanges", () => {
     expect(changes[0]).toMatchObject({ env: "MODEL_FLAGSHIP", from: "m1", to: "m2", unpin: true, lanes: 3 });
     expect(effectiveLeg(data.lanes[0].primary)).toBe("m2");
     expect(envBlockOf(changes, CATALOG)).toBe("# delete MODEL_FLAGSHIP  (unpin → Claude Opus 5)");
+    // Set through a legacy alias: the delete line names the alias, and the
+    // destination is whatever the server says takes over (here another alias's value).
+    Object.assign(data.selectors[0], { overrideEnv: "FLAGSHIP_MODEL_LEGACY", unpinnedModel: "m1" });
+    const aliased = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
+    expect(envBlockOf(aliased, CATALOG)).toBe("# delete FLAGSHIP_MODEL_LEGACY  (unpin → Claude Opus 4.8)");
+    data.lanes[3].primary.setEnv = "REPORT_MODEL_LEGACY";
+    const pinDraft = { PIN_REPORT: UNPIN };
+    expect(envBlockOf(computeChanges({ data, draft: pinDraft, selectorDraft: resolve(data, pinDraft).selectorDraft }), CATALOG)).toBe("# delete REPORT_MODEL_LEGACY  (unpin → Claude Opus 4.8)");
     const plain = makeData();
     expect(computeChanges({ data: plain, draft, selectorDraft: resolve(plain, draft).selectorDraft })).toHaveLength(0);
   });

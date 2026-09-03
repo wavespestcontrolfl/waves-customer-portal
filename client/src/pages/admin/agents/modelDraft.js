@@ -44,7 +44,7 @@ export function selectorDraftFor(selectorByKey, draft) {
   const resolve = (key) => {
     const s = selectorByKey[key];
     if (!s) return undefined;
-    if (draft[s.env] === UNPIN) return s.codeDefault || (s.derivesFrom ? resolve(s.derivesFrom) || selectorByKey[s.derivesFrom]?.current : undefined);
+    if (draft[s.env] === UNPIN) return s.unpinnedModel || (s.derivesFrom ? resolve(s.derivesFrom) || selectorByKey[s.derivesFrom]?.current : undefined);
     if (draft[s.env]) return draft[s.env];
     if (s.derived && s.derivesFrom) return resolve(s.derivesFrom);
     return undefined;
@@ -52,8 +52,15 @@ export function selectorDraftFor(selectorByKey, draft) {
   return resolve;
 }
 
-// What a selector-fed leg returns to once the selector's override is deleted.
-export const selectorUnpinnedModel = (s, selectorByKey) => s.codeDefault || (s.derivesFrom ? selectorByKey[s.derivesFrom]?.current : null) || null;
+// What a selector-fed leg returns to once the selector's ACTIVE override is
+// deleted: the server's after-unpin model (next set alias, else the registry
+// default), or the parent a derived selector follows.
+export const selectorUnpinnedModel = (s, selectorByKey) => s.unpinnedModel || (s.derivesFrom ? selectorByKey[s.derivesFrom]?.current : null) || null;
+
+// The env var an unpin DELETES: the one actually set in Railway (a legacy
+// alias such as MODEL_OPENAI_BEST or OPENAI_MODEL), not the canonical name
+// the composer writes new values to.
+const deleteEnvOf = (c) => c.deleteEnv || c.env;
 
 // Effective model for a leg after the draft: a lane pin wins over its
 // selector, exactly as `process.env.PIN || MODELS.TIER` does at boot.
@@ -99,6 +106,7 @@ export function computeChanges({ data, draft, selectorDraft }) {
       from: s.current,
       to: next,
       unpin,
+      deleteEnv: unpin ? s.overrideEnv || s.env : undefined,
       label: `${s.key} selector${moving.length ? ` (+ ${moving.map((d) => d.key).join(", ")}, unset so it follows)` : ""}`,
       lanes: following.length,
       laneNames: following.map((l) => l.name),
@@ -128,6 +136,7 @@ export function computeChanges({ data, draft, selectorDraft }) {
         to: destinations[0],
         destinations,
         unpin,
+        deleteEnv: unpin ? leg.setEnv || env : undefined,
         label,
         lanes: sharing.length,
         laneNames: sharing.map((x) => x.name),
@@ -146,7 +155,7 @@ export const destinationLabel = (change, catalog) => (change.destinations || [ch
 // Unpins are deletions: Railway has no "unset" syntax, so the line is an
 // instruction rather than an assignment.
 export function envBlockOf(changes, catalog) {
-  return changes.map((c) => (c.unpin ? `# delete ${c.env}  (unpin → ${destinationLabel(c, catalog)})` : `${c.env}=${c.to}`)).join("\n");
+  return changes.map((c) => (c.unpin ? `# delete ${deleteEnvOf(c)}  (unpin → ${destinationLabel(c, catalog)})` : `${c.env}=${c.to}`)).join("\n");
 }
 
 // Can the target model serve what this env feeds (provider, modality, deep-only)?
