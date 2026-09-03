@@ -3854,6 +3854,9 @@ export default function EstimateToolViewV2({
           landscapeComplexity: "MODERATE",
           nearWater: "NO",
           bedArea: "",
+          // Parcel-wide canopy count from the earlier bare-building lookup
+          // (pre-push codex P1 r4); palms clear through palmPrefillAllowed.
+          treeCount: "",
         });
       }
       if (ep.pool === "YES" || ep.pool === "POSSIBLE") upd.hasPool = "YES";
@@ -4087,6 +4090,16 @@ export default function EstimateToolViewV2({
     const address = form.address.trim();
     if (!address) {
       setSatelliteStatus({ type: "err", msg: "Enter an address first" });
+      return;
+    }
+    // A unit lookup dropped every parcel-wide read on purpose; this action
+    // would write them straight back (lot, bed area, canopy, densities,
+    // pool, water) — pre-push codex P1 r4.
+    if (enrichedProfile?.residentialUnitLookup) {
+      setSatelliteStatus({
+        type: "err",
+        msg: "Satellite analysis reads the whole parcel — not applied to a single-unit lookup. Enter the unit's own figures.",
+      });
       return;
     }
     setSatelliteStatus({
