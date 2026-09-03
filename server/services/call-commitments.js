@@ -834,15 +834,27 @@ async function resolveFulfillment(conn, commitment, call) {
           ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.sent_at, strength: "direct", basis: "estimate_sent_on_the_lead_this_call_created" }
           : { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.sent_at, strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
       }
-      if (!customerId) return null;
-      const est = await reallyDelivered(conn("estimates")
-        .where("customer_id", customerId)
+      // An estimate linked only through estimates.customer_phone still keeps
+      // the promise (commercial proposals store the phone with a NULL
+      // customer_id, so a same-customer lookup misses them). Mirror the
+      // promised-estimate-watcher phone predicate (Codex #3738 P1): a LINKED
+      // call is cleared by its own customer's estimate; an UNLINKED call only
+      // by an UNLINKED estimate whose phone matches the caller — a shared
+      // household number never lets one customer's estimate clear another's
+      // promise.
+      const estQ = reallyDelivered(conn("estimates")
         .whereNotNull("sent_at")
         .where("sent_at", ">", after)
-        .where("sent_at", "<=", until))
-        .orderBy("sent_at", "asc")
-        .first("id", "sent_at", "status");
-      return est ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.sent_at, strength: "association", basis: `estimate_sent_to_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+        .where("sent_at", "<=", until));
+      if (customerId) {
+        estQ.where("customer_id", customerId);
+      } else if (phone) {
+        estQ.whereNull("customer_id").modify((b) => phoneWhere(b, "customer_phone", phone));
+      } else {
+        return null;
+      }
+      const est = await estQ.orderBy("sent_at", "asc").first("id", "sent_at", "status");
+      return est ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.sent_at, strength: "association", basis: customerId ? `estimate_sent_to_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` : `estimate_sent_to_caller_phone_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "send_appointment_confirmation": {
       if (!phone) return null;

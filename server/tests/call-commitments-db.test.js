@@ -342,6 +342,26 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     }
   });
 
+  test('an estimate linked only by customer_phone fulfills an UNLINKED caller\'s promise; a linked estimate on a shared number does not (codex #3738 P1)', async () => {
+    const call = await db('call_log').where({ id: callId }).first(); // unlinked (customer_id NULL), from_phone = PHONE
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000), customer_phone: PHONE }).returning('id');
+    let otherId = null;
+    try {
+      // An UNLINKED estimate whose phone matches the caller keeps the promise
+      // (commercial proposals store the phone with a NULL customer_id).
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'association', basis: expect.stringContaining('caller_phone') });
+      // A LINKED estimate on the same (shared) number must NOT clear an
+      // unlinked caller's promise — mirrors the watcher's shared-number rule.
+      const [other] = await db('customers').insert({ first_name: 'Housemate', phone: PHONE }).returning('id');
+      otherId = other.id;
+      await db('estimates').where({ id: est.id }).update({ customer_id: otherId });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+    } finally {
+      await db('estimates').where({ id: est.id }).del();
+      if (otherId) await db('customers').where({ id: otherId }).del();
+    }
+  });
+
   test('buildCallOutcomes: the paid total covers every later paid invoice, not just the capped list', async () => {
     const [cust] = await db('customers').insert({ first_name: 'Revenue', phone: '+15555550166' }).returning('id');
     cleanup.customerIds.push(cust.id);
