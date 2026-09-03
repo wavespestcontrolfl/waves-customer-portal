@@ -501,6 +501,20 @@ describe('reconcileSendError', () => {
     expect(commRow(s.db)).toMatchObject({ satisfied_reason: 'sent' });
     expect(a.consumed_at).toBeTruthy();
   });
+  test("'sent' on a row whose lifecycle the admin already advanced by hand keeps that lifecycle (the send stamp settles, the inbox is released); a row still awaiting one opens it (→ contacted)", async () => {
+    const s = scenario();
+    await nightly(s.db);
+    Object.assign(placement(s.db), { status: 'watching', outreach_status: 'send_error', outreach_send_token: null, outreach_to_email: 'editor@example.org' });
+    expect((await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org', excludeId: 'none' }))?.id).toBe(s.row.id); // ambiguous ⇒ held
+    expect((await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'sent', approvedBy: 'Adam' })).ok).toBe(true);
+    expect(placement(s.db)).toMatchObject({ status: 'watching', outreach_status: 'sent' });
+    expect(await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org', excludeId: 'none' })).toBeNull(); // settled ⇒ released
+    const t = scenario();
+    await nightly(t.db);
+    Object.assign(placement(t.db), { outreach_status: 'send_error', outreach_send_token: null });
+    expect((await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'sent', approvedBy: 'Adam' })).ok).toBe(true);
+    expect(placement(t.db)).toMatchObject({ status: 'contacted', outreach_status: 'sent' });
+  });
   test("'sent' satisfies the instance when only another dimension was revised earlier (overall revision ≠ communication revision)", async () => {
     // the path's payment inputs were revised before the draft: overall revision 3, communication revision 1; the draft is stamped 3
     const s = scenario({ path: { revision: 3, revision_payment: 3, revision_communication: 1 }, placement: { leased_path_revision: 3 } });

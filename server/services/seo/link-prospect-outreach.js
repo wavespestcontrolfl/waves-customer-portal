@@ -681,10 +681,11 @@ async function reconcileSendError({ prospectId, outcome, approvedBy = 'admin' })
   const note = outcome === 'sent'
     ? `Outreach reconciled as SENT ${now.toISOString()} by ${approvedBy}`
     : `Outreach reconciled as NOT sent (re-queued) ${now.toISOString()} by ${approvedBy}`;
+  // a confirmed send opens the conversation (→ contacted) on a row still awaiting one; a row whose lifecycle the
+  // admin already advanced by hand (watching / lost / placed …) keeps that lifecycle — only the send stamp settles
   const patch = outcome === 'sent'
     ? {
-        status: 'contacted',
-        parked_from_status: null,
+        ...(SENDABLE_STATUSES.includes(prospect.status) ? { status: 'contacted', parked_from_status: null } : {}),
         outreach_status: 'sent',
         outreach_sent_at: prospect.outreach_sent_at || now,
         outreach_send_token: null,

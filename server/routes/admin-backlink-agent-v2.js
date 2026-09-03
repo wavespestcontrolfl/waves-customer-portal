@@ -718,10 +718,11 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
     );
     // Reconcilable = ambiguous sends: a send_error, OR a 'sending' stuck past the
     // stale window (a crashed mid-send) — both resolvable via reconcileSendError.
+    // WHATEVER the lifecycle status reads: an ambiguous send holds its recipient's inbox until it is reconciled
+    // (conversationOpen), so a row moved on by hand must stay in the one place the operator can settle it.
     const staleCutoff = new Date(Date.now() - Outreach.STALE_SENDING_MS);
     const needsReconcile = await orderByPriority(
       db('seo_link_prospects')
-        .whereIn('status', [...Outreach.SENDABLE_STATUSES]) // an owner-parked draft sends too, so its ambiguous send reconciles here too
         .where((b) => b
           .where('outreach_status', 'send_error')
           .orWhere((s) => s.where('outreach_status', 'sending').andWhere('updated_at', '<', staleCutoff)))
