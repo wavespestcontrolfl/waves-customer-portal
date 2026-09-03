@@ -31,7 +31,7 @@ const APPROVAL_DECISIONS = ['approved', 'rejected', 'watch'];
 const APPROVAL_ACTIONS = ['acquire', 'accept_terms', 'purchase', 'renewal', 'outreach_send', 'outreach_followup'];
 const APPROVABLE_LEVELS = ['OWNER_FREE', 'OWNER_ACCOUNT', 'OWNER_OUTREACH', 'OWNER_PAYMENT', 'OWNER_MEMBERSHIP', 'OWNER_LEGAL', 'OWNER_HUMAN_STEP'];
 const SATISFIED_REASONS = ['sent', 'placed', 'charged', 'manual_charged', 'no_payment_required', 'human_step_done', 'group_purchase'];
-const END_OUTCOMES = ['failed', 'skipped', 'not_sent', 'voided', 'superseded', 'terms_changed', 'lost', 'human_step_done', 'path_failed_after_charge'];
+const END_OUTCOMES = ['failed', 'skipped', 'not_sent', 'voided', 'superseded', 'terms_changed', 'lost', 'human_step_done', 'path_failed_after_charge', 'path_failed_after_free'];
 
 const quoted = (arr) => arr.map((v) => `'${v}'`).join(', ');
 const check = (table, name, expr) => `ALTER TABLE ${table} ADD CONSTRAINT ${name} CHECK (${expr})`;

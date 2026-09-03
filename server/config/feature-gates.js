@@ -28,6 +28,7 @@
  *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
  *   GATE_AGENT_ACTIVITY=true    (Activity tab in /admin/agents — read-only feed over existing ledgers; dark in dev AND prod)
  *   GATE_OPS_DIGESTS_IN_APP=true (owner ops digests become ops_digest bell rows in the Activity feed instead of contact@ emails; dark in dev AND prod)
+ *   GATE_CLOSEOUT_MONEY_COMMS_ALERTS=true (closeout alerts also map the comms / invoice / invoiceDelivery facts — failed completion notice, invoice owed but not minted, invoice or receipt delivery incomplete — as per-visit cards + closeout_gaps_today members; their outage holds the floor; read-only, no comms; dark in dev AND prod)
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
@@ -59,6 +60,7 @@
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
+ *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true (season timeline under the lawn price card — four SWFL turf seasons from the current month, one-line focus each, cadence + projected months per frequency from the scheduling catalog on /data; dev-open, prod dark)
@@ -2131,6 +2133,13 @@ const gates = {
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   techTips: gateEnvValue('GATE_TECH_TIPS'),
 
+  // Ops queue (2026-09-02): the Agents hub "Queue" tab — a read-only
+  // projection of every long-running lane's persisted state (pending /
+  // parked / failed) in one place. No actions live there. OFF unless set,
+  // dev AND prod — GET /api/admin/agents/queue/availability answers
+  // { available: false }, /queue is 404, and the tab is not rendered.
+  // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
+  adminOpsQueue: gateEnvValue('GATE_ADMIN_OPS_QUEUE'),
   // Audio-synced call transcript (admin call log). When on, calls whose
   // call_log.transcript_structured carries diarized segments render them as
   // a clickable list that follows recording playback; click a line to seek.
@@ -2170,6 +2179,20 @@ const gates = {
   // FIX alerts are not routed here. Kill switch: unset. This entry is for
   // logGateStatus; the helper reads both env vars at CALL time.
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
+
+  // Closeout money + comms alerts — services/closeout-alerts.js maps three
+  // more closeout facts to operator issues: comms failed (completion notice
+  // rejected by the provider), invoice pending on an actionable reason
+  // (parked manual bill, frozen required mint, expected-<lane>-not-minted),
+  // and invoiceDelivery failed / never-sent (receipt with no recipient or
+  // exhausted, pay-link text failed, paid-but-no-receipt, payer invoice
+  // unsent). Transient, queue-owned, consent-blocked and not_required
+  // states stay silent. With the gate on, comms + invoiceDelivery outages
+  // also HOLD the closeout_gaps_today floor like the mapped facts do. OFF
+  // (default, dev AND prod): the pre-gate five-fact mapping, byte-identical.
+  // Read-only, no comms, no bell-policy change. Kill switch: unset. This
+  // entry is for logGateStatus; the service reads gateEnvValue at CALL time.
+  closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

@@ -382,6 +382,16 @@ describe('decision-inputs hash (§3.6b — per dimension + shared floors)', () =
     expect(P.decisionInputsHash('execution', url)).not.toBe(P.decisionInputsHash('execution', a));
     expect(P.decisionInputsHash('payment', url)).toBe(P.decisionInputsHash('payment', a));
   });
+  test('the currency attestation (id on the path + the immutable row hash via ctx.attestation) is a PAYMENT input only', () => {
+    const a = ctx();
+    expect(P.decisionInputs('payment', a)).toMatchObject({ currency_attestation_id: null, currency_attestation_hash: null });
+    const withId = { ...a, path: { ...a.path, currency_attestation_id: 'att-1' } };
+    const withHash = { ...withId, attestation: { hash: 'h'.repeat(64) } };
+    expect(P.decisionInputs('payment', withHash)).toMatchObject({ currency_attestation_id: 'att-1', currency_attestation_hash: 'h'.repeat(64) });
+    expect(P.decisionInputsHash('payment', withId)).not.toBe(P.decisionInputsHash('payment', a));
+    expect(P.decisionInputsHash('payment', withHash)).not.toBe(P.decisionInputsHash('payment', withId));
+    for (const d of ['communication', 'execution']) expect(P.decisionInputsHash(d, withHash)).toBe(P.decisionInputsHash(d, a));
+  });
   test('legal_terms_hash moves EVERY dimension (§3.3b: all three revisions bump on a terms change)', () => {
     const a = ctx();
     const b = { ...a, path: { ...a.path, legal_terms_hash: 'b'.repeat(64) } };

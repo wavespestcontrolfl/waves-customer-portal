@@ -227,7 +227,9 @@ function isValidMerchantBinding(b) {
 // own `action_hash` (§3.6b), recomputed by the send claim.
 // ---------------------------------------------------------------------------
 const DIMENSION_INPUT_FIELDS = Object.freeze({
-  payment: Object.freeze(['estimated_cost_cents', 'renewal_cost_cents', 'renewal_period', 'currency', 'fee_scope', 'payment_required', 'legal_attestation', 'legal_terms_hash', 'merchant_binding']),
+  // currency_attestation_id (§3.2) + the attestation row's own hash (§3.6b: the evidence that let an ambiguous currency
+  // authorize spending is frozen with the price) — both null until the step-4 owner flow creates the attestation table
+  payment: Object.freeze(['estimated_cost_cents', 'renewal_cost_cents', 'renewal_period', 'currency', 'currency_attestation_id', 'currency_attestation_hash', 'fee_scope', 'payment_required', 'legal_attestation', 'legal_terms_hash', 'merchant_binding']),
   communication: Object.freeze(['acquisition_type', 'link_type', 'expected_rel', 'legal_attestation', 'legal_terms_hash', 'terms_accepted_by_send', 'execution_after_send']),
   execution: Object.freeze(['acquisition_type', 'account_required', 'email_verification', 'agent_completable', 'legal_attestation', 'legal_terms_hash', 'execution_after_send', 'submission_url']),
 });
@@ -249,7 +251,8 @@ const floorInputsHash = (ctx) => sha256(floorInputs(ctx));
 function decisionInputs(dimension, ctx = {}) {
   const fields = DIMENSION_INPUT_FIELDS[dimension];
   if (!fields) throw new Error(`unknown authority dimension '${dimension}'`);
-  const path = ctx.path || {};
+  // ctx.attestation = the immutable seo_link_currency_attestations row backing path.currency_attestation_id (null until it exists)
+  const path = { ...(ctx.path || {}), currency_attestation_hash: ctx.attestation && ctx.attestation.hash ? ctx.attestation.hash : null };
   return { dimension, ...Object.fromEntries(fields.map((f) => [f, path[f] === undefined ? null : path[f]])), floors: floorInputs(ctx) };
 }
 const decisionInputsHash = (dimension, ctx) => sha256(decisionInputs(dimension, ctx));
