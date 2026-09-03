@@ -381,7 +381,22 @@ function buildTriageItem({
   };
 }
 
+// Review cards that SURVIVE a recording swap (the webhook's replace and the
+// operator's adopt-recording retire the rest as superseded): the card about
+// the recordings themselves, the owed dispatch-blocking unit question (human
+// verdict only — AGENTS.md), and the email-review cards whose newest
+// resolved disposition the first-touch release gate reads as operator
+// approval and whose bounce read-back the owner owes (Codex #3764 r3 + r4).
+const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
+  'additional_recording',
+  'missing_unit_number',
+  'email_unverified',
+  'email_invalid',
+  'email_bounce_reverify',
+]);
+
 module.exports = {
+  SUPERSEDE_KEPT_REASON_CODES,
   computeAppointmentIdempotencyKey,
   computeAddressHash,
   checkTcpaConsent,

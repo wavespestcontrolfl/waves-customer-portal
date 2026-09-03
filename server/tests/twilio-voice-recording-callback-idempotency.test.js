@@ -450,6 +450,8 @@ describe('POST /recording-status', () => {
     tables.triage_items.push(
       { id: 't-addr', call_log_id: 'c1', reason_code: 'address_unverified', status: 'open', payload: '{}' },
       { id: 't-unit', call_log_id: 'c1', reason_code: 'missing_unit_number', status: 'open', payload: '{}' },
+      { id: 't-email', call_log_id: 'c1', reason_code: 'email_unverified', status: 'open', payload: '{}' },
+      { id: 't-bounce', call_log_id: 'c1', reason_code: 'email_bounce_reverify', status: 'open', payload: '{}' },
     );
     await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
     expect(tables.call_log[0].recording_sid).toBe(REC_2);
@@ -459,6 +461,9 @@ describe('POST /recording-status', () => {
     expect(addr.resolution_note).toContain(`replaced by ${REC_2}`);
     // The owed dispatch-blocking question survives the swap — a human closes it.
     expect(unit.status).toBe('open');
+    // …and so do the email-review cards: a resolved one would read as operator approval to the first-touch release gate (r4 P1).
+    expect(tables.triage_items.find((t) => t.id === 't-email').status).toBe('open');
+    expect(tables.triage_items.find((t) => t.id === 't-bounce').status).toBe('open');
     // …so the call stays review-open.
     expect(tables.call_log[0].review_status).toBe('open');
   });

@@ -1753,13 +1753,14 @@ router.post('/recording-status', async (req, res) => {
         // would otherwise leave them actionable on stale evidence. The
         // additional_recording card is about the recordings themselves and
         // stays. Same transaction as the swap (Codex #3736 r10 P1).
-        // A missing_unit_number card stays too: it is an owed dispatch-
-        // blocking question that closes only on a human verdict (AGENTS.md),
-        // never because the audio changed (Codex #3764 r3 P1).
+        // The cards in SUPERSEDE_KEPT_REASON_CODES stay (the unit question
+        // and the email-review cards close only on a human verdict — never
+        // because the audio changed; Codex #3764 r3 + r4 P1).
         if (n > 0 && attach.action === 'replace') {
+          const { SUPERSEDE_KEPT_REASON_CODES } = require('../services/call-routing-gates');
           const retired = await trx('triage_items')
             .where({ call_log_id: baseline.id })
-            .whereNotIn('reason_code', ['additional_recording', 'missing_unit_number'])
+            .whereNotIn('reason_code', SUPERSEDE_KEPT_REASON_CODES)
             .whereIn('status', ['open', 'in_progress'])
             .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Superseded: recording ${baseline.recording_sid || 'none'} replaced by ${RecordingSid}` });
           // The review flag follows the cards (Codex #3736 r14 P2): with the
