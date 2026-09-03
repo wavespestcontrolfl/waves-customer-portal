@@ -228,6 +228,7 @@ describe('lead-estimate link service', () => {
           const q = {
             whereNull: () => { conditional = true; return q; },
             whereNotIn: () => { conditional = true; return q; },
+            whereIn: () => { conditional = true; return q; },
             first: async () => (lostRace.has(clause.id) ? opts.raceRows[clause.id] : (opts.leadsById || {})[clause.id]) || null,
             update: async (patch) => {
               if (conditional && opts.raceRows && opts.raceRows[clause.id]) { lostRace.add(clause.id); return 0; }
@@ -339,7 +340,7 @@ describe('lead-estimate link service', () => {
     await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2g', customerId: 'customer-1', database });
     expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig6', expect.anything());
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup6', expect.objectContaining({ customerId: 'customer-1' }));
-    expect(database._updates).toEqual([{ id: 'lead-dup6', patch: expect.objectContaining({ estimate_id: 'estimate-2g' }), conditional: false }]);
+    expect(database._updates).toEqual([{ id: 'lead-dup6', patch: expect.objectContaining({ estimate_id: 'estimate-2g' }), conditional: true }]);
     // The duplicate row has no ad_service_attribution row of its own, so the
     // ORIGINAL's funnel row is the one advanced to booked (codex r8 P1).
     expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('lead-orig6', 'won', database);
@@ -376,7 +377,23 @@ describe('lead-estimate link service', () => {
     // The hop cannot land, so the acceptance credits the run's own row.
     expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig3', expect.anything());
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup3', expect.objectContaining({ customerId: 'customer-1' }));
-    expect(database._updates).toEqual([{ id: 'lead-dup3', patch: expect.objectContaining({ estimate_id: 'estimate-2d' }), conditional: false }]);
+    expect(database._updates).toEqual([{ id: 'lead-dup3', patch: expect.objectContaining({ estimate_id: 'estimate-2d' }), conditional: true }]);
+    // The original failed validation: it is not this opportunity, so its
+    // funnel row is not booked (pre-push P1 on r8).
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+  });
+
+  test('a duplicate row the office closed between the read and the fallback claim is not converted (the claim is atomic on status = duplicate)', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2i', estimate_data: { lead_id: 'lead-dup9' } },
+      leadsById: { 'lead-dup9': { id: 'lead-dup9', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-missing' } } },
+      raceRows: { 'lead-dup9': { id: 'lead-dup9', status: 'lost', estimate_id: null } },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2i', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    expect(database._updates).toEqual([]);
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
   });
 
   test('an indirectly resolved original whose contact does not match the estimate is never converted', async () => {
@@ -405,7 +422,7 @@ describe('lead-estimate link service', () => {
     await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2f', customerId: 'customer-1', database });
     expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig5', expect.anything());
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup5', expect.objectContaining({ customerId: 'customer-1' }));
-    expect(database._updates).toEqual([{ id: 'lead-dup5', patch: expect.objectContaining({ estimate_id: 'estimate-2f' }), conditional: false }]);
+    expect(database._updates).toEqual([{ id: 'lead-dup5', patch: expect.objectContaining({ estimate_id: 'estimate-2f' }), conditional: true }]);
   });
 
   test('an indirectly resolved original that is ALREADY won records no second win on the duplicate row', async () => {
@@ -430,7 +447,7 @@ describe('lead-estimate link service', () => {
     });
     await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2c', customerId: 'customer-1', database });
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup2', expect.anything());
-    expect(database._updates).toEqual([{ id: 'lead-dup2', patch: expect.objectContaining({ estimate_id: 'estimate-2c' }), conditional: false }]);
+    expect(database._updates).toEqual([{ id: 'lead-dup2', patch: expect.objectContaining({ estimate_id: 'estimate-2c' }), conditional: true }]);
     // No original ⇒ no surviving attribution row to advance.
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
   });

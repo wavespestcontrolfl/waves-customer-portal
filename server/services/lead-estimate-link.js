@@ -553,6 +553,12 @@ function parseEstimateData(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+// Status sets the accept path's conditional stamps claim against (see
+// `convert` below): the original must still be open; the fallback row must
+// still carry the dedupe label.
+const OPEN_LEAD_CLAIM = OPEN_LEAD_STATUSES;
+const DUPLICATE_LEAD_CLAIM = ['duplicate'];
+
 async function markLinkedLeadEstimateAccepted({
   estimateId,
   customerId,
@@ -567,18 +573,21 @@ async function markLinkedLeadEstimateAccepted({
   // Stamp the accepted estimate onto a rescued (previously unlinked) lead so
   // accepted-estimate reporting that joins on `leads.estimate_id`
   // (seo/conversion-feedback-miner) counts it, then convert it.
-  // `atomic` (the indirect duplicate→original hop only) closes the read→stamp
-  // window the same way linkRescuedLead does: stamp only while the lead is
-  // still unlinked and open; on 0 rows re-read and proceed only if the link
+  // `claim` (the indirect duplicate→original hop and the named-row fallback)
+  // closes the read→stamp window the same way linkRescuedLead does: stamp
+  // only while the lead is still unlinked AND still in the state the caller
+  // read (open for the original, 'duplicate' for the fallback row — a staff
+  // lost/disqualified/won decision in between must not be overwritten,
+  // pre-push P1 on #3834 r8); on 0 rows re-read and proceed only if the link
   // that won the race is THIS estimate. Returns false when another estimate
-  // took the lead (pre-push P1 on #3834) so the caller can credit the named
-  // row instead. The direct path keeps its unconditional stamp as before.
-  const convert = async (lead, { atomic = false } = {}) => {
+  // or a closure took the lead so the caller can decide what to credit. The
+  // direct path keeps its unconditional stamp as before.
+  const convert = async (lead, { claim = null } = {}) => {
     if (!lead.estimate_id) {
       const stamp = database('leads').where({ id: lead.id });
-      if (atomic) stamp.whereNull('estimate_id').whereNotIn('status', [...CLOSED_LEAD_STATUSES]);
+      if (claim) stamp.whereNull('estimate_id').whereIn('status', claim);
       const stamped = await stamp.update({ estimate_id: estimateId, updated_at: new Date() });
-      if (atomic && !stamped) {
+      if (claim && !stamped) {
         const current = await database('leads').where({ id: lead.id }).first('estimate_id', 'status');
         // Refresh the caller's row from the re-read so the fallback judges
         // the original's CURRENT status: an original the office closed as
@@ -640,13 +649,12 @@ async function markLinkedLeadEstimateAccepted({
     // the win to that estimate and leave the accepted one unlinked, codex
     // #3834 r4 P1). A named lead that is itself open converts as before.
     const indirect = lead.id !== named.id;
-    const eligible = !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at
-      && (!indirect || (
-        leadMatchesEstimateContact(lead, estimate)
-        && (!lead.customer_id || !customerId || lead.customer_id === customerId)
-        && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId))
-      ));
-    if (eligible && (await convert(lead, { atomic: indirect }))) return;
+    const sameOpportunity = indirect
+      && leadMatchesEstimateContact(lead, estimate)
+      && (!lead.customer_id || !customerId || lead.customer_id === customerId)
+      && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId));
+    const eligible = !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at && (!indirect || sameOpportunity);
+    if (eligible && (await convert(lead, { claim: indirect ? OPEN_LEAD_CLAIM : null }))) return;
     // The hop could not land (original gone, another customer's, contact
     // mismatch, already FK-linked to a different estimate, or lost the
     // stamp race to a concurrent link). An accepted
@@ -661,14 +669,16 @@ async function markLinkedLeadEstimateAccepted({
     // would double-count it in the raw lead KPIs (codex #3834 r6 P1). When
     // the hop did not resolve, `lead` IS the named duplicate row, so the
     // 'won' check is the original's check exactly when there is one.
-    if (named.status === 'duplicate' && !named.deleted_at && lead.status !== 'won') {
-      await convert(named);
+    if (named.status === 'duplicate' && !named.deleted_at && lead.status !== 'won' && (await convert(named, { claim: DUPLICATE_LEAD_CLAIM }))) {
       // The duplicate row never got an ad_service_attribution row (/calculate
       // skips it for repeats), so markConverted's funnel bridge on the named
       // id touched nothing. The one surviving attribution is the original's:
       // advance THAT funnel row to booked (monotonic, funnel table only — the
-      // original's lead row stays untouched, codex #3834 r8 P1).
-      if (indirect) await bridgeLeadFunnelStage(lead.id, 'won', database);
+      // original's lead row stays untouched, codex #3834 r8 P1) — but only
+      // when the original was validated as the SAME opportunity; an original
+      // that failed the contact/customer/estimate checks is someone else's
+      // inquiry and its funnel is not ours to book (pre-push P1 on #3834 r8).
+      if (sameOpportunity) await bridgeLeadFunnelStage(lead.id, 'won', database);
     }
     return;
   }
