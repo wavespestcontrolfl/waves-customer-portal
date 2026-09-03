@@ -69,6 +69,7 @@ Ship code changes through the Waves review/deploy pipeline without triggering th
 ### 7. Parallel sessions
 - Another session's hot branch (tip moved recently): deliver fixes as committable PR review suggestions, never competing pushes. One PR = one session.
 - Pull the LIVE PR state before commenting or re-tagging @codex — pasted snapshots go stale.
+- **Paginate every Codex comment read**: `gh api --paginate "repos/{owner}/{repo}/pulls/N/comments?per_page=100"`. The REST default is 30 per page; once threads plus replies pass 30, the newest findings fall off the end and a round reads as 2 findings when it was 3 (#3818 r5 missed a P1 this way, 2026-09-03). Counting by `created_at > tag time` does not help — the cut-off is positional.
 
 ### Astro-repo differences
 - Every push fans out builds across the whole Cloudflare Pages fleet (1 concurrent build account-wide; hub lags 30–45 min) — batch changes, pace commits.
