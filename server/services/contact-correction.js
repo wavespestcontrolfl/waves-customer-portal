@@ -39,7 +39,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { callAnthropic } = require('./llm/call');
+const { dispatchWithFallback } = require('./llm/call');
 
 const WORKFLOW = 'contact_correction';
 
@@ -160,9 +160,32 @@ NOT corrections (return an empty list):
 
 For a MOVE / whole-new-address correction, include every part the message states (street as address_line1, unit as address_line2, city, state, zip). If the customer says a unit/apartment should be removed, return address_line2 with new_value "".
 
-Respond with JSON only:
-{"corrections":[{"field":"first_name|last_name|email|address_line1|address_line2|city|state|zip","new_value":"...","quote":"<the customer's words stating it>","confidence":"high|medium|low"}]}
+Report each correction with its field, the new_value, the customer's own words stating it as the quote, and a confidence.
 Only include a correction when the message states it explicitly. When unsure, omit it.`;
+
+// Structured-output contract (llm/call.js jsonSchema). The quote-grounding
+// and value-grounding checks below still decide whether anything applies.
+const CORRECTIONS_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['corrections'],
+  properties: {
+    corrections: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['field', 'new_value', 'quote', 'confidence'],
+        properties: {
+          field: { type: 'string', enum: ['first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'city', 'state', 'zip'] },
+          new_value: { type: 'string', description: 'The corrected value; "" to remove a unit line' },
+          quote: { type: 'string', description: "The customer's words stating the correction, verbatim" },
+          confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+        },
+      },
+    },
+  },
+};
 
 function normValue(v) {
   return String(v == null ? '' : v).trim();
@@ -291,8 +314,7 @@ async function extractSmsContactCorrections({ body }) {
     // The name form requires a capitalized token so "I'm not sure …"
     // stays harmless.
     if (wrongPersonDetected(String(body || '').replace(/[\u2018\u2019]/g, "'"))) return [];
-    const res = await callAnthropic({
-      model: MODELS.FAST,
+    const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
       system: EXTRACT_SYSTEM,
       // The COMPLETE body goes to the extractor (codex #3413 r57): the
       // prefilter examined all of it, so truncating here would silently
@@ -302,12 +324,14 @@ async function extractSmsContactCorrections({ body }) {
       // the cap, not this call site.
       text: `Inbound customer SMS:\n"""${text}"""`,
       jsonMode: true,
+      jsonSchema: CORRECTIONS_SCHEMA,
       maxTokens: 500,
       // Deadline WELL below the queue's 10-minute worker lease (codex
-      // #3413 r31): with a timeoutMs budget the SDK makes a single bounded
-      // attempt, so a stalled provider can never outlive the lease and
-      // trigger a duplicate paid extraction via stale-lock recovery. A
-      // timeout surfaces as ok:false → null → the queue's own retry.
+      // #3413 r31): the dispatcher treats an explicit budget as the shared
+      // wall-clock ceiling across both legs (each attempt single-shot), so a
+      // stalled provider can never outlive the lease and trigger a duplicate
+      // paid extraction via stale-lock recovery. A timeout surfaces as
+      // ok:false → null → the queue's own retry.
       timeoutMs: 120_000,
     });
     if (!res?.ok || !Array.isArray(res.json?.corrections)) {
