@@ -575,13 +575,16 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   ].map((n) => n.toLowerCase()));
   for (const name of knownNames) {
     if (allowedNames.has(name)) continue;
-    const hit = body.match(new RegExp(`\\b${escapeRe(name)}\\b`, 'i'));
-    if (!hit) continue;
     // A prior reviewer greeted as "Bill" is a leak only as a name: lowercase
     // "no surprise bill" is prose (span capture found this on a real review);
-    // "bill did a great job" is not.
-    if (DUAL_USE_FIRST_NAMES.has(name) && hit[0] === hit[0].toLowerCase() && inProseContext(body, hit.index, name)) continue;
-    return reject('forbidden_name', name);
+    // "bill did a great job" is not. EVERY occurrence must be prose — "the
+    // long summer was nice; summer handled the visit" leaks on the second.
+    const nameRe = new RegExp(`\\b${escapeRe(name)}\\b`, 'gi');
+    let hit;
+    while ((hit = nameRe.exec(body)) !== null) {
+      if (DUAL_USE_FIRST_NAMES.has(name) && hit[0] === hit[0].toLowerCase() && inProseContext(body, hit.index, name)) continue;
+      return reject('forbidden_name', name);
+    }
   }
   // Allowlist provenance for ANY introduced proper noun: a capitalized word
   // that is not sentence-initial must be the reviewer's name, a tech name the

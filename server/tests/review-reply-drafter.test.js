@@ -765,6 +765,10 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(Drafter.verifyReplyText(good('Hi Dana, with pat on the job the ants are gone from your kitchen. Marcus says thanks.'), gp)).toBe('forbidden_name');
     // Contexts are per word (GitHub r2): "the pat" is not prose, "the bill" is; "good frank" is not, "be frank" is.
     expect(Drafter.verifyReplyText(good('Hi Dana, the pat handled the ants with Marcus and they are gone from your kitchen.'), gp)).toBe('forbidden_name');
+    // Every occurrence must be prose (pre-push r10): a second, bare occurrence still leaks.
+    const gs = grounding({ forbiddenNames: ['Bill'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana, no surprise bill for the ants; bill and Marcus got them out of your kitchen.'), gs)).toBe('forbidden_name');
+    expect(Drafter.verifyReplyText(good('Hi Dana, no surprise bill for the ants, and Marcus got them out of your kitchen.'), gs)).toBeNull();
     const gf = grounding({ forbiddenNames: ['Frank'] });
     expect(Drafter.verifyReplyText(good('Hi Dana, the good frank got the ants with Marcus and they are gone from your kitchen.'), gf)).toBe('forbidden_name');
   });
