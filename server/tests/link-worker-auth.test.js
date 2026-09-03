@@ -196,6 +196,32 @@ describe('link-worker-auth HMAC', () => {
     const { res } = await drive(makeReq({ method: 'POST', url, headers: signedHeaders({ method: 'POST', url }) }), 'vendor_price');
     expect(res.statusCode).toBe(403); // hermes key: claim/report only
   });
+
+  test('the hermes_watchdog key reaches ONLY the watchdog endpoint and has its own secret', async () => {
+    process.env.LINK_WORKER_SECRET_HERMES_WATCHDOG = 'watchdog-secret';
+    const url = '/api/integrations/watchdog-worker/status';
+    const req = makeReq({ url, headers: signedHeaders({ url, keyId: 'hermes_watchdog', secret: 'watchdog-secret' }) });
+    const ok = await drive(req, 'watchdog');
+    expect(ok.next).toHaveBeenCalledWith();
+    expect(req.linkWorker).toEqual({ provider: 'hermes', authScheme: 'hmac', keyId: 'hermes_watchdog' });
+
+    // the backlink secret does not sign for the watchdog key
+    const crossSigned = await drive(makeReq({ url, headers: signedHeaders({ url, keyId: 'hermes_watchdog' }) }), 'watchdog');
+    expect(crossSigned.res.statusCode).toBe(401);
+    // the watchdog key cannot claim prospects
+    const claimUrl = '/api/integrations/backlink-worker/claim';
+    const escalate = await drive(makeReq({ url: claimUrl, headers: signedHeaders({ url: claimUrl, keyId: 'hermes_watchdog', secret: 'watchdog-secret' }) }), 'claim');
+    expect(escalate.res.statusCode).toBe(403);
+    // the backlink key cannot read the watchdog snapshot
+    const backlinkKey = await drive(makeReq({ url, headers: signedHeaders({ url }) }), 'watchdog');
+    expect(backlinkKey.res.statusCode).toBe(403);
+    // and the legacy bearer is not extended to the new lane
+    const bearer = await drive(makeReq({ url, headers: { authorization: 'Bearer legacy-bearer' } }), 'watchdog');
+    expect(bearer.res.statusCode).toBe(403);
+    delete process.env.LINK_WORKER_SECRET_HERMES_WATCHDOG;
+    const unconfigured = await drive(makeReq({ url, headers: signedHeaders({ url, keyId: 'hermes_watchdog', secret: 'watchdog-secret' }) }), 'watchdog');
+    expect(unconfigured.res.statusCode).toBe(503);
+  });
 });
 
 describe('link-worker-auth bearer transition', () => {

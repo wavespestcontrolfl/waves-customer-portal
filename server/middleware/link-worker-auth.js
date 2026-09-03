@@ -52,6 +52,10 @@ const SWEEP_PROBABILITY = 0.04;
 const KEY_RECORDS = {
   hermes: { provider: 'hermes', secretEnv: 'LINK_WORKER_SECRET_HERMES', endpoints: ['claim', 'report'] },
   hermes_vendor: { provider: 'hermes', secretEnv: 'LINK_WORKER_SECRET_HERMES_VENDOR', endpoints: ['vendor_price', 'vendor_login'] },
+  // The external agent watchdog (docs/hermes/waves-agent-watchdog-skill.md):
+  // its own secret and a read-only capability, one identity per lane. HMAC
+  // only — the bearer transition below is deliberately NOT extended to it.
+  hermes_watchdog: { provider: 'hermes', secretEnv: 'LINK_WORKER_SECRET_HERMES_WATCHDOG', endpoints: ['watchdog'] },
 };
 
 // Transitional bearer identity (§1 ordered rollout): same provider record and

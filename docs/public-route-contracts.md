@@ -579,7 +579,10 @@ public by protocol).
 `/api/health` (GET; liveness probe, no data).
 `/api/integrations/*-worker` mounts (hermes workers; each authenticates
 via its own HMAC-signed header check inside the router — an
-unauthenticated internal route here is P0).
+unauthenticated internal route here is P0). `watchdog-worker` (GET
+`/status`, key `hermes_watchdog`, gate `GATE_HERMES_WATCHDOG`) serves the
+external agent watchdog a counts-only health snapshot — no customer data,
+no item titles; adding a field that names a customer is P0.
 Customer authentication (`server/routes/auth.js`, mounted at `/api/auth`):
 `POST /send-code`, `/verify-code`, `/refresh`, `/logout` are unauthenticated
 by definition. send-code and verify-code sit behind the `server/index.js`

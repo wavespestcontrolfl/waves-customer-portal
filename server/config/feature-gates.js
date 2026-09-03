@@ -61,6 +61,7 @@
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
+ *   GATE_HERMES_WATCHDOG=true (external agent watchdog: GET /api/integrations/watchdog-worker/status serves the PII-free health snapshot to the hermes_watchdog key and the 23-min liveness cron bells when the watchdog stops polling; off = 404 + cron no-op; kill = unset)
  *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
@@ -2180,6 +2181,18 @@ const gates = {
   // features.queue false, /queue is 404, and the tab is not rendered.
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   adminOpsQueue: gateEnvValue('GATE_ADMIN_OPS_QUEUE'),
+
+  // External agent watchdog — routes/integrations-watchdog-worker.js +
+  // services/agent-watchdog-liveness.js. ON: the hermes_watchdog key can read
+  // GET /api/integrations/watchdog-worker/status (job_health classes, ops-queue
+  // COUNTS, link-worker lease state — never item titles), and the 23-min
+  // liveness cron rings one bell per ET day when the watchdog stops polling.
+  // OFF (default, dev AND prod): /status answers 404 { error: 'watchdog lane
+  // disabled' } and the cron is a no-op. Kill switch: unset. This entry is for
+  // logGateStatus; both readers use gateEnvValue('GATE_HERMES_WATCHDOG') at
+  // CALL time, so a flip needs no redeploy. Still requires GATE_HERMES_WORKER
+  // (the shared link-worker auth gate) to reach the router at all.
+  hermesWatchdog: gateEnvValue('GATE_HERMES_WATCHDOG'),
   // Intelligence Bar tool activity (2026-09-02): POST /query answers carry a
   // `toolActivity` list — one operator-facing line per tool call the exchange
   // ran (label, done / error / proposed, duration, round) — and the ⌘K

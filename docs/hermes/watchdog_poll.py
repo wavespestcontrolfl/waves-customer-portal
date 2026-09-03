@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Waves agent watchdog — one poll of the portal health snapshot.
+
+Runs on the Hostinger Hermes box from a cron job every 10 minutes (see
+waves-agent-watchdog-skill.md). Standard library only (no requests). No model call: it signs one GET, diffs the
+portal's `reasons` against the last poll, and prints a page ONLY when
+something changed. Silence is the normal output.
+
+    python3 watchdog_poll.py            # prints a page or nothing; exit 0
+
+Exit code is always 0 on a completed poll (an unreachable portal is a
+FINDING, not a script failure). Exit 2 only for a local misconfiguration
+(missing secret file / PORTAL_URL) so the cron's own error path surfaces it.
+
+State lives in /data/workspace/.waves-watchdog-state.json:
+  { "consecutive_failures": n, "last_reasons": [...], "last_paged_at": iso|null,
+    "down_since": iso|null }
+
+Paging rules (deterministic — the portal computes the health, this only
+decides whether it is NEWS):
+  * unreachable / non-200 / database.ok == false  → failure streak += 1;
+    page at exactly 3 consecutive (~30 min), then at most every 6 h while it
+    stays down; one "back" page on recovery.
+  * 200 + verdict=attention                         → page only for reason keys
+    NOT in last_reasons. Cleared reasons are not announced (the admin bell
+    and the Agents → Queue tab already show them).
+  * 200 + verdict=healthy                            → nothing.
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sign_request import signed_headers, SECRET_FILES  # noqa: E402
+
+PORTAL_URL = os.environ.get("PORTAL_URL", "https://portal.wavespestcontrol.com").rstrip("/")
+STATE_FILE = os.environ.get("WAVES_WATCHDOG_STATE", "/data/workspace/.waves-watchdog-state.json")
+KEY_ID = "hermes_watchdog"
+TIMEOUT_S = 15
+PAGE_AFTER_FAILURES = 3
+REPAGE_DOWN_HOURS = 6
+QUEUE_LINK = f"{PORTAL_URL}/admin/agents?tab=queue"
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def hours_since(iso):
+    if not iso:
+        return None
+    then = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds() / 3600.0
+
+
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            s = json.load(f)
+    except (OSError, ValueError):
+        s = {}
+    return {
+        "consecutive_failures": int(s.get("consecutive_failures", 0) or 0),
+        "last_reasons": list(s.get("last_reasons", []) or []),
+        "last_paged_at": s.get("last_paged_at"),
+        "down_since": s.get("down_since"),
+    }
+
+
+def save_state(state):
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, STATE_FILE)
+
+
+def poll():
+    """Return (ok: bool, snapshot|None, detail: str)."""
+    url = f"{PORTAL_URL}/api/integrations/watchdog-worker/status"
+    req = urllib.request.Request(url, headers=signed_headers("GET", url, key_id=KEY_ID), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
+            status, raw = r.status, r.read()
+    except urllib.error.HTTPError as e:
+        body = (e.read() or b"")[:120].decode("utf-8", "replace").replace("\n", " ")
+        return False, None, f"HTTP {e.code} {body}"
+    except (urllib.error.URLError, OSError) as e:
+        return False, None, f"unreachable ({e.__class__.__name__})"
+    if status != 200:
+        return False, None, f"HTTP {status}"
+    try:
+        snap = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return False, None, "non-JSON response"
+    if not snap.get("database", {}).get("ok", False):
+        return False, snap, "database degraded"
+    return True, snap, "ok"
+
+
+def describe(reason, snap):
+    kind = reason.split(":", 1)[0]
+    if kind == "job":
+        _, name, state = reason.split(":", 2)
+        for j in snap.get("jobs", {}).get("items", []):
+            if j.get("job") == name:
+                age = j.get("last_success_age_minutes")
+                err = j.get("last_error")
+                bits = [f"{name} is {state}"]
+                if age is not None:
+                    bits.append(f"last success {age} min ago")
+                if j.get("consecutive_failures"):
+                    bits.append(f"{j['consecutive_failures']} failures in a row")
+                if err:
+                    bits.append(f"error: {err[:140]}")
+                return " · ".join(bits)
+        return f"{name} is {state}"
+    if kind == "ops":
+        _, lane, tail = reason.split(":", 2)
+        return f"ops queue lane {lane}: {tail}"
+    if reason.startswith("link_worker:stale_leases="):
+        return f"backlink worker: {reason.split('=')[1]} prospect lease(s) claimed over 2 h ago with no report"
+    return reason
+
+
+def main():
+    if not os.path.exists(SECRET_FILES[KEY_ID]):
+        print(f"watchdog_poll: secret file missing: {SECRET_FILES[KEY_ID]}", file=sys.stderr)
+        sys.exit(2)
+
+    state = load_state()
+    ok, snap, detail = poll()
+    out = []
+
+    if not ok:
+        state["consecutive_failures"] += 1
+        if not state["down_since"]:
+            state["down_since"] = now_iso()
+        n = state["consecutive_failures"]
+        since_page = hours_since(state["last_paged_at"])
+        if n == PAGE_AFTER_FAILURES or (n > PAGE_AFTER_FAILURES and (since_page is None or since_page >= REPAGE_DOWN_HOURS)):
+            out.append(
+                f"🚨 Waves portal DOWN or degraded since {state['down_since']} — {detail}. "
+                f"{n} consecutive failed polls. Check Railway (portal service + Postgres) and {PORTAL_URL}/api/health."
+            )
+            state["last_paged_at"] = now_iso()
+        save_state(state)
+    else:
+        if state["consecutive_failures"] >= PAGE_AFTER_FAILURES and state["last_paged_at"]:
+            out.append(f"✅ Waves portal reachable again (down since {state['down_since']}).")
+        state["consecutive_failures"] = 0
+        state["down_since"] = None
+
+        reasons = list(snap.get("reasons", []) or [])
+        new = [r for r in reasons if r not in state["last_reasons"]]
+        if snap.get("verdict") == "attention" and new:
+            lines = [f"⚠️ Waves agents need attention ({len(new)} new):"]
+            lines += [f"• {describe(r, snap)}" for r in new]
+            lines.append(QUEUE_LINK)
+            out.append("\n".join(lines))
+            state["last_paged_at"] = now_iso()
+        state["last_reasons"] = reasons
+        save_state(state)
+
+    if out:
+        print("\n\n".join(out))
+
+
+if __name__ == "__main__":
+    main()
