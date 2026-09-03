@@ -374,7 +374,7 @@ describe('Google Business review sync', () => {
       ] });
     });
     const mark = jest.spyOn(service, '_markCustomerLeftReview').mockRejectedValue(new Error('suppression write failed'));
-    const enrollReviewThankYou = jest.spyOn(require('../services/automation-enroll'), 'enrollReviewThankYou').mockResolvedValue({ enrolled: true });
+    const enrollReviewThankYou = jest.spyOn(require('../services/automation-enroll'), 'enrollReviewThankYou').mockResolvedValue({ enrolled: false, reason: 'error' });
     const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
     const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
 
@@ -385,13 +385,58 @@ describe('Google Business review sync', () => {
     expect(enrollReviewThankYou).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', source: 'google_review' }));
     expect(result.synced).toBe(1);
     // Surfaced, but not as a storage failure.
+    // The first failure is the one reported; a RESOLVED failure marker from the enrollment helper counts too.
     expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_side_effect', error: expect.stringContaining('suppression write failed') })]);
+    expect(enrollReviewThankYou).toHaveBeenCalledTimes(1);
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(degraded).not.toHaveBeenCalled();
     expect(db.__state.rows.google_reviews).toEqual(expect.arrayContaining([
       expect.objectContaining({ gbp_review_name: 'accounts/1/locations/2/reviews/rev-3', customer_id: 'cust-1' }),
     ]));
     mark.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); enrollReviewThankYou.mockRestore();
+  });
+
+  test('three consecutive row failures trip the breaker: the location aborts to the Places fallback with the row error, not a row-by-row crawl', async () => {
+    const reviews = Array.from({ length: 6 }, (_, i) => ({
+      name: `accounts/1/locations/2/reviews/rev-${i}`, reviewer: { displayName: `Reviewer ${i}` }, starRating: 'FIVE', comment: 'ok', createTime: '2026-05-14T01:22:29Z',
+    }));
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews });
+    });
+    const upsert = jest.spyOn(service, '_upsertGbpReview').mockRejectedValue(new Error('Knex: Timeout acquiring a connection'));
+    const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+    const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation').mockResolvedValue({ synced: 0, new: 0 });
+
+    const result = await service.syncAllReviews();
+
+    expect(upsert).toHaveBeenCalledTimes(3);
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp', error: expect.stringMatching(/3 consecutive review rows failed to store.*Timeout acquiring/) })]);
+    expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/3 consecutive review rows failed/));
+    expect(places).toHaveBeenCalledTimes(1);
+    upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
+  });
+
+  test('a null client after a FAILED stored-token lookup is reported as that failure, never as missing credentials', async () => {
+    // _getStoredTokens records the failure and resolves {} → _getClient resolves null.
+    service._getClient = jest.fn(async () => null);
+    service._tokenLookupErrors.bradenton = 'Knex: Timeout acquiring a connection';
+    global.fetch = jest.fn(async () => ({ json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) }));
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+    const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation').mockResolvedValue({ synced: 0, new: 0 });
+    const health = jest.spyOn(service, '_assessReviewSyncHealth').mockResolvedValue({});
+
+    await service.syncAllReviews();
+
+    expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^stored-token lookup failed: Knex: Timeout/));
+    expect(health).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ bradenton: expect.stringMatching(/^stored-token lookup failed/) }));
+    expect(service._classifyLocationSyncHealth({ hasResource: true, source: 'places_fallback', gbpFailure: 'stored-token lookup failed: Knex: Timeout' }).detail).not.toMatch(/credentials/);
+    delete service._tokenLookupErrors.bradenton;
+    degraded.mockRestore(); places.mockRestore(); health.mockRestore();
   });
 
   test('upgrades a legacy Places row to the GBP review resource identity', async () => {

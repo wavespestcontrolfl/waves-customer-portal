@@ -26,6 +26,10 @@ function firstDefined(...values) {
   return null;
 }
 
+// Consecutive per-row storage failures that abort a location's GBP loop as
+// systemic (see the circuit breaker in syncAllReviews).
+const GBP_ROW_FAILURE_BREAKER = 3;
+
 function sameReviewerAndTime(row, reviewerName, createdAt, maxDriftMs = 24 * 60 * 60 * 1000) {
   if (!row?.reviewer_name || !row?.review_created_at || !reviewerName || !createdAt) return false;
   const rowTime = new Date(row.review_created_at).getTime();
@@ -134,6 +138,7 @@ class GoogleBusinessService {
 
     // Cache of OAuth2 clients per location
     this._clients = {};
+    this._tokenLookupErrors = {};
 
     if (!this.configured) {
       logger.warn('[gbp] No GBP OAuth client credentials found for any location — Google Business Profile disabled');
@@ -149,9 +154,13 @@ class GoogleBusinessService {
       const row = await db('system_settings')
         .where({ key: tokenSettingsKey(locationId) })
         .first();
+      delete this._tokenLookupErrors[locationId];
       return parseJsonObject(row?.value);
     } catch (err) {
       logger.warn(`[gbp] Stored token lookup failed for ${locationId}: ${err.message}`);
+      // Remembered so a null client can be reported as the DB failure it
+      // is, not as missing credentials (codex #3833 r1 P2).
+      this._tokenLookupErrors[locationId] = err.message;
       return {};
     }
   }
@@ -524,7 +533,9 @@ class GoogleBusinessService {
       return flipped > 0;
     } catch (err) {
       logger.warn(`[gbp] Auto-mark left-review failed for customer ${customerId}: ${err.message}`);
-      return false;
+      // null = the write FAILED (distinct from false = nothing to flip), so
+      // the sync's side-effect guard can report it.
+      return null;
     }
   }
 
@@ -1003,8 +1014,15 @@ class GoogleBusinessService {
     // side effect runs independently so a failed reinstatement clear or
     // suppression mark cannot skip the attribution-moment thank-you, which
     // is never retried (existing.customer_id is set on the next sync).
-    const sideEffect = async (label, fn) => {
-      try { await fn(); } catch (sideErr) {
+    // `failed(outcome)` inspects a RESOLVED result: the helpers self-catch
+    // and resolve a failure marker instead of throwing (suppression mark →
+    // null, thank-you enrollment → { reason: 'error' }); ordinary no-ops
+    // (nothing to flip, gate off, deduped) are not failures.
+    const sideEffect = async (label, fn, failed = () => false) => {
+      try {
+        const outcome = await fn();
+        if (failed(outcome)) throw new Error(`${label} resolved a failure (${typeof outcome === 'object' && outcome ? outcome.reason || 'failed' : String(outcome)})`);
+      } catch (sideErr) {
         logger.error(`[gbp] post-write ${label} failed for review row ${result.id} (${normalized.gbp_review_name || normalized.google_review_id || '?'}): ${sideErr.message}`);
         result.sideEffectError = result.sideEffectError || sideErr.message;
       }
@@ -1040,7 +1058,7 @@ class GoogleBusinessService {
     }
     if (row.customer_id) {
       // A matched review means the customer left one — stop asking them.
-      await sideEffect('suppression mark', () => this._markCustomerLeftReview(row.customer_id));
+      await sideEffect('suppression mark', () => this._markCustomerLeftReview(row.customer_id), (flipped) => flipped === null);
       // Thank-you sequence on the ATTRIBUTION moment only (a new review, or
       // an existing one that just matched a customer) — not on every hourly
       // re-sync; the helper's once-ever dedupe backstops replays anyway.
@@ -1050,13 +1068,13 @@ class GoogleBusinessService {
       if (justAttributed) {
         await sideEffect('thank-you enrollment', async () => {
           const { enrollReviewThankYou } = require('./automation-enroll');
-          await enrollReviewThankYou({
+          return enrollReviewThankYou({
             customerId: row.customer_id,
             locationId: row.location_id,
             starRating: row.star_rating,
             source: 'google_review',
           });
-        });
+        }, (outcome) => outcome && outcome.reason === 'error');
       }
     } else if (result.inserted) {
       // New review we couldn't tie to a customer — alert the office to match
@@ -1457,6 +1475,7 @@ class GoogleBusinessService {
             // failure now skips that row, keeps the rest of the feed, and
             // rings its own degraded alert with the real error.
             const rowFailures = [];
+            let consecutiveRowFailures = 0;
             for (const review of reviews) {
               const normalized = this._normalizeGbpReview(review, loc);
               try {
@@ -1474,7 +1493,18 @@ class GoogleBusinessService {
               } catch (rowErr) {
                 rowFailures.push({ review: normalized.gbp_review_name || normalized.google_review_id || '?', error: rowErr.message });
                 logger.error(`[gbp] review upsert failed for ${loc.name} (${normalized.gbp_review_name || normalized.google_review_id || '?'}): ${rowErr.message}`);
+                // Circuit breaker (codex r1 P1): a database that is down
+                // fails EVERY row the same way — walking a 100-review feed
+                // one pool timeout at a time would hold the location lock
+                // for the rest of the hour. Three in a row is systemic:
+                // abort to the location catch (Places fallback + degraded
+                // alert carrying this error), not a row-by-row crawl.
+                if (++consecutiveRowFailures >= GBP_ROW_FAILURE_BREAKER) {
+                  throw new Error(`${consecutiveRowFailures} consecutive review rows failed to store — aborting the location (last: ${rowErr.message})`);
+                }
+                continue;
               }
+              consecutiveRowFailures = 0;
             }
             sources[loc.id] = 'gbp';
             usedGbp = true;
@@ -1484,7 +1514,8 @@ class GoogleBusinessService {
               // reconcile below would stamp them missing — skip it this
               // run (the next successful run reconciles), and alert with
               // the row error instead of a credentials story.
-              const cause = `${rowFailures.length} of ${reviews.length} review row(s) failed to store — first: ${rowFailures[0].error}`;
+              const stored = reviews.length - rowFailures.length;
+              const cause = `${rowFailures.length} of ${reviews.length} review row(s) failed to store (${stored} stored) — first: ${rowFailures[0].error}`;
               errors.push({ location: loc.name, error: cause, source: 'gbp_row' });
               await this._notifyDegradedSync(loc, `review upsert failed: ${cause}`);
             } else {
@@ -1507,8 +1538,11 @@ class GoogleBusinessService {
             logger.warn(`[gbp] GBP Reviews sync failed for ${loc.name}; using Places fallback: ${gbpErr.message}`);
           }
         } else if (loc.googleLocationResourceName) {
-          gbpFailure = 'no_client';
-          gbpFailures[loc.id] = 'no_client';
+          // A null client after a FAILED token lookup is a database
+          // problem, not missing credentials.
+          const tokenErr = this._tokenLookupErrors[loc.id];
+          gbpFailure = tokenErr ? `stored-token lookup failed: ${tokenErr}` : 'no_client';
+          gbpFailures[loc.id] = gbpFailure;
         }
 
         if (!usedGbp) {
@@ -2041,7 +2075,7 @@ class GoogleBusinessService {
         const body = reconcileFailure
           ? `Review sync for ${loc.name} pulled the GBP feed, but the ${cause}. New reviews are still syncing; REMOVALS will not be detected until the reconcile succeeds.`
           : upsertFailure
-            ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. The other reviews synced; the removal reconcile was skipped this run so the failed rows are not misreported as removed. This is a database write error, not a credentials problem — read the error and the code.`
+            ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. ${/\(0 stored\)/.test(cause) ? 'NO review from this pull was stored' : 'The stored reviews are current'}; the removal reconcile was skipped this run so the failed rows are not misreported as removed. This is a database write error, not a credentials problem — read the error and the code.`
             : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
         await NotificationService.notifyAdmin(
           'review',
