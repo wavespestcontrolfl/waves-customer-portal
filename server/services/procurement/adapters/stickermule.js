@@ -26,7 +26,10 @@
  * Money moves through the account's saved payment method — the adapter never
  * sees card data. Timeout 30 s per call, no retry.
  */
-const BASE_URL = process.env.STICKERMULE_API_BASE || 'https://api.stickermule.com';
+// The production origin is FIXED: the bearer key is only ever sent here. No
+// env override — a typo'd or compromised value would exfiltrate the vendor
+// credential (Codex r4 P1); tests inject fetchImpl instead.
+const BASE_URL = 'https://api.stickermule.com';
 const TIMEOUT_MS = 30000;
 
 class RefusedError extends Error {
