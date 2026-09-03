@@ -2950,6 +2950,7 @@ export default function EstimateToolViewV2({
     // Hydration now seeds the linked-customer chip — clear it with the rest
     // of the edit state or it lingers over the next blank form.
     setExistingCustomerMatch(null);
+    setAddressMatches([]);
   }
 
   const set = useCallback((key, val) => {
@@ -3158,6 +3159,57 @@ export default function EstimateToolViewV2({
 
   const [enrichedProfile, setEnrichedProfile] = useState(null);
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
+  // Customers whose street line matches the looked-up address. Surfaced as a
+  // suggestion the operator links explicitly — never auto-applied. Two adults
+  // at one address (spouses quoting separately) each need their own estimate;
+  // the old silent first-hit link put the second person's quote on the first
+  // person's profile.
+  const [addressMatches, setAddressMatches] = useState([]);
+
+  // The ONE way a customer row becomes the linked customer — shared by the
+  // Customer Lookup list and the address-match suggestion. The lookup list
+  // adopts the customer's address (the operator searched by person); the
+  // suggestion keeps the address the operator just looked up.
+  function applyCustomerLink(c, { adoptAddress }) {
+    const name = `${c.firstName || ""} ${c.lastName || ""}`.trim();
+    // 'Commercial' is a flat non-member tier — exclude it so a commercial
+    // customer doesn't unlock recurring-customer loyalty discounts.
+    const hasActivePlan =
+      c.tier && c.tier !== "null" && c.tier !== "Commercial" && c.monthlyRate > 0;
+    setForm((f) => ({
+      ...f,
+      customerId: c.id || "",
+      ...(adoptAddress
+        ? { address: c.address || f.address, measuredTurfSf: "" }
+        : {}),
+      customerName: name,
+      customerPhone: c.phone || f.customerPhone || "",
+      customerEmail: c.email || f.customerEmail || "",
+      // No plan: the address suggestion resets the loyalty flag (it may have
+      // been set for whoever was linked before); the lookup list keeps the
+      // operator's own answer, as it always has.
+      isRecurringCustomer: hasActivePlan ? "YES" : adoptAddress ? f.isRecurringCustomer : "NO",
+    }));
+    setExistingCustomerMatch(c);
+    setAddressMatches([]);
+    setCustomerSearch("");
+    setCustomers([]);
+    // isRecurringCustomer is a pricing input — a preview or saved row priced
+    // before the link is stale.
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }
+
+  // Drops the linked customer but keeps the typed contact fields, so a wrong
+  // link (address suggestion, deep link, or a mis-click) is one tap to undo.
+  function unlinkCustomer() {
+    setExistingCustomerMatch(null);
+    setForm((f) => ({ ...f, customerId: "", isRecurringCustomer: "NO" }));
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }
   // What the linked customer already buys and pays PER APPLICATION today —
   // the office prices an upgrade against this. Read-only context: it never
   // feeds the quote, so a failed/absent load just renders no panel (the
@@ -3455,6 +3507,7 @@ export default function EstimateToolViewV2({
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
     setExistingCustomerMatch(null);
+    setAddressMatches([]);
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
     // A fresh lead/customer prefill is a new job — never chain it into a
@@ -3716,6 +3769,8 @@ export default function EstimateToolViewV2({
 
   async function doLookup() {
     const address = form.address.trim();
+    // Read at click time: a deep link seeds form.customerId with no chip.
+    const customerAlreadyLinked = !!(existingCustomerMatch || form.customerId);
     if (!address) {
       setLookupStatus({ type: "err", msg: "Enter an address" });
       return;
@@ -3890,51 +3945,34 @@ export default function EstimateToolViewV2({
       setSavedId(null);
       setSavedViewUrl(null);
 
-      try {
-        const addrSearch = address.split(",")[0].trim();
-        const custR = await fetch(
-          `/api/admin/customers?search=${encodeURIComponent(addrSearch)}&limit=3`,
-          { headers: authHeaders, signal: lookupController.signal },
-        );
-        if (custR.ok) {
-          const custData = await custR.json();
-          if (lookupSuperseded()) return;
-          const custs = custData.customers || custData || [];
-          const match = custs.find(
-            (c) =>
-              c.address &&
-              address
-                .toLowerCase()
-                .includes(c.address.split(",")[0].trim().toLowerCase()),
+      // Existing customers at this street. A SUGGESTION only: the operator
+      // links one explicitly (or keeps what they typed). Skipped when a
+      // customer is already linked — a deliberate link is never second-
+      // guessed by a re-lookup.
+      setAddressMatches([]);
+      if (!customerAlreadyLinked) {
+        try {
+          const addrSearch = address.split(",")[0].trim();
+          const custR = await fetch(
+            `/api/admin/customers?search=${encodeURIComponent(addrSearch)}&limit=10`,
+            { headers: authHeaders, signal: lookupController.signal },
           );
-          if (match) {
-            setExistingCustomerMatch(match);
-            // 'Commercial' is a flat non-member tier — exclude it so a commercial
-            // customer doesn't unlock recurring-customer loyalty discounts.
-            const hasActivePlan =
-              match.tier && match.tier !== "null" && match.tier !== "Commercial" && match.monthlyRate > 0;
-            setForm((f) => ({
-              ...f,
-              customerId: match.id || f.customerId || "",
-              isRecurringCustomer: hasActivePlan ? "YES" : "NO",
-              customerName:
-                `${match.firstName || ""} ${match.lastName || ""}`.trim(),
-              customerPhone: match.phone || f.customerPhone || "",
-              customerEmail: match.email || f.customerEmail || "",
-            }));
-            // isRecurringCustomer is a pricing input and this apply lands
-            // after a second awaited fetch — invalidate so a Generate started
-            // after the property apply (but before this match) can't mount a
-            // price computed without the loyalty flag.
-            setEstimate(null);
-            setSavedId(null);
-            setSavedViewUrl(null);
-          } else {
-            setExistingCustomerMatch(null);
+          if (custR.ok) {
+            const custData = await custR.json();
+            if (lookupSuperseded()) return;
+            const custs = custData.customers || custData || [];
+            const matches = custs.filter(
+              (c) =>
+                c.address &&
+                address
+                  .toLowerCase()
+                  .includes(c.address.split(",")[0].trim().toLowerCase()),
+            );
+            setAddressMatches(matches);
           }
+        } catch {
+          /* ignore customer lookup errors */
         }
-      } catch {
-        /* ignore customer lookup errors */
       }
 
       // The inner catch above deliberately swallows customer-lookup errors —
@@ -5103,6 +5141,7 @@ export default function EstimateToolViewV2({
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
     setExistingCustomerMatch(null);
+    setAddressMatches([]);
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
     setCustomerSearch("");
@@ -5727,30 +5766,7 @@ export default function EstimateToolViewV2({
                       <button
                         key={c.id}
                         type="button"
-                        onClick={() => {
-                          // 'Commercial' is a flat non-member tier — exclude it
-                          // so a commercial customer doesn't unlock loyalty discounts.
-                          const hasActivePlan =
-                            c.tier && c.tier !== "null" && c.tier !== "Commercial" && c.monthlyRate > 0;
-                          setForm((f) => ({
-                            ...f,
-                            customerId: c.id || "",
-                            address: c.address || f.address,
-                            measuredTurfSf: "",
-                            customerName: name,
-                            customerPhone: c.phone || f.customerPhone || "",
-                            customerEmail: c.email || f.customerEmail || "",
-                            isRecurringCustomer: hasActivePlan
-                              ? "YES"
-                              : f.isRecurringCustomer,
-                          }));
-                          setExistingCustomerMatch(c);
-                          setCustomerSearch("");
-                          setCustomers([]);
-                          setEstimate(null);
-                          setSavedId(null);
-                          setSavedViewUrl(null);
-                        }}
+                        onClick={() => applyCustomerLink(c, { adoptAddress: true })}
                         className="w-full text-left px-3 py-2 border-b-hairline border-zinc-200 last:border-b-0 hover:bg-zinc-50 cursor-pointer"
                       >
                         {" "}
@@ -5870,6 +5886,7 @@ export default function EstimateToolViewV2({
                     setLookupStatus({ type: "", msg: "" });
                     setEnrichedProfile(null);
                     setExistingCustomerMatch(null);
+                    setAddressMatches([]);
                     setSatelliteStatus({ type: "", msg: "" });
                     setSatelliteData(null);
                     setEstimate(null);
@@ -5988,24 +6005,86 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               {existingCustomerMatch && (
-                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
-                  {" "}
-                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
-                  Existing customer:{" "}
-                  <strong>
-                    {existingCustomerMatch.firstName}{" "}
-                    {existingCustomerMatch.lastName}
-                  </strong>
-                  {matchHasActivePlan(existingCustomerMatch)
-                    ? " · Recurring plan"
-                    : " · No active plan"}
-                  {matchHasActivePlan(existingCustomerMatch) &&
-                  existingCustomerMatch.monthlyRate > 0 &&
-                  form.isRecurringCustomer === "YES"
-                    ? " · 15% loyalty discount applied"
-                    : ""}
+                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900 flex items-center gap-2">
+                  <span className="flex-1 min-w-0">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
+                    Existing customer:{" "}
+                    <strong>
+                      {existingCustomerMatch.firstName}{" "}
+                      {existingCustomerMatch.lastName}
+                    </strong>
+                    {matchHasActivePlan(existingCustomerMatch)
+                      ? " · Recurring plan"
+                      : " · No active plan"}
+                    {matchHasActivePlan(existingCustomerMatch) &&
+                    existingCustomerMatch.monthlyRate > 0 &&
+                    form.isRecurringCustomer === "YES"
+                      ? " · 15% loyalty discount applied"
+                      : ""}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={unlinkCustomer}
+                    className="bg-transparent border-0 p-0 cursor-pointer text-14 text-zinc-600 underline underline-offset-2 hover:text-zinc-900 shrink-0"
+                  >
+                    Unlink
+                  </button>
                 </div>
               )}
+              {addressMatches.length > 0 &&
+                !existingCustomerMatch &&
+                !form.customerId && (
+                  <div className="mb-2.5 border-hairline border-zinc-300 rounded-xs overflow-hidden">
+                    <div className="px-3 py-2 bg-zinc-50 border-b border-zinc-200 text-14 font-medium text-zinc-900">
+                      This address matches{" "}
+                      {addressMatches.length === 1
+                        ? "an existing customer"
+                        : `${addressMatches.length} existing customers`}
+                    </div>
+                    {addressMatches.map((c) => {
+                      const name =
+                        `${c.firstName || ""} ${c.lastName || ""}`.trim() ||
+                        "(no name)";
+                      return (
+                        <div
+                          key={c.id}
+                          className="flex items-center gap-3 px-3 py-2 border-b-hairline border-zinc-200"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="text-14 text-zinc-900 font-medium truncate">
+                              {name}
+                            </div>
+                            <div className="text-14 text-ink-secondary truncate">
+                              {[c.phone, c.email, matchHasActivePlan(c) ? c.tier : null]
+                                .filter(Boolean)
+                                .join(" · ") || "no contact on file"}
+                            </div>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => applyCustomerLink(c, { adoptAddress: false })}
+                          >
+                            Link
+                          </Button>
+                        </div>
+                      );
+                    })}
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-3 py-2 bg-zinc-50">
+                      <span className="text-14 text-ink-secondary">
+                        Or search above to link someone else.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setAddressMatches([])}
+                        className="bg-transparent border-0 p-0 cursor-pointer text-14 text-zinc-900 underline underline-offset-2 shrink-0 self-start sm:self-auto"
+                      >
+                        Not this person — keep what I typed
+                      </button>
+                    </div>
+                  </div>
+                )}
               {/* Gated on the DATA, not on existingCustomerMatch — the
                   deep-link entry path links a customer without setting a
                   match object, and the panel must render there too. */}
