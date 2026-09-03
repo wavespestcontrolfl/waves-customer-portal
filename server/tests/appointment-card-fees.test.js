@@ -1023,6 +1023,10 @@ describe('appointmentCardCancelPreview', () => {
     res = await appointmentCardCancelPreview('svc-1');
     expect(res.rule).toMatchObject({ code: 'not_secured', willCharge: false });
     expect(res.rule.text).not.toMatch(/^No card is saved/);
+    mockTableHandlers = handlersWith({ hold: { id: 'h-parked' } });
+    res = await appointmentCardCancelPreview('svc-1');
+    expect(res.rule).toMatchObject({ code: 'card_hold_lane', willCharge: false });
+    expect(res.rule.text).not.toMatch(/released|settled/);
   });
   test('outside-window → no fee, and the rule names the visit start and the free-cancel reason', async () => {
     mockApptTime = new Date(Date.now() + 100 * HOUR);

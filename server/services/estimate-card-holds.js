@@ -1325,6 +1325,8 @@ function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now
       return rule(false, 'A card is saved, but no late-cancel fee was agreed for this visit, so nothing will be charged.');
     case 'payer_billed':
       return rule(false, 'A card is saved, but a third-party payer is billed for this visit, so the homeowner\'s card will not be charged.');
+    case 'card_hold_lane':
+      return rule(false, 'This visit\'s fee is handled by the estimate card hold, not the appointment card — this cancel starts no new charge; check the hold\'s status on the visit.');
     case 'fee_settled':
       return rule(false, `The fee for this visit was already settled${detail ? ` (${detail})` : ''}, so nothing more will be charged.`);
     case 'no_time':

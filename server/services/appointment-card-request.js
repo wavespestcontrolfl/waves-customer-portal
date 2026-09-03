@@ -2183,7 +2183,10 @@ function skipRule(skipReason) {
   if (reason === 'not_completed' || reason === 'no_charge_target') return { code: 'not_secured' };
   if (reason === 'no_agreed_fee' || reason === 'no_fee_consent') return { code: 'no_agreed_fee' };
   if (reason === 'payer_billed') return { code: 'payer_billed' };
-  if (reason === 'card_hold_lane') return { code: 'fee_settled', detail: 'card hold already released' };
+  // A hold row in ANY status owns this visit's fee event — held holds are
+  // answered by the hold preview before this rail runs, so what reaches
+  // here is a parked/charged/released hold. Don't guess which.
+  if (reason === 'card_hold_lane') return { code: 'card_hold_lane' };
   if (reason.startsWith('fee_')) return { code: 'fee_settled', detail: reason.slice(4).replace(/_/g, ' ') };
   return { code: 'no_card' };
 }
