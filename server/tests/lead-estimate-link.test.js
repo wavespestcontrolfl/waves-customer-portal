@@ -1002,6 +1002,36 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-rep-new'] });
   });
 
+  test('self-booking: an unrelated open lead plus a repeat row are two opportunities — ambiguous, nothing converts', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const database = makeConvertDb({
+      customer: { id: 'c5', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [{ id: 'L-unrelated', status: 'new', customer_id: 'c5', first_contact_at: '2026-08-20T12:00:00Z' }],
+      customerDuplicateLead: { id: 'L-rep5', status: 'duplicate', customer_id: 'c5', extracted_data: { duplicate_of_lead_id: 'L-foreign5' }, first_contact_at: '2026-09-01T12:00:00Z' },
+      leadsById: { 'L-foreign5': { id: 'L-foreign5', status: 'new', customer_id: 'c-OTHER' } },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c5', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: false, reason: 'ambiguous_customer_link' });
+    expect(markConverted).not.toHaveBeenCalled();
+  });
+
+  test('self-booking: a repeat whose root IS the customer\'s open lead collapses into that one opportunity', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const database = makeConvertDb({
+      customer: { id: 'c6', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [{ id: 'L-root6', status: 'new', customer_id: 'c6', first_contact_at: '2026-08-20T12:00:00Z' }],
+      customerDuplicateLead: { id: 'L-rep6', status: 'duplicate', customer_id: 'c6', extracted_data: { duplicate_of_lead_id: 'L-root6' } },
+      leadsById: { 'L-root6': { id: 'L-root6', status: 'new', customer_id: 'c6', first_contact_at: '2026-08-20T12:00:00Z' } },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c6', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-root6'] });
+    expect(markConverted).toHaveBeenCalledWith('L-root6', expect.not.objectContaining({ onlyIfStatusIn: expect.anything() }));
+  });
+
   test('self-booking: duplicate rows behind two DIFFERENT opportunities are ambiguous — nothing converts', async () => {
     const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({

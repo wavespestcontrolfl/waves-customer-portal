@@ -955,68 +955,53 @@ async function convertLeadFromEvent({
       // a customer). Anything else is an add-on for an established customer —
       // skip rather than guess which deal the event closed.
       if (resolvedCustomerId) {
-        let linked = await findOpenLeadsForCustomer(database, resolvedCustomerId);
-        // The customer's only wizard row may be a repeat filed as 'duplicate'
-        // (codex #3834 r11 P1): the win goes to the open root when that root
-        // is this customer's (or unlinked); an original under a DIFFERENT
-        // customer (shared household contact) is not ours to convert, so the
-        // authenticated repeat row itself takes the booking win — as it did
-        // before the label existed.
-        // Every duplicate row is resolved and the distinct opportunities
-        // counted — the single-candidate rule holds here too (pre-push P1):
-        // two repeats of ONE root are one opportunity; two different roots
-        // (or a root plus a foreign-original repeat) are ambiguous.
-        if (!linked.length) {
-          const repeats = await database('leads')
-            .where({ customer_id: resolvedCustomerId, lead_type: 'quote_wizard', status: 'duplicate' })
-            .whereNull('deleted_at')
-            .orderBy('created_at', 'desc');
-          const picks = new Map();
-          for (const repeat of repeats) {
-            const root = await followDuplicateLink(database, repeat);
-            const rootIsOurs = root.id !== repeat.id && !CLOSED_LEAD_STATUSES.has(root.status) && !root.deleted_at
-              && (!root.customer_id || String(root.customer_id) === String(resolvedCustomerId));
-            // Keyed by the resolved ancestry: two repeats of one foreign
-            // original are ONE opportunity, and the newest repeat (rows are
-            // newest-first) is its authenticated winner (pre-push/r12 P1).
-            if (!picks.has(root.id)) picks.set(root.id, { pick: rootIsOurs ? root : repeat, winner: rootIsOurs ? null : repeat });
-          }
-          if (picks.size > 1) {
-            logger.warn(`[lead-trigger] ${source} customer-link skip — ${picks.size} distinct opportunities behind duplicate rows (ambiguous)`, {
-              source, customerId: resolvedCustomerId, leadIds: [...picks.keys()],
-            });
-            return { converted: false, reason: 'ambiguous_customer_link' };
-          }
-          if (picks.size === 1) {
-            const [{ pick, winner }] = picks.values();
-            duplicateWinner = winner;
-            linked = [pick];
-          }
+        const linked = await findOpenLeadsForCustomer(database, resolvedCustomerId);
+        // A wizard row filed as 'duplicate' is an opportunity too (codex
+        // #3834 r11 P1): it resolves to its open root when that root is this
+        // customer's (or unlinked) — the same opportunity as an open row
+        // already in the set — and to the authenticated repeat row itself
+        // when the original belongs to a DIFFERENT customer (shared
+        // household contact), which is not ours to convert. Duplicate rows
+        // are resolved ALONGSIDE the open rows (pre-push P1 on r12) so the
+        // single-candidate rule below judges the combined set: two repeats
+        // of one root are one opportunity; an unrelated open lead plus a
+        // repeat are two.
+        const repeats = await database('leads')
+          .where({ customer_id: resolvedCustomerId, lead_type: 'quote_wizard', status: 'duplicate' })
+          .whereNull('deleted_at')
+          .orderBy('created_at', 'desc');
+        const winners = new Map(); // candidate id → the repeat row taking the win (foreign root), or null
+        for (const repeat of repeats) {
+          const root = await followDuplicateLink(database, repeat);
+          if (linked.some((l) => l.id === root.id) || [...winners.values()].some((w) => w && w.root === root.id)) continue;
+          const rootIsOurs = root.id !== repeat.id && !CLOSED_LEAD_STATUSES.has(root.status) && !root.deleted_at
+            && (!root.customer_id || String(root.customer_id) === String(resolvedCustomerId));
+          linked.push(rootIsOurs ? root : repeat);
+          winners.set(rootIsOurs ? root.id : repeat.id, rootIsOurs ? null : { row: repeat, root: root.id });
         }
         // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
         // estimate belongs to that deal — exclude it so we never convert it or
         // misattribute this estimate's value hints. (Tier 1 already handled a
         // lead linked to THIS estimate.)
-        if (estimateId) {
-          linked = linked.filter((l) => !l.estimate_id || l.estimate_id === estimateId);
-        }
-        if (linked.length) {
-          if (linked.length > 1) {
-            logger.warn(`[lead-trigger] ${source} customer-link skip — ${linked.length} open leads (ambiguous)`, {
-              source, customerId: resolvedCustomerId, leadIds: linked.map((l) => l.id),
+        const scoped = estimateId ? linked.filter((l) => !l.estimate_id || l.estimate_id === estimateId) : linked;
+        if (scoped.length) {
+          if (scoped.length > 1) {
+            logger.warn(`[lead-trigger] ${source} customer-link skip — ${scoped.length} open leads (ambiguous)`, {
+              source, customerId: resolvedCustomerId, leadIds: scoped.map((l) => l.id),
             });
             return { converted: false, reason: 'ambiguous_customer_link' };
           }
           const established = await customerHasWonLead(database, resolvedCustomerId);
-          const originating = await isOriginatingLead(database, resolvedCustomerId, linked[0]);
+          const originating = await isOriginatingLead(database, resolvedCustomerId, scoped[0]);
           if (established || !originating) {
             logger.warn(`[lead-trigger] ${source} customer-link skip (established=${established}, originating=${originating})`, {
-              source, customerId: resolvedCustomerId, leadIds: linked.map((l) => l.id),
+              source, customerId: resolvedCustomerId, leadIds: scoped.map((l) => l.id),
             });
             return { converted: false, reason: established ? 'customer_link_established' : 'customer_link_not_originating' };
           }
-          candidates = linked;
+          candidates = scoped;
           resolution = 'customer_link';
+          duplicateWinner = winners.get(scoped[0].id)?.row || null;
         }
       }
 

@@ -65,17 +65,25 @@ function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
     // A quote-wizard repeat filed as a 'duplicate' of this lead inside the
     // window is the customer re-engaging (the public route labels the new
     // row and never writes the original — codex #3834 r10 P1), so the
-    // original is not stale.
-    .whereNotExists(function () {
-      this.select(1).from('leads as repeat')
-        .whereRaw("repeat.lead_type = 'quote_wizard' AND repeat.status = 'duplicate'")
-        .whereRaw("repeat.extracted_data->>'duplicate_of_lead_id' = leads.id::text")
-        .where('repeat.created_at', '>=', cutoff)
-        // A removed repeat says nothing about re-engagement (codex r11 P2).
-        .modify((builder) => {
-          if (excludeSoftDeleted) builder.whereNull('repeat.deleted_at');
-        });
-    })
+    // original is not stale. The marker can chain (B → A → O when two
+    // repeats raced), so every ancestor of a recent repeat is exempt, not
+    // just the row it names (pre-push P1 on r12); a removed repeat or hop
+    // says nothing about re-engagement (codex r11 P2).
+    .whereRaw(
+      `leads.id::text NOT IN (
+        WITH RECURSIVE chain AS (
+          SELECT r.extracted_data->>'duplicate_of_lead_id' AS parent_id, 1 AS depth
+          FROM leads r
+          WHERE r.lead_type = 'quote_wizard' AND r.status = 'duplicate' AND r.created_at >= ?${excludeSoftDeleted ? ' AND r.deleted_at IS NULL' : ''}
+          UNION ALL
+          SELECT p.extracted_data->>'duplicate_of_lead_id', chain.depth + 1
+          FROM chain JOIN leads p ON p.id::text = chain.parent_id
+          WHERE p.lead_type = 'quote_wizard' AND p.status = 'duplicate' AND chain.depth < 8${excludeSoftDeleted ? ' AND p.deleted_at IS NULL' : ''}
+        )
+        SELECT parent_id FROM chain WHERE parent_id IS NOT NULL
+      )`,
+      [cutoff],
+    )
     // A lead linked to a customer with booked (or already-delivered) service
     // FROM THIS LEAD'S COURTSHIP is pending won-conversion, not
     // unresponsive. Two scopes keep one dead or unrelated visit from
