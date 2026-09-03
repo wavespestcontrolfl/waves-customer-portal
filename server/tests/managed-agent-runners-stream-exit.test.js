@@ -1,4 +1,4 @@
-// The BI and content runners' session recorder must see how the stream
+// The BI, content and lead-response runners' session recorder must see how the stream
 // actually ended (Codex r7 on #3846): a `session.error` event is the same
 // failure as `error`, and a stream that closes before any terminal event is
 // `session_stream_eof` — never a success the later session GET could
@@ -14,6 +14,10 @@ jest.mock('../services/bi-agent-config', () => ({ BI_AGENT_CONFIG: { model: 'bi-
 jest.mock('../services/content/content-agent-tools', () => ({ executeContentTool: jest.fn() }));
 jest.mock('../services/content/content-agent-config', () => ({ CONTENT_AGENT_CONFIG: { model: 'content-model' } }));
 jest.mock('../models/db', () => () => ({ insert: async () => {}, where: () => ({ first: async () => null }) }));
+jest.mock('../services/lead-response-tools', () => ({ executeLeadTool: jest.fn() }));
+jest.mock('../services/lead-response-agent-config', () => ({ LEAD_RESPONSE_AGENT_CONFIG: { model: 'lead-model' } }));
+jest.mock('../services/intelligence-bar/circuit-breaker', () => ({ getBreaker: jest.fn(() => ({ isOpen: () => false, recordSuccess() {}, recordFailure() {} })) }));
+jest.mock('../services/intelligence-bar/tool-events', () => ({ recordToolEvent: jest.fn() }));
 
 const ORIGINAL_ENV = { ...process.env };
 const ORIGINAL_FETCH = global.fetch;
@@ -29,7 +33,7 @@ function fetchFor(frames) {
   return jest.fn(async (url, opts = {}) => {
     if (opts.method === 'POST' && String(url).endsWith('/sessions')) return { ok: true, status: 200, json: async () => ({ id: 'sess-1' }) };
     if (opts.method === 'POST') return { ok: true, status: 200, json: async () => ({}) };
-    if (String(url).includes('stream=true')) return { ok: true, status: 200, body: sseBody(frames) };
+    if (/stream=true|\/events\/stream$/.test(String(url))) return { ok: true, status: 200, body: sseBody(frames) };
     throw new Error(`unexpected fetch ${opts.method || 'GET'} ${url}`);
   });
 }
@@ -44,6 +48,7 @@ const recorded = () => mockRecordSessionUsage.mock.calls[0][0];
 const RUNNERS = [
   ['bi-agent', '../services/bi-agent', 'agent_bi', (m) => m.run({ skipSMS: true })],
   ['content-agent', '../services/content/content-agent', 'agent_content', (m) => m.run({ topic: 'termites', publishDraft: false, distributeSocial: false })],
+  ['lead-response-agent', '../services/lead-response-agent', 'agent_lead', (m) => m.processLead({ leadId: 'lead-1', customerId: 'cust-1', name: 'Test Lead', phone: '+19415550100' })],
 ];
 
 describe.each(RUNNERS)('%s — the session recorder sees how the stream ended', (name, path, laneId, run) => {
@@ -53,7 +58,7 @@ describe.each(RUNNERS)('%s — the session recorder sees how the stream ended', 
     mockRecordSessionUsage.mockResolvedValue(null);
     now = 1_000_000;
     Date.now = () => now;
-    process.env = { ...ORIGINAL_ENV, ANTHROPIC_API_KEY: 'k', BI_AGENT_ID: 'agent_bi_1', BI_AGENT_ENVIRONMENT_ID: 'env_1', CONTENT_AGENT_ID: 'agent_content_1' };
+    process.env = { ...ORIGINAL_ENV, ANTHROPIC_API_KEY: 'k', BI_AGENT_ID: 'agent_bi_1', BI_AGENT_ENVIRONMENT_ID: 'env_1', CONTENT_AGENT_ID: 'agent_content_1', LEAD_AGENT_ID: 'agent_lead_1', LEAD_AGENT_ENVIRONMENT_ID: 'env_1' };
   });
   afterAll(() => { process.env = ORIGINAL_ENV; global.fetch = ORIGINAL_FETCH; Date.now = ORIGINAL_NOW; });
 

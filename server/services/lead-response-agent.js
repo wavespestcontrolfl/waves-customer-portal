@@ -158,6 +158,8 @@ const LeadResponseAgent = {
 
     let sessionId = null;
     let failure = null;
+    // Set only by a terminal event: any other stream exit is a failure.
+    let sessionEnded = false;
     try {
       const session = await apiCall('POST', '/sessions', {
         agent: LEAD_AGENT_ID,
@@ -295,12 +297,18 @@ const LeadResponseAgent = {
         }
 
         const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
-        if (event === 'done' || event === 'session_complete' || event === 'session.status_idle' || stopReason === 'end_turn') break;
+        if (event === 'done' || event === 'session_complete' || event === 'session.status_idle' || stopReason === 'end_turn') { sessionEnded = true; break; }
         if (event === 'error' || event === 'session.error') {
           logger.error(`[lead-agent] Agent error: ${JSON.stringify(data)}`);
           failure = 'session_error_event';
           break;
         }
+      }
+      // The stream closed before the session said it ended: not a success,
+      // whatever the session GET reports later.
+      if (!failure && !sessionEnded) {
+        logger.error(`[lead-agent] Stream ended without a terminal event for session ${sessionId}`);
+        failure = 'session_stream_eof';
       }
 
       const durationSeconds = Math.round((Date.now() - startTime) / 1000);
