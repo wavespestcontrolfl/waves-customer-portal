@@ -625,11 +625,11 @@ router.patch('/prospects/:id', async (req, res, next) => {
       // a status edit INTO the active outreach lifecycle (prospect / contacted / negotiating / awaiting_owner) — a reopen
       // from lost / rejected above all — drops the closure stamp with it: conversationClosed (the §13 inbox guard) would
       // otherwise keep reading the live row as closed and free its inbox to a second conversation; lost-link recovery
-      // clears it the same way. An active row never carries the stamp, so clearing it on every edit whose RESULT is
-      // active is exact — a reopen by link_type alone (the status already active, the row re-entering the outreach
-      // lane) included, not only a status edit.
+      // clears it the same way. The clear is tied to the edits that REOPEN: a status edit into the active lifecycle, or
+      // the row entering the outreach lane (a link_type edit alone, the status already active) — never an unrelated
+      // edit (notes, a page move) on a row that carries the stamp.
       const resultStatus = 'status' in patch ? patch.status : current.status;
-      if (ACTIVE_OUTREACH_STATUSES.includes(resultStatus)) patch.conversation_closed_at = null;
+      if (ACTIVE_OUTREACH_STATUSES.includes(resultStatus) && ('status' in patch || entersOutreach)) patch.conversation_closed_at = null;
       // an edit whose RESULT is an open conversation (§13: contacted / negotiating, a park from them, or a sent pitch
       // on a row the reopen above just made active again) while the current row is not one OPENS it for the
       // recipient: the same recipient-level lock + predicate the send claim takes, so no two writers open the same inbox

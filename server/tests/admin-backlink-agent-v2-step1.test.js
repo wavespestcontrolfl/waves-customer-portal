@@ -64,7 +64,7 @@ describe('rolling-deploy compatibility of the board unique key', () => {
   });
   test('a status edit that reopens the outreach lifecycle drops the conversation closure stamp (the §13 inbox guard reads it)', () => {
     const s = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
-    expect(s).toContain('if (ACTIVE_OUTREACH_STATUSES.includes(resultStatus)) patch.conversation_closed_at = null;'); // the RESULT status: a link_type-only reopen clears it too
+    expect(s).toContain("if (ACTIVE_OUTREACH_STATUSES.includes(resultStatus) && ('status' in patch || entersOutreach)) patch.conversation_closed_at = null;"); // a status edit or a lane entry (link_type alone) reopens; an unrelated edit never clears it
     // … and an edit whose RESULT is an open conversation (a reopened row with its pitch out included) runs the inbox guard
     expect(s).toContain('const opensConversation = Outreach.conversationOpen({ ...current, ...patch }) && !Outreach.conversationOpen(current);');
   });
