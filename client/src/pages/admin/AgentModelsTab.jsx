@@ -534,7 +534,12 @@ export default function AgentModelsTab() {
                               <option value="">{mixed ? "Mixed — see selectors" : `Keep ${modelLabel(catalog, m.id)}`}</option>
                               <ModelOptions catalog={catalog} accepts={accepts} exclude={m.id} />
                             </Select>
-                            {rowValue && <span className="text-11 text-ink-secondary">{envs.length} selector{envs.length === 1 ? "" : "s"} move</span>}
+                            {rowValue && (
+                              <span className="text-11 text-ink-secondary">
+                                {envs.length} selector{envs.length === 1 ? "" : "s"} move
+                                {m.selectors.length > envs.length ? ` · ${m.selectors.length - envs.length} locked stay` : ""}
+                              </span>
+                            )}
                           </div>
                         ) : (
                           <span className="text-12 text-ink-tertiary">pinned by lane — change it on the lane</span>

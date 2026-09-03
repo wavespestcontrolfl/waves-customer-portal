@@ -94,6 +94,15 @@ describe('model-switchboard', () => {
       expect(lanes.find((l) => l.id === id).lock).toBeTruthy();
     }
     expect(selectors.find((s) => s.key === 'OPENAI_EMBEDDING').lock.kind).toBe('migration');
+    // A selector referenced only by locked lanes is locked too, so the
+    // selector picker can't move what the lane lock says is frozen.
+    const lockedLaneSelectors = new Set(
+      lanes.filter((l) => l.lock).flatMap((l) => [l.primary.selector, l.fallback?.selector]).filter(Boolean),
+    );
+    for (const key of lockedLaneSelectors) {
+      const onlyLocked = lanes.filter((l) => l.primary.selector === key || l.fallback?.selector === key).every((l) => l.lock);
+      if (onlyLocked) expect(selectors.find((s) => s.key === key).lock).toBeTruthy();
+    }
     // Muse has no adapter: present in the catalog only as an unavailable option.
     expect(sb.MODEL_CATALOG['muse-spark-1.3'].status).toBe('unavailable');
   });

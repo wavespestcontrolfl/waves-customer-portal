@@ -63,8 +63,9 @@ const ADAPTERS = {
   },
 };
 
-// "fable 5.1" should find claude-fable-5-1; "Astra" should find whatever id
-// OpenAI ships. Compare on lower-case alphanumerics only, token by token.
+// "fable 5.1" should find the Fable 5.1 id (dashes, not dots); "Astra" should
+// find whatever id OpenAI ships. Compare on lower-case alphanumerics only,
+// token by token.
 function normalize(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
