@@ -525,7 +525,7 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
       auto_reply_version: draft.version || null,
       auto_reply_mode: draft.mode || null,
     } : {}),
-    auto_reply_error: draft?.ok === false ? JSON.stringify({ reason: draft.reason, rejections: draft.rejections, error: draft.error }) : null,
+    auto_reply_error: draft?.ok === false ? JSON.stringify({ reason: draft.reason, rejections: draft.rejections, details: draft.rejectionDetails || undefined, error: draft.error }) : null,
     auto_reply_grounding: JSON.stringify(extra.grounding || null),
     auto_reply_claimed_until: null,
     ...(extra.fields || {}),
@@ -811,7 +811,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
         auto_reply_grounding: JSON.stringify(snapshot),
         auto_reply_claimed_until: null,
       },
-      auditMeta: { version: draft.version, mode: draft.mode, intent, reviewOnly: !!draft.reviewOnly },
+      auditMeta: { version: draft.version, mode: draft.mode, intent, reviewOnly: !!draft.reviewOnly, safeCopy: !!draft.safeCopy },
       guard: claimGuard(row, { accountFingerprint: snapshot?.accountFingerprint || null }),
       // Both cron and Post-now report "posted" = live on Google; a local-only
       // save (no GBP creds) must surface as an error, never as posted.

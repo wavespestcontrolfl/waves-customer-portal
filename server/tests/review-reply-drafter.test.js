@@ -656,25 +656,81 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(payload.text).toContain('Review text:');
     expect(payload.system).not.toContain('ants in the kitchen');
   });
-  test('retries with the violation named, then falls back to review-only, then gives up', async () => {
+  test('retries with every prior violation and its words named, withholds account facts from attempt 3, then falls back to safe copy', async () => {
     mockDispatch
       .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.') })
       .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, call 941-555-1212 about the ants Marcus treated.') })
-      .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, our records show Marcus treated the ants for you.') });
+      .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, our records show Marcus treated the ants for you.') })
+      .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, Marcus says the ants are gone for good from your kitchen.') });
     const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
+    expect(r.ok).toBe(true);
+    expect(r.safeCopy).toBe(true);
+    expect(r.text).toBe(good('Hi Dana,\n\nThanks for the review. We\'ll make sure Marcus hears it.'));
+    expect(r.rejections).toEqual(['forbidden_name', 'phone', 'private_channel', 'banned_phrase']);
+    expect(r.rejectionDetails.map((d) => d.span)).toEqual(['tyler', '941-555-1212', 'our records', 'for good']);
+    expect(r.attempts).toBe(4);
+    // Attempt 2 names the first violation with its words; attempt 4 lists all three prior ones.
+    expect(mockDispatch.mock.calls[1][1].text).toContain('PREVIOUS ATTEMPTS WERE REJECTED');
+    expect(mockDispatch.mock.calls[1][1].text).toContain('named a technician the reviewer did not name (the words: "tyler")');
+    expect(mockDispatch.mock.calls[3][1].text).toContain('attempt 1:');
+    expect(mockDispatch.mock.calls[3][1].text).toContain('attempt 3:');
+    expect(mockDispatch.mock.calls[3][1].text).toContain('(the words: "our records")');
+    // Attempts 3 and 4 are review-only: no account facts in the user text.
+    expect(mockDispatch.mock.calls[1][1].text).toContain('PUBLIC-SAFE ACCOUNT FACTS');
+    expect(mockDispatch.mock.calls[2][1].text).toContain('ACCOUNT FACTS: none available');
+    expect(mockDispatch.mock.calls[3][1].text).toContain('ACCOUNT FACTS: none available');
+  });
+  test('safe copy is verified like any draft: a low rating still parks, and the row reports every rejection', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.') });
+    const r = await Drafter.draftReviewReply({ grounding: grounding({ rating: 3 }), recentReplies: [] });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('verifier_reject');
-    expect(r.rejections).toEqual(['forbidden_name', 'phone', 'private_channel']);
-    expect(r.attempts).toBe(3);
-    expect(mockDispatch.mock.calls[1][1].text).toContain('PREVIOUS ATTEMPT WAS REJECTED');
-    // third attempt is review-only: no account facts in the user text
-    expect(mockDispatch.mock.calls[2][1].text).toContain('ACCOUNT FACTS: none available');
+    expect(r.attempts).toBe(4);
+    expect(r.rejectionDetails).toHaveLength(4);
+    expect(r.rejectionDetails[0]).toMatchObject({ attempt: 1, code: 'forbidden_name', span: 'tyler' });
   });
-  test('no review-only step when there were no account facts (2 attempts max)', async () => {
-    mockDispatch.mockResolvedValue({ ok: true, text: good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.') });
-    const r = await Drafter.draftReviewReply({ grounding: grounding({ account: null }), recentReplies: [] });
-    expect(r.ok).toBe(false);
-    expect(r.attempts).toBe(2);
+  test('safe copy without a named tech, and its variants dodge the non-repetition rule', () => {
+    const g = grounding({ mentionedTechNames: [], topics: [] });
+    const first = Drafter.safeCopyReply(g, 'service_quality', []);
+    expect(first).toBe(good('Hi Dana,\n\nThanks for the review. Glad to be your pest and lawn team.'));
+    const second = Drafter.safeCopyReply(g, 'service_quality', [first]);
+    expect(second).not.toBe(first);
+    expect(Drafter.verifyReplyText(second, g, { recentReplies: [first], mode: 'service_quality' })).toBeNull();
+    const noText = grounding({ firstName: '', text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(Drafter.safeCopyReply(noText, 'no_text', [])).toBe(good('Hello there,\n\nThanks for the five stars. Glad to be your pest and lawn team.'));
+    expect(Drafter.safeCopyReply(grounding({ rating: 2 }), 'low_rating', [])).toBeNull();
+  });
+  test('the first prompt names the reviewer phrases the reply may not echo, and the relationship rule', () => {
+    const g = grounding({ text: 'If you want to be bug free call Marcus, absolutely the best pest control around.', account: null });
+    expect(Drafter.reviewEchoBans(g.review.text)).toEqual(expect.arrayContaining(['free', 'best']));
+    const text = Drafter.buildUserText(g, [], null);
+    expect(text).toContain('DO NOT USE these words');
+    expect(text).toContain('"free"');
+    expect(text).toContain('RELATIONSHIP WORDING: none.');
+    const rec = Drafter.buildUserText(grounding(), [], null);
+    expect(rec).toContain('RELATIONSHIP WORDING ALLOWED: recurring, regular');
+    expect(Drafter.buildUserText(grounding(), [], null)).not.toContain('DO NOT USE these words');
+  });
+  test('possessives of allowed names, sentence-initial inflections of review words, and lowercase dual-use greeting names are prose', () => {
+    expect(Drafter.verifyReplyText(good("Hi Dana, Marcus's name comes up a lot, and the ants are gone from your kitchen."), grounding())).toBeNull();
+    expect(Drafter.verifyReplyText(good("Hi Dana, Kevin's name comes up a lot, and the ants are gone from your kitchen."), grounding())).toBe('unlisted_name');
+    const g = grounding({ text: 'Adam was on-time, professional, super helpful in helping me with my ant problems.', mentionedTechNames: ['Adam'], topics: ['technician'] });
+    g.allow.names = ['Dana', 'Adam'];
+    expect(Drafter.verifyReplyText(good('Hi Dana, glad Adam was on time. Ants can be stubborn, so we will keep at it.'), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana, glad Adam helped. Someone will pass your note along to him.'), g)).toBeNull();
+    // An inflection that is also a known name still needs provenance.
+    const gb = grounding({ text: 'Marcus and the whole team got the ants out of the kitchen.', forbiddenNames: ['Teams'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana, glad the ants are out. Teams will hear about it from Marcus.'), gb)).toBe('forbidden_name');
+    // A prior reviewer greeted as Bill leaks only as a name.
+    const recent = [good('Hi Bill, glad the wasps are handled.')];
+    expect(Drafter.verifyReplyText(good('Hi Dana, no surprise bill from Marcus, and the ants are gone from your kitchen.'), grounding(), { recentReplies: recent })).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana, Bill and Marcus are glad the ants are gone from your kitchen.'), grounding(), { recentReplies: recent })).toBe('forbidden_name');
+  });
+  test('dual-use first names in prose are not treated as introduced names', () => {
+    const g = grounding({ text: 'Adam was on time and helpful with my ant problems.', mentionedTechNames: ['Adam'], topics: ['technician'] });
+    g.allow.names = ['Dana', 'Adam'];
+    expect(Drafter.verifyReplyText(good('Hi Dana, glad Adam was the right guy for the ant problems. We will pass that along.'), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana, glad Adam helped with the ant problems. We will make sure kevin hears it.'), g)).toBe('unlisted_name');
   });
   test('provider outage surfaces as provider_unavailable', async () => {
     mockDispatch.mockResolvedValueOnce({ ok: false, reason: 'all_failed' });
