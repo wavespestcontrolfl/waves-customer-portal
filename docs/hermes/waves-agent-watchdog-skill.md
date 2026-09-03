@@ -25,8 +25,7 @@ then the only remedy is a human.
   "database": { "ok": true, "latency_ms": 4 },
   "jobs": { "available": true, "total": 61, "unhealthy": 1,
             "items": [ { "job": "geocoder-backstop", "state": "failing",
-                         "last_success_age_minutes": 190, "consecutive_failures": 3,
-                         "last_error": "ECONNRESET" } ] },
+                         "last_success_age_minutes": 190, "consecutive_failures": 3 } ] },
   "ops_queue": { "available": true, "pending": 12, "parked": 40, "failed": 2,
                  "lanes": [ { "key": "calls", "label": "Call processing",
                               "pending": 0, "parked": 1, "failed": 2, "error": false } ] },
@@ -40,7 +39,9 @@ then the only remedy is a human.
 - `jobs.items` lists only unhealthy crons (`failing` / `stuck` / `stale`) — the
   same classifier the portal's Agents → Queue tab and the Intelligence Bar use.
 - `ops_queue` is **counts only**. Item titles never cross the wire (customer
-  names live there). Open the portal for the rows.
+  names live there), and neither does a job's error text — open the portal's
+  Agents → Queue tab for both. A sub-read that fails says `available: false`
+  and nothing else.
 - `reasons` are stable keys. The script diffs them against the previous poll.
 - Off → `404 { "error": "watchdog lane disabled" }`. That is a configuration
   state, not an outage: stop and tell the operator.
@@ -103,7 +104,7 @@ down; one "reachable again" message on recovery):
 New attention reasons (only the NEW ones; cleared ones are not announced):
 
 > ⚠️ Waves agents need attention (2 new):
-> • geocoder-backstop is failing · last success 190 min ago · 3 failures in a row · error: ECONNRESET
+> • geocoder-backstop is failing · last success 190 min ago · 3 failures in a row
 > • ops queue lane calls: failed=2
 > https://portal.wavespestcontrol.com/admin/agents?tab=queue
 

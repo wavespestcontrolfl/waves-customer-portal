@@ -10,9 +10,11 @@
  *   - the ops queue's per-lane pending / parked / failed counts;
  *   - the link-worker audit + prospect leases (Hermes's own claim → report loop).
  *
- * PII rule: this payload leaves the portal. Only COUNTS and job names cross the
- * wire — ops-queue item titles/hrefs carry customer names and are dropped here.
- * last_error is the cron-lock sanitized string (digits masked, truncated).
+ * PII rule: this payload leaves the portal. Only COUNTS, job names and fixed
+ * state words cross the wire — ops-queue item titles/hrefs carry customer
+ * names and are dropped; job_health.last_error is only digit-masked, so it
+ * stays inside too (the Agents → Queue tab shows it); a failing sub-read
+ * reports a fixed `unavailable` marker, never its message.
  *
  * `reasons` are stable string keys (job:<name>:<state>, ops:<lane>:failed=<n>,
  * db:degraded, link_worker:stale_leases=<n>) so the Hermes side diffs them
@@ -39,10 +41,12 @@ const STALE_LEASE_HOURS = 2;
 
 const ATTENTION_JOB_STATES = new Set(['failing', 'stuck', 'stale']);
 
+// A failed read reports ONLY that it is unavailable — the message stays in
+// the server log (SQL/provider errors can carry bound customer data).
 function contain(label, fn, fallback) {
   return fn().catch((err) => {
     logger.warn(`[agent-watchdog] ${label} read failed: ${err.message}`);
-    return { ...fallback, available: false, error: err.message };
+    return { ...fallback, available: false };
   });
 }
 
@@ -65,7 +69,6 @@ async function readJobs() {
         state: j.state,
         last_success_age_minutes: j.last_success_age_minutes,
         consecutive_failures: j.consecutive_failures,
-        last_error: j.last_error,
       })),
   };
 }

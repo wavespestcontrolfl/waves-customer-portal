@@ -97,7 +97,8 @@ describe('buildWatchdogSnapshot', () => {
       'link_worker:stale_leases=1',
     ]);
     expect(snap.jobs.items.map((j) => j.job)).toEqual(['geocoder-backstop', 'old-digest']);
-    expect(snap.jobs.items[0].last_error).toBe('ECONNRESET');
+    expect(snap.jobs.items[0]).toEqual({ job: 'geocoder-backstop', state: 'failing', last_success_age_minutes: 190, consecutive_failures: 3 });
+    expect(JSON.stringify(snap)).not.toContain('ECONNRESET');
   });
 
   test('the ops queue is omitted (not failed) when its gate is off', async () => {
@@ -108,12 +109,13 @@ describe('buildWatchdogSnapshot', () => {
     expect(snap.verdict).toBe('healthy');
   });
 
-  test('a throwing sub-read degrades to available:false and the rest still judges', async () => {
+  test('a throwing sub-read degrades to available:false WITHOUT its message and the rest still judges', async () => {
     getScheduledJobHealth.mockRejectedValue(new Error('relation "job_health" does not exist'));
-    dbTables.seo_link_worker_requests = () => { throw new Error('boom'); };
+    dbTables.seo_link_worker_requests = () => { throw new Error('boom: jane@example.com'); };
     const snap = await buildWatchdogSnapshot();
-    expect(snap.jobs.available).toBe(false);
+    expect(snap.jobs).toEqual({ available: false, total: 0, unhealthy: 0, items: [] });
     expect(snap.link_worker.available).toBe(false);
+    expect(JSON.stringify(snap)).not.toMatch(/job_health|jane@example/);
     expect(snap.reasons).toEqual(['jobs:unavailable', 'link_worker:unavailable']);
     expect(snap.verdict).toBe('attention');
     expect(snap.database.ok).toBe(true);

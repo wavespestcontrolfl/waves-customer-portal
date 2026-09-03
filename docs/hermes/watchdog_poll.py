@@ -122,14 +122,11 @@ def describe(reason, snap):
         for j in snap.get("jobs", {}).get("items", []):
             if j.get("job") == name:
                 age = j.get("last_success_age_minutes")
-                err = j.get("last_error")
                 bits = [f"{name} is {state}"]
                 if age is not None:
                     bits.append(f"last success {age} min ago")
                 if j.get("consecutive_failures"):
                     bits.append(f"{j['consecutive_failures']} failures in a row")
-                if err:
-                    bits.append(f"error: {err[:140]}")
                 return " · ".join(bits)
         return f"{name} is {state}"
     if kind == "ops":
