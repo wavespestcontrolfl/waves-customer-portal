@@ -46,8 +46,8 @@ function makeDb(seed = {}) {
       whereNotIn(col, arr) { st.preds.push((r) => !arr.includes(r[col])); return q; },
       whereRaw(sql, bindings = []) {
         const lower = (v) => String(v == null ? '' : v).trim().toLowerCase();
-        if (/^LOWER\(\?\?\) = \?$/.test(sql)) st.preds.push((r) => lower(r[bindings[0]]) === bindings[1]);
-        else if (/^LOWER\(split_part\(\?\?, '@', 2\)\) = \?$/.test(sql)) st.preds.push((r) => lower(r[bindings[0]]).split('@')[1] === bindings[1]);
+        if (/^LOWER\(TRIM\(\?\?\)\) = \?$/.test(sql)) st.preds.push((r) => lower(r[bindings[0]]) === bindings[1]);
+        else if (/^LOWER\(split_part\(TRIM\(\?\?\), '@', 2\)\) = \?$/.test(sql)) st.preds.push((r) => lower(r[bindings[0]]).split('@')[1] === bindings[1]);
         else if (/split_part/.test(sql)) st.preds.push((r) => canonicalProspectDomain(r.target_domain) === bindings[0]);
         // the sender's trailing-24h attempt count (link-prospect-outreach dailySendCount): rows attempted since `since`
         else if (/outreach_attempted_at >= \?/.test(sql)) { st.count = true; st.preds.push((r) => r.outreach_attempted_at != null && new Date(r.outreach_attempted_at).getTime() >= new Date(bindings[0]).getTime()); }

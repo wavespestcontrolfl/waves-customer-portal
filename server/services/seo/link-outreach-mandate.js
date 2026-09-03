@@ -115,10 +115,11 @@ async function recipientReview(q, email) {
   const shared = [];
   for (const src of CONTACT_SOURCES) {
     const idCol = src.idColumn || 'id';
-    const hits = await q(src.table).whereRaw(`LOWER(??) = ?`, [src.column, recipient]).select(`${idCol} as id`);
+    // stored addresses are normalized the same way as the recipient (case + surrounding whitespace)
+    const hits = await q(src.table).whereRaw(`LOWER(TRIM(??)) = ?`, [src.column, recipient]).select(`${idCol} as id`);
     for (const h of hits) exact.push({ source: src.source, id: h.id });
     if (domain && !SHARED_MAIL_DOMAINS.has(domain)) {
-      const byDomain = await q(src.table).whereRaw(`LOWER(split_part(??, '@', 2)) = ?`, [src.column, domain]).select(`${idCol} as id`);
+      const byDomain = await q(src.table).whereRaw(`LOWER(split_part(TRIM(??), '@', 2)) = ?`, [src.column, domain]).select(`${idCol} as id`);
       for (const h of byDomain) if (!exact.some((e) => e.source === src.source && e.id === h.id)) shared.push({ source: src.source, id: h.id });
     }
   }
