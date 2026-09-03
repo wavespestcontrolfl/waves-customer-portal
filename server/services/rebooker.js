@@ -1101,7 +1101,10 @@ class SmartRebooker {
 
     const originalDate = service.scheduled_date;
     const win = parseWindow(newWindow);
-    const windowEnd = win.end || service.window_end;
+    // clearWindowEnd (office Combine compensation, pre-push codex #3843
+    // P1): an open-ended row that was moved onto a materialized end must
+    // be put back open-ended — `end: null` alone keeps the current end.
+    const windowEnd = win.end || (options.clearWindowEnd === true ? null : service.window_end);
 
     // Same-day target whose window already elapsed in ET is just as
     // unreachable as yesterday — a stale morning option accepted in the

@@ -148,13 +148,14 @@ async function combineRows({ serviceIds, createdBy }) {
   // notification. initiated_by is a varchar(20) on reschedule_log, so
   // the actor is the surface ('admin'), not the createdBy stamp — the
   // visit row carries who combined it.
-  const move = (id, date, start, end, expect) => rebooker.reschedule(id, date, { start, end }, 'admin', 'admin', {
+  const move = (id, date, start, end, expect, extra = {}) => rebooker.reschedule(id, date, { start, end }, 'admin', 'admin', {
     adminWindowRules: true,
     overlapAdvisory: true,
     sourceSurface: 'dispatch_board',
     notifyRequested: false,
     keepStatus: true,
     expect,
+    ...extra,
   });
   const done = [];
   try {
@@ -169,8 +170,12 @@ async function combineRows({ serviceIds, createdBy }) {
     const stuck = [];
     for (const m of done.reverse()) {
       try {
+        // An open-ended row goes back open-ended: the move materialized an
+        // end from its duration, and `end: null` alone would keep it
+        // (rebooker clearWindowEnd; pre-push codex P1).
         await move(m.id, m.from.scheduled_date, String(m.from.window_start).slice(0, 5), m.from.window_end ? String(m.from.window_end).slice(0, 5) : null,
-          { scheduled_date: m.scheduledDate, window_start: m.start, window_end: m.end, visit_id: null });
+          { scheduled_date: m.scheduledDate, window_start: m.start, window_end: m.end, visit_id: null },
+          m.from.window_end ? {} : { clearWindowEnd: true });
       } catch {
         stuck.push(`${m.id} (now ${m.start}–${m.end}, was ${String(m.from.window_start).slice(0, 5)}${m.from.window_end ? `–${String(m.from.window_end).slice(0, 5)}` : ''})`);
       }

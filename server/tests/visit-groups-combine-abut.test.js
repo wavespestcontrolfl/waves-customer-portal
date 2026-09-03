@@ -241,6 +241,20 @@ describe('combineRows', () => {
     expect(mockReleaseHold).not.toHaveBeenCalled();
   });
 
+  test('an open-ended row that was moved goes back OPEN-ENDED on compensation (rebooker clearWindowEnd; pre-push P1)', async () => {
+    createOrJoin
+      .mockRejectedValueOnce(new Error('rows not mutually groupable: window'))
+      .mockRejectedValueOnce(new Error('rows not mutually groupable: technician'));
+    selectRows([row('a', '09:00', '10:00'), row('b', '13:00', null, { estimated_duration_minutes: 90 })]);
+    mockReschedule.mockResolvedValue({ success: true });
+    await expect(combineRows({ serviceIds: ['a', 'b'], createdBy: 'admin:t1' })).rejects.toThrow('technician');
+    expect(mockReschedule.mock.calls[0].slice(0, 3)).toEqual(['b', '2026-09-04', { start: '10:00', end: '11:30' }]);
+    expect(mockReschedule.mock.calls[0][5].clearWindowEnd).toBeUndefined();
+    expect(mockReschedule.mock.calls[1].slice(0, 3)).toEqual(['b', '2026-09-04', { start: '13:00', end: null }]);
+    expect(mockReschedule.mock.calls[1][5]).toEqual({ ...MOVE_OPTS, clearWindowEnd: true, expect: { scheduled_date: '2026-09-04', window_start: '10:00', window_end: '11:30', visit_id: null } });
+    expect(mockReleaseHold).toHaveBeenCalledTimes(1);
+  });
+
   test('a rebooker refusal mid-move propagates (the route maps its statusCode)', async () => {
     createOrJoin.mockRejectedValueOnce(new Error('rows not mutually groupable: window'));
     selectRows([row('lawn', '11:00', '12:00'), row('pest', '14:00', '15:00')]);

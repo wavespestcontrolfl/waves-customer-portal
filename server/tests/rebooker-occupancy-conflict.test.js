@@ -172,6 +172,16 @@ describe('reschedule — shared occupancy conflict gate', () => {
     expect(flipped.trx.mock.calls.some((c) => c[0] === 'job_status_history')).toBe(true);
   });
 
+  test('clearWindowEnd: an end of null is WRITTEN as null instead of keeping the row\'s current end (Combine compensation)', async () => {
+    const kept = wireRescheduleMocks(service({ window_end: '11:30:00' }));
+    await SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: null }, 'admin', 'admin', { overlapAdvisory: true, adminWindowRules: true });
+    expect(kept.trxScheduled.update).toHaveBeenCalledWith(expect.objectContaining({ window_start: '13:00', window_end: '11:30:00' }));
+
+    const cleared = wireRescheduleMocks(service({ window_end: '11:30:00' }));
+    await SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: null }, 'admin', 'admin', { overlapAdvisory: true, adminWindowRules: true, clearWindowEnd: true });
+    expect(cleared.trxScheduled.update).toHaveBeenCalledWith(expect.objectContaining({ window_start: '13:00', window_end: null }));
+  });
+
   test('overlapAdvisory with a clean slot carries no warnings key', async () => {
     wireRescheduleMocks(service());
 
