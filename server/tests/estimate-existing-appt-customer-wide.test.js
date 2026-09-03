@@ -1,5 +1,6 @@
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  gateEnvValue: jest.fn(() => false),
   gates: {},
 }));
 
@@ -104,6 +105,8 @@ const CW_ROW_CROSS_FAMILY = {
 beforeEach(() => {
   featureGates.isEnabled.mockReset();
   featureGates.isEnabled.mockReturnValue(false);
+  featureGates.gateEnvValue.mockReset();
+  featureGates.gateEnvValue.mockReturnValue(false);
 });
 
 describe('findLinkedUpcomingAppointment — customer-wide fallback (gated)', () => {
@@ -168,9 +171,9 @@ describe('findLinkedUpcomingAppointment — customer-wide fallback (gated)', () 
   });
 
   it('in-progress gate ON: en_route/on_site rows become adoptable — the on-site accept adopts the visit in progress', async () => {
-    featureGates.isEnabled.mockImplementation((k) => (
-      k === 'estimateExistingApptCustomerWide' || k === 'estimateAdoptInProgressVisit'
-    ));
+    featureGates.isEnabled.mockImplementation((k) => k === 'estimateExistingApptCustomerWide');
+    // Read at call time (live kill) — the env-value reader, not the boot map.
+    featureGates.gateEnvValue.mockImplementation((k) => k === 'GATE_ESTIMATE_ADOPT_IN_PROGRESS_VISIT');
     const onSiteRow = { ...CW_ROW, id: 'ss-on-site', status: 'on_site' };
     const conn = makeFakeConn([null, [onSiteRow]]);
     const row = await findLinkedUpcomingAppointment(ESTIMATE, null, { database: conn });

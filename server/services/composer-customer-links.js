@@ -173,7 +173,12 @@ async function buildPayBalanceLink(customerIds) {
   };
 }
 
-async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert' } = {}) {
+// The newest OPEN, customer-viewable, pricing-gate-deliverable estimate on
+// the account — resolved WITHOUT minting anything, so a caller can decide
+// whether the link will actually be sent before a permanent short_codes row
+// exists (GH codex #3814 r1 P2). Answers { estimate } or { estimate: null,
+// reason }; buildLatestEstimateLink below is resolve + mint.
+async function findLatestOpenEstimate(customerIds) {
   const { isEstimateCustomerViewable } = require('../routes/estimate-public');
   // Viewability (expiry, linkage-invalidation) is a predicate the query can't
   // express, and a filter applied AFTER a limit lets newer hidden rows mask an
@@ -197,7 +202,7 @@ async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert
     if (estimate || rows.length < PAGE) break;
   }
   if (!estimate?.token) {
-    return { url: null, line: '', reason: 'No open estimate on this account' };
+    return { estimate: null, reason: 'No open estimate on this account' };
   }
   // Engine-authoritative pricing gate (#3750, GH codex P1 r22): the composer
   // link is a customer send like any other. While the gate is on, the newest
@@ -207,7 +212,28 @@ async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert
   {
     const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
     if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
-      return { url: null, line: '', reason: 'The latest open estimate has no engine-verified price — re-save it from the estimate tool before linking it' };
+      return { estimate: null, reason: 'The latest open estimate has no engine-verified price — re-save it from the estimate tool before linking it' };
+    }
+  }
+  return { estimate };
+}
+
+// Mint the customer-facing short link for an estimate findLatestOpenEstimate
+// resolved. createShortCode always inserts a fresh row, so a caller whose
+// send can retry (the call-booking confirmation) passes reuseExisting to
+// take the estimate's earliest existing short code instead of accumulating
+// bearer links across retries (pre-push codex P1); the composer insert
+// keeps its own per-insert code for click attribution.
+async function mintEstimateLink(estimate, { purpose = 'composer_insert', reuseExisting = false } = {}) {
+  if (reuseExisting) {
+    const { existingShortUrlFor } = require('./short-url');
+    const reused = await existingShortUrlFor({ kind: 'estimate', entityType: 'estimates', entityId: estimate.id });
+    if (reused) {
+      return {
+        url: reused,
+        line: `You can view your estimate here: ${reused}\n\n`,
+        estimate: { id: estimate.id, serviceType: estimate.service_type || null, status: estimate.status },
+      };
     }
   }
   const url = await shortenOrPassthrough(`${publicPortalUrl()}/estimate/${estimate.token}`, {
@@ -225,6 +251,12 @@ async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert
     line: `You can view your estimate here: ${url}\n\n`,
     estimate: { id: estimate.id, serviceType: estimate.service_type || null, status: estimate.status },
   };
+}
+
+async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert' } = {}) {
+  const found = await findLatestOpenEstimate(customerIds);
+  if (!found.estimate) return { url: null, line: '', reason: found.reason };
+  return mintEstimateLink(found.estimate, { purpose });
 }
 
 async function buildReferralLink(customerId) {
@@ -291,5 +323,7 @@ module.exports = {
   buildReviewRequestLink,
   buildPayBalanceLink,
   buildLatestEstimateLink,
+  findLatestOpenEstimate,
+  mintEstimateLink,
   buildReferralLink,
 };

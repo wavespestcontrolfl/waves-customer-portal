@@ -830,16 +830,19 @@ const gates = {
   // sent estimate from the phone, and the in-progress visit must become the
   // plan's first (priced) application instead of minting a duplicate
   // pending row. Same fail-closed opt-in as the customer-wide gate above
-  // (changes which visit an acceptance attaches to).
-  estimateAdoptInProgressVisit: process.env.GATE_ESTIMATE_ADOPT_IN_PROGRESS_VISIT === 'true',
+  // (changes which visit an acceptance attaches to). The decision point
+  // re-reads the env through gateEnvValue so a var flip is a live kill
+  // (GH codex #3814 r1 P1); this entry is the inventory/boot-log row.
+  estimateAdoptInProgressVisit: gateEnvValue('GATE_ESTIMATE_ADOPT_IN_PROGRESS_VISIT'),
   // Call-pipeline booking confirmation carries the customer's open estimate
   // link: a phone booking against an unaccepted (sent/viewed) estimate is
   // unpriced by design — the recurring rate is plan billing, and the
   // per-visit price depends on the frequency the customer picks at accept.
   // The link lets them accept, pick the plan, and add the card before the
   // visit instead of on the doorstep. Customer-facing copy → dark until
-  // the owner approves the wording; `false`/unset is the kill.
-  callConfirmationEstimateLink: process.env.GATE_CALL_CONFIRMATION_ESTIMATE_LINK === 'true',
+  // the owner approves the wording; `false`/unset is the kill, read at
+  // call time through gateEnvValue (GH codex #3814 r1 P1).
+  callConfirmationEstimateLink: gateEnvValue('GATE_CALL_CONFIRMATION_ESTIMATE_LINK'),
 
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
