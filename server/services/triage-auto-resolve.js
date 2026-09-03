@@ -982,7 +982,7 @@ function visitAtOnFileAddress(item, visit, places) {
 // existed — the historical backlog) gets NO booking evidence: without the
 // requested service there is nothing to prove a booking answered, and a
 // reprocess could have re-classified the call. Those cards stay for humans.
-function bookingCoversRequest(item, mine, { multiProperty, places }) {
+function bookingCoversRequest(item, mine, { singleProperty, places }) {
   const categories = requestedServiceTokens(item);
   if (!categories.length) return false;
   const parents = mine.filter((v) => !v.parent_service_id && strictlyAfter(v.created_at, item.created_at));
@@ -1010,7 +1010,7 @@ function bookingCoversRequest(item, mine, { multiProperty, places }) {
   };
   const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id) && inAsk(v) && bookingAtRequestedAddress(item, v, places));
   let pool = direct;
-  if (!multiProperty && requestedAddressIsOnFile(item) && window) {
+  if (singleProperty && requestedAddressIsOnFile(item) && window) {
     pool = pool.concat(parents.filter((v) => inAsk(v) && visitAtOnFileAddress(item, v, places)));
   }
   return categories.every((tokens) => pool.some((v) => serviceTypeMatches(`${v.service_type || ''} ${v.service_category_snapshot || ''}`, tokens)));
@@ -1039,7 +1039,11 @@ async function loadVisitEvidence(conn, items, flag) {
     places.set(String(r.id), { customer_id: r.customer_id, key: addressKey(r.address_line1), unit: unitOf(r.address_line1, r.address_line2), city: r.city, zip: r.zip });
     activeCount.set(String(r.customer_id), (activeCount.get(String(r.customer_id)) || 0) + 1);
   }
-  const multiProperty = (customerId) => (activeCount.get(String(customerId)) || 0) > 1;
+  // The association and address arms need EXACTLY one active property —
+  // an account with none (a legacy row whose only address is the customers
+  // column) proves as little about WHICH address as one with several
+  // (pre-push hook P1 on 12f3c751c).
+  const singleProperty = (customerId) => (activeCount.get(String(customerId)) || 0) === 1;
 
   // Positive allowlist: a live booking is one that is still going to happen
   // or did happen. cancelled / rescheduled / skipped / no_show rows prove
@@ -1063,10 +1067,10 @@ async function loadVisitEvidence(conn, items, flag) {
   for (const item of visitItems) {
     const mine = visitsByCustomer.get(String(item.call_customer_id)) || [];
     if (needsBooking(item)
-      && bookingCoversRequest(item, mine, { multiProperty: multiProperty(item.call_customer_id), places })) {
+      && bookingCoversRequest(item, mine, { singleProperty: singleProperty(item.call_customer_id), places })) {
       flag(item.id, 'booking_after_card');
     }
-    if (ADDRESS_MOOT_CODES.has(item.reason_code) && !multiProperty(item.call_customer_id)) {
+    if (ADDRESS_MOOT_CODES.has(item.reason_code) && singleProperty(item.call_customer_id)) {
       // Address cards: a visit COMPLETED after the card, positively at the
       // on-file address, for a single-property customer. The classifier
       // adds the heard-address ↔ on-file match.
