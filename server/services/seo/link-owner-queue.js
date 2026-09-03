@@ -250,7 +250,8 @@ async function listOwnerQueue(db) {
   const freshPayment = (p) => {
     const d = domainById.get(p.domain_id);
     const path = pathById.get(p.path_id) || null;
-    if (!path || path.id !== d.best_path_id) return false;
+    // a LEASED card cannot be the primary: its click is the lease 409 and every unleased sibling would defer to it
+    if (p.claimed_at || !path || path.id !== d.best_path_id) return false;
     const ctx = { path, domain: d, policy, score: d.score };
     return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && whyNotApprovable(r, path) === null && whyNotHere(p, r) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null, heldDomain.has(d.id)).reason);
   };
@@ -279,7 +280,8 @@ async function listOwnerQueue(db) {
     const shared = Boolean(path && path.fee_scope === 'account_wide' && p.payment_group_id);
     const ctx = onBestPath ? { path, domain: d, policy, score: d.score } : null;
     const mine = rows.filter((r) => r.prospect_id === p.id).map((r) => {
-      let whyNot = onBestPath ? (whyNotApprovable(r, path) || whyNotHere(p, r)) : 'placement is not on the domain\'s current best path — the nightly bridge rotates it';
+      // the lease is the click's first refusal — a leased card never shows a button that can only 409
+      let whyNot = onBestPath ? (whyNotApprovable(r, path) || whyNotHere(p, r) || (p.claimed_at ? 'leased to a worker — refresh after it reports' : null)) : 'placement is not on the domain\'s current best path — the nightly bridge rotates it';
       // the same freshness test the click applies — a stale stamp never shows a button that can only 409, and an
       // APPROVED row whose inputs moved since (price, policy, revision) is shown as awaiting the bridge's re-decision
       // rather than as live spending authority (the bridge invalidates it on its next pass)

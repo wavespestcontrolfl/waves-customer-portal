@@ -357,6 +357,24 @@ describe('approveRow', () => {
     expect(rows(db).find((x) => x.prospect_id === staleP.id).approval_id).toBeUndefined();
   });
 
+  test('account-wide fee: a LEASED sibling that sorts first never carries the button — the primary is an unleased card', async () => {
+    const { db } = await parked({ make: paidPath, path: { fee_scope: 'account_wide' } });
+    const sorted = [...placements(db)].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    Object.assign(sorted[0], { claimed_at: NOW, claimed_by: 'hermes' }); // the lowest id is leased
+    const { cards } = await Q.listOwnerQueue(db);
+    const primaries = cards.filter((c) => c.rows.some((r) => r.dimension === 'payment' && r.approvable));
+    expect(primaries).toHaveLength(1);
+    expect(primaries[0].placement.id).toBe(sorted[1].id);
+    // the leased card shows the lease, not a button
+    expect(cards.find((c) => c.placement.id === sorted[0].id).rows.every((r) => r.approvable === false && /leased to a worker/.test(r.why_not))).toBe(true);
+    // one approval covers the unleased siblings — the leased one is not attached
+    expect(primaries[0].rows.find((r) => r.dimension === 'payment').shared_fee).toEqual({ group_id: sorted[0].payment_group_id, placements: N - 1 });
+    const pay = openRows(db, 'payment').find((r) => r.prospect_id === sorted[1].id);
+    const r = await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: 4500, now: LATER, bridge: inline });
+    expect(r.attached).toHaveLength(N - 1);
+    expect(rows(db).find((x) => x.prospect_id === sorted[0].id && x.dimension === 'payment').approval_id).toBeUndefined();
+  });
+
   test('account-wide fee: a stale-path or in-flight sibling with an equal hash never inherits the approval', async () => {
     const { db, p } = await parked({ make: paidPath, path: { fee_scope: 'account_wide' } });
     const groupId = placements(db)[0].payment_group_id;
