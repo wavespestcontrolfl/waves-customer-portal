@@ -2813,10 +2813,12 @@ function OutreachApprovals({ canRun, onChange }) {
     const id = p.id;
     setBusyId(id); setMsg(null);
     // the acknowledged match travels with the click (§13): the server sends only when the lookup still yields it
-    const body = acks[id] && p.recipient_review?.lookup_hash ? { reviewed_lookup_hash: p.recipient_review.lookup_hash } : {};
+    // the acknowledgement is bound to the hash it was given for: a reloaded card with a new match starts unacknowledged
+    const ackKey = `${id}:${p.recipient_review?.lookup_hash || ""}`;
+    const body = acks[ackKey] && p.recipient_review?.lookup_hash ? { reviewed_lookup_hash: p.recipient_review.lookup_hash } : {};
     const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/send`, body);
     setMsg({ ok, text: ok ? "Outreach sent." : (OUTREACH_CODE_MSG[r.code] || r.error || "Send failed.") });
-    if (!ok && r.code === "recipient_review_required") setAcks((prev) => ({ ...prev, [id]: false })); // the reload below shows the current match
+    if (!ok && r.code === "recipient_review_required") setAcks((prev) => ({ ...prev, [ackKey]: false })); // the reload below shows the current match
     setBusyId(null); refresh();
   };
   const reconcile = async (id, outcome) => {
@@ -2873,11 +2875,11 @@ function OutreachApprovals({ canRun, onChange }) {
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 4, whiteSpace: "pre-wrap", maxHeight: 84, overflow: "hidden" }}>{p.outreach_body}</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
                   <DraftReviewLine review={p.draft_review} />
-                  <RecipientReview review={p.recipient_review} acked={acks[p.id]} disabled={busyId === p.id} onAck={(v) => setAcks({ ...acks, [p.id]: v })} />
+                  <RecipientReview review={p.recipient_review} acked={acks[`${p.id}:${p.recipient_review?.lookup_hash || ""}`]} disabled={busyId === p.id} onAck={(v) => setAcks({ ...acks, [`${p.id}:${p.recipient_review?.lookup_hash || ""}`]: v })} />
                 </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
-                <button onClick={() => send(p)} disabled={!canRun || busyId === p.id || p.recipient_review?.kind === "customer" || (p.recipient_review?.kind === "ambiguous" && !acks[p.id])} style={outreachBtn(D.teal, true, busyId === p.id || p.recipient_review?.kind === "customer" || (p.recipient_review?.kind === "ambiguous" && !acks[p.id]))}>
+                <button onClick={() => send(p)} disabled={!canRun || busyId === p.id || p.recipient_review?.kind === "customer" || (p.recipient_review?.kind === "ambiguous" && !acks[`${p.id}:${p.recipient_review?.lookup_hash || ""}`])} style={outreachBtn(D.teal, true, busyId === p.id || p.recipient_review?.kind === "customer" || (p.recipient_review?.kind === "ambiguous" && !acks[`${p.id}:${p.recipient_review?.lookup_hash || ""}`]))}>
                   {busyId === p.id ? "Sending…" : "Approve & send"}
                 </button>
                 <button onClick={() => setEditing(p)} disabled={busyId === p.id} style={outreachBtn(D.teal, false)}>Edit</button>
@@ -3552,7 +3554,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     setBusy(row.id);
     setError(null);
     setResult(null);
-    const body = acks[row.id] && row.draft?.recipient_review?.lookup_hash ? { reviewed_lookup_hash: row.draft.recipient_review.lookup_hash } : {};
+    const ackKey = `${row.id}:${row.draft?.recipient_review?.lookup_hash || ""}`; // bound to the hash it was given for
+    const body = acks[ackKey] && row.draft?.recipient_review?.lookup_hash ? { reviewed_lookup_hash: row.draft.recipient_review.lookup_hash } : {};
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/send`, { method: "POST", body });
       setResult({ tone: D.green, text: `Sent the pitch to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}` });
@@ -3562,7 +3565,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       // the match changed under the card (or the lookup now yields one): drop the stale acknowledgement and reload so
       // the owner reviews the CURRENT match — the server sends only against the hash it just computed
       if (e?.code === "recipient_review_required" || e?.code === "customer_recipient" || e?.code === "recipient_changed") {
-        setAcks((prev) => ({ ...prev, [row.id]: false }));
+        setAcks((prev) => ({ ...prev, [ackKey]: false }));
         await load();
       }
     } finally {
@@ -3732,9 +3735,9 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                                 <div style={{ color: D.muted, whiteSpace: "pre-wrap", maxHeight: 84, overflow: "hidden" }}>{r.draft?.body || ""}</div>
                               </div>
                               <DraftReviewLine review={r.draft?.review} />
-                              <RecipientReview review={r.draft?.recipient_review} acked={acks[r.id]} disabled={rowBusy} onAck={(v) => setAcks({ ...acks, [r.id]: v })} />
+                              <RecipientReview review={r.draft?.recipient_review} acked={acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]} disabled={rowBusy} onAck={(v) => setAcks({ ...acks, [`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]: v })} />
                               <span>
-                                <button onClick={() => send(c, r)} disabled={rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[r.id])} style={btn(rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[r.id]), D.green)}>
+                                <button onClick={() => send(c, r)} disabled={rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`])} style={btn(rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]), D.green)}>
                                   {rowBusy ? "Sending…" : "Send the pitch"}
                                 </button>
                               </span>
