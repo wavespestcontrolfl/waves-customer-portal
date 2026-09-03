@@ -574,6 +574,16 @@ describe('Google Business review sync', () => {
     const untagged = await run(rowErr);
     expect(untagged.sideEffectError).toBe(rowErr.message);
     expect(untagged.systemicError).toBeUndefined();
+    // DNS / route failures are connection-wide too (codex r7 P1): a host that
+    // does not resolve or route fails every row the same way.
+    for (const dead of [
+      Object.assign(new Error('getaddrinfo ENOTFOUND postgres.railway.internal'), { code: 'ENOTFOUND' }),
+      Object.assign(new Error('connect ENETUNREACH 10.0.0.5:5432'), { code: 'ENETUNREACH' }),
+      new Error('getaddrinfo EAI_AGAIN postgres.railway.internal'),
+    ]) {
+      const tagged = await run(dead);
+      expect(tagged.systemicError).toBe(dead);
+    }
 
     // Self-catching helpers resolve a marker: the ORIGINAL error is what gets
     // classified (pre-push audit on codex r5 P1) — for both the suppression

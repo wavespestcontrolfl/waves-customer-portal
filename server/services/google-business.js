@@ -38,16 +38,18 @@ const GBP_ROW_FAILURE_BREAKER = 3;
 function isSystemicDbFailure(err) {
   const code = String((err && err.code) || '');
   // Node socket codes ride in err.code too (ECONNRESET / ECONNREFUSED /
-  // ETIMEDOUT / EPIPE) and Knex's pool timeout is a KnexTimeoutError —
-  // classify those before any SQLSTATE test, or they read as row errors.
-  if (/^E(CONNRESET|CONNREFUSED|TIMEDOUT|PIPE|HOSTUNREACH|AI_AGAIN)$/i.test(code)) return true;
+  // ETIMEDOUT / EPIPE, plus the DNS and route failures ENOTFOUND /
+  // ENETUNREACH / EAI_* — codex r7 P1) and Knex's pool timeout is a
+  // KnexTimeoutError — classify those before any SQLSTATE test, or they
+  // read as row errors.
+  if (/^E(CONNRESET|CONNREFUSED|TIMEDOUT|PIPE|HOSTUNREACH|NETUNREACH|NETDOWN|NOTFOUND|AI_AGAIN|AI_NONAME|AI_FAIL)$/i.test(code)) return true;
   if (String((err && err.name) || '') === 'KnexTimeoutError') return true;
   // 57014 (query_canceled) is what statement_timeout raises under database
   // overload — every row would wait the full timeout under the location
   // lock, the exact crawl the breaker exists to stop (codex r3 P1).
   if (/^(08|53)/.test(code) || /^57P0[123]$/.test(code) || code === '57014') return true;
   if (/^\d{5}$/.test(code)) return false; // any other SQLSTATE is about the statement/row
-  return /timeout acquiring a connection|econnreset|econnrefused|etimedout|connection terminated|socket hang up/i.test(String((err && err.message) || ''));
+  return /timeout acquiring a connection|econnreset|econnrefused|etimedout|enotfound|enetunreach|getaddrinfo|connection terminated|socket hang up/i.test(String((err && err.message) || ''));
 }
 
 function sameReviewerAndTime(row, reviewerName, createdAt, maxDriftMs = 24 * 60 * 60 * 1000) {
