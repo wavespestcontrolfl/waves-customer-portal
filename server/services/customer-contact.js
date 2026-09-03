@@ -360,6 +360,7 @@ module.exports = {
   SERVICE_CONTACT_COLUMNS,
   firstNameFrom,
   getPrimaryContact,
+  samePhone,
   getServiceContact,
   getServiceContactSmsRecipient,
   getServiceContactSlots,
