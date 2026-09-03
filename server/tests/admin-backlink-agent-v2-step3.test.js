@@ -208,7 +208,7 @@ describe('PATCH /registry/:id', () => {
     expect(mockState.updates).toHaveLength(0);
   });
   test('watch sets watching + a recheck date; reject/reopen clear it', async () => {
-    mockState.firstDomain = { id: 'd1', domain: 'a.com', agent_state: 'qualified' };
+    mockState.firstDomain = { id: 'd1', domain: 'a.com', agent_state: 'investigating' }; // pre-bridge: the plain registry action (a qualified domain's Reject / Watch is the audited Owner-queue decision — step 4b routes test)
     const w = await call(patch(), { params: { id: 'd1' }, body: { action: 'watch' } });
     expect(w.body.agent_state).toBe('watching');
     expect(mockState.updates[0].patch.agent_state).toBe('watching');

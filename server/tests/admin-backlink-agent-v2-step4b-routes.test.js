@@ -131,6 +131,7 @@ describe('the owner clicks', () => {
 
 describe('PATCH /registry/:id after the shared-writer extraction', () => {
   test('watch: watching + 30-day recheck + coverage reset; lane-owned ⇒ 409; unknown action ⇒ 400', async () => {
+    mockState.domains[0].agent_state = 'investigating'; // pre-bridge: nothing to audit, the plain registry action
     const r = await run('patch', '/registry/:id', { params: { id: 'd1' }, body: { action: 'watch' } });
     expect(r.statusCode).toBe(200);
     expect(r.body).toMatchObject({ id: 'd1', agent_state: 'watching' });
@@ -145,11 +146,28 @@ describe('PATCH /registry/:id after the shared-writer extraction', () => {
   });
 
   test('reject stamps the owner as the rejecter; reopen clears the marker and the backoff', async () => {
+    mockState.domains[0].agent_state = 'investigating';
     await run('patch', '/registry/:id', { params: { id: 'd1' }, body: { action: 'reject' } });
     expect(mockState.domains[0]).toMatchObject({ agent_state: 'rejected', rejected_by: 'owner' });
     expect(mockState.sourceUpdates).toHaveLength(0);
     await run('patch', '/registry/:id', { params: { id: 'd1' }, body: { action: 'reopen' } });
     expect(mockState.domains[0]).toMatchObject({ agent_state: 'investigating', rejected_by: null, investigate_after: null, investigate_failures: 0, investigate_claim_token: null, probe_coverage_mask: 0 });
     expect(mockState.sourceUpdates).toHaveLength(1);
+  });
+
+  test('reject / watch on a bridge-decided domain are the Owner-queue decision: decideDomain with the actor, its refusal status passed through; reopen stays the plain action', async () => {
+    const r = await run('patch', '/registry/:id', { params: { id: 'd1' }, body: { action: 'reject', note: 'spammy' } }); // d1 = qualified
+    expect(Q.decideDomain).toHaveBeenCalledWith(expect.anything(), { domainId: 'd1', decision: 'rejected', actor: 'Adam', note: 'spammy' });
+    expect(r.body).toMatchObject({ id: 'd1', domain: 'example.org', agent_state: 'rejected', audited: 1 });
+    expect(mockState.updates).toHaveLength(0); // the service wrote it, not the state-only path
+    await run('patch', '/registry/:id', { params: { id: 'd1' }, body: { action: 'watch' } });
+    expect(Q.decideDomain).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ decision: 'watch', note: null }));
+    Q.decideDomain.mockRejectedValueOnce(new Q.OwnerQueueError(409, 'lane-owned'));
+    const refused = await run('patch', '/registry/:id', { params: { id: 'd1' }, body: { action: 'reject' } });
+    expect(refused.statusCode).toBe(409);
+    Q.decideDomain.mockClear();
+    await run('patch', '/registry/:id', { params: { id: 'd1' }, body: { action: 'reopen' } });
+    expect(Q.decideDomain).not.toHaveBeenCalled();
+    expect(mockState.domains[0].agent_state).toBe('investigating');
   });
 });

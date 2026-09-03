@@ -203,8 +203,19 @@ async function listOwnerQueue(db) {
   const byId = [...cardsFor].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   for (const p of byId) if (p.payment_group_id && !groupPrimary.has(p.payment_group_id) && freshPayment(p)) groupPrimary.set(p.payment_group_id, p.id);
   for (const p of byId) if (p.payment_group_id && !groupPrimary.has(p.payment_group_id)) groupPrimary.set(p.payment_group_id, p.id);
-  const groupSize = new Map();
-  for (const p of cardsFor) if (p.payment_group_id) groupSize.set(p.payment_group_id, (groupSize.get(p.payment_group_id) || 0) + 1);
+  // what ONE approval from the primary covers: the siblings the click attaches to (unleased cards on the same path whose
+  // payment row matches the primary's revision, level, key and hash and is not yet approved) — never the raw group
+  // size, which would count a stale-path or leased sibling the approval will not reach
+  const coveredByGroup = new Map();
+  for (const [groupId, primaryId] of groupPrimary) {
+    const p = cardsFor.find((x) => x.id === primaryId);
+    const d = domainById.get(p.domain_id);
+    const path = pathById.get(p.path_id) || pathById.get(d.best_path_id) || null;
+    const lead = path ? rows.find((r) => r.prospect_id === p.id && r.dimension === 'payment' && !r.satisfied_at) : null;
+    const attachable = (s) => s.payment_group_id === groupId && s.path_id === path.id && !s.claimed_at
+      && rows.some((r) => r.prospect_id === s.id && r.dimension === 'payment' && r.instance_key === lead.instance_key && r.level === lead.level && r.decision_inputs_hash === lead.decision_inputs_hash && Number(r.path_revision) === Number(lead.path_revision) && !r.satisfied_at && !r.approved);
+    coveredByGroup.set(groupId, lead ? cardsFor.filter((s) => s.id === p.id || attachable(s)).length : 1);
+  }
 
   const cards = cardsFor.map((p) => {
     const d = domainById.get(p.domain_id);
@@ -228,8 +239,8 @@ async function listOwnerQueue(db) {
         // the quote THIS row authorizes: a renewal instance is the renewal price, never the initial fee; null fails closed
         quote_cents: r.dimension === 'payment' && path ? (actionFor(r) === 'renewal' ? (Number.isSafeInteger(path.renewal_cost_cents) && path.renewal_cost_cents > 0 ? path.renewal_cost_cents : null) : (Number.isSafeInteger(path.estimated_cost_cents) && path.estimated_cost_cents > 0 ? path.estimated_cost_cents : null)) : null,
         approvable: whyNot === null && primary,
-        why_not: whyNot || (primary ? null : `one approval covers the ${groupSize.get(p.payment_group_id)} locations sharing this fee — approve it on the first card`),
-        shared_fee: sharedFee ? { group_id: p.payment_group_id, placements: groupSize.get(p.payment_group_id) } : null,
+        why_not: whyNot || (primary ? null : `one approval covers the ${coveredByGroup.get(p.payment_group_id)} locations sharing this fee — approve it on the first card`),
+        shared_fee: sharedFee ? { group_id: p.payment_group_id, placements: coveredByGroup.get(p.payment_group_id) } : null,
       };
     });
     return {
@@ -385,9 +396,19 @@ async function decideDomain(db, { domainId, decision, actor, note = null, now = 
     const approvals = [];
     for (const r of audited) {
       const path = pathById.get(r.path_id);
-      const snapshot = path ? { ...P.decisionInputs(r.dimension, { path, domain, policy, score: domain.score, instanceKey: r.instance_key }), ...(path.legal_attestation === true ? { legal_terms_url: legalTermsUrlOf(path) } : {}) } : { dimension: r.dimension, instance_key: r.instance_key };
+      // the audit record describes ONE context: hash, revision and snapshot are all taken from the live path / domain /
+      // policy the owner decided under. When the card's stamp differs (inputs moved after it parked), the card's stamp
+      // is kept inside the snapshot so the record still names the authority row it answers; `authority` stays the
+      // level the card offered — the one the owner declined.
+      const ctx = path ? { path, domain, policy, score: domain.score, instanceKey: r.instance_key } : null;
+      const hash = ctx ? P.decisionInputsHash(r.dimension, ctx) : r.decision_inputs_hash;
+      const revision = path ? pathRevisionFor(path, r.dimension) : r.path_revision;
+      const moved = hash !== r.decision_inputs_hash || Number(revision) !== Number(r.path_revision);
+      const snapshot = ctx
+        ? { ...P.decisionInputs(r.dimension, ctx), ...(path.legal_attestation === true ? { legal_terms_url: legalTermsUrlOf(path) } : {}), ...(moved ? { card: { decision_inputs_hash: r.decision_inputs_hash, path_revision: r.path_revision } } : {}) }
+        : { dimension: r.dimension, instance_key: r.instance_key };
       const [a] = await trx('seo_link_approvals').insert({
-        prospect_id: r.prospect_id, path_id: r.path_id, path_revision: r.path_revision, decision_inputs_hash: r.decision_inputs_hash,
+        prospect_id: r.prospect_id, path_id: r.path_id, path_revision: revision, decision_inputs_hash: hash,
         money_action: r.dimension === 'payment', decision, authority: r.level, approved_amount_cents: null, max_payable_cents: null,
         terms_snapshot: { ...snapshot, ...(note ? { note: String(note).slice(0, 2000) } : {}) },
         dimension: r.dimension, action: actionFor(r), instance_key: r.instance_key, action_hash: null,

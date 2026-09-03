@@ -283,6 +283,9 @@ describe('approveRow', () => {
     expect(primaries[0].path.on_best_path).toBe(true);
     const stale = cards.find((c) => c.placement.id === staleP.id).rows.find((r) => r.dimension === 'payment');
     expect(stale).toMatchObject({ approvable: false, why_not: expect.stringMatching(/not on the domain/) });
+    // the card says what ONE approval covers — the siblings the click attaches to, not the raw group size
+    expect(primaries[0].rows.find((r) => r.dimension === 'payment').shared_fee).toEqual({ group_id: groupId, placements: N });
+    expect(cards.find((c) => c.placement.id !== staleP.id && c.placement.id !== primaries[0].placement.id).rows.find((r) => r.dimension === 'payment').why_not).toMatch(new RegExp(`covers the ${N} locations`));
     // the approval from the fresh primary attaches to the fresh siblings and skips the stale one
     const pay = openRows(db, 'payment').find((r) => r.prospect_id === primaries[0].placement.id);
     const r = await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: 4500, now: LATER, bridge: inline });
@@ -459,6 +462,24 @@ describe('decideDomain (Reject / Watch)', () => {
     await nightly(db, { now: LATER });
     expect((await Q.listOwnerQueue(db)).cards).toHaveLength(WAVES_LOCATIONS.length);
     expect(rows(db).filter((x) => !x.ended_at)).toHaveLength(before.length);
+  });
+
+  test('a rejection audited after the inputs moved stamps hash, revision and snapshot from one live context and keeps the card\'s stamp inside', async () => {
+    const { db, d } = await parked();
+    const before = openRows(db)[0];
+    storedPath(db).revision_execution = Number(storedPath(db).revision_execution) + 1;
+    storedPath(db).confidence = '0.90';
+    await Q.decideDomain(db, { domainId: d.id, decision: 'rejected', actor: ACTOR, now: LATER });
+    const a = approvals(db).find((x) => x.prospect_id === before.prospect_id);
+    const live = P.decisionInputsHash('execution', { path: storedPath(db), domain: storedDomain(db), policy: P.normalizePolicyRow(null), score: storedDomain(db).score, instanceKey: before.instance_key });
+    expect(a).toMatchObject({ decision: 'rejected', authority: before.level, decision_inputs_hash: live, path_revision: Number(before.path_revision) + 1 });
+    expect(a.terms_snapshot).toMatchObject({ floors: expect.objectContaining({ confidence: 0.9 }), card: { decision_inputs_hash: before.decision_inputs_hash, path_revision: before.path_revision } });
+    expect(a.terms_snapshot.card.decision_inputs_hash).not.toBe(live);
+    // unmoved inputs: the stamps equal the card's and no card stamp is repeated
+    const { db: db2, d: d2 } = await parked();
+    await Q.decideDomain(db2, { domainId: d2.id, decision: 'rejected', actor: ACTOR, now: NOW });
+    expect(approvals(db2)[0]).toMatchObject({ decision_inputs_hash: openRows(db2)[0].decision_inputs_hash, path_revision: openRows(db2)[0].path_revision });
+    expect(approvals(db2)[0].terms_snapshot.card).toBeUndefined();
   });
 
   test('watch: watching + a 30-day recheck, audit rows decision=watch', async () => {
