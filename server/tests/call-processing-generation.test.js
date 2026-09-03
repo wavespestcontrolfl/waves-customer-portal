@@ -625,7 +625,8 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // The customer DECLINE carries the hold predicate on its UPDATE too, and its guard answers the
     // accept path's 409; the legacy SSR renderer checks the hold beside the linkage markers (codex r4 P1).
     const pub = src('../routes/estimate-public.js');
-    expect((pub.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(1);
+    // decline + the five CAS whole-blob mutations (select-tier, bond, interior, service mix, preferences).
+    expect((pub.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(6);
     expect(pub).toContain("return { ok: false, status: 409, error: 'This estimate is being re-priced — please try again in a few minutes' };");
     expect(pub.indexOf('|| estimateLinkageInvalidated(estimate)\n      // A clarify re-price hold (isEstimateCustomerViewable parity)')).toBeGreaterThan(-1);
     expect(route).toContain("update({ status: 'send_failed', last_send_error: 'reprice_pending', scheduled_at: null, updated_at: db.fn.now() })");

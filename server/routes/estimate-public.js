@@ -528,6 +528,9 @@ function isEstimateAskAnswerable(estimate = {}, now = new Date()) {
   // would keep answering questions about — and disclosing — the wrong
   // lead's estimate content.
   if (estimateLinkageInvalidated(estimate)) return false;
+  // Same for a clarify re-price hold: the held row is off the customer
+  // surface, so its ask token answers nothing about it either.
+  if (require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
@@ -14029,6 +14032,10 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+      // marker off) a held row — the ms-truncated CAS below does not exclude
+      // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -14322,6 +14329,10 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+      // marker off) a held row — the ms-truncated CAS below does not exclude
+      // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       // Compare-and-swap on the read snapshot (pre-push P0): any concurrent
       // write — an accept, a preference toggle, another bond switch — makes
       // this update 0-row and the caller reloads server truth. Millisecond
@@ -14584,6 +14595,10 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+      // marker off) a held row — the ms-truncated CAS below does not exclude
+      // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -15368,6 +15383,10 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
         .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+        // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+        // marker off) a held row — the ms-truncated CAS below does not exclude
+        // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+        .whereRaw(REPRICE_PENDING_ABSENT_SQL)
         // Same ms-truncated CAS as the bond/interior writes: any concurrent
         // write — an accept, a preference toggle, another opt-out — makes this
         // a zero-row update and the caller reloads server truth.
@@ -15593,6 +15612,10 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+      // marker off) a held row — the ms-truncated CAS below does not exclude
+      // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -18125,6 +18148,12 @@ function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   // marker lands — accepting wrong-lead content creates the money-bearing
   // terminal state the deferred-invalidation finalizer must then preserve.
   if (estimateLinkageInvalidated(estimate)) return false;
+  // A clarify re-price hold: the row is off the customer surface, so no
+  // public mutation (tier / bond / interior / preferences / service mix)
+  // may run on it either — their whole-blob writes would otherwise erase
+  // the marker (pre-push codex P0 on #3804). Accept refuses it again under
+  // its locked read.
+  if (require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   // An unpublished estimate (draft / scheduled-but-not-yet-sent) must never be
   // acceptable through the public link. The legacy server-HTML page short-

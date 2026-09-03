@@ -75,6 +75,13 @@ describe('isEstimateAcceptActive — unpublished/expiry hardening', () => {
     expect(isEstimateAcceptActive({ status: 'declined', expires_at: FUTURE })).toBe(false);
   });
 
+  it('rejects a row under a clarify re-price hold — no public mutation may run on (or overwrite the marker off) a held row (pre-push codex P0 on #3804)', () => {
+    const held = JSON.stringify({ estimatorEngine: { reprice_pending_at: '2026-09-03T12:00:00Z', reprice_attempt: 'att-1' } });
+    expect(isEstimateAcceptActive({ status: 'sent', expires_at: FUTURE, estimate_data: held })).toBe(false);
+    expect(isEstimateAcceptActive({ status: 'sending', expires_at: null, estimate_data: held })).toBe(false);
+    expect(isEstimateAcceptActive({ status: 'sent', expires_at: FUTURE, estimate_data: JSON.stringify({ estimatorEngine: {} }) })).toBe(true);
+  });
+
   it('rejects linkage-invalidated rows — pending marker alone blocks acceptance (PR #3304 r23)', () => {
     const pending = JSON.stringify({ estimatorEngine: { invalidation_pending_at: FUTURE } });
     expect(isEstimateAcceptActive({ status: 'sent', expires_at: FUTURE, estimate_data: pending })).toBe(false);

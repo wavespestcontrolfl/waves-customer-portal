@@ -561,7 +561,12 @@ generic 404 as an unknown token, and the two writes refuse with 409
 `{ error: 'This estimate is being re-priced — please try again in a few
 minutes' }` — `/accept` inside its locked read, `/decline` at the
 guard AND on the UPDATE's own predicate (a hold landing between the two
-parks the decline on that 409, never a stale 'declined' terminal). A
+parks the decline on that 409, never a stale 'declined' terminal); the
+pricing mutations (`/select-tier`, `/bond`, `/interior-service`,
+`/service-opt-out`, `/preferences`) and the ask endpoint treat a held
+row as not accept-active / not answerable at the pre-read, and the five
+mutations predicate their whole-blob writes on the marker's absence, so
+none of them can overwrite the hold off the row. A
 group's held siblings are skipped at preflight, claim and publication;
 a held ANCHOR parks as `send_failed`. No enumeration signal: the hold
 is unobservable from outside beyond the accept/decline 409, which a held
