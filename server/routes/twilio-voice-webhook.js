@@ -159,6 +159,277 @@ function maskSid(sid) {
   return `${value.slice(0, 2)}…${value.slice(-6)}`;
 }
 
+// ── Recording-callback idempotency ─────────────────────────────────────────
+// Twilio delivers /recording-status at least once, not exactly once: a retry
+// after a webhook timeout (the 2026-08-29 pool-exhaustion 502s), and the
+// ring-first flow's SECOND recording (outer <Dial record> + inner voicemail
+// <Record> share one CallSid). Applying every delivery as a blind overwrite
+// desynchronised rows: a retry reset transcription_status to 'pending' on a
+// row whose transcript was already complete, and a second recording landing
+// after processing swapped recording_url out from under the transcript and
+// extraction that were built from the first one — with processRecording
+// then skipping the row as already_processed, nothing ever reconciled it.
+//
+// Pure decision, exported for tests. `row` is the call_log row the callback
+// resolved to; `incoming` is the callback's recording.
+//   attach    — the row has no recording yet: store it (first delivery).
+//   duplicate — same RecordingSid again: touch nothing, still schedule the
+//               (claim-fenced, idempotent) processing attempt.
+//   replace   — a DIFFERENT recording on a row nothing has finished on:
+//               last-wins as before (the voicemail recording superseding the
+//               short dial-leg recording is the normal ring-first order), the
+//               superseded recording is kept in metadata, and the row's
+//               processing_status is reset to NULL in the same write so the
+//               sweep re-runs it on the new audio (voicemail/spam rows would
+//               otherwise never re-enter the sweep with a transcript present).
+//   park      — a different recording on a row that is being processed or
+//               already finished: never overwrite the recording the transcript
+//               came from. Kept in metadata.additional_recordings and surfaced
+//               for review; the office adopts it deliberately.
+function isPanQuarantinedRow(row) {
+  const raw = row?.transcription_metadata;
+  try {
+    const meta = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+    return String(meta?.pan_detected) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+// Statuses under which the recording on the row is load-bearing: a pass is
+// reading it right now, or the transcript/extraction/lead were built from it
+// and no automatic pass will ever run again. Every OTHER status (NULL,
+// pending, voicemail, spam, no_transcription, extraction_failed) re-transcribes
+// from recording_url on its next pass, so a replacement stays consistent.
+// …and the finished downstream-failure states: extraction ran and cards,
+// leads or notifications may already exist for that audio, so a different
+// recording is parked for a deliberate decision, never swapped in and
+// auto-reprocessed.
+const RECORDING_LOAD_BEARING_STATUSES = new Set(['processing', 'processed', 'customer_creation_failed', 'lead_creation_failed']);
+// The attach/replace write re-checks the same set IN the statement (a pass
+// can land any of them between the read and the write). Built from the set
+// so the decision and the fence can never name different statuses.
+const NOT_LOAD_BEARING_SQL = `(processing_status IS NULL OR processing_status NOT IN (${[...RECORDING_LOAD_BEARING_STATUSES].map((s) => `'${s}'`).join(', ')}))`;
+
+function listedRecordingReason(metadata, sid) {
+  try {
+    const m = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
+    const has = (list) => (Array.isArray(m[list]) ? m[list] : []).some((e) => e && e.recording_sid === sid);
+    if (has('superseded_recordings')) return 'already_superseded';
+    if (has('additional_recordings')) return 'already_parked';
+    return null;
+  } catch { return null; }
+}
+
+function decideRecordingAttach(row, incoming) {
+  const currentSid = row?.recording_sid || null;
+  const currentUrl = String(row?.recording_url || '').trim();
+  if (currentSid && incoming?.recording_sid && currentSid === incoming.recording_sid) {
+    return { action: 'duplicate' };
+  }
+  // A retry of a recording this row already SUPERSEDED or PARKED is a
+  // duplicate too: matched only against the current SID, REC1's retry after
+  // REC2 replaced it would replace REC2 back (and process the older audio)
+  // or park REC1 with a spurious card.
+  const listed = incoming?.recording_sid ? listedRecordingReason(row?.metadata, incoming.recording_sid) : null;
+  if (listed) return { action: 'duplicate', reason: listed };
+  // A pass in flight, or one that finished, on a row with NO recording yet
+  // (a PAN-masked transcript pass, a manual Process on a cached Twilio
+  // transcript) is load-bearing too: installing the first recording under
+  // it would let that pass finalize as processed without ever transcribing
+  // the audio, and the retry would then skip it as already_processed.
+  const status = row?.processing_status == null ? null : String(row.processing_status);
+  if (RECORDING_LOAD_BEARING_STATUSES.has(status)) {
+    return { action: 'park', reason: `processing_status_${status}` };
+  }
+  if (!currentSid && !currentUrl) return { action: 'attach' };
+  return {
+    action: 'replace',
+    superseded: {
+      recording_sid: currentSid,
+      recording_url: currentUrl || null,
+      recording_duration_seconds: row?.recording_duration_seconds ?? null,
+    },
+  };
+}
+
+// ── Call-status monotonicity ──────────────────────────────────────────────
+// Twilio's status callbacks are not ordered: an outbound call registers
+// initiated/ringing/answered/completed, and a retried or delayed 'ringing'
+// arriving after 'completed' must not roll a finished call back to ringing —
+// recoverMissingRecentRecordings and the unrecorded-call watchdog only look at
+// status='completed' rows, so a downgraded row silently leaves their sweep.
+const TERMINAL_CALL_STATUSES = new Set(['completed', 'busy', 'failed', 'no-answer', 'canceled']);
+
+function nextCallStatus(existingStatus, incomingStatus) {
+  if (!incomingStatus) return existingStatus || null;
+  // `completed` is absorbing: a call that connected stays completed however
+  // late a busy/failed/no-answer callback for one of its legs arrives. An
+  // unsuccessful terminal may still advance to completed.
+  if (existingStatus === 'completed') return existingStatus;
+  if (TERMINAL_CALL_STATUSES.has(existingStatus) && !TERMINAL_CALL_STATUSES.has(incomingStatus)) {
+    return existingStatus;
+  }
+  return incomingStatus;
+}
+
+// ── Built-in transcription precedence ─────────────────────────────────────
+// The voicemail <Record transcribe> fires /transcription with Twilio's rough
+// built-in text, usually a minute or two after the recording — often AFTER
+// the processor has already written the diarized OpenAI transcript the
+// extraction ran on. Letting the late built-in text overwrite that swapped
+// the displayed transcript for one the extraction never saw. The built-in
+// text is a fallback: it fills an empty row, or replaces its own earlier
+// copy, and never displaces a provider transcript.
+function builtinTranscriptMayReplace(row) {
+  if (!row) return false;
+  if (!row.transcription) return true;
+  const provider = row.transcription_provider ? String(row.transcription_provider) : null;
+  return !provider || provider === 'twilio_builtin';
+}
+
+// A second recording that arrived while the row's recording was load-bearing
+// (decideRecordingAttach → park). Nothing is lost: the recording rides in
+// metadata.additional_recordings, and an advisory Needs Review card names it
+// so the office can listen and adopt it deliberately (the adopt-recording
+// admin action swaps it in and force-reprocesses). Idempotent per
+// RecordingSid: a retried callback does not append twice or file twice.
+// Carried by every write that would keep audio on the row — the attach
+// UPDATE and the park UPDATE alike — so a PAN stamp landing between the
+// handler's read and its write makes the write skip instead of storing
+// card audio on a quarantined call.
+const NOT_PAN_QUARANTINED_SQL = "(transcription_metadata IS NULL OR (transcription_metadata::jsonb ->> 'pan_detected') IS DISTINCT FROM 'true')";
+
+async function parkAdditionalRecording(row, extra) {
+  const entry = {
+    recording_sid: extra.recording_sid || null,
+    recording_url: extra.recording_url || null,
+    recording_duration_seconds: extra.recording_duration_seconds ?? null,
+    received_at: new Date().toISOString(),
+    parked_because: extra.reason || null,
+  };
+  const { buildTriageItem } = require('../services/call-routing-gates');
+  const card = () => buildTriageItem({
+    callLogId: row.id,
+    flag: 'additional_recording',
+    extraction: null,
+    severity: 'advisory',
+    extraPayload: {
+      recording_sid: entry.recording_sid,
+      recording_duration_seconds: entry.recording_duration_seconds,
+      parked_because: entry.parked_because,
+      kept_recording_sid: row.recording_sid || null,
+    },
+  });
+  // The park and its review card commit TOGETHER: a card insert that fails
+  // rolls the park back, the error reaches the handler, and the handler
+  // answers 500 so Twilio delivers the callback again — a parked recording
+  // with no card would otherwise be invisible to the office for good.
+  let appended = 0;
+  await db.transaction(async (trx) => {
+    appended = await trx('call_log')
+      .where({ id: row.id })
+      .whereRaw(NOT_PAN_QUARANTINED_SQL)
+      // Append only when this RecordingSid is not already parked — a retry
+      // of the same callback must not grow the list.
+      .whereRaw(
+        "NOT COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) @> ?::jsonb",
+        [JSON.stringify([{ recording_sid: entry.recording_sid }])],
+      )
+      // …and never when it is the row's CURRENT recording: a retry decided
+      // "already parked" on a read an operator's adoption (or a later
+      // callback's replace) has since overtaken would otherwise re-park the
+      // active recording and file a spurious adoption card for it (Codex
+      // #3736 r12 P2). The fence is in the write, where the race is.
+      .whereRaw('recording_sid IS DISTINCT FROM ?', [entry.recording_sid])
+      .update({
+        metadata: trx.raw(
+          "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}',"
+          + " COALESCE(metadata -> 'additional_recordings', '[]'::jsonb) || ?::jsonb, true)",
+          [JSON.stringify([entry])],
+        ),
+      });
+    if (appended > 0) {
+      // The call is under review the moment its card exists: review_status
+      // is the aggregate the dashboard counts (AGENTS.md; Codex #3736 r15
+      // P2), set in the same transaction as the card.
+      await trx('call_log').where({ id: row.id }).update({ review_status: 'open' });
+      // One open card per call: a SECOND parked recording rides the open
+      // card's payload (parked_recording_sids) instead of vanishing behind
+      // the conflict target, so the office sees every recording it can adopt.
+      await trx('triage_items')
+        .insert(card())
+        .onConflict(trx.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
+        .merge({
+          payload: trx.raw(
+            "jsonb_set(COALESCE(triage_items.payload, '{}'::jsonb), '{parked_recording_sids}',"
+            + " (SELECT COALESCE(jsonb_agg(DISTINCT v), '[]'::jsonb) FROM (SELECT e AS v FROM jsonb_array_elements(COALESCE(triage_items.payload -> 'parked_recording_sids', '[]'::jsonb)) e"
+            + " UNION SELECT to_jsonb(triage_items.payload ->> 'recording_sid') WHERE triage_items.payload ->> 'recording_sid' IS NOT NULL UNION SELECT to_jsonb(?::text)) u), true)",
+            [entry.recording_sid],
+          ),
+        });
+    }
+  }).catch((err) => {
+    err.parkFailed = true;
+    throw err;
+  });
+  if (appended === 0) {
+    // Either a retry of an already-parked RecordingSid or a PAN stamp that
+    // landed after the handler read the row. A quarantined call never keeps
+    // audio, parked or attached: delete the incoming recording at Twilio
+    // instead of parking it, and file no card for audio that no longer
+    // exists. A plain retry files nothing either — the card was filed with
+    // the first delivery, and re-filing would reopen one the office already
+    // resolved by adopting or dismissing the recording.
+    const now = await db('call_log').where({ id: row.id }).first('transcription_metadata', 'recording_sid');
+    if (isPanQuarantinedRow(now)) {
+      logger.warn(`[recording-status] recording ${maskSid(entry.recording_sid)} for ${maskSid(row.twilio_call_sid)} arrived as the call was PAN-quarantined — deleting instead of parking`);
+      const processor = require('../services/call-recording-processor');
+      // The incoming recording first (its failure state must be saved), then
+      // the row as it is — its CURRENT recording, the audio the card may
+      // have been heard on, and every parked one.
+      await processor.quarantineCardRecording(
+        { ...row, recording_sid: entry.recording_sid, recording_url: entry.recording_url },
+        { source: 'recording_status_post_quarantine_park' },
+      ).catch((e) => logger.error(`[recording-status] post-quarantine parked recording delete failed: ${e.message}`));
+      await processor.quarantineCardRecording(row, { source: 'recording_status_post_quarantine_park' })
+        .catch((e) => logger.error(`[recording-status] post-quarantine current recording delete failed: ${e.message}`));
+      return { parked: false, quarantined: true };
+    }
+    // The SID became the row's current recording between the read and the
+    // write (adopted, or made current by a competing callback): it is not
+    // parked and must not get a card — the row already carries it.
+    if (now?.recording_sid && now.recording_sid === entry.recording_sid) {
+      return { parked: false, quarantined: false, duplicate: true, reason: 'now_current' };
+    }
+    // A retry of an already-parked SID files nothing — UNLESS the first
+    // delivery's card insert failed after the park landed: with no card in
+    // ANY status the parked recording is invisible to the office, and the
+    // carrier's retry is the durable second chance to file it. A card that
+    // exists (open, or resolved by adopting / dismissing) is left alone.
+    const anyCard = await db('triage_items')
+      .where({ call_log_id: row.id, reason_code: 'additional_recording' })
+      .first('id')
+      .catch(() => null);
+    if (anyCard) return { parked: false, quarantined: false, duplicate: true };
+    // Parked earlier with no card at all (a pre-transaction row): file it.
+    // A failure here is the same failure as a rolled-back park — the
+    // recording is parked with no card — and gets the same 500 so Twilio
+    // delivers the callback again.
+    await db.transaction(async (trx) => {
+      await trx('triage_items')
+        .insert(card())
+        .onConflict(trx.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
+        .ignore();
+      // The recovered card opens the call for review like a first-delivery
+      // park does (hook P1 on r15): the aggregate the dashboard counts.
+      await trx('call_log').where({ id: row.id }).update({ review_status: 'open' });
+    }).catch((err) => { err.parkFailed = true; throw err; });
+    return { parked: false, quarantined: false, duplicate: true, cardFiled: true };
+  }
+  return { parked: true, quarantined: false };
+}
+
 function sanitizeVoiceProviderError(value) {
   return String(value || '')
     .replace(/https:\/\/lookups\.twilio\.com\/v2\/PhoneNumbers\/[^?\s)]+/gi, 'https://lookups.twilio.com/v2/PhoneNumbers/[phone]')
@@ -846,7 +1117,7 @@ router.post('/voice', async (req, res) => {
       logger.info(`[twilio-voice] Duplicate inbound voice ${maskSid(CallSid)} — routing only, skipped re-logging`);
     }
 
-    logger.info(`Inbound call: ${maskPhone(From)} -> ${maskPhone(To)} (${maskSid(CallSid)}) customer=${customer?.first_name || 'unknown'}`);
+    logger.info(`Inbound call: ${maskPhone(From)} -> ${maskPhone(To)} (${maskSid(CallSid)}) customer=${customer ? 'known' : 'unknown'}`);
 
     // Build TwiML response — this webhook IS production inbound routing:
     // all 25 Waves numbers point their voice_url here (verified against
@@ -1079,7 +1350,7 @@ router.post('/call-complete', async (req, res) => {
       });
     }
 
-    logger.info(`Call complete: ${CallSid} status=${status} duration=${duration}s`);
+    logger.info(`Call complete: ${maskSid(CallSid)} status=${status} duration=${duration}s`);
 
     // If no answer, play Waves custom voicemail greeting + record.
     //
@@ -1358,26 +1629,199 @@ router.post('/recording-status', async (req, res) => {
         this.whereNull('transcription_metadata')
           .orWhereRaw("(transcription_metadata::jsonb ->> 'pan_detected') IS DISTINCT FROM 'true'");
       };
+      // Resolve the row FIRST (parent preferred, child fallback) so the
+      // attach is decided against what the row already holds — see
+      // decideRecordingAttach. The guarded UPDATE below still carries the
+      // quarantine predicate and a recording_sid fence, so a stamp or a
+      // competing delivery landing between this read and the write makes
+      // the write skip instead of overwriting.
+      const ATTACH_COLUMNS = [
+        'id', 'twilio_call_sid', 'recording_sid', 'recording_url', 'recording_duration_seconds',
+        'processing_status', 'transcription_metadata', 'metadata',
+      ];
+      let targetRow = null;
+      if (ParentCallSid) {
+        targetRow = await db('call_log').where('twilio_call_sid', ParentCallSid).first(...ATTACH_COLUMNS);
+      }
+      if (!targetRow) {
+        targetRow = await db('call_log').where('twilio_call_sid', CallSid).first(...ATTACH_COLUMNS);
+      }
       let updated = 0;
       let matchedSid = null;
-      if (ParentCallSid) {
-        updated = await db('call_log')
-          .where('twilio_call_sid', ParentCallSid)
+      let attach = null;
+      // A duplicate delivery for a row in a SETTLED state schedules no pass
+      // (Codex #3736 r15 P1): the non-force dedup guard skips only
+      // 'processed', so a Twilio at-least-once retry of a parked SID would
+      // re-run extraction — customer, lead, booking, messaging work — on a
+      // voicemail / spam / *_failed row that was deliberately left there.
+      // Only a row still awaiting a pass gets the duplicate-recovery attempt.
+      const RETRYABLE_STATUSES = new Set([null, 'extraction_failed', 'no_transcription']);
+      let duplicateOfSettledRow = false;
+      // Decide against what the row holds, write with that decision fenced
+      // in, and if the fence refused (a competing callback attached first,
+      // or a pass claimed the row after the read) re-read and decide AGAIN
+      // against the row as it is now. Two rounds cover one interleaving;
+      // whatever still cannot be written is parked, so a RecordingSid is
+      // never dropped on the floor — Twilio gets a 200 and will not retry.
+      const park = async (row, reason) => {
+        const outcome = await parkAdditionalRecording(row, {
+          recording_sid: RecordingSid,
+          recording_url: recordingData.recording_url,
+          recording_duration_seconds: recordingData.recording_duration_seconds,
+          reason,
+        });
+        if (!outcome.parked) return;
+        logger.warn(`[recording-status] recording ${maskSid(RecordingSid)} for ${maskSid(row.twilio_call_sid)} parked for review (${reason}) — recording_url kept`);
+      };
+      for (let round = 0; round < 2 && targetRow && !isPanQuarantinedRow(targetRow); round += 1) {
+        attach = decideRecordingAttach(targetRow, { recording_sid: RecordingSid });
+        if (attach.action === 'duplicate') {
+          // Exactly-once for the row: nothing to write. The processing
+          // attempt below is still scheduled — it is claim-fenced and skips
+          // an already-processed row, and it is what recovers a first
+          // delivery whose in-memory timers a deploy wiped. A retry of a
+          // PARKED recording still goes through the park path: it writes
+          // nothing new but files the review card if the first delivery
+          // lost it.
+          if (attach.reason === 'already_parked') await park(targetRow, 'retry');
+          duplicateOfSettledRow = !RETRYABLE_STATUSES.has(targetRow.processing_status || null);
+          matchedSid = targetRow.twilio_call_sid;
+          logger.info(`[recording-status] duplicate delivery of ${maskSid(RecordingSid)} for ${maskSid(matchedSid)} — row untouched`);
+          break;
+        }
+        if (attach.action === 'park') {
+          await park(targetRow, attach.reason);
+          break;
+        }
+        const write = { ...recordingData };
+        if (attach.action === 'replace') {
+          // The row's transcript/extraction (if any) describe the OLD
+          // audio. Reset processing_status atomically with the swap so the
+          // restart-safe sweep re-runs the call on the new recording even
+          // if the in-memory timer below is lost to a deploy: the sweep's
+          // fresh branch is `processing_status IS NULL`, and it never
+          // re-enters voicemail/spam rows that still carry a transcript.
+          write.processing_status = null;
+          // …and the retry budget: extraction_attempts counted failures on
+          // the OLD audio, and the sweep's cap would otherwise refuse the
+          // new recording after a single transient error (Codex #3736 r11).
+          write.extraction_attempts = 0;
+          // The transcript, its structure and its provider describe the OLD
+          // audio: cleared with the swap, or a transcription failure on the
+          // new audio would fall back to them and finish the call with the
+          // new recording and the old words. PAN stamps (transcription_
+          // metadata) are left alone — they are durable by contract.
+          write.transcription = null;
+          write.transcript_structured = null;
+          write.transcription_provider = null;
+          // …and everything derived from that transcript: a deferred or
+          // failed reprocess must not leave the old call's identity, service
+          // and synopsis rendered beside the new audio.
+          Object.assign(write, {
+          // A rejected-transcript row was parked as 'voicemail' by
+          // transcriptRejectionUpdate — answered_by/call_outcome stamped from
+          // the audio being discarded here, and the next pass reads either
+          // as deterministic voicemail evidence and cannot reclassify the
+          // replacement as a live call (Codex #3736 r6 P1). Clear them only
+          // when they came with a rejected transcript; Twilio's own dial-
+          // completion stamps (no rejection) stay.
+          answered_by: db.raw("CASE WHEN transcription_status = 'rejected' AND answered_by = 'voicemail' THEN NULL ELSE answered_by END"),
+          call_outcome: db.raw("CASE WHEN transcription_status = 'rejected' AND call_outcome = 'voicemail' THEN NULL ELSE call_outcome END"),
+          ai_extraction: null,
+          ai_extraction_enriched: null,
+          ai_extraction_validation_errors: null,
+          v2_extraction_status: null,
+          call_summary: null,
+          lead_synopsis: null,
+          sentiment: null,
+          lead_quality: null,
+          // The routing audit on the row was derived from the discarded
+          // audio too; the replacement pass writes its own, and its route
+          // decision is a new row keyed on the new recording (r7 P1).
+          ai_validation: null,
+          ai_address_validation: null,
+          // …and the recording-derived disposition (spam_discarded,
+          // callback_task_created…): a deferred or failed replacement pass
+          // would otherwise leave the new audio wearing the old terminal
+          // outcome to every consumer (Codex #3736 r17 P2).
+          disposition: null, });
+          // Last-wins as before, but the superseded recording is kept: the
+          // dial-leg recording a voicemail replaced is still evidence.
+          write.metadata = db.raw(
+            "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{superseded_recordings}',"
+            + " COALESCE(metadata -> 'superseded_recordings', '[]'::jsonb) || ?::jsonb, true)",
+            [JSON.stringify([{ ...attach.superseded, superseded_at: new Date().toISOString(), superseded_by: RecordingSid || null }])],
+          );
+        }
+        const baseline = targetRow;
+        // A failed attach/replace transaction (a deadlock, a transient
+        // error in the swap or the card retirement) must reach the handler's
+        // catch as a redelivery request (Codex #3736 r16 P1): a 200 would
+        // tell Twilio the SID was stored while it is stored nowhere, and the
+        // recovery sweep cannot find it (the row still has its old URL).
+        updated = await db.transaction(async (trx) => {
+        const n = await trx('call_log')
+          .where({ id: baseline.id })
           .where(notQuarantined)
-          .update(recordingData);
-        if (updated > 0) matchedSid = ParentCallSid;
-      }
-      if (updated === 0) {
-        updated = await db('call_log')
-          .where('twilio_call_sid', CallSid)
-          .where(notQuarantined)
-          .update(recordingData);
-        if (updated > 0) matchedSid = CallSid;
+          // Fence on the recording this decision was made against.
+          .where(function recordingUnchanged() {
+            if (baseline.recording_sid) this.where('recording_sid', baseline.recording_sid);
+            else this.whereNull('recording_sid');
+          })
+          // Attach and replace are both decided on the status the row had
+          // when it was READ; a pass can claim it between that read and this
+          // write (and start transcribing the old audio, or finalize without
+          // the new audio). Re-checked in the write; zero rows re-decides.
+          .whereRaw(NOT_LOAD_BEARING_SQL)
+          .update(write);
+        // A replace retires the review cards the OLD audio raised (address,
+        // scheduling, email, routing): they describe a recording this call
+        // no longer has, and the re-run's ON CONFLICT DO NOTHING inserts
+        // would otherwise leave them actionable on stale evidence. The
+        // additional_recording card is about the recordings themselves and
+        // stays. Same transaction as the swap (Codex #3736 r10 P1).
+        // The cards in SUPERSEDE_KEPT_REASON_CODES stay (the unit question
+        // and the email-review cards close only on a human verdict — never
+        // because the audio changed; Codex #3764 r3 + r4 P1).
+        if (n > 0 && attach.action === 'replace') {
+          const { SUPERSEDE_KEPT_REASON_CODES } = require('../services/call-routing-gates');
+          const retired = await trx('triage_items')
+            .where({ call_log_id: baseline.id })
+            .whereNotIn('reason_code', SUPERSEDE_KEPT_REASON_CODES)
+            .whereIn('status', ['open', 'in_progress'])
+            .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Superseded: recording ${baseline.recording_sid || 'none'} replaced by ${RecordingSid}` });
+          // The review flag follows the cards (Codex #3736 r14 P2): with the
+          // old audio's cards retired and nothing else open, a row that was
+          // review-open (a V2-vetoed spam row, say) must not stay counted.
+          if (retired > 0) {
+            const stillOpen = await trx('triage_items')
+              .where({ call_log_id: baseline.id })
+              .whereIn('status', ['open', 'in_progress'])
+              .first('id');
+            if (!stillOpen) await trx('call_log').where({ id: baseline.id }).update({ review_status: null });
+          }
+        }
+        return n;
+        }).catch((err) => { err.attachFailed = true; throw err; });
+        if (updated > 0) {
+          matchedSid = baseline.twilio_call_sid;
+          break;
+        }
+        // Stale decision. Re-read and go round once more; on the second
+        // refusal, park rather than lose the recording.
+        const nowRow = await db('call_log').where({ id: baseline.id }).first(...ATTACH_COLUMNS);
+        if (!nowRow) break;
+        targetRow = nowRow;
+        if (isPanQuarantinedRow(nowRow)) break;
+        if (round === 1) {
+          attach = { action: 'park', reason: 'write_contended' };
+          await park(nowRow, attach.reason);
+        }
       }
 
       let quarantinedMatch = null;
       let stampedRaceRow = null;
-      if (updated === 0) {
+      if (updated === 0 && !matchedSid && attach?.action !== 'park') {
         quarantinedMatch = await db('call_log')
           .whereIn('twilio_call_sid', [ParentCallSid, CallSid].filter(Boolean))
           .whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
@@ -1385,7 +1829,7 @@ router.post('/recording-status', async (req, res) => {
       }
 
       if (updated > 0) {
-        logger.info(`Recording saved: ${matchedSid} → ${RecordingSid} (${RecordingDuration}s)`);
+        logger.info(`Recording saved: ${maskSid(matchedSid)} → ${maskSid(RecordingSid)} (${RecordingDuration}s)`);
         // A recording makes this the voicemail lane's call: retire any
         // missed-call bell already rung for it — unconditionally, not only
         // when the voicemail-callback alert fires (codex r6).
@@ -1393,7 +1837,8 @@ router.post('/recording-status', async (req, res) => {
           .catch((e) => logger.warn(`[recording-status] missed-call supersede failed for ${maskSid(matchedSid)}: ${e.message}`));
       } else if (quarantinedMatch) {
         logger.warn(`[recording-status] recording ${maskSid(RecordingSid)} arrived for PAN-quarantined call ${maskSid(quarantinedMatch.twilio_call_sid)} — deleting instead of attaching`);
-        await require('../services/call-recording-processor').quarantineCardRecording(
+        const qProcessorDelete = require('../services/call-recording-processor');
+        await qProcessorDelete.quarantineCardRecording(
           {
             ...quarantinedMatch,
             // The recording that JUST arrived is RecordingSid — preferring
@@ -1405,6 +1850,10 @@ router.post('/recording-status', async (req, res) => {
           },
           { source: 'recording_status_post_quarantine' },
         ).catch((e) => logger.error(`[recording-status] post-quarantine recording delete failed: ${e.message}`));
+        // …and the row's own recording plus every parked one (a 404 on an
+        // already-deleted one is a complete delete, never a retry).
+        await qProcessorDelete.quarantineCardRecording(quarantinedMatch, { source: 'recording_status_post_quarantine' })
+          .catch((e) => logger.error(`[recording-status] post-quarantine current recording delete failed: ${e.message}`));
         // The masked transcript is still a REAL transcript — extraction /
         // lead / appointment processing must run for this call (Codex #2676
         // round-9 P1). Processed IMMEDIATELY (round-11 P1): there is no CDN
@@ -1421,6 +1870,15 @@ router.post('/recording-status', async (req, res) => {
         } catch (e) {
           logger.error(`[recording-status] quarantined-transcript processing setup failed: ${e.message}`);
         }
+      } else if (matchedSid) {
+        // Duplicate delivery: the row already carries this recording. No
+        // Studio-recovery insert, no re-attach — only the idempotent
+        // processing attempt below.
+      } else if (attach?.action === 'park') {
+        // Handled above: the row keeps the recording its transcript came
+        // from and the office decides whether to adopt the new one. No
+        // orphan insert, no auto-processing of a recording the row does
+        // not carry.
       } else if (!ParentCallSid) {
         const primaryCallSid = CallSid;
         try {
@@ -1519,6 +1977,12 @@ router.post('/recording-status', async (req, res) => {
           },
           { source: 'recording_status_post_quarantine' },
         ).catch((e) => logger.error(`[recording-status] raced post-quarantine delete failed: ${e.message}`));
+        // …and the row's own recording plus every parked one, now — the
+        // first call records the row's current SID as owed but deletes only
+        // the just-arrived one; without this mirror of the quarantinedMatch
+        // path the current PAN-bearing audio waited for the recovery sweep.
+        await require('../services/call-recording-processor').quarantineCardRecording(stampedRaceRow, { source: 'recording_status_post_quarantine' })
+          .catch((e) => logger.error(`[recording-status] raced post-quarantine current recording delete failed: ${e.message}`));
         try {
           const rProcessor = require('../services/call-recording-processor');
           void rProcessor.processRecording(stampedRaceRow.twilio_call_sid)
@@ -1550,7 +2014,9 @@ router.post('/recording-status', async (req, res) => {
       // post-cutover call on 2026-07-28).
       if (matchedSid) {
         queueVoiceMessageSync(matchedSid);
-        try {
+        if (duplicateOfSettledRow) {
+          logger.info(`[recording-status] duplicate delivery for ${maskSid(matchedSid)} on a settled row — no pass scheduled`);
+        } else try {
           const processor = require('../services/call-recording-processor');
           const earlyDelayMs = Number(process.env.CALL_PROC_EARLY_PROCESS_DELAY_MS) || 2 * 60 * 1000;
           const fallbackDelayMs = 10 * 60 * 1000;
@@ -1585,7 +2051,10 @@ router.post('/recording-status', async (req, res) => {
     res.sendStatus(200);
   } catch (err) {
     logger.error(`Recording status webhook error: ${err.message}`);
-    res.sendStatus(200);
+    // A park that did not commit (its review card insert failed and rolled
+    // the park back) is the one failure Twilio must deliver again: a 200
+    // here would drop the recording for good.
+    res.sendStatus(err && (err.parkFailed || err.attachFailed) ? 500 : 200);
   }
 });
 
@@ -1617,37 +2086,91 @@ router.post('/transcription', async (req, res) => {
       // recording-status/recovery guards key on that stamp
       // (Codex #2676 round-10 P1).
       let targetRow = null;
+      const TRANSCRIPTION_COLUMNS = ['id', 'twilio_call_sid', 'recording_sid', 'transcription', 'transcription_provider', 'transcription_metadata'];
       if (ParentCallSid) {
-        targetRow = await db('call_log').where('twilio_call_sid', ParentCallSid).first('id', 'twilio_call_sid');
+        targetRow = await db('call_log').where('twilio_call_sid', ParentCallSid).first(...TRANSCRIPTION_COLUMNS);
       }
       if (!targetRow) {
-        targetRow = await db('call_log').where('twilio_call_sid', CallSid).first('id', 'twilio_call_sid');
+        targetRow = await db('call_log').where('twilio_call_sid', CallSid).first(...TRANSCRIPTION_COLUMNS);
       }
       let updated = 0;
       let matchedSid = null;
       if (targetRow) {
         const CallProc = require('../services/call-recording-processor');
-        const update = {
-          transcription: scrubbedTranscription,
-          transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
-          transcription_provider: 'twilio_builtin',
-          transcription_model: null,
-          transcription_metadata: JSON.stringify(await CallProc.withPanStamps(targetRow.id, {
-            provider: 'twilio_builtin',
-            source: 'twilio_transcription_webhook',
-            transcription_status: TranscriptionStatus || null,
-            transcript_chars: scrubbedTranscription.length,
-            recording_sid_present: !!RecordingSid,
-            // Detection stamped in the SAME write that persists the scrubbed
-            // text (round-12 P1): a crash before the best-effort quarantine
-            // below — or a concurrent /recording-status callback — must
-            // still see a durable pan_detected on the row.
-            ...(panScrub.count > 0 ? { pan_detected: true, pan_count: panScrub.count, quarantine_source: 'twilio_transcription_webhook_pending' } : {}),
-          })),
-          updated_at: new Date(),
-        };
-        updated = await db('call_log').where({ id: targetRow.id }).update(update);
-        if (updated > 0) matchedSid = targetRow.twilio_call_sid;
+        const panStamp = panScrub.count > 0
+          ? { pan_detected: true, pan_count: panScrub.count, quarantine_source: 'twilio_transcription_webhook_pending' }
+          : {};
+        // A built-in transcript belongs to ONE recording. Recording A's late
+        // callback after B replaced (or the office adopted) it must not put
+        // A's words on B's row — the swap cleared the transcript, so this
+        // text would land and a failed provider transcription of B would
+        // then fall back to it. Decided against the row as read and fenced
+        // in the write; the PAN stamp below still lands (A's audio is kept
+        // as evidence and its card number still quarantines).
+        const staleRecording = !!RecordingSid && !!targetRow.recording_sid && targetRow.recording_sid !== RecordingSid;
+        if (staleRecording) {
+          logger.info(`[transcription] built-in transcript for ${maskSid(targetRow.twilio_call_sid)} is for ${maskSid(RecordingSid)}, not the row's current recording — text kept out`);
+        }
+        if (!staleRecording && builtinTranscriptMayReplace(targetRow)) {
+          const update = {
+            transcription: scrubbedTranscription,
+            transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
+            transcription_provider: 'twilio_builtin',
+            transcription_model: null,
+            transcription_metadata: CallProc.transcriptionMetadataWrite({
+              provider: 'twilio_builtin',
+              source: 'twilio_transcription_webhook',
+              transcription_status: TranscriptionStatus || null,
+              transcript_chars: scrubbedTranscription.length,
+              recording_sid_present: !!RecordingSid,
+              // Detection stamped in the SAME write that persists the scrubbed
+              // text (round-12 P1): a crash before the best-effort quarantine
+              // below — or a concurrent /recording-status callback — must
+              // still see a durable pan_detected on the row.
+              ...panStamp,
+            }),
+            updated_at: new Date(),
+          };
+          // The precedence is re-checked IN the write: a provider transcript
+          // that landed between the read above and this update keeps its
+          // place (see builtinTranscriptMayReplace).
+          updated = await db('call_log')
+            .where({ id: targetRow.id })
+            .where(function builtinMayReplace() {
+              this.whereNull('transcription')
+                .orWhereNull('transcription_provider')
+                .orWhere('transcription_provider', 'twilio_builtin');
+            })
+            // …and still the recording this text describes (a swap landing
+            // between the read and this write makes it skip).
+            .where(function currentRecording() {
+              if (RecordingSid) this.whereNull('recording_sid').orWhere('recording_sid', RecordingSid);
+            })
+            .update(update);
+          if (updated > 0) matchedSid = targetRow.twilio_call_sid;
+        }
+        if (updated === 0) {
+          // A provider transcript is already on the row: the built-in text
+          // is not stored over it. A card number Twilio's text caught that
+          // the provider transcript did not still has to leave a durable
+          // detection stamp and quarantine the audio.
+          logger.info(`[transcription] built-in transcript for ${maskSid(targetRow.twilio_call_sid)} kept out — a provider transcript is already on the row`);
+          if (panScrub.count > 0) {
+            // Merge the detection stamp INTO the row's current metadata in
+            // SQL — never serialize the snapshot read above: the processor
+            // can write newer provider provenance between that read and
+            // this write, and a rebuilt blob would replace it (codex P1).
+            await db('call_log').where({ id: targetRow.id }).update({
+              transcription_metadata: db.raw(
+                "COALESCE(transcription_metadata, '{}'::jsonb) || ?::jsonb",
+                [JSON.stringify({ ...panStamp, builtin_pan_detected_after_provider_transcript: true })],
+              ),
+              updated_at: new Date(),
+            });
+            matchedSid = targetRow.twilio_call_sid;
+            updated = 1;
+          }
+        }
       }
 
       if (updated > 0) {
@@ -1663,15 +2186,21 @@ router.post('/transcription', async (req, res) => {
               // row — carry its own RecordingSid so the Twilio delete can
               // still identify the audio (Codex #2676 round-5 P1). The
               // /recording-status guard covers the reverse ordering.
-              await require('../services/call-recording-processor')
-                .quarantineCardRecording(
-                  // The audio that produced THIS PAN transcript is the
-                  // callback's RecordingSid — prefer it over a stale row SID
-                  // so a second recording is the one deleted immediately
-                  // (round-12 P1; mirrors the recording-status path).
-                  { ...callRow, recording_sid: RecordingSid || callRow.recording_sid || null },
+              const qProcessor = require('../services/call-recording-processor');
+              // The audio that produced THIS PAN transcript is the
+              // callback's RecordingSid — deleted first (round-12 P1) — and
+              // then the row AS IT IS: its current recording and every parked
+              // or superseded one (the same two steps as /recording-status).
+              // Overriding the row's SID alone deleted the callback's audio,
+              // cleared the current recording's URL and left that audio at
+              // Twilio with nothing owed.
+              if (RecordingSid && RecordingSid !== callRow.recording_sid) {
+                await qProcessor.quarantineCardRecording(
+                  { ...callRow, recording_sid: RecordingSid, recording_url: null },
                   { source: 'twilio_transcription_webhook' },
                 );
+              }
+              await qProcessor.quarantineCardRecording(callRow, { source: 'twilio_transcription_webhook' });
             }
           } catch (qErr) {
             logger.error(`[transcription] PAN quarantine failed for ${maskSid(matchedSid)}: ${qErr.message}`);
@@ -1845,9 +2374,24 @@ router.post('/call-status', async (req, res) => {
       const existing = await trx('call_log').where('twilio_call_sid', CallSid).first();
 
       if (existing) {
+        // Never roll a finished call back to an in-flight status on a late
+        // or retried non-terminal event (see nextCallStatus) — and when the
+        // status is retained, keep its duration too: a delayed busy/failed/
+        // ringing leg callback carries CallDuration "0" and would otherwise
+        // zero a completed call's real length (which drops it from the
+        // duration-gated recording sweeps).
+        const status = nextCallStatus(existing.status, CallStatus);
+        const incomingDuration = parseInt(CallDuration || 0) || 0;
+        // On a row that is already terminal the duration never decreases: a
+        // retried "completed" or a late leg callback can carry
+        // CallDuration "0" (a truthy string) and would otherwise zero the
+        // real length, dropping the call from the duration-gated sweeps.
+        const duration = TERMINAL_CALL_STATUSES.has(existing.status)
+          ? Math.max(Number(existing.duration_seconds) || 0, incomingDuration)
+          : (incomingDuration || Number(existing.duration_seconds) || 0);
         await trx('call_log').where('twilio_call_sid', CallSid).update({
-          status: CallStatus,
-          duration_seconds: parseInt(CallDuration || existing.duration_seconds || 0),
+          status,
+          duration_seconds: duration,
           updated_at: new Date(),
         });
         return;
@@ -1949,6 +2493,11 @@ router.post('/call-status', async (req, res) => {
 });
 
 router._test = {
+  decideRecordingAttach,
+  nextCallStatus,
+  builtinTranscriptMayReplace,
+  isPanQuarantinedRow,
+  TERMINAL_CALL_STATUSES,
   agentHandoffKind,
   appendAgentHandoff,
   languageVestibule,

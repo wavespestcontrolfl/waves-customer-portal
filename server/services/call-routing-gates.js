@@ -92,6 +92,7 @@ function buildRouteDecision({
   routingResult,
   action,
   mode = 'enforce',
+  recordingSid = null,
 }) {
   const scheduling = extraction?.scheduling || {};
   const confidence = extraction?.confidence || {};
@@ -100,6 +101,10 @@ function buildRouteDecision({
     call_log_id: callLogId,
     decision_version: V2_DECISION_VERSION,
     mode,
+    // The recording this decision was derived from is part of the audit
+    // key: a replaced recording's pass writes its OWN row instead of
+    // colliding with (and then updating) the discarded audio's decision.
+    recording_sid: recordingSid || '',
     validator_recommendation: routingResult?.allowed
       ? (scheduling.status === 'confirmed' ? 'auto_create_appointment' : 'upsert_customer_only')
       : 'needs_review',
@@ -270,6 +275,15 @@ function buildTriageItem({
     // call has NO extraction, so nothing downstream (lead/customer/route
     // decision) exists; this card is the only surface it gets.
     extraction_failed_permanent: 'service_unknown',
+    // A second Twilio recording arrived while the row's recording was
+    // load-bearing (a pass was reading it, or the call had finished) — the
+    // office listens and adopts it deliberately (twilio-voice-webhook
+    // parkAdditionalRecording; admin adopt-recording action).
+    additional_recording: 'service_unknown',
+    // The pass expected to mint a customer (named caller, phone, real
+    // prospect) and the insert did not land — same lane as its lead twin,
+    // and this card is the only surface the failure gets.
+    customer_creation_failed: 'customer_field_conflict',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;
@@ -367,7 +381,22 @@ function buildTriageItem({
   };
 }
 
+// Review cards that SURVIVE a recording swap (the webhook's replace and the
+// operator's adopt-recording retire the rest as superseded): the card about
+// the recordings themselves, the owed dispatch-blocking unit question (human
+// verdict only — AGENTS.md), and the email-review cards whose newest
+// resolved disposition the first-touch release gate reads as operator
+// approval and whose bounce read-back the owner owes (Codex #3764 r3 + r4).
+const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
+  'additional_recording',
+  'missing_unit_number',
+  'email_unverified',
+  'email_invalid',
+  'email_bounce_reverify',
+]);
+
 module.exports = {
+  SUPERSEDE_KEPT_REASON_CODES,
   computeAppointmentIdempotencyKey,
   computeAddressHash,
   checkTcpaConsent,

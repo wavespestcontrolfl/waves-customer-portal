@@ -728,6 +728,21 @@ describe('buildRouteDecision', () => {
     expect(decision.validator_recommendation).toBe('auto_create_appointment');
     expect(decision.final_action_taken).toBe('auto_route');
     expect(decision.mode).toBe('enforce');
+    // No recording given → the '' key member, never NULL (NULLs never
+    // collide in a unique index, which would defeat idempotency).
+    expect(decision.recording_sid).toBe('');
+  });
+
+  test('keys the decision on the recording it was derived from (codex #3736 gh-r7)', () => {
+    const decision = buildRouteDecision({
+      callLogId: 'test-id',
+      extraction: validV2Extraction(),
+      finalTriageFlags: [],
+      routingResult: { allowed: true },
+      action: 'auto_route',
+      recordingSid: 'RE' + '9'.repeat(32),
+    });
+    expect(decision.recording_sid).toBe('RE' + '9'.repeat(32));
   });
 
   test('builds route decision for triage', () => {
