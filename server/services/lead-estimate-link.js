@@ -27,6 +27,26 @@ function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase() || null;
 }
 
+// A public-quote repeat run inserts its own lead row as status 'duplicate'
+// with extracted_data.duplicate_of_lead_id naming the OPEN lead the customer
+// is actually in the pipeline as (routes/public-quote.js). 'duplicate' is a
+// CLOSED status here, so lifecycle events on the repeat run's estimate
+// (sent / viewed / accepted) would otherwise advance nothing and an accepted
+// rerun would credit no lead as won (pre-push P1 on #3834). This is the
+// trusted linkage path — the estimate token, not the public route, drives
+// it — and the link is followed one hop only; the caller still re-validates
+// the target (open, unlinked, contact matches the estimate) exactly as it
+// would the named lead.
+async function followDuplicateLink(database, lead) {
+  if (!lead || lead.status !== 'duplicate') return lead;
+  let data = lead.extracted_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  const originalId = data && data.duplicate_of_lead_id;
+  if (!originalId) return lead;
+  const original = await database('leads').where({ id: originalId }).first();
+  return original || lead;
+}
+
 function leadMatchesEstimateContact(lead, estimate) {
   if (!lead || !estimate) return false;
   if (lead.customer_id && estimate.customer_id) {
@@ -201,7 +221,7 @@ async function resolveEstimateEventLeads(database, estimateId, { originatingNotA
   //    open, not already linked to another estimate, and a genuine contact match.
   const dataLeadId = parseEstimateData(estimate.estimate_data)?.lead_id || null;
   if (dataLeadId) {
-    const lead = await database('leads').where({ id: dataLeadId }).first();
+    const lead = await followDuplicateLink(database, await database('leads').where({ id: dataLeadId }).first());
     if (
       lead
       && !lead.deleted_at
@@ -585,8 +605,25 @@ async function markLinkedLeadEstimateAccepted({
   //    convert that exact lead by id — precise, no sweeping.
   const dataLeadId = parseEstimateData(estimate.estimate_data)?.lead_id || null;
   if (dataLeadId) {
-    const lead = await database('leads').where({ id: dataLeadId }).first();
-    if (lead && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at) await convert(lead);
+    const named = await database('leads').where({ id: dataLeadId }).first();
+    const lead = await followDuplicateLink(database, named);
+    // An INDIRECTLY resolved original (via a duplicate marker) is validated
+    // like the send/view path validates the named lead: its contact must
+    // match the accepted estimate, it must not already belong to a different
+    // customer (markConverted would overwrite an unrelated lead's customer
+    // linkage — codex #3834 r2 P1), and it must not already be FK-linked to
+    // a DIFFERENT estimate (the office may have built and sent one for the
+    // original after the repeat was filed — converting it here would credit
+    // the win to that estimate and leave the accepted one unlinked, codex
+    // #3834 r4 P1). A named lead that is itself open converts as before.
+    const indirect = lead && named && lead.id !== named.id;
+    const eligible = lead && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at
+      && (!indirect || (
+        leadMatchesEstimateContact(lead, estimate)
+        && (!lead.customer_id || !customerId || lead.customer_id === customerId)
+        && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId))
+      ));
+    if (eligible) await convert(lead);
     return;
   }
 
