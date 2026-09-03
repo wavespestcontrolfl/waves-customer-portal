@@ -619,6 +619,20 @@ describe('re-decision', () => {
     expect(placements(db)[0]).toMatchObject({ path_id: old.id, status: 'contacted' });
     expect(domainState(db)).toBe('acquiring');
   });
+  test('a SENT conversation on the BEST path is still re-decided when the policy moves (pinning forbids path moves only)', async () => {
+    const { db, d, p } = scenario({ make: outreachPath, path: { account_required: true } }); // execution instance beside the communication one
+    const sent = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: d.id, path_id: p.id, status: 'contacted', outreach_status: 'sent', outreach_sent_at: EARLIER, link_type: 'resource', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(sent);
+    await run(db);
+    const exec = rows(db).find((x) => x.prospect_id === sent.id && x.dimension === 'execution');
+    expect([exec.level, Boolean(exec.satisfied_at)]).toEqual(['OWNER_ACCOUNT', false]);
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+    Object.assign(db._tables.seo_link_policy[0], { auto_account_creation: true, updated_at: new Date(NOW.getTime() + 1000) });
+    expect((await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(NOW.getTime() + 1000) })).map((x) => x.why)).toEqual(['stale']);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r.redecided).toBeGreaterThanOrEqual(1);
+    expect(rows(db).find((x) => x.id === exec.id).level).toBe('AUTO_ACCOUNT');
+  });
   test('the park compare-and-swap includes the outreach state: a send that started after the snapshot is never parked under it', async () => {
     const { db, d, p } = scenario({ make: outreachPath });
     const pl = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: d.id, path_id: p.id, status: 'prospect', outreach_status: 'drafted', link_type: 'resource', updated_at: EARLIER };

@@ -96,13 +96,16 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     const mine = all.filter((p) => expected.includes(p.location_key));
     const offShapeOpen = all.some((p) => !expected.includes(p.location_key) && (rowsByProspect.get(p.id) || []).some((r) => !r.satisfied_at));
     // a PINNED conversation (locked send state / sent stamp — the mover refuses it) is this domain's placement for its
-    // location wherever it sits: bridged in place, never a path-mismatch or rotation source until the lock releases
+    // location wherever it sits: bridged in place and never a path-mismatch source until the lock releases. On the
+    // best path it is decided like any other row (a policy / path / domain change still re-decides its open
+    // execution / payment instances before the post-send action); on another path it is frozen.
     const pinned = (p) => isOutreachLocked(p);
+    const frozen = (p) => pinned(p) && p.path_id !== d.best_path_id;
     const onBest = mine.filter((p) => p.path_id === d.best_path_id || pinned(p));
     const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), best ? ts(best.updated_at) : 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
     const staleRow = (r, p) => (best && rotationOutcome(r, best) !== null)
       || (!r.satisfied_at && (ts(r.decided_at) < cutoff || ts(r.decided_at) < ts(p.updated_at)));
-    const withRows = mine.filter((p) => rowsByProspect.has(p.id) && !pinned(p));
+    const withRows = mine.filter((p) => rowsByProspect.has(p.id) && !frozen(p));
     let why = null;
     if (forced.has(d.id)) why = 'forced';
     else if (BRIDGE_STATES.includes(d.agent_state) && expected.some((l) => !onBest.some((p) => p.location_key === l && rowsByProspect.has(p.id)))) why = 'unbridged';
