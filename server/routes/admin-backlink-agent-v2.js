@@ -309,6 +309,10 @@ const REGISTRY_JOBS = Object.freeze({
       .catch((err) => logger.error(`[link-investigator] admin run failed: ${err.message}`));
     return Promise.resolve({ started: true });
   },
+  // Step 4 (PR 2a): the authority bridge — decisions + parks only, no network,
+  // fast enough to run inline. Gated by GATE_LINK_AUTHORITY inside the service
+  // (reports `gated: true` when off); a held lease reports `skipped`.
+  authority: (opts) => require('../services/seo/link-authority-bridge').runAuthorityBridge(db, { dryRun: opts.dryRun, ...(opts.limit ? { limit: opts.limit } : {}) }),
 });
 router.post('/registry/jobs/:job', async (req, res, next) => {
   try {
