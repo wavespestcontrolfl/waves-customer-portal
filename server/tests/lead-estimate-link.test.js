@@ -291,6 +291,36 @@ describe('lead-estimate link service', () => {
     expect(database._updates).toEqual([{ id: 'lead-qw', patch: expect.objectContaining({ estimate_id: 'estimate-2' }) }]);
   });
 
+  test('a repeat-run duplicate lead named in estimate_data resolves to the OPEN original it duplicates and converts THAT lead', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2b', estimate_data: { lead_id: 'lead-dup' } },
+      leadsById: {
+        'lead-dup': { id: 'lead-dup', status: 'duplicate', customer_id: 'customer-1', extracted_data: JSON.stringify({ duplicate_of_lead_id: 'lead-orig' }) },
+        'lead-orig': { id: 'lead-orig', status: 'new', customer_id: 'customer-1' },
+      },
+    });
+
+    await markLinkedLeadEstimateAccepted({
+      estimateId: 'estimate-2b', customerId: 'customer-1', monthlyValue: 60, database,
+    });
+
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-orig', expect.objectContaining({ customerId: 'customer-1' }));
+    expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-dup', expect.anything());
+    expect(database._updates).toEqual([{ id: 'lead-orig', patch: expect.objectContaining({ estimate_id: 'estimate-2b' }) }]);
+  });
+
+  test('a duplicate lead whose original is gone stays closed (no conversion, no fallback sweep)', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2c', estimate_data: { lead_id: 'lead-dup2' } },
+      leadsById: { 'lead-dup2': { id: 'lead-dup2', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-missing' } } },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2c', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    expect(database._updates).toEqual([]);
+  });
+
   test('standalone estimate: rescues a single unlinked lead by contact and stamps the link', async () => {
     const database = makeAcceptDb({
       linked: [],

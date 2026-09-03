@@ -530,7 +530,7 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     // Every self-book link carries the lead trigger: non-pest/one-time
     // bookings seed no quarterly series, so /confirm's lead→won conversion
     // (`followUpRows.length > 0 || lead_id`) needs the param (Codex r2).
-    expect(source).toMatch(/bookingParams\.set\('lead', lifecycleLeadId\)/);
+    expect(source).toMatch(/bookingParams\.set\('lead', lead\.id\)/);
     // Recurring programs beyond pest/lawn/tree route to their own funnel
     // services; unmapped recurring shapes withhold the link instead of
     // falling through to Lawn Care (Codex r2).

@@ -1770,15 +1770,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }).returning(['id']);
       lead = rows[0];
     }
-    // Lifecycle identity (codex #3834 r1 P1): the draft estimate, the
-    // quote→book handoff, the booking text, and the lead_id handed back to
-    // the browser all follow the OPEN lead the customer is actually in the
-    // pipeline as. A repeat run's own row is a 'duplicate' marker only —
-    // sending/viewing/accepting the refreshed quote must advance and
-    // convert the original lead, not the closed duplicate.
-    const lifecycleLeadId = duplicateOfLeadId || lead.id;
-    {
-    }
 
     // Upsert a customers row so wizard-priced leads surface in /admin/customers
     // alongside the leads pipeline. Mirrors the lead-webhook precedent where
@@ -1920,11 +1911,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // so re-submits and pre-existing rows are safe).
       const attachedCallLead = ['voicemail', 'inbound_call'].includes(lead?.lead_type);
       if (attachedCallLead) {
-        await backfillCallLeadAttribution({ leadId: lifecycleLeadId, customerId, serviceInterest });
+        await backfillCallLeadAttribution({ leadId: lead.id, customerId, serviceInterest });
       } else if (channelAttr) {
         await db('ad_service_attribution').insert({
           customer_id: customerId,
-          lead_id: lifecycleLeadId,
+          lead_id: lead.id,
           service_line: inferServiceLine(serviceInterest),
           specific_service: inferSpecificService(serviceInterest),
           service_bucket: inferServiceBucket(serviceInterest),
@@ -2093,7 +2084,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     let draftEstimateId = null;
     try {
       const estimateDataObj = {
-        lead_id: lifecycleLeadId,
+        lead_id: lead.id,
         // setupFeeQuote is injected just before each write, decided under
         // the same transaction/row lock as the write — see applySetupFeeQuote.
         services,
@@ -2266,7 +2257,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
       const existingEst = await db('estimates')
         .where({ source: 'quote_wizard', status: 'draft' })
-        .whereRaw("estimate_data->>'lead_id' = ?", [lifecycleLeadId])
+        .whereRaw("estimate_data->>'lead_id' = ?", [lead.id])
         .first();
       // A refreshed wizard draft whose ADDRESS changed must drop its stale
       // property_id (codex #3504 r11): the draft row is reused across
@@ -2529,7 +2520,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // this param their bookings stranded the lead in new_lead (Codex
         // #2964 r2). Not an identity input — booking.js treats lead_id as a
         // conversion signal only.
-        bookingParams.set('lead', lifecycleLeadId);
+        bookingParams.set('lead', lead.id);
         // Quote→book handoff on EVERY self-book link (this builder already runs
         // only for self-bookable shapes — see the estimateBlocksSelfBookLink
         // gate above). The token is the customers-only gate pass
@@ -2550,7 +2541,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         }
         const longBookingUrl = `${PORTAL_BASE_URL}/book?${bookingParams.toString()}`;
         bookingUrl = await shortenOrPassthrough(longBookingUrl, {
-          kind: 'booking', entityType: 'leads', entityId: lifecycleLeadId,
+          kind: 'booking', entityType: 'leads', entityId: lead.id,
         });
         }
       } catch (e) {
@@ -2623,7 +2614,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           {
             workflow: 'public_quote',
             entity_type: 'lead',
-            entity_id: lifecycleLeadId,
+            entity_id: lead.id,
           },
         );
         if (!customerBody) {
@@ -2635,7 +2626,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             channel: 'sms',
             audience: 'lead',
             purpose: 'conversational',
-            leadId: lifecycleLeadId,
+            leadId: lead.id,
             identityTrustLevel: 'phone_provided_unverified',
             entryPoint: 'public_quote_booking_sms',
             metadata: {
@@ -2733,7 +2724,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
     if (quoteRequired) {
       return res.status(202).json({
-        lead_id: lifecycleLeadId,
+        lead_id: lead.id,
         quote_required: true,
         service: manualQuoteLine?.service || null,
         reason: quoteRequiredReason || 'commercial_property_manual_quote_required',
@@ -2755,7 +2746,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
 
     const response = {
-      lead_id: lifecycleLeadId,
+      lead_id: lead.id,
       monthly_total: Math.round(monthly * 100) / 100,
       annual_total: Math.round(annual),
       variance_low: Math.round(monthly * (1 - varianceBand)),
