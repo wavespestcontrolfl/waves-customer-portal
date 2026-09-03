@@ -416,6 +416,11 @@ function ServiceCardV2({
   const zoneColor =
     zoneColors?.[service.zone] || service.zoneColor || "#18181B";
   const status = service.status;
+  // Computed once: the owed row may be a completed SECONDARY behind a
+  // pending / in-flight primary (groupMultiServiceStops never requires equal
+  // statuses), so the resume action must not hang off the primary's status
+  // (pre-push Codex P1).
+  const owedMember = owedStopMember(service);
   const isLawn = detectServiceCategory(service.serviceType) === "lawn";
   const dimmed = status === "completed" || status === "skipped";
 
@@ -860,13 +865,14 @@ function ServiceCardV2({
             </div>{" "}
           </>
         )}
-        {status === "completed" && owedStopMember(service) ? (
+        {owedMember ? (
           // The closeout is still owed (resume marker / status-only
           // completion): the card must offer the resume, not just wear the
           // badge — same handler the mobile list and day grid route through
           // (pre-push Codex P1). On a consolidated stop the owed member may
-          // be a secondary row, so the action targets that row.
-          <Button size="sm" onClick={() => onComplete(owedStopMember(service))}>
+          // be a secondary row behind a not-yet-completed primary, so the
+          // gate and the action both use that row.
+          <Button size="sm" onClick={() => onComplete(owedMember)}>
             Resume Closeout
           </Button>
         ) : (
