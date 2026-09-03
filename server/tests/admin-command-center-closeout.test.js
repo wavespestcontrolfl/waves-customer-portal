@@ -116,7 +116,7 @@ test('money + comms facts render per-visit cards with their labels only behind G
   closeoutAlertsPrivate.memo.clear();
   getCloseoutStatus.mockResolvedValue(closeout({ facts: { invoiceDelivery: fact('failed', 'receipt_delivery_exhausted') } }));
   expect((await run()).filter((a) => moneyTypes.includes(a.type))).toEqual([
-    expect.objectContaining({ id: 'svc-1_invoice_delivery_incomplete', label: 'Invoice or receipt delivery incomplete', summary: expect.stringMatching(/failed after retries/) }),
+    expect.objectContaining({ id: 'svc-1_invoice_delivery_incomplete:receipt_delivery_exhausted', label: 'Invoice or receipt delivery incomplete', summary: expect.stringMatching(/failed after retries/) }),
   ]);
 });
 

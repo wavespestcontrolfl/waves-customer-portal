@@ -339,13 +339,23 @@ function moneyCommsIssues(facts) {
       || (delivery.state === 'pending' && ACTIONABLE_INVOICE_DELIVERY_PENDING.has(delivery.reason)));
   if (deliveryOpen) {
     const summary = delivery.reason === 'receipt_no_recipient'
-      ? 'Payment receipt could not be sent — no receipt recipient on file; add an email or mobile for this customer.'
+      // Adding a recipient does not retry the completed receipt job (GH
+      // r2 P2) — the operator resends from the invoice afterwards.
+      ? 'Payment receipt could not be sent — no receipt recipient on file; add an email or mobile for this customer, then resend the receipt from the invoice.'
       : delivery.reason === 'receipt_delivery_exhausted'
         ? 'Payment receipt delivery failed after retries.'
         : delivery.reason === 'paid_receipt_not_sent'
           ? 'Invoice is paid but no receipt was ever sent.'
           : 'Payer-billed invoice was never sent to the payer.';
-    issues.push({ type: CLOSEOUT_ALERT_TYPES.invoiceDelivery, fact: 'invoiceDelivery', reason: delivery.reason, summary });
+    // Reason-qualified identity (GH r2 P2): a dismissed paid-but-no-receipt
+    // card must not swallow a later exhausted delivery on the same invoice.
+    issues.push({
+      type: CLOSEOUT_ALERT_TYPES.invoiceDelivery,
+      fact: 'invoiceDelivery',
+      reason: delivery.reason,
+      identity: `${CLOSEOUT_ALERT_TYPES.invoiceDelivery}:${delivery.reason}`,
+      summary,
+    });
   }
   return issues;
 }

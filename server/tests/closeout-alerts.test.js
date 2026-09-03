@@ -142,14 +142,14 @@ describe('money + comms facts (GATE_CLOSEOUT_MONEY_COMMS_ALERTS)', () => {
   test('invoiceDelivery: failed + the two never-sent pendings alert; queue-owned, send-window, draft-unsent, no-invoice-yet, opt-out stay silent', () => {
     on();
     const cases = [
-      ['receipt_no_recipient', 'failed', /no receipt recipient/],
+      ['receipt_no_recipient', 'failed', /no receipt recipient.*then resend the receipt/],
       ['receipt_delivery_exhausted', 'failed', /failed after retries/],
       ['paid_receipt_not_sent', 'pending', /no receipt was ever sent/],
       ['payer_invoice_unsent', 'pending', /never sent to the payer/],
     ];
     for (const [reason, state, re] of cases) {
       expect(closeoutIssuesForVisit(money({ invoiceDelivery: fact(state, reason) }))).toEqual([
-        expect.objectContaining({ type: 'invoice_delivery_incomplete', fact: 'invoiceDelivery', reason, summary: expect.stringMatching(re) }),
+        expect.objectContaining({ type: 'invoice_delivery_incomplete', fact: 'invoiceDelivery', reason, identity: `invoice_delivery_incomplete:${reason}`, summary: expect.stringMatching(re) }),
       ]);
     }
     for (const f of [
