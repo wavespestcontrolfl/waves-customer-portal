@@ -204,11 +204,14 @@ describe('PATCH /registry/:id', () => {
     expect(mockState.touchWhereNotNull).toBe(0);
     const rj = await call(patch(), { params: { id: 'd1' }, body: { action: 'reject' } });
     expect(rj.body.agent_state).toBe('rejected');
+    expect(mockState.updates[1].patch.rejected_by).toBe('owner'); // the marker the authority bridge honours: only its OWN rejections lift
+    expect(mockState.updates[0].patch.rejected_by).toBeNull(); // watch clears it
     expect(mockState.updates[1].patch.watch_recheck_at).toBeNull();
     expect(mockState.updates[1].patch.probe_coverage_mask).toBeUndefined(); // reject leaves the mask alone
     expect(mockState.touchUpdates).toHaveLength(1); // reject releases no hint cursor
     const ro = await call(patch(), { params: { id: 'd1' }, body: { action: 'reopen' } });
     expect(ro.body.agent_state).toBe('investigating');
+    expect(mockState.updates[2].patch.rejected_by).toBeNull(); // reopen clears it
     // an explicit Reopen is a fresh mandate: the failure backoff is cleared (Codex PR r1 P2)
     expect(mockState.updates[2].patch.investigate_after).toBeNull();
     expect(mockState.updates[2].patch.investigate_failures).toBe(0);

@@ -362,6 +362,15 @@ describe('floors and waivers', () => {
     expect(rows(db).every((x) => x.level === 'AUTO_FREE')).toBe(true);
     expect(domainState(db)).toBe('rejected'); // the owner's ruling stands until Acquire anyway (a waiver)
   });
+  test('the owner\'s Reject on a domain the bridge had already rejected stands — the marker, not the DENY signature, decides recovery', async () => {
+    const { db } = scenario({ domain: { spam_score: 30 } });
+    await run(db);
+    expect(db._tables.seo_link_domains[0]).toMatchObject({ agent_state: 'rejected', rejected_by: 'bridge' });
+    Object.assign(db._tables.seo_link_domains[0], { rejected_by: 'owner', spam_score: 2, updated_at: new Date(NOW.getTime() + 1000) }); // the registry Reject, then a re-scan
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r).toMatchObject({ redecided: WAVES_LOCATIONS.length, aggregateChanges: 0 });
+    expect(db._tables.seo_link_domains[0]).toMatchObject({ agent_state: 'rejected', rejected_by: 'owner' });
+  });
   test('INVALID (unenriched) stamps and sends the domain back to investigating', async () => {
     const { db } = scenario({ domain: { spam_score: null } });
     await run(db);
@@ -481,6 +490,72 @@ describe('re-decision', () => {
     const rowLock = db._raws.findIndex((x) => x === 'FOR UPDATE seo_link_domains');
     expect(advisory).toBeGreaterThanOrEqual(0);
     expect(rowLock).toBeGreaterThan(advisory);
+  });
+  test('a route the investigator disproved (best_path_id cleared) retires the open instances, invalidates their approvals and sends the domain back to investigating', async () => {
+    const { db, d, p } = scenario();
+    await run(db);
+    const row = rows(db)[0];
+    const approval = { id: uid(), prospect_id: row.prospect_id, path_id: p.id, decision: 'approved', authority: 'OWNER_FREE', dimension: 'execution', instance_key: row.instance_key, invalidated_at: null };
+    db._tables.seo_link_approvals.push(approval);
+    row.approval_id = approval.id;
+    Object.assign(db._tables.seo_link_domains[0], { best_path_id: null, updated_at: new Date(NOW.getTime() + 1000) }); // disproveGonePaths
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([{ id: d.id, domain: 'example.org', why: 'stale' }]);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r).toMatchObject({ decided: 1, ended: WAVES_LOCATIONS.length, invalidatedApprovals: 1, aggregateChanges: 1, placementsCreated: 0, errors: [] });
+    expect(rows(db).every((x) => x.ended_at && x.end_outcome === 'superseded')).toBe(true);
+    expect(approval.invalidated_at).toBeTruthy();
+    expect(domainState(db)).toBe('investigating');
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // converged
+  });
+  test('a settled payment on a placement outside the lane shape blocks a NEW in-shape placement (owner review, never a second payment instance)', async () => {
+    const { db, d } = scenario({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: 20000, currency: 'USD', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
+    const old = paidPath(d); // the signup-shape path this was paid under
+    db._tables.seo_link_acquisition_paths.push(old);
+    const paid = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: old.id, status: 'live', link_type: 'directory', payment_group_id: null, updated_at: EARLIER };
+    paid.payment_group_id = paid.id;
+    db._tables.seo_link_prospects.push(paid);
+    db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: paid.id, path_id: old.id, dimension: 'payment', instance_kind: '-', instance_key: '-:1', level: 'OWNER_PAYMENT', decision_inputs_hash: 'x', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: EARLIER, satisfied_reason: 'charged' });
+    const r = await run(db);
+    expect(r).toMatchObject({ decided: 0, placementsCreated: 0, rowsWritten: 0, parked: 0 });
+    expect(r.errors).toEqual([{ domain: 'example.org', skipped: expect.stringMatching(/settled payment on a placement outside the lane shape/) }]);
+    expect(placements(db)).toHaveLength(1);
+  });
+  test('a fee_scope change after payment activity never regroups: the keys stay, the unsatisfied payment instances park OWNER_INPUT_REQUIRED; without activity the regroup is automatic', async () => {
+    const { db } = scenario({ make: paidPath }); // per_location: each placement its own group
+    const stored = db._tables.seo_link_acquisition_paths[0];
+    await run(db);
+    const before = placements(db).map((x) => [x.id, x.payment_group_id]);
+    expect(before.every(([id, g]) => g === id)).toBe(true);
+    // account_wide with no purchase anywhere: automatic regroup onto the first placement's id
+    Object.assign(stored, { fee_scope: 'account_wide', revision_payment: 2, updated_at: new Date(NOW.getTime() + 1000) });
+    await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(new Set(placements(db).map((x) => x.payment_group_id)).size).toBe(1);
+    // money left on one placement, then the scope flips back: NOT applied — keys untouched, the rest park for the owner's regroup
+    const charged = rows(db).find((x) => x.dimension === 'payment');
+    Object.assign(charged, { satisfied_at: NOW, satisfied_reason: 'charged' });
+    Object.assign(stored, { fee_scope: 'per_location', revision_payment: 3, updated_at: new Date(NOW.getTime() + 120000) });
+    const r = await run(db, { now: new Date(NOW.getTime() + 180000) });
+    expect(r.errors).toEqual([]);
+    expect(new Set(placements(db).map((x) => x.payment_group_id)).size).toBe(1); // unchanged
+    const pending = rows(db).filter((x) => x.dimension === 'payment' && !x.satisfied_at);
+    expect(pending).toHaveLength(WAVES_LOCATIONS.length - 1);
+    expect(pending.every((x) => x.level === 'OWNER_INPUT_REQUIRED' && /owner performs the regroup/.test(x.reason))).toBe(true);
+    expect(placements(db).filter((x) => x.authority === 'OWNER_INPUT_REQUIRED' && x.status === 'awaiting_owner')).toHaveLength(WAVES_LOCATIONS.length - 1); // parked for the owner's regroup
+    expect(rows(db).find((x) => x.id === charged.id).level).toBe(charged.level); // the charged proof is never re-decided
+  });
+  test('retiring an instance the path no longer requires invalidates its approval', async () => {
+    const { db, p } = scenario({ make: paidPath });
+    await run(db);
+    const pay = rows(db).find((x) => x.dimension === 'payment');
+    const approval = { id: uid(), prospect_id: pay.prospect_id, path_id: p.id, decision: 'approved', authority: 'OWNER_PAYMENT', dimension: 'payment', instance_key: pay.instance_key, invalidated_at: null };
+    db._tables.seo_link_approvals.push(approval);
+    pay.approval_id = approval.id;
+    Object.assign(db._tables.seo_link_acquisition_paths[0], { payment_required: false, fee_scope: null, estimated_cost_cents: null, revision_payment: 2, updated_at: new Date(NOW.getTime() + 1000) });
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r.invalidatedApprovals).toBeGreaterThanOrEqual(1);
+    expect(rows(db).find((x) => x.id === pay.id)).toMatchObject({ end_outcome: 'superseded' });
+    expect(approval.invalidated_at).toBeTruthy();
+    expect(approval.invalidated_reason).toMatch(/no longer required/);
   });
   test('a superseded best path is skipped with a reason and writes nothing', async () => {
     const { db } = scenario({ path: { superseded_by: 'x' } });

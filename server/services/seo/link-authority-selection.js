@@ -84,8 +84,10 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const candidateIds = [...new Set([...owned.map((d) => d.id), ...owners.map((p) => p.domain_id), ...waivers.map((w) => w.domain_id), ...forced])]
     .filter((id) => !forced.size || forced.has(id));
   if (!candidateIds.length) return [];
-  const domains = await db('seo_link_domains').whereIn('id', candidateIds).whereNotNull('best_path_id').select('id', 'domain', 'agent_state', 'best_path_id', 'updated_at');
-  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'revision_payment', 'revision', 'baseline');
+  // no best_path_id filter: a domain whose route the investigator disproved (best_path_id cleared) still owns
+  // open rows — it is selected once so the bridge retires them (see below), then drops out of the candidates
+  const domains = await db('seo_link_domains').whereIn('id', candidateIds).select('id', 'domain', 'agent_state', 'best_path_id', 'updated_at');
+  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id).filter(Boolean))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'revision_payment', 'revision', 'baseline');
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
   const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'updated_at', 'outreach_status', 'outreach_sent_at');
@@ -137,6 +139,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     const withRows = mine.filter((p) => rowsByProspect.has(p.id) && !frozen(p));
     let why = null;
     if (forced.has(d.id)) why = 'forced';
+    else if (!d.best_path_id) why = all.some((p) => (rowsByProspect.get(p.id) || []).some((r) => !r.satisfied_at)) ? 'stale' : null; // route gone: open unsatisfied rows to retire
     else if (BRIDGE_STATES.includes(d.agent_state) && expected.some((l) => !onBest.some((p) => p.location_key === l && rowsByProspect.has(p.id)))) why = 'unbridged';
     else if (contradicted || offShapeOpen || withRows.some((p) => p.path_id !== d.best_path_id || instanceSetMoved(p) || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
     else if (waiverAt.has(`${d.id}|${d.best_path_id}`) && !withRows.length && !BRIDGE_STATES.includes(d.agent_state)) why = 'stale'; // a waiver on a rejected domain whose rows were all ended

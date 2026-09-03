@@ -85,6 +85,22 @@ async function annotateApprovals(trx, rows) {
   return rows;
 }
 const authorized = (r) => Boolean(r.satisfied_at) || isAuto(r.level) || (isOwner(r.level) && r.approved === true);
+// an approval attached to an instance that is ending is invalidated with it
+// (the action it approved no longer exists on the current path)
+async function invalidateApprovals(trx, rows, reason, now) {
+  const ids = [...new Set(rows.filter((r) => r.approval_id).map((r) => r.approval_id))];
+  if (!ids.length) return 0;
+  return trx('seo_link_approvals').whereIn('id', ids).whereNull('invalidated_at').update({ invalidated_at: now, invalidated_reason: reason, updated_at: now });
+}
+// "a purchase in any state" (plan §3.3) before the purchases table exists: money
+// left (a satisfied payment instance, ended or not) or an owner's valid payment
+// approval on any of these placements
+async function paymentActivity(trx, prospectIds) {
+  if (!prospectIds.length) return false;
+  const rows = await trx(AUTH).whereIn('prospect_id', prospectIds).where({ dimension: 'payment' }).select('id', 'satisfied_at', 'approval_id');
+  if (rows.some((r) => r.satisfied_at)) return true;
+  return (await annotateApprovals(trx, rows)).some((r) => r.approved);
+}
 // payment on an outreach path is DEFERRED until the publisher exposes a checkout
 // (ready_for_payment, §3.3b): it neither parks the placement nor holds the
 // domain back from ready_to_acquire — the initial send claims on communication
@@ -115,21 +131,31 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   if (!named) return { skipped: 'no best path', out };
   const { inFlight } = await claimProspectDomain(trx, named.domain);
   const domain = await trx('seo_link_domains').where({ id: domainId }).forUpdate().first();
-  if (!domain || !domain.best_path_id) return { skipped: 'no best path', out };
+  if (!domain) return { skipped: 'no best path', out };
+  const allIds = (await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id')).map((p) => p.id);
+  if (!domain.best_path_id) {
+    // the investigator cleared the route (disproveGonePaths) and left the
+    // placements behind: every open unsatisfied instance ends, its approval is
+    // invalidated, and a lane-owned aggregate goes back to investigating —
+    // nothing on this domain is claimable until a route exists again
+    const open = allIds.length ? await trx(AUTH).whereIn('prospect_id', allIds).whereNull('ended_at').whereNull('satisfied_at').select('id', 'approval_id') : [];
+    if (!open.length) return { skipped: 'no best path', out };
+    out.invalidatedApprovals += await invalidateApprovals(trx, open, 'path disproven: no best path', now);
+    await trx(AUTH).whereIn('id', open.map((r) => r.id)).update({ ended_at: now, end_outcome: 'superseded', updated_at: now });
+    out.ended += open.length;
+    if (BRIDGE_STATES.includes(domain.agent_state)) {
+      out.aggregateChanges += await trx('seo_link_domains').where({ id: domain.id, agent_state: domain.agent_state }).update({ agent_state: 'investigating', rejected_by: null, updated_at: now });
+    }
+    return { decided: true, out };
+  }
   const path = await trx('seo_link_acquisition_paths').where({ id: domain.best_path_id }).first();
   if (!path || path.superseded_by) return { skipped: 'best path superseded', out };
   if (path.baseline === true) return { skipped: 'baseline placeholder (not an executable path)', out };
   const ctx = { path, domain, policy, score: domain.score };
-  // a `rejected` the bridge wrote itself (§3.1: every blocking row DENY) is the
-  // one it may lift once the inputs improve; the owner's registry Reject on a
-  // domain whose rows were NOT all DENY carries no such signature and stands.
-  // Read before this run re-decides anything.
-  let bridgeRejected = false;
-  if (domain.agent_state === 'rejected') {
-    const ids = (await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id')).map((p) => p.id);
-    const blocking = ids.length ? await trx(AUTH).whereIn('prospect_id', ids).whereNull('ended_at').whereNull('satisfied_at').select('level') : [];
-    bridgeRejected = blocking.length > 0 && blocking.every((r) => r.level === 'DENY');
-  }
+  // a `rejected` the bridge wrote itself (rejected_by = 'bridge': every blocking
+  // row was DENY) is the one it may lift once the inputs improve; the owner's
+  // registry Reject stamps 'owner' and stands until Reopen / Watch or a waiver
+  const bridgeRejected = domain.agent_state === 'rejected' && domain.rejected_by === 'bridge';
 
   // §6.3 1b — the latest waiver, honoured only for the exact floors the owner looked at
   let waiver = null;
@@ -143,8 +169,16 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   }
   const staleAfter = Math.max(ts(policyUpdatedAt), ts(domain.updated_at), ts(path.updated_at), waiver ? ts(waiverRow.approved_at) : 0);
 
-  const decision = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: false, waiver });
   const outreachPath = OUTREACH_ACQUISITION_TYPES.includes(path.acquisition_type);
+
+  // the lane's shape, and the domain's placements outside it (the other lane's
+  // keys after a re-rank); a settled payment on an off-shape row means the
+  // acquisition was already paid for — a NEW in-shape placement would open a
+  // second payment instance under another group and the group-keyed duplicate
+  // guard could not see the first, so the shape change waits for the owner
+  const shape = new Set(expectedLocations(path));
+  const offShape = (await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'location_key')).filter((p) => !shape.has(p.location_key));
+  const offShapePaid = offShape.length ? await paymentActivity(trx, offShape.map((p) => p.id)) : false;
 
   let placements = [];
   for (const location of expectedLocations(path)) {
@@ -177,6 +211,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       Object.assign(row, adopt);
     }
     if (!row) {
+      if (offShapePaid) return { skipped: 'settled payment on a placement outside the lane shape: owner review before a new placement', out };
       const [created] = await trx('seo_link_prospects').insert({
         target_domain: domain.domain, target_page: HOMEPAGE, target_url: path.submission_url || null, location_key: location,
         domain_id: domain.id, path_id: path.id, link_type: path.link_type,
@@ -226,25 +261,42 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   // or N unscoped signups — and never decided: its open unsatisfied instances
   // end `superseded`, so it carries no authority (not claimable under the
   // authority contract) and stops being a staleness source. Its history stays.
-  const shape = new Set(expectedLocations(path));
-  const offShape = (await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'location_key')).filter((p) => !shape.has(p.location_key));
   if (offShape.length) {
-    out.ended += await trx(AUTH).whereIn('prospect_id', offShape.map((p) => p.id)).whereNull('ended_at').whereNull('satisfied_at').update({ ended_at: now, end_outcome: 'superseded', updated_at: now });
+    const retiring = await trx(AUTH).whereIn('prospect_id', offShape.map((p) => p.id)).whereNull('ended_at').whereNull('satisfied_at').select('id', 'approval_id');
+    if (retiring.length) {
+      out.invalidatedApprovals += await invalidateApprovals(trx, retiring, 'placement outside the lane shape', now);
+      await trx(AUTH).whereIn('id', retiring.map((r) => r.id)).update({ ended_at: now, end_outcome: 'superseded', updated_at: now });
+      out.ended += retiring.length;
+    }
   }
 
   // payment group (§3.3 / bridge): the purchase contract keys every reservation,
   // duplicate guard and renewal by it — account_wide siblings share the first
   // placement's id; a per_location fee is its own group (re-investigation from
   // account_wide to per_location splits the group; the reverse re-joins it)
+  // A fee_scope change after placements exist is a REGROUP: automatic only while
+  // no purchase exists in any state (plan §3.3) — otherwise the keys stay as they
+  // are (merging paid groups or detaching a placement from the purchase keyed to
+  // its group would break renewal attribution and the duplicate guard) and every
+  // unsatisfied payment instance parks OWNER_INPUT_REQUIRED for the owner's
+  // regroup. A first assignment (no group yet) is never a regroup.
+  let regroupHeld = false;
   if (path.payment_required && placements.length) {
     const anchor = path.fee_scope === 'account_wide' ? ((placements.find((p) => p.payment_group_id) || {}).payment_group_id || placements[0].id) : null;
-    for (const p of placements) {
-      const groupId = anchor || p.id;
-      if (p.payment_group_id === groupId) continue;
-      await trx('seo_link_prospects').where({ id: p.id }).update({ payment_group_id: groupId, updated_at: now });
-      p.payment_group_id = groupId;
+    const changing = placements.filter((p) => p.payment_group_id !== (anchor || p.id));
+    regroupHeld = changing.some((p) => p.payment_group_id) && await paymentActivity(trx, allIds);
+    if (!regroupHeld) {
+      for (const p of changing) {
+        const groupId = anchor || p.id;
+        await trx('seo_link_prospects').where({ id: p.id }).update({ payment_group_id: groupId, updated_at: now });
+        p.payment_group_id = groupId;
+      }
     }
   }
+  const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: false, waiver });
+  const decision = regroupHeld
+    ? { ...decided, instances: decided.instances.map((i) => (i.dimension === 'payment' ? { ...i, level: P.LEVELS.OWNER_INPUT_REQUIRED, reason: 'fee scope changed after payment activity: the owner performs the regroup' } : i)) }
+    : decided;
 
   const summaries = [];
   for (const placement of placements) {
@@ -316,6 +368,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     // instances the path no longer requires end (an unsatisfied one only)
     for (const r of open) {
       if (r.ended_at || r.satisfied_at || required.has(key(r))) continue;
+      out.invalidatedApprovals += await invalidateApprovals(trx, [r], 'instance no longer required by the path', now);
       await trx(AUTH).where({ id: r.id }).update({ ended_at: now, end_outcome: 'superseded', updated_at: now });
       r.ended_at = now;
       out.ended += 1;
@@ -397,7 +450,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id), outreach: outreachById.get(p.path_id) === true, claimed_at: p.claimed_at || null, offShape: !shape.has(p.location_key) });
     const next = aggregateState([...seen.values()]);
     if (next !== domain.agent_state) {
-      const moved = await trx('seo_link_domains').where({ id: domain.id, agent_state: domain.agent_state }).update({ agent_state: next, updated_at: now });
+      const moved = await trx('seo_link_domains').where({ id: domain.id, agent_state: domain.agent_state }).update({ agent_state: next, rejected_by: next === 'rejected' ? 'bridge' : null, updated_at: now });
       if (moved) out.aggregateChanges += 1;
     }
   }

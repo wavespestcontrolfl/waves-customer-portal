@@ -393,6 +393,9 @@ router.patch('/registry/:id', async (req, res, next) => {
     if (!domain) return res.status(404).json({ error: 'not found' });
     const now = new Date();
     const patch = { agent_state: nextState, updated_at: now };
+    // who rejected: the authority bridge lifts only its OWN rejections once the
+    // inputs improve; the owner's stands until Reopen / Watch clears the marker
+    patch.rejected_by = action === 'reject' ? 'owner' : null;
     patch.watch_recheck_at = nextState === 'watching' ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
     // A manual Watch starts a LONG-TERM watch generation exactly like the
     // investigator's own parks: the probe-coverage mask resets, so the
