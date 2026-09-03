@@ -1407,7 +1407,9 @@ function runAnnualEconomics() {
     // lawn floor's per-visit reserve and TREE_SHRUB.callbackReservePerVisit —
     // so a --db overlay moves the economics with the price (codex r20 P2).
     { key: 'lawn_care', service: 'lawn_care 9x st_augustine (4,500 sf)', revenuePerVisit: lawn9.perApp, visits: 9, modeledMinutes: lawnCostModeled.modeledMinutes, driveMinutes: lawnCostModeled.driveMinutes, observed: RECORDED_VISIT_SPAN_MINUTES.lawn_care_9x, materialPerVisit: lawnCostModeled.materialPerVisit, callbackReservePerVisit: lawnCostModeled.callbackReservePerVisit },
-    { key: 'mosquito', service: 'mosquito seasonal9 (8,000 sf lot)', revenuePerVisit: mosq.perVisit, visits: 9, modeledMinutes: 30, observed: null, materialPerVisit: mosq.materialPerVisit },
+    // Visits come from the (possibly overlaid) cadence expectMosquito priced with —
+    // pricing_config.mosquito_visits can change seasonal9 (codex r23 P2).
+    { key: 'mosquito', service: 'mosquito seasonal9 (8,000 sf lot)', revenuePerVisit: mosq.perVisit, visits: mosq.visits, modeledMinutes: 30, observed: null, materialPerVisit: mosq.materialPerVisit },
     // Rodent bait setup is waived by any other qualifying service, and a
     // stand-alone rodent program is Bronze — so Silver+ rows (which imply
     // another qualifier) carry no setup fee (codex r2 P2).
