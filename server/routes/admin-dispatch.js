@@ -3449,12 +3449,18 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
   try {
     const CardHolds = require('../services/estimate-card-holds');
     const holdPreview = await CardHolds.cardHoldCancelPreview(req.params.serviceId);
-    // A held hold answers outright; so does a non-held hold STATE (charge in
-    // flight / fee settled) — the appointment rail would only restate it as
-    // "handled by the card hold" (Codex #3800 r1 P1).
-    if (holdPreview.held || holdPreview.rule?.code !== 'no_card') return res.json(holdPreview);
+    // A HELD (or in-flight) hold answers outright. A CLOSED hold (released /
+    // charged) must NOT short-circuit: the appointment rail may still carry
+    // an in-flight charge or a live consent for the same visit (pre-push P0
+    // on #3800 r3). Ask it; fall back to the hold's closed-state verdict
+    // only when the appointment rail has nothing of its own to say.
+    if (holdPreview.held) return res.json(holdPreview);
     const ApptCardRequests = require('../services/appointment-card-request');
     const apptPreview = await ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId);
+    const apptCode = apptPreview.rule?.code;
+    if (holdPreview.rule?.code !== 'no_card' && (apptCode === 'no_card' || apptCode === 'card_hold_lane')) {
+      return res.json(holdPreview);
+    }
     res.json({
       held: apptPreview.secured === true,
       feeApplies: apptPreview.feeApplies === true,

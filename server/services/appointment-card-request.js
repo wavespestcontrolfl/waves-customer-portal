@@ -2119,7 +2119,7 @@ async function feeEligibleRequestForVisit(scheduledServiceId) {
     // (Codex #3153 r24 P2): the capture can finish with valid fee consent
     // right after, and the no-show route's idempotent retry would never
     // re-evaluate the agreed fee.
-    return { request: null, reason: 'not_completed', inFlight: request.status === 'completing' };
+    return { request: null, reason: 'not_completed', inFlight: request.status === 'completing', status: request.status };
   }
   if (!(Number(request.no_show_fee_amount) > 0)) return { request: null, reason: 'no_agreed_fee' };
   if (!(Number(request.cancel_window_hours) > 0)) return { request: null, reason: 'no_agreed_fee' };
@@ -2178,8 +2178,12 @@ async function feeEligibleRequestForVisit(scheduledServiceId) {
 }
 
 // feeEligibleRequestForVisit exclusion → cancel-fee rule code (+ detail).
-function skipRule(skipReason) {
+function skipRule(skipReason, requestStatus = null) {
   const reason = String(skipReason || '');
+  // 'satisfied' = secured by an existing saved card or prepaid coverage
+  // WITHOUT the fee disclosure — exempt because no fee was agreed, not
+  // because capture failed (Codex #3800 r3 P2).
+  if (reason === 'not_completed' && requestStatus === 'satisfied') return { code: 'no_agreed_fee' };
   if (reason === 'not_completed' || reason === 'no_charge_target') return { code: 'not_secured' };
   if (reason === 'no_agreed_fee' || reason === 'no_fee_consent') return { code: 'no_agreed_fee' };
   if (reason === 'payer_billed') return { code: 'payer_billed' };
@@ -2772,7 +2776,7 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
   // — the disabled rail cannot charge, so the lane presents as absent.
   const { describeCancelFeeRule, freeCancelReason } = require('./estimate-card-holds');
   if (!isApptCardFeeRailEnabled()) return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'rail_dark' }) };
-  const { request, unresolved, reason: skipReason, inFlight } = await feeEligibleRequestForVisit(scheduledServiceId);
+  const { request, unresolved, reason: skipReason, inFlight, status: requestStatus } = await feeEligibleRequestForVisit(scheduledServiceId);
   if (!request) {
     if (unresolved) {
       // Lane state unverifiable (Codex #3153 r9 P1): reporting "no fee"
@@ -2798,7 +2802,7 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
     // A capture mid-completion ('completing') can finish with fee consent a
     // moment from now — not "never saved" (pre-push P1): undetermined.
     if (inFlight) return { secured: false, feeApplies: false, unresolved: true, rule: describeCancelFeeRule({ code: 'capture_in_flight' }) };
-    return { secured: false, feeApplies: false, rule: describeCancelFeeRule(skipRule(skipReason)) };
+    return { secured: false, feeApplies: false, rule: describeCancelFeeRule(skipRule(skipReason, requestStatus)) };
   }
   const feeAmount = Number(request.no_show_fee_amount);
   const windowHours = Number(request.cancel_window_hours) > 0 ? Number(request.cancel_window_hours) : 24;

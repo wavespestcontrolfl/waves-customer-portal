@@ -784,6 +784,12 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     expect(res).toMatchObject({ held: false, feeApplies: false, rule: { code: 'fee_settled', willCharge: false } });
     expect(res.rule.text).toMatch(/already settled \(released\)/);
   });
+  it('held + in-window with the local card row gone → STILL a charge verdict: the direct cancel path self-heals the attach and charges', async () => {
+    stubDb([holdRow, null]);
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, rule: { code: 'in_window', willCharge: true } });
+  });
   it('held + in-window start → fee applies with the hold\'s own fee amount', async () => {
     stubDb(holdRow);
     mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));

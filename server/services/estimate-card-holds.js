@@ -1907,6 +1907,14 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
   let feeApplies = isCardHoldEnabled() && !!start && isWithinCancelWindow({ hold, serviceStart: start, now });
   let ruleCode = feeApplies ? 'in_window' : freeCancelReason({ start, now, windowHours, anchorAt: hold.held_at });
   let sticky = null;
+  // NO card-revocation check on the direct in-window verdict — deliberately.
+  // handleCardHoldCancellation's in-window branch calls chargeNoShowFee with
+  // attachSelfHeal (default true), which re-attaches the stored Stripe
+  // payment method and charges even when the local payment_methods row is
+  // gone. The preview must describe what the charge path DOES; only the
+  // sticky branch below releases free on a missing row (pre-push P0 on
+  // #3800 r3). Whether a removed card should still be charged here is an
+  // owner ruling, not a preview change.
   const previewStartMs = start ? new Date(start).getTime() : NaN;
   const previewStartLive = Number.isFinite(previewStartMs) && (previewStartMs - now.getTime()) > -CARD_HOLD_POST_START_GRACE_MS;
   if (!feeApplies && isCardHoldEnabled() && previewStartLive && hold.sticky_window_disclosed && isStickyCancelWindowEnabled()) {
