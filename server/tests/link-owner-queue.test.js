@@ -297,6 +297,14 @@ describe('approveRow', () => {
     const n = await nightly(db, { now: LATER2 });
     expect(n).toMatchObject({ selected: 1, released: 1 });
     expect(domainState(db)).toBe('ready_to_acquire');
+    // the inline run THROWS (a DB blip after commit): the approval is still reported, the run reads skipped: failed
+    const boom = await parked();
+    const brow = openRows(boom.db)[0];
+    const rb = await Q.approveRow(boom.db, { authorityId: brow.id, actor: ACTOR, now: LATER, bridge: async () => { throw new Error('connection reset'); } });
+    expect(rb.bridge).toMatchObject({ skipped: 'failed', error: 'connection reset' });
+    expect(approvals(boom.db)).toHaveLength(1);
+    await nightly(boom.db, { now: LATER2 });
+    expect(domainState(boom.db)).toBe('ready_to_acquire');
     // gate off: selection only, the approval still lands
     const g = await parked();
     isEnabled.mockReturnValue(false);

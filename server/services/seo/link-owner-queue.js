@@ -102,6 +102,16 @@ async function activeWaiver(q, domainId, pathId, ctx) {
   return { waiver: w.decision_inputs_hash === P.floorInputsHash(ctx) ? { id: w.id } : null, row: w };
 }
 
+// The bridge run after a click is BEST-EFFORT and runs after the click's transaction committed: a failure here
+// (policy load, selection, the cron lock, a DB blip) must not turn a recorded decision into a 500 — the bumped
+// updated_at already guarantees the nightly run picks the domain up. Reported as skipped: 'failed'.
+async function bestEffortBridge(run, db, opts) {
+  try { return await run(db, opts); } catch (err) {
+    require('../logger').error(`[backlink-owner-queue] post-commit bridge run failed for ${(opts.domainIds || []).join(',')}: ${err.message}`);
+    return { skipped: 'failed', error: err.message, gated: false, selected: 0, decided: 0, parked: 0, released: 0, aggregateChanges: 0, errors: [err.message] };
+  }
+}
+
 const pathRevisionFor = (path, dimension) => Number(path[`revision_${dimension}`] ?? path.revision ?? 1);
 const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
 
@@ -269,7 +279,7 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     return { approval, attached, domainId: domain.id, prospectIds };
   });
   const run = bridge || require('./link-authority-bridge').runAuthorityBridge;
-  const ran = await run(db, { domainIds: [result.domainId], notify: noop, now });
+  const ran = await bestEffortBridge(run, db, { domainIds: [result.domainId], notify: noop, now });
   return { ...result, bridge: ran };
 }
 
@@ -355,7 +365,7 @@ async function acquireAnyway(db, { domainId, actor, note = null, now = new Date(
     return { waiver, replaced, domainId: domain.id, domain: domain.domain, floors: failing };
   });
   const run = bridge || require('./link-authority-bridge').runAuthorityBridge;
-  const ran = await run(db, { domainIds: [result.domainId], notify: noop, now });
+  const ran = await bestEffortBridge(run, db, { domainIds: [result.domainId], notify: noop, now });
   // what now awaits the owner on this domain (parked siblings park nothing new, so `parked` alone undercounts)
   const ids = (await db('seo_link_prospects').where({ domain_id: result.domainId }).select('id')).map((p) => p.id);
   const open = ids.length ? await loadApprovals(db, await db(AUTH).whereIn('prospect_id', ids).whereNull('ended_at').whereNull('satisfied_at')) : [];
