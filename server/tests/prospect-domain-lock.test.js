@@ -130,7 +130,14 @@ describe('every board writer takes the shared lock inside its check+insert trans
     expect(block).not.toMatch(/\bdb\('seo_link_prospects'\)/);
     // a target_page edit is a placement move: domain lock + canonical placement probe (self excluded) → 409, before the update
     const iMove = block.indexOf("'target_page' in patch && patch.target_page !== current.target_page");
-    const iMoveLock = block.indexOf('lockProspectDomain(trx, current.target_domain)');
+    const iMoveLock = block.indexOf('lockProspectDomain(trx, current.target_domain)', iMove); // the move's own re-take, after the check
+    // a conversation-opening edit takes the domain lock BEFORE the inbox lock (the send claim's domain → inbox → row order), so a
+    // page move in the same edit never takes the domain lock after the inbox
+    const iOpenLock = block.indexOf('lockProspectDomain(trx, current.target_domain)');
+    const iInbox = block.indexOf('Outreach.inboxConflict(trx, { recipient, excludeId: current.id })');
+    expect(iOpenLock).toBeGreaterThan(iLock);
+    expect(iInbox).toBeGreaterThan(iOpenLock);
+    expect(iMove).toBeGreaterThan(iInbox);
     const iMoveProbe = block.indexOf('findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key })'); // scoped to the row's own location since step 2
     expect(iMove).toBeGreaterThan(iRead);
     expect(iMoveLock).toBeGreaterThan(iMove);

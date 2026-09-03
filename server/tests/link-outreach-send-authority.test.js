@@ -394,20 +394,21 @@ describe('one conversation per inbox (§13)', () => {
     expect(at(/link_outreach_inbox:editor@example\.org/)).toBeGreaterThan(at(/lost_recovery:example\.org/));
     expect(at(/FOR UPDATE seo_link_prospects/)).toBeGreaterThan(at(/link_outreach_inbox:editor@example\.org/));
   });
-  test('a CLOSED conversation releases the inbox: a lost / rejected placement, or one carrying the closure stamp; a live one without the stamp still holds it', async () => {
+  test('a CLOSED conversation releases the inbox: a completed placement (placed / live / indexed / watching / lost / rejected) or one carrying the closure stamp; an active one with its pitch out holds it until then', async () => {
     const s = scenario({ policy: AUTO_POLICY });
     await nightly(s.db);
-    // the earlier placement pitched this inbox and was lost — its lifetime send stamp does not hold the inbox forever
+    // the earlier placement pitched this inbox — its lifetime send stamp never holds the inbox on its own
     const other = { id: uid(), domain_id: null, path_id: null, target_domain: 'other.org', target_page: '/', location_key: '-', status: 'lost', outreach_status: 'sent', outreach_to_email: 'editor@example.org', outreach_sent_at: EARLIER, conversation_closed_at: null, link_type: 'editorial', updated_at: EARLIER };
     s.db._tables.seo_link_prospects.push(other);
-    expect(await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' })).toBeNull();
-    Object.assign(other, { status: 'rejected' });
-    expect(await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' })).toBeNull();
-    // live with the conversation still open (no stamp: a late send or follow-up may be pending) holds the inbox …
-    Object.assign(other, { status: 'live' });
+    for (const status of ['lost', 'rejected', 'placed', 'live', 'indexed', 'watching']) {
+      Object.assign(other, { status });
+      expect(await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' })).toBeNull();
+    }
+    // an ACTIVE conversation (contacted, the pitch out) holds the inbox …
+    Object.assign(other, { status: 'contacted' });
     expect((await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' }))?.id).toBe(other.id);
     expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).toMatchObject({ ok: false, code: 'inbox_in_flight' });
-    // … until its communication lifecycle completes and the closure is stamped (§3.3)
+    // … until its communication lifecycle is stamped closed (§3.3) — whatever its status reads
     Object.assign(other, { conversation_closed_at: NOW });
     expect(await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' })).toBeNull();
     expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).ok).toBe(true);

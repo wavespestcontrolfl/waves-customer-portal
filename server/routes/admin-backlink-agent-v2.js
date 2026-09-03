@@ -631,8 +631,11 @@ router.patch('/prospects/:id', async (req, res, next) => {
       // recipient-level lock + predicate the send claim takes (plan §13), so no two writers open the same inbox
       const opensConversation = 'status' in patch && ['contacted', 'negotiating'].includes(patch.status) && !['contacted', 'negotiating'].includes(current.status);
       if (opensConversation) {
-        // the same lock ORDER as the send claim (inbox advisory lock → row lock): the recipient read before the locks
-        // is re-read under the row lock — re-addressed meanwhile means the inbox locked is not this row's; refuse
+        // the same lock ORDER as the send claim (domain → inbox advisory lock → row lock) for EVERY conversation-opening
+        // edit, not only a board admission — a page move below re-takes the domain lock, which must never follow the
+        // inbox lock; the recipient read before the locks is re-read under the row lock — re-addressed meanwhile means
+        // the inbox locked is not this row's; refuse
+        await lockProspectDomain(trx, current.target_domain);
         const Outreach = require('../services/seo/link-prospect-outreach');
         const before = await trx('seo_link_prospects').where({ id: current.id }).first('outreach_to_email');
         const recipient = before && before.outreach_to_email;

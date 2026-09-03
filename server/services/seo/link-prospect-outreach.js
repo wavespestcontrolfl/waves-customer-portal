@@ -41,7 +41,9 @@ const { OUTREACH_TYPES, isValidEmail } = require('./link-prospect-worker');
 // the placement is lost / rejected or carries the durable closure stamp (conversation_closed_at, §3.3: written when a
 // live / indexed placement's communication lifecycle completes; a lost-link recovery cycle clears it when it reopens
 // the same placement). A lifetime send stamp alone holds nothing: a finished conversation is not an open one.
-const CONVERSATION_CLOSED_STATUSES = Object.freeze(['lost', 'rejected']);
+// a conversation is OVER once the placement reached its outcome — won (placed / live / indexed), watched, lost or
+// rejected — or carries the closure stamp; a `sent` pitch on a completed placement holds no inbox
+const CONVERSATION_CLOSED_STATUSES = Object.freeze(['placed', 'live', 'indexed', 'watching', 'lost', 'rejected']);
 const conversationClosed = (row) => Boolean(row.conversation_closed_at) || CONVERSATION_CLOSED_STATUSES.includes(row.status);
 const CONVERSATION_OPEN = (row) => !conversationClosed(row) && (
   ['contacted', 'negotiating'].includes(row.status)
