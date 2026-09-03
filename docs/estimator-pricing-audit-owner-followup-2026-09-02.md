@@ -210,20 +210,20 @@ Waves today for the same 2,000 sf home: $610 install + $72 per quarterly check (
 
 Assumptions, all ASSUMED until Adam confirms: install labor 120 min; inspection 5 min/station + 20 min drive (the engine's own model, 95 min); $35/hr loaded; cartridges at the 25-pack rate ($6.83) unless noted; stations are pre-baited so year 1 needs no cartridges.
 
-> **Correction 2026-09-03:** the replacement rows below assumed ONE cartridge per station. Each station holds two, so "33% replacement" on 15 stations is 10 of 30 cartridges = **$68/yr** ($107 at the 6-pack rate) and 100% is **$205–$321/yr**. Re-derived: quarterly at 33% → −$2 to −$41; quarterly at 100% → −$139 to −$255; annual check at $225 / 33% → +$102 (45%); annual at $225 / 100% → −$35 to −$151; annual at $275 / 100% → +$15 to −$101. The approved plan (`docs/estimator-pricing-plan-2026-09-03.md`) supersedes the $0-install / 36-month shape discussed here with a setup fee + prepaid annual protection.
+> **Correction 2026-09-03:** the first draft of this table assumed ONE cartridge per station. Each station holds two, so 15 stations carry 30 cartridges: "33% replacement" is 10 cartridges = **$68/yr** ($107 at the 6-pack rate) and 100% is **$205–$321/yr**. The table and the cumulative figures below are regenerated on that basis. The approved plan (`docs/estimator-pricing-plan-2026-09-03.md`) supersedes the $0-install / 36-month shape discussed here with a setup fee + prepaid annual protection.
 
 | Line | Revenue/yr | Materials/yr | Labor/yr | Margin/yr |
 |---|---|---|---|---|
 | Quarterly monitoring as sold ($24/mo), 0% replacement | $288 | $0 | $222 | +$66 (23%) |
-| Quarterly, 33% replacement (5 cartridges) | $288 | $34 ($53 at 6-pack) | $222 | +$32 to +$13 |
-| Quarterly, 100% replacement | $288 | $102 ($160 at 6-pack) | $222 | −$36 to −$94 |
-| Annual check at Massey's $225, 33% replacement | $225 | $34 | $55 | +$136 (60%) |
-| Annual check at $225, 100% replacement | $225 | $102 ($160) | $55 | +$68 to +$10 |
-| Annual check at $275, 100% replacement | $275 | $102 ($160) | $55 | +$118 to +$60 |
+| Quarterly, 33% replacement (10 of 30 cartridges) | $288 | $68 ($107 at 6-pack) | $222 | −$2 to −$41 |
+| Quarterly, 100% replacement (30 cartridges) | $288 | $205 ($321 at 6-pack) | $222 | −$139 to −$255 |
+| Annual check at Massey's $225, 33% replacement | $225 | $68 ($107) | $55 | +$102 (45%) to +$63 |
+| Annual check at $225, 100% replacement | $225 | $205 ($321) | $55 | −$35 to −$151 |
+| Annual check at $275, 100% replacement | $275 | $205 ($321) | $55 | +$15 to −$101 |
 
 Install as a separate line at real cost: 15 × ($24.00 + $5.25 + $0.75) × 1.45 = **$653** (vs $610 today); hardware $360 of that (a whole 16-box is $384).
 
-If the install is **absorbed into an annual plan** (Massey's shape for a takeover, since the customer will not pay $610 to leave a $225/yr renewal): sunk year-1 cost ≈ $360 hardware + $70 install labor (ASSUMED) + $55 inspection = $485. At $225/yr with 33% replacement the plan is cumulative-negative through year 2 (−$260, then −$124) and roughly break-even at the end of year 3; at $275/yr it turns positive during year 3. **A 3-year minimum term** (or a reduced install fee plus a lower annual) is what makes the annual-check plan stand on its own. These are planning numbers; the plan should let Adam set the labor minutes and replacement rate and see the term fall out.
+If the install is **absorbed into an annual plan** (Massey's shape for a takeover, since the customer will not pay $610 to leave a $225/yr renewal): sunk year-1 cost ≈ $360 hardware + $70 install labor (ASSUMED) + $55 inspection = $485. At $225/yr with 33% replacement (+$102/yr at the 25-pack rate) the plan is cumulative-negative through year 4 (−$383, −$281, −$179, −$77) and breaks even during year 5; at $275/yr (+$152/yr) it turns positive during year 4. A 3-year minimum term no longer covers the hardware on its own: **a 4–5-year term, a reduced-but-nonzero install fee, or a lower replacement rate** is what makes the annual-check plan stand. These are planning numbers; the plan should let Adam set the labor minutes and replacement rate and see the term fall out.
 
 ### 7.4 Rulings and direction from the owner (2026-09-02)
 

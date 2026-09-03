@@ -483,7 +483,7 @@ function expectPlugging(lawnSqFt, spacing = 12) {
 // (quote: floor / custom, fixed 4 apps, eligible statuses only) and Tree-Age
 // (DBH tier floor / custom, quote-only above the last priced tier, 0.5 apps/yr).
 // A branch the engine must refuse returns null; pricing it is a P1 below.
-function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize, appsPerYear = null, intervalMonths = null, customPricePerPalm = null, diagnosisConfirmed = false, selectedProduct = null, palmStatus = null, dbhInches = null }) {
+function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize, appsPerYear = null, intervalMonths = null, customPricePerPalm = null, diagnosisConfirmed = false, selectedProduct = null, palmStatus = null, dbhInches = null, highDose = false, largeDiameter = false, nonstandardProduct = false }) {
   const P = constants.PALM;
   const t = P.treatments[treatmentType];
   if (!t) return null;
@@ -496,7 +496,12 @@ function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize, apps
     if (!palmSize) return null;
     const tier = t.tiers.find((x) => x.size === palmSize);
     if (!tier) return null;
-    perPalm = tier.pricePerPalm; apps = t.defaultAppsPerYear;
+    // quoteBasedWhen flags switch a tiered treatment to quote pricing: a custom
+    // price is REQUIRED and floors at the selected size tier (codex r15 P2).
+    const flags = { highDose, largeDiameter, nonstandardProduct };
+    const quoteRequired = (t.quoteBasedWhen || []).some((f) => flags[f] === true);
+    if (quoteRequired && customPricePerPalm == null) return null;
+    perPalm = quoteRequired ? quote(tier.pricePerPalm) : tier.pricePerPalm; apps = t.defaultAppsPerYear;
   } else if (treatmentType === 'fungal') {
     if (diagnosisConfirmed !== true || !t.products.includes(selectedProduct)) return null;
     if (appsPerYear == null && intervalMonths == null) return null;
@@ -692,9 +697,10 @@ function runLawnMatrix() {
       }
     } finally { Object.assign(V, saved); }
   }
-  const rowEdges = constants.LAWN_BRACKETS.st_augustine.map((r) => r[0]);
-  const sizes = new Set([500, 1499, ...rowEdges, ...rowEdges.map((x) => x - 1), ...rowEdges.map((x) => x + 1), 4250, 12500, 20000, 20001, 25000, 30000]);
   for (const track of Object.keys(constants.LAWN_BRACKETS)) {
+    // Row edges from EACH track's live bracket rows (codex r15 P2), plus the table cutoff ±1.
+    const rowEdges = constants.LAWN_BRACKETS[track].map((r) => r[0]);
+    const sizes = new Set([500, 1499, ...rowEdges, ...rowEdges.map((x) => x - 1), ...rowEdges.map((x) => x + 1), 4250, 12500, constants.LAWN_TABLE_MAX_SQFT, constants.LAWN_TABLE_MAX_SQFT + 1, 25000, 30000]);
     for (const sqft of [...sizes].sort((a, b) => a - b)) {
       for (const tier of ['standard', 'enhanced', 'premium']) {
         const exp = expectLawn({ track, lawnSqFt: sqft, tier });
@@ -733,7 +739,9 @@ function runLawnMatrix() {
 
 function runMosquitoMatrix() {
   const section = 'mosquito';
-  const edges = [7999, 8000, 11999, 12000, 17999, 18000, 34999, 35000, 43560, 60000];
+  // Category edges from the LIVE lot categories (DB overlay included): each band's
+  // maxSqFt and the next band's first foot; 43,560 / 60,000 are extra samples (codex r15 P2).
+  const edges = [...new Set(constants.MOSQUITO.lotCategories.filter((c) => Number.isFinite(c.maxSqFt)).flatMap((c) => [c.maxSqFt, c.maxSqFt + 1])), 43560, 60000].sort((a, b) => a - b);
   // choose lots so treatable lands near edges: treatable = lot - 2000 - hardscape(lot)
   const lots = new Set([3000, 5000, 8000, 10500, 12000, 15000, 20000, 25000, 35000, 40000, 45000, 60000, 90000]);
   for (const lot of [...lots].sort((a, b) => a - b)) {
@@ -806,8 +814,12 @@ function runMosquitoMatrix() {
 
 function runRodentMatrix() {
   const section = 'rodent_bait';
-  const edges = [1750, 2750, 3750, 4750, 5750, 6750];
-  const sizes = new Set([600, ...edges, ...edges.map((e) => e - 1), ...edges.map((e) => e + 1), 7750, 8750, 12000]);
+  // Bracket edges from the LIVE baitBrackets array plus the first two extension
+  // steps above the top bracket (codex r15 P2).
+  const R = constants.RODENT;
+  const edges = R.baitBrackets.map((b) => b.maxSqFt);
+  const top = edges[edges.length - 1];
+  const sizes = new Set([600, ...edges, ...edges.map((e) => e - 1), ...edges.map((e) => e + 1), top + R.baitBracketExtension.perSqFt, top + 2 * R.baitBracketExtension.perSqFt, 12000]);
   for (const sqft of [...sizes].sort((a, b) => a - b)) {
     const exp = expectRodentBait({ homeSqFt: sqft });
     const r = runEngine({ ...BASE, homeSqFt: sqft, services: { rodentBait: {} } });
@@ -939,6 +951,15 @@ function runSpecialtyMatrix() {
     { treatmentType: 'treeAge', palmCount: 3, dbhInches: 12, customPricePerPalm: 40 },
     { treatmentType: 'treeAge', palmCount: 2, dbhInches: 25, customPricePerPalm: 200 },
     { treatmentType: 'treeAge', palmCount: 2, dbhInches: 25 },
+    // tiered quote overrides (codex r15 P2): each flag, missing / below-floor / above-floor custom price
+    { treatmentType: 'insecticide', palmCount: 2, palmSize: 'large', highDose: true },
+    { treatmentType: 'insecticide', palmCount: 2, palmSize: 'large', highDose: true, customPricePerPalm: 50 },
+    { treatmentType: 'insecticide', palmCount: 2, palmSize: 'large', highDose: true, customPricePerPalm: 120 },
+    { treatmentType: 'combo', palmCount: 3, palmSize: 'small', largeDiameter: true, customPricePerPalm: 40 },
+    { treatmentType: 'combo', palmCount: 3, palmSize: 'small', largeDiameter: true, customPricePerPalm: 90 },
+    { treatmentType: 'combo', palmCount: 1, palmSize: 'medium', nonstandardProduct: true },
+    { treatmentType: 'combo', palmCount: 1, palmSize: 'medium', nonstandardProduct: true, customPricePerPalm: 130 },
+    { treatmentType: 'insecticide', palmCount: 4, palmSize: 'medium', nonstandardProduct: true, customPricePerPalm: 30 },
   ];
   for (const c of palmCases) {
     const exp = c.palmCount > 0 && Number.isInteger(c.palmCount) ? expectPalm(c) : null;
@@ -1042,26 +1063,31 @@ function runAnnualEconomics() {
   const term = expectTermiteBait({ homeSqFt: 2000 });
   const pestMaterial = 6.67; // engine's chemCost talak 1.30 + taurus 4.87 + surfactant 0.50 (service-pricing.js pestVisitCostModel)
   const rows = [
-    { service: 'pest_control quarterly (2,000 sf)', revenuePerVisit: pestQ.perApp, visits: 4, modeledMinutes: 25, observed: RECORDED_VISIT_SPAN_MINUTES.pest_control_quarterly, materialPerVisit: pestMaterial, callbackRate: OBSERVED_PEST_CALLBACK_RATE, callbackMinutes: RECORDED_VISIT_SPAN_MINUTES.pest_re_service.median, setupFee: constants.PEST.initialFee },
-    { service: 'lawn_care 9x st_augustine (4,500 sf)', revenuePerVisit: lawn9.perApp, visits: 9, modeledMinutes: lawnCostModeled.modeledMinutes, driveMinutes: lawnCostModeled.driveMinutes, observed: RECORDED_VISIT_SPAN_MINUTES.lawn_care_9x, materialPerVisit: lawnCostModeled.materialPerVisit, callbackReservePerVisit: 2 },
-    { service: 'mosquito seasonal9 (8,000 sf lot)', revenuePerVisit: mosq.perVisit, visits: 9, modeledMinutes: 30, observed: null, materialPerVisit: mosq.materialPerVisit },
+    { key: 'pest_control', service: 'pest_control quarterly (2,000 sf)', revenuePerVisit: pestQ.perApp, visits: 4, modeledMinutes: 25, observed: RECORDED_VISIT_SPAN_MINUTES.pest_control_quarterly, materialPerVisit: pestMaterial, callbackRate: OBSERVED_PEST_CALLBACK_RATE, callbackMinutes: RECORDED_VISIT_SPAN_MINUTES.pest_re_service.median, setupFee: constants.PEST.initialFee },
+    { key: 'lawn_care', service: 'lawn_care 9x st_augustine (4,500 sf)', revenuePerVisit: lawn9.perApp, visits: 9, modeledMinutes: lawnCostModeled.modeledMinutes, driveMinutes: lawnCostModeled.driveMinutes, observed: RECORDED_VISIT_SPAN_MINUTES.lawn_care_9x, materialPerVisit: lawnCostModeled.materialPerVisit, callbackReservePerVisit: 2 },
+    { key: 'mosquito', service: 'mosquito seasonal9 (8,000 sf lot)', revenuePerVisit: mosq.perVisit, visits: 9, modeledMinutes: 30, observed: null, materialPerVisit: mosq.materialPerVisit },
     // Rodent bait setup is waived by any other qualifying service, and a
     // stand-alone rodent program is Bronze — so Silver+ rows (which imply
     // another qualifier) carry no setup fee (codex r2 P2).
-    { service: 'rodent_bait (2,000 sf)', revenuePerVisit: rod.perVisit, visits: 4, modeledMinutes: rod.stations * 5, observed: null, materialPerVisit: rod.stations * 1.5, extraAnnual: rod.stations * 7.5, setupFee: rod.setupFee, setupStandaloneOnly: true },
-    { service: 'tree_shrub 6x (1,440 sf beds, 6 trees)', revenuePerVisit: ts.perApp, visits: 6, modeledMinutes: ts.onSiteMin + 10, driveMinutes: 0, observed: null, materialPerVisit: round2(ts.materialCost / 6) },
+    { key: 'rodent_bait', service: 'rodent_bait (2,000 sf)', revenuePerVisit: rod.perVisit, visits: 4, modeledMinutes: rod.stations * 5, observed: null, materialPerVisit: rod.stations * 1.5, extraAnnual: rod.stations * 7.5, setupFee: rod.setupFee, setupStandaloneOnly: true },
+    { key: 'tree_shrub', service: 'tree_shrub 6x (1,440 sf beds, 6 trees)', revenuePerVisit: ts.perApp, visits: 6, modeledMinutes: ts.onSiteMin + 10, driveMinutes: 0, observed: null, materialPerVisit: round2(ts.materialCost / 6) },
     // Cartridge replacement + follow-up reserve per year, no per-visit bait material (plan §A1; codex r6 P1).
-    { service: 'termite_bait monitoring (2,000 sf)', revenuePerVisit: term.perApp, visits: 4, modeledMinutes: term.stations * 5, observed: null, materialPerVisit: 0, extraAnnual: termiteAnnualCost(term.stations), setupFee: term.installPrice /* billed installation — first-year revenue includes it (codex r2 P2) */ },
+    { key: 'termite_bait', service: 'termite_bait monitoring (2,000 sf)', revenuePerVisit: term.perApp, visits: 4, modeledMinutes: term.stations * 5, observed: null, materialPerVisit: 0, extraAnnual: termiteAnnualCost(term.stations), setupFee: term.installPrice /* billed installation — first-year revenue includes it (codex r2 P2) */ },
   ];
   for (const row of rows) {
+    // The tier % reaches a row only if its service is in the LIVE qualifying list
+    // and not in the percent-exclusion map (discount-engine.js isTierDiscountEligible /
+    // excludedFromPercentDiscount) — a DB overlay that drops rodent_bait's tier
+    // qualifier removes its discount here too (codex r15 P2).
+    const tierEligible = constants.WAVEGUARD.qualifyingServices.includes(row.key) && constants.WAVEGUARD.excludedFromPercentDiscount[row.key] !== true;
     for (const tier of ['bronze', 'silver', 'gold', 'platinum']) {
-      const discount = constants.WAVEGUARD.tiers[tier].discount;
+      const discount = tierEligible ? constants.WAVEGUARD.tiers[tier].discount : 0;
       const modeled = unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.modeledMinutes, driveMinutes: row.driveMinutes ?? constants.GLOBAL.DRIVE_TIME, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, callbackDriveMinutes: 0 /* recorded callback span already contains drive (MON-004) */, discountPct: discount });
       const observed = row.observed ? unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.observed.median, driveMinutes: 0 /* recorded span already contains drive — never re-added (MON-004) */, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, callbackDriveMinutes: 0 /* recorded callback span already contains drive (MON-004) */, discountPct: discount }) : null;
       const observedP75 = row.observed ? unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.observed.p75, driveMinutes: 0 /* recorded span already contains drive — never re-added (MON-004) */, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, callbackDriveMinutes: 0 /* recorded callback span already contains drive (MON-004) */, discountPct: discount }) : null;
       const setupThisYear = row.setupFee && !(row.setupStandaloneOnly && tier !== 'bronze') ? row.setupFee : 0;
       const firstYearRevenue = round2(modeled.revenueAnnual + setupThisYear);
-      out.push({ service: row.service, tier, discount, perVisitList: row.revenuePerVisit, visits: row.visits, renewalRevenue: modeled.revenueAnnual, firstYearRevenue, setupFee: setupThisYear, modeledMinutes: row.modeledMinutes, observedMinutes: row.observed ? row.observed.median : null, observedN: row.observed ? row.observed.n : null, modeled, observed, observedP75 });
+      out.push({ service: row.service, tier, discount, tierDiscountEligible: tierEligible, perVisitList: row.revenuePerVisit, visits: row.visits, renewalRevenue: modeled.revenueAnnual, firstYearRevenue, setupFee: setupThisYear, modeledMinutes: row.modeledMinutes, observedMinutes: row.observed ? row.observed.median : null, observedN: row.observed ? row.observed.n : null, modeled, observed, observedP75 });
     }
   }
   return { section, rows: out };
@@ -1153,6 +1179,31 @@ function runPrepayAndCadence() {
     const cadenceStatus = expectedText === actualText ? 'match' : 'MISMATCH';
     scenarios.push({ section, name: `${c.key} (${visits}/yr) annual-prepay coverage cadence`, expected: expectedText, actual: actualText, status: cadenceStatus, extra: { coverageCadence: coverage, expectedCadence: expectedLabel, coveredVisits: visitsPerYearForCadence(coverage), expectedSupported, error: coverageErr } });
     flagIf(cadenceStatus === 'MISMATCH', 'P1', section, `${c.key} (${visits}/yr) annual-prepay coverage cadence`, `expected ${expectedText}, resolver returned ${actualText}${coverage && visitsPerYearForCadence(coverage) != null && visitsPerYearForCadence(coverage) < visits ? ` — the term would cover ${visitsPerYearForCadence(coverage)} of ${visits} prepaid visits` : ''}`);
+  }
+  // Mixed bundles (codex r15 P2): the prepay rule is mix-dependent — a SOLO pest or
+  // mosquito plan earns 0 % (fee-waiver incentive), any bundle of two or more
+  // distinct services earns the % on its discountable lines, and foam_recurring is
+  // added back at full price whatever it is mixed with. Independent total =
+  // Σ non-discountable + Σ discountable × (1 − %).
+  const NON_DISCOUNTABLE = ['foam_recurring'];
+  const bundles = [
+    { name: 'pest + lawn', services: { pest: { frequency: 'quarterly' }, lawn: { tier: 'standard' } }, keys: ['pest_control', 'lawn_care'] },
+    { name: 'pest + mosquito (two fee-mix services ⇒ not solo)', services: { pest: { frequency: 'quarterly' }, mosquito: { tier: 'seasonal9' } }, keys: ['pest_control', 'mosquito'] },
+    { name: 'foam + lawn', services: { foamRecurring: { points: 5, cadence: 'quarterly' }, lawn: { tier: 'standard' } }, keys: ['foam_recurring', 'lawn_care'] },
+    { name: 'foam + pest', services: { foamRecurring: { points: 5, cadence: 'bimonthly' }, pest: { frequency: 'quarterly' } }, keys: ['foam_recurring', 'pest_control'] },
+    { name: 'pest + lawn + mosquito + tree_shrub + foam', services: { pest: { frequency: 'quarterly' }, lawn: { tier: 'enhanced' }, mosquito: { tier: 'monthly12' }, treeShrub: { tier: 'standard', treeCount: 3 }, foamRecurring: { points: 5, cadence: 'monthly' } }, keys: ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'foam_recurring'] },
+  ];
+  for (const b of bundles) {
+    const res = runEngine({ ...BASE, bedArea: 2000, services: b.services }).result;
+    const lis = b.keys.map((k) => line(res, k)).filter(Boolean);
+    if (lis.length !== b.keys.length) { findings.push({ severity: 'P1', section, name: `bundle ${b.name}`, detail: `engine returned ${lis.length} of ${b.keys.length} recurring lines` }); continue; }
+    const rows = lis.map((li) => ({ service: li.service, service_key: li.service, serviceKey: li.service, name: li.name || li.service, frequency: li.frequency || null, visits_per_year: li.visitsPerYear ?? li.visits ?? null, visitsPerYear: li.visitsPerYear ?? li.visits ?? null, annual: li.annualAfterDiscount ?? li.annual, perApp: li.perApp ?? li.perVisit }));
+    const base = round2(rows.reduce((s, r) => s + r.annual, 0));
+    const nonDisc = round2(rows.filter((r) => NON_DISCOUNTABLE.includes(r.service)).reduce((s, r) => s + r.annual, 0));
+    const expected = round2(nonDisc + (base - nonDisc) * (1 - PREPAY_PCT));
+    let resolved = null; let resolveErr = null;
+    try { resolved = converter.resolveAnnualPrepayInvoiceTotal({ baseAnnual: base, recurringServices: rows, estimateData: { lineItems: lis } }); } catch (e) { resolveErr = e.message; }
+    record(section, `bundle ${b.name}: annual prepay total (${PREPAY_PCT * 100}% on ${round2(base - nonDisc)}, ${nonDisc} at full price)`, { bundle: b.keys }, expected, resolved ? resolved.amount : null, { extra: { base, nonDiscountable: nonDisc, rate: resolved ? resolved.rate : null, discount: resolved ? resolved.discount : null, error: resolveErr, tier: res.waveGuard.tier } });
   }
 }
 

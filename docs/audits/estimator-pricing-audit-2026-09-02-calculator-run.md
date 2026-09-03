@@ -1,7 +1,7 @@
 # Independent estimator pricing audit — run output
 
-Generated 2026-09-03T20:40:06.219Z. Constants source: **constants.js (in-code defaults)**.
-Scenarios: 1446 · independent-vs-engine matches: 1400 · mismatches: 1 · expected a price but the engine returned none: 0 · engine-only observations: 45 (1400 + 1 + 0 + 45 = 1446) · commercial engine errors: 0
+Generated 2026-09-03T20:54:15.051Z. Constants source: **constants.js (in-code defaults)**.
+Scenarios: 1459 · independent-vs-engine matches: 1411 · mismatches: 1 · expected a price but the engine returned none: 0 · engine-only observations: 47 (1411 + 1 + 0 + 47 = 1459) · commercial engine errors: 0
 
 ## Findings raised by this run
 
@@ -102,6 +102,8 @@ Recorded span = check-in → check-out, which often includes driving to the next
 - [specialty] palm {"treatmentType":"fungal","palmCount":2,"diagnosisConfirmed":true,"selectedProduct":"PHOSPHO-Jet"}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"fungal palm treatment pricing requires appsPerYear or intervalMonths","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"lethalBronzing","palmCount":2,"palmStatus":"symptomatic"}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"Palm is not eligible for lethal bronzing injection pricing and should be handled outside this service","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"treeAge","palmCount":2,"dbhInches":25}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"customPricePerPalm is required for Tree-Age pricing above 20 DBH inches","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"insecticide","palmCount":2,"palmSize":"large","highDose":true}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"customPricePerPalm is required for quote-based insecticide palm pricing","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"combo","palmCount":1,"palmSize":"medium","nonstandardProduct":true}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"customPricePerPalm is required for quote-based combo palm pricing","palmSizeUsed":null}
 - [commercial] commercial pest office 5,000 sf: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_pest","annual":715.83,"price":null,"perApp":178.96,"visits":4,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":0.45,"review":false}]}
 - [commercial] commercial lawn 60,000 sf turf: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_lawn","annual":6231.52,"price":null,"perApp":778.94,"visits":8,"manualQuote":false,"taxable":false,"taxCategory":"lawn_spraying_or_treatment","margin":0.45,"review":false}]}
 - [commercial] commercial mosquito 40,000 sf lot: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_mosquito","annual":1321.09,"price":null,"perApp":146.79,"visits":9,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":0.45,"review":false}]}
