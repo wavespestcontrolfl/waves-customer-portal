@@ -478,9 +478,17 @@ const TOKEN_RUN_RE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{20,64}(?![A-Za-z0-9_-])/g;
 // match is never enough: "https://evil.example/?next=portal…/secure/<tok>"
 // sends the bearer to evil.example (GH Codex #3812 r6 P1; earlier rounds
 // covered path-nested, subdomain and suffix look-alikes the same way).
-function secureLinkRuns(text) {
-  return String(text || '')
-    .split(/\s+/)
+// Runs are split on the ORIGINAL text and decoded one by one: decoding
+// first would let "%0A" inside a hostile URL manufacture a fresh,
+// trusted-looking run ("https://evil.example/%0Aportal…/secure/<tok>" —
+// the browser keeps the escape and follows evil.example; r8 P1). Decoded
+// whitespace inside a run stays inside it, and the URL parser then judges
+// the whole run against the real origin.
+function decodedRuns(body) {
+  return String(body || '').split(/\s+/).filter(Boolean).map(decodeLinkText);
+}
+function secureLinkRuns(runs) {
+  return runs
     .filter((run) => /\/secure\//i.test(run))
     .map((run) => run.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, ''))
     // A bare label glued to the link ("Link:", "now,") is shed — but only a
@@ -527,13 +535,14 @@ function canonicalSecureToken(run, host) {
  * gates — they are neither judged nor reclassified here.
  */
 async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
-  const text = decodeLinkText(body);
+  const runs = decodedRuns(body);
+  const text = runs.join(' ');
   const refuse = (error) => ({ present: true, ok: false, error });
   const host = new URL(publicPortalUrl()).host.toLowerCase();
 
   // 1. Every run carrying a /secure/ path must parse as a canonical link.
   const canonicalTokens = [];
-  for (const run of secureLinkRuns(text)) {
+  for (const run of secureLinkRuns(runs)) {
     const token = canonicalSecureToken(run, host);
     if (!token) return refuse('A /secure link in this message is not on the Waves portal — remove it before sending.');
     if (!canonicalTokens.includes(token)) canonicalTokens.push(token);
