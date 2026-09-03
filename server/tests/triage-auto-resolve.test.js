@@ -367,6 +367,10 @@ describe('evidence rules', () => {
     expect(classifyTriageItem(item({ ...base, customer_phone: '+19415559999' }), evidenceFor('t1', { caller_phone_added: true }), { now: NOW })).toBeNull();
     // On a slot but no post-card human event (the pass itself may have written it) → stays open.
     expect(classifyTriageItem(item({ ...base, customer_phone: '+19415550123' }), evidenceFor('t1', {}), { now: NOW })).toBeNull();
+    // A confirmed-but-unbooked call keeps its card: the appointment is still owed.
+    expect(classifyTriageItem(item({ ...base, customer_phone: '+19415550123', call_extraction: { ...NO_ADDR_EXTRACTION, scheduling: { status: 'confirmed' } } }), evidenceFor('t1', { caller_phone_added: true }), { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ ...base, customer_phone: '+19415550123', call_extraction: { ...NO_ADDR_EXTRACTION, scheduling: { status: 'confirmed' } } }), { bookedCallIds: new Set(['call-1']), evidence: new Map([['t1', { caller_phone_added: true }]]) }, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'caller_phone_added' });
   });
 
   test('not_confirmed resolves on a booking created after the card', () => {
@@ -380,6 +384,7 @@ describe('evidence rules', () => {
     const heard = {
       reason_code: 'address_unverifiable',
       customer_address_line1: '1234 Palm Ave',
+      customer_address_line2: 'Apt 2', // the raw reading names unit 2 — units are identity
       customer_created_at: CUSTOMER_AFTER, // customer born from the call — address_moot cannot fire
       payload: { flag: 'address_unverifiable', address_as_heard: '1234 Palm Avenue' },
       call_extraction: { property: { service_address: { street_line_1: '1234 Palm Ave', raw_text: '1234 palm ave unit 2' } } },
@@ -410,11 +415,16 @@ describe('evidence helpers', () => {
     expect(heardAddressMatchesOnFile(located('77 Oak St', { city: 'Bradenton', zip: '34205-1234' }))).toBe(true);
     expect(heardAddressMatchesOnFile(located('77 Oak St', { city: 'Tampa' }))).toBe(false);
     expect(heardAddressMatchesOnFile(located('77 Oak St', { zip: '33601' }))).toBe(false);
+    // Units are identity: a reading naming a unit the file lacks or differs from fails.
+    expect(heardAddressMatchesOnFile(located('77 Oak St Apt 4'))).toBe(false);
+    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_address_line2: 'Unit 4', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({ address_line1: '77 Oak St', address_line2: '#4' }), call_extraction: NO_ADDR_EXTRACTION, payload: {} }))).toBe(true);
+    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_address_line2: 'Unit B', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({}), call_extraction: { property: { service_address: { street_line_1: '77 Oak St', street_line_2: 'Unit A', city: 'Bradenton', postal_code: '34205' } } }, payload: {} }))).toBe(false);
     // A reading that carries a locality the file LACKS cannot be established.
     expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: null, customer_zip: null, call_extraction_v1: JSON.stringify({ address_line1: '77 Oak St', city: 'Tampa' }), call_extraction: NO_ADDR_EXTRACTION, payload: {} }))).toBe(false);
     expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({}), call_extraction: NO_ADDR_EXTRACTION, payload: { address_as_heard: '77 Oak St, Tampa FL 33601' } }))).toBe(false);
     expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({}), call_extraction: NO_ADDR_EXTRACTION, payload: { address_as_heard: '77 Oak Street, Bradenton, FL 34205' } }))).toBe(true);
-    expect(heardAddressMatchesOnFile(heard('77 Oak St Apt 4'))).toBe(true);
+    // (a unit the file lacks — see the unit cases below)
+    expect(heardAddressMatchesOnFile(heard('77 Oak St Apt 4'))).toBe(false);
     // Same number, different street type = a different street.
     expect(heardAddressMatchesOnFile(heard('77 Oak Ave'))).toBe(false);
     expect(heardAddressMatchesOnFile(heard('77 Oak'))).toBe(false);

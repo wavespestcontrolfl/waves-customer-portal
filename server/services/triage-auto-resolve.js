@@ -213,6 +213,23 @@ function localityOfRaw(text) {
 // file LACKS cannot be established, so it fails (two readings naming
 // different cities must not both pass a street-only file). A reading with
 // neither city nor ZIP still has to pass the street key.
+// The unit named by an address: an explicit line2 ("Apt 4" / "#4") or one
+// embedded in the street ("100 Main St Apt 4"), through the shared
+// customer-properties keys so "Apt 4" == "Unit 4" == "#4".
+function unitOf(line1, line2) {
+  const { unitKey, streetEmbeddedUnitKey } = require('./customer-properties');
+  return unitKey(line2) || streetEmbeddedUnitKey(line1) || '';
+}
+const onFileUnit = (item) => unitOf(item.customer_address_line1, item.customer_address_line2);
+
+// A heard reading's unit must equal the on-file unit when it names one (a
+// unit the file lacks cannot be established); a reading without a unit
+// still has to pass the street key and locality.
+function heardUnitMatches(item, reading) {
+  const heardUnit = unitOf(reading.text, reading.line2);
+  return !heardUnit || heardUnit === onFileUnit(item);
+}
+
 function localityMatches(item, { city, zip }) {
   const heardZip = zip5(zip);
   if (heardZip && heardZip !== zip5(item.customer_zip)) return false;
@@ -231,16 +248,16 @@ function heardAddressMatchesOnFile(item) {
   const v2 = parseMaybeJson(item.call_extraction);
   if (v2 === undefined) return false;
   const addr = v2?.property?.service_address || {};
-  if (addr.street_line_1) heard.push({ text: addr.street_line_1, city: addr.city, zip: addr.postal_code });
+  if (addr.street_line_1) heard.push({ text: addr.street_line_1, line2: addr.street_line_2, city: addr.city, zip: addr.postal_code });
   if (addr.raw_text) heard.push({ text: addr.raw_text, ...localityOfRaw(addr.raw_text) });
   const v1 = parseMaybeJson(item.call_extraction_v1);
   if (v1 === undefined) return false;
-  if (v1?.address_line1) heard.push({ text: v1.address_line1, city: v1.city, zip: v1.zip });
+  if (v1?.address_line1) heard.push({ text: v1.address_line1, line2: v1.address_line2, city: v1.city, zip: v1.zip });
   const readings = heard.filter((h) => String(h.text || '').trim());
   if (!readings.length) return false;
   // Every reading must key AND agree — one unkeyable representation (a bare
   // street, a fragment) is unverified evidence, not ignorable.
-  return readings.every((h) => addressKey(h.text) === onFile && localityMatches(item, h));
+  return readings.every((h) => addressKey(h.text) === onFile && localityMatches(item, h) && heardUnitMatches(item, h));
 }
 
 // The requested service categories the CARD snapshotted at filing time
@@ -545,7 +562,12 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
     if (code === 'email_unverified' && ev.email_engaged) {
       return { action: 'resolve', rule: 'email_engaged' };
     }
-    if (code === 'caller_not_authorized' && ev.caller_phone_added && callerPhoneOnFile(item)) {
+    // Clearing the authorization question must not make a confirmed-but-
+    // unbooked call (the routing block kept its appointment from being
+    // created, and no not_confirmed sibling exists) read as fully resolved
+    // — the promised appointment is still owed.
+    if (code === 'caller_not_authorized' && ev.caller_phone_added && callerPhoneOnFile(item)
+        && !callConfirmedUnbooked(item, ctx)) {
       return { action: 'resolve', rule: 'caller_phone_added' };
     }
     if (code === 'not_confirmed' && ev.booking_after_card) {
@@ -609,6 +631,7 @@ function loadCandidateItems(conn, itemIds = null) {
       'c.deleted_at as customer_deleted_at',
       'c.pipeline_stage as customer_pipeline_stage',
       'c.address_line1 as customer_address_line1',
+      'c.address_line2 as customer_address_line2',
       'c.zip as customer_zip',
       'c.city as customer_city',
       'c.first_name as customer_first_name',
@@ -732,17 +755,20 @@ async function loadContactEvidence(conn, items, flag) {
 // service_address_* when present, else the ACTIVE property row of this
 // customer it points at — street key AND locality must agree. A row with
 // neither is only associated with the customer and proves nothing about
-// where service happens.
+// where service happens. The unit is part of the identity: Unit B is not
+// Unit A, and a unit-less stamp cannot prove a unit.
 function visitAtOnFileAddress(item, visit, places) {
   const onFile = addressKey(item.customer_address_line1);
   if (!onFile) return false;
+  const unit = onFileUnit(item);
   if (visit.service_address_line1) {
     return addressKey(visit.service_address_line1) === onFile
+      && unitOf(visit.service_address_line1, visit.service_address_line2) === unit
       && localityMatches(item, { city: visit.service_address_city, zip: visit.service_address_zip });
   }
   const place = visit.property_id ? places.get(String(visit.property_id)) : null;
   return Boolean(place) && String(place.customer_id) === String(item.call_customer_id)
-    && place.key === onFile && localityMatches(item, place);
+    && place.key === onFile && place.unit === unit && localityMatches(item, place);
 }
 
 // not_confirmed → bookings created after the card that COLLECTIVELY cover
@@ -754,12 +780,14 @@ function visitAtOnFileAddress(item, visit, places) {
 // address. Direct bookings are held to the snapshot too: a reprocess that
 // re-classified the call and minted a different-service booking must not
 // close the original ask. A card with no snapshot (filed before it
-// existed) is answered only by this call's own booking.
+// existed — the historical backlog) gets NO booking evidence: without the
+// requested service there is nothing to prove a booking answered, and a
+// reprocess could have re-classified the call. Those cards stay for humans.
 function bookingCoversRequest(item, mine, { multiProperty, places }) {
+  const categories = requestedServiceTokens(item);
+  if (!categories.length) return false;
   const parents = mine.filter((v) => !v.parent_service_id && strictlyAfter(v.created_at, item.created_at));
   const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id));
-  const categories = requestedServiceTokens(item);
-  if (!categories.length) return direct.length > 0;
   let pool = direct;
   const askIsOnFile = !callSuppliedAddress(item.call_extraction, item.call_extraction_v1) || heardAddressMatchesOnFile(item);
   if (!multiProperty && askIsOnFile) {
@@ -788,11 +816,11 @@ async function loadVisitEvidence(conn, items, flag, { lock = false } = {}) {
   const propRows = await conn('customer_properties')
     .whereIn('customer_id', customerIds)
     .where('active', true)
-    .select('id', 'customer_id', 'address_line1', 'city', 'zip');
+    .select('id', 'customer_id', 'address_line1', 'address_line2', 'city', 'zip');
   const places = new Map();
   const activeCount = new Map();
   for (const r of propRows) {
-    places.set(String(r.id), { customer_id: r.customer_id, key: addressKey(r.address_line1), city: r.city, zip: r.zip });
+    places.set(String(r.id), { customer_id: r.customer_id, key: addressKey(r.address_line1), unit: unitOf(r.address_line1, r.address_line2), city: r.city, zip: r.zip });
     activeCount.set(String(r.customer_id), (activeCount.get(String(r.customer_id)) || 0) + 1);
   }
   const multiProperty = (customerId) => (activeCount.get(String(customerId)) || 0) > 1;
@@ -806,7 +834,7 @@ async function loadVisitEvidence(conn, items, flag, { lock = false } = {}) {
     .whereIn('status', [...LIVE_BOOKING_STATUSES])
     .orderBy('id', 'asc')
     .select('id', 'customer_id', 'source_call_log_id', 'parent_service_id', 'status', 'service_type', 'service_category_snapshot', 'scheduled_date',
-      'created_at', 'completed_at', 'service_address_line1', 'service_address_city', 'service_address_zip', 'property_id');
+      'created_at', 'completed_at', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip', 'property_id');
   if (lock) q.forUpdate();
   const visits = await q;
   // Indexed once — the backlog is cards × a customer's own visits, not
