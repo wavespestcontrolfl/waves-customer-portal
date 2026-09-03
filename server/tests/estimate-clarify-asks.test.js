@@ -1326,6 +1326,16 @@ describe('unit_number ask (call pipeline lane)', () => {
     // The same interchangeable designator twice is still one answer.
     expect(extractUnitReply('Unit 204, apt 204')).toBe('Apt 204');
     expect(extractUnitReply('#204')).toBe('Apt 204');
+    // A hash owned by the worded designator ("Lot #12") is decoration, not a second (apartment) designator (codex r18 P1 on #3804).
+    expect(extractUnitReply('Lot #12')).toBe('Lot 12');
+    expect(extractUnitReply('Space #7')).toBe('Space 7');
+    expect(extractUnitReply('Suite #210')).toBe('Suite 210');
+    expect(extractUnitReply("It's lot # 12")).toBe('Lot 12');
+    expect(extractUnitReply('Apt #204')).toBe('Apt 204');
+    // …while a hash the worded matcher did not consume still names a second premise or value.
+    expect(extractUnitReply('Lot #12 or apt 12')).toBeNull();
+    expect(extractUnitReply('Lot #12 or #12')).toBeNull();
+    expect(extractUnitReply('Lot #12, #13')).toBeNull();
     // Structural designators are not a unit answer.
     expect(extractUnitReply('Bldg 9')).toBeNull();
     expect(extractUnitReply('Yes, Apt 204 please')).toBe('Apt 204');
@@ -1574,6 +1584,19 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     expect(mockEnsurePrimaryProperty.mock.invocationCallOrder[0]).toBeLessThan(mockSyncPrimaryAddress.mock.invocationCallOrder[0]);
     expect(mockRecordCallProperty).not.toHaveBeenCalled();
     expect(writeback()).toEqual(expect.objectContaining({ lead: 'unit_added', customer: 'line2_filled' }));
+  });
+
+  test('a structural-only line 2 ("Bldg 9") is kept beside the replied unit on the mirror and the synced primary — never replaced by it (codex r18 P1 on #3804)', async () => {
+    mockState.selectQueue = [[], [], []];
+    await reply(
+      { id: 'lead-1', address: null },
+      { id: 'cust-1', address_line1: '1048 Example Lakes Cir', address_line2: 'Bldg 9', city: 'Sarasota', zip: '34232' },
+    );
+    expect(mockState.updates.find((u) => u.table === 'customers').payload).toEqual({ address_line2: 'Bldg 9 Apt 204' });
+    expect(mockEnsurePrimaryProperty).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1', address_line2: 'Bldg 9 Apt 204' }), { conn: expect.anything(), source: 'clarify_unit_reply' });
+    expect(mockSyncPrimaryAddress).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1', address_line2: 'Bldg 9 Apt 204' }), expect.anything(), { explicitLine2: true, preserveCoords: true });
+    expect(mockRecordCallProperty).not.toHaveBeenCalled();
+    expect(writeback().customer).toBe('line2_filled');
   });
 
   test('a customer whose line 2 is blank but whose PRIMARY property row at the building carries Apt 9: the primary is kept, Apt 204 becomes a secondary', async () => {

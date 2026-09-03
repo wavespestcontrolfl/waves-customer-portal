@@ -437,7 +437,7 @@ async function writeLeadUnit(trx, { leadId, linkage, building, unitLine }) {
 // property row, or the evidence that it is already on file. Mutates out
 // (customer, propertyId, propertyCreated, primaryEnsuredId).
 async function writeCustomerUnit(trx, { customerId, customerRow, building, unitLine, out }) {
-  const { dwellingUnitOnLine, dwellingUnitOfUnitLine } = require('../utils/address-normalizer');
+  const { dwellingUnitOnLine, dwellingUnitOfUnitLine, structuralUnitPart } = require('../utils/address-normalizer');
   const { recordCallProperty, syncPrimaryAddress, ensurePrimaryProperty } = require('./customer-properties');
   const { unitLineValueKey } = require('../utils/address-normalizer');
   const ownAddress = String(customerRow.address_line1 || '').trim();
@@ -512,13 +512,19 @@ async function writeCustomerUnit(trx, { customerId, customerRow, building, unitL
       if (unitAlreadyOnFile) {
         out.customer = 'property_exists';
       } else {
-        await trx('customers').where({ id: customerId }).update({ address_line2: unitLine });
+        // A structural-only line 2 ("Bldg 9", "Floor 2") is the building
+        // the replied unit sits in — kept beside it, never replaced by it,
+        // on the mirror and (through the sync) the primary; the lead
+        // write-back keeps its structural part the same way (codex r18 P1
+        // on #3804).
+        const line2 = [structuralUnitPart(customerRow.address_line2), unitLine].filter(Boolean).join(' ');
+        await trx('customers').where({ id: customerId }).update({ address_line2: line2 });
         // A customer with no primary property row yet (lazy-backfill
         // model, or property persistence gated/failed at call time)
         // gets one from the mirror — WITH the unit — or the sync below
         // would silently have nothing to update (codex r1 P2 on #3788).
-        const ensured = await ensurePrimaryProperty({ ...customerRow, address_line2: unitLine }, { conn: trx, source: 'clarify_unit_reply' });
-        await syncPrimaryAddress({ ...customerRow, address_line2: unitLine }, trx, { explicitLine2: true, preserveCoords: true });
+        const ensured = await ensurePrimaryProperty({ ...customerRow, address_line2: line2 }, { conn: trx, source: 'clarify_unit_reply' });
+        await syncPrimaryAddress({ ...customerRow, address_line2: line2 }, trx, { explicitLine2: true, preserveCoords: true });
         out.customer = 'line2_filled';
         if (ensured?.created && ensured.propertyId) {
           // Created from a mirror that may lack coordinates/type —
@@ -1111,7 +1117,12 @@ function unitReplyIsAmbiguous(text, normalizeUnitLine) {
     const u = norm(m[1]); if (u) values.add(u);
   }
   const worded = [...text.matchAll(new RegExp(UNIT_REPLY_RE.source, 'gi'))];
-  const hashed = [...text.matchAll(new RegExp(UNIT_HASH_REPLY_RE.source, 'gi'))];
+  // A hash INSIDE a worded match ("Lot #12") is that designator's own
+  // decoration, not a second — implicit apartment — designator on the same
+  // value: only a hash the worded matcher did not consume counts (codex
+  // r18 P1 on #3804).
+  const ownedByWorded = (at) => worded.some((m) => at >= m.index && at < m.index + m[0].length);
+  const hashed = [...text.matchAll(new RegExp(UNIT_HASH_REPLY_RE.source, 'gi'))].filter((m) => !ownedByWorded(m.index));
   for (const v of [...worded.map((m) => m[2]), ...hashed.map((m) => m[1])].map(norm)) if (v) values.add(v);
   if (values.size > 1) return true;
   // One value under TWO different designators ("Lot 12 or Apt 12") names

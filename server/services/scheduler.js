@@ -11,6 +11,7 @@ const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive } = require('../utils/cron-lock');
+const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
@@ -430,6 +431,12 @@ async function claimDueScheduledEstimates(now) {
         -- must not claim one scheduled before that commit.
         AND archived_at IS NULL
         AND scheduled_at <= ?
+        -- A clarify re-price hold pulls the row off the cron. The reply's own
+        -- unschedule reaches 'scheduled' rows; a hold that landed on a claimed
+        -- row (or past a failed unschedule) is refused at send time, and
+        -- claiming it again would only burn an attempt (codex r18 P2 on
+        -- #3804). Repeated at every stage like the archive guard.
+        AND ${REPRICE_PENDING_ABSENT_SQL}
         -- Cross-process guard (codex #3244 r3): once any member of a group is
         -- mid-send (another pod's batch), the whole group is spoken for — its
         -- send publishes the rest. Claiming a second member here would only
@@ -453,6 +460,7 @@ async function claimDueScheduledEstimates(now) {
         -- mid-claim would still deliver the invalidated content.
         AND e.archived_at IS NULL
         AND e.scheduled_at <= ?
+        AND ${REPRICE_PENDING_ABSENT_SQL}
       ORDER BY e.scheduled_at ASC, e.created_at ASC
       FOR UPDATE OF e SKIP LOCKED
       LIMIT ?
@@ -465,6 +473,7 @@ async function claimDueScheduledEstimates(now) {
     FROM due
     WHERE e.id = due.id
       AND e.archived_at IS NULL
+      AND ${REPRICE_PENDING_ABSENT_SQL}
     RETURNING e.*
   `, [now, now, SCHEDULED_ESTIMATE_CLAIM_LIMIT, now]);
 
@@ -4068,12 +4077,16 @@ function initScheduledJobs() {
           }
         } catch (e) {
           logger.error(`Scheduled estimate ${est.id} failed: ${e.message}`);
-          // A pricing-authority refusal is deterministic (the row needs a
-          // re-save through the engine): fail it once with the gate's own
-          // message instead of burning scheduled_send_attempts on retries
-          // (pre-push codex P1 on #3750).
-          const pricingAuthorityRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER'].includes(e.code));
-          await markScheduledEstimateSendFailure(est, e.message, { retry: !pricingAuthorityRefusal, now });
+          // A pricing-authority refusal or a clarify re-price hold is
+          // deterministic (the row needs a re-save / re-draft through the
+          // engine): fail it once with the gate's own message instead of
+          // burning scheduled_send_attempts on retries — a retried hold went
+          // back to 'scheduled' with a fresh due time and was reclaimed until
+          // the attempts ran out; parked as send_failed with no due time it
+          // is inert, as the sibling release leaves a held row (pre-push
+          // codex P1 on #3750; codex r18 P2 on #3804).
+          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING'].includes(e.code));
+          await markScheduledEstimateSendFailure(est, e.message, { retry: !deterministicRefusal, now });
         }
       }
       logger.info(`Scheduled estimates processed: ${scheduled.length}`);
