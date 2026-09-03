@@ -112,6 +112,17 @@ function withClarifyLock(digits, callback) {
   });
 }
 
+// Item-specific linkage for the unit ask: the call whose card it serves,
+// the lead/customer the answer belongs to, and the building it names.
+function unitAskFlags({ callLogId, leadId, customerId, unitAskBuilding }) {
+  return {
+    ...(callLogId ? { unit_call_log_id: String(callLogId) } : {}),
+    ...(leadId ? { unit_lead_id: String(leadId) } : {}),
+    ...(customerId ? { unit_customer_id: String(customerId) } : {}),
+    ...(unitAskBuilding ? { unit_ask_building: unitAskBuilding } : {}),
+  };
+}
+
 // Rewrite an unclaimed pending clarify with the union of missing items and
 // the NEWEST request's linkage. Runs under the clarify lock (trx), so the
 // flags read is serialized. Linkage is REPLACED, not backfilled: the
@@ -126,7 +137,12 @@ async function mergePendingClarify(trx, existing, { askable, firstName, linkage 
   } catch { existingFlags = {}; }
   const existingMissing = Array.isArray(existingFlags.missing) ? existingFlags.missing : [];
   const merged = [...new Set([...existingMissing, ...askable])];
-  const unitAskBuilding = linkage.unitAskBuilding || existingFlags.unit_ask_building || null;
+  // The unit item binds to ITS call/lead/customer/building — refreshed
+  // only by a request that asks for the unit, never by a later merged ask
+  // for another lead on the same phone (codex r1 P1; same rule as
+  // bedroom_estimate_id).
+  const unitLinkage = askable.includes('unit_number') ? unitAskFlags(linkage) : {};
+  const unitAskBuilding = unitLinkage.unit_ask_building || existingFlags.unit_ask_building || null;
   const changed = await trx('message_drafts')
     .where({ id: existing.id, status: 'pending' })
     .update({
@@ -137,8 +153,7 @@ async function mergePendingClarify(trx, existing, { askable, firstName, linkage 
         missing: merged,
         lead_id: linkage.leadId || null,
         estimate_id: linkage.estimateId || null,
-        ...(linkage.callLogId ? { call_log_id: String(linkage.callLogId) } : {}),
-        ...(unitAskBuilding ? { unit_ask_building: unitAskBuilding } : {}),
+        ...unitLinkage,
         // The bedroom item binds to ITS unit draft, independent of the
         // generic linkage a later merged ask may re-point.
         ...(askable.includes('bedroom_count') && linkage.estimateId ? { bedroom_estimate_id: String(linkage.estimateId) } : {}),
@@ -307,8 +322,7 @@ async function parkClarifyAsk({
           toPhone: `+1${digits}`,
           lead_id: leadId || null,
           estimate_id: estimateId || null,
-          ...(callLogId ? { call_log_id: String(callLogId) } : {}),
-          ...(unitAskBuilding ? { unit_ask_building: unitAskBuilding } : {}),
+          ...(askable.includes('unit_number') ? unitAskFlags({ callLogId, leadId, customerId, unitAskBuilding }) : {}),
           // Item-specific target for the bedroom re-price (see mergePendingClarify).
           ...(askable.includes('bedroom_count') && estimateId ? { bedroom_estimate_id: String(estimateId) } : {}),
           source,
@@ -556,9 +570,14 @@ function extractAddressReply(body) {
 // is accepted only when the unit was the only thing asked AND the question
 // was actually delivered (same rule as the bedroom ask). Returns the
 // canonical unit line ("Apt 204" / "Apt 12B") or null.
-const UNIT_REPLY_RE = /\b(?:apt|apartment|unit)\.?\s*#?\s*([a-z]?\d{1,5}[a-z]?|[a-z]\d{0,4}|\d{1,4}-[a-z0-9]{1,3})\b/i;
-const UNIT_HASH_REPLY_RE = /#\s*([a-z]?\d{1,5}[a-z]?|[a-z]\d{0,4})\b/i;
-const BARE_UNIT_REPLY_RE = /^\s*(?:it'?s\s+|its\s+|number\s+)?([a-z]?\d{1,5}[a-z]?|\d{1,4}-[a-z0-9]{1,3})\s*[.!]?\s*$/i;
+// A unit VALUE: carries a digit ("204", "12B", "PH1", "TH12", "A-204",
+// "204-B") or is a single letter ("B") — never a bare word, so "apt on
+// the 3rd floor" cannot capture "on" (codex r1 P2: the normalizer's
+// multi-letter and hyphenated forms are accepted).
+const UNIT_VALUE = '(?:[a-z]{0,2}\\d{1,5}(?:-?[a-z0-9]{1,4})?|[a-z](?:-\\d{1,5})?)';
+const UNIT_REPLY_RE = new RegExp(`\\b(?:apt|apartment|unit)\\.?\\s*#?\\s*(${UNIT_VALUE})\\b`, 'i');
+const UNIT_HASH_REPLY_RE = new RegExp(`#\\s*(${UNIT_VALUE})\\b`, 'i');
+const BARE_UNIT_REPLY_RE = new RegExp(`^\\s*(?:it'?s\\s+|its\\s+|number\\s+)?(${UNIT_VALUE})\\s*[.!]?\\s*$`, 'i');
 function extractUnitReply(body, { bareOk = false } = {}) {
   const text = String(body || '').trim();
   if (!text) return null;
@@ -738,30 +757,45 @@ async function handleClarifyReply({ phone, body }) {
           .update({ service_interest: serviceText });
       }
       if (recorded.includes('unit_number')) {
-        const { splitStreetLineUnit } = require('../utils/address-normalizer');
-        // leads.address is ONE free-text line: append the unit to the street
-        // the caller gave, only when that line carries no unit yet.
-        if (freshFlags.lead_id) {
-          const leadRow = await trx('leads').where({ id: freshFlags.lead_id }).whereNull('deleted_at').first();
+        const { splitStreetLineUnit, normalizeLeadAddress, normalizeStreetLine } = require('../utils/address-normalizer');
+        const streetKey = (line) => normalizeStreetLine(splitStreetLineUnit(String(line || '')).street)
+          .toLowerCase().replace(/[^a-z0-9]/g, '');
+        const building = freshFlags.unit_ask_building || null;
+        // The unit binds to the ask's OWN lead/customer/call (unit_* flags),
+        // never the generic linkage a later merged ask may have re-pointed.
+        const unitLeadId = freshFlags.unit_lead_id || null;
+        const unitCustomerId = freshFlags.unit_customer_id || null;
+        // leads.address is ONE formatted line ("123 Main St, Sarasota, FL
+        // 34236"): the unit goes in as line 2 through the shared formatter
+        // (street, unit, locality), only when the line carries no unit yet.
+        if (unitLeadId) {
+          const leadRow = await trx('leads').where({ id: unitLeadId }).whereNull('deleted_at').first();
           const leadAddress = String(leadRow?.address || '').trim();
           if (leadAddress && !splitStreetLineUnit(leadAddress).unit) {
-            await trx('leads').where({ id: freshFlags.lead_id }).whereNull('deleted_at')
-              .update({ address: `${leadAddress} ${unitLine}` });
+            const formatted = normalizeLeadAddress({ raw: leadAddress, line2: unitLine });
+            await trx('leads').where({ id: unitLeadId }).whereNull('deleted_at')
+              .update({ address: formatted.fullAddress || `${leadAddress}, ${unitLine}` });
           }
         }
-        // Fill-only, like the street: an existing unit line is never
-        // clobbered by an SMS-captured one.
-        if (fresh.customer_id) {
-          await trx('customers').where({ id: fresh.customer_id })
-            .where((q) => q.whereNull('address_line2').orWhere('address_line2', ''))
-            .update({ address_line2: unitLine });
+        // Fill-only, like the street — and only when the customer's own
+        // street IS the building the ask named: an existing member asking
+        // about a second property must not get that property's apartment
+        // stamped onto their home address (codex r1 P1).
+        if (unitCustomerId && building?.street_line_1) {
+          const customerRow = await trx('customers').where({ id: unitCustomerId }).first();
+          const customerStreet = String(customerRow?.address_line1 || '').trim();
+          if (customerStreet && streetKey(customerStreet) === streetKey(building.street_line_1)) {
+            await trx('customers').where({ id: unitCustomerId })
+              .where((q) => q.whereNull('address_line2').orWhere('address_line2', ''))
+              .update({ address_line2: unitLine });
+          }
         }
         // The Triage Inbox card keeps its human verdict (AGENTS.md: no
         // auto-resolution for missing_unit_number) — the reply is stamped
         // on it so the reviewer sees the answer beside the ask.
-        if (freshFlags.call_log_id) {
+        if (freshFlags.unit_call_log_id) {
           await trx('triage_items')
-            .where({ call_log_id: String(freshFlags.call_log_id), reason_code: 'missing_unit_number' })
+            .where({ call_log_id: String(freshFlags.unit_call_log_id), reason_code: 'missing_unit_number' })
             .whereIn('status', ['open', 'in_progress'])
             .update({
               payload: trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('customer_reply_unit', ?::text, 'customer_reply_at', ?::text)", [unitLine, new Date().toISOString()]),
@@ -1154,8 +1188,16 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
       // A unit is "on file" when the customer's line 2 holds one, or the
       // lead's/estimate's single address line carries a unit designator.
       const { splitStreetLineUnit } = require('../utils/address-normalizer');
-      const hasUnitNow = !!String(customer?.address_line2 || '').trim()
-        || [lead?.address, estimate?.address].some((value) => value && splitStreetLineUnit(String(value)).unit);
+      // Judged on the unit ask's OWN lead/customer (unit_* linkage) when a
+      // later merged ask re-pointed the generic linkage elsewhere.
+      const unitLead = flags.unit_lead_id && String(flags.unit_lead_id) !== String(flags.lead_id || '')
+        ? await trx('leads').where({ id: flags.unit_lead_id }).whereNull('deleted_at').first()
+        : lead;
+      const unitCustomer = flags.unit_customer_id && String(flags.unit_customer_id) !== String(fresh.customer_id || '')
+        ? await trx('customers').where({ id: flags.unit_customer_id }).whereNull('deleted_at').first()
+        : customer;
+      const hasUnitNow = !!String(unitCustomer?.address_line2 || '').trim()
+        || [unitLead?.address, estimate?.address].some((value) => value && splitStreetLineUnit(String(value)).unit);
       const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
         || (item === 'specific_service' && !hasServiceNow)
         || (item === 'unit_number' && !hasUnitNow)

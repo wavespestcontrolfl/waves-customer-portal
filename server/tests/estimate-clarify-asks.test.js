@@ -1211,7 +1211,7 @@ describe('unit_number ask (call pipeline lane)', () => {
     expect(combined).toMatch(/ Also, what's the apartment or unit number at 1048 Example Lakes Cir\?$/);
   });
 
-  test('parks the unit ask with the call and building in flags', async () => {
+  test('parks the unit ask with item-specific call/lead/customer/building linkage', async () => {
     const result = await parkClarifyAsk({
       missing: ['unit_number'], phone: '+17735550142', firstName: 'Anna', customerId: 'cust-1', leadId: 'lead-1',
       callLogId: 'call-1', source: 'call_missing_unit_number', channelProvenance: 'voice', unitAskBuilding: BUILDING,
@@ -1222,17 +1222,38 @@ describe('unit_number ask (call pipeline lane)', () => {
     expect(row.draft_response).toMatch(/unit number at 1048 Example Lakes Cir\?$/);
     const flags = JSON.parse(row.flags);
     expect(flags).toEqual(expect.objectContaining({
-      missing: ['unit_number'], toPhone: '+17735550142', lead_id: 'lead-1', call_log_id: 'call-1',
+      missing: ['unit_number'], toPhone: '+17735550142', lead_id: 'lead-1',
+      unit_call_log_id: 'call-1', unit_lead_id: 'lead-1', unit_customer_id: 'cust-1',
       unit_ask_building: BUILDING, channel_provenance: 'voice',
     }));
   });
 
-  test('extractUnitReply: designated forms always; a bare token only when allowed', () => {
+  test('a later merged ask for ANOTHER lead on the same phone keeps the unit item bound to its own call/lead', async () => {
+    mockState.existingDraft = {
+      id: 'draft-1', status: 'pending', sent_at: null,
+      flags: JSON.stringify({ missing: ['unit_number'], lead_id: 'lead-A', unit_call_log_id: 'call-A', unit_lead_id: 'lead-A', unit_customer_id: null, unit_ask_building: BUILDING }),
+    };
+    const result = await parkClarifyAsk({ missing: ['specific_service'], phone: '+17735550142', leadId: 'lead-B', source: 'lead_intake' });
+    expect(result.skipped).toBe('merged_into_open_clarify');
+    const merged = mockState.updates.find((u) => u.table === 'message_drafts');
+    const flags = JSON.parse(merged.payload.flags);
+    expect(flags.missing).toEqual(['unit_number', 'specific_service']);
+    expect(flags.lead_id).toBe('lead-B');
+    expect(flags.unit_lead_id).toBe('lead-A');
+    expect(flags.unit_call_log_id).toBe('call-A');
+    expect(merged.payload.draft_response).toMatch(/unit number at 1048 Example Lakes Cir\?$/);
+  });
+
+  test('extractUnitReply: designated forms always (incl. PH1 / TH12 / A-204); a bare token only when allowed; never a bare word', () => {
     const { extractUnitReply } = _private;
     expect(extractUnitReply('Apt 204')).toBe('Apt 204');
     expect(extractUnitReply("it's apt. 12B, thanks!")).toBe('Apt 12B');
     expect(extractUnitReply('Unit 7')).toBe('Apt 7');
     expect(extractUnitReply('#7')).toBe('Apt 7');
+    expect(extractUnitReply('Unit PH1')).toBe('Apt PH1');
+    expect(extractUnitReply('apt TH12 please')).toBe('Apt TH12');
+    expect(extractUnitReply('Unit A-204')).toBe('Apt A-204');
+    expect(extractUnitReply('apt on the 3rd floor')).toBeNull();
     expect(extractUnitReply('204')).toBeNull();
     expect(extractUnitReply('204', { bareOk: true })).toBe('Apt 204');
     expect(extractUnitReply('its 12B.', { bareOk: true })).toBe('Apt 12B');
@@ -1246,19 +1267,23 @@ describe('unit_number ask (call pipeline lane)', () => {
       customer_id: 'cust-1',
       status: 'approved',
       sent_at: '2026-09-03T12:00:00Z',
-      flags: JSON.stringify({ missing: ['unit_number'], lead_id: 'lead-1', call_log_id: 'call-1', unit_ask_building: BUILDING }),
+      flags: JSON.stringify({
+        missing: ['unit_number'], lead_id: 'lead-1',
+        unit_call_log_id: 'call-1', unit_lead_id: 'lead-1', unit_customer_id: 'cust-1', unit_ask_building: BUILDING,
+      }),
       ...overrides,
     });
+    const LEAD = { id: 'lead-1', address: '1048 Example Lakes Cir, Sarasota, FL 34232' };
     beforeEach(() => {
       mockSmsThreadDraftsEnabled.mockReturnValue(false);
     });
 
-    test('"Apt 204" lands on the lead line, the customer\'s line 2 (fill-only), and the open triage card — the card is never resolved', async () => {
-      mockState.firstQueue = [AWAITING(), AWAITING(), { id: 'lead-1', address: '1048 Example Lakes Cir' }];
+    test('"Apt 204" goes in as line 2 of the lead address, onto the customer\'s line 2 (same building, fill-only), and onto the open card — never resolving it', async () => {
+      mockState.firstQueue = [AWAITING(), AWAITING(), LEAD, { id: 'cust-1', address_line1: '1048 Example Lakes Circle', address_line2: null }];
       const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
       expect(result.handled).toBe(true);
       const leadUpdate = mockState.updates.find((u) => u.table === 'leads');
-      expect(leadUpdate.payload.address).toBe('1048 Example Lakes Cir Apt 204');
+      expect(leadUpdate.payload.address).toBe('1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232');
       const customerUpdate = mockState.updates.find((u) => u.table === 'customers');
       expect(customerUpdate.payload.address_line2).toBe('Apt 204');
       const cardUpdate = mockState.updates.find((u) => u.table === 'triage_items');
@@ -1272,15 +1297,23 @@ describe('unit_number ask (call pipeline lane)', () => {
       expect(flags.answered_at).toBeTruthy();
     });
 
+    test('a member asking about a SECOND property never gets that unit stamped on their home address', async () => {
+      mockState.firstQueue = [AWAITING(), AWAITING(), LEAD, { id: 'cust-1', address_line1: '9 Home St', address_line2: null }];
+      const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
+      expect(result.handled).toBe(true);
+      expect(mockState.updates.find((u) => u.table === 'leads').payload.address).toBe('1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232');
+      expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
+    });
+
     test('a lead line that already carries a unit is left alone', async () => {
-      mockState.firstQueue = [AWAITING(), AWAITING(), { id: 'lead-1', address: '1048 Example Lakes Cir Apt 9' }];
+      mockState.firstQueue = [AWAITING(), AWAITING(), { id: 'lead-1', address: '1048 Example Lakes Cir Apt 9, Sarasota, FL 34232' }, { id: 'cust-1', address_line1: '9 Home St' }];
       const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
       expect(result.handled).toBe(true);
       expect(mockState.updates.find((u) => u.table === 'leads')).toBeUndefined();
     });
 
     test('a bare "204" answers a DELIVERED one-question ask, never an unsent one', async () => {
-      mockState.firstQueue = [AWAITING(), AWAITING(), { id: 'lead-1', address: '1048 Example Lakes Cir' }];
+      mockState.firstQueue = [AWAITING(), AWAITING(), LEAD, { id: 'cust-1', address_line1: '9 Home St' }];
       expect((await handleClarifyReply({ phone: '+17735550142', body: '204' })).handled).toBe(true);
       mockState.updates = [];
       mockState.firstQueue = [AWAITING({ status: 'pending', sent_at: null })];
@@ -1294,7 +1327,7 @@ describe('unit_number ask (call pipeline lane)', () => {
     const freshRow = (flags = {}, overrides = {}) => ({
       id: 'draft-1', source_ref: 'clarify:7735550142', customer_id: null, status: 'approved', sent_at: null,
       draft_response: 'Unit?', final_response: null,
-      flags: JSON.stringify({ missing: ['unit_number'], toPhone: '+17735550142', lead_id: 'lead-1', unit_ask_building: BUILDING, ...flags }),
+      flags: JSON.stringify({ missing: ['unit_number'], toPhone: '+17735550142', lead_id: 'lead-1', unit_lead_id: 'lead-1', unit_ask_building: BUILDING, ...flags }),
       ...overrides,
     });
 
@@ -1306,17 +1339,28 @@ describe('unit_number ask (call pipeline lane)', () => {
     });
 
     test('a unit that reached the lead line or the customer\'s line 2 retires the ask', async () => {
-      mockState.firstQueue = [freshRow(), { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir Apt 204', first_name: 'Anna' }];
+      mockState.firstQueue = [freshRow(), { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232', first_name: 'Anna' }];
       expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('retired');
       mockState.updates = [];
       mockState.firstQueue = [
-        freshRow({}, { customer_id: 'cust-1' }),
+        freshRow({ unit_customer_id: 'cust-1' }, { customer_id: 'cust-1' }),
         { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir', first_name: 'Anna' },
         { id: 'cust-1', first_name: 'Anna', address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 204' },
       ];
       const verdict = await claimClarifyDispatch({ draft: DRAFT });
       expect(verdict.outcome).toBe('retired');
       expect(verdict.message).toContain('already provided');
+    });
+
+    test('the unit item is judged on ITS lead when a merged ask re-pointed the generic lead', async () => {
+      mockState.firstQueue = [
+        freshRow({ lead_id: 'lead-B', unit_lead_id: 'lead-A', missing: ['unit_number', 'specific_service'] }),
+        { id: 'lead-B', status: 'new', address: '5 Other Rd', service_interest: null, first_name: 'Anna' },
+        { id: 'lead-A', status: 'new', address: '1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232', first_name: 'Anna' },
+      ];
+      const verdict = await claimClarifyDispatch({ draft: DRAFT });
+      expect(verdict.outcome).toBe('send');
+      expect(verdict.flags.missing).toEqual(['specific_service']);
     });
   });
 });

@@ -7299,6 +7299,11 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
+    // Set by WHICHEVER lane files the missing_unit_number card (enforce
+    // advisory loop or the shadow bridge) — the completed-call clarify ask
+    // below reads it, so the ask does not depend on the routing mode
+    // (codex r1 P1 on #3775).
+    let clarifyUnitOwed = false;
     // In-run email-review signal: set the moment either bridge branch decides
     // the extracted email needs read-back, BEFORE any card insert — so a
     // failed triage insert cannot release the first-touch email hold below.
@@ -7601,6 +7606,7 @@ const CallRecordingProcessor = {
           // identity signals the shadow bridge used to surface. onConflict dedups
           // against the blocked-branch inserts below.
           for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
+            if (flag === 'missing_unit_number') clarifyUnitOwed = true;
             await db('triage_items')
               .insert(buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory', addressValidation }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
@@ -7923,6 +7929,7 @@ const CallRecordingProcessor = {
               // of truth for the address, and the bridge only files this ask
               // when AV's building corroborates it.
               if (flag === 'missing_unit_number') {
+                clarifyUnitOwed = true;
                 await db('triage_items')
                   .insert(buildTriageItem({
                     callLogId: call.id,
@@ -11215,16 +11222,25 @@ const CallRecordingProcessor = {
         // dropped-call text: inbound, not spam/voicemail, no
         // do-not-contact, the inbound ANI only (implied consent is
         // personal to it — a dictated callback number never receives it).
+        // A DROPPED call stays on its own one-shot text above — parking a
+        // second address question for the same run would let the owner
+        // send the same ask twice (codex r1 P1). The street judgment reads
+        // the CANONICAL extraction only: in shadow mode a V2-only street
+        // is deliberately not adopted, so the persisted lead is
+        // addressless and the ask must fire (codex r1 P1).
         // Fail-soft — a clarify hiccup never breaks the call.
-        if (leadId && !extracted.is_spam && !extracted.is_voicemail && !isOutboundCall(call)
+        if (leadId && !droppedMidIntake && !extracted.is_spam && !extracted.is_voicemail && !isOutboundCall(call)
           && v2Result?.extraction?.consent?.do_not_contact_request !== true) {
           try {
             const clarifyAni = firstExternalPhone(call.from_phone);
-            const hasStreet = !!String(extracted.address_line1 || '').trim()
-              || !!String(v2Result?.extraction?.property?.service_address?.street_line_1 || '').trim();
-            const unitOwed = bridgeNeedsConfirmation.includes('missing_unit_number');
+            const hasStreet = !!String(extracted.address_line1 || '').trim();
+            const unitOwed = clarifyUnitOwed;
             const clarifyMissing = unitOwed ? ['unit_number'] : (!hasStreet ? ['street_address'] : []);
             if (clarifyAni && clarifyMissing.length) {
+              // A durable draft must not outlive a lost claim: a peer may
+              // have reprocessed the call as spam/DNC meanwhile (codex r1
+              // P2 — same fence as the dropped-call text).
+              if (!(await stillOwnsClaim())) return abandonToPeer('the completed-call clarify draft');
               const { parkClarifyAsk } = require('./estimate-clarify-asks');
               const n = v2AddressValidation?.normalized || {};
               const unitAskBuilding = unitOwed ? {
