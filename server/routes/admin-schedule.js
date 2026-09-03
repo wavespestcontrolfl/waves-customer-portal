@@ -1353,6 +1353,7 @@ const {
   copyBillToFields,
   copyStampedServiceAddressFields,
 } = require('../services/booking/visit-financial-stamps');
+const { anchorSoleProperty } = require('../services/customer-properties');
 
 function clearAppointmentDiscountCatalogFields(target, cols) {
   if (!target || !cols) return;
@@ -9949,6 +9950,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               // anchored on a secondary/rental-property visit must not spawn
               // children that fall back to the customer's primary address.
               copyStampedServiceAddressFields(childData, parent, cols);
+              await anchorSoleProperty(childData, cols, trx);
             } catch (spawnStampErr) {
               // The optional column stamps above are non-blocking, but a
               // pricing refusal (exclusion catalog not loaded) must abort
@@ -11782,6 +11784,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyAppointmentDiscountFields(data, parent, cols);
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
+    await anchorSoleProperty(data, cols, trx);
     const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates, skipParent);
     // Anchored-split provenance governs the per-visit amount on EVERY
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -12077,6 +12080,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           copyAppointmentDiscountFields(nextData, parent, cols);
           copyBillToFields(nextData, parent, cols);
           copyStampedServiceAddressFields(nextData, parent, cols);
+          await anchorSoleProperty(nextData, cols, conn);
           let parentAddons = [];
           try {
             // Nested transaction = savepoint: a missing
@@ -16874,6 +16878,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
+        await anchorSoleProperty(data, cols, conn);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
         // Anchored-split provenance governs the per-visit amount on EVERY
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -16964,6 +16969,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
+        await anchorSoleProperty(data, cols, conn);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
         // Anchored-split provenance governs the per-visit amount on EVERY
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest

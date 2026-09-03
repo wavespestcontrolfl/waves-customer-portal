@@ -1170,7 +1170,14 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   // recurring_pattern and supplies it only through opts.pattern, and the
   // legacy (label, cadence) bridge needs that evidence (codex #3604 r3 P1).
   const childIdentity = opts.childIdentity || await resolveSeriesChildIdentity(conn, { ...parent, recurring_pattern: pattern });
-  const builtRows = buildRecurringFollowUpRows(parent, {
+  // Sole-property anchor (visit groups): children copy the parent's
+  // property_id, so a parent with none spawns rows that never group. Resolve
+  // the fallback ONCE on a copy of the parent and let copyIfPresent carry it —
+  // the parent row itself is not rewritten here. Same rule as the admin
+  // extension writers (customer-properties.anchorSoleProperty).
+  const anchoredParent = { ...parent };
+  await require('./customer-properties').anchorSoleProperty(anchoredParent, columns, conn);
+  const builtRows = buildRecurringFollowUpRows(anchoredParent, {
     ...opts,
     childIdentity,
     pattern,

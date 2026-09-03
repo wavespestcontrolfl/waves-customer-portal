@@ -528,8 +528,30 @@ async function soleActivePropertyId(customerId, conn = db) {
   }
 }
 
+/**
+ * Sole-property anchor for a SPAWNED row (recurring follow-ups, series
+ * extensions, next-visit rolls): when the row copied from its parent carries
+ * no property_id, stamp the customer's sole active property so the visit-group
+ * seam (visit-groups.js groupRowOn) can see it — a null-property row never
+ * groups automatically. Prod 2026-09-03: 11 of 23 admin-created rows since
+ * Sep 1 inherited a parent's empty value this way. Rules: never overrides an
+ * explicit stamp; only an UNSTAMPED row (no service_address_line1) — an
+ * unstamped row resolves to the customer's address by every reader's
+ * COALESCE, which for a sole-property customer IS that property, while a
+ * stamped row may name an address the customer never registered; the
+ * 20260903000050 backfill applies the same rule to existing rows.
+ * Cols-guarded like the stamp copy; best-effort (null on error).
+ */
+async function anchorSoleProperty(target, cols, conn = db) {
+  if (!target || !cols || !cols.property_id) return;
+  if (target.property_id != null || !target.customer_id) return;
+  if (cols.service_address_line1 && target.service_address_line1) return;
+  target.property_id = await soleActivePropertyId(target.customer_id, conn);
+}
+
 module.exports = {
   soleActivePropertyId,
+  anchorSoleProperty,
   OCCUPANCY_TYPES,
   normStreet,
   addressKey,
