@@ -1309,7 +1309,8 @@ function freeCancelReason({ start, now = new Date(), windowHours, anchorAt = nul
 }
 // `onFailure` — what the rail's cancel handler does when its own lookup
 // fails at commit time: the appointment rail parks review ('review'); the
-// estimate-hold rail releases the hold free ('release'). The unresolved
+// estimate-hold rail releases the hold free ('release'); 'unknown' when the
+// failure happened before rail ownership was established. The unresolved
 // copy must state the rail's real outcome, not a shared guess.
 function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now = new Date(), anchorAt = null, sticky = null, detail = null, onFailure = 'review' }) {
   const fee = fmtFeeAmount(feeAmount);
@@ -1360,7 +1361,9 @@ function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now
     default:
       return rule(null, `Couldn't verify the fee terms right now${detail ? ` (${detail})` : ''}. Nothing will be charged automatically — ${onFailure === 'release'
         ? 'if the check still fails when you confirm, the hold is released free; check the visit\'s billing afterwards.'
-        : 'the cancel will be parked for billing review.'}`);
+        : onFailure === 'review'
+          ? 'the cancel will be parked for billing review.'
+          : 'check the visit\'s billing after cancelling.'}`);
   }
 }
 
@@ -1851,7 +1854,9 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
         .first();
     } catch (err) {
       logger.warn('[estimate-card-holds] hold-state lookup for cancel preview failed — reporting undetermined', { error: err.message });
-      return { held: false, feeApplies: false, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'release', detail: 'card hold lookup failed' }) };
+      // Rail ownership is unknown here (the appointment rail may own this
+      // visit and park review), so promise neither outcome (pre-push P1).
+      return { held: false, feeApplies: false, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'unknown', detail: 'card hold lookup failed' }) };
     }
     if (!latest) return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
     const state = String(latest.status || '');
