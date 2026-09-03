@@ -30,9 +30,13 @@ function providerOf(id) {
 
 // Ids the registry resolves to today that are not picker options (audio,
 // embeddings, image/video generation) still need a label + provider.
+// A Fable / Mythos id configured before it reaches the catalog must keep the
+// deep-only restriction (same rule as model-discovery.requiresDeep).
 function catalogEntry(id) {
   if (MODEL_CATALOG[id]) return MODEL_CATALOG[id];
-  return { label: id, provider: providerOf(id), caps: [], status: 'current' };
+  const entry = { label: id, provider: providerOf(id), caps: [], status: 'current' };
+  if (/^claude-(fable|mythos)/.test(id)) entry.requires = 'deep';
+  return entry;
 }
 
 // ── Registry selectors ────────────────────────────────────────────────
@@ -139,6 +143,10 @@ const LOCK = {
   agents: (detail) => ({ kind: 'provider', label: 'Anthropic only', detail }),
 };
 
+// Lane extras: `retry` = the availability retry of the fallback leg (the photo
+// lanes re-run Gemini on GEMINI_VISION_FALLBACK); `also` = further legs that
+// run IN PARALLEL with the primary (the fan-outs' OpenAI arm). Both resolve
+// like any ref and count in the Models-in-use view and the change preview.
 const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by six photo lanes';
 // `inbound: true` = the lane's prompt carries customer or third-party content
 // (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The Gemini
@@ -173,14 +181,14 @@ const LANES = [
   L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', T('FLAGSHIP'), null, { note: 'routine categories on the flagship tier' }),
 
   // ── Multimodal ──
-  L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, note: `Claude + Gemini in parallel, Gemini retries on GEMINI_VISION_FALLBACK · ${SHARED_GEMINI_PIN}` }),
-  L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('treatment_zone', 'Treatment-zone suggestion (map)', 'treatment-zone-suggest.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, note: SHARED_GEMINI_PIN }),
-  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, note: 'three legs today: Claude + OPENAI_VISION_MODEL (gpt-5-mini) + Gemini · owner ruling 2026-09-02: one Gemini model — not yet coded' }),
-  L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), D('GEMINI_PROPERTY_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, note: 'consensus of Claude + OPENAI_PROPERTY_MODEL (gpt-5-mini) + Gemini' }),
-  L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), D('GEMINI_VISION_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, note: 'plus OPENAI_VISION_MODEL (gpt-5-mini)' }),
+  L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  L('treatment_zone', 'Treatment-zone suggestion (map)', 'treatment-zone-suggest.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: SHARED_GEMINI_PIN }),
+  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, retry: T('GEMINI_VISION_FALLBACK'), also: [D('OPENAI_VISION_MODEL', 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'three legs in parallel · owner ruling 2026-09-02: one Gemini model — not yet coded' }),
+  L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), D('GEMINI_PROPERTY_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D('OPENAI_PROPERTY_MODEL', 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
+  L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), D('GEMINI_VISION_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D('OPENAI_VISION_MODEL', 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })] }),
   L('turf_ocr', 'Turf-height gauge OCR', 'turf-height-ocr.js', 'multimodal', D('GEMINI_TURF_OCR_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), T('VISION')),
   L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'drives customer-facing health scores (owner 2026-07-21)' }),
   L('vision_delta', 'Before / after vision delta', 'vision-delta.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
@@ -393,6 +401,8 @@ function getSwitchboard() {
       : { primary: resolveRef(lane.primary), fallback: resolveRef(lane.fallback) };
     const primary = withProvider(legs.primary);
     const fallback = withProvider(legs.fallback);
+    const retry = withProvider(resolveRef(lane.retry));
+    const also = (lane.also || []).map((ref) => withProvider(resolveRef(ref)));
     if (primary.selector && byKey[primary.selector] && !primary.pinned) byKey[primary.selector].laneCount += 1;
     return {
       id: lane.id,
@@ -401,6 +411,8 @@ function getSwitchboard() {
       policy: lane.policy,
       primary,
       fallback,
+      retry,
+      also,
       applies: primary.live ? 'live' : 'restart',
       lock: lane.lock || null,
       fanout: !!lane.fanout,
@@ -410,7 +422,7 @@ function getSwitchboard() {
   });
   const models = { ...MODEL_CATALOG };
   for (const lane of lanes) {
-    for (const leg of [lane.primary, lane.fallback]) {
+    for (const leg of [lane.primary, lane.fallback, lane.retry, ...lane.also]) {
       if (leg?.model && !models[leg.model]) models[leg.model] = catalogEntry(leg.model);
     }
   }

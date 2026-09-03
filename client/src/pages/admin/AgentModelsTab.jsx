@@ -219,8 +219,12 @@ export default function AgentModelsTab() {
     [draft, selectorDraft],
   );
 
+  // Every leg a lane runs or falls back to: primary, fallback, the fallback's
+  // retry, and any parallel arms.
+  const legsOf = (lane) => [lane.primary, lane.fallback, lane.retry, ...(lane.also || [])].filter(Boolean);
+
   const laneChanged = useCallback(
-    (lane) => effectiveLeg(lane, lane.primary) !== lane.primary.model || (lane.fallback && effectiveLeg(lane, lane.fallback) !== lane.fallback.model),
+    (lane) => legsOf(lane).some((leg) => effectiveLeg(lane, leg) !== leg.model),
     [effectiveLeg],
   );
 
@@ -247,7 +251,7 @@ export default function AgentModelsTab() {
         const moving = derived.filter((d) => !d.lock);
         const keys = [s.key, ...moving.map((d) => d.key)];
         const follows = (leg) => leg && keys.includes(leg.selector) && !pinnedAfterDraft(leg);
-        const following = data.lanes.filter((l) => follows(l.primary) || follows(l.fallback));
+        const following = data.lanes.filter((l) => legsOf(l).some(follows));
         const lockedLanes = following.filter((l) => l.lock).map((l) => l.name);
         byEnv.set(s.env, {
           env: s.env,
@@ -264,13 +268,13 @@ export default function AgentModelsTab() {
       }
     }
     for (const l of data.lanes) {
-      for (const leg of [l.primary, l.fallback]) {
+      for (const leg of legsOf(l)) {
         const env = leg?.pinEnv;
         const next = env && draft[env];
         if (!next || byEnv.has(env)) continue;
         const unpin = next === UNPIN;
-        const sharing = data.lanes.filter((x) => x.primary.pinEnv === env || x.fallback?.pinEnv === env);
-        const legOf = (x) => (x.primary.pinEnv === env ? x.primary : x.fallback);
+        const sharing = data.lanes.filter((x) => legsOf(x).some((g) => g.pinEnv === env));
+        const legOf = (x) => legsOf(x).find((g) => g.pinEnv === env);
         // Unpinning a shared env can land its lanes on different models (a
         // selector-backed leg vs one with its own literal default).
         const destinations = unpin ? [...new Set(sharing.map((x) => baseAfterDraft(legOf(x))))] : [next];
@@ -297,6 +301,8 @@ export default function AgentModelsTab() {
     for (const l of data.lanes) {
       const r = row(l.primary.model);
       r.primaryLanes += 1;
+      // Parallel arms run on every request too.
+      for (const a of l.also || []) if (a.model !== l.primary.model) row(a.model).primaryLanes += 1;
       // What catches this model's lanes if its provider is down: the set of
       // fallback models across its primary lanes, plus how many have none.
       r.backups = r.backups || new Map();
@@ -306,6 +312,7 @@ export default function AgentModelsTab() {
       } else {
         r.noBackup = (r.noBackup || 0) + 1;
       }
+      if (l.retry?.model) row(l.retry.model).fallbackLanes += 1;
     }
     const providerOrder = { anthropic: 0, openai: 1, gemini: 2 };
     return [...rows.values()].sort(
@@ -340,7 +347,7 @@ export default function AgentModelsTab() {
     if (!data) return [];
     return data.lanes
       .filter((l) => l.inbound && laneChanged(l))
-      .filter((l) => [effectiveLeg(l, l.primary), effectiveLeg(l, l.fallback)].some((id) => id && catalog[id]?.provider === "gemini" && ![l.primary.model, l.fallback?.model].includes(id)))
+      .filter((l) => legsOf(l).some((leg) => { const id = effectiveLeg(l, leg); return id && id !== leg.model && catalog[id]?.provider === "gemini"; }))
       .map((l) => l.name);
   }, [data, laneChanged, effectiveLeg, catalog]);
   // Unpins are deletions: Railway has no "unset" syntax, so the line is an
@@ -396,7 +403,7 @@ export default function AgentModelsTab() {
     return data.lanes.filter((l) => {
       if (laneModel && l.primary.model !== laneModel && l.fallback?.model !== laneModel) return false;
       if (filter === "changed") return laneChanged(l);
-      if (filter === "pinned") return l.primary.pinned || (l.fallback && l.fallback.pinned);
+      if (filter === "pinned") return legsOf(l).some((leg) => leg.pinned);
       if (filter === "fanout") return l.fanout;
       if (filter === "locked") return !!l.lock;
       if (filter === "nobackup") return !l.fallback;
@@ -694,6 +701,8 @@ export default function AgentModelsTab() {
                       const pinLegs = [
                         { leg: l.primary, which: "primary" },
                         { leg: l.fallback, which: "fallback" },
+                        { leg: l.retry, which: "retry" },
+                        ...(l.also || []).map((a) => ({ leg: a, which: "parallel arm" })),
                       ].filter((x) => x.leg?.pinEnv);
                       return (
                         <React.Fragment key={l.id}>
@@ -713,7 +722,19 @@ export default function AgentModelsTab() {
                               <Leg leg={l.primary} catalog={catalog} effective={effectiveLeg(l, l.primary)} />
                             </TD>
                             <TD>
-                              <Leg leg={l.fallback} catalog={catalog} effective={effectiveLeg(l, l.fallback)} />
+                              <div className="flex flex-col gap-1">
+                                <Leg leg={l.fallback} catalog={catalog} effective={effectiveLeg(l, l.fallback)} />
+                                {l.retry && (
+                                  <span className="text-11 text-ink-secondary">
+                                    then retries <ModelChip catalog={catalog} id={effectiveLeg(l, l.retry)} />
+                                  </span>
+                                )}
+                                {l.also?.map((a) => (
+                                  <span key={a.pinEnv || a.model} className="text-11 text-ink-secondary">
+                                    also in parallel <ModelChip catalog={catalog} id={effectiveLeg(l, a)} />
+                                  </span>
+                                ))}
+                              </div>
                             </TD>
                             <TD>
                               {l.applies === "live" ? <Badge tone="strong">Next request</Badge> : <Badge>Restart</Badge>}
@@ -728,7 +749,7 @@ export default function AgentModelsTab() {
                                       )}
                                       <Select
                                         size="sm"
-                                        aria-label={`Pin ${l.name}${which === "fallback" ? " fallback" : ""}`}
+                                        aria-label={`Pin ${l.name}${which === "primary" ? "" : ` ${which}`}`}
                                         value={draft[leg.pinEnv] || ""}
                                         onChange={onPick(leg.pinEnv, leg.accepts, modelLabel(catalog, leg.model))}
                                         className="w-52"
@@ -767,6 +788,18 @@ export default function AgentModelsTab() {
                                       <dd className="m-0 text-zinc-900 u-nums">{l.fallback.via}</dd>
                                     </>
                                   )}
+                                  {l.retry && (
+                                    <>
+                                      <dt className="text-11 uppercase tracking-label text-ink-tertiary">Retry via</dt>
+                                      <dd className="m-0 text-zinc-900 u-nums">{l.retry.via}</dd>
+                                    </>
+                                  )}
+                                  {l.also?.map((a) => (
+                                    <React.Fragment key={a.pinEnv || a.model}>
+                                      <dt className="text-11 uppercase tracking-label text-ink-tertiary">Parallel arm via</dt>
+                                      <dd className="m-0 text-zinc-900 u-nums">{a.via}</dd>
+                                    </React.Fragment>
+                                  ))}
                                   {l.note && (
                                     <>
                                       <dt className="text-11 uppercase tracking-label text-ink-tertiary">Notes</dt>

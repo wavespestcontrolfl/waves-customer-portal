@@ -77,6 +77,8 @@ describe('model-switchboard lane catalog matches the call sites', () => {
     const problems = [];
     for (const m of missing(sources, lane.primary, false)) problems.push(`primary: no file matches ${m}`);
     if (lane.fallback) for (const m of missing(sources, lane.fallback, true)) problems.push(`fallback: no file matches ${m}`);
+    if (lane.retry) for (const m of missing(sources, lane.retry, true)) problems.push(`retry: no file matches ${m}`);
+    for (const ref of lane.also || []) for (const m of missing(sources, ref, false)) problems.push(`also: no file matches ${m}`);
     expect(problems).toEqual([]);
   });
 });

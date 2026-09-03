@@ -121,6 +121,30 @@ describe('model-switchboard', () => {
     }
   });
 
+  it('photo lanes carry the shared Gemini retry leg and the fan-outs their OpenAI arm', () => {
+    const { lanes } = sb.getSwitchboard();
+    const pest = lanes.find((l) => l.id === 'pest_id');
+    expect(pest.retry.model).toBe(MODELS.GEMINI_VISION_FALLBACK);
+    expect(pest.retry.selector).toBe('GEMINI_VISION_FALLBACK');
+    const sat = lanes.find((l) => l.id === 'satellite');
+    expect(sat.also.map((a) => a.pinEnv)).toEqual(['OPENAI_VISION_MODEL']);
+    expect(sat.also[0].provider).toBe('openai');
+    expect(lanes.find((l) => l.id === 'property_trio').also[0].pinEnv).toBe('OPENAI_PROPERTY_MODEL');
+  });
+
+  it('an uncatalogued Fable id configured through env keeps the deep-only restriction', () => {
+    const prev = process.env.MODEL_DEEP;
+    process.env.MODEL_DEEP = 'claude-fable-9-9';
+    try {
+      jest.resetModules();
+      const { models } = require('../services/model-switchboard').getSwitchboard();
+      expect(models['claude-fable-9-9'].requires).toBe('deep');
+      expect(models['claude-fable-9-9'].provider).toBe('anthropic');
+    } finally {
+      if (prev === undefined) delete process.env.MODEL_DEEP; else process.env.MODEL_DEEP = prev;
+    }
+  });
+
   it('locks the lanes a generic picker must not move', () => {
     const { lanes, selectors } = sb.getSwitchboard();
     for (const id of ['call_extraction', 'transcription', 'embeddings', 'image_gen', 'mentions_prober']) {
