@@ -468,7 +468,12 @@ instantly but never mints a self-book slot (`bookingUrl` null, like bed
 bug): the self-book funnel collapses it to the generic pest visit with no
 catalog `service_id`, which the included second visit's scheduling needs —
 the owner books the first visit. Instant eligibility also requires the live
-`regular_standalone.treatments` display count to still read 2. All three are
+`regular_standalone.treatments` display count to still read 2, re-checked
+(after a pricing-config resync into the serving worker) immediately before
+the engine. The engine input freezes `packageTreatments: 2` and
+`catalogServiceKey: cockroach_control` on the request, so the stored draft
+regenerates the two-visit promise on every send / view and the accepted
+visit resolves `service_id` by that exact key. All three are
 additive — no existing key or response field changed. Lot-priced keys (`mosquito`, `oneTimeMosquito`,
 `treeShrub`) park as `lot_size_requires_verification` when the lookup
 flagged the lot verify-first; the response is then a manual quote, never a

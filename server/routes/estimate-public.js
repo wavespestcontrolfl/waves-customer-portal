@@ -17286,6 +17286,12 @@ function normalizeOneTimeBreakdown(estData) {
         warrantyExtendedSelected: item.warrantyExtendedSelected === true,
         offerKey: item.offerKey || null,
         visits: item.visits || null,
+        // Verified catalog identity frozen on a keyed public line (the
+        // standalone cockroach package): the one-time profile carries it
+        // so the accept path stamps service_id by exact key, where engine-key
+        // containment is deliberately blind (codex #3842 r3 P1).
+        serviceKey: item.serviceKey || item.service_key || null,
+        treatments: Number.isInteger(item.treatments) && item.treatments > 0 ? item.treatments : null,
         warrantyType: item.warrantyType || null,
         warrantyLabel: item.warrantyLabel || null,
         guaranteeScope: item.guaranteeScope || null,

@@ -479,7 +479,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   const seen = new Set();
   const seenEngineKeys = new Map();
   // `service` is the category (used for the row's service field + label dedup).
-  const add = (service, label, engineKey = null) => {
+  const add = (service, label, engineKey = null, catalogServiceKey = null) => {
     const clean = String(label || '').trim();
     const key = clean.toLowerCase();
     if (!clean || !service || seen.has(key)) return;
@@ -514,7 +514,11 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     // key so slot-reservation's catalogServiceIdForProfile can stamp service_id
     // for specialties like german_roach / stinging_insect — without it, both
     // query engine_key='pest_control' and stay unstamped (codex #3328 r1 P1).
-    const row = { service, label: clean, visitsPerYear: null, engineKey: engineKey || null };
+    // `catalogServiceKey` is the VERIFIED catalog identity a keyed public
+    // quote froze on the line — exact-key resolution ahead of containment
+    // for products whose engine key is deliberately unaliased
+    // (cockroach_control / pest_initial_roach; codex #3842 r3 P1).
+    const row = { service, label: clean, visitsPerYear: null, engineKey: engineKey || null, catalogServiceKey: catalogServiceKey || null };
     rows.push(row);
     if (engineKey && !seenEngineKeys.has(engineKey)) seenEngineKeys.set(engineKey, row);
   };
@@ -586,7 +590,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     }
     // Third arg is the RAW engine key off the breakdown item — the catalog's
     // identity, distinct from the display category passed first.
-    add(category || service || 'one_time_service', label, service || null);
+    add(category || service || 'one_time_service', label, service || null, item.serviceKey || null);
   }
   return rows;
 }
@@ -2084,6 +2088,7 @@ module.exports = {
   MAX_SLOT_HORIZON_DAYS,
   // Exposed for tests — don't rely on them in app code.
   _internals: {
+    oneTimeProfileServices,
     filterSeasonalSlots,
     parseAnchorTime,
     pickNearbyAnchor,

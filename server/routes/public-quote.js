@@ -2,9 +2,9 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
-const { publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
+const { COCKROACH_PACKAGE_VISITS, publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
 const logger = require('../services/logger');
-const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
+const { generateEstimate, normalizeRoachType, syncConstantsFromDB, constants: pricingConstants } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
@@ -1474,8 +1474,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (services.pestInitialRoach) {
       // Standalone cockroach package: species, severity and the per-estimate
       // price override are staff-scoped (they move the price / scale) — the
-      // site always prices the native regular_standalone scale.
-      engineInput.services.pestInitialRoach = { roachType: 'regular' };
+      // site always prices the native regular_standalone scale. The
+      // promised count and the verified catalog identity are FROZEN into
+      // the input (the draft stores engineInput verbatim and regenerates
+      // from it on send / view), so the estimate the customer accepts says
+      // two visits and the accepted visit resolves to cockroach_control's
+      // two-treatment completion profile whatever the display config says
+      // later (codex #3842 r3 P1 ×2). Reachable only through the keyed
+      // path, so keyedService is always the verified row here.
+      engineInput.services.pestInitialRoach = {
+        roachType: 'regular',
+        packageTreatments: COCKROACH_PACKAGE_VISITS,
+        catalogServiceKey: keyedService.service_key,
+      };
     }
     if (services.bedBug) {
       engineInput.services.bedBug = publicQuoteBedBugInput(services.bedBug);
@@ -1542,6 +1553,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // catalog read failure fails closed the same way (codex #3842 r2 P1 +
     // pre-push P1).
     if (keyedInstant && !keyedQuoteOnRequest) {
+      // The cockroach gate's second authority lives in this process's
+      // engine constants, which only the admin save's own worker resyncs —
+      // pull the pricing_config row into THIS worker first (coalesced,
+      // one read) so a replica cannot pass the gate on a stale count
+      // (codex #3842 r3 P1).
+      if (engineInput.services?.pestInitialRoach) {
+        try { await syncConstantsFromDB(); } catch (syncErr) { logger.warn(`[public-quote] pricing-config resync before the cockroach gate failed: ${syncErr.message}`); }
+      }
       const fresh = await publicSelectableService(requestedServiceKey);
       if (!fresh?.instant) {
         keyedQuoteOnRequest = true;
@@ -2173,6 +2192,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // the one-time fee card reads treatments (codex #3842 r2 P2).
             treatments: item.treatments ?? null,
             detail: item.detail ?? null,
+            // Verified catalog identity a keyed public quote froze into the
+            // line (see engineInput above) — the accept path resolves
+            // service_id by it (codex #3842 r3 P1).
+            serviceKey: item.serviceKey ?? null,
             // Residential T&S has no bed-area INPUT — the engine resolves a
             // lot-derived area and stores it on the line; the audit's
             // dimension picker reads it from here (GH codex on #3628).

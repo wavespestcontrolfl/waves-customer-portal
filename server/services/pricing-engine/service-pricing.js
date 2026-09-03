@@ -1683,6 +1683,14 @@ function pricePestInitialRoach(property, options = {}) {
     autoFiredFromRecurringPest = false,
     source,
     priceOverride,
+    // Public keyed package (catalog cockroach_control): the treatment count
+    // the customer was promised and the verified catalog identity ride the
+    // engine INPUT — the wizard draft freezes that input and every send /
+    // view regenerates from it, so the promise and the identity survive a
+    // later admin display-config edit (codex #3842 r3 P1 ×2). Absent for
+    // every other caller, where the display config stays live.
+    packageTreatments,
+    catalogServiceKey,
   } = options;
   const roachMeta = normalizeRoachType(requestedRoachTypeInput);
   const severityMeta = normalizeRoachSeverity(requestedSeverityInput);
@@ -1749,9 +1757,11 @@ function pricePestInitialRoach(property, options = {}) {
   const label = typeof displayConfig.name === 'string' && displayConfig.name.trim()
     ? displayConfig.name.trim()
     : (isGerman ? 'German Cockroach Treatment' : 'Cockroach Treatment');
-  const treatments = Number.isFinite(Number(displayConfig.treatments)) && Number(displayConfig.treatments) > 0
-    ? Math.round(Number(displayConfig.treatments))
-    : 1;
+  const frozenTreatments = Number.isInteger(packageTreatments) && packageTreatments > 0 ? packageTreatments : null;
+  const treatments = frozenTreatments
+    ?? (Number.isFinite(Number(displayConfig.treatments)) && Number(displayConfig.treatments) > 0
+      ? Math.round(Number(displayConfig.treatments))
+      : 1);
   const treatmentsNote = `Includes ${treatments} treatment visit${treatments === 1 ? '' : 's'}.`;
   const baseDetail = isGerman
     ? 'Heavier treatment for German roaches (the small indoor / kitchen kind) — interior spray, gel bait at hot spots, and a growth regulator to break the breeding cycle.'
@@ -1761,6 +1771,7 @@ function pricePestInitialRoach(property, options = {}) {
     label,
     detail: `${baseDetail} ${treatmentsNote}`,
     treatments,
+    ...(typeof catalogServiceKey === 'string' && catalogServiceKey.trim() ? { serviceKey: catalogServiceKey.trim() } : {}),
     price,
     bracketPrice,
     priceOverridden: overrideValid,

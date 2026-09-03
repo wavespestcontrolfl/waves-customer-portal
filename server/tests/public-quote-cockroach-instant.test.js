@@ -108,6 +108,29 @@ describe('cockroach_control as a public instant quote', () => {
     }
     expect(cockroachPackageDisplayCurrent()).toBe(true);
   });
+  test('the keyed input freezes the promised count and the catalog identity — a later display edit cannot change what the draft regenerates (codex r3 P1 ×2)', () => {
+    const frozen = { pestInitialRoach: { roachType: 'regular', packageTreatments: COCKROACH_PACKAGE_VISITS, catalogServiceKey: 'cockroach_control' } };
+    const original = PEST.pestInitialRoach.display.regular_standalone;
+    try {
+      PEST.pestInitialRoach.display.regular_standalone = { ...original, treatments: 3 };
+      const line = roachLine({ ...BASE_PROPERTY, services: frozen });
+      expect(line.treatments).toBe(2);
+      expect(line.detail).toMatch(/Includes 2 treatment visits\./);
+      expect(line.serviceKey).toBe('cockroach_control');
+      // Unfrozen callers (the recurring add-on, staff wizard) keep the live config.
+      expect(roachLine({ ...BASE_PROPERTY, services: quoteServicesForKey('cockroach_control') }).treatments).toBe(3);
+    } finally {
+      PEST.pestInitialRoach.display.regular_standalone = original;
+    }
+    // The price is untouched by the freeze.
+    const bare = roachLine({ ...BASE_PROPERTY, services: quoteServicesForKey('cockroach_control') });
+    const withFreeze = roachLine({ ...BASE_PROPERTY, services: frozen });
+    expect(Number(withFreeze.price)).toBe(Number(bare.price));
+    expect(bare.serviceKey).toBeUndefined();
+    // Junk freezes are ignored, never trusted.
+    expect(roachLine({ ...BASE_PROPERTY, services: { pestInitialRoach: { roachType: 'regular', packageTreatments: 0, catalogServiceKey: '  ' } } }).treatments).toBe(2);
+    expect(roachLine({ ...BASE_PROPERTY, services: { pestInitialRoach: { roachType: 'regular', packageTreatments: '3' } } }).serviceKey).toBeUndefined();
+  });
   test('the footprint drives the bracket, not the lot', () => {
     const small = roachLine({ ...BASE_PROPERTY, homeSqFt: 1200, services: quoteServicesForKey('cockroach_control') });
     const large = roachLine({ ...BASE_PROPERTY, homeSqFt: 3200, lotSqFt: 4000, services: quoteServicesForKey('cockroach_control') });
