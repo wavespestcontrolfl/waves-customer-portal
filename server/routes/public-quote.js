@@ -542,9 +542,11 @@ function normalizePublicQuotePestFrequency(value) {
 // admin-editable display config the engine's line item uses
 // (pest_base.initial_roach.display via db-bridge — pricingConstants.PEST is
 // the live merged object, so admin renames apply here without a restart).
-// A quote-wizard roach fee always prices at the recurring-add-on scale keys
-// (regular / german), never regular_standalone. Fallbacks mirror
-// pricePestInitialRoach's, for a stale config row predating the display key.
+// Takes a SCALE key: the recurring roach add-on prices at regular / german,
+// the standalone cockroach package (catalog cockroach_control) at
+// regular_standalone — pass the key the engine line actually uses. Fallbacks
+// mirror pricePestInitialRoach's, for a stale config row predating the
+// display key.
 function publicQuoteRoachDisplayName(roachType) {
   const configured = pricingConstants.PEST?.pestInitialRoach?.display?.[roachType]?.name;
   if (typeof configured === 'string' && configured.trim()) return configured.trim();
@@ -758,7 +760,10 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.topDressing ? 'Lawn Top Dressing Service' : null,
     services.lawnPestControl ? 'Lawn Pest Control' : null,
     services.oneTimeMosquito ? 'One-Time Mosquito Treatment' : null,
-    services.pestInitialRoach ? publicQuoteRoachDisplayName('regular') : null,
+    // Standalone package: the engine prices AND renders the regular_standalone
+    // scale, so the lead label reads that scale's configured name (pre-push
+    // codex P1 — the two names are admin-editable independently).
+    services.pestInitialRoach ? publicQuoteRoachDisplayName('regular_standalone') : null,
     services.bedBug ? 'Bed Bug Treatment Service' : null,
     services.rodentInspection ? 'Rodent Inspection Service' : null,
   ].filter(Boolean).join(' + ');

@@ -20,9 +20,20 @@ describe('cockroach_control as a public instant quote', () => {
     expect(PUBLIC_QUOTE_SERVICE_KEYS).toContain('pestInitialRoach');
     expect(quoteServicesForKey('cockroach_control')).toEqual({ pestInitialRoach: { roachType: 'regular' } });
   });
-  test('labels carry the configured display name; compact label stays short', () => {
+  test('labels carry the STANDALONE scale\'s configured display name; compact label stays short', () => {
     expect(buildPublicQuoteServiceInterest({ pestInitialRoach: {} })).toBe('Cockroach Treatment Service');
     expect(buildCompactPublicQuoteServiceInterest({ pestInitialRoach: {} })).toBe('Roach');
+    // The two names are admin-editable independently — the lead label must
+    // follow regular_standalone (the scale the engine prices and renders),
+    // not the recurring add-on's name (pre-push codex P1).
+    const original = PEST.pestInitialRoach.display.regular_standalone;
+    PEST.pestInitialRoach.display.regular_standalone = { ...original, name: 'Roach Package' };
+    try {
+      expect(buildPublicQuoteServiceInterest({ pestInitialRoach: {} })).toBe('Roach Package');
+      expect(buildPublicQuoteServiceInterest({ pest: { frequency: 'quarterly', roachType: 'regular' } })).not.toContain('Roach Package');
+    } finally {
+      PEST.pestInitialRoach.display.regular_standalone = original;
+    }
   });
   test('prices one standalone knockdown line on the regular_standalone scale with no recurring spread', () => {
     const estimate = generateEstimate({ ...BASE_PROPERTY, services: quoteServicesForKey('cockroach_control') });

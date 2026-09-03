@@ -22,16 +22,19 @@ const TREATMENTS = 2;
 const MIGRATION_TAG = 'migration:20260903000041';
 const UP_REASON = 'Standalone cockroach treatment renders as the two-treatment package (visit 2 included at no charge; owner ruling 2026-09-03)';
 
-async function loadRow(knex) {
-  if (!(await knex.schema.hasTable('pricing_config'))) return null;
-  const row = await knex('pricing_config').where({ config_key: CONFIG_KEY }).first();
+// Row-locked read (FOR UPDATE) so the read-modify-write below cannot
+// overwrite an admin edit that lands between the read and the update
+// (pre-push codex P0). Callers pass the migration's transaction.
+async function loadRow(trx) {
+  if (!(await trx.schema.hasTable('pricing_config'))) return null;
+  const row = await trx('pricing_config').where({ config_key: CONFIG_KEY }).forUpdate().first();
   if (!row) return null;
   const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
   if (!data || typeof data !== 'object') return null;
   return data;
 }
 
-async function saveTreatments(knex, oldData, treatments, reason) {
+async function saveTreatments(trx, oldData, treatments, reason) {
   const display = oldData.initial_roach?.display || {};
   const newData = {
     ...oldData,
@@ -43,11 +46,11 @@ async function saveTreatments(knex, oldData, treatments, reason) {
       },
     },
   };
-  await knex('pricing_config')
+  await trx('pricing_config')
     .where({ config_key: CONFIG_KEY })
-    .update({ data: JSON.stringify(newData), updated_at: knex.fn.now() });
-  if (await knex.schema.hasTable('pricing_config_audit')) {
-    await knex('pricing_config_audit').insert({
+    .update({ data: JSON.stringify(newData), updated_at: trx.fn.now() });
+  if (await trx.schema.hasTable('pricing_config_audit')) {
+    await trx('pricing_config_audit').insert({
       config_key: CONFIG_KEY,
       old_value: JSON.stringify(oldData),
       new_value: JSON.stringify(newData),
@@ -58,13 +61,15 @@ async function saveTreatments(knex, oldData, treatments, reason) {
 }
 
 exports.up = async function up(knex) {
-  const data = await loadRow(knex);
-  if (!data) return;
-  const current = Number(data.initial_roach?.display?.[SCALE_KEY]?.treatments);
-  // Anything other than the shipped default of 1 is an admin decision — leave
-  // it (and write no audit row, so down() will not touch it either).
-  if (current !== 1) return;
-  await saveTreatments(knex, data, TREATMENTS, UP_REASON);
+  await knex.transaction(async (trx) => {
+    const data = await loadRow(trx);
+    if (!data) return;
+    const current = Number(data.initial_roach?.display?.[SCALE_KEY]?.treatments);
+    // Anything other than the shipped default of 1 is an admin decision —
+    // leave it (and write no audit row, so down() will not touch it either).
+    if (current !== 1) return;
+    await saveTreatments(trx, data, TREATMENTS, UP_REASON);
+  });
 };
 
 exports.down = async function down(knex) {
@@ -74,10 +79,12 @@ exports.down = async function down(knex) {
     .orderBy('changed_at', 'desc')
     .first();
   if (!audit) return;
-  const data = await loadRow(knex);
-  if (!data) return;
-  // Only restore when the value is still what up() wrote — a later admin
-  // edit wins.
-  if (Number(data.initial_roach?.display?.[SCALE_KEY]?.treatments) !== TREATMENTS) return;
-  await saveTreatments(knex, data, 1, `rollback of ${MIGRATION_TAG}`);
+  await knex.transaction(async (trx) => {
+    const data = await loadRow(trx);
+    if (!data) return;
+    // Only restore when the value is still what up() wrote — a later admin
+    // edit wins.
+    if (Number(data.initial_roach?.display?.[SCALE_KEY]?.treatments) !== TREATMENTS) return;
+    await saveTreatments(trx, data, 1, `rollback of ${MIGRATION_TAG}`);
+  });
 };
