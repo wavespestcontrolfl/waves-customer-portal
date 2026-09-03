@@ -68,10 +68,14 @@ router.get('/', async (req, res, next) => {
     // Auto-enroll as promoter if not already
     const { promoter } = await engine.resolvePromoter(req.customerId);
 
+    // Legacy rows (promoter_id never backfilled) key on referrer_customer_id:
+    // for a household sibling that is the OWNER's id as well as the acting
+    // customer's (GH codex #3850 r2 P2).
+    const legacyReferrerIds = [...new Set([req.customerId, promoter.customer_id].filter(Boolean))];
     const referrals = await db('referrals')
       .where(function () {
         this.where({ promoter_id: promoter.id })
-          .orWhere({ referrer_customer_id: req.customerId });
+          .orWhereIn('referrer_customer_id', legacyReferrerIds);
       })
       .orderBy('created_at', 'desc');
 
@@ -219,6 +223,9 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
     const { promoter } = await engine.resolvePromoter(req.customerId);
     const settings = await engine.getSettings();
     const referralLink = engine.getPromoterReferralLink(promoter, settings);
+    // The friend hears from the person who tapped, not the household
+    // promoter's owner (GH codex #3850 r2 P2); the code stays the household's.
+    const self = await db('customers').where({ id: req.customerId }).first('first_name').catch(() => null);
 
     // Cooldown: same promoter+phone within 24 hours = no-op (idempotent double-tap protection)
     const cleanPhone = phone.replace(/\s+/g, '');
@@ -236,7 +243,7 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
     const friendly = friendName ? friendName.replace(/[<>]/g, '') : 'there';
     const body = await renderRequiredSmsTemplate('referral_invite', {
       referee_name: friendly,
-      referrer_name: promoter.first_name || 'your neighbor',
+      referrer_name: self?.first_name || promoter.first_name || 'your neighbor',
       referral_link: referralLink,
     }, {
       workflow: 'referral_invite',
@@ -395,7 +402,8 @@ router.post('/invite-email', inviteLimiter, async (req, res, next) => {
         to: cleanEmail,
         payload: {
           friend_name: friendly || 'there',
-          referrer_name: promoter.first_name || 'A Waves customer',
+          // The acting customer's name, not the household promoter owner's.
+          referrer_name: selfCustomer?.first_name || promoter.first_name || 'A Waves customer',
           referral_url: referralLink,
           referral_offer_line: engine.buildRefereeOfferLine(settings),
         },

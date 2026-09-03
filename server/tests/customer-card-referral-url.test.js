@@ -39,6 +39,18 @@ test('a sibling with no own row shares the household promoter link', async () =>
   expect(engine.findHouseholdPromoter).toHaveBeenCalledWith('cust-2');
 });
 
+test('a legacy household row with a code but no link is rebuilt from the code, never the generic tab', async () => {
+  ownRow(null);
+  engine.findHouseholdPromoter.mockResolvedValueOnce({ id: 'promo-h', referral_code: 'WAVES-HOUSE01', referral_link: null });
+  expect(await referralShareUrl({ id: 'cust-2', referral_code: null })).toBe('https://portal.wavespestcontrol.com/r/WAVES-HOUSE01');
+});
+
+test('an own legacy row with a code but no link is rebuilt the same way', async () => {
+  ownRow({ referral_link: null, referral_code: 'WAVES-OWN00001' });
+  expect(await referralShareUrl({ id: 'cust-1', referral_code: null })).toBe('https://portal.wavespestcontrol.com/r/WAVES-OWN00001');
+  expect(engine.findHouseholdPromoter).not.toHaveBeenCalled();
+});
+
 test('no own row and no household promoter → customers.referral_code, then the generic refer tab', async () => {
   ownRow(null);
   expect(await referralShareUrl({ id: 'cust-3', referral_code: 'WAVES-LEGACY1' })).toBe('https://portal.wavespestcontrol.com/r/WAVES-LEGACY1');

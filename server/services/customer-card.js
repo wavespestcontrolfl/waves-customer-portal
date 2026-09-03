@@ -66,18 +66,24 @@ function memberSinceYearET(customer = {}) {
  */
 async function referralShareUrl(customer) {
   let referralUrl = null;
+  let code = null;
   try {
     const promoter = await db('referral_promoters')
       .where({ customer_id: customer.id })
-      .first('referral_link')
+      .first('referral_link', 'referral_code')
       || await require('./referral-engine').findHouseholdPromoter(customer.id);
     if (promoter?.referral_link) referralUrl = promoter.referral_link;
+    // A legacy row may carry a backfilled code with no link (the unification
+    // migration was best-effort) — rebuild from the code below (GH codex
+    // #3850 r2 P2) before ever falling back to the generic tab.
+    code = promoter?.referral_code || null;
   } catch { /* table optional in older envs */ }
-  if (!referralUrl && customer.referral_code) {
+  code = code || customer.referral_code || null;
+  if (!referralUrl && code) {
     try {
       const { getPromoterReferralLink, getSettings } = require('./referral-engine');
       const settings = await getSettings().catch(() => ({}));
-      referralUrl = getPromoterReferralLink({ referral_code: customer.referral_code }, settings) || null;
+      referralUrl = getPromoterReferralLink({ referral_code: code }, settings) || null;
     } catch { /* settings/table unavailable — generic fallback below */ }
   }
   return referralUrl || `${publicPortalUrl()}/?tab=refer`;
