@@ -464,6 +464,10 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         // row keyed on the adopted recording (Codex #3736 r7 P1).
         ai_validation: null,
         ai_address_validation: null,
+        // …and the recording-derived disposition, like the webhook's replace
+        // (Codex #3736 r17 P2): a deferred or failed pass must not leave the
+        // adopted audio wearing the old terminal outcome.
+        disposition: null,
         // The row is no longer "processed": its transcript and extraction
         // describe the previous recording. NULL puts it back in the sweep,
         // so even if the immediate pass below defers (CDN not ready) or
