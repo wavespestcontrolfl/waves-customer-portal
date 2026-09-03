@@ -46,6 +46,15 @@ invoked by a human or an agent session, on purpose, from the repo root.
 | `pricing-funnel-report.js` | READ-ONLY | Pricing funnel standing instrument: close rates DEDUPED BY CUSTOMER for pest (solo), lawn, and pest+lawn bundles, banded by size and price ($/visit; $/1k-sqft/app), with accepted-vs-expired price medians. `--since=YYYY-MM-DD` for era cuts, `--lane=pest\|lawn`. Feeds pricing decisions (owner directive 2026-08-04) and the /weekly-marketing sweep. |
 | `reset-out-of-area-coords.js` | MUTATES (dry-run default) | Clears customer coordinates that lie OUTSIDE the service-area box (`server/services/service-area.js`) so the hourly geocoder backstop sweep re-geocodes them through the PR #3802 guard (coarse / partial / out-of-area Google answers now stay null). Per customer, one transaction: guarded `customers` reset (exact prior coordinates), the primary `customer_properties` mirror row, any open `scheduled_services` stamps copied from it (routing prefers the visit stamp), and an `audit_log` `customer.geocode.reset` row carrying the previous coordinates + reset ids (reversible). Exit 1 when any row was skipped. Pins inside the box are never touched. First run 2026-09-03: 16 rows. |
 
+## Sibling: `ops/backup/`
+
+Not an agent script. `ops/backup/restore.sh` is the decrypt + `pg_restore`
+half of the nightly backup drill (`.github/workflows/db-backup-drill.yml`),
+kept in the repo so a human can run the same code in a real disaster. Setup,
+what the drill proves, and the disaster procedure are in
+`docs/db-backup-restore-drill-runbook.md`. It MUTATES its target and refuses
+any database that already holds tables unless `RESTORE_REPLACE_EXISTING=yes`.
+
 ## Prod read-only access recipe
 
 The portal's `DATABASE_URL` points at `postgres.railway.internal`, which is
