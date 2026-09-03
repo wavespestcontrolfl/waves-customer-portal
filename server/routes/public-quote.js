@@ -23,7 +23,9 @@ function duplicateOfFromExtracted(extractedData) {
   return (data && data.duplicate_of_lead_id) || null;
 }
 
-async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKey } = {}, now = Date.now()) {
+// `excludeLeadId` is the caller's OWN row (the token path re-checks a row the
+// property-lookup stage already minted) — a row is never its own prior.
+async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKey, excludeLeadId = null } = {}, now = Date.now()) {
   const emailLc = String(email || '').trim().toLowerCase();
   const phoneDigits = String(phone || '').replace(/\D/g, '').slice(-10);
   const addressLc = String(address || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -49,6 +51,7 @@ async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKe
       OPEN_ESTIMATE_STATUSES,
     )
     .where('created_at', '>', new Date(now - WIZARD_LEAD_REUSE_DAYS * 24 * 60 * 60 * 1000))
+    .modify((qb) => { if (excludeLeadId) qb.whereNot('id', excludeLeadId); })
     .orderBy('created_at', 'desc')
     .first('id');
   return prior ? prior.id : null;
@@ -1752,17 +1755,21 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .update(updateFields)
         .returning(['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data']);
       lead = rows[0];
-      if (lead && lead.status === 'duplicate') {
-        // The marker was computed from an earlier stage's fields; this stage
-        // may have changed the property or the service (codex #3834 r4 P1),
-        // and a different inquiry is not a duplicate of the old one. Re-run
-        // the exact predicate against what was just typed — own row only:
-        // the marker moves or clears on THIS row, nothing on the original.
-        const stored = duplicateOfFromExtracted(lead.extracted_data);
-        duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey });
+      if (lead && lead.lead_type === 'quote_wizard' && (lead.status === 'new' || lead.status === 'duplicate')) {
+        // The normal wizard flow mints a 'new' row at the property-lookup
+        // stage and hands its token here, so this is where a repeat through
+        // the documented flow is first fully typed (codex #3834 r7 P1). And a
+        // marker computed from an earlier stage's fields may be stale: this
+        // stage may have changed the property or the service (r4 P1), and a
+        // different inquiry is not a duplicate of the old one. Re-run the
+        // exact predicate against what was just typed, excluding THIS row —
+        // the label moves, lands, or clears on this row only; nothing on the
+        // original is written.
+        const stored = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
+        duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead.id });
         if (duplicateOfLeadId !== stored) {
           await db('leads').where({ id: lead.id }).update(duplicateOfLeadId
-            ? { extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ duplicate_of_lead_id: duplicateOfLeadId })]), updated_at: new Date() }
+            ? { status: 'duplicate', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ duplicate_of_lead_id: duplicateOfLeadId })]), updated_at: new Date() }
             : { status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
         }
       }

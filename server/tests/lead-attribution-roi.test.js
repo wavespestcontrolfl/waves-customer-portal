@@ -77,6 +77,14 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     expect(exclusion[3]).toEqual(['adam martinez']);
   });
 
+  test('non-engaged rows (spam / cancelled / auto-filed duplicate) are excluded from the source population', async () => {
+    setup({ costs: [{ cost_amount: 3 }], leads: [], invoices: [] });
+    await calculateSourceROI('src-1', start, end);
+    const statusExclusion = mockWhereCalls.find((c) => c[0] === 'leads' && c[1] === 'whereNotIn' && c[2] === 'status');
+    expect(statusExclusion).toBeTruthy();
+    expect(statusExclusion[3]).toEqual(expect.arrayContaining(['duplicate', 'spam', 'cancelled']));
+  });
+
   test('bounds the invoice query to the period end (created_at <= end)', async () => {
     setup({
       costs: [{ cost_amount: 3 }],

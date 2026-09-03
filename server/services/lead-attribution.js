@@ -1,3 +1,4 @@
+const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
 const db = require('../models/db');
 const logger = require('./logger');
 
@@ -340,7 +341,11 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
     .whereNull('deleted_at')
     .where('first_contact_at', '>=', start)
     .where('first_contact_at', '<=', end)
-    .modify((qb) => applyNameExclusion(qb, excludeCustomerNames));
+    .modify((qb) => applyNameExclusion(qb, excludeCustomerNames))
+    // Same population rule as the leads analytics overview: spam, cancelled
+    // and auto-filed wizard 'duplicate' repeats are not prospects and must
+    // not dilute the source's conversion rate (codex #3834 r6).
+    .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES);
 
   const totalLeads = leads.length;
   const wonLeads = leads.filter(l => l.status === 'won');

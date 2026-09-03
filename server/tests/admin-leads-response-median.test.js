@@ -34,6 +34,7 @@ function mockLeadsDb({ monthLeads, openLeads, recentMinutes }, captured = {}, db
     const builder = {
       where(...a) { calls.push(['where', a[0], a[1], a[2]]); return builder; },
       whereNull(...a) { calls.push(['whereNull', ...a]); return builder; },
+      whereNotIn(...a) { calls.push(['whereNotIn', ...a]); return builder; },
       whereNotNull(...a) { calls.push(['whereNotNull', ...a]); return builder; },
       whereRaw(...a) { calls.push(['whereRaw', ...a]); return builder; },
       pluck() { return Promise.resolve(recentMinutes); },

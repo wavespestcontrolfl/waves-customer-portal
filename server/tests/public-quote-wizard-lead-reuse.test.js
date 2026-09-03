@@ -11,9 +11,11 @@ const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { OPEN_ESTIMATE_STATUSES } = require('../services/estimate-automation-duplicates');
 
 function chainMock(firstResult) {
-  const calls = { where: [], whereRaw: [], whereIn: [], whereNull: [], orderBy: [] };
+  const calls = { where: [], whereRaw: [], whereIn: [], whereNull: [], whereNot: [], orderBy: [] };
   const api = {
     where: jest.fn((...a) => { calls.where.push(a); return api; }),
+    whereNot: jest.fn((...a) => { calls.whereNot.push(a); return api; }),
+    modify: jest.fn((fn) => { fn(api); return api; }),
     whereNull: jest.fn((...a) => { calls.whereNull.push(a); return api; }),
     whereRaw: jest.fn((...a) => { calls.whereRaw.push(a); return api; }),
     whereIn: jest.fn((...a) => { calls.whereIn.push(a); return api; }),
@@ -32,6 +34,7 @@ describe('findPriorOpenWizardLeadId', () => {
     const now = Date.UTC(2026, 7, 31, 19, 0, 0);
     await expect(_internals.findPriorOpenWizardLeadId(dbh, SAME, now)).resolves.toBe('lead-prior');
     expect(dbh).toHaveBeenCalledWith('leads');
+    expect(calls.whereNot).toEqual([]); // no own row to exclude on the tokenless path
     expect(calls.where[0]).toEqual([{ lead_type: 'quote_wizard', service_key: 'pest_general_quarterly' }]);
     expect(calls.whereNull[0]).toEqual(['deleted_at']);
     expect(calls.whereRaw[0]).toEqual(['LOWER(email) = ?', ['visitor.one@example.com']]);
@@ -46,6 +49,12 @@ describe('findPriorOpenWizardLeadId', () => {
     expect([col, op]).toEqual(['created_at', '>']);
     expect(cutoff.getTime()).toBe(now - _internals.WIZARD_LEAD_REUSE_DAYS * 86400000);
     expect(calls.orderBy[0]).toEqual(['created_at', 'desc']);
+  });
+
+  test('the token path excludes its OWN row from the candidates (a row is never its own prior)', async () => {
+    const { dbh, calls } = chainMock({ id: 'lead-prior' });
+    await expect(_internals.findPriorOpenWizardLeadId(dbh, { ...SAME, excludeLeadId: 'lead-self' })).resolves.toBe('lead-prior');
+    expect(calls.whereNot).toEqual([['id', 'lead-self']]);
   });
 
   test('no matching open lead → null (the row inserts as a normal new lead)', async () => {
@@ -86,10 +95,14 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // ...and then the predicate is re-run on the new fields (codex r4 P1): a
     // changed property/service clears the marker and reopens the row as new,
     // on THIS row only.
-    const block = src.slice(src.indexOf("if (lead && lead.status === 'duplicate') {"), src.indexOf('if (lead && !lead.lead_source_id && sourceMeta.leadSourceId)'));
-    expect(block).toMatch(/duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey \}\)/);
+    // The lookup-minted 'new' row is re-checked here too (codex r7 P1): the
+    // documented lookup→calculate flow is where a repeat is first fully typed.
+    const block = src.slice(src.indexOf("if (lead && lead.lead_type === 'quote_wizard' && (lead.status === 'new' || lead.status === 'duplicate')) {"), src.indexOf('if (lead && !lead.lead_source_id && sourceMeta.leadSourceId)'));
+    expect(block.length).toBeGreaterThan(200);
+    expect(block).toMatch(/duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead\.id \}\)/);
     expect(block).toMatch(/if \(duplicateOfLeadId !== stored\)/);
     expect(block).toMatch(/await db\('leads'\)\.where\(\{ id: lead\.id \}\)\.update\(/);
+    expect(block).toMatch(/\? \{ status: 'duplicate', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) \|\| \?::jsonb"/);
     expect(block).toMatch(/status: 'new', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) - 'duplicate_of_lead_id'"\)/);
   });
 
@@ -106,7 +119,7 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // The marker is read only to label THIS row and skip its attribution;
     // no query selects the original for update from /calculate or /upsell.
     expect(src).not.toMatch(/where\(\{ id: originalId \}\)/);
-    expect(src).not.toMatch(/duplicateOfFromExtracted\(lead\.extracted_data\) : null/);
+    expect(src).not.toMatch(/const draftLeadIds/); // the /upsell draft sync never widens past the authenticated lead
     expect(src.match(/duplicateOfFromExtracted\(/g).length).toBe(2); // the definition + the token-path read
   });
 });
