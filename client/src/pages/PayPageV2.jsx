@@ -629,7 +629,7 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
     <div data-glass-clear="" className="waves-no-print" style={{ marginTop: SP.lg }}>
       <button
         type="button"
-        data-glass-accent=""
+        data-glass="soft"
         aria-expanded={open}
         aria-controls="waves-other-ways-to-pay"
         onClick={() => setOpen((v) => !v)}
@@ -642,11 +642,11 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
           alignItems: 'center',
           gap: SP.sm,
           padding: '8px 12px',
-          borderRadius: RADIUS.input,
-          // Same gold glass CTA treatment as the page's other action
-          // buttons (goldChipButton) — owner 2026-08-31.
-          border: '1px solid rgba(255,238,180,0.92)',
-          background: 'rgba(240,165,0,0.38)',
+          // Owner 2026-09-03: not the gold CTA glass — the toggle reads as a
+          // section header, so it takes the same soft panel treatment as the
+          // Zelle box it opens (PAY_BOX), and the label always carries
+          // "— Zelle" (wrapping on narrow viewports instead of hiding it).
+          ...PAY_BOX,
           cursor: 'pointer',
           fontFamily: DOC_FONT,
           textAlign: 'left',
@@ -656,9 +656,9 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
         <span style={{ borderRadius: 8, boxShadow: '0 0 0 2px rgba(255,255,255,0.85)', display: 'inline-flex' }} aria-hidden="true">
           <PayAppMark app="zelle" size={26} />
         </span>
-        <span style={{ minWidth: 0, fontSize: FS.body, lineHeight: LH.snug, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        <span style={{ minWidth: 0, fontSize: FS.body, lineHeight: LH.snug }}>
           <span style={{ fontWeight: FW.semibold }}>Other ways to pay</span>
-          {!narrow && <span style={{ opacity: 0.75 }}> — Zelle</span>}
+          <span style={{ opacity: 0.75 }}> — Zelle</span>
         </span>
         <span aria-hidden="true" style={{ display: 'inline-flex', transition: 'transform 200ms ease', transform: open ? 'rotate(180deg)' : 'none' }}>
           <Icon name="chevronDown" size={18} strokeWidth={2} />
@@ -720,6 +720,86 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
           </p>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Pay-page FAQ (GATE_PAY_PAGE_FAQ, 2026-09-03) ───────────────────
+// Three or four questions directly under the Pay button, above "Other ways
+// to pay". Every answer restates a fact this page already carries (the
+// method tiles, the consent copy, the bank-processing / verification
+// states, the Zelle panel) — nothing here is a new business rule, and the
+// surcharge percent is DERIVED from the same rate the tile shows, never a
+// typed string. Native <details> so there is no state to fence; rendered
+// only inside the payment panel, so it leaves with the panel on success /
+// bank-processing. Renders nothing unless the server sent `payFaq` (gate).
+const FAQ_SUMMARY = {
+  listStyle: 'none',
+  cursor: 'pointer',
+  display: 'grid',
+  gridTemplateColumns: 'minmax(0, 1fr) auto',
+  alignItems: 'center',
+  gap: SP.sm,
+  padding: `${SP.sm}px 0`,
+  fontSize: FS.body,
+  fontWeight: FW.semibold,
+  color: DOC.ink,
+  lineHeight: LH.snug,
+};
+function PayFaqItem({ question, children }) {
+  return (
+    <details style={{ borderTop: '1px solid rgba(4,57,94,0.12)' }}>
+      <summary style={FAQ_SUMMARY}>
+        <span>{question}</span>
+        <span aria-hidden="true" style={{ display: 'inline-flex', color: DOC.muted }}>
+          <Icon name="chevronDown" size={16} strokeWidth={2} />
+        </span>
+      </summary>
+      <p style={{ margin: 0, padding: `0 0 ${SP.sm}px`, fontSize: FS.bodyLg, color: DOC.muted, lineHeight: LH.body }}>
+        {children}
+      </p>
+    </details>
+  );
+}
+function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBilled }) {
+  if (!enabled) return null;
+  // Same derivation as PaymentForm's tile: the /setup rate when it has
+  // answered, else the client mirror of the configured rate.
+  const rate = Number(cardSurchargeRate);
+  const pct = Number(((Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_CARD_SURCHARGE_RATE) * 100).toFixed(2)).toString();
+  return (
+    <div data-glass-clear="" className="waves-no-print" style={{ marginTop: SP.lg }}>
+      <div style={{ ...eyebrow, marginBottom: SP.xs }}>Common questions</div>
+      <div data-glass="soft" role="region" aria-label="Payment questions" style={{ position: 'relative', padding: `0 ${SP.sm}px`, ...PAY_BOX }}>
+        <PayFaqItem question="Why is there a card fee, and how do I avoid it?">
+          Credit cards entered directly carry a surcharge of up to {pct}% — the exact surcharge and
+          total are shown before you confirm. Apple Pay, Google Pay, and Link are currently charged at
+          the quoted amount with no surcharge, and debit cards, prepaid cards, and bank transfers have
+          no added card surcharge{zelle ? ', and Zelle has no fees' : ''}.
+        </PayFaqItem>
+        <PayFaqItem question="How long does a bank (ACH) payment take?">
+          Bank transfers take a few business days to clear — there’s nothing more you need to do
+          after you pay, and we’ll email your receipt once it settles. If your bank needs to be
+          verified first, your statement will show a small deposit (or two) from Stripe in the next
+          1–2 business days; use it to confirm your account and complete the payment.
+        </PayFaqItem>
+        {zelle && (
+          <PayFaqItem question="Can I pay by Zelle?">
+            Yes — open “Other ways to pay” below for our Zelle details, put the invoice number in
+            the memo, and send it from your own banking app. We mark the invoice paid once the money
+            reaches our account; until then it stays open here.
+          </PayFaqItem>
+        )}
+        {!thirdPartyBilled && (
+          <PayFaqItem question="Is my card saved?">
+            {saveRequired
+              ? 'A payment method on file is required for recurring service, so this one is saved after you pay. '
+              : 'Only if you check the box to save it before you pay. '}
+            You can remove a saved method anytime in the Waves app or your customer portal, or by
+            emailing billing@wavespestcontrol.com or calling us.
+          </PayFaqItem>
+        )}
+      </div>
     </div>
   );
 }
@@ -2947,6 +3027,13 @@ export default function PayPageV2() {
                 Loading payment form…
               </div>
             )}
+            <PayFaq
+              enabled={!!data.payFaq}
+              cardSurchargeRate={stripeSetup?.cardSurchargeRate}
+              zelle={!!data.manualPayOptions?.zelle?.recipient && !stripeSetup?.combined && !(data.manualPayOptions?.creditPending && !stripeSetup)}
+              saveRequired={!payer && saveCardRequired}
+              thirdPartyBilled={!!payer}
+            />
             {/* Hidden once /setup reports a combined-balance PI (the server
                 already withholds the block when siblings preview; this
                 covers the setup verdict). Amount: /setup's post-credit

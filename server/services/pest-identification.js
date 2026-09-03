@@ -17,12 +17,13 @@
  *
  * Vision goes to MODELS.VISION (Claude) + the Gemini vision scorer directly —
  * the same pattern as lawn-assessment.js. Vision does NOT route through
- * llm/deep.js (DEEP is text-only lanes; VISION keeps temperature support).
+ * llm/deep.js (DEEP is text-only lanes). No sampling controls on the request —
+ * current Anthropic models reject them.
  */
 
 const logger = require('./logger');
-const { anthropicCreateWithSamplingRetry } = require('./llm/call');
 const MODELS = require('../config/models');
+const { anthropicText } = require('./llm/call');
 const {
   safePublicFirstName,
   safePublicCity,
@@ -370,10 +371,9 @@ async function callClaudeVision(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropicCreateWithSamplingRetry(anthropic, {
+    const response = await anthropic.messages.create({
       model: MODELS.VISION,
       max_tokens: 500,
-      temperature: 0.2, // match Gemini's 0.2 so the dual-vision merge compares like-for-like
       messages: [{
         role: 'user',
         content: [
@@ -382,7 +382,7 @@ async function callClaudeVision(base64Image, mimeType) {
         ],
       }],
     });
-    const text = response.content?.[0]?.text;
+    const text = anthropicText(response);
     if (!text) { logger.warn('[pest-identification] Claude returned empty content'); return null; }
     return JSON.parse(text.replace(/```json|```/g, '').trim());
   } catch (err) {
