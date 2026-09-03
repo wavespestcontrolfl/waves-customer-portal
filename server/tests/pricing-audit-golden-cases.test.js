@@ -394,3 +394,26 @@ describe("pricing audit — FROZEN golden prices (in-code constants, reviewed 20
     for (const [k, v] of Object.entries(expected)) expect(li[k]).toBe(v);
   });
 });
+
+describe('pricing audit — FROZEN WaveGuard tier discounts (in-code constants, reviewed 2026-09-03)', () => {
+  // Literal POST-discount amounts per line. Every FROZEN case above is a solo
+  // Bronze quote asserting list price, and the bundle tests derive their
+  // expectation from the live constants, so a reviewed percentage edit (e.g.
+  // Silver 10% → 15%) passed both — it fails here (codex r9 P2).
+  const S = { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', tier: 'enhanced' }, mosquito: { tier: 'seasonal9' }, treeShrub: { tier: 'standard', treeCount: 6 } };
+  const FROZEN_TIERS = [
+    ['silver: pest + lawn', ['pest', 'lawn'], 'silver', 0.1, { pest_control: [403.2, 33.6], lawn_care: [518.4, 43.2] }],
+    ['gold: pest + lawn + mosquito', ['pest', 'lawn', 'mosquito'], 'gold', 0.15, { pest_control: [380.8, 31.73], lawn_care: [489.6, 40.8], mosquito: [589.05, 49.09] }],
+    ['platinum: pest + lawn + mosquito + tree & shrub', ['pest', 'lawn', 'mosquito', 'treeShrub'], 'platinum', 0.2, { pest_control: [358.4, 29.87], lawn_care: [460.8, 38.4], mosquito: [554.4, 46.2], tree_shrub: [509.6, 42.47] }],
+  ];
+  test.each(FROZEN_TIERS)('%s prices exactly as frozen', (_name, keys, tier, pct, perLine) => {
+    const res = generateEstimate({ ...BASE, bedArea: 2000, services: Object.fromEntries(keys.map((k) => [k, S[k]])) });
+    expect(res.waveGuard.tier).toBe(tier);
+    for (const [service, [annualAfterDiscount, monthlyAfterDiscount]] of Object.entries(perLine)) {
+      const li = line(res, service);
+      expect(li.discount.effectiveDiscount).toBe(pct);
+      expect(li.annualAfterDiscount).toBe(annualAfterDiscount);
+      expect(li.monthlyAfterDiscount).toBe(monthlyAfterDiscount);
+    }
+  });
+});

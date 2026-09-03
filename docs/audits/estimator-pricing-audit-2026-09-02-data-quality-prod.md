@@ -4,6 +4,8 @@ Generated 2026-09-03T05:43:04.582Z · database host ma….pr….rl….net · win
 
 ## Service catalog overview
 
+_Round 9 (Codex P2): `active_with_engine_key` / `active_without_engine_key` now require at least one non-empty string member (a `[null]`, `[{}]` or `[""]` array counts as unmapped, matching the runtime string-containment lookup). The row below is the 2026-09-03T05:43Z run under the old non-empty-array predicate and was not re-queried._
+
 | services | active | active_with_engine_key | active_without_engine_key | quote_selectable | recurring_missing_cadence | with_base_price |
 |---|---|---|---|---|---|---|
 | 92 | 77 | 27 | 50 | 60 | 1 | 20 |
@@ -195,6 +197,8 @@ _Round 7 (Codex P2): the query now excludes `INTERNAL_TEST_CUSTOMERS` (the same 
 | monthly_membership | 3 | 3 | 0 | 0 | 0 |
 
 ## Completed billable visits since 2026-06-01 with no invoice (by lane)
+
+_Round 9 (Codex P2): the population is now scoped by completion time (`completed_at`, ET date ≥ --since) like the Billing Recovery workbench, not by `scheduled_date`. The table below is the 2026-09-03T05:43Z run under the scheduled-date scope and was not re-queried._
 
 _Round 3 (Codex P1): the script's predicate now mirrors the Billing Recovery workbench's `uninvoicedLeakQuery` (effective price incl. per-application fee, dispositions, record-level callbacks, always-free types, self-pay only, autopay rule). The table below is the earlier, looser predicate and was not re-queried; the workbench figure supersedes it._
 

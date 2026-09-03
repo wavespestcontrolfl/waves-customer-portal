@@ -49,7 +49,10 @@ const { visitsPerYearForCadence } = require(path.join(__dirname, '..', 'server',
 const CADENCE_LABELS = ['monthly', 'monthly_nth_weekday', 'every_6_weeks', 'seasonal_feb_oct', 'bimonthly', 'bi_monthly', 'quarterly', 'triannual', 'every_4_months', 'semiannual', 'biannual', 'annual', 'yearly'];
 const CADENCE_CASE_SQL = `(case lower(trim(frequency)) ${CADENCE_LABELS.map((l) => `when '${l}' then ${visitsPerYearForCadence(l)}`).join(' ')} else null end)`;
 // coalesce: a NULL engine_keys makes the bare predicate NULL, and NOT NULL is NULL — null rows are gaps (codex r6 P2).
-const HAS_ENGINE_KEY_SQL = "coalesce(jsonb_typeof(engine_keys) = 'array' and jsonb_array_length(engine_keys) > 0, false)";
+// "Has an engine key" = at least one NON-EMPTY STRING member: the runtime lookup
+// is string containment (engine_keys @> '["foam_drill"]'), so [null], [{}] or
+// [""] can never resolve a line and count as unmapped (codex r9 P2).
+const HAS_ENGINE_KEY_SQL = "coalesce(jsonb_typeof(engine_keys) = 'array' and exists (select 1 from jsonb_array_elements(engine_keys) ek where jsonb_typeof(ek) = 'string' and btrim(ek #>> '{}') <> ''), false)";
 // Mirror of cadenceCatalogKeyForProfile in server/services/slot-reservation.js:
 // recurring pest / lawn / mosquito / tree-shrub visits resolve their catalog row
 // by service_key (category x visits/yr), bypassing engine-key containment, so
@@ -301,12 +304,15 @@ const CHECKS = [
     // service record or status-only completion, not dispositioned, no
     // non-void invoice on the record or the visit, no callback on either row,
     // not fully prepaid, self-pay only, never an always-free type, and not an
-    // active-autopay customer unless on a per-visit lane. Two deliberate
-    // differences: membership-covered visits are excluded outright (dues cover
-    // them), and any visit stamped with an annual-prepay term is excluded —
-    // the workbench validates term coverage in JS (annualPrepayCoversVisit),
-    // which this raw-SQL audit cannot, so it under-counts lapsed terms.
-    title: `Completed billable visits since ${SINCE} with no invoice (by lane) — Billing Recovery predicate`,
+    // active-autopay customer unless on a per-visit lane. The population is
+    // scoped by COMPLETION time like the workbench (ss.completed_at, ET date
+    // >= --since), not by scheduled_date — a late status correction completes
+    // after its service date (codex r9 P2). Two deliberate differences:
+    // membership-covered visits are excluded outright (dues cover them), and
+    // any visit stamped with an annual-prepay term is excluded — the workbench
+    // validates term coverage in JS (annualPrepayCoversVisit), which this
+    // raw-SQL audit cannot, so it under-counts lapsed terms.
+    title: `Billable visits completed (ET) since ${SINCE} with no invoice (by lane) — Billing Recovery predicate`,
     params: [SINCE, TODAY_ET],
     sql: `with u as (
             select distinct ss.id, ss.customer_id, ss.scheduled_date, ${EFFECTIVE_PRICE_SQL} as effective_price, c.billing_mode
@@ -314,7 +320,7 @@ const CHECKS = [
             join customers c on c.id = ss.customer_id
             left join service_records sr on sr.scheduled_service_id = ss.id
             left join visit_billing_dispositions d on d.scheduled_service_id = ss.id
-            where ss.status='completed' and ss.scheduled_date >= $1::date
+            where ss.status='completed' and (ss.completed_at at time zone 'America/New_York')::date >= $1::date
               and ${EFFECTIVE_PRICE_SQL} > 0
               and d.id is null
               and (sr.status = 'completed' or (sr.id is null and ss.status = 'completed'))
