@@ -83,7 +83,9 @@ const INTENT_SCHEMA = {
   required: ['interest', 'confidence'],
   properties: {
     interest: { type: 'string', enum: ['pest', 'lawn', 'one_time', 'unknown'] },
-    confidence: { type: 'number', description: '0 to 1' },
+    // Range constraints (minimum/maximum) are outside the structured-output
+    // schema subset every provider accepts; the 0–1 range is enforced below.
+    confidence: { type: 'number', description: 'Confidence in the classification, from 0 to 1' },
   },
 };
 
@@ -115,7 +117,7 @@ Rules:
     if (!response.ok || !response.json) return { interest: null, confidence: 0, method: 'ai' };
     const parsed = response.json;
     const interest = ['pest', 'lawn', 'one_time'].includes(parsed.interest) ? parsed.interest : null;
-    const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0;
+    const confidence = typeof parsed.confidence === 'number' && parsed.confidence >= 0 && parsed.confidence <= 1 ? parsed.confidence : 0;
     return { interest, confidence, method: 'ai' };
   } catch (err) {
     logger.error(`[sms-service-intent] AI classify failed: ${err.message}`);
