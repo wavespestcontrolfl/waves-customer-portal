@@ -13,6 +13,7 @@
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { SIGNUP_LINK_TYPES } = require('./link-path-investigation-schema');
 const { isOutreachLocked } = require('./link-registry');
+const { requiredInstances } = require('./link-authority-policy');
 
 const AUTH = 'seo_link_placement_authorities';
 // The aggregate states the bridge OWNS. `new`/`investigating`/`watching`/
@@ -71,7 +72,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     .filter((id) => !forced.size || forced.has(id));
   if (!candidateIds.length) return [];
   const domains = await db('seo_link_domains').whereIn('id', candidateIds).whereNotNull('best_path_id').select('id', 'domain', 'agent_state', 'best_path_id', 'updated_at');
-  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id))]).select('id', 'updated_at', 'link_type', 'legal_terms_hash', 'payment_required', 'revision_payment', 'revision', 'baseline');
+  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'revision_payment', 'revision', 'baseline');
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
   const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'updated_at', 'outreach_status', 'outreach_sent_at');
@@ -105,11 +106,20 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), best ? ts(best.updated_at) : 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
     const staleRow = (r, p) => (best && rotationOutcome(r, best) !== null)
       || (!r.satisfied_at && (ts(r.decided_at) < cutoff || ts(r.decided_at) < ts(p.updated_at)));
+    // the OPEN instance set must equal what the path REQUIRES now (policy requiredInstances): an in-place
+    // re-investigation that adds a fee or legal terms needs a new row even when every existing row is satisfied,
+    // and an instance the path no longer requires must be ended
+    const required = best ? new Set(requiredInstances(best).map((i) => `${i.dimension}|${i.instance_kind}`)) : null;
+    const instanceSetMoved = (p) => {
+      if (!required) return false;
+      const openKeys = new Set((rowsByProspect.get(p.id) || []).map((r) => `${r.dimension}|${r.instance_kind}`));
+      return [...required].some((k) => !openKeys.has(k)) || [...openKeys].some((k) => !required.has(k));
+    };
     const withRows = mine.filter((p) => rowsByProspect.has(p.id) && !frozen(p));
     let why = null;
     if (forced.has(d.id)) why = 'forced';
     else if (BRIDGE_STATES.includes(d.agent_state) && expected.some((l) => !onBest.some((p) => p.location_key === l && rowsByProspect.has(p.id)))) why = 'unbridged';
-    else if (offShapeOpen || withRows.some((p) => p.path_id !== d.best_path_id || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
+    else if (offShapeOpen || withRows.some((p) => p.path_id !== d.best_path_id || instanceSetMoved(p) || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
     else if (waiverAt.has(`${d.id}|${d.best_path_id}`) && !withRows.length && !BRIDGE_STATES.includes(d.agent_state)) why = 'stale'; // a waiver on a rejected domain whose rows were all ended
     if (why) picked.push({ id: d.id, domain: d.domain, why, at: ts(d.updated_at) });
   }

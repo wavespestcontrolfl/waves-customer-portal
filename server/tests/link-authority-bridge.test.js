@@ -578,6 +578,7 @@ describe('re-decision', () => {
     const pl = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: p.id, status: 'prospect', link_type: 'directory', updated_at: EARLIER };
     db._tables.seo_link_prospects.push(pl);
     db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: pl.id, path_id: p.id, dimension: 'payment', instance_kind: '-', instance_key: '-:1', level: 'AUTO_FREE', decision_inputs_hash: 'old', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: EARLIER, satisfied_reason: 'no_payment_required' });
+    db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: pl.id, path_id: p.id, dimension: 'execution', instance_kind: '-', instance_key: '-:1', level: 'OWNER_FREE', decision_inputs_hash: 'old', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: EARLIER, satisfied_reason: 'placed' }); // the full required set, all satisfied
     db._tables.seo_link_domains[0].agent_state = 'watching';
     expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // same revision: the proof stands
     Object.assign(db._tables.seo_link_acquisition_paths[0], { revision_payment: 2, updated_at: new Date(NOW.getTime() + 1000) });
@@ -632,6 +633,34 @@ describe('re-decision', () => {
     const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
     expect(r.redecided).toBeGreaterThanOrEqual(1);
     expect(rows(db).find((x) => x.id === exec.id).level).toBe('AUTO_ACCOUNT');
+  });
+  test('an in-place re-investigation that ADDS a required instance (a fee) re-selects a fully satisfied placement and opens the new row', async () => {
+    const { db, d, p } = scenario();
+    const pl = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: p.id, status: 'live', link_type: 'directory', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(pl);
+    db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: pl.id, path_id: p.id, dimension: 'execution', instance_kind: '-', instance_key: '-:1', level: 'OWNER_FREE', decision_inputs_hash: 'old', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: EARLIER, satisfied_reason: 'placed' });
+    db._tables.seo_link_domains[0].agent_state = 'watching'; // not bridge-owned: only the instance-set rule can select it
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+    Object.assign(db._tables.seo_link_acquisition_paths[0], { acquisition_type: 'paid_listing', payment_required: true, estimated_cost_cents: 4500, currency: 'USD', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'checkout.stripe.com', merchant_account_id: 'acct_1' } }, revision_payment: 2, updated_at: new Date(NOW.getTime() + 1000) });
+    expect((await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['stale']);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r).toMatchObject({ placementsCreated: WAVES_LOCATIONS.length - 1, rowsWritten: 2 * WAVES_LOCATIONS.length - 1 }); // the sibling locations are bridged too; the live one gains exactly its payment row
+    expect(rows(db).filter((x) => x.prospect_id === pl.id && !x.ended_at).map((x) => [x.dimension, x.level, Boolean(x.satisfied_at)]).sort()).toEqual([['execution', 'OWNER_FREE', true], ['payment', 'OWNER_PAYMENT', false]]);
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+  });
+  test('an UNLOCKED conversation (a draft) on another page bound to the previous path follows the re-rank through the mover', async () => {
+    const { db, d, p } = scenario({ make: outreachPath });
+    const old = outreachPath(d); // live, no longer best
+    db._tables.seo_link_acquisition_paths.push(old);
+    const draft = { id: uid(), target_domain: 'example.org', target_page: 'https://www.wavespestcontrol.com/pest-control/', location_key: '-', domain_id: d.id, path_id: old.id, status: 'prospect', outreach_status: 'drafted', outreach_subject: 'old', outreach_send_token: 'tok', link_type: 'resource', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(draft);
+    db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: draft.id, path_id: old.id, dimension: 'communication', instance_kind: '-', instance_key: '-:1', level: 'OWNER_OUTREACH', decision_inputs_hash: 'old', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: null });
+    expect((await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['unbridged']); // no in-shape row on the best path yet
+    const r = await run(db);
+    expect(r).toMatchObject({ placementsCreated: 0, ended: 1, rowsWritten: 1, errors: [] });
+    expect(placements(db)).toHaveLength(1);
+    expect(placements(db)[0]).toMatchObject({ id: draft.id, path_id: p.id, outreach_status: 'none', outreach_subject: null }); // moved; the draft composed for the old route is cleared
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
   });
   test('the park compare-and-swap includes the outreach state: a send that started after the snapshot is never parked under it', async () => {
     const { db, d, p } = scenario({ make: outreachPath });

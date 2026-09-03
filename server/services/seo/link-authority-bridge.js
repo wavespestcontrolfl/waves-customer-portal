@@ -139,10 +139,11 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     if (!row && location === '-' && inFlight) {
       // an outreach conversation already exists for this inbox (a manual or
       // strategy-agent row on another page): that row IS the placement rather
-      // than a second one. A row already bound to a different live path is
-      // that path's placement — nothing is created this run.
+      // than a second one. Bound to another path: a LOCKED/sent conversation
+      // is pinned there (nothing is created this run); an unlocked one (a
+      // draft, a fresh prospect) follows the re-rank through the mover below.
       row = await trx('seo_link_prospects').where({ id: inFlight.id }).first();
-      if (!row || (row.path_id && row.path_id !== path.id)) return { skipped: `outreach conversation in flight on another path (${inFlight.status})`, out };
+      if (!row || (row.path_id && row.path_id !== path.id && isOutreachLocked(row))) return { skipped: `outreach conversation in flight on another path (${inFlight.status})`, out };
     }
     if (row && !row.path_id) {
       // an UNBOUND row — exact homepage match or the in-flight conversation;
