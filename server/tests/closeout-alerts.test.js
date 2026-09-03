@@ -114,7 +114,7 @@ describe('money + comms facts (GATE_CLOSEOUT_MONEY_COMMS_ALERTS)', () => {
   test('comms: only failed alerts; deferral, sending, recap in flight, consent block and every not_required stay silent', () => {
     on();
     expect(closeoutIssuesForVisit(money({ comms: fact('failed', 'completion_sms_failed') }))).toEqual([
-      expect.objectContaining({ type: 'completion_notice_failed', fact: 'comms', reason: 'completion_sms_failed', summary: expect.stringMatching(/failed to send.*Communications/) }),
+      expect.objectContaining({ type: 'completion_notice_failed', fact: 'comms', reason: 'completion_sms_failed', summary: expect.stringMatching(/failed to send.*Communications, then dismiss this card/) }),
     ]);
     for (const c of [
       fact('pending', 'deferred_send_window'), fact('pending', 'completion_sms_sending'), fact('pending', 'recap_sms_in_flight'), fact('pending', 'awaiting_completion'),

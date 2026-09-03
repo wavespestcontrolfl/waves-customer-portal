@@ -314,8 +314,10 @@ function moneyCommsIssues(facts) {
       reason: comms.reason,
       // No completion-notice resend endpoint exists and Dispatch will not
       // reopen a committed completion (GH r3 P2) — point at the manual
-      // messaging flow the office already uses.
-      summary: 'Completion notice to the customer failed to send — send it manually from Communications.',
+      // messaging flow the office already uses. That flow never clears the
+      // record's completionSmsStatus, so the card cannot auto-resolve; the
+      // operator dismisses it after sending (GH r4 P2).
+      summary: 'Completion notice to the customer failed to send — send it manually from Communications, then dismiss this card.',
     });
   }
   const invoice = facts.invoice;
