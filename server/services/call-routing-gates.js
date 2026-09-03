@@ -323,6 +323,11 @@ function buildTriageItem({
     // The off-hour card's whole job is to show the agreed time so the office
     // can place it on an hour boundary — it needs the scheduling payload.
     'off_hour_start',
+    // The authorization card keeps its filing-time scheduling status: the
+    // evidence sweep must never clear it while the call's CONFIRMED
+    // appointment is still unbooked, and a reprocess can rewrite the
+    // rolling extraction's status underneath the open card.
+    'caller_not_authorized',
   ]);
   if (SCHEDULING_PAYLOAD_FLAGS.has(flag) && extraction?.scheduling) {
     const s = extraction.scheduling;

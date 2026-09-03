@@ -434,10 +434,15 @@ function hasNewAddressEvidence(payloadRaw) {
       return true; // unparseable → fail closed, keep the card
     }
   }
+  const snap = payload.heard_address;
   return Boolean(
     payload.address_as_heard
     || (Array.isArray(payload.address_candidates) && payload.address_candidates.length)
-    || payload.address_recovered,
+    || payload.address_recovered
+    // The filing-time snapshot of the address the call named is new
+    // evidence in its own right — a later reprocess clearing the rolling
+    // extraction must not make the card moot against the on-file address.
+    || (snap && typeof snap === 'object' && Object.values(snap).some((v) => String(v ?? '').trim() !== '')),
   );
 }
 
@@ -552,6 +557,19 @@ function callConfirmedUnbooked(item, ctx) {
   return !ctx.bookedCallIds.has(item.call_log_id);
 }
 
+// The CARD's answer to the same question, for the authorization arm: its
+// filing-time scheduling status (scheduling_window.status, snapshotted for
+// caller_not_authorized cards from this PR on) — never the rolling
+// extraction a force-reprocess rewrites from confirmed to requested. A
+// card with no snapshot cannot prove the appointment was not confirmed and
+// fails closed.
+function cardConfirmedUnbooked(item, ctx) {
+  const window = parseMaybeJson(item.payload)?.scheduling_window;
+  if (!window || typeof window !== 'object') return true;
+  if (window.status !== 'confirmed') return false;
+  return !ctx.bookedCallIds.has(item.call_log_id);
+}
+
 // Does the customer's current surname match what THIS call's extractions
 // heard? backfillCustomerFromAppointmentContact writes last_name onto even
 // PRE-EXISTING customers from the call's merged extraction (a V1-only
@@ -637,7 +655,7 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
     // created, and no not_confirmed sibling exists) read as fully resolved
     // — the promised appointment is still owed.
     if (code === 'caller_not_authorized' && ev.caller_phone_added && callerPhoneOnFile(item)
-        && !callConfirmedUnbooked(item, ctx)) {
+        && !cardConfirmedUnbooked(item, ctx)) {
       return { action: 'resolve', rule: 'caller_phone_added' };
     }
     if (code === 'not_confirmed' && ev.booking_after_card) {
@@ -867,17 +885,20 @@ function bookingCoversRequest(item, mine, { multiProperty, places }) {
   const categories = requestedServiceTokens(item);
   if (!categories.length) return false;
   const parents = mine.filter((v) => !v.parent_service_id && strictlyAfter(v.created_at, item.created_at));
-  const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id) && bookingAtRequestedAddress(item, v, places));
+  // The requested days bind every booking, this call's own included — a
+  // reprocess that moved only the date and minted a new booking must not
+  // close the original ask. A card that asked for no date binds none.
+  const window = requestedWindow(item);
+  const inWindow = (v) => {
+    if (!window) return true;
+    if (!toDate(v.scheduled_date)) return false;
+    const day = etCalendarDayOf(v.scheduled_date);
+    return day >= window.start && day <= window.end;
+  };
+  const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id) && inWindow(v) && bookingAtRequestedAddress(item, v, places));
   let pool = direct;
-  if (!multiProperty && requestedAddressIsOnFile(item)) {
-    const window = requestedWindow(item);
-    if (window) {
-      pool = pool.concat(parents.filter((v) => {
-        if (!toDate(v.scheduled_date)) return false;
-        const day = etCalendarDayOf(v.scheduled_date);
-        return day >= window.start && day <= window.end && visitAtOnFileAddress(item, v, places);
-      }));
-    }
+  if (!multiProperty && requestedAddressIsOnFile(item) && window) {
+    pool = pool.concat(parents.filter((v) => inWindow(v) && visitAtOnFileAddress(item, v, places)));
   }
   return categories.every((tokens) => pool.some((v) => serviceTypeMatches(`${v.service_type || ''} ${v.service_category_snapshot || ''}`, tokens)));
 }
@@ -1128,6 +1149,7 @@ module.exports = {
   callSuppliedAddress,
   customerPredatesCall,
   callConfirmedUnbooked,
+  cardConfirmedUnbooked,
   surnameCameFromCall,
   heardAddressMatchesOnFile,
   callerPhoneOnFile,

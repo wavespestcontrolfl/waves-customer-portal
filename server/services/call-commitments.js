@@ -789,32 +789,31 @@ function callEndedAt(call) {
 // manual accept stamps sent_at with no delivery record, and an accepted
 // estimate was certainly handed off). A group-send sibling never carries
 // its own deliveryState (only the anchor does) — and a sibling that was
-// sent on its own BEFORE joining the group keeps its stale stamp — so the
-// witness is the LATER of the sibling's own handoff and its anchor's
-// (GREATEST ignores the null side).
-const HANDED_OFF_AT_SQL = `GREATEST(
-  NULLIF(estimates.estimate_data #>> '{deliveryState,lastDeliveredAt}', '')::timestamptz,
-  (SELECT NULLIF(a.estimate_data #>> '{deliveryState,lastDeliveredAt}', '')::timestamptz FROM estimates a
-     WHERE a.id::text = estimates.estimate_data ->> 'groupPublishedByEstimateId'))`;
-// Rows whose witness falls in (after, until]: the SQL form for a single
-// query, the row form for a batch fetched with the `handed_off_at`
-// column below. The witness time — not sent_at — is when the promise was
-// kept: an estimate sent BEFORE the call and accepted after it kept the
-// promise at acceptance (pre-push hook P1 on 3b5b2cb27).
+// sent on its own BEFORE joining the group keeps its stale stamp — so BOTH
+// the sibling's own handoff and its anchor's are witnesses, each tested
+// against the window on its own (the later one may fall past `until`
+// while the earlier one qualifies).
+const OWN_HANDOFF_SQL = `NULLIF(estimates.estimate_data #>> '{deliveryState,lastDeliveredAt}', '')::timestamptz`;
+const ANCHOR_HANDOFF_SQL = `(SELECT NULLIF(a.estimate_data #>> '{deliveryState,lastDeliveredAt}', '')::timestamptz FROM estimates a
+     WHERE a.id::text = estimates.estimate_data ->> 'groupPublishedByEstimateId')`;
+
+// Rows with a witness in (after, until]: the SQL form for a single query,
+// the row form for a batch fetched with the witness columns below. The
+// witness time — not sent_at — is when the promise was kept: an estimate
+// sent BEFORE the call and accepted after it kept the promise at
+// acceptance (pre-push hook P1 on 3b5b2cb27).
 const handedOffWithin = (qb, after, until = null) => qb.where(function handoffWitness() {
-  this.whereRaw(
-    `((${HANDED_OFF_AT_SQL}) > ?${until ? ` AND (${HANDED_OFF_AT_SQL}) <= ?` : ''})`,
-    until ? [after, until] : [after],
-  ).orWhere(function acceptedWitness() {
-    this.where("accepted_at", ">", after);
-    if (until) this.where("accepted_at", "<=", until);
-  });
+  const within = (expr) => `(${expr} > ?${until ? ` AND ${expr} <= ?` : ''})`;
+  const bind = until ? [after, until] : [after];
+  this.whereRaw(within(OWN_HANDOFF_SQL), bind)
+    .orWhereRaw(within(ANCHOR_HANDOFF_SQL), bind)
+    .orWhereRaw(within("accepted_at"), bind);
 });
-const HANDOFF_ORDER_SQL = `LEAST(COALESCE(${HANDED_OFF_AT_SQL}, 'infinity'::timestamptz), COALESCE(accepted_at, 'infinity'::timestamptz)) asc`;
-const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${HANDED_OFF_AT_SQL} as handed_off_at`)];
+const HANDOFF_ORDER_SQL = `LEAST(COALESCE(${OWN_HANDOFF_SQL}, 'infinity'::timestamptz), COALESCE(${ANCHOR_HANDOFF_SQL}, 'infinity'::timestamptz), COALESCE(accepted_at, 'infinity'::timestamptz)) asc`;
+const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${OWN_HANDOFF_SQL} as handed_off_at`), conn.raw(`${ANCHOR_HANDOFF_SQL} as anchor_handed_off_at`)];
 // The EARLIEST post-boundary witness time on a fetched row, or null.
 const witnessAt = (row, after) => {
-  const times = [row.handed_off_at, row.accepted_at]
+  const times = [row.handed_off_at, row.anchor_handed_off_at, row.accepted_at]
     .map((t) => (t ? new Date(t) : null))
     .filter((d) => d && !Number.isNaN(d.getTime()) && d > after);
   return times.length ? new Date(Math.min(...times.map((d) => d.getTime()))) : null;
@@ -876,12 +875,21 @@ async function directEstimatesSentAfter(conn, probes) {
     })
     .whereNotNull("sent_at"), minAfter)
     .select(cols);
-  const leadByEstimateId = new Map(leads.filter((l) => l.estimate_id).map((l) => [String(l.estimate_id), l]));
+  // Several leads can share one estimate_id — every call behind them is a
+  // match, not an arbitrary one of them.
+  const leadsByEstimateId = new Map();
+  for (const l of leads) {
+    if (!l.estimate_id) continue;
+    const k = String(l.estimate_id);
+    leadsByEstimateId.set(k, [...(leadsByEstimateId.get(k) || []), l]);
+  }
   const leadById = new Map(leads.map((l) => [String(l.id), l]));
   for (const r of linked) {
-    const lead = leadByEstimateId.get(String(r.id)) || leadById.get(String(r.mirror_lead_id || ""));
-    const callId = lead && callBySid.get(lead.twilio_call_sid);
-    if (callId) consider(callId, r, "estimate_linked_to_this_call_sent");
+    const matched = [...(leadsByEstimateId.get(String(r.id)) || [])];
+    const mirror = leadById.get(String(r.mirror_lead_id || ""));
+    if (mirror) matched.push(mirror);
+    const callIds = new Set(matched.map((l) => callBySid.get(l.twilio_call_sid)).filter(Boolean));
+    for (const callId of callIds) consider(callId, r, "estimate_linked_to_this_call_sent");
   }
   return out;
 }

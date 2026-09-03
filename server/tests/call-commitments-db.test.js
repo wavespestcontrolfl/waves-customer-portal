@@ -406,6 +406,16 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toBeNull();
       await db('estimates').where({ id: est.id }).update({ estimate_data: handedOff() });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toMatchObject({ record_id: est.id, strength: 'association' });
+      // Sibling and anchor witnesses are tested against the window on their
+      // own: an anchor resent past the association window does not hide the
+      // sibling's own qualifying handoff (Codex r8 P2).
+      const [lateAnchor] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: new Date(Date.now() + 20 * 24 * 60 * 60 * 1000).toISOString() } }) }).returning('id');
+      try {
+        await db('estimates').where({ id: est.id }).update({ estimate_data: handedOff(30, { groupPublishedByEstimateId: lateAnchor.id }) });
+        expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toMatchObject({ record_id: est.id, strength: 'association' });
+      } finally {
+        await db('estimates').where({ id: lateAnchor.id }).del();
+      }
     } finally {
       await db('leads').where({ id: lead.id }).del();
       await db('estimates').where({ id: est.id }).del();
@@ -484,6 +494,28 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     } finally {
       await db('estimates').whereIn('id', [stamped.id, mirror.id]).del();
       await db('leads').where({ id: lead.id }).del();
+    }
+  });
+
+  test('directEstimatesSentAfter: every call behind leads that share one estimate gets the direct proof (Codex r8 P2)', async () => {
+    const call = await db('call_log').where({ id: callId }).first();
+    const sid2 = 'CA' + '8'.repeat(30) + 'z2';
+    const [call2] = await db('call_log').insert({ twilio_call_sid: sid2, direction: 'inbound', from_phone: PHONE, to_phone: OUR_NUMBER, status: 'completed', duration_seconds: 90, created_at: call.created_at }).returning('id');
+    cleanup.callIds.push(call2.id);
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000), estimate_data: handedOff() }).returning('id');
+    const [leadA] = await db('leads').insert({ phone: PHONE, twilio_call_sid: SID, estimate_id: est.id, status: 'estimate_sent' }).returning('id');
+    const [leadB] = await db('leads').insert({ phone: PHONE, twilio_call_sid: sid2, estimate_id: est.id, status: 'estimate_sent' }).returning('id');
+    try {
+      const after = new Date(call.created_at.getTime() + 90 * 1000);
+      const out = await cc.directEstimatesSentAfter(db, [
+        { key: 'a', callId: call.id, twilioCallSid: SID, after },
+        { key: 'b', callId: call2.id, twilioCallSid: sid2, after },
+      ]);
+      expect(out.get('a')).toMatchObject({ record_id: est.id, strength: 'direct' });
+      expect(out.get('b')).toMatchObject({ record_id: est.id, strength: 'direct' });
+    } finally {
+      await db('leads').whereIn('id', [leadA.id, leadB.id]).del();
+      await db('estimates').where({ id: est.id }).del();
     }
   });
 

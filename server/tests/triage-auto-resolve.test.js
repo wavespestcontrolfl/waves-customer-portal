@@ -363,17 +363,22 @@ describe('evidence rules', () => {
   });
 
   test('caller_not_authorized needs BOTH the human contact event and the number on a slot now', () => {
-    const base = { reason_code: 'caller_not_authorized', call_direction: 'inbound', call_from_phone: '+19415550123' };
+    const base = { reason_code: 'caller_not_authorized', call_direction: 'inbound', call_from_phone: '+19415550123', payload: { scheduling_window: { status: 'requested' } } };
     expect(classifyTriageItem(item({ ...base, customer_service_contact2_phone: '(941) 555-0123' }), evidenceFor('t1', { caller_phone_added: true }), { now: NOW }))
       .toEqual({ action: 'resolve', rule: 'caller_phone_added' });
     // Event logged but the number is no longer on any slot → stays open.
     expect(classifyTriageItem(item({ ...base, customer_phone: '+19415559999' }), evidenceFor('t1', { caller_phone_added: true }), { now: NOW })).toBeNull();
     // On a slot but no post-card human event (the pass itself may have written it) → stays open.
     expect(classifyTriageItem(item({ ...base, customer_phone: '+19415550123' }), evidenceFor('t1', {}), { now: NOW })).toBeNull();
-    // A confirmed-but-unbooked call keeps its card: the appointment is still owed.
-    expect(classifyTriageItem(item({ ...base, customer_phone: '+19415550123', call_extraction: { ...NO_ADDR_EXTRACTION, scheduling: { status: 'confirmed' } } }), evidenceFor('t1', { caller_phone_added: true }), { now: NOW })).toBeNull();
-    expect(classifyTriageItem(item({ ...base, customer_phone: '+19415550123', call_extraction: { ...NO_ADDR_EXTRACTION, scheduling: { status: 'confirmed' } } }), { bookedCallIds: new Set(['call-1']), evidence: new Map([['t1', { caller_phone_added: true }]]) }, { now: NOW }))
+    // A confirmed-but-unbooked call keeps its card: the appointment is still
+    // owed. The CARD's filing-time status decides — the rolling extraction
+    // (a reprocess may have rewritten it to 'requested') is never read.
+    const confirmed = { ...base, customer_phone: '+19415550123', payload: { scheduling_window: { status: 'confirmed' } }, call_extraction: { ...NO_ADDR_EXTRACTION, scheduling: { status: 'requested' } } };
+    expect(classifyTriageItem(item(confirmed), evidenceFor('t1', { caller_phone_added: true }), { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item(confirmed), { bookedCallIds: new Set(['call-1']), evidence: new Map([['t1', { caller_phone_added: true }]]) }, { now: NOW }))
       .toEqual({ action: 'resolve', rule: 'caller_phone_added' });
+    // No snapshot (a pre-snapshot card) → cannot prove it was not confirmed → stays open.
+    expect(classifyTriageItem(item({ ...base, customer_phone: '+19415550123', payload: { flag: 'caller_not_authorized' } }), evidenceFor('t1', { caller_phone_added: true }), { now: NOW })).toBeNull();
   });
 
   test('not_confirmed resolves on a booking created after the card', () => {
@@ -513,6 +518,9 @@ describe('evidence helpers', () => {
     // (a reprocess that moved the property) does not close the original ask.
     expect(bookingCoversRequest(card(none), [atOther], { multiProperty: false, places })).toBe(false);
     expect(bookingCoversRequest(card(none), [atOnFile], { multiProperty: false, places })).toBe(true);
+    // …and this call's own booking outside the requested days (a reprocess
+    // that moved only the date) does not either.
+    expect(bookingCoversRequest(card(none), [{ ...atOnFile, scheduled_date: '2026-08-02' }], { multiProperty: false, places })).toBe(false);
     expect(bookingCoversRequest(card(named), [atOther], { multiProperty: true, places })).toBe(true);
   });
 
