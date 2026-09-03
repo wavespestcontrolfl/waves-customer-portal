@@ -23,15 +23,15 @@ function chainMock(firstResult) {
   return { dbh, api, calls };
 }
 
-const SAME = { email: '  Visitor.One@Example.com ', phone: '(941) 555-0142', address: '123  Sample St, Parrish, FL 34219' };
+const SAME = { email: '  Visitor.One@Example.com ', phone: '(941) 555-0142', address: '123  Sample St, Parrish, FL 34219', serviceKey: 'pest_general_quarterly' };
 
 describe('findPriorOpenWizardLeadId', () => {
-  test('matches the newest open quote_wizard lead on email + phone + address, normalized', async () => {
+  test('matches the newest open quote_wizard lead on service + email + phone + address, normalized', async () => {
     const { dbh, calls } = chainMock({ id: 'lead-prior' });
     const now = Date.UTC(2026, 7, 31, 19, 0, 0);
     await expect(_internals.findPriorOpenWizardLeadId(dbh, SAME, now)).resolves.toBe('lead-prior');
     expect(dbh).toHaveBeenCalledWith('leads');
-    expect(calls.where[0]).toEqual([{ lead_type: 'quote_wizard' }]);
+    expect(calls.where[0]).toEqual([{ lead_type: 'quote_wizard', service_key: 'pest_general_quarterly' }]);
     expect(calls.whereNull[0]).toEqual(['deleted_at']);
     expect(calls.whereRaw[0]).toEqual(['LOWER(email) = ?', ['visitor.one@example.com']]);
     expect(calls.whereRaw[1][1]).toEqual(['%9415550142']);
@@ -52,7 +52,8 @@ describe('findPriorOpenWizardLeadId', () => {
     ['missing email', { ...SAME, email: '' }],
     ['short phone', { ...SAME, phone: '555-0142' }],
     ['missing address', { ...SAME, address: '  ' }],
-  ])('%s → null without touching the database (all three keys are required)', async (_label, keys) => {
+    ['no catalog service key (manual / quote-on-request mix)', { ...SAME, serviceKey: null }],
+  ])('%s → null without touching the database (all four keys are required)', async (_label, keys) => {
     const { dbh } = chainMock({ id: 'never' });
     await expect(_internals.findPriorOpenWizardLeadId(dbh, keys)).resolves.toBeNull();
     expect(dbh).not.toHaveBeenCalled();
