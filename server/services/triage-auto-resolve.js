@@ -863,7 +863,20 @@ async function loadEmailEvidence(conn, items, flag) {
   // duplicated across customers (or used by a test send), and another
   // recipient's open answers nothing about this caller's read-back. A card
   // on an unlinked call has no customer to bind to and gets no evidence.
-  const emailItems = items.filter((i) => i.reason_code === 'email_unverified' && i.call_customer_id);
+  const bound = items.filter((i) => i.reason_code === 'email_unverified' && i.call_customer_id);
+  if (!bound.length) return;
+  // A call an owner verdict DENIED (first_touch_holds.last_error =
+  // 'email_denied_await_correction', stamped by admin-triage and cleared
+  // only by an explicit approval there or the correction fanout) gets no
+  // email evidence: a force-reprocess can file a fresh card on that call,
+  // and engagement on the address a human already ruled wrong is not this
+  // sweep's to overrule — closing the card here would strand the
+  // deny-stamped hold, which the ledger sweep excludes, pending forever.
+  const denied = new Set((await conn('first_touch_holds')
+    .whereIn('call_log_id', [...new Set(bound.map((i) => i.call_log_id))])
+    .where('last_error', 'email_denied_await_correction')
+    .select('call_log_id')).map((h) => String(h.call_log_id)));
+  const emailItems = bound.filter((i) => !denied.has(String(i.call_log_id)));
   const emailsByItem = new Map(emailItems.map((i) => [i.id, capturedEmails(i)]));
   const allEmails = [...new Set([...emailsByItem.values()].flat())];
   if (!allEmails.length) return;

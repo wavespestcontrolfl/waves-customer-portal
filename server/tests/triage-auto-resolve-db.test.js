@@ -47,6 +47,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     if (ids.visits.length) await db('scheduled_services').whereIn('id', ids.visits).del();
     if (ids.estimates.length) await db('estimates').whereIn('id', ids.estimates).del();
     if (ids.emails.length) await db('email_messages').whereIn('id', ids.emails).del();
+    if (ids.calls.length) await db('first_touch_holds').whereIn('call_log_id', ids.calls).del();
     if (ids.calls.length) await db('triage_items').whereIn('call_log_id', ids.calls).del();
     if (ids.calls.length) await db('call_log').whereIn('id', ids.calls).del();
     if (ids.properties.length) await db('customer_properties').whereIn('id', ids.properties).del();
@@ -123,7 +124,8 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
 
   // email_unverified: a card carrying its filing-time release target + an
   // engaged message to that address, sent to `recipientId` after the card.
-  async function seedEmailCall(sid, { recipientOf }) {
+  // denied: the call carries an owner deny stamp on its first-touch hold.
+  async function seedEmailCall(sid, { recipientOf, denied = false }) {
     const { customerId } = await seedCustomer(sid.slice(-2));
     const target = `release-${sid.slice(-2).toLowerCase()}@example.invalid`;
     const callAt = new Date(Date.now() - 65 * 60000);
@@ -133,6 +135,12 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
       customer_id: customerId, review_status: 'open', created_at: callAt,
     }).returning('id');
     ids.calls.push(call.id);
+    if (denied) {
+      await db('first_touch_holds').insert({
+        call_log_id: call.id, customer_id: customerId, held_email: target, held_drip: true, held_newsletter: false,
+        status: 'pending', last_error: 'email_denied_await_correction', created_at: callAt, updated_at: callAt,
+      });
+    }
     const cardAt = new Date(Date.now() - 60 * 60000);
     const [card] = await db('triage_items').insert({
       call_log_id: call.id, category: 'contact_ambiguous', severity: 'blocking', reason_code: 'email_unverified',
@@ -147,10 +155,11 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     return { cardId: card.id };
   }
 
-  test('email_unverified resolves on an engaged message sent to THIS customer at the release target — never on another customer\'s message to the same address', async () => {
+  test('email_unverified resolves on an engaged message sent to THIS customer at the release target — never on another customer\'s message to the same address, nor on a call an owner verdict denied', async () => {
     const mine = await seedEmailCall(SID.replace(/e2$/, 'm1'), { recipientOf: (id) => id });
     const { customerId: stranger } = await seedCustomer('m9');
     const other = await seedEmailCall(SID.replace(/e2$/, 'm2'), { recipientOf: () => stranger });
+    const deniedCall = await seedEmailCall(SID.replace(/e2$/, 'm3'), { recipientOf: (id) => id, denied: true });
     const result = await sweep.runTriageAutoResolve({ now: new Date() });
     expect(result.skipped).toBe(false);
     const closed = await db('triage_items').where({ id: mine.cardId }).first();
@@ -158,6 +167,12 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     expect(closed.resolution_note).toBe(sweep.RULE_NOTES.email_engaged);
     const open = await db('triage_items').where({ id: other.cardId }).first();
     expect(open.status).toBe('open');
+    // The deny stamp is a human ruling on this address; engagement does not
+    // overrule it here, and the hold keeps its stamp for the correction path.
+    const deniedCard = await db('triage_items').where({ id: deniedCall.cardId }).first();
+    expect(deniedCard.status).toBe('open');
+    const hold = await db('first_touch_holds').where({ call_log_id: deniedCard.call_log_id }).first();
+    expect(hold.last_error).toBe('email_denied_await_correction');
   });
 
   test('quote_promised resolves on a call-stamped estimate DELIVERED after the card — not one sent before it, a suppressed send, or another customer\'s estimate', async () => {
