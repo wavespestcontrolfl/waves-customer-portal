@@ -448,11 +448,13 @@ async function upsertSessionRow(row) {
  * own usage block (GET /v1/sessions/{id}). Called by the six agent runners in
  * their `finally` once the SSE loop ends (however it ends); never throws into
  * them. Re-recording the same session id updates its row (see
- * upsertSessionRow). `latency_ms` is the wall time since `startedAt`: the
- * run for one-shot runners, the longest turn for the assistant. `failure`
- * is the runner's OWN outcome — null on success, else the Error it threw or
- * a short code (`initial_message_failed`, `missing_draft`,
- * `session_error_event`) — combined with the remote status: the row is ok
+ * upsertSessionRow). `latency_ms` is the wall time since `startedAt`, taken
+ * BEFORE the usage GET so a slow or timed-out fetch is never billed as agent
+ * latency: the run for one-shot runners, the longest turn for the assistant.
+ * `failure` is the runner's OWN outcome — null on success, else the Error it
+ * threw or a short code (`initial_message_failed`, `missing_draft`,
+ * `session_error_event`, `max_events` when the runner's own event cap ended
+ * the stream) — combined with the remote status: the row is ok
  * only when the session is not terminated AND the runner succeeded, so an
  * application-level failure is never hidden behind an idle session. When
  * the usage GET itself fails (429, network, the 15 s timeout) the session
@@ -465,6 +467,7 @@ async function upsertSessionRow(row) {
 async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, failure = null } = {}) {
   try {
     if (!ledgerEnabled() || !sessionId) return null;
+    const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;
     let session = null;
     try {
       const { anthropicSessionsFetch } = require('./intelligence-bar/managed-agents-ops-tools');
@@ -492,7 +495,7 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
       cache_write_tokens: tokens.cache_write_tokens,
       output_tokens: tokens.output_tokens,
       reasoning_tokens: tokens.reasoning_tokens,
-      latency_ms: startedAt ? toCount(Date.now() - Number(startedAt)) : null,
+      latency_ms: latencyMs,
       error_code: errorCode,
       error_class: errorCode ? classifyFailure(errorCode) : null,
       provider_ref: String(sessionId).slice(0, 120),

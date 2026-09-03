@@ -399,6 +399,22 @@ describe('llm call ledger', () => {
       expect(row.latency_ms).toBeGreaterThanOrEqual(1500);
     });
 
+    it("latency_ms is the runner's own elapsed time — a slow usage GET is never billed as agent latency", async () => {
+      const now = jest.spyOn(Date, 'now').mockReturnValue(1_000_800);
+      // the usage GET "takes" 15 s: the clock jumps while it is in flight
+      global.fetch = jest.fn(async () => {
+        now.mockReturnValue(1_015_800);
+        return { ok: true, status: 200, json: () => Promise.resolve({ id: 's', status: 'idle', usage: { input_tokens: 1, output_tokens: 1 } }) };
+      });
+      const { metrics } = load();
+      try {
+        await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 's', startedAt: 1_000_000 });
+      } finally {
+        now.mockRestore();
+      }
+      expect(ledgerRows()[0]).toMatchObject({ provider_ref: 's', latency_ms: 800 });
+    });
+
     it('marks a terminated session as failed', async () => {
       global.fetch = fetchJson({ id: 's', status: 'terminated', usage: { input_tokens: 1, output_tokens: 1 } });
       const { metrics } = load();

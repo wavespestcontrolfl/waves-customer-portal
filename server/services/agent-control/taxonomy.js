@@ -143,7 +143,9 @@ function classifyFailure(errorCode, ctx = {}) {
   // `<provider>_timeout` from llm/call.js providerErrorReason (Codex on #3793).
   if (code === 'timeout_budget_exhausted' || code === 'timeout' || /_(408|timeout)$/.test(code)) return 'timeout';
   if (code === 'openai_incomplete') return ctx.pastBudget ? 'timeout' : 'incomplete';
-  if (code === 'budget_exhausted' || code === 'max_cost' || code === 'max_tool_calls') return 'budget';
+  // `max_events`: a Managed Agents runner's own SSE event cap ended the
+  // stream before the session did — our budget, not the provider's fault.
+  if (code === 'budget_exhausted' || code === 'max_cost' || code === 'max_tool_calls' || code === 'max_events') return 'budget';
   if (code === 'bad_request' || /_(400|413)$/.test(code)) return 'bad_input';
   if (code === 'empty_json' || code === 'empty_text' || code === 'unparseable' || code === 'truncated') return 'incomplete';
   // `<provider>_refusal`: the model declined (stop_reason 'refusal') — the

@@ -152,6 +152,7 @@ const ContentAgent = {
       for await (const { event, data } of streamSessionEvents(sessionId)) {
         if (--maxIterations <= 0) {
           logger.warn(`[content-agent] Hit max iterations for session ${sessionId}`);
+          failure = 'max_events';
           break;
         }
 

@@ -187,7 +187,11 @@ class ManagedAssistant {
       }
 
       // 5. Stream events and handle custom tool calls
-      const reply = await this.processSessionEvents(sessionId, conversation, customerId);
+      const { reply, failure: streamFailure } = await this.processSessionEvents(sessionId, conversation, customerId);
+      // A stream that ended on an error event or on our event cap still
+      // hands back a reply to send; the turn itself failed, and the ledger
+      // row below says so.
+      failure = streamFailure;
 
       // 6. Save assistant reply
       await db('agent_messages').insert({
@@ -212,7 +216,7 @@ class ManagedAssistant {
       };
 
     } catch (err) {
-      failure = err;
+      failure = failure || err;
       logger.error(`[managed-assistant] Error: ${err.message}`);
       return {
         reply: "I'm having trouble right now. Let me connect you with our team. — Waves Pest Control",
@@ -229,15 +233,22 @@ class ManagedAssistant {
   }
 
   /**
-   * Stream session events, execute custom tool calls, return final text.
+   * Stream session events, execute custom tool calls, return the final text
+   * with this turn's stream outcome. `failure` is null when the agent ended
+   * the turn, `session_error_event` when the stream emitted an error (the
+   * reply is then whatever text arrived first, else the fallback copy) and
+   * `max_events` when our own event cap ended it. The caller sends the reply
+   * either way; the call ledger records the turn as failed.
    */
   async processSessionEvents(sessionId, conversation, customerId) {
     let finalReply = '';
+    let failure = null;
     let maxIterations = 30; // expanded assistant needs more room for multi-step workflows
 
     for await (const { event, data } of streamSessionEvents(sessionId)) {
       if (--maxIterations <= 0) {
         logger.warn(`[managed-assistant] Hit max iterations for session ${sessionId}`);
+        failure = 'max_events';
         break;
       }
 
@@ -313,6 +324,7 @@ class ManagedAssistant {
       // ── Error from agent ──
       if (event === 'error') {
         logger.error(`[managed-assistant] Agent error: ${JSON.stringify(data)}`);
+        failure = 'session_error_event';
         if (!finalReply) {
           finalReply = "I'm having trouble right now. Let me connect you with our team. — Waves Pest Control";
         }
@@ -320,7 +332,7 @@ class ManagedAssistant {
       }
     }
 
-    return finalReply || "I'm here to help! Could you tell me a bit more about what you need? — Waves Pest Control";
+    return { reply: finalReply || "I'm here to help! Could you tell me a bit more about what you need? — Waves Pest Control", failure };
   }
 
   /**
