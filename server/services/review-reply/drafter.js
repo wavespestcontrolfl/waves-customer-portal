@@ -1002,42 +1002,27 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
 }
 
 /**
- * Deterministic last-resort reply. Uses only the reviewer's first name, the
- * technician names the reviewer wrote, and the location sign-off — nothing
+ * Deterministic last-resort reply. Uses only the reviewer's first name and
+ * the location sign-off — nothing
  * the verifier could call unsourced, and no wording that implies a past or
  * future relationship (a first-visit reviewer gets none). Three phrasings so the non-repetition
  * rule does not reject the third use at one location. Returns the first
  * variant that passes verifyReplyDetailed, else null (the row parks).
  */
-function techPraised(reviewText, name) {
-  const clauses = String(reviewText || '').split(CLAUSE_BREAK_RE);
-  const nameRe = new RegExp(`\\b${escapeRe(name)}\\b`, 'i');
-  const mentioning = clauses.filter((c) => nameRe.test(c));
-  return mentioning.length > 0 && mentioning.every((c) => !new RegExp(NEGATION_RE.source, 'i').test(c));
-}
-
 function safeCopyReply(grounding, mode, recentReplies = []) {
   const r = grounding.review;
   if (mode === 'low_rating' || !(Number(r.rating) >= 4)) return null;
   const greeting = r.firstName ? `Hi ${r.firstName},` : 'Hello there,';
-  // The tech variants only when the reviewer PRAISED the person: praise mode,
-  // and no negation in the clause that names them ("Adam was late but the
-  // ants are gone" gets the plain variant).
-  const tech = mode === 'tech_praise' ? ((r.mentionedTechNames || []).find((n) => techPraised(r.text, n)) || null) : null;
   const noun = r.hasText ? 'the review' : (Number(r.rating) === 5 ? 'the five stars' : 'the rating');
+  // No technician name: a 4-star review can name a tech in a complaint, and
+  // nothing deterministic reads sentiment. The plain variant is safe for all.
   // Each variant opens differently: the non-repetition rule compares the
   // first five words of the body, greeting included.
-  const variants = tech
-    ? [
-      `Thanks for ${noun}. We'll make sure ${tech} hears it.`,
-      `We appreciate ${noun}. ${tech} will be glad to hear it, and we'll pass it along.`,
-      `Much appreciated. We'll let ${tech} know you said so.`,
-    ]
-    : [
-      `Thanks for ${noun}. Glad to be your pest and lawn team.`,
-      `We appreciate ${noun}. Glad you chose us.`,
-      `Much appreciated. Thanks for choosing us.`,
-    ];
+  const variants = [
+    `Thanks for ${noun}. Glad to be your pest and lawn team.`,
+    `We appreciate ${noun}. Glad you chose us.`,
+    `Much appreciated. Thanks for choosing us.`,
+  ];
   for (const body of variants) {
     const text = `${greeting}\n\n${body}\n\n${signOffFor(grounding.locationName)}`;
     if (!verifyReplyDetailed(text, grounding, { recentReplies, mode })) return text;

@@ -665,7 +665,7 @@ describe('draftReviewReply — fallback ladder', () => {
     const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
     expect(r.ok).toBe(true);
     expect(r.safeCopy).toBe(true);
-    expect(r.text).toBe(good('Hi Dana,\n\nThanks for the review. We\'ll make sure Marcus hears it.'));
+    expect(r.text).toBe(good('Hi Dana,\n\nThanks for the review. Glad to be your pest and lawn team.'));
     expect(r.rejections).toEqual(['forbidden_name', 'phone', 'private_channel', 'banned_phrase']);
     expect(r.rejectionDetails.map((d) => d.span)).toEqual(['tyler', null, 'our records', 'for good']);
     expect(r.rejectionDetails.every((d) => d.text === undefined)).toBe(true);
@@ -691,7 +691,7 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(r.rejectionDetails).toHaveLength(4);
     expect(r.rejectionDetails[0]).toMatchObject({ attempt: 1, code: 'forbidden_name', span: 'tyler' });
   });
-  test('safe copy without a named tech, and its variants dodge the non-repetition rule', () => {
+  test('safe copy never names a technician, and its variants dodge the non-repetition rule', () => {
     const g = grounding({ mentionedTechNames: [], topics: [] });
     const first = Drafter.safeCopyReply(g, 'service_quality', []);
     expect(first).toBe(good('Hi Dana,\n\nThanks for the review. Glad to be your pest and lawn team.'));
@@ -709,10 +709,10 @@ describe('draftReviewReply — fallback ladder', () => {
     const noText = grounding({ firstName: '', text: '', mentionedTechNames: [], topics: [], account: null });
     expect(Drafter.safeCopyReply(noText, 'no_text', [])).toBe(good('Hello there,\n\nThanks for the five stars. Glad to be your pest and lawn team.'));
     expect(Drafter.safeCopyReply(grounding({ rating: 2 }), 'low_rating', [])).toBeNull();
-    // A tech named in a complaint clause gets the plain variant, even at 4 stars.
-    const mixed = grounding({ rating: 4, text: 'Marcus was not on time, but the ants are gone and the yard looks good.' });
+    // A 4-star review can name a tech in a complaint; safe copy never names one.
+    const mixed = grounding({ rating: 4, text: 'Marcus was rude, but the ants are gone and the yard looks good.' });
     expect(Drafter.safeCopyReply(mixed, 'tech_praise', [])).toBe(good('Hi Dana,\n\nThanks for the review. Glad to be your pest and lawn team.'));
-    expect(Drafter.safeCopyReply(grounding(), 'results', [])).not.toContain('Marcus');
+    expect(Drafter.safeCopyReply(grounding(), 'tech_praise', [])).not.toContain('Marcus');
   });
   test('the first prompt names the reviewer phrases the reply may not echo, and the relationship rule', () => {
     const g = grounding({ text: 'If you want to be bug free call Marcus, absolutely the best pest control around.', account: null });
