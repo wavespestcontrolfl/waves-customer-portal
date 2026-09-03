@@ -89,3 +89,36 @@ describe.each(RUNNERS)('%s — the session recorder sees how the stream ended', 
     expect(result.durationSeconds).toBe(2);
   });
 });
+
+describe('lead-response-agent — a status_idle event is not terminal on its own (Codex r8)', () => {
+  const path = '../services/lead-response-agent';
+  const run = (m) => m.processLead({ leadId: 'lead-1', customerId: 'cust-1', name: 'Test Lead', phone: '+19415550100' });
+  const idle = (stop) => ({ event: 'session.status_idle', data: { stop_reason: { type: stop } } });
+  beforeEach(() => {
+    jest.resetModules();
+    mockRecordSessionUsage.mockReset();
+    mockRecordSessionUsage.mockResolvedValue(null);
+    now = 1_000_000;
+    Date.now = () => now;
+    process.env = { ...ORIGINAL_ENV, ANTHROPIC_API_KEY: 'k', LEAD_AGENT_ID: 'agent_lead_1', LEAD_AGENT_ENVIRONMENT_ID: 'env_1' };
+  });
+  afterAll(() => { process.env = ORIGINAL_ENV; global.fetch = ORIGINAL_FETCH; Date.now = ORIGINAL_NOW; });
+
+  it('a requires_action idle mid-run keeps streaming to the terminal frame — the run is ok with everything after it', async () => {
+    global.fetch = fetchFor([text('first '), idle('requires_action'), text('second'), { event: 'done', data: {} }]);
+    await expect(run(load(path))).resolves.toMatchObject({ report: 'first second' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('an idle with end_turn is the terminal', async () => {
+    global.fetch = fetchFor([text('all done'), idle('end_turn'), text('never read')]);
+    await expect(run(load(path))).resolves.toMatchObject({ report: 'all done' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('a requires_action idle followed by the stream closing is session_stream_eof, not a success', async () => {
+    global.fetch = fetchFor([text('first '), idle('requires_action')]);
+    await run(load(path));
+    expect(recorded()).toMatchObject({ failure: 'session_stream_eof' });
+  });
+});

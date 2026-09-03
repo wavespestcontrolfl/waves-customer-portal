@@ -296,8 +296,12 @@ const LeadResponseAgent = {
           }]);
         }
 
+        // session.status_idle is NOT terminal on its own: it arrives with
+        // stop_reason requires_action while the agent waits for the tool
+        // result sent above, and the run continues. Only its end_turn is
+        // (the rule agent-dispatcher.js documents) — Codex r8 on #3846.
         const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
-        if (event === 'done' || event === 'session_complete' || event === 'session.status_idle' || stopReason === 'end_turn') { sessionEnded = true; break; }
+        if (event === 'done' || event === 'session_complete' || stopReason === 'end_turn') { sessionEnded = true; break; }
         if (event === 'error' || event === 'session.error') {
           logger.error(`[lead-agent] Agent error: ${JSON.stringify(data)}`);
           failure = 'session_error_event';
