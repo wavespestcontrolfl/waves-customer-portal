@@ -39,6 +39,7 @@ jest.mock('../services/seo/link-registry-intake', () => ({ intake: jest.fn(), re
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => g === 'linkAuthority') }));
 jest.mock('../services/seo/link-path-investigator', () => ({ investigatePaths: jest.fn(), LOCK_KEY: 'link-path-investigator' }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/email/gmail-client', () => ({ sendMessage: jest.fn(), isConnected: jest.fn(async () => true) }));
 jest.mock('../services/seo/link-authority-bridge', () => ({ runAuthorityBridge: jest.fn(), LOCK_KEY: 'link-authority-bridge' }));
 jest.mock('../services/seo/link-owner-queue', () => {
   class OwnerQueueError extends Error { constructor(status, message) { super(message); this.status = status; } }
@@ -46,6 +47,8 @@ jest.mock('../services/seo/link-owner-queue', () => {
     OwnerQueueError,
     listOwnerQueue: jest.fn(async () => ({ cards: [{ placement: { id: 'p1' } }] })),
     approveRow: jest.fn(async () => ({ approval: { dimension: 'execution', action: 'acquire', instance_key: '-:1' }, attached: ['a1'], bridge: { gated: false, released: 1 } })),
+    sendRow: jest.fn(async () => ({ sent: true, prospectId: 'p1', message_id: 'm1', thread_id: 't1', authority: { level: 'OWNER_OUTREACH', approval_id: 'ap1' } })),
+    SEND_CODE_STATUS: { recipient_review_required: 409 },
     decideDomain: jest.fn(async () => ({ domain: 'example.org', agent_state: 'rejected', audited: 1 })),
     acquireAnyway: jest.fn(async () => ({ domain: 'example.org', floors: [{ floor: 'score' }], bridge: { gated: false, parked: 1 }, awaiting: 1 })),
   };
@@ -53,6 +56,7 @@ jest.mock('../services/seo/link-owner-queue', () => {
 
 const router = require('../routes/admin-backlink-agent-v2');
 const Q = require('../services/seo/link-owner-queue');
+const Outreach = require('../services/seo/link-prospect-outreach');
 
 function handler(method, routePath) {
   const layer = router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
@@ -84,6 +88,36 @@ describe('GET /owner-queue', () => {
     const r = await run('get', '/owner-queue', {});
     expect(r.statusCode).toBe(200);
     expect(r.body).toEqual({ cards: [{ placement: { id: 'p1' } }], gateOn: true });
+  });
+});
+
+describe('the send click (PR 3a)', () => {
+  test('POST /owner-queue/rows/:id/send passes the row, the admin, the displayed draft hash and the acknowledged lookup hash; a non-string hash is dropped', async () => {
+    const r = await run('post', '/owner-queue/rows/:id/send', { params: { id: 'a1' }, body: { draft_hash: 'd1', reviewed_lookup_hash: 'h1' } });
+    expect(r.statusCode).toBe(200);
+    expect(Q.sendRow).toHaveBeenCalledWith(expect.anything(), { authorityId: 'a1', actor: 'Adam', reviewedLookupHash: 'h1', draftHash: 'd1' });
+    expect(r.body).toMatchObject({ sent: true, message_id: 'm1' });
+    await run('post', '/owner-queue/rows/:id/send', { params: { id: 'a1' }, body: { reviewed_lookup_hash: 42, draft_hash: 7 } });
+    expect(Q.sendRow).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ reviewedLookupHash: null, draftHash: null }));
+  });
+  test('POST /prospects/:id/outreach/send binds the click to the draft the list displayed: no draft_hash ⇒ 400 before the sender; otherwise it travels with the acknowledged hash', async () => {
+    const spy = jest.spyOn(Outreach, 'sendOutreach').mockResolvedValue({ ok: true, message_id: 'm1' });
+    const bare = await run('post', '/prospects/:id/outreach/send', { params: { id: 'p1' }, body: { reviewed_lookup_hash: 'h1' } });
+    expect(bare.statusCode).toBe(400);
+    expect(bare.body).toMatchObject({ ok: false, code: 'draft_hash_required' });
+    expect(spy).not.toHaveBeenCalled();
+    const ok = await run('post', '/prospects/:id/outreach/send', { params: { id: 'p1' }, body: { draft_hash: 'd1', reviewed_lookup_hash: 'h1' } });
+    expect(ok.statusCode).toBe(200);
+    expect(spy).toHaveBeenCalledWith({ prospectId: 'p1', approvedBy: 'Adam', mode: 'owner', reviewedLookupHash: 'h1', draftHash: 'd1' });
+    spy.mockRestore();
+  });
+  test('a sender refusal surfaces its code and the recipient review for the owner to acknowledge', async () => {
+    const err = new Q.OwnerQueueError(409, 'review the match');
+    err.code = 'recipient_review_required'; err.review = { kind: 'ambiguous', lookup_hash: 'h9' };
+    Q.sendRow.mockRejectedValueOnce(err);
+    const r = await run('post', '/owner-queue/rows/:id/send', { params: { id: 'a1' } });
+    expect(r.statusCode).toBe(409);
+    expect(r.body).toEqual({ error: 'review the match', code: 'recipient_review_required', review: { kind: 'ambiguous', lookup_hash: 'h9' } });
   });
 });
 

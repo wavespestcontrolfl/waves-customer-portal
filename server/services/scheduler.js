@@ -1659,8 +1659,9 @@ function initScheduledJobs() {
   // Decides only — never leases, sends, or spends.
   cron.schedule('35 3 * * *', async () => {
     try {
-      const r = await require('./seo/link-authority-bridge').runAuthorityBridge(db);
-      if (!r.gated && r.selected) logger.info(`[link-authority] bridge: ${r.skipped ? `SKIPPED (${r.skipped}) ` : ''}selected ${r.selected} decided ${r.decided} placements ${r.placementsCreated} rows ${r.rowsWritten} redecided ${r.redecided} ended ${r.ended} parked ${r.parked} released ${r.released} approvals_invalidated ${r.invalidatedApprovals} aggregate ${r.aggregateChanges} errors ${r.errors.length}`);
+      // the nightly is the ONE caller that auto-sends what it authorized (plan §6.4) — admin jobs and owner clicks never do
+      const r = await require('./seo/link-authority-bridge').runAuthorityBridge(db, { autoSend: true });
+      if (!r.gated && r.selected) logger.info(`[link-authority] bridge: ${r.skipped ? `SKIPPED (${r.skipped}) ` : ''}selected ${r.selected} decided ${r.decided} placements ${r.placementsCreated} rows ${r.rowsWritten} redecided ${r.redecided} ended ${r.ended} parked ${r.parked} released ${r.released} approvals_invalidated ${r.invalidatedApprovals} aggregate ${r.aggregateChanges} errors ${r.errors.length}${r.autoSend ? ` auto_sent ${r.autoSend.sent}/${r.autoSend.attempted}` : ''}`);
     } catch (err) { logger.error(`Link authority bridge failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
