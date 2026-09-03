@@ -335,6 +335,14 @@ function buildTriageItem({
       callback_window_start: s.callback_window_start ?? null,
       callback_window_end: s.callback_window_end ?? null,
       scheduling_notes_raw: s.scheduling_notes_raw ?? null,
+      // Filing-time snapshot of the requested service: the evidence sweep
+      // matches a later booking against THIS, never the call's rolling
+      // ai_extraction_enriched (a force-reprocess overwrites that while the
+      // open card keeps its original ask).
+      requested_service_categories: [
+        extraction?.service_request?.primary_service_category,
+        ...(Array.isArray(extraction?.service_request?.secondary_categories) ? extraction.service_request.secondary_categories : []),
+      ].filter((c) => typeof c === 'string' && c.trim()),
     };
   }
 

@@ -61,6 +61,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { lockTriageCall } = require('../utils/triage-locks');
+const { etCalendarDayOf } = require('../utils/datetime-et');
 
 const SPAM_AGE_DAYS = 7;
 const ADVISORY_AGE_DAYS = 30;
@@ -146,7 +147,6 @@ const RULE_NOTES = {
 
 // Evidence window for the association booking arm (mirrors
 // call-commitments' ASSOCIATION_WINDOW_DAYS).
-const BOOKING_WINDOW_DAYS = 14;
 // scheduled_services statuses that are a booking still going to happen or
 // one that did (scheduled_services_status_check minus cancelled /
 // rescheduled / skipped / no_show).
@@ -209,17 +209,23 @@ function heardAddressMatchesOnFile(item) {
   const v1 = parseMaybeJson(item.call_extraction_v1);
   if (v1 === undefined) return false;
   if (v1?.address_line1) heard.push(v1.address_line1);
-  const keys = heard.map(addressKey).filter(Boolean);
-  if (!keys.length) return false;
-  return keys.every((k) => k === onFile);
+  const heardValues = heard.map((h) => String(h || '').trim()).filter(Boolean);
+  if (!heardValues.length) return false;
+  // Every heard value must key AND agree — one unkeyable representation
+  // (a bare street, a fragment) is unverified evidence, not ignorable.
+  return heardValues.every((h) => addressKey(h) === onFile);
 }
 
-// The V2 extraction's requested service categories, as match tokens.
+// The requested service categories the CARD snapshotted at filing time
+// (call-routing-gates writes scheduling_window.requested_service_categories),
+// as match tokens. Never the call's ai_extraction_enriched: that column is a
+// rolling snapshot a force-reprocess overwrites while the open card keeps
+// its original ask. A card filed before the snapshot existed yields no
+// tokens, so its association arm stays closed.
 function requestedServiceTokens(item) {
-  const v2 = parseMaybeJson(item.call_extraction);
-  if (!v2) return [];
-  const sr = v2.service_request || {};
-  const cats = [sr.primary_service_category, ...(Array.isArray(sr.secondary_categories) ? sr.secondary_categories : [])];
+  const payload = parseMaybeJson(item.payload);
+  const cats = payload?.scheduling_window?.requested_service_categories;
+  if (!Array.isArray(cats)) return [];
   const tokens = new Set();
   for (const c of cats) {
     for (const t of String(c || '').toLowerCase().split(/[^a-z]+/)) {
@@ -235,14 +241,16 @@ function serviceTypeMatches(serviceType, requestedTokens) {
   return requestedTokens.some((t) => words.has(t));
 }
 
-// The date the caller asked for, from the card's scheduling payload.
+// The calendar days (ET, YYYY-MM-DD) the caller asked for, from the card's
+// scheduling payload. Inclusive; a single requested date is a one-day window.
 function requestedWindow(item) {
   const payload = parseMaybeJson(item.payload);
   const w = payload?.scheduling_window || {};
-  const start = toDate(w.confirmed_start_at) || toDate(w.requested_date_range_start);
-  if (!start) return null;
-  const end = toDate(w.requested_date_range_end) || start;
-  return { start, end };
+  const startRaw = w.confirmed_start_at || w.requested_date_range_start;
+  if (!startRaw || !toDate(startRaw)) return null;
+  const start = etCalendarDayOf(startRaw);
+  const end = w.requested_date_range_end && toDate(w.requested_date_range_end) ? etCalendarDayOf(w.requested_date_range_end) : start;
+  return end >= start ? { start, end } : { start: end, end: start };
 }
 
 function phoneDigits(value) {
@@ -266,18 +274,15 @@ function callerPhoneOnFile(item) {
   ].some((slot) => phoneDigits(slot) === ani);
 }
 
-// Every email THIS call captured — the V1 extraction's email/email_raw and
-// the dictation candidates on the card.
-function capturedEmails(item) {
+// The address THIS call established for the caller: the V1 extraction's
+// adopted email plus the first-touch hold's held target for the call. Never
+// the card's email_candidates — those are alternative spellings awaiting
+// the read-back, and one of them may be another customer's real address.
+function capturedEmails(item, heldEmails = []) {
   const out = new Set();
   const v1 = parseMaybeJson(item.call_extraction_v1);
-  for (const v of [v1?.email, v1?.email_raw]) {
+  for (const v of [v1?.email, ...heldEmails]) {
     const e = String(v || '').trim().toLowerCase();
-    if (e) out.add(e);
-  }
-  const payload = parseMaybeJson(item.payload);
-  for (const c of (Array.isArray(payload?.email_candidates) ? payload.email_candidates : [])) {
-    const e = String(c?.value || '').trim().toLowerCase();
     if (e) out.add(e);
   }
   return [...out];
@@ -610,11 +615,20 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
   const { resolveFulfillment } = require('./call-commitments');
   for (const item of candidates.filter((i) => i.reason_code === 'quote_promised')) {
     try {
+      // The resolver returns the FIRST direct estimate after its call
+      // boundary and stops, so an older direct estimate would mask a later
+      // qualifying one. Move its boundary to the card: bridged_at + 0s is
+      // exactly callEndedAt, so only estimates delivered after the card are
+      // visible to it.
+      const boundary = new Date(Math.max(
+        toDate(item.created_at)?.getTime() || 0,
+        toDate(item.call_created_at)?.getTime() || 0,
+      ));
       const proof = await resolveFulfillment(conn, { kind: 'send_estimate' }, {
         id: item.call_log_id,
-        created_at: item.call_created_at,
-        duration_seconds: item.call_duration_seconds,
-        bridged_at: item.call_bridged_at,
+        created_at: boundary,
+        duration_seconds: 0,
+        bridged_at: boundary,
         direction: item.call_direction,
         customer_id: item.call_customer_id,
         twilio_call_sid: item.call_twilio_call_sid,
@@ -635,7 +649,18 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
   // after the card (an older message opened later proves nothing about
   // this call's capture), and never bounced/complained.
   const emailItems = candidates.filter((i) => i.reason_code === 'email_unverified');
-  const emailsByItem = new Map(emailItems.map((i) => [i.id, capturedEmails(i)]));
+  const heldByCall = new Map();
+  if (emailItems.length) {
+    const holdRows = await conn('first_touch_holds')
+      .whereIn('call_log_id', [...new Set(emailItems.map((i) => i.call_log_id))])
+      .select('call_log_id', 'held_email');
+    for (const r of holdRows) {
+      const list = heldByCall.get(String(r.call_log_id)) || [];
+      if (r.held_email) list.push(r.held_email);
+      heldByCall.set(String(r.call_log_id), list);
+    }
+  }
+  const emailsByItem = new Map(emailItems.map((i) => [i.id, capturedEmails(i, heldByCall.get(String(i.call_log_id)) || [])]));
   const allEmails = [...new Set([...emailsByItem.values()].flat())];
   if (allEmails.length) {
     const rows = await conn('email_messages')
@@ -668,7 +693,7 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
     const rows = await conn('activity_log')
       .whereIn('customer_id', [...new Set(authItems.map((i) => i.call_customer_id))])
       .whereIn('action', ['service_contact_added', 'service_contact_updated'])
-      .select('customer_id', 'created_at', 'metadata');
+      .select('customer_id', 'action', 'created_at', 'metadata');
     for (const item of authItems) {
       const last4 = phoneDigits(callerPhone(item)).slice(-4);
       if (last4.length !== 4) continue;
@@ -677,6 +702,10 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
         if (!strictlyAfter(r.created_at, item.created_at)) return false;
         const meta = parseMaybeJson(r.metadata);
         if (!HUMAN_CONTACT_SOURCES.has(String(meta?.source || ''))) return false;
+        // An update event also fires for name/email/role-only edits and still
+        // carries the unchanged phone — only a phone change is evidence.
+        if (r.action === 'service_contact_updated'
+          && !(Array.isArray(meta?.changed_fields) && meta.changed_fields.includes('phone'))) return false;
         return String(meta?.phone || '').slice(-4) === last4;
       });
       if (hit) flag(item.id, 'caller_phone_added');
@@ -687,14 +716,16 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
   const visitItems = candidates.filter((i) => (i.reason_code === 'not_confirmed' || ADDRESS_MOOT_CODES.has(i.reason_code)) && i.call_customer_id);
   if (visitItems.length) {
     const customerIds = [...new Set(visitItems.map((i) => i.call_customer_id))];
-    const propertyCounts = new Map();
-    const countRows = await conn('customer_properties')
+    const propertyIds = new Map();
+    const propRows = await conn('customer_properties')
       .whereIn('customer_id', customerIds)
-      .groupBy('customer_id')
-      .select('customer_id')
-      .count({ n: '*' });
-    for (const r of countRows) propertyCounts.set(String(r.customer_id), Number(r.n || 0));
-    const multiProperty = (customerId) => (propertyCounts.get(String(customerId)) || 0) > 1;
+      .select('id', 'customer_id');
+    for (const r of propRows) {
+      const list = propertyIds.get(String(r.customer_id)) || [];
+      list.push(String(r.id));
+      propertyIds.set(String(r.customer_id), list);
+    }
+    const multiProperty = (customerId) => (propertyIds.get(String(customerId)) || []).length > 1;
 
     const q = conn('scheduled_services')
       .whereIn('customer_id', customerIds)
@@ -704,7 +735,7 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
       // rows prove nothing.
       .whereIn('status', [...LIVE_BOOKING_STATUSES])
       .orderBy('id', 'asc')
-      .select('id', 'customer_id', 'source_call_log_id', 'status', 'service_type', 'scheduled_date', 'created_at', 'completed_at');
+      .select('id', 'customer_id', 'source_call_log_id', 'status', 'service_type', 'scheduled_date', 'created_at', 'completed_at', 'service_address_line1', 'property_id');
     if (lock) q.forUpdate();
     const visits = await q;
 
@@ -727,18 +758,31 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
         const window = requestedWindow(item);
         if (!window) continue;
         const tokens = requestedServiceTokens(item);
-        const lo = new Date(window.start.getTime() - BOOKING_WINDOW_DAYS * 86400000);
-        const hi = new Date(window.end.getTime() + BOOKING_WINDOW_DAYS * 86400000);
-        const assoc = mine.some((v) => strictlyAfter(v.created_at, item.created_at)
-          && toDate(v.scheduled_date) && toDate(v.scheduled_date) >= lo && toDate(v.scheduled_date) <= hi
-          && serviceTypeMatches(v.service_type, tokens));
+        const assoc = mine.some((v) => {
+          if (!strictlyAfter(v.created_at, item.created_at) || !toDate(v.scheduled_date)) return false;
+          // Inside the requested days exactly — no association horizon
+          // around them, or an unrelated recurring visit nearby would count.
+          const day = etCalendarDayOf(v.scheduled_date);
+          return day >= window.start && day <= window.end && serviceTypeMatches(v.service_type, tokens);
+        });
         if (assoc) flag(item.id, 'booking_after_card');
       } else {
         // Address cards: a visit COMPLETED after the card for a
         // single-property customer. The classifier adds the heard-address
         // ↔ on-file street match.
         if (multiProperty(item.call_customer_id)) continue;
-        const done = mine.some((v) => v.status === 'completed' && strictlyAfter(v.completed_at, item.created_at));
+        const onFile = addressKey(item.customer_address_line1);
+        if (!onFile) continue;
+        const ownProperties = propertyIds.get(String(item.call_customer_id)) || [];
+        const done = mine.some((v) => {
+          if (v.status !== 'completed' || !strictlyAfter(v.completed_at, item.created_at)) return false;
+          // The visit's EFFECTIVE address: a stamped service_address_* or a
+          // property row that is not the account's own is service somewhere
+          // else and proves nothing about the on-file address.
+          if (v.property_id && !ownProperties.includes(String(v.property_id))) return false;
+          if (v.service_address_line1 && addressKey(v.service_address_line1) !== onFile) return false;
+          return true;
+        });
         if (done) flag(item.id, 'visit_completed_at_address');
       }
     }

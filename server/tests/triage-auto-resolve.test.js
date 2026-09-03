@@ -412,6 +412,13 @@ describe('evidence helpers', () => {
     // A bare street with no house number proves nothing.
     expect(heardAddressMatchesOnFile(heard('Oak St'))).toBe(false);
     expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', call_extraction_v1: 'not-json{', call_extraction: NO_ADDR_EXTRACTION, payload: {} }))).toBe(false);
+    // A matching structured extraction cannot hide an unkeyable raw reading.
+    expect(heardAddressMatchesOnFile(item({
+      customer_address_line1: '77 Oak St',
+      call_extraction_v1: JSON.stringify({ address_line1: '77 Oak St' }),
+      call_extraction: { property: { service_address: { street_line_1: '77 Oak Street', raw_text: 'Oak Street' } } },
+      payload: {},
+    }))).toBe(false);
     expect(heardAddressMatchesOnFile(item({ customer_address_line1: null, call_extraction_v1: JSON.stringify({ address_line1: '77 Oak St' }), payload: {} }))).toBe(false);
   });
 
@@ -421,27 +428,30 @@ describe('evidence helpers', () => {
     expect(callerPhoneOnFile(item({ call_direction: 'inbound', call_from_phone: '+19415550100', customer_phone: '+19415550101' }))).toBe(false);
   });
 
-  test('capturedEmails unions V1 email/email_raw and dictation candidates, lowercased', () => {
+  test('capturedEmails is the V1 adopted email plus the held targets, lowercased — never the dictation candidates', () => {
     const emails = capturedEmails(item({
       call_extraction_v1: JSON.stringify({ email: 'Pat@Example.com', email_raw: 'pat@examplecom' }),
       payload: { email_candidates: [{ value: 'pat@example.com' }, { value: 'PAT.S@example.com' }] },
-    }));
-    expect(emails.sort()).toEqual(['pat.s@example.com', 'pat@example.com', 'pat@examplecom']);
+    }), ['Held@Example.com']);
+    expect(emails.sort()).toEqual(['held@example.com', 'pat@example.com']);
   });
 
   test('requested service tokens ignore generic words; service types match on a specific token', () => {
-    const tokens = requestedServiceTokens(item({ call_extraction: { service_request: { primary_service_category: 'pest_control', secondary_categories: ['mosquito_control'] } } }));
+    const tokens = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_control', 'mosquito_control'] } } }));
     expect(tokens.sort()).toEqual(['mosquito', 'pest']);
+    // The call's rolling extraction is never the source (a reprocess rewrites it).
+    expect(requestedServiceTokens(item({ payload: { scheduling_window: {} }, call_extraction: { service_request: { primary_service_category: 'pest_control' } } }))).toEqual([]);
     expect(serviceTypeMatches('Quarterly Pest Control', tokens)).toBe(true);
     expect(serviceTypeMatches('Mosquito Treatment', tokens)).toBe(true);
     expect(serviceTypeMatches('Lawn Care', tokens)).toBe(false);
     expect(serviceTypeMatches('Pest Control', [])).toBe(false);
   });
 
-  test('requestedWindow prefers the confirmed start, falls back to the requested range, null without either', () => {
-    expect(requestedWindow(item({ payload: { scheduling_window: { confirmed_start_at: '2026-08-04T14:00:00Z' } } })).start.toISOString()).toBe('2026-08-04T14:00:00.000Z');
-    const w = requestedWindow(item({ payload: { scheduling_window: { requested_date_range_start: '2026-08-04', requested_date_range_end: '2026-08-06' } } }));
-    expect(w.end.getTime()).toBeGreaterThan(w.start.getTime());
+  test('requestedWindow is ET calendar days: confirmed start first, then the requested range, null without either', () => {
+    expect(requestedWindow(item({ payload: { scheduling_window: { confirmed_start_at: '2026-08-04T14:00:00Z' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-04' });
+    // 01:00Z is still the previous ET evening.
+    expect(requestedWindow(item({ payload: { scheduling_window: { confirmed_start_at: '2026-08-05T01:00:00Z' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-04' });
+    expect(requestedWindow(item({ payload: { scheduling_window: { requested_date_range_start: '2026-08-04', requested_date_range_end: '2026-08-06' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-06' });
     expect(requestedWindow(item({ payload: { scheduling_window: { status: 'requested' } } }))).toBeNull();
   });
 

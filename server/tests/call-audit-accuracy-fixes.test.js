@@ -200,10 +200,12 @@ describe('triage surfacing', () => {
     expect(JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'address_unverified', extraction: unitExtraction }).payload).unit_ask_building).toBeUndefined();
   });
 
-  test('scheduling-shaped cards carry the captured window fields', () => {
-    const item = buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction });
+  test('scheduling-shaped cards carry the captured window fields and a filing-time service snapshot', () => {
+    const withService = { ...extraction, service_request: { ...(extraction.service_request || {}), primary_service_category: 'pest_control', secondary_categories: ['mosquito_control', null] } };
+    const item = buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction: withService });
     const payload = JSON.parse(item.payload);
     expect(payload.scheduling_window).toEqual({
+      requested_service_categories: ['pest_control', 'mosquito_control'],
       status: 'requested',
       confirmed_start_at: null,
       requested_date_range_start: '2026-07-14',

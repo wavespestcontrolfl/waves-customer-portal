@@ -48,7 +48,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     await db.destroy();
   });
 
-  async function seedCall(sid, { cardAgeMin, bookingAgeMin, bookingStatus = 'confirmed' }) {
+  async function seedCall(sid, { cardAgeMin, bookingAgeMin, bookingStatus = 'confirmed', bookingDayOffset = 2 }) {
     const customerId = await seedCustomer(sid.slice(-2));
     const callAt = new Date(Date.now() - (cardAgeMin + 5) * 60000);
     const [call] = await db('call_log').insert({
@@ -59,24 +59,26 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     }).returning('id');
     ids.calls.push(call.id);
     const cardAt = new Date(Date.now() - cardAgeMin * 60000);
+    const requestedDay = new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
     const [card] = await db('triage_items').insert({
       call_log_id: call.id, category: 'time_ambiguous', severity: 'blocking', reason_code: 'not_confirmed',
       status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt,
-      payload: JSON.stringify({ flag: 'not_confirmed', scheduling_window: { status: 'requested', requested_date_range_start: new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10) } }),
+      payload: JSON.stringify({ flag: 'not_confirmed', scheduling_window: { status: 'requested', requested_date_range_start: requestedDay, requested_service_categories: ['pest_control'] } }),
     }).returning('id');
     const [visit] = await db('scheduled_services').insert({
       customer_id: customerId, service_type: 'Quarterly Pest Control', status: bookingStatus,
-      scheduled_date: new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10),
+      scheduled_date: new Date(Date.now() + bookingDayOffset * 86400000).toISOString().slice(0, 10),
       created_at: new Date(Date.now() - bookingAgeMin * 60000),
     }).returning('id');
     ids.visits.push(visit.id);
     return { callId: call.id, cardId: card.id };
   }
 
-  test('booking after the card resolves it as auto; a pre-card or skipped booking leaves it open', async () => {
+  test('booking after the card on the requested day resolves it as auto; a pre-card, skipped, or off-day booking leaves it open', async () => {
     const fresh = await seedCall(SID, { cardAgeMin: 60, bookingAgeMin: 10 });
     const stale = await seedCall(SID.replace(/e2$/, 'e3'), { cardAgeMin: 10, bookingAgeMin: 60 });
     const skipped = await seedCall(SID.replace(/e2$/, 'e4'), { cardAgeMin: 60, bookingAgeMin: 10, bookingStatus: 'skipped' });
+    const offDay = await seedCall(SID.replace(/e2$/, 'e5'), { cardAgeMin: 60, bookingAgeMin: 10, bookingDayOffset: 5 });
 
     const result = await sweep.runTriageAutoResolve({ now: new Date() });
     expect(result.skipped).toBe(false);
@@ -96,5 +98,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
 
     const skippedCard = await db('triage_items').where({ id: skipped.cardId }).first();
     expect(skippedCard.status).toBe('open');
+    const offDayCard = await db('triage_items').where({ id: offDay.cardId }).first();
+    expect(offDayCard.status).toBe('open');
   });
 });
