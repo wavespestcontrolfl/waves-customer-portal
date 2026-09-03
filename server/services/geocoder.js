@@ -6,8 +6,41 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { isInServiceAreaBox } = require('./service-area');
 
 const GOOGLE_KEY = process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
+
+// A geocode is only good enough to route on when it resolved to a specific
+// building inside the service area. Google answers a garbage or half-written
+// address by widening until something matches, and those wide answers are
+// exactly the shape that has put false coordinates on customer rows:
+//   "4696"                          -> postal_code, Raetihi NEW ZEALAND
+//   "8124 Bessemer Ave, ..., 34608" -> partial_match, a ZIP centroid
+//   a city named "Venice", no state -> the wrong Venice, in Ontario
+//   a snowbird's mailing address    -> a real rooftop in Fort Worth, Texas
+// A ZIP or city centroid is worse than no coordinate at all, because route
+// optimization treats it as the customer's front door — the same reasoning
+// the backstop sweep already applies to blank streets, enforced one level
+// lower so every caller inherits it instead of each remembering to check.
+const STREET_LEVEL_TYPES = new Set(['street_address', 'premise', 'subpremise']);
+const STREET_LEVEL_LOCATION_TYPES = new Set(['ROOFTOP', 'RANGE_INTERPOLATED']);
+
+/**
+ * Why a geocode result is unusable, or null when it is usable. Pure, so the
+ * policy is unit-testable without a live API call.
+ */
+function rejectGeocodeResult(result) {
+  if (!result || !result.geometry || !result.geometry.location) return 'no_location';
+  if (result.partial_match === true) return 'partial_match';
+  const types = Array.isArray(result.types) ? result.types : [];
+  const streetLevel =
+    types.some((t) => STREET_LEVEL_TYPES.has(t)) ||
+    STREET_LEVEL_LOCATION_TYPES.has(result.geometry.location_type);
+  if (!streetLevel) return `coarse_result:${types.join('|') || 'unknown'}`;
+  const { lat, lng } = result.geometry.location;
+  if (!isInServiceAreaBox(lat, lng)) return 'outside_service_area';
+  return null;
+}
 
 // In-process memo (speeds up batch runs; process restart clears)
 const memo = new Map();
@@ -27,7 +60,8 @@ async function geocodeAddressWithStatus(address) {
   if (!address) return { location: null, permanent: true };
   if (memo.has(address)) {
     const cached = memo.get(address);
-    // memo only ever stores null for ZERO_RESULTS, so a cached null is permanent.
+    // memo stores null only for permanent verdicts — ZERO_RESULTS and a
+    // rejected result — so a cached null is permanent.
     return { location: cached, permanent: cached === null };
   }
   if (!GOOGLE_KEY) {
@@ -42,6 +76,17 @@ async function geocodeAddressWithStatus(address) {
     const resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
     const data = await resp.json();
     if (data.status === 'OK' && data.results && data.results.length > 0) {
+      const rejected = rejectGeocodeResult(data.results[0]);
+      if (rejected) {
+        // Permanent like ZERO_RESULTS: the same address string will keep
+        // producing the same unusable answer, so memoize it and let the
+        // sweep exclude the row instead of spending a call per pass. Only
+        // an address edit can change the verdict, and the sweep's
+        // pruneStaleExclusions already re-admits a row when that happens.
+        logger.warn(`[geocoder] rejected geocode for "${address}": ${rejected}`);
+        memo.set(address, null);
+        return { location: null, permanent: true };
+      }
       const { lat, lng } = data.results[0].geometry.location;
       const result = { lat, lng };
       memo.set(address, result);
@@ -270,4 +315,5 @@ module.exports = {
   regeocodeCustomerAddressGuarded,
   buildAddress,
   sweepUngeocodedCustomers,
+  rejectGeocodeResult,
 };
