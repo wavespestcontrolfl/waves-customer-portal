@@ -796,13 +796,17 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, contract
     }
     // No stored link: the composer's own unwritten insert, or a dead one.
     // The composer names the contract and the token must be one the insert
-    // minted; the row's customer must own the recipient. Delivered-live and
-    // status are judged under the row lock at activation.
+    // minted; the row's customer must own the recipient, and the row must
+    // be one a fresh link may be written over (the writer's own rule — an
+    // expired document request re-opens, other expired contracts do not;
+    // pre-push Codex P1). Delivered-live is judged under the row lock at
+    // activation.
     if (!contractId || !UNWRITTEN_CONTRACT_TOKEN_RE.test(token)) {
       return refuse('This contract signing link is expired or no longer live — remove it and insert a fresh one.');
     }
-    const contract = await db('customer_contracts').where({ id: contractId }).first('id', 'customer_id', 'status');
-    if (!contract || terminal(contract.status)) {
+    const contract = await db('customer_contracts').where({ id: contractId }).first('id', 'customer_id', 'status', 'contract_type');
+    const { shareLinkWritableStatuses } = require('../routes/admin-contracts');
+    if (!contract || !shareLinkWritableStatuses(contract).includes(String(contract.status || '').toLowerCase())) {
       return refuse('This contract signing link is expired or no longer live — remove it and insert a fresh one.');
     }
     const bad = await owned(contract.customer_id, 'contract signing link');

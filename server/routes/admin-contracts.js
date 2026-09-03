@@ -631,6 +631,7 @@ router.post('/:id/renewal-notice', async (req, res, next) => {
 module.exports = router;
 module.exports.createShareLink = createShareLink;
 module.exports.deliveredLiveShareLink = deliveredLiveShareLink;
+module.exports.shareLinkWritableStatuses = shareLinkWritableStatuses;
 module.exports.activatePreparedShareLinks = activatePreparedShareLinks;
 module.exports.restorePreparedShareLinks = restorePreparedShareLinks;
 module.exports.recordPreparedShareLinkSends = recordPreparedShareLinkSends;

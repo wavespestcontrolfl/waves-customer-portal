@@ -52,6 +52,7 @@ jest.mock('../routes/admin-contracts', () => ({
   activatePreparedShareLinks: jest.fn(async (links) => ({ ok: true, activations: links.map((l) => ({ ...l, customerId: 'cust-A', previous: { status: 'draft', shared_at: null } })) })),
   restorePreparedShareLinks: jest.fn(async () => {}),
   recordPreparedShareLinkSends: jest.fn(async () => {}),
+  shareLinkWritableStatuses: (c) => (c?.contract_type === 'document_template' ? ['draft', 'sent', 'viewed', 'expired'] : ['draft', 'sent', 'viewed']),
 }));
 jest.mock('../services/sms-media', () => ({
   mediaFromOutboundAttachments: jest.fn(() => []),

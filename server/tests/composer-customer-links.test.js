@@ -65,6 +65,7 @@ jest.mock('../routes/reports-public', () => ({
 jest.mock('../routes/admin-contracts', () => ({
   createShareLink: jest.fn(),
   deliveredLiveShareLink: jest.requireActual('../routes/admin-contracts').deliveredLiveShareLink,
+  shareLinkWritableStatuses: jest.requireActual('../routes/admin-contracts').shareLinkWritableStatuses,
 }));
 // The public prep page's own resolver (token → source; expiry enforced there).
 jest.mock('../routes/prep-public', () => ({ resolvePrepSource: jest.fn() }));
@@ -1149,7 +1150,14 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       const contracts = wireUnwritten();
       expect(await bearerLinkSendCheck(MINTED_BODY, '9415550100', { trustedCustomerId: 'c1', contractId: 'k9' })).toEqual({ ok: true, contracts: [{ id: 'k9', tokenHash: hashContractToken(MINTED), delivered: false }] });
       expect(contracts.where).toHaveBeenCalledWith({ id: 'k9' });
-      expect(contracts.first).toHaveBeenCalledWith('id', 'customer_id', 'status');
+      expect(contracts.first).toHaveBeenCalledWith('id', 'customer_id', 'status', 'contract_type');
+    });
+
+    test('an expired document request re-opens (the writer\'s own rule); an expired contract of any other type does not (pre-push Codex P1)', async () => {
+      wireUnwritten({ id: 'k9', customer_id: 'c1', status: 'expired', contract_type: 'document_template' });
+      expect((await bearerLinkSendCheck(MINTED_BODY, '9415550100', { trustedCustomerId: 'c1', contractId: 'k9' })).ok).toBe(true);
+      wireUnwritten({ id: 'k9', customer_id: 'c1', status: 'expired', contract_type: 'autopay_authorization' });
+      expect((await bearerLinkSendCheck(MINTED_BODY, '9415550100', { trustedCustomerId: 'c1', contractId: 'k9' })).error).toMatch(/expired or no longer live/);
     });
 
     test('no contractId (a pasted or reloaded link) refuses — nothing to activate', async () => {
