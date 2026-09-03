@@ -38,10 +38,114 @@ function makeQuery(rows = []) {
     orWhereNot: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    leftJoin: jest.fn().mockReturnThis(),
     then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
   });
   return builder;
 }
+
+describe('findConflictingVisits — travel option (GATE_SLOT_TRAVEL_GAP)', () => {
+  const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_DRIVE_TIME_CALIBRATION'];
+  const saved = {};
+  beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    for (const k of ENV_KEYS) delete process.env[k];
+    db.raw = jest.fn((sql) => sql);
+  });
+  afterAll(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  // Palmetto candidate vs Bradenton stop — ~33 legacy-model minutes apart.
+  const PALMETTO = { lat: 27.545, lng: -82.545 };
+  const BRADENTON = { lat: 27.425, lng: -82.41 };
+  const rowsOnDate = [
+    // Touches the 09:00–10:00 window with zero gap across a real drive.
+    { id: 'touching', window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 60, ...BRADENTON },
+    // Overlaps outright.
+    { id: 'overlap', window_start: '09:30:00', window_end: null, estimated_duration_minutes: 60, lat: null, lng: null },
+    // Far enough away in time (14:00) — fine.
+    { id: 'far', window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60, ...BRADENTON },
+    // Coordless neighbour with exactly the 15-minute buffer before 09:00 — fine.
+    { id: 'coordless-ok', window_start: '07:45:00', window_end: '08:45:00', estimated_duration_minutes: 60, lat: null, lng: null },
+    // Coordless neighbour 10 minutes before — buffer-only violation.
+    { id: 'coordless-near', window_start: '07:50:00', window_end: '08:50:00', estimated_duration_minutes: 60, lat: null, lng: null },
+  ];
+
+  test('gate off + travel → the legacy overlap SQL, byte for byte (no join, no coordinate raws)', async () => {
+    const q = makeQuery([]);
+    db.mockReturnValue(q);
+    await findConflictingVisits({ db, date: '2099-01-05', windowStart: '09:00', windowEnd: '10:00', travel: PALMETTO });
+    expect(q.leftJoin).not.toHaveBeenCalled();
+    expect(db.raw).not.toHaveBeenCalled();
+    expect(q.whereRaw.mock.calls[0][0]).toContain('window_start < ?::time');
+  });
+
+  test('gate on WITHOUT travel → still the legacy overlap SQL (opt-in per call site)', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const q = makeQuery([]);
+    db.mockReturnValue(q);
+    await findConflictingVisits({ db, date: '2099-01-05', windowStart: '09:00', windowEnd: '10:00' });
+    expect(q.leftJoin).not.toHaveBeenCalled();
+    expect(q.whereRaw.mock.calls[0][0]).toContain('window_start < ?::time');
+  });
+
+  test('gate on + travel → guarded-coord date scan; overlap AND travel-gap rows returned, tagged', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const q = makeQuery(rowsOnDate);
+    db.mockReturnValue(q);
+    const found = await findConflictingVisits({
+      db, date: '2099-01-05', windowStart: '09:00', windowEnd: '10:00', travel: PALMETTO,
+      excludeServiceIds: ['x'], includeHolds: false, excludeCustomerId: 'c1',
+    });
+    expect(q.leftJoin).toHaveBeenCalledWith('customers', 'scheduled_services.customer_id', 'customers.id');
+    expect(q.where).toHaveBeenCalledWith('scheduled_services.scheduled_date', '2099-01-05');
+    expect(q.whereNotIn).toHaveBeenCalledWith('scheduled_services.status', ['cancelled']);
+    expect(q.whereNotIn).toHaveBeenCalledWith('scheduled_services.id', ['x']);
+    expect(q.whereNotNull).toHaveBeenCalledWith('scheduled_services.window_start');
+    expect(q.orWhereNot).toHaveBeenCalledWith('scheduled_services.customer_id', 'c1');
+    expect(db.raw.mock.calls.some(([sql]) => /COALESCE\(scheduled_services\.lat/.test(sql))).toBe(true);
+    // No overlap SQL on this path — the predicate runs in JS.
+    expect(q.whereRaw).not.toHaveBeenCalled();
+    // Row order is the query's (orderBy is the DB's job; the mock returns
+    // fixture order).
+    expect(found.map((r) => [r.id, r.conflict_reason])).toEqual([
+      ['touching', 'travel_gap'],
+      ['overlap', 'overlap'],
+      ['coordless-near', 'travel_gap'],
+    ]);
+  });
+
+  test('gate on + travel → a live hold in front of a far committed stop does not shadow it', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const FAR_SOUTH = { lat: 27.20, lng: -82.545 }; // ~67 modeled minutes from Palmetto
+    const q = makeQuery([
+      { id: 'far', customer_id: 'c9', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60, ...FAR_SOUTH },
+      { id: 'hold', customer_id: null, reservation_expires_at: '2099-01-01T00:00:00Z', window_start: '10:15:00', window_end: '11:00:00', estimated_duration_minutes: 45, ...PALMETTO },
+    ]);
+    db.mockReturnValue(q);
+    const found = await findConflictingVisits({
+      db, date: '2099-01-05', windowStart: '11:15', windowEnd: '12:15', travel: PALMETTO,
+    });
+    expect(found.map((r) => [r.id, r.conflict_reason])).toEqual([['far', 'travel_gap']]);
+  });
+
+  test('gate on + travel with null coords → buffer-only (drive term drops out)', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const q = makeQuery(rowsOnDate);
+    db.mockReturnValue(q);
+    const found = await findConflictingVisits({
+      db, date: '2099-01-05', windowStart: '09:00', windowEnd: '10:00', travel: { lat: null, lng: null },
+    });
+    // 'touching' now needs only 15 minutes and has 0 → still a violation;
+    // 'far' and 'coordless-ok' stay clear.
+    expect(found.map((r) => r.id)).toEqual(['touching', 'overlap', 'coordless-near']);
+  });
+});
 
 describe('findConflictingVisits', () => {
   beforeEach(() => jest.clearAllMocks());

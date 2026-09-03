@@ -769,6 +769,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             technicianId: slot.technician_id,
             expectAnchor: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             sourceSurface: 'customer_web',
+            travelGap: true,
             // The confirmation is the series pass's durable text (below).
             notifyRequested: true,
           }
@@ -782,7 +783,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           // This page discloses its series scope to the customer (the
           // seriesScopeMismatch consent pin above) and decides it here —
           // the collective choke point must not widen a disclosed single move.
-          { technicianId: slot.technician_id, seriesPolicy: 'single' }
+          // travelGap: customer-facing move — the rebooker's occupancy probe
+          // applies GATE_SLOT_TRAVEL_GAP (the offers above were built under it).
+          { technicianId: slot.technician_id, seriesPolicy: 'single', travelGap: true }
         );
     } catch (err) {
       if (err?.statusCode) {
