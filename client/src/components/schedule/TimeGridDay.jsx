@@ -97,6 +97,17 @@ function adminFetch(path, options = {}) {
   });
 }
 
+// adminFetch throws the raw response body; the visit routes answer JSON
+// { error } — show the sentence, not the envelope.
+function friendlyServerError(err) {
+  const raw = String((err && err.message) || err || '');
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.error) return String(parsed.error);
+  } catch { /* not JSON */ }
+  return raw;
+}
+
 function parseHHMM(s) {
   if (!s || typeof s !== 'string') return null;
   const m = s.match(/^(\d{1,2}):(\d{2})/);
@@ -975,7 +986,7 @@ function UnassignedRail({ services, onEdit, onProtocol, onTreatmentPlan, onViewA
   );
 }
 
-function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassign, onClear, busy }) {
+function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassign, onClear, busy, combine, onCombine, separate, onSeparate }) {
   const [targetDate, setTargetDate] = useState(defaultDate);
   useEffect(() => { setTargetDate(defaultDate); }, [defaultDate]);
   // Advisory overlap summary for the picked landing date — each selected
@@ -1022,6 +1033,40 @@ function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassig
       >
         Unassign all
       </button>
+      {/* Visit group office actions (visit-group-scope.md §3): Combine
+          groups the selected same-customer rows into one stop — a later
+          row moves to abut the earlier one when their windows are apart
+          (no customer text); Separate splits a grouped row back out. */}
+      {combine && (
+        <>
+          <span className="mx-1 text-zinc-500">·</span>
+          <button
+            type="button"
+            onClick={onCombine}
+            disabled={busy}
+            className="px-3 py-1 rounded-sm text-11 text-white disabled:opacity-40"
+            style={{ border: '1px solid #52525B' }}
+            title="Group the selected services into one stop"
+          >
+            Combine
+          </button>
+        </>
+      )}
+      {separate && (
+        <>
+          <span className="mx-1 text-zinc-500">·</span>
+          <button
+            type="button"
+            onClick={onSeparate}
+            disabled={busy}
+            className="px-3 py-1 rounded-sm text-11 text-white disabled:opacity-40"
+            style={{ border: '1px solid #52525B' }}
+            title="Split this service out of its visit"
+          >
+            Separate
+          </button>
+        </>
+      )}
       <div className="flex-1" />
       <button
         type="button"
@@ -1416,6 +1461,61 @@ export default function TimeGridDay({
     }
   }, [selection, allServices, onChange, clearSelection]);
 
+  const selectedRows = useMemo(
+    () => allServices.filter((s) => selection.has(s.id)),
+    [allServices, selection],
+  );
+  const customerOf = (s) => s.customerId || s.customer_id || null;
+  // Combine: two or more rows of ONE customer, none terminal. The server
+  // owns every other rule (family, tech, autopay, artifacts, windows) and
+  // answers with its 409 text.
+  const canCombine = selectedRows.length >= 2
+    && !!customerOf(selectedRows[0])
+    && selectedRows.every((s) => customerOf(s) === customerOf(selectedRows[0]))
+    && selectedRows.every((s) => !['completed', 'cancelled', 'skipped', 'no_show'].includes(s.status));
+  // Separate: exactly one grouped row.
+  const separable = selectedRows.length === 1 && selectedRows[0].visit
+    && Number(selectedRows[0].visit.serviceCount) > 1 && selectedRows[0].visit.id
+    ? selectedRows[0] : null;
+
+  const handleCombine = useCallback(async () => {
+    if (!canCombine) return;
+    setBusy(true);
+    try {
+      const result = await adminFetch('/admin/visits/group', {
+        method: 'POST',
+        body: JSON.stringify({ serviceIds: selectedRows.map((s) => s.id) }),
+      });
+      const moved = Array.isArray(result?.moved) ? result.moved : [];
+      if (moved.length) {
+        alert(`Combined into one stop. Moved ${moved.length} service${moved.length === 1 ? '' : 's'} to follow the earlier one: ${moved.map((m) => `${minutesToLabel(parseHHMM(m.start))}–${minutesToLabel(parseHHMM(m.end))}`).join(', ')}. No text was sent; the standing reminders use the new time.`);
+      }
+      clearSelection();
+    } catch (err) {
+      alert('Combine failed: ' + friendlyServerError(err));
+    } finally {
+      setBusy(false);
+      onChange?.();
+    }
+  }, [canCombine, selectedRows, onChange, clearSelection]);
+
+  const handleSeparate = useCallback(async () => {
+    if (!separable) return;
+    setBusy(true);
+    try {
+      await adminFetch(`/admin/visits/${separable.visit.id}/split`, {
+        method: 'POST',
+        body: JSON.stringify({ serviceId: separable.id }),
+      });
+      clearSelection();
+    } catch (err) {
+      alert('Separate failed: ' + friendlyServerError(err));
+    } finally {
+      setBusy(false);
+      onChange?.();
+    }
+  }, [separable, onChange, clearSelection]);
+
   if (techList.length === 0 && unassignedInRail.length === 0) {
     return (
       <div
@@ -1441,6 +1541,10 @@ export default function TimeGridDay({
         <BulkActionBar
           count={selection.size}
           defaultDate={date}
+          combine={canCombine}
+          onCombine={handleCombine}
+          separate={!!separable}
+          onSeparate={handleSeparate}
           selectedServices={allServices
             .filter((s) => selection.has(s.id))
             .map((s) => {
