@@ -3094,6 +3094,23 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('a raw engine flea line labels its row with the package name, not the bare service key', () => {
+    // The raw engine shape (engineResult.lineItems) is labeled from the
+    // line's top-level fields; a bare service key would be mapped to the
+    // category label and the customer read "One-Time Pest Control" over a
+    // "$225 initial + $125 follow-up" detail (PR #3845 follow-up).
+    const { priceFlea } = require('../services/pricing-engine');
+    const line = priceFlea({ services: { flea: true }, footprintSqFt: 2000, lotSqFt: 7500 });
+    const breakdown = normalizeOneTimeBreakdown({ engineResult: { lineItems: [line] } });
+
+    expect(breakdown.items).toEqual([expect.objectContaining({
+      service: 'flea_package',
+      label: 'Flea Elimination Package — 2 visits',
+      amount: 350,
+      detail: '$225 initial + $125 follow-up',
+    })]);
+  });
+
   test('quote-required result spec rows lock public commercial manual drafts', async () => {
     const estimateData = {
       result: {

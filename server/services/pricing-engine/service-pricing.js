@@ -7661,9 +7661,15 @@ function priceFlea(property = {}) {
   const warrantyLabel = offer.warrantyType === 'conditional_retreat'
     ? 'Conditional retreat guarantee'
     : 'No retreat warranty included';
+  // Top-level `name` like every sibling one-time pricer (roach, mosquito,
+  // bed bug): the public breakdown labels a raw engine line from its
+  // top-level fields and maps a bare service key to the category label,
+  // so a display-only name rendered the row as "One-Time Pest Control".
+  const packageName = 'Flea Elimination Package — 2 visits';
 
   return {
     service: offer.service,
+    name: packageName,
     serviceKey: 'flea',
     billingCadence: 'one_time',
     offerKey,
@@ -7683,7 +7689,7 @@ function priceFlea(property = {}) {
     },
     modifiers: { urgencyMultiplier, recurringCustomerMultiplier, rushPremium },
     display: {
-      name: 'Flea Elimination Package — 2 visits',
+      name: packageName,
       detail: `$${initial} initial + $${followUp} follow-up`,
       exteriorDetail,
     },
