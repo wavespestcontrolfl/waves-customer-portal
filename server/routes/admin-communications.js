@@ -207,6 +207,8 @@ router.post('/sms', async (req, res, next) => {
   let claimedReviewClaimToken = null;
   // Verified composer statement links — a real send is their first delivery.
   let statementLinkIds = null;
+  // Verified composer prep links — a real send writes the tagger's dedupe marker.
+  let prepLinkSends = null;
   const clearManualReservation = async () => {
     if (!manualReservationId) return;
     const id = manualReservationId;
@@ -449,6 +451,7 @@ router.post('/sms', async (req, res, next) => {
       });
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
+      if (bearerCheck.preps) prepLinkSends = bearerCheck.preps;
     } catch (bearerErr) {
       logger.warn(`[communications] bearer link pre-send check failed — aborting send: ${bearerErr.message}`);
       return abortUnsent(503, 'Could not verify a customer link in this message — try again in a moment.');
@@ -655,6 +658,16 @@ router.post('/sms', async (req, res, next) => {
         logger.warn(`[communications] statement sent stamp failed (text already sent): ${stampErr.message}`);
       }
     }
+    // Composer-carried prep links: a REAL send is a delivered prep text —
+    // the tagger's replay-guard marker, as the manual sender writes it.
+    if (prepLinkSends && result?.sent) {
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        if (isRealProviderSend(result)) await require('../services/composer-customer-links').markPrepGuidesSent(prepLinkSends, req.technicianId || null);
+      } catch (stampErr) {
+        logger.warn(`[communications] prep sent marker failed (text already sent): ${stampErr.message}`);
+      }
+    }
     if (claimedReviewRequestId) {
       try {
         const { isRealProviderSend } = require('../services/sms-auto-send');
@@ -818,6 +831,13 @@ router.post('/sms', async (req, res, next) => {
         await require('../services/composer-customer-links').markStatementsSent(statementLinkIds);
       } catch (stampErr) {
         logger.warn(`[communications] statement sent stamp failed after a throw: ${stampErr.message}`);
+      }
+    }
+    if (prepLinkSends && err?.providerOutcome?.sent === true) {
+      try {
+        await require('../services/composer-customer-links').markPrepGuidesSent(prepLinkSends, req.technicianId || null);
+      } catch (stampErr) {
+        logger.warn(`[communications] prep sent marker failed after a throw: ${stampErr.message}`);
       }
     }
     // Guarded reopen: anything the send actually resolved before the throw

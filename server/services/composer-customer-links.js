@@ -501,7 +501,13 @@ function linkRuns(runs, fragmentRe) {
 function secureLinkRuns(runs) {
   return linkRuns(runs, /\/secure\//i);
 }
-function canonicalPortalToken(run, host, pathRe) {
+// `hosts`: one owned host or the whole owned set (ownedPortalHosts) — this
+// Express app serves the SPA and every public bearer route on EVERY host it
+// answers (server/index.js has no Host restriction), so a long-form
+// /prep, /pay/statement, /appointment or /report URL on the branded short
+// host is the same working page as on the portal origin and is judged the
+// same (GH Codex #3844 r8 P1 — the long-form twin of the r6 short-link fix).
+function canonicalPortalToken(run, hosts, pathRe) {
   let url;
   try {
     url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`);
@@ -511,7 +517,7 @@ function canonicalPortalToken(run, host, pathRe) {
   // HTTPS or the schemeless canonical form only — an explicit http:// would
   // expose the 30-day bearer before any redirect reaches HTTPS.
   if (url.protocol !== 'https:') return null;
-  if (url.host.toLowerCase() !== host) return null;
+  if (![].concat(hosts).includes(url.host.toLowerCase())) return null;
   // The public routes match with a trailing slash too (React Router and the
   // Express /l and /secure mounts alike), so /prep/<token>/ is the same
   // working page as /prep/<token> — judged the same, or it would slip the
@@ -519,8 +525,8 @@ function canonicalPortalToken(run, host, pathRe) {
   const m = pathRe.exec(url.pathname.replace(/\/+$/, ''));
   return m ? m[1] : null;
 }
-function canonicalSecureToken(run, host) {
-  return canonicalPortalToken(run, host, /^\/secure\/([A-Za-z0-9_-]{16,})$/i);
+function canonicalSecureToken(run, hosts) {
+  return canonicalPortalToken(run, hosts, /^\/secure\/([A-Za-z0-9_-]{16,})$/i);
 }
 
 /**
@@ -550,12 +556,11 @@ async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) 
   const runs = decodedRuns(body);
   const text = runs.join(' ');
   const refuse = (error) => ({ present: true, ok: false, error });
-  const host = new URL(publicPortalUrl()).host.toLowerCase();
-
+  const hosts = ownedPortalHosts();
   // 1. Every run carrying a /secure/ path must parse as a canonical link.
   const canonicalTokens = [];
   for (const run of secureLinkRuns(runs)) {
-    const token = canonicalSecureToken(run, host);
+    const token = canonicalSecureToken(run, hosts);
     if (!token) return refuse('A /secure link in this message is not on the Waves portal — remove it before sending.');
     if (!canonicalTokens.includes(token)) canonicalTokens.push(token);
   }
@@ -652,17 +657,18 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
 // /l/:code is served on EVERY owned origin — the branded short host and the
 // portal origin alike (server/index.js mounts /l with no host restriction) —
 // so a branded URL rewritten onto the portal host is the same working link
-// and is judged the same (GH Codex #3844 r6 P1). Any other host is not ours.
-function ownedShortLinkHosts() {
+// and is judged the same (GH Codex #3844 r6 P1) — and the long-form bearer
+// paths the same way in reverse (r8 P1). Any other host is not ours.
+function ownedPortalHosts() {
   return [...new Set([require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map((u) => new URL(u).host.toLowerCase()))];
 }
 async function shortCodeRows(runs) {
   const shortRuns = linkRuns(runs, /\/l\//i);
   if (!shortRuns.length) return [];
-  const hosts = ownedShortLinkHosts();
+  const hosts = ownedPortalHosts();
   const rows = [];
   for (const run of shortRuns) {
-    const code = hosts.map((host) => canonicalPortalToken(run, host, /^\/l\/([A-Za-z0-9_-]+)$/i)).find(Boolean);
+    const code = canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i);
     if (!code) continue;
     const row = await db('short_codes').where({ code: code.toLowerCase() }).first('code', 'kind', 'entity_type', 'entity_id');
     if (row) rows.push(row);
@@ -678,27 +684,27 @@ const REPORT_TOKEN_RE = /^\/report\/([A-Za-z0-9_-]{16,})$/i;
 // delivery-time re-check — so they are immediate-only, and /sms re-reads the
 // gate. Service report links the same (pre-push Codex P0): only /sms binds
 // the page to the recipient. Long form or the branded short form.
-function appointmentLinkPresent(runs, host, shortRows) {
-  return linkRuns(runs, /\/appointment\//i).some((run) => canonicalPortalToken(run, host, APPOINTMENT_TOKEN_RE))
+function appointmentLinkPresent(runs, hosts, shortRows) {
+  return linkRuns(runs, /\/appointment\//i).some((run) => canonicalPortalToken(run, hosts, APPOINTMENT_TOKEN_RE))
     || shortRows.some((row) => row.kind === 'appointment');
 }
-function reportLinkPresent(runs, host, shortRows) {
-  return linkRuns(runs, /\/report\//i).some((run) => canonicalPortalToken(run, host, REPORT_TOKEN_RE))
+function reportLinkPresent(runs, hosts, shortRows) {
+  return linkRuns(runs, /\/report\//i).some((run) => canonicalPortalToken(run, hosts, REPORT_TOKEN_RE))
     || shortRows.some((row) => row.kind === 'service_report');
 }
 
 async function immediateOnlyLinkSendCheck(body) {
   const runs = decodedRuns(body);
-  const host = new URL(publicPortalUrl()).host.toLowerCase();
+  const hosts = ownedPortalHosts();
   for (const kind of IMMEDIATE_ONLY_LINK_KINDS) {
     for (const run of linkRuns(runs, kind.fragment)) {
-      const token = kind.token(run, host);
+      const token = kind.token(run, hosts);
       if (token && await kind.applies(token)) return { present: true, label: kind.label };
     }
   }
   const shortRows = await shortCodeRows(runs);
-  if (appointmentLinkPresent(runs, host, shortRows)) return { present: true, label: 'Appointment page' };
-  if (reportLinkPresent(runs, host, shortRows)) return { present: true, label: 'Service report' };
+  if (appointmentLinkPresent(runs, hosts, shortRows)) return { present: true, label: 'Appointment page' };
+  if (reportLinkPresent(runs, hosts, shortRows)) return { present: true, label: 'Service report' };
   return { present: false };
 }
 
@@ -798,9 +804,12 @@ function recipientAccountBinder({ toLast10, trustedCustomerId }) {
 // once the token expires or its guide loses its active version — the public
 // route's own predicates (resolvePrepSource, loadTemplateByKey), re-run at
 // the send (GH Codex #3844 r3 P2).
-async function checkPrepLinks(ctx) {
+// Every verified prep page's customer + pest identity lands in `preps` so a
+// real send can write the tagger's dedupe marker (markPrepGuidesSent).
+async function checkPrepLinks(ctx, preps) {
+  const { PREP_CONFIG } = require('./prep-guide-sender');
   for (const run of linkRuns(ctx.runs, /\/prep\//i)) {
-    const token = canonicalPortalToken(run, ctx.host, /^\/prep\/([a-f0-9]{32})$/i);
+    const token = canonicalPortalToken(run, ctx.hosts, /^\/prep\/([a-f0-9]{32})$/i);
     if (!token) return refuseSend('A prep guide link in this message is not on the Waves portal — remove it before sending.');
     const source = await require('../routes/prep-public').resolvePrepSource(token);
     if (!source) return refuseSend('This prep guide link has expired — remove it and insert a fresh one.');
@@ -811,6 +820,12 @@ async function checkPrepLinks(ctx) {
     if (!source.customerId) return refuseSend('This prep guide page has no customer on file — remove the prep link before sending.');
     const bad = await ownedByRecipient(ctx, source.customerId, 'prep guide link');
     if (bad) return bad;
+    // The marker is keyed by the tagger's pest type; a guide outside
+    // PREP_CONFIG (a project prep page) has no replay guard to satisfy.
+    const pestType = Object.keys(PREP_CONFIG).find((k) => PREP_CONFIG[k].emailTemplateKey === source.templateKey);
+    if (pestType && !preps.some((p) => p.customerId === source.customerId && p.pestType === pestType)) {
+      preps.push({ customerId: source.customerId, pestType });
+    }
   }
   return null;
 }
@@ -834,7 +849,7 @@ async function liveCustomersOnNumber(toLast10) {
 
 async function checkStatementLinks(ctx, statements) {
   for (const run of linkRuns(ctx.runs, /\/pay\/statement\//i)) {
-    const token = canonicalPortalToken(run, ctx.host, /^\/pay\/statement\/([0-9a-f]{64})$/i);
+    const token = canonicalPortalToken(run, ctx.hosts, /^\/pay\/statement\/([0-9a-f]{64})$/i);
     if (!token) return refuseSend('A statement link in this message is not on the Waves portal — remove it before sending.');
     if (!require('../config/feature-gates').isEnabled('payerStatements')) {
       return refuseSend('Payer statements are switched off (GATE_PAYER_STATEMENTS) — remove the statement link before sending.');
@@ -865,7 +880,7 @@ async function checkAppointmentLinks(ctx, shortRows, onRecipientAccount) {
     return onRecipientAccount(visit.customer_id, 'appointment link');
   };
   for (const run of linkRuns(ctx.runs, /\/appointment\//i)) {
-    const token = canonicalPortalToken(run, ctx.host, APPOINTMENT_TOKEN_RE);
+    const token = canonicalPortalToken(run, ctx.hosts, APPOINTMENT_TOKEN_RE);
     if (!token) return refuseSend('An appointment link in this message is not on the Waves portal — remove it before sending.');
     const bad = await bind(await visitById({ reschedule_token: token }));
     if (bad) return bad;
@@ -894,7 +909,7 @@ async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
     return onRecipientAccount(record.customer_id, 'service report link');
   };
   for (const run of linkRuns(ctx.runs, /\/report\//i)) {
-    const token = canonicalPortalToken(run, ctx.host, REPORT_TOKEN_RE);
+    const token = canonicalPortalToken(run, ctx.hosts, REPORT_TOKEN_RE);
     if (!token) return refuseSend('A service report link in this message is not on the Waves portal — remove it before sending.');
     const bad = await bind(await publicReport({ report_view_token: token }));
     if (bad) return bad;
@@ -911,7 +926,7 @@ async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
 // each kind binds to the recipient's account.
 async function checkAccountBoundLinks(ctx) {
   const shortRows = await shortCodeRows(ctx.runs);
-  if (appointmentLinkPresent(ctx.runs, ctx.host, shortRows) && process.env.GATE_APPOINTMENT_PAGE !== 'true') {
+  if (appointmentLinkPresent(ctx.runs, ctx.hosts, shortRows) && process.env.GATE_APPOINTMENT_PAGE !== 'true') {
     return refuseSend('Appointment pages are switched off (GATE_APPOINTMENT_PAGE) — remove the appointment link before sending.');
   }
   const onRecipientAccount = recipientAccountBinder(ctx);
@@ -922,16 +937,37 @@ async function checkAccountBoundLinks(ctx) {
 async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
   const ctx = {
     runs: decodedRuns(body),
-    host: new URL(publicPortalUrl()).host.toLowerCase(),
+    hosts: ownedPortalHosts(),
     toLast10: String(toLast10 || ''),
     trustedCustomerId,
   };
   const statements = [];
-  const refusal = (await checkPrepLinks(ctx))
+  const preps = [];
+  const refusal = (await checkPrepLinks(ctx, preps))
     || (await checkStatementLinks(ctx, statements))
     || (await checkAccountBoundLinks(ctx));
   if (refusal) return refusal;
-  return { ok: true, ...(statements.length ? { statements } : {}) };
+  return { ok: true, ...(statements.length ? { statements } : {}), ...(preps.length ? { preps } : {}) };
+}
+
+/**
+ * A REAL provider send of a composer prep link is a delivered prep text:
+ * write the SAME customer_interactions marker the appointment tagger's
+ * replay guard (hasSentPrepSms — sms_outbound + "<pestType> prep info
+ * sent") looks for, as the manual Send prep guide path does, so a later
+ * onServiceScheduled / regenerate-brief replay does not text prep again
+ * (GH Codex #3844 r8 P2). Fail-soft: the text already went out.
+ */
+async function markPrepGuidesSent(preps, actorId) {
+  for (const { customerId, pestType } of preps) {
+    await db('customer_interactions').insert({
+      customer_id: customerId,
+      interaction_type: 'sms_outbound',
+      admin_user_id: actorId || null,
+      subject: `${pestType} prep info sent`,
+      body: 'Prep SMS sent via the Communications composer (prep guide link).',
+    });
+  }
 }
 
 /**
@@ -1163,6 +1199,7 @@ module.exports = {
   immediateOnlyLinkSendCheck,
   bearerLinkSendCheck,
   markStatementsSent,
+  markPrepGuidesSent,
   buildAppointmentPageLink,
   buildPrepGuideLink,
   buildServiceReportLink,

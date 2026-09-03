@@ -104,6 +104,7 @@ const {
   buildServiceReportLink,
   buildStatementLink,
   markStatementsSent,
+  markPrepGuidesSent,
 } = require('../services/composer-customer-links');
 
 function chainBuilder({ firstRow = null, rows = [] } = {}) {
@@ -995,6 +996,15 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
     expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/report/${'b'.repeat(32)}//`)).toEqual({ present: true, label: 'Service report' });
   });
+
+  test('long-form bearers on the branded short host are the same served pages — fenced like the portal origin (GH Codex #3844 r8 P1)', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`wavespest.co/prep/${PREP}`)).toEqual({ present: true, label: 'Prep guide' });
+    expect(await immediateOnlyLinkSendCheck(`wavespest.co/pay/statement/${'f'.repeat(64)}`)).toEqual({ present: true, label: 'Statement pay' });
+    expect(await immediateOnlyLinkSendCheck('wavespest.co/appointment/abcDEF123_-xyz789QWERTY')).toEqual({ present: true, label: 'Appointment page' });
+    expect(await immediateOnlyLinkSendCheck(`wavespest.co/report/${'b'.repeat(32)}`)).toEqual({ present: true, label: 'Service report' });
+    expect(await immediateOnlyLinkSendCheck(`wavespest.co.evil.example/prep/${PREP}`)).toEqual({ present: false });
+  });
 });
 
 describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointment + report links)', () => {
@@ -1022,8 +1032,8 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       loadTemplateByKey.mockReset().mockResolvedValue({ template: { id: 't1' }, activeVersion: { id: 'tv1' } });
     });
 
-    test('a resolving token whose guide has an active version, owned by the recipient, passes', async () => {
-      expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+    test('a resolving token whose guide has an active version, owned by the recipient, passes — its customer + pest ride back for the dedupe marker', async () => {
+      expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea' }] });
       expect(resolvePrepSource).toHaveBeenCalledWith(PREP);
       expect(loadTemplateByKey).toHaveBeenCalledWith('prep.flea');
     });
@@ -1050,6 +1060,16 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
     test('a trailing slash is the same page — the token is still bound at the send (GH Codex #3844 r7 P1)', async () => {
       expect((await bearerLinkSendCheck(`${PREP_BODY}/`, '5551234567', { trustedCustomerId: 'c1' })).error).toMatch(/different customer/);
       expect(resolvePrepSource).toHaveBeenCalledWith(PREP);
+    });
+
+    test('the long form on the branded short host is the same served page — judged, not skipped (GH Codex #3844 r8 P1)', async () => {
+      expect((await bearerLinkSendCheck(`Checklist: wavespest.co/prep/${PREP}`, '5551234567', { trustedCustomerId: 'c1' })).error).toMatch(/different customer/);
+      expect(resolvePrepSource).toHaveBeenCalledWith(PREP);
+    });
+
+    test('a project prep page (guide outside PREP_CONFIG) passes with no marker identity — the tagger has no replay guard for it', async () => {
+      resolvePrepSource.mockResolvedValue({ templateKey: 'prep.project.termite', customerId: 'c1' });
+      expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
     });
 
     test('a non-canonical prep host refuses outright', async () => {
@@ -1203,6 +1223,15 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       wireAccount({ linkCustomer: acct('c9', 'other'), report: { id: 'r1', customer_id: 'c9', structured_notes: null } });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/${REPORT}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
     });
+  });
+
+  test('markPrepGuidesSent writes the tagger\'s replay-guard marker (sms_outbound + "<pest> prep info sent") per verified prep page (GH Codex #3844 r8 P2)', async () => {
+    const insert = jest.fn(async () => [1]);
+    mockBuilders = { customer_interactions: { insert } };
+    await markPrepGuidesSent([{ customerId: 'c1', pestType: 'flea' }, { customerId: 'c2', pestType: 'bed_bug' }], 'admin-9');
+    expect(insert).toHaveBeenCalledTimes(2);
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'c1', interaction_type: 'sms_outbound', subject: 'flea prep info sent', admin_user_id: 'admin-9' }));
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'c2', subject: 'bed_bug prep info sent' }));
   });
 
   test('markStatementsSent goes through the email delivery\'s own finalized → sent writer, per statement', async () => {

@@ -440,7 +440,7 @@ describe('admin communications SMS route', () => {
         const first = jest.fn();
         if (table === 'payer_statements') first.mockResolvedValue({ id: 31, payer_id: 7, status: 'finalized' });
         else if (table === 'payers') first.mockResolvedValue({ id: 7, ap_phone: '+15551234567' });
-        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
       });
       sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM3' });
       await withServer(async (baseUrl) => {
@@ -503,7 +503,7 @@ describe('admin communications SMS route', () => {
         const first = jest.fn();
         if (table === 'payer_statements') first.mockResolvedValue({ id: 31, payer_id: 7, status: 'finalized' });
         else if (table === 'payers') first.mockResolvedValue({ id: 7, ap_phone: '+15551234567' });
-        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
       });
       const accepted = new Error('audit row failed');
       accepted.providerOutcome = { sent: true, providerMessageId: 'SM9' };
