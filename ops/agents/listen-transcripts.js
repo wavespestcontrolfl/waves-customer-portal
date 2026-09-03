@@ -43,6 +43,11 @@ const crypto = require('crypto');
 
 const args = process.argv.slice(2);
 const mode = args.find((a) => !a.startsWith('--')) || 'extract';
+// extract is documented as "no DB": dispatchWithFallback records one
+// llm_dispatch_log row per call when GATE_LLM_DISPATCH_METRICS is on and a
+// DATABASE_URL happens to be in the shell. feature-gates reads the env at
+// require time, so the kill is set here, before any require (Codex r1 P1).
+if (mode === 'extract') process.env.GATE_LLM_DISPATCH_METRICS = 'false';
 const flag = (name, dflt) => {
   const hit = args.find((a) => a === `--${name}` || a.startsWith(`--${name}=`));
   if (!hit) return dflt;
@@ -56,6 +61,7 @@ const CODEX_SESSIONS = path.join(os.homedir(), '.codex', 'sessions');
 const CHUNK_CHARS = 14000;
 const MAX_CHUNKS = Number(flag('max-chunks', 20));
 const EVIDENCE_MAX = 200;
+const { etDateString } = require(path.join(REPO_ROOT, 'server/utils/datetime-et'));
 
 // ── transcript readers ───────────────────────────────────────────────
 
@@ -139,24 +145,36 @@ function collectTurns({ hours, now = Date.now() }) {
 // ── redaction + chunking ─────────────────────────────────────────────
 
 function redactedChunks(sources, { redact }) {
-  const chunks = [];
-  let buf = '';
-  let stats = { turns: 0, findings: {} };
-  const flush = () => { if (buf.trim()) chunks.push(buf); buf = ''; };
-  for (const src of sources) {
+  const stats = { turns: 0, withheld: 0, findings: {} };
+  // Chunk per source so the cap can keep the NEWEST material: sources arrive
+  // newest-first, turns inside a source oldest-first, so a long session
+  // contributes its latest chunks first (Codex r1 P2).
+  const perSource = sources.map((src) => {
+    const chunks = [];
+    let buf = '';
+    const flush = () => { if (buf.trim()) chunks.push(buf); buf = ''; };
     for (const turn of src.turns) {
       const clean = redact(turn.text);
       for (const f of clean.findings) stats.findings[f.type] = (stats.findings[f.type] || 0) + (f.count || 1);
       stats.turns += 1;
+      // pii-redactor returns the ORIGINAL text at confidence 'low' when it
+      // cannot safely tokenise (all-lowercase names, suspicious unstructured
+      // runs). That text never leaves the machine — the turn is withheld
+      // whole (Codex r1 P1).
+      if (clean.confidence === 'low') { stats.withheld += 1; continue; }
       const piece = `[${turn.role}] ${clean.text.trim()}\n\n`;
       if (buf.length + piece.length > CHUNK_CHARS) flush();
       // A single oversized turn is truncated, not split — an idea rarely
       // needs more than the first 14k chars of a turn.
       buf += piece.slice(0, CHUNK_CHARS);
     }
-  }
-  flush();
-  return { chunks: chunks.slice(0, MAX_CHUNKS), truncated: chunks.length > MAX_CHUNKS, stats };
+    flush();
+    return chunks;
+  });
+  const total = perSource.reduce((n, c) => n + c.length, 0);
+  const ordered = [];
+  for (const chunks of perSource) for (let i = chunks.length - 1; i >= 0; i--) ordered.push(chunks[i]);
+  return { chunks: ordered.slice(0, MAX_CHUNKS), truncated: total > MAX_CHUNKS, stats };
 }
 
 // ── LLM extraction ───────────────────────────────────────────────────
@@ -176,13 +194,16 @@ Hard rules (drop an idea rather than bend these):
 Return ONLY JSON: {"ideas":[{"working_title":string,"slug":string,"city":string|null,"primary_kw":string,"secondary_kws":[string],"thesis":string,"outline":[string,...],"sources":[string,...],"why_now":string,"evidence":string(<=200 chars, quoted or paraphrased from the transcript),"confidence":0.0-1.0}]}. Return {"ideas":[]} when nothing qualifies. At most 4 ideas per transcript.`;
 
 const NEAR_ME_RE = /\bnear me\b|\bnearby\b/i;
-const OUT_OF_FOOTPRINT_RE = /\b(tampa|fort myers|ft\.? myers|naples|orlando|cape coral|st\.? pete(rsburg)?|clearwater|miami|jacksonville)\b/i;
-const STATEWIDE_RE = /\b(in|across|throughout)\s+(florida|fl)\b/i;
 const DOOR_TO_DOOR_RE = /door[\s-]to[\s-]door/i;
-const SAFE_CLAIM_RE = /\b(pet|family|child|kid|people)[\s-]?safe\b|\bsafe for (pets|dogs|cats|kids|children|family)\b/i;
-const REENTRY_MINUTES_RE = /\b\d+\s*(minutes?|mins?|hours?|hrs?)\b.*\b(re-?entry|dry|drying|come back|go back)\b|\b(re-?entry|dry|drying|come back|go back)\b.*\b\d+\s*(minutes?|mins?|hours?|hrs?)\b/i;
 const SOURCE_HOSTS = ['edis.ifas.ufl.edu', 'gardeningsolutions.ifas.ufl.edu', 'entnemdept.ufl.edu', 'epa.gov', 'fdacs.gov', 'cdc.gov'];
-const FOOTPRINT_CITIES = ['bradenton', 'parrish', 'palmetto', 'sarasota', 'venice', 'north port', 'lakewood ranch', 'port charlotte'];
+const PULL_INSTRUCTION_RE = /^pull the current uf\/ifas edis publication\b/i;
+// The canonical gates the engine applies pre-draft / at publish — reused here
+// so the review lane never offers an idea the runner would reject later
+// (Codex r1 P1 ×2): geography from topic-targeting-gate (full out-of-area
+// list, strict statewide framing), compliance idiom + banned topics from
+// content-guardrails.
+const targetingGate = require(path.join(REPO_ROOT, 'server/services/content/topic-targeting-gate'));
+const { reentrySafetyClaimFinding, bannedTopicFinding } = require(path.join(REPO_ROOT, 'server/services/content/content-guardrails'))._internals;
 
 function ideaText(idea) {
   return [idea.working_title, idea.slug, idea.primary_kw, ...(idea.secondary_kws || []), idea.thesis, ...(idea.outline || [])].filter(Boolean).join(' \n ');
@@ -190,7 +211,7 @@ function ideaText(idea) {
 
 function sourceAllowed(src) {
   const s = String(src || '');
-  if (/^pull the current/i.test(s) || /^facts-bank:/i.test(s)) return true;
+  if (PULL_INSTRUCTION_RE.test(s) || /^facts-bank:/i.test(s)) return true;
   const m = s.match(/^https?:\/\/([^/]+)/i);
   return !!m && SOURCE_HOSTS.some((h) => m[1] === h || m[1].endsWith(`.${h}`));
 }
@@ -205,11 +226,13 @@ function targetingViolation(idea) {
   if (!title || !slug || !idea.thesis || !Array.isArray(idea.outline) || !idea.outline.length) return 'incomplete';
   if (!/^\/(pest-control|lawn-care|tree-shrub|mosquito)\//.test(slug)) return 'slug_prefix';
   if (NEAR_ME_RE.test(text)) return 'near_me_phrasing';
-  if (DOOR_TO_DOOR_RE.test(text)) return 'door_to_door';
-  if (OUT_OF_FOOTPRINT_RE.test(`${title} ${slug} ${idea.primary_kw || ''}`)) return 'out_of_footprint_geo';
-  if (STATEWIDE_RE.test(`${title} ${slug} ${idea.primary_kw || ''}`) && !FOOTPRINT_CITIES.some((c) => text.toLowerCase().includes(c)) && !/\bswfl\b|southwest florida/i.test(text)) return 'statewide_only';
-  if (SAFE_CLAIM_RE.test(text)) return 'safe_claim';
-  if (REENTRY_MINUTES_RE.test(text)) return 'reentry_minutes';
+  if (DOOR_TO_DOOR_RE.test(text) || bannedTopicFinding(text)) return 'banned_topic';
+  // Framing parts only (title / slug / keyword) — an outline may MENTION
+  // Tampa educationally; the post may not be built around it.
+  const geo = targetingGate.geoBlockReason(`${title} ${slug.replace(/[-/]/g, ' ')} ${idea.primary_kw || ''}`);
+  if (geo === targetingGate.CODES.GEO_OUT_OF_AREA) return 'out_of_footprint_geo';
+  if (geo) return 'statewide_only';
+  if (reentrySafetyClaimFinding(text)) return 'reentry_safety_claim';
   const sources = Array.isArray(idea.sources) ? idea.sources.filter(sourceAllowed) : [];
   if (!sources.length) return 'no_allowed_source';
   const citySuffix = slug.match(/-(bradenton|sarasota|venice|parrish|palmetto|north-port|lakewood-ranch|port-charlotte)-fl\/$/);
@@ -233,7 +256,7 @@ function briefFor(idea, { now }) {
     primary_kw: idea.primary_kw || null,
     secondary_kws: Array.isArray(idea.secondary_kws) ? idea.secondary_kws.slice(0, 6) : [],
     intent: 'informational',
-    window: now.toISOString().slice(0, 10),
+    window: etDateString(now), // ET calendar day — availableAtFor reads it as ET midnight (Codex r1 P1)
     byline: 'adam',
     cta: ['QUOTE'],
     schema_types: ['Article'],
@@ -250,13 +273,32 @@ function briefFor(idea, { now }) {
   };
 }
 
+// One malformed entry must not abort the whole extraction: coerce the
+// list fields, drop entries missing the required strings (Codex r1 P2).
+function shapeIdea(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const str = (v) => (typeof v === 'string' ? v.trim() : '');
+  const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim()) : []);
+  const idea = {
+    working_title: str(raw.working_title), slug: str(raw.slug), city: str(raw.city) || null,
+    primary_kw: str(raw.primary_kw), secondary_kws: list(raw.secondary_kws), thesis: str(raw.thesis),
+    outline: list(raw.outline), sources: list(raw.sources), why_now: str(raw.why_now), evidence: str(raw.evidence),
+    confidence: Number(raw.confidence) || 0,
+  };
+  if (!idea.working_title || !idea.slug || !idea.thesis || !idea.outline.length) return null;
+  return idea;
+}
+
 async function extractIdeas(chunks, { dispatch, policy }) {
   const ideas = [];
   const failures = [];
   for (const [i, chunk] of chunks.entries()) {
     const res = await dispatch(policy, { system: SYSTEM_PROMPT, text: chunk, jsonMode: true, maxTokens: 2500 });
     if (!res.ok || !res.json || !Array.isArray(res.json.ideas)) { failures.push({ chunk: i, reason: res.reason || 'bad_json' }); continue; }
-    for (const idea of res.json.ideas) ideas.push(idea);
+    for (const idea of res.json.ideas) {
+      const shaped = shapeIdea(idea);
+      if (shaped) ideas.push(shaped); else failures.push({ chunk: i, reason: 'malformed_idea' });
+    }
   }
   return { ideas, failures };
 }
@@ -307,7 +349,7 @@ async function seedFlags(db, briefs) {
   const byKey = new Map(queued.map((r) => [r.dedupe_key, r.status]));
   const titles = briefs.map((b) => normalizeTitle(b.working_title));
   const liveTitles = new Set(
-    (await db('blog_posts').select('title')).map((r) => normalizeTitle(r.title)),
+    (await db('blog_posts').whereRaw("workflow_status IS DISTINCT FROM 'archived'").select('title')).map((r) => normalizeTitle(r.title)),
   );
   const queuedTitles = new Set(
     (await db('opportunity_queue')
@@ -337,6 +379,12 @@ async function runSeed({ file, only, execute }) {
 
   const manifest = seeder.loadManifest(file);
   const onlyIds = only ? new Set(String(only).split(',').map((s) => s.trim()).filter(Boolean)) : null;
+  if (onlyIds) {
+    const known = new Set(manifest.briefs.map((b) => b.id));
+    const unknown = [...onlyIds].filter((id) => !known.has(id));
+    // A mistyped id must not silently shrink an --execute run (Codex r1 P2).
+    if (unknown.length) { console.error(`--only names ids not in the manifest: ${unknown.join(', ')}`); process.exit(2); }
+  }
   const briefs = manifest.briefs.filter((b) => !onlyIds || onlyIds.has(b.id));
   if (!briefs.length) { console.error('no briefs selected'); process.exit(2); }
 
@@ -372,7 +420,7 @@ async function runExtract({ hours, out }) {
   const sources = collectTurns({ hours, now: now.getTime() });
   const { chunks, truncated, stats } = redactedChunks(sources, { redact });
   console.log(`transcripts: ${sources.length} file(s), ${stats.turns} prose turn(s), ${chunks.length} chunk(s)${truncated ? ` (capped at --max-chunks=${MAX_CHUNKS})` : ''}`);
-  console.log(`redacted: ${Object.entries(stats.findings).map(([k, v]) => `${k}×${v}`).join(', ') || 'nothing matched'}`);
+  console.log(`redacted: ${Object.entries(stats.findings).map(([k, v]) => `${k}×${v}`).join(', ') || 'nothing matched'}; ${stats.withheld} turn(s) withheld (low-confidence redaction)`);
   if (!chunks.length) { console.log('nothing to listen to'); return; }
 
   const { ideas, failures } = await extractIdeas(chunks, { dispatch: dispatchWithFallback, policy: MODELS.TEXT_POLICIES.fastStructured });
@@ -394,7 +442,7 @@ async function runExtract({ hours, out }) {
 if (require.main === module) {
   (async () => {
     if (mode === 'extract') {
-      const out = flag('out', path.join(os.tmpdir(), `listen-${new Date().toISOString().slice(0, 10)}.json`));
+      const out = flag('out', path.join(os.tmpdir(), `listen-${etDateString(new Date())}.json`));
       await runExtract({ hours: Number(flag('hours', 24)), out });
     } else if (mode === 'seed') {
       const file = flag('file');
@@ -410,6 +458,6 @@ if (require.main === module) {
 module.exports = {
   _internals: {
     textBlocks, readClaudeTranscript, readCodexTranscript, redactedChunks, extractIdeas,
-    targetingViolation, buildManifest, briefFor, normalizeTitle, sourceAllowed, SYSTEM_PROMPT,
+    targetingViolation, buildManifest, briefFor, normalizeTitle, sourceAllowed, shapeIdea, SYSTEM_PROMPT,
   },
 };

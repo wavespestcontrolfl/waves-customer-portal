@@ -6692,5 +6692,5 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding },
+  _internals: { reentrySafetyClaimFinding, bannedTopicFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding },
 };
