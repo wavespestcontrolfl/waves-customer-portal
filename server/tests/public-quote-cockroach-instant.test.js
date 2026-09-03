@@ -116,7 +116,7 @@ describe('cockroach_control as a public instant quote', () => {
       const line = roachLine({ ...BASE_PROPERTY, services: frozen });
       expect(line.treatments).toBe(2);
       expect(line.detail).toMatch(/Includes 2 treatment visits\./);
-      expect(line.serviceKey).toBe('cockroach_control');
+      expect(line.catalogServiceKey).toBe('cockroach_control');
       // Unfrozen callers (the recurring add-on, staff wizard) keep the live config.
       expect(roachLine({ ...BASE_PROPERTY, services: quoteServicesForKey('cockroach_control') }).treatments).toBe(3);
     } finally {
@@ -126,10 +126,10 @@ describe('cockroach_control as a public instant quote', () => {
     const bare = roachLine({ ...BASE_PROPERTY, services: quoteServicesForKey('cockroach_control') });
     const withFreeze = roachLine({ ...BASE_PROPERTY, services: frozen });
     expect(Number(withFreeze.price)).toBe(Number(bare.price));
-    expect(bare.serviceKey).toBeUndefined();
+    expect(bare.catalogServiceKey).toBeUndefined();
     // Junk freezes are ignored, never trusted.
     expect(roachLine({ ...BASE_PROPERTY, services: { pestInitialRoach: { roachType: 'regular', packageTreatments: 0, catalogServiceKey: '  ' } } }).treatments).toBe(2);
-    expect(roachLine({ ...BASE_PROPERTY, services: { pestInitialRoach: { roachType: 'regular', packageTreatments: '3' } } }).serviceKey).toBeUndefined();
+    expect(roachLine({ ...BASE_PROPERTY, services: { pestInitialRoach: { roachType: 'regular', packageTreatments: '3' } } }).catalogServiceKey).toBeUndefined();
   });
   test('an unmeasured building (route-synthesized sqft) routes to manual review, never a firm bracket price (codex r4 P1)', () => {
     const measured = generateEstimate({ ...BASE_PROPERTY, buildingSizeMeasured: true, services: quoteServicesForKey('cockroach_control') });

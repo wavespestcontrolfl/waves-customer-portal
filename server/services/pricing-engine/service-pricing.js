@@ -1780,7 +1780,10 @@ function pricePestInitialRoach(property, options = {}) {
     label,
     detail: `${baseDetail} ${treatmentsNote}`,
     treatments,
-    ...(typeof catalogServiceKey === 'string' && catalogServiceKey.trim() ? { serviceKey: catalogServiceKey.trim() } : {}),
+    // Emitted under its OWN name: `serviceKey` is an engine-family field
+    // other pricers already use (priceFlea → 'flea'), never a catalog key
+    // (codex #3842 r5 P1).
+    ...(typeof catalogServiceKey === 'string' && catalogServiceKey.trim() ? { catalogServiceKey: catalogServiceKey.trim() } : {}),
     price,
     bracketPrice,
     priceOverridden: overrideValid,

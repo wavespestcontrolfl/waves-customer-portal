@@ -283,8 +283,15 @@ describe('catalogLinkForProfile — verified catalog key on the line', () => {
   });
   test('the one-time profile carries the frozen key off the breakdown line', () => {
     const { oneTimeProfileServices } = require('../services/estimate-slot-availability')._internals;
-    const rows = oneTimeProfileServices({}, { result: { oneTime: { items: [{ service: 'pest_initial_roach', label: 'Cockroach Treatment Service', price: 250, serviceKey: 'cockroach_control' }] } } });
+    const rows = oneTimeProfileServices({}, { result: { oneTime: { items: [{ service: 'pest_initial_roach', label: 'Cockroach Treatment Service', price: 250, catalogServiceKey: 'cockroach_control' }] } } });
     expect(rows[0]).toMatchObject({ engineKey: 'pest_initial_roach', catalogServiceKey: 'cockroach_control' });
+    // The engine's own `serviceKey` family token (flea → 'flea', catalog row
+    // flea_tick via engine_keys) is NOT a catalog key: it stays on the
+    // containment path, never an exact lookup for a row that does not exist
+    // (codex r5 P1 — regression guard).
+    const flea = oneTimeProfileServices({}, { result: { oneTime: { items: [{ service: 'flea_knockdown_single', label: 'Flea Treatment', price: 199, serviceKey: 'flea' }] } } });
+    expect(flea[0].catalogServiceKey).toBeNull();
+    expect(flea[0].engineKey).toBe('flea_knockdown_single');
   });
 });
 

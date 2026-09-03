@@ -246,8 +246,11 @@ async function loadPublicServicesMenu(conn = db) {
   // engine constants, which only the admin save's own worker resyncs — pull
   // pricing_config in (coalesced) before advertising, and fail closed for
   // that row when the refresh did not land (pre-push codex P1, replicas).
+  // Bounded by the bridge's 60s window: this is an unauthenticated GET, and
+  // an unconditional full resync per request would queue database-wide
+  // refreshes behind the global sync queue (codex #3842 r5 P1).
   let displayVerified = true;
-  if (rows.some((r) => PUBLIC_QUOTE_REQUESTS[r.service_key]?.pestInitialRoach)) {
+  if (rows.some((r) => PUBLIC_QUOTE_REQUESTS[r.service_key]?.pestInitialRoach) && pricingEngine.needsSync()) {
     try { displayVerified = (await pricingEngine.syncConstantsFromDB()) === true; } catch { displayVerified = false; }
   }
   return rows.map((row) => menuItem(row, { displayVerified }));

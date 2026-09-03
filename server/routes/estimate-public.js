@@ -17290,7 +17290,9 @@ function normalizeOneTimeBreakdown(estData) {
         // standalone cockroach package): the one-time profile carries it
         // so the accept path stamps service_id by exact key, where engine-key
         // containment is deliberately blind (codex #3842 r3 P1).
-        serviceKey: item.serviceKey || item.service_key || null,
+        // Only the dedicated field — the engine's own `serviceKey` is a
+        // family token (flea → 'flea'), never a catalog key (codex #3842 r5 P1).
+        catalogServiceKey: item.catalogServiceKey || null,
         treatments: Number.isInteger(item.treatments) && item.treatments > 0 ? item.treatments : null,
         warrantyType: item.warrantyType || null,
         warrantyLabel: item.warrantyLabel || null,

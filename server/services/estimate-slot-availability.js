@@ -590,7 +590,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     }
     // Third arg is the RAW engine key off the breakdown item — the catalog's
     // identity, distinct from the display category passed first.
-    add(category || service || 'one_time_service', label, service || null, item.serviceKey || null);
+    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null);
   }
   return rows;
 }

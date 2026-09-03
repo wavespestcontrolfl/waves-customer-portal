@@ -4,7 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { COCKROACH_PACKAGE_VISITS, publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
 const logger = require('../services/logger');
-const { generateEstimate, normalizeRoachType, syncConstantsFromDB, constants: pricingConstants } = require('../services/pricing-engine');
+const { generateEstimate, normalizeRoachType, syncConstantsFromDB, needsSync, constants: pricingConstants } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
@@ -968,8 +968,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // first eligibility read, or a replica whose constants are stale
       // demotes an eligible quote / advertises a stale one. A failed refresh
       // leaves the count unverified: quote-on-request (pre-push codex P1).
+      // Bounded by the bridge's own 60s window (needsSync) — a full resync
+      // per request would let an unauthenticated caller queue database-wide
+      // refreshes (codex #3842 r5 P1).
       let displayVerified = true;
-      if (quoteServicesForKey(requestedServiceKey)?.pestInitialRoach) {
+      if (quoteServicesForKey(requestedServiceKey)?.pestInitialRoach && needsSync()) {
         try { displayVerified = (await syncConstantsFromDB()) === true; } catch { displayVerified = false; }
       }
       keyedService = await publicSelectableService(requestedServiceKey);
@@ -1572,7 +1575,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // state) rather than throwing on a failed read — an unrefreshed
       // count is unverified, so the gate fails closed (codex #3842 r4 P0).
       let resynced = true;
-      if (engineInput.services?.pestInitialRoach) {
+      if (engineInput.services?.pestInitialRoach && needsSync()) {
         try { resynced = (await syncConstantsFromDB()) === true; } catch (syncErr) { resynced = false; logger.warn(`[public-quote] pricing-config resync before the cockroach gate failed: ${syncErr.message}`); }
       }
       const fresh = resynced ? await publicSelectableService(requestedServiceKey) : null;
@@ -2209,7 +2212,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // Verified catalog identity a keyed public quote froze into the
             // line (see engineInput above) — the accept path resolves
             // service_id by it (codex #3842 r3 P1).
-            serviceKey: item.serviceKey ?? null,
+            catalogServiceKey: item.catalogServiceKey ?? null,
             // Residential T&S has no bed-area INPUT — the engine resolves a
             // lot-derived area and stores it on the line; the audit's
             // dimension picker reads it from here (GH codex on #3628).
