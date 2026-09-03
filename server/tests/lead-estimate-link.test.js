@@ -376,6 +376,21 @@ describe('lead-estimate link service', () => {
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
   });
 
+  test('a live duplicate whose original is soft-deleted resolves to the named row: no conversion of the deleted original, no funnel on it', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2n', estimate_data: { lead_id: 'lead-dupN' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: {
+        'lead-dupN': { id: 'lead-dupN', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-delO' } },
+        'lead-delO': { id: 'lead-delO', status: 'new', deleted_at: '2026-09-02T00:00:00Z', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com' },
+      },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2n', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-delO', expect.anything());
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dupN', expect.anything());
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+  });
+
   test('a duplicate marker cycle (A ↔ B) terminates and credits the named row', async () => {
     const database = makeAcceptDb({
       linked: [],
@@ -968,6 +983,23 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     });
     const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c2', enforceOriginating: true, database, leadAttributionService: { markConverted } });
     expect(result).toEqual({ converted: false, reason: 'duplicate_claim_lost' });
+  });
+
+  test('self-booking: two repeats of the SAME foreign original are one opportunity — the newest repeat takes the win', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const database = makeConvertDb({
+      customer: { id: 'c4', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [],
+      customerDuplicateLeads: [
+        { id: 'L-rep-new', status: 'duplicate', customer_id: 'c4', extracted_data: { duplicate_of_lead_id: 'L-foreign' }, first_contact_at: '2026-09-01T12:00:00Z' },
+        { id: 'L-rep-old', status: 'duplicate', customer_id: 'c4', extracted_data: { duplicate_of_lead_id: 'L-foreign' }, first_contact_at: '2026-08-31T12:00:00Z' },
+      ],
+      leadsById: { 'L-foreign': { id: 'L-foreign', status: 'new', customer_id: 'c-OTHER' } },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c4', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-rep-new'] });
   });
 
   test('self-booking: duplicate rows behind two DIFFERENT opportunities are ambiguous — nothing converts', async () => {

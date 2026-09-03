@@ -116,7 +116,12 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     expect(src).toMatch(/if \(touch\) await db\('ad_service_attribution'\)\.insert\(\{\n\s+customer_id: customerId,\n\s+lead_id: touch\.leadId,/);
     // A submission that adds properties is a wider inquiry, never a repeat
     // (codex r10 P1) — on both paths.
-    expect(src).toMatch(/duplicateOfLeadId = additionalProperties\.length \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
+    expect(src).toMatch(/duplicateOfLeadId = widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
+    // After the label lands (either path) the target is re-checked: a
+    // target the office closed in the window makes this a fresh inquiry,
+    // reopened on THIS row only (codex r12 P1).
+    expect(src).toMatch(/const targetOpen = await db\('leads'\)\.where\(\{ id: duplicateOfLeadId \}\)\.whereIn\('status', OPEN_LEAD_STATUSES\)\.whereNull\('deleted_at'\)\.first\('id'\);/);
+    expect(src).toMatch(/if \(!targetOpen\) \{\n\s+await db\('leads'\)\.where\(\{ id: lead\.id, status: 'duplicate' \}\)\.update\(\{ status: 'new'/);
     expect(src).toMatch(/if \(!lead && !additionalProperties\.length\) \{\n\s+duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
     // The replace path carries the marker forward...
     expect(src).toMatch(/'duplicate_of_lead_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'duplicate_of_lead_id'/);
@@ -127,7 +132,10 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // documented lookup→calculate flow is where a repeat is first fully typed.
     const block = src.slice(src.indexOf("if (lead && lead.lead_type === 'quote_wizard' && (lead.status === 'new' || lead.status === 'duplicate')) {"), src.indexOf('if (lead && !lead.lead_source_id && sourceMeta.leadSourceId)'));
     expect(block.length).toBeGreaterThan(200);
-    expect(block).toMatch(/duplicateOfLeadId = additionalProperties\.length \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead\.id, beforeCreatedAt: lead\.created_at \}\)/);
+    // The stored additional-property list counts as well as the request's
+    // (codex r12 P1).
+    expect(block).toMatch(/const widerInquiry = additionalProperties\.length > 0 \|\| \(parseExtracted\(lead\.extracted_data\)\?\.additional_properties\?\.length > 0\);/);
+    expect(block).toMatch(/duplicateOfLeadId = widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead\.id, beforeCreatedAt: lead\.created_at \}\)/);
     expect(block).toMatch(/if \(duplicateOfLeadId !== stored\)/);
     // The relabel is scoped to the status just read (codex r9 P1): a staff
     // transition in between wins and this public retry updates 0 rows.

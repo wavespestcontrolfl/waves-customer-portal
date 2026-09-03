@@ -56,7 +56,7 @@ async function followDuplicateLink(database, lead) {
     const originalId = data && data.duplicate_of_lead_id;
     if (!originalId) return current;
     const original = await database('leads').where({ id: originalId }).first();
-    if (!original) return lead;
+    if (!original || original.deleted_at) return lead;
     current = original;
   }
   return current;
@@ -976,8 +976,10 @@ async function convertLeadFromEvent({
             const root = await followDuplicateLink(database, repeat);
             const rootIsOurs = root.id !== repeat.id && !CLOSED_LEAD_STATUSES.has(root.status) && !root.deleted_at
               && (!root.customer_id || String(root.customer_id) === String(resolvedCustomerId));
-            const pick = rootIsOurs ? root : repeat;
-            if (!picks.has(pick.id)) picks.set(pick.id, { pick, winner: rootIsOurs ? null : repeat });
+            // Keyed by the resolved ancestry: two repeats of one foreign
+            // original are ONE opportunity, and the newest repeat (rows are
+            // newest-first) is its authenticated winner (pre-push/r12 P1).
+            if (!picks.has(root.id)) picks.set(root.id, { pick: rootIsOurs ? root : repeat, winner: rootIsOurs ? null : repeat });
           }
           if (picks.size > 1) {
             logger.warn(`[lead-trigger] ${source} customer-link skip — ${picks.size} distinct opportunities behind duplicate rows (ambiguous)`, {

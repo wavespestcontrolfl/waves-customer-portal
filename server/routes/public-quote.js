@@ -18,10 +18,13 @@ const WIZARD_LEAD_REUSE_DAYS = 30;
 // address is a different inquiry (a second property), never a duplicate.
 // extracted_data.duplicate_of_lead_id off a lead row (jsonb arrives parsed;
 // legacy rows may carry a string), or null.
-function duplicateOfFromExtracted(extractedData) {
+function parseExtracted(extractedData) {
   let data = extractedData;
   if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
-  return (data && data.duplicate_of_lead_id) || null;
+  return data || null;
+}
+function duplicateOfFromExtracted(extractedData) {
+  return parseExtracted(extractedData)?.duplicate_of_lead_id || null;
 }
 
 // `excludeLeadId` is the caller's OWN row (the token path re-checks a row the
@@ -1777,8 +1780,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // A submission that adds properties is a wider inquiry, never a
         // repeat (codex #3834 r10 P1): the extra addresses live only on
         // this row and each is a manual follow-up quote the pipeline must
-        // still show — a 'duplicate' label would bury them.
-        duplicateOfLeadId = additionalProperties.length ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
+        // still show — a 'duplicate' label would bury them. The list the
+        // property-lookup stage stored counts too (the update above carried
+        // it forward when this stage omitted the optional field, r12 P1).
+        const widerInquiry = additionalProperties.length > 0 || (parseExtracted(lead.extracted_data)?.additional_properties?.length > 0);
+        duplicateOfLeadId = widerInquiry ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
         // Scoped to the status just read: a staff transition landing in
         // between (won / lost / contacted) wins, and this public retry
         // updates 0 rows instead of regressing it (codex #3834 r9 P1). On 0
@@ -1837,6 +1843,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           : extractedData,
       }).returning(['id']);
       lead = rows[0];
+    }
+    // The label was computed from a read of the target; if the office closed
+    // that original between the read and the write (lost / won / deleted),
+    // this submission is a fresh inquiry, not a repeat of a closed one
+    // (codex #3834 r12 P1). Re-check after the write on both paths and
+    // reopen THIS row — scoped to the label it just received, so a staff
+    // transition on this row in the meantime still wins.
+    if (duplicateOfLeadId) {
+      const targetOpen = await db('leads').where({ id: duplicateOfLeadId }).whereIn('status', OPEN_LEAD_STATUSES).whereNull('deleted_at').first('id');
+      if (!targetOpen) {
+        await db('leads').where({ id: lead.id, status: 'duplicate' }).update({ status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
+        duplicateOfLeadId = null;
+      }
     }
 
     // Upsert a customers row so wizard-priced leads surface in /admin/customers
