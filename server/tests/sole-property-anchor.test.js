@@ -72,6 +72,35 @@ describe('anchorSoleProperty', () => {
     await anchorSoleProperty(row, COLS, () => { throw new Error('boom'); });
     expect(row.property_id).toBeNull();
   });
+
+  test('inside a caller transaction the lookup runs in a savepoint, so a failure cannot abort the caller (pre-push #3837 r3 P1)', async () => {
+    // A knex trx: isTransaction + .transaction(fn) opens a nested savepoint.
+    // The inner read fails; the savepoint rolls back and the outer trx
+    // stays usable — pinned by the outer conn never being queried directly.
+    let savepoints = 0;
+    let outerQueried = false;
+    const trx = () => { outerQueried = true; throw new Error('must read through the savepoint'); };
+    trx.isTransaction = true;
+    trx.transaction = async (fn) => {
+      savepoints += 1;
+      const sp = () => { throw new Error('boom'); };
+      sp.isTransaction = true;
+      return fn(sp);
+    };
+    const row = { customer_id: 'c-sole', property_id: null };
+    await anchorSoleProperty(row, COLS, trx);
+    expect(row.property_id).toBeNull();
+    expect(savepoints).toBe(1);
+    expect(outerQueried).toBe(false);
+
+    // And a healthy savepoint read resolves the anchor as before.
+    const okTrx = () => { throw new Error('must read through the savepoint'); };
+    okTrx.isTransaction = true;
+    okTrx.transaction = async (fn) => fn(fakeConn({ 'c-sole': [{ id: 'p1', active: true }] }));
+    const row2 = { customer_id: 'c-sole', property_id: null };
+    await anchorSoleProperty(row2, COLS, okTrx);
+    expect(row2.property_id).toBe('p1');
+  });
 });
 
 describe('every spawned-row writer anchors the sole property', () => {

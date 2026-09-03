@@ -514,14 +514,20 @@ async function syncPrimaryCoordsFromCustomer(customerId, conn = db) {
  * regroup only covers estimate-backed rows). Two or more active
  * properties → null: the office places those, same exactly-one rule the
  * 20260829000050 linkage backfill applied. Best-effort — null on error.
+ * Inside a caller transaction the read runs in a SAVEPOINT (knex nested
+ * transaction): a failed statement aborts a PostgreSQL transaction, so a
+ * swallowed error here would otherwise fail every later scheduling write
+ * with 25P02 (pre-push audit #3837 r3 P1; same shape as
+ * visit-groups.maybeGroupRow).
  */
 async function soleActivePropertyId(customerId, conn = db) {
   if (!customerId) return null;
+  const read = (c) => c('customer_properties')
+    .where({ customer_id: customerId, active: true })
+    .limit(2)
+    .select('id');
   try {
-    const rows = await conn('customer_properties')
-      .where({ customer_id: customerId, active: true })
-      .limit(2)
-      .select('id');
+    const rows = conn.isTransaction ? await conn.transaction((sp) => read(sp)) : await read(conn);
     return rows.length === 1 ? rows[0].id : null;
   } catch {
     return null;
