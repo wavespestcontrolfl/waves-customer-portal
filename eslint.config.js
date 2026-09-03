@@ -4,8 +4,26 @@
 // unreachable code), never how it looks. The repo has no lint history, so
 // enforcement is changed-files-only — untouched legacy code is never
 // flagged. Escape hatch: git commit -n
+//
+// ONE deliberate exception to "broken code only": the two structural
+// warnings in QUALITY_WARN (cyclomatic complexity, nesting depth). They
+// never block a commit — they exist so the author sees the number before
+// Codex does, because "this function decides too much" is the single most
+// repeated Codex simplification finding (CLAUDE.md rule 20). Policy: a
+// warning on a function the diff ADDS or REWRITES is a P2 for review; a
+// warning on untouched legacy code is noise and is ignored. Thresholds were
+// set from a baseline over the whole non-test tree so that only the top
+// ~4% of existing functions trip them (see PR #TBD for the distribution).
 const globals = require('globals');
 const react = require('eslint-plugin-react');
+
+// Structural warnings (see header). Source blocks only — test files and
+// fixtures are exempt: a describe() body with many cases is not a decision
+// tree, and the counter would just teach people to split suites.
+const QUALITY_WARN = {
+  complexity: ['warn', { max: 20 }],
+  'max-depth': ['warn', 4],
+};
 
 const ERRORS_ONLY = {
   'no-undef': 'error',
@@ -21,6 +39,8 @@ const ERRORS_ONLY = {
   // would train everyone to bypass the hook.
   'no-unused-vars': ['warn', { args: 'none', varsIgnorePattern: '^_' }],
 };
+
+const SOURCE_RULES = { ...ERRORS_ONLY, ...QUALITY_WARN };
 
 module.exports = [
   {
@@ -42,7 +62,7 @@ module.exports = [
       sourceType: 'commonjs',
       globals: { ...globals.node },
     },
-    rules: ERRORS_ONLY,
+    rules: SOURCE_RULES,
   },
   // Jest tests (server + packages ONLY — client tests are vitest and must
   // not inherit jest globals; flat config merges globals across every
@@ -56,7 +76,7 @@ module.exports = [
       sourceType: 'commonjs',
       globals: { ...globals.node, ...globals.jest },
     },
-    rules: ERRORS_ONLY,
+    rules: { ...ERRORS_ONLY, complexity: 'off', 'max-depth': 'off' },
   },
   // Client — ESM + JSX in the browser. eslint-plugin-react is loaded ONLY
   // for jsx-uses-vars/jsx-uses-react so components referenced from JSX
@@ -73,7 +93,7 @@ module.exports = [
       globals: { ...globals.browser },
     },
     rules: {
-      ...ERRORS_ONLY,
+      ...SOURCE_RULES,
       'react/jsx-uses-vars': 'error',
       'react/jsx-uses-react': 'error',
     },
@@ -178,6 +198,8 @@ module.exports = [
     },
     rules: {
       ...ERRORS_ONLY,
+      complexity: 'off',
+      'max-depth': 'off',
       'react/jsx-uses-vars': 'error',
       'react/jsx-uses-react': 'error',
     },

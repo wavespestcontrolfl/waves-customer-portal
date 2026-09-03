@@ -378,6 +378,12 @@ severity noted.
 - **Simplest implementation that fully meets the current requirement.**
   No speculative config, single-call-site generic handlers,
   one-implementation interfaces, or future-proofing layers. P2.
+- **Structural lint is a signal, not a gate.** `eslint.config.js` warns
+  (never errors) on `complexity` > 20 and `max-depth` > 4. A warning on a
+  function the diff adds or rewrites is P2 (remove decisions per CLAUDE.md
+  rule 20 — not a one-use helper that just moves the branches); a warning
+  on untouched legacy code is ignored. Never add `--max-warnings` to the
+  lint-staged command — it would block commits on pre-existing code.
 - **No compat shims for code changed in the same PR.** Migrate every
   internal call site; no deprecated wrappers, re-export aliases, or dual
   paths for callers this repo controls (P2). The inverse is mandatory for
