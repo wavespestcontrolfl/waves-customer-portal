@@ -482,6 +482,20 @@ describe('POST /recording-status', () => {
     expect(tables.call_log[0].review_status).toBeNull();
   });
 
+  test('a retry of a parked SID whose first delivery lost its card files the card AND opens the call for review (hook P1 on r15)', async () => {
+    tables.call_log.push({
+      id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 45,
+      processing_status: 'processed', transcription: 'Agent: fixture line.', review_status: null,
+      metadata: { additional_recordings: [{ recording_sid: REC_2, recording_url: `${URL_2}.mp3`, parked_because: 'processing_status_processed' }] },
+    });
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    expect(tables.triage_items).toHaveLength(1);
+    expect(tables.triage_items[0]).toMatchObject({ call_log_id: 'c1', reason_code: 'additional_recording', status: 'open' });
+    expect(tables.call_log[0].review_status).toBe('open');
+    // Still exactly one parked entry — the retry appended nothing.
+    expect(tables.call_log[0].metadata.additional_recordings).toHaveLength(1);
+  });
+
   test('a duplicate delivery for a settled row (voicemail) schedules no pass; one for a row still awaiting a pass does (codex #3736 gh-r15 P1)', async () => {
     tables.call_log.push({
       id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 45,
@@ -567,11 +581,17 @@ describe('POST /recording-status', () => {
     tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: 'processing' });
     await post('/recording-status', recordingCallback());
     tables.triage_items.length = 0;
-    const realImpl = db.getMockImplementation();
-    db.mockImplementation((t) => { const b = realImpl(t); if (t === 'triage_items') b.insert = () => ({ onConflict: () => ({ ignore: () => Promise.reject(new Error('deadlock detected')) }) }); return b; });
+    // The recovered card and the review flag are filed in one transaction
+    // (hook P1 on r15); the insert inside it fails.
+    const realTx = db.transaction;
+    db.transaction = jest.fn(async (fn) => fn(Object.assign((t) => {
+      const b = db(t);
+      if (t === 'triage_items') b.insert = () => ({ onConflict: () => ({ ignore: () => Promise.reject(new Error('deadlock detected')) }) });
+      return b;
+    }, { raw: db.raw })));
     const res = await post('/recording-status', recordingCallback());
     expect(res.sendStatus).toHaveBeenCalledWith(500);
-    db.mockImplementation(realImpl);
+    db.transaction = realTx;
   });
 
   test('a retry of a recording REC2 already replaced does not replace REC2 back', async () => {

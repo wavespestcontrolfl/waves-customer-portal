@@ -416,11 +416,15 @@ async function parkAdditionalRecording(row, extra) {
     // A failure here is the same failure as a rolled-back park — the
     // recording is parked with no card — and gets the same 500 so Twilio
     // delivers the callback again.
-    await db('triage_items')
-      .insert(card())
-      .onConflict(db.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
-      .ignore()
-      .catch((err) => { err.parkFailed = true; throw err; });
+    await db.transaction(async (trx) => {
+      await trx('triage_items')
+        .insert(card())
+        .onConflict(trx.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
+        .ignore();
+      // The recovered card opens the call for review like a first-delivery
+      // park does (hook P1 on r15): the aggregate the dashboard counts.
+      await trx('call_log').where({ id: row.id }).update({ review_status: 'open' });
+    }).catch((err) => { err.parkFailed = true; throw err; });
     return { parked: false, quarantined: false, duplicate: true, cardFiled: true };
   }
   return { parked: true, quarantined: false };

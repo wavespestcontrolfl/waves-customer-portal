@@ -779,7 +779,7 @@ function isImplausibleTranscript(transcription, recordingSeconds) {
 // under this cap (≥10 min between attempts via the sweep's age gate), which
 // rides out transient provider errors. At the cap a blocking triage item is
 // filed so the call can't die silently.
-const CALL_EXTRACTION_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.CALL_EXTRACTION_MAX_ATTEMPTS || '3', 10) || 3);
+const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require('../config/call-extraction-retry');
 
 // Human-readable "confirm before dispatch" reasons surfaced by the address /
 // identity bridge below. Shown on the lead's AI-triage activity so Virginia
@@ -15701,7 +15701,7 @@ const CallRecordingProcessor = {
                 .orWhere(function () {
                   this.where('processing_status', 'extraction_failed')
                     .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
-                    .andWhere('created_at', '>', db.raw("NOW() - INTERVAL '7 days'"));
+                    .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
                 });
             })
             .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
@@ -15728,7 +15728,7 @@ const CallRecordingProcessor = {
           this.where('processing_status', 'extraction_failed')
             .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
             .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
-            .andWhere('created_at', '>', db.raw("NOW() - INTERVAL '7 days'"));
+            .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
         })
         .orWhere(function () {
           this.where('processing_status', 'processing')
