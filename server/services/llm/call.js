@@ -225,7 +225,10 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, m
  * Anthropic SDK messages.create. Uses a real system param; passes tools through
  * (e.g. server web_search) for callers that need them.
  */
-async function callAnthropic({ model, system, text, images = [], tools, jsonMode = true, maxTokens = 1024, timeoutMs, temperature, anthropicClient } = {}) {
+// A payload `temperature` is read by the Gemini leg only. Current Anthropic
+// models (Opus 4.7+, Sonnet 5, Fable) reject sampling controls with a 400, so
+// this leg never forwards it.
+async function callAnthropic({ model, system, text, images = [], tools, jsonMode = true, maxTokens = 1024, timeoutMs, anthropicClient } = {}) {
   if (!anthropicClient && (!Anthropic || !process.env.ANTHROPIC_API_KEY)) return { ok: false, reason: 'no_key' };
   try {
     const client = anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -238,38 +241,15 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
     // are silently not cached — harmless.
     if (system) req.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
     if (tools) req.tools = tools;
-    if (Number.isFinite(temperature)) req.temperature = temperature;
     // maxRetries:0 whenever a budget is supplied — the SDK's per-request
     // timeout applies to EACH attempt, so its default retry policy (2 retries)
     // could hold a caller for ~3x its ceiling. Callers with a timeoutMs budget
     // (e.g. the fact-check publish lock, dispatchWithFallback's shared
     // deadline) need it to be a true wall-clock ceiling; the pre-failover
     // fact-check client was constructed with maxRetries:0 for the same reason.
-    const startedAtMs = Date.now();
-    const create = (request, budgetMs) => (budgetMs
-      ? client.messages.create(request, { timeout: budgetMs, maxRetries: 0 })
-      : client.messages.create(request));
-    let resp;
-    try {
-      resp = await create(req, timeoutMs);
-    } catch (err) {
-      // Newer Anthropic models (Opus 4.8+, Fable) reject sampling controls
-      // with a 400 "`temperature` is deprecated for this model". Callers
-      // pinning temp 0 for cross-provider greedy decode (extraction routes)
-      // shouldn't lose the whole leg over it — strip and retry once, within
-      // whatever remains of the ORIGINAL budget so two attempts can never
-      // exceed dispatchWithFallback's shared wall-clock deadline.
-      const remainingMs = timeoutMs ? timeoutMs - (Date.now() - startedAtMs) : undefined;
-      if (req.temperature !== undefined
-          && /temperature.*deprecated/i.test(err?.message || '')
-          && (!timeoutMs || remainingMs > 0)) {
-        logger.warn(`[llm] ${model} rejects temperature — retrying without sampling controls`);
-        const { temperature: _dropped, ...bare } = req;
-        resp = await create(bare, remainingMs);
-      } else {
-        throw err;
-      }
-    }
+    const resp = timeoutMs
+      ? await client.messages.create(req, { timeout: timeoutMs, maxRetries: 0 })
+      : await client.messages.create(req);
     // Older SDK/test adapters may omit the explicit block type while still
     // returning a valid text field; accept both shapes.
     const out = (resp?.content || []).find((b) => b?.type === 'text' || (b?.type == null && typeof b?.text === 'string'))?.text || '';
@@ -405,22 +385,13 @@ function recordDispatchOutcome(policy, outcome) {
   }
 }
 
-// Direct-SDK Anthropic create with the same sampling-controls strip-retry
-// the dispatcher leg uses: newer models (Opus 4.8+, Fable) 400 on
-// `temperature`; vision scorers that pin 0.2 for repeatability retry once
-// without it instead of losing the Claude leg (audit P1 2026-07-22 — the
-// VISION tier default moved to Opus).
-async function anthropicCreateWithSamplingRetry(client, request) {
-  try {
-    return await client.messages.create(request);
-  } catch (err) {
-    if (request.temperature !== undefined && /temperature.*deprecated/i.test(err?.message || '')) {
-      logger.warn(`[llm] ${request.model} rejects temperature — retrying without sampling controls`);
-      const { temperature: _dropped, ...bare } = request;
-      return client.messages.create(bare);
-    }
-    throw err;
-  }
+// Direct-SDK Anthropic create for the sites that bypass the policy dispatcher
+// (vision scorers, OCR, commitments). Callers never send sampling controls —
+// current Anthropic models reject them — so there is no retry here; this is
+// the one seam those sites share, which is where the per-call ledger
+// (agent-control S2a, GATE_LLM_CALL_LEDGER) records direct usage.
+async function anthropicCreate(client, request) {
+  return client.messages.create(request);
 }
 
 module.exports = {
@@ -428,7 +399,7 @@ module.exports = {
   // dispatcher's REAL budget instead of mirroring the number (see
   // utils/claim-ceiling.js).
   DEFAULT_FALLBACK_BUDGET_MS,
-  anthropicCreateWithSamplingRetry,
+  anthropicCreate,
   callOpenAI,
   callGemini,
   callAnthropic,

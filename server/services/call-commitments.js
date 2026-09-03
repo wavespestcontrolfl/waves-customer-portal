@@ -36,7 +36,7 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
-const { anthropicCreateWithSamplingRetry } = require('./llm/call');
+const { anthropicCreate } = require('./llm/call');
 
 // A due time typed by the office arrives either as an ISO instant (the
 // panel converts its datetime-local value with the ET helper) or, from any
@@ -501,10 +501,9 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   // retry lanes — a claim-holding pass must not sit through the SDK's
   // per-attempt timeouts.
   const budgeted = { messages: { create: (request) => anthropic.messages.create(request, { timeout: MODEL_TIMEOUT_MS, maxRetries: 0 }) } };
-  const response = await anthropicCreateWithSamplingRetry(budgeted, {
+  const response = await anthropicCreate(budgeted, {
     model: MODELS.FLAGSHIP,
     max_tokens: 2000,
-    temperature: 0,
     messages: [{ role: 'user', content: buildCommitmentsPrompt({ transcript, callStartedAt }) }],
   });
   const text = (response?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');

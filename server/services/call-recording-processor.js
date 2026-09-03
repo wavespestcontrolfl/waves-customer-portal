@@ -6073,13 +6073,11 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   // explicit timeoutMs: an explicit budget is a shared deadline whose first
   // leg gets the full remainder (a stalled primary would starve the
   // fallback); the dispatcher's default budget splits evenly across legs.
-  // temperature: 0 pins greedy decode on the legs that still accept
-  // sampling controls (the gemini rollback leg). It is deliberately NOT
-  // plumbed to the OpenAI leg — the Responses API 400s ("Unsupported
-  // parameter: 'temperature' is not supported with this model") on the
-  // GPT-5.6 reasoning line, so the primary's repeat-stability rests on the
-  // reasoning model's default decoding; Anthropic strips-and-retries in
-  // callAnthropic for the same reason.
+  // temperature: 0 pins greedy decode on the Gemini rollback leg only. The
+  // OpenAI Responses API 400s on it for the GPT-5.6 reasoning line and the
+  // Anthropic leg never forwards sampling controls (current models reject
+  // them), so the primary's repeat-stability rests on the reasoning model's
+  // default decoding.
   const res = await dispatchWithFallback(CALL_EXTRACTION_ROUTE, {
     text: prompt,
     jsonMode: true,

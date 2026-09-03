@@ -38,9 +38,8 @@
  *               the call site.                                       → Sonnet 5
  *  VISION     — Image scoring. Opus 4.8 (owner 2026-07-21: photo scoring
  *               drives customer-facing health scores — best model is the
- *               live model). Opus rejects `temperature`, so every direct
- *               vision caller goes through anthropicCreateWithSamplingRetry
- *               (llm/call.js) which strips it and retries once. → Opus 4.8
+ *               live model). Current Anthropic models reject sampling
+ *               controls; no direct caller sends `temperature`.  → Opus 4.8
  *
  * Cost-aware routing directive (2026-07-16): use the least-expensive model
  * that is reliably strong for the lane, reserve Opus for difficult/high-stakes

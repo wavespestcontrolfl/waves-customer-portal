@@ -21,7 +21,7 @@
  */
 
 const logger = require('./logger');
-const { anthropicCreateWithSamplingRetry } = require('./llm/call');
+const { anthropicCreate } = require('./llm/call');
 const MODELS = require('../config/models');
 const {
   safePublicFirstName,
@@ -370,10 +370,9 @@ async function callClaudeVision(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropicCreateWithSamplingRetry(anthropic, {
+    const response = await anthropicCreate(anthropic, {
       model: MODELS.VISION,
       max_tokens: 500,
-      temperature: 0.2, // match Gemini's 0.2 so the dual-vision merge compares like-for-like
       messages: [{
         role: 'user',
         content: [
