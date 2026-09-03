@@ -452,6 +452,12 @@ async function writeCustomerUnit(trx, { customerId, customerRow, building, unitL
   // A dedicated line 2 is unit evidence only for the DWELLING it carries — a
   // structural-only "Bldg 9" there is not the apartment (codex r17 P1 on #3804).
   const propUnit = (p) => dwellingUnitOfUnitLine(String(p.address_line2 || '')) || dwellingUnitOnLine(String(p.address_line1 || '')) || '';
+  // The structural locator kept beside a replied unit: the mirror's own
+  // line 2 ("Bldg 9"), or — the supported legacy divergence read through
+  // primaryAtBuilding below — a structural-only value stored on the primary
+  // property alone, which the explicit-line-2 sync would otherwise erase
+  // (codex r18 + r19 P1 on #3804).
+  const structuralLocator = (primary) => structuralUnitPart(customerRow.address_line2) || (primary ? structuralUnitPart(primary.address_line2) : '');
   const atBuilding = (props || []).filter((p) => sameBuildingForWrite(customerAddressLine(p), building));
   const unitAlreadyOnFile = atBuilding.some((p) => propUnit(p) && unitLineValueKey(propUnit(p)) === wanted);
   // The building + replied unit as its OWN property row on the account,
@@ -512,12 +518,12 @@ async function writeCustomerUnit(trx, { customerId, customerRow, building, unitL
       if (unitAlreadyOnFile) {
         out.customer = 'property_exists';
       } else {
-        // A structural-only line 2 ("Bldg 9", "Floor 2") is the building
-        // the replied unit sits in — kept beside it, never replaced by it,
-        // on the mirror and (through the sync) the primary; the lead
-        // write-back keeps its structural part the same way (codex r18 P1
-        // on #3804).
-        const line2 = [structuralUnitPart(customerRow.address_line2), unitLine].filter(Boolean).join(' ');
+        // A structural-only line 2 ("Bldg 9", "Floor 2") — on the mirror or
+        // only on the primary property — is the building the replied unit
+        // sits in: kept beside it, never replaced by it, on the mirror and
+        // (through the sync) the primary; the lead write-back keeps its
+        // structural part the same way (codex r18 + r19 P1 on #3804).
+        const line2 = [structuralLocator(primaryAtBuilding), unitLine].filter(Boolean).join(' ');
         await trx('customers').where({ id: customerId }).update({ address_line2: line2 });
         // A customer with no primary property row yet (lazy-backfill
         // model, or property persistence gated/failed at call time)

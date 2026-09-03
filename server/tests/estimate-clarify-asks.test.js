@@ -1599,6 +1599,18 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     expect(writeback().customer).toBe('line2_filled');
   });
 
+  test('a structural-only locator stored on the PRIMARY property alone (mirror line 2 blank) is kept beside the replied unit — the explicit-line-2 sync must not erase it (codex r19 P1 on #3804)', async () => {
+    mockState.selectQueue = [[], [], [{ id: 'prop-primary', is_primary: true, address_line1: '1048 Example Lakes Cir', address_line2: 'Bldg 9', city: 'Sarasota', zip: '34232' }]];
+    await reply(
+      { id: 'lead-1', address: null },
+      { id: 'cust-1', address_line1: '1048 Example Lakes Cir', address_line2: null, city: 'Sarasota', zip: '34232' },
+    );
+    expect(mockState.updates.find((u) => u.table === 'customers').payload).toEqual({ address_line2: 'Bldg 9 Apt 204' });
+    expect(mockSyncPrimaryAddress).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1', address_line2: 'Bldg 9 Apt 204' }), expect.anything(), { explicitLine2: true, preserveCoords: true });
+    expect(mockRecordCallProperty).not.toHaveBeenCalled();
+    expect(writeback().customer).toBe('line2_filled');
+  });
+
   test('a customer whose line 2 is blank but whose PRIMARY property row at the building carries Apt 9: the primary is kept, Apt 204 becomes a secondary', async () => {
     mockState.selectQueue = [[], [], [{ id: 'prop-primary', is_primary: true, address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 9', city: 'Sarasota', zip: '34232' }]];
     await reply({ id: 'lead-1', address: null }, { id: 'cust-1', address_line1: '1048 Example Lakes Cir', address_line2: null, city: 'Sarasota', zip: '34232' });
