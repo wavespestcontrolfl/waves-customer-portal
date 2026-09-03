@@ -51,7 +51,8 @@ jest.mock('../models/db', () => {
     };
     q.sum = () => q;
     // A vendor_orders update returns 0 rows when the ledger row already left 'placing' (mockState.ledgerSettled).
-    q.update = async (row) => { mockState.updates.push({ table, row }); return table === 'vendor_orders' && mockState.ledgerSettled && row.status ? 0 : 1; };
+    // (a status transition, or the cap reservation's amount-only write — the green path's order-facts attach carries external_order_number and still lands).
+    q.update = async (row) => { mockState.updates.push({ table, row }); return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
     q.delete = async () => { mockState.deletes.push(table); return 1; };
     let row;
     const returning = async () => {
@@ -199,9 +200,33 @@ test('run-level error releases the claim and propagates', async () => {
   expect(notify).not.toHaveBeenCalled();
 });
 
+test('cap reservation refuses once the claim is no longer placing — the adapter never submits after stale recovery parked it (pre-push P0)', async () => {
+  const dbFn = require('../models/db');
+  expect(await dispatch.reserveUnderCaps(dbFn, 'ledger-1', 9900)).toEqual({ ok: true });
+  mockState.ledgerSettled = true;
+  expect(await dispatch.reserveUnderCaps(dbFn, 'ledger-1', 9900)).toMatchObject({ ok: false, reason: 'claim_lost' });
+  // End to end: the SiteOne adapter's final beforeSubmit sees the refusal and refuses; the park finds the row settled and stands down.
+  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
+  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
+  mockState.product = talstar;
+  mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
+  mockState.ledgerSettled = false;
+  const place = jest.fn(async ({ beforeSubmit }) => {
+    mockState.ledgerSettled = true; // stale recovery parks the claim mid-run
+    const gate = await beforeSubmit(9900);
+    expect(gate).toMatchObject({ ok: false, reason: 'claim_lost' });
+    const err = new Error(gate.message); err.refuse = gate.reason; throw err;
+  });
+  const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, place });
+  expect(r).toMatchObject({ skipped: 'already_settled' });
+  expect(auditVendorOrder).not.toHaveBeenCalled();
+  expect(notify).not.toHaveBeenCalled();
+});
+
 test('vendor call outlives stale recovery: the parked row keeps needs_review, gains the order number, request goes ordered, no placed audit (pre-push P1)', async () => {
-  mockState.ledgerSettled = true; // recoverStalePlacing parked this row while place() ran
   const a = mockAdapter();
+  const inner = a.place;
+  a.place = jest.fn(async (...args) => { const out = await inner(...args); mockState.ledgerSettled = true; return out; }); // recoverStalePlacing parks the row while the vendor call is out, after the cap gate passed
   const r = await run(a);
   expect(r).toMatchObject({ status: 'needs_review', reason: 'placed_after_stale_park', externalOrderNumber: 'SM-1' });
   expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'placed').length).toBe(1); // the conditional attempt only — returned 0 rows

@@ -239,7 +239,12 @@ async function monthlySpentCents(conn, { now = new Date(), excludeId = null } = 
  * scoped advisory lock, sum the month (every non-failed row except this one,
  * reserved `placing` amounts included), compare, and on success write this
  * row's amount_cents in the same transaction — so the next reservation, in
- * any process, sees it. Returns { ok } | { ok:false, reason, message }.
+ * any process, sees it. The write is conditional on the row still being
+ * 'placing': a claim recoverStalePlacing has already parked is no longer
+ * this worker's to spend on, so the reservation REFUSES (claim_lost) and the
+ * adapter — which only ever submits on { ok: true } — never clicks after
+ * ownership is gone (pre-push P0). Returns { ok } | { ok:false, reason,
+ * message }.
  */
 async function reserveUnderCaps(conn, ledgerId, cents, { now = new Date(), env = process.env } = {}) {
   const { perOrder, monthly } = caps(env);
@@ -250,7 +255,8 @@ async function reserveUnderCaps(conn, ledgerId, cents, { now = new Date(), env =
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAPS_LOCK_KEY]);
     const spent = await monthlySpentCents(trx, { now, excludeId: ledgerId });
     if (spent + cents > monthly) return { ok: false, reason: 'over_monthly_cap', message: `${dollars(cents)} would take this month to ${dollars(spent + cents)}, over the monthly cap ${dollars(monthly)}` };
-    await trx('vendor_orders').where({ id: ledgerId }).update({ amount_cents: cents, updated_at: new Date() });
+    const n = await trx('vendor_orders').where({ id: ledgerId, status: 'placing' }).update({ amount_cents: cents, updated_at: new Date() });
+    if (n !== 1) return { ok: false, reason: 'claim_lost', message: 'this order\'s claim was parked by stale recovery while the vendor call ran — nothing submitted; see the Restock tab' };
     return { ok: true };
   });
 }
