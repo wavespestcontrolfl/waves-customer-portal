@@ -535,10 +535,13 @@ async function markCardLinkSendOutcome(visitId, stamp) {
   // the office alert below is the human backstop either way.
   let parked = false;
   try {
-    await db('scheduled_services')
+    // Value-guarded on OUR stamp: zero rows means the claim is no longer
+    // ours (released, adopted, or already parked) — that is NOT parked, and
+    // the alert below says so (pre-push Codex P1 on #3844).
+    const parkedRows = await db('scheduled_services')
       .where({ id: visitId, card_link_sent_at: stamp })
       .update({ card_link_sent_at: CLAIM_PARK_DATE, updated_at: new Date() });
-    parked = true;
+    parked = parkedRows === 1;
   } catch (parkErr) {
     logger.warn(`[appt-card-request] claim park failed for visit ${visitId}: ${parkErr.message}`);
   }
