@@ -131,7 +131,7 @@ const LANE_RUNTIME = {
   lawn_diag_writer: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   wdo_project_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: null },
   // internal_write: a project-scoped lookup persists the answer to projects.wdo_history (admin-projects.js) — Codex r9.
-  wdo_history: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa' },
+  wdo_history: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa' },
 
   // ── Estimates & sales ──
   lead_triage: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
@@ -140,7 +140,7 @@ const LANE_RUNTIME = {
   intent_composer: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', expected_duration_ms: 120_000 },
   commercial_proposal: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy' },
   churn_classify: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
-  signal_detector: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', expected_cadence: 'daily', ...LONG_BATCH },
+  signal_detector: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', ...LONG_BATCH },
   retention_drafts: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M2', ...LONG_BATCH },
 
   // ── Service reports ──
@@ -190,15 +190,16 @@ const LANE_RUNTIME = {
   signup_worker: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: null, ...LONG_BATCH },
   link_investigator: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', ...LONG_BATCH },
   mentions_prober: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'search', fallback_class: 'measurement', eval_family: null, expected_cadence: 'daily', ...LONG_BATCH },
-  mentions_sentiment: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', expected_cadence: 'daily' },
+  mentions_sentiment: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   image_gen: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'image', fallback_class: 'offline', eval_family: null, expected_duration_ms: 180_000 },
   video_gen: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'video', fallback_class: 'offline', eval_family: null, ...LONG_BATCH },
-  events: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', expected_cadence: 'daily', maturity: 'M3', ...LONG_BATCH },
-  ads_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'daily' },
+  events: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M3', ...LONG_BATCH },
+  ads_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null },
 
   // ── Intelligence Bar & knowledge ──
   ib_admin: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'sql_tool', expected_duration_ms: 120_000 },
-  ib_tech: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'sql_tool' },
+  // internal_write: every tech IB request logs an intelligence_bar_queries row and tool use a tool_health_events row — Codex r10.
+  ib_tech: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'sql_tool' },
   ib_tools: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy' },
   chart_builder_image: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   // offline, not interactive: one callAnthropic() with no cross-provider chain and no
@@ -208,7 +209,7 @@ const LANE_RUNTIME = {
   // ai_summary / recommendations; every WikiQA query logs to knowledge_queries.
   knowledge_qa: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa' },
   wiki_qa: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa' },
-  kb_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_cadence: 'daily', ...LONG_BATCH },
+  kb_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
   wiki_compiler: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', ...LONG_BATCH },
   embeddings: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'embedding', fallback_class: 'offline', eval_family: null },
   extreme_tier: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: null, expected_duration_ms: 300_000 },
@@ -222,7 +223,7 @@ const LANE_RUNTIME = {
   agent_lead: { side_effect_class: 'customer_visible', ledger: 'session', fallback_class: 'interactive', eval_family: 'long_running_agent', maturity: 'M3', ...AGENT_SESSION },
   // irreversible_external: distribute_to_social → SocialMedia.publishToAll
   // posts straight to the platforms (content-agent-tools.js) — Codex r2.
-  agent_content: { side_effect_class: 'irreversible_external', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', ...AGENT_SESSION },
+  agent_content: { side_effect_class: 'irreversible_external', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', maturity: 'M3', ...AGENT_SESSION },
   agent_meta: { side_effect_class: 'internal_write', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', ...AGENT_SESSION },
   agent_backlink: { side_effect_class: 'internal_write', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', ...AGENT_SESSION },
   agent_assistant: { side_effect_class: 'customer_visible', ledger: 'session', fallback_class: 'interactive', eval_family: 'long_running_agent', maturity: 'M3', ...AGENT_SESSION },
@@ -230,7 +231,8 @@ const LANE_RUNTIME = {
   // ── Back office ──
   expense_categorize: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   tax_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'weekly', ...LONG_BATCH },
-  inventory_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', expected_duration_ms: 180_000 },
+  // offline: direct Anthropic SDK calls, no second provider, failures reach the Express error path — Codex r10.
+  inventory_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 180_000 },
   job_screen: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
 };
 
