@@ -17,6 +17,16 @@
  * READ-ONLY. No writes, no comms.
  */
 const { getCloseoutStatus } = require('./closeout-status');
+const gates = require('../config/feature-gates');
+
+// GATE_CLOSEOUT_MONEY_COMMS_ALERTS — the comms / invoice / invoiceDelivery
+// facts become per-visit alert issues (and hold the readability floor).
+// OFF (default, dev AND prod): the five legacy facts only — byte-identical
+// to the pre-gate mapping. Read at CALL time (the techTips idiom) so a flip
+// needs no redeploy; fails closed when feature-gates is mocked partially.
+function moneyCommsAlertsEnabled() {
+  return typeof gates.gateEnvValue === 'function' && gates.gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS') === true;
+}
 
 // One status fans out probe groups of up to ~10 concurrent queries; 2 keeps
 // a full sweep's worst case at ~20 in-flight queries so a dashboard poll
@@ -49,6 +59,12 @@ const CLOSEOUT_ALERT_TYPES = Object.freeze({
   // fact reads done/not_required. Issues carry an `identity` including the
   // code so a NEW contradiction on an already-dismissed visit re-surfaces.
   contradiction: 'closeout_contradiction',
+  // Money + comms facts (GATE_CLOSEOUT_MONEY_COMMS_ALERTS): each gets its
+  // own lifecycle key so a dismissed report card never masks a failed
+  // completion notice or an unminted invoice on the same visit.
+  comms: 'completion_notice_failed',
+  invoice: 'invoice_not_minted',
+  invoiceDelivery: 'invoice_delivery_incomplete',
 });
 const CLOSEOUT_ALERT_LABELS = Object.freeze({
   completion_not_committed: 'Completion not committed',
@@ -58,6 +74,9 @@ const CLOSEOUT_ALERT_LABELS = Object.freeze({
   missing_required_photos: 'Missing required photos',
   customer_signature_unverified: 'Customer signature unverified',
   closeout_contradiction: 'Closeout records contradict',
+  completion_notice_failed: 'Completion notice failed',
+  invoice_not_minted: 'Invoice owed but not minted',
+  invoice_delivery_incomplete: 'Invoice or receipt delivery incomplete',
 });
 // Operator copy for the canonical contradiction codes closeout-status
 // emits today; unknown future codes fall back to a humanized code so a new
@@ -76,9 +95,30 @@ const MAPPED_FACT_KEYS = Object.freeze(['completion', 'report', 'reportDelivery'
 // the invoice_* contradictions (pre-push r18 P1) — with facts.invoice
 // 'unknown' those contradictions are silently absent, so treating the read
 // as complete would let an outage clear a contradiction alert and the cron
-// re-fire it on recovery. followUp/license/comms/invoiceDelivery still
-// never hold the floor: they produce no issues here (r14).
+// re-fire it on recovery. followUp/license never hold the floor: they
+// produce no issues here (r14). comms/invoiceDelivery join the set ONLY
+// while the money+comms gate is on — that is when their outage would hide
+// an issue this mapper emits (the gate's one semantic change to holding).
 const ISSUE_INPUT_FACT_KEYS = Object.freeze([...MAPPED_FACT_KEYS, 'invoice']);
+const MONEY_COMMS_INPUT_FACT_KEYS = Object.freeze([...ISSUE_INPUT_FACT_KEYS, 'comms', 'invoiceDelivery']);
+function issueInputFactKeys() {
+  return moneyCommsAlertsEnabled() ? MONEY_COMMS_INPUT_FACT_KEYS : ISSUE_INPUT_FACT_KEYS;
+}
+// Invoice reasons an operator can act on: the two parked manual cases, a
+// frozen required mint that never minted, and the expected-<lane>-not-
+// minted family. The invoice fact never emits `failed`; every other
+// pending reason (awaiting_completion) is transient. `unknown` = outage.
+const ACTIONABLE_INVOICE_PENDING = (reason) => reason === 'parked_manual_refunded_invoice'
+  || reason === 'parked_manual_canceled_setup_fee'
+  || reason === 'frozen_required_mint_not_minted'
+  || /^expected_.+_not_minted$/.test(reason || '');
+// Invoice-delivery pending reasons an operator owns: a paid invoice whose
+// receipt was never enqueued, and a payer-billed invoice never sent. The
+// queue-owned states (receipt_<jobStatus>), the send-window hold,
+// no_invoice_yet (the invoice fact's issue, not this one) and
+// invoice_draft_unsent (the stale-drafts alert owns that population at
+// three days) stay silent; opt-out reads not_required upstream.
+const ACTIONABLE_INVOICE_DELIVERY_PENDING = new Set(['paid_receipt_not_sent', 'payer_invoice_unsent']);
 // Report-delivery reasons that are in flight or held BY DESIGN — not an
 // operator gap (the queue / payment hold / send window owns them).
 const TRANSIENT_DELIVERY_REASONS = new Set([
@@ -93,7 +133,7 @@ const TRANSIENT_DELIVERY_REASONS = new Set([
 function factsFullyKnown(status) {
   if (!status || !status.found) return false;
   const facts = status.facts || {};
-  return ISSUE_INPUT_FACT_KEYS.every((k) => facts[k]?.state !== 'unknown');
+  return issueInputFactKeys().every((k) => facts[k]?.state !== 'unknown');
 }
 
 async function memoisedCloseoutStatus(serviceId, now, fresh = false) {
@@ -211,6 +251,7 @@ function closeoutIssuesForVisit(status) {
       summary: `Completed job has ${actualPhotoCount} of ${requiredPhotoCount} required closeout photo${requiredPhotoCount === 1 ? '' : 's'}.`,
     });
   }
+  if (moneyCommsAlertsEnabled()) issues.push(...moneyCommsIssues(facts));
   // Unevaluated requirement (GH codex r3 P2): a catalog service with
   // requires_customer_signature keeps summary.closedOut false even when every
   // fact is done — closeout-status lists it as requirements.unevaluated
@@ -242,6 +283,53 @@ function closeoutIssuesForVisit(status) {
   return issues;
 }
 
+// Money + comms issues (GATE_CLOSEOUT_MONEY_COMMS_ALERTS). Only what an
+// operator must act on: a completion notice the provider rejected, an
+// invoice that is owed but was never minted (or is parked for a manual
+// bill), and an invoice / receipt that failed to deliver or was never
+// sent. Quiet-hours deferral, sending, recap in flight, queue-owned
+// receipt states, consent blocks and every not_required rule stay silent
+// (owner rulings already encoded in closeout-status). `unknown` never
+// alerts — it holds the floor through factsFullyKnown instead.
+function moneyCommsIssues(facts) {
+  const issues = [];
+  const comms = facts.comms;
+  if (comms?.state === 'failed') {
+    issues.push({
+      type: CLOSEOUT_ALERT_TYPES.comms,
+      fact: 'comms',
+      reason: comms.reason,
+      summary: 'Completion notice to the customer failed to send — resend it from the visit.',
+    });
+  }
+  const invoice = facts.invoice;
+  if (invoice?.state === 'pending' && ACTIONABLE_INVOICE_PENDING(invoice.reason)) {
+    const summary = invoice.reason === 'parked_manual_refunded_invoice'
+      ? 'A refunded invoice sits beside this visit — reconcile and bill it by hand.'
+      : invoice.reason === 'parked_manual_canceled_setup_fee'
+        ? 'The acceptance invoice carrying the setup fee was canceled — bill the visit and the setup fee by hand.'
+        : 'This visit owes an invoice that was never minted — create it before the customer is billed elsewhere.';
+    issues.push({ type: CLOSEOUT_ALERT_TYPES.invoice, fact: 'invoice', reason: invoice.reason, summary });
+  }
+  const delivery = facts.invoiceDelivery;
+  const deliveryOpen = Boolean(delivery)
+    && (delivery.state === 'failed'
+      || (delivery.state === 'pending' && ACTIONABLE_INVOICE_DELIVERY_PENDING.has(delivery.reason)));
+  if (deliveryOpen) {
+    const summary = delivery.reason === 'receipt_no_recipient'
+      ? 'Payment receipt could not be sent — no receipt recipient on file; add an email or mobile for this customer.'
+      : delivery.reason === 'receipt_delivery_exhausted'
+        ? 'Payment receipt delivery failed after retries.'
+        : delivery.reason === 'completion_sms_failed'
+          ? 'Invoice pay-link text failed to send — resend the invoice.'
+          : delivery.reason === 'paid_receipt_not_sent'
+            ? 'Invoice is paid but no receipt was ever sent.'
+            : 'Payer-billed invoice was never sent to the payer.';
+    issues.push({ type: CLOSEOUT_ALERT_TYPES.invoiceDelivery, fact: 'invoiceDelivery', reason: delivery.reason, summary });
+  }
+  return issues;
+}
+
 module.exports = {
   loadCloseoutStatuses,
   closeoutIssuesForVisit,
@@ -249,5 +337,5 @@ module.exports = {
   CLOSEOUT_ALERT_TYPES,
   CLOSEOUT_ALERT_LABELS,
   CLOSEOUT_CONCURRENCY,
-  __private: { memo, openFact },
+  __private: { memo, openFact, moneyCommsIssues },
 };

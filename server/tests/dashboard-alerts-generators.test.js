@@ -334,6 +334,47 @@ describe('Action Inbox generators', () => {
     expect(loadCloseoutStatuses).toHaveBeenCalledWith(['svc-a', 'svc-b', 'svc-c', 'svc-d'], { fresh: false });
   });
 
+  test('closeout_gaps_today: money + comms facts count as members only behind GATE_CLOSEOUT_MONEY_COMMS_ALERTS', async () => {
+    const { loadCloseoutStatuses } = require('../services/closeout-alerts');
+    const { __private } = require('../services/dashboard-alerts');
+    const fact = (state, reason, extra = {}) => ({ state, reason, ...extra });
+    const done = (o = {}) => ({
+      found: true,
+      facts: {
+        completion: fact('done', 'record_exists'), application: fact('done', 'x'), photos: fact('not_required', 'x'),
+        report: fact('done', 'x'), reportDelivery: fact('done', 'x'), invoice: fact('done', 'x'), invoiceDelivery: fact('done', 'x'),
+        comms: fact('done', 'x'), followUp: fact('not_required', 'x'), license: fact('not_required', 'x'), ...o,
+      },
+    });
+    const statuses = () => new Map([
+      ['svc-a', done({ comms: fact('failed', 'completion_sms_failed'), invoice: fact('pending', 'expected_invoice_not_minted'), invoiceDelivery: fact('pending', 'no_invoice_yet') })],
+      ['svc-b', done({ invoiceDelivery: fact('pending', 'receipt_queued'), comms: fact('pending', 'deferred_send_window') })], // transient → silent either way
+    ]);
+    try {
+      __private.resetCloseoutCarry();
+      delete process.env.GATE_CLOSEOUT_MONEY_COMMS_ALERTS;
+      primeDb({ scheduled_services: [{ id: 'svc-a' }, { id: 'svc-b' }] });
+      loadCloseoutStatuses.mockResolvedValueOnce(statuses());
+      expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
+      process.env.GATE_CLOSEOUT_MONEY_COMMS_ALERTS = 'true';
+      __private.resetCloseoutCarry();
+      primeDb({ scheduled_services: [{ id: 'svc-a' }, { id: 'svc-b' }] });
+      loadCloseoutStatuses.mockResolvedValueOnce(statuses());
+      const item = (await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today');
+      expect(item).toMatchObject({ count: 1, members: ['svc-a:completion_notice_failed', 'svc-a:invoice_not_minted'] });
+      expect(item.label).toBe('1 completed visit today not closed out (2 open items)');
+      // A comms outage is now an incomplete read: the gap holds (no members) rather than clearing.
+      __private.resetCloseoutCarry();
+      primeDb({ scheduled_services: [{ id: 'svc-a' }], dashboard_alert_state: { alert_id: 'closeout_gaps_today', current_count: 1, last_label: 'x', last_seen_at: new Date().toISOString() } });
+      loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', done({ comms: fact('unknown', 'no_comms_marker_on_record') })]]));
+      const held = (await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today');
+      expect(held).toMatchObject({ count: 1, heldThroughOutage: true });
+      expect(held.members).toBeUndefined();
+    } finally {
+      delete process.env.GATE_CLOSEOUT_MONEY_COMMS_ALERTS;
+    }
+  });
+
   test('closeout_gaps_today: a lookup outage holds the last-known gap (no clear/re-fire); a complete clean read clears it (codex r5)', async () => {
     const { loadCloseoutStatuses } = require('../services/closeout-alerts');
     const { __private } = require('../services/dashboard-alerts');
