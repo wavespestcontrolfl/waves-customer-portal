@@ -29,13 +29,19 @@ const SCAN_LIMIT = 200;
 /**
  * A name for matching: lowercased, diacritics stripped, punctuation trimmed,
  * whitespace collapsed ("Muñoz-Pérez" → "munoz-perez", "De La Cruz" →
- * "de la cruz"). '' when nothing usable remains.
+ * "de la cruz", "O’Connor" / "O'Connor" / "OConnor" → "oconnor"). '' when
+ * nothing usable remains. Apostrophes go in EVERY form (ASCII ', typographic
+ * ’ ‘, modifier ʼ): Google's display name and the customer record rarely
+ * agree on one, and keeping only the ASCII form let "O’Connor" match a
+ * customer stored "OConnor" while missing one stored "O'Connor" — two such
+ * customers must be two surname matches, not one (GH codex r4 P1). Hyphens
+ * stay: a hyphen joins two surnames, whose suffix is a different surname.
  */
 function normalizeName(value) {
   return String(value || '')
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
-    .replace(/[^a-z'\- ]/g, '')
+    .replace(/[^a-z\- ]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }

@@ -627,12 +627,14 @@ class GoogleBusinessService {
         let result;
         try {
           result = await db.transaction(async (trx) => {
-          const match = await findConfidentClickMatch(row, { conn: trx });
-          if (!match) return { nomatch: true };
-          // The collector entry is a detached payload — re-read the live row.
+          // The collector entry is a detached payload captured under an
+          // EARLIER hold of this lock; a newer runner may have rewritten the
+          // review (reviewer_name at least) in between. Read the live row
+          // FIRST and correlate on ITS fields, so the surname rung never
+          // judges a stale name (GH codex r4 P1).
           const live = await trx('google_reviews')
             .where({ google_review_id: row.google_review_id })
-            .first('id', 'customer_id', 'missing_since', 'star_rating', 'location_id');
+            .first('id', 'customer_id', 'missing_since', 'star_rating', 'location_id', 'reviewer_name', 'review_created_at');
           // Vanished or removal-stamped since the collector queued it: the
           // review is no longer live, so the match-this bell would point at
           // an unusable flow (the removal alert already rang) — handled,
@@ -642,6 +644,8 @@ class GoogleBusinessService {
           // a "come match this" bell for an already-matched review is pure
           // noise — handled, so the caller skips the unlinked notification.
           if (live.customer_id) return { handled: true };
+          const match = await findConfidentClickMatch(live, { conn: trx });
+          if (!match) return { nomatch: true };
           // One click must correspond to ONE eligible review (pre-push P1
           // r6): if another unlinked review also sits inside the click's
           // forward window, the click can't say which of them the customer
@@ -659,7 +663,7 @@ class GoogleBusinessService {
             .whereRaw("(reviewer_name IS NULL OR reviewer_name != '_stats')")
             .where('review_created_at', '>=', new Date(clickedAtMs))
             .where('review_created_at', '<=', new Date(clickedAtMs + AUTO_LINK_MAX_BEFORE_MS));
-          if (match.locationTrusted === true) windowQuery = windowQuery.where('location_id', row.location_id);
+          if (match.locationTrusted === true) windowQuery = windowQuery.where('location_id', live.location_id);
           const windowRows = await windowQuery.limit(10).select('id');
           if (windowRows.some((r) => r.id !== live.id)) return { nomatch: true };
           // Conditional-write guards (pre-push P1 r2): a manual match or a
@@ -722,16 +726,17 @@ class GoogleBusinessService {
       }, { recordHealth: false });
       if (outcome?.skipped || outcome?.nomatch) return false;
       if (!outcome?.linked) return true;
-      const match = outcome.match;
+      const { match, live } = outcome;
       // FYI bell (exception-based ops): say WHAT linked and WHY so a wrong
       // match is one glance + one manual re-match away, not silent. The
       // WHY is the matcher's own evidence — only what the rung checked, with
-      // the real competing-click facts (GH codex r2 P2).
+      // the real competing-click facts (GH codex r2 P2). Display fields come
+      // from the live row the match was judged on, not the payload.
       try {
-        const stars = Number(row.star_rating) || 0;
+        const stars = Number(live.star_rating) || 0;
         await NotificationService.notifyAdmin(
           'review',
-          `Auto-linked Google review from ${row.reviewer_name || 'Anonymous'}`,
+          `Auto-linked Google review from ${live.reviewer_name || 'Anonymous'}`,
           `${stars}-star review was linked by click tracking: the customer tapped their review link ${match.clickOffsetLabel} this review posted (${match.evidence}). Wrong match? Re-match it in Reviews.`,
           {
             link: '/admin/reviews',

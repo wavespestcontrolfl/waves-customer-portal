@@ -334,6 +334,11 @@ describe('reviewerSurnames', () => {
     // (GH codex r1 P1): "De La Cruz" is a candidate surname, and so is "Cruz".
     expect(reviewerSurnames('Maria De La Cruz')).toEqual(['maria de la cruz', 'de la cruz', 'la cruz', 'cruz']);
     expect(reviewerSurnames('José Muñoz-Pérez')).toEqual(['jose munoz-perez', 'munoz-perez']);
+    // Apostrophes in any form never distinguish a surname (GH codex r4 P1);
+    // hyphens do — a hyphen joins two surnames.
+    expect(reviewerSurnames('Pat O’Connor')).toEqual(['pat oconnor', 'oconnor']);
+    expect(reviewerSurnames("Pat O'Connor")).toEqual(['pat oconnor', 'oconnor']);
+    expect(reviewerSurnames('Pat OConnor')).toEqual(['pat oconnor', 'oconnor']);
     expect(reviewerSurnames('SunshineGal88')).toEqual([]);
     expect(reviewerSurnames('Dana B.')).toEqual(['dana b']);
     expect(reviewerSurnames('')).toEqual([]);
@@ -370,6 +375,19 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     expect(await findConfidentClickMatch(REVIEW, { conn })).toMatchObject({ rung: 'click_name', locationTrusted: false });
     // A post-migration pair stamped for the review's location is trusted.
     expect(await findConfidentClickMatch(REVIEW, { conn: makeConn({ clickRows: [northgate(), other()] }) })).toMatchObject({ rung: 'click_name', locationTrusted: true });
+  });
+
+  test('apostrophe forms are ONE surname: "O’Connor" links a lone O\'Connor or OConnor clicker and refuses when both clicked (GH codex r4 P1)', async () => {
+    const review = { ...REVIEW, reviewer_name: 'Pat O’Connor' };
+    const ascii = northgate({ customer_id: 'cust-oconnor-ascii', first_name: 'Pat', last_name: "O'Connor" });
+    const bare = northgate({ customer_id: 'cust-oconnor-bare', first_name: 'Pat', last_name: 'OConnor', redirected_at: '2026-08-07T17:50:00.000Z' });
+    // Either spelling alone corroborates the typographic display name.
+    expect(await findConfidentClickMatch(review, { conn: makeConn({ clickRows: [ascii, other()] }) })).toMatchObject({ customerId: 'cust-oconnor-ascii', rung: 'click_name' });
+    expect(await findConfidentClickMatch(review, { conn: makeConn({ clickRows: [bare, other()] }) })).toMatchObject({ customerId: 'cust-oconnor-bare', rung: 'click_name' });
+    // Both clicked: two surname matches — a human decides. Before the fix the
+    // ASCII apostrophe survived normalization while the typographic one was
+    // dropped, so only "OConnor" matched and the review auto-linked to them.
+    expect(await findConfidentClickMatch(review, { conn: makeConn({ clickRows: [ascii, bare, other()] }) })).toBeNull();
   });
 
   test('evidence states only what the rung checked: the real count of other clickers at this location, or that there were none (GH codex r2 P2, r3 P2)', async () => {

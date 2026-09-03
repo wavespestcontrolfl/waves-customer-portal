@@ -740,7 +740,10 @@ async function searchAttributionCandidates(options = {}) {
     // suffixes are de-accented while LOWER(last_name) keeps accents, and no
     // unaccent extension exists: the lowercase name is ALSO bound as-is, so
     // a "Muñoz-Pérez" reviewer finds the customer whether the record keeps
-    // the accents or dropped them (GH codex r1 P2). Surnames derive from the
+    // the accents or dropped them (GH codex r1 P2). The suffixes also carry
+    // no apostrophe in any form (normalizeName), so the column is compared
+    // apostrophe-free too — "O’Connor" finds a record stored "O'Connor" or
+    // "OConnor" (GH codex r4 P1). Surnames derive from the
     // REVIEWER NAME fallback only — an explicit search-box value keeps the
     // plain field matching ("10 Main Street" must not add every customer
     // surnamed Street, ranked ahead of the address hit; GH codex r2 P2).
@@ -752,7 +755,7 @@ async function searchAttributionCandidates(options = {}) {
         .orWhereRaw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE ?", [likeLower]);
       if (surnames.length) {
         const lower = terms.toLowerCase();
-        this.orWhereRaw(`LOWER(last_name) IN (${surnames.map(() => '?').join(', ')})`, surnames)
+        this.orWhereRaw(`regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g') IN (${surnames.map(() => '?').join(', ')})`, surnames)
           .orWhereRaw("(? = LOWER(last_name) OR ? LIKE ('% ' || LOWER(last_name)))", [lower, lower]);
       }
       this.orWhereILike('phone', like)

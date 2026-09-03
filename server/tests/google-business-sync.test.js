@@ -1733,6 +1733,59 @@ describe('Google Business review sync', () => {
       expect(notifs[0].body).toContain('only click in the window');
     });
 
+    test('correlates on the LIVE row, not the collector payload: a reviewer_name rewritten by a newer runner reaches the matcher and the bell (GH codex r4 P1)', async () => {
+      process.env.GATE_REVIEW_CLICK_AUTOLINK = 'true';
+      const createdAt = new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString();
+      const matcher = jest.fn(async () => ({
+        ...CONFIDENT_MATCH,
+        clickedAt: new Date(Date.parse(createdAt) - 10 * 60000).toISOString(),
+        clickOffsetMs: 10 * 60000,
+        clickOffsetLabel: '10m before',
+        rung: 'click_name',
+        locationTrusted: false,
+        evidence: "the reviewer's last name matches this customer's; no other clicker at this location in the window",
+      }));
+      jest.doMock('../services/review-click-correlation', () => ({
+        AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
+        findConfidentClickMatch: matcher,
+        findLikelyReviewers: jest.fn(async () => []),
+      }));
+      db.__state.rows.customers.push({
+        id: 'cust-clicker', first_name: 'Pat', last_name: 'OConnor',
+        has_left_google_review: false, review_marked_at: null,
+      });
+      db.__state.rows.google_reviews.push({
+        id: 'rev-stale',
+        google_review_id: 'accounts/1/locations/2/reviews/rev-stale',
+        gbp_review_name: 'accounts/1/locations/2/reviews/rev-stale',
+        location_id: 'bradenton',
+        reviewer_name: 'Pat O’Connor', // rewritten by a newer runner after the payload was queued
+        star_rating: 4,
+        review_text: 'Great',
+        review_created_at: createdAt,
+        customer_id: null,
+        missing_since: null,
+        review_reply: null,
+      });
+      // The deferred payload still carries the name the review had when it
+      // was queued, under an earlier hold of the location lock.
+      const linked = await service._attemptClickAutoLink({
+        google_review_id: 'accounts/1/locations/2/reviews/rev-stale',
+        location_id: 'bradenton',
+        reviewer_name: 'SunshineGal88',
+        review_created_at: createdAt,
+        star_rating: 4,
+      });
+      expect(linked).toBe(true);
+      expect(matcher).toHaveBeenCalledTimes(1);
+      expect(matcher.mock.calls[0][0]).toMatchObject({ reviewer_name: 'Pat O’Connor', location_id: 'bradenton', review_created_at: createdAt });
+      const review = db.__state.rows.google_reviews.find(r => r.id === 'rev-stale');
+      expect(review.customer_id).toBe('cust-clicker');
+      const notifs = (db.__state.rows.notifications || []).filter(n => n.category === 'review');
+      expect(notifs).toHaveLength(1);
+      expect(notifs[0].title).toBe('Auto-linked Google review from Pat O’Connor');
+    });
+
     test('a click_name match links with link_source click_auto and carries the matcher\'s own evidence into the bell', async () => {
       process.env.GATE_REVIEW_CLICK_AUTOLINK = 'true';
       jest.doMock('../services/review-click-correlation', () => ({
