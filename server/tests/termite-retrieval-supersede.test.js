@@ -110,6 +110,9 @@ test('a prior episode\'s SAME-DATE unread task is retired before the fresh one i
   expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/supersedes an earlier station-retrieval task/);
   expect(mockNotifyAdmin.mock.calls[0][3].dedupeKey).toBe('termite_station_retrieval:c1:req-1');
+  // A same-key re-raise with a corrected date rewrites the standing row
+  // (notifyAdmin refreshOnDedupe) instead of silently keeping the old one.
+  expect(mockNotifyAdmin.mock.calls[0][3].refreshOnDedupe).toBe(true);
   expect(out).toEqual(expect.objectContaining({ raised: true }));
 });
 

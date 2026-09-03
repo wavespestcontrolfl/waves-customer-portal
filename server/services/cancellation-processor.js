@@ -209,6 +209,10 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
         bell: true,
         link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
         dedupeKey,
+        // A same-key re-raise whose INSTRUCTION changed (a corrected coverage
+        // date on the same request) rewrites the standing row and surfaces
+        // it unread again; identical content stays a plain dedupe.
+        refreshOnDedupe: true,
         metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental, ...(requestId ? { requestId } : {}), ...(retrieveAfter ? { retrieveAfter } : {}) },
         trx,
       }
