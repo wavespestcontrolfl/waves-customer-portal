@@ -758,6 +758,7 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.topDressing ? 'Lawn Top Dressing Service' : null,
     services.lawnPestControl ? 'Lawn Pest Control' : null,
     services.oneTimeMosquito ? 'One-Time Mosquito Treatment' : null,
+    services.pestInitialRoach ? publicQuoteRoachDisplayName('regular') : null,
     services.bedBug ? 'Bed Bug Treatment Service' : null,
     services.rodentInspection ? 'Rodent Inspection Service' : null,
   ].filter(Boolean).join(' + ');
@@ -821,6 +822,7 @@ function buildCompactPublicQuoteServiceInterest(services = {}) {
     services.topDressing ? 'Top Dressing' : null,
     services.lawnPestControl ? 'Lawn Pest' : null,
     services.oneTimeMosquito ? 'One-Time Mosquito' : null,
+    services.pestInitialRoach ? 'Roach' : null,
     services.bedBug ? 'Bed Bug' : null,
     services.rodentInspection ? 'Rodent Inspection' : null,
   ]);
@@ -886,6 +888,10 @@ const PUBLIC_QUOTE_SERVICE_KEYS = [
   // One-time mosquito: priced by treatable lot area from the lookup
   // (service-menu phase 2, 2026-09-03).
   'oneTimeMosquito',
+  // Standalone cockroach treatment (catalog cockroach_control): the
+  // two-treatment package priced as one regular_standalone knockdown
+  // (owner ruling 2026-09-03).
+  'pestInitialRoach',
 ];
 
 const quoteLimiter = rateLimit({
@@ -1422,6 +1428,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // Station / dunk add-ons are staff-scoped on the estimate, never
       // self-selected from an unauthenticated body (they move the price).
       engineInput.services.oneTimeMosquito = {};
+    }
+    if (services.pestInitialRoach) {
+      // Standalone cockroach package: species, severity and the per-estimate
+      // price override are staff-scoped (they move the price / scale) — the
+      // site always prices the native regular_standalone scale.
+      engineInput.services.pestInitialRoach = { roachType: 'regular' };
     }
     if (services.bedBug) {
       engineInput.services.bedBug = publicQuoteBedBugInput(services.bedBug);

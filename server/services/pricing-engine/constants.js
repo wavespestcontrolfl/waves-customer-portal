@@ -175,7 +175,9 @@ const PEST = {
     display: {
       regular: { name: 'Cockroach Treatment Service', treatments: 1 },
       german: { name: 'German Cockroach Treatment', treatments: 1 },
-      regular_standalone: { name: 'Cockroach Treatment Service', treatments: 1 },
+      // Owner ruling 2026-09-03: the standalone product is the two-treatment
+      // package (visit 2 included, booked at completion at no charge).
+      regular_standalone: { name: 'Cockroach Treatment Service', treatments: 2 },
     },
   },
   frequencyDiscounts: {

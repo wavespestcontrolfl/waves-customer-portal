@@ -459,8 +459,12 @@ set by two keys: `oneTimeMosquito` (menu `mosquito_one_time`; priced by
 treatable lot area; station / dunk add-ons are staff-scoped and never
 site-selectable) and menu `lawn_pest_knockdown` → `lawnPestControl`
 (turf-priced on the forwarded track; a lot-only lookup routes it to manual
-review like the lawn programs). Both are additive — no existing key or
-response field changed. Lot-priced keys (`mosquito`, `oneTimeMosquito`,
+review like the lawn programs). Catalog `cockroach_control` → `pestInitialRoach`
+(owner ruling 2026-09-03: the two-treatment package priced as one
+regular_standalone knockdown on the home footprint; species / severity /
+price override stay staff-scoped, the site prices the native scale; the
+included second visit is booked at completion at no charge). All three are
+additive — no existing key or response field changed. Lot-priced keys (`mosquito`, `oneTimeMosquito`,
 `treeShrub`) park as `lot_size_requires_verification` when the lookup
 flagged the lot verify-first; the response is then a manual quote, never a
 price built from the synthetic sqft×4 fallback. `oneTimeMosquito` goes one

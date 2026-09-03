@@ -113,7 +113,7 @@ describe('instant-quote set stays in step with the public quote engine', () => {
     expect(PUBLIC_QUOTE_REQUESTS.pest_general_bimonthly.pest.frequency).toBe('bimonthly');
   });
   test('products with no complete public engine request are never advertised as instant', () => {
-    for (const k of ['cockroach_control', 'wdo_inspection', 'pest_general_semiannual', 'lawn_care_quarterly', 'termite_liquid',
+    for (const k of ['wdo_inspection', 'pest_general_semiannual', 'lawn_care_quarterly', 'termite_liquid',
       'palm_injection', 'bed_bug_treatment', 'dethatching', 'termite_trenching', 'termite_slab_pretreat',
       'lawn_care_one_time', 'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy', 'bee_wasp_removal',
       'plugging', 'top_dressing', 'rodent_exclusion_only']) {

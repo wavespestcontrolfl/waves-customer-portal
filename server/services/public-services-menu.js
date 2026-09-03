@@ -83,15 +83,19 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
   // site-collected grass track rides along (mergeKeyedRequestOptions).
   mosquito_one_time: { oneTimeMosquito: {} },
   lawn_pest_knockdown: { lawnPestControl: {} },
+  // Owner ruling 2026-09-03: cockroach_control is the two-treatment package
+  // priced as ONE standalone knockdown (engine pestInitialRoach on the
+  // regular_standalone footprint scale); the included second visit is booked
+  // at completion at no charge (typed-followup-obligation
+  // TWO_TREATMENT_PACKAGE_KEYS). Species / severity / price override are
+  // staff-scoped — the site prices the native (regular) scale.
+  cockroach_control: { pestInitialRoach: { roachType: 'regular' } },
 });
 // Selectable but NOT instant (quote-on-request), because the public engine
 // needs inputs the website does not collect or returns a manual line:
 //   palm_injection (palm count) · bed_bug_treatment (method) ·
 //   dethatching / termite_trenching / termite_slab_pretreat (quote-required
 //   lines) · lawn_care_quarterly ·
-//   cockroach_control (the catalog row is a two-treatment package with a
-//   required follow-up; the only standalone roach pricer is the single-visit
-//   knockdown — owner ruling pending before it can be instant) ·
 //   lawn_care_one_time (manually scoped: fert / weed / insect — the keyed
 //   request carries no treatment type) · rodent_sanitation_light/standard/heavy
 //   (one engine key covers three rows, so acceptance could stamp no service_id).
