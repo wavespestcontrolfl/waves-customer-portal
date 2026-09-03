@@ -2980,13 +2980,17 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
   // operator has since left never renders under the newly expanded one,
   // and (via the ref check) never OVERWRITES the loaded detail of the row
   // they moved to — that would strand the expanded row on "Loading…"
+  // …and only the LATEST request for that row may write: an expand still in flight when a mutation refetches the
+  // same id must not land last and overwrite the refreshed waiver / paths (same generation guard as the list)
+  const detailGen = useRef(0);
   const loadDetail = async (id) => {
+    const gen = ++detailGen.current;
     try {
       const r = await adminFetch(`/admin/backlink-agent/registry/${id}`);
-      if (expandedRef.current !== id) return;
+      if (expandedRef.current !== id || gen !== detailGen.current) return;
       setDetail({ forId: id, ...r });
     } catch (e) {
-      if (expandedRef.current !== id) return;
+      if (expandedRef.current !== id || gen !== detailGen.current) return;
       setDetail({ forId: id, error: e?.message || "Detail load failed" });
     }
   };

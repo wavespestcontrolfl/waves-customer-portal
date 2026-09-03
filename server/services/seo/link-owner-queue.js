@@ -144,7 +144,13 @@ function waivableFloors(path, domain, policy) {
 // (policy load, selection, the cron lock, a DB blip) must not turn a recorded decision into a 500 — the bumped
 // updated_at already guarantees the nightly run picks the domain up. Reported as skipped: 'failed'.
 async function bestEffortBridge(run, db, opts) {
-  try { return await run(db, opts); } catch (err) {
+  try {
+    const out = await run(db, opts);
+    // the bridge catches a per-domain failure itself and resolves with it in `errors` — to the click that is the same
+    // deferral as a thrown failure: the decision is recorded, the nightly run retries the domain
+    if (Array.isArray(out.errors) && out.errors.length) return { ...out, skipped: 'failed', error: out.errors.join('; ') };
+    return out;
+  } catch (err) {
     require('../logger').error(`[backlink-owner-queue] post-commit bridge run failed for ${(opts.domainIds || []).join(',')}: ${err.message}`);
     return { skipped: 'failed', error: err.message, gated: false, selected: 0, decided: 0, parked: 0, released: 0, aggregateChanges: 0, errors: [err.message] };
   }

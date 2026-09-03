@@ -598,6 +598,14 @@ describe('acquireAnyway', () => {
     for (const s of [inv, ok, none]) expect(waivers(s.db)).toHaveLength(0);
   });
 
+  test('a bridge run that resolves with a per-domain error is reported as deferred (skipped: failed), the waiver still recorded', async () => {
+    const s = scenario({ domain: { agent_state: 'rejected', score: 40 } });
+    const erring = async () => ({ gated: false, selected: 1, decided: 0, parked: 0, released: 0, aggregateChanges: 0, errors: ['example.org: deadlock detected'] });
+    const r = await Q.acquireAnyway(s.db, { domainId: s.d.id, actor: ACTOR, now: NOW, bridge: erring });
+    expect(waivers(s.db)).toHaveLength(1);
+    expect(r.bridge).toMatchObject({ skipped: 'failed', error: expect.stringMatching(/deadlock/) });
+  });
+
   test('a post-commit summary read failure keeps the recorded waiver: an unavailable summary, never a 500', async () => {
     const s = scenario({ domain: { agent_state: 'rejected', score: 40 } });
     s.db._beforeResolve = (table, db) => { if (table === 'seo_link_prospects' && waivers(db).length) throw new Error('connection reset'); };
