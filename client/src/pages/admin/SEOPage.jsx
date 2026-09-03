@@ -3408,6 +3408,13 @@ const ACTION_LABELS = {
   outreach_followup: "send the follow-up",
 };
 const money = (cents) => (cents == null ? "—" : `$${(cents / 100).toFixed(2)}`);
+// "95", "95.5", "95.50" → 9500 / 9550 / 9550; "10.075", "-1", "abc", "" → null
+function dollarsToCents(raw) {
+  const m = /^\s*\$?\s*(\d{1,7})(?:\.(\d{1,2}))?\s*$/.exec(String(raw));
+  if (!m) return null;
+  const cents = Number(m[1]) * 100 + Number((m[2] || "").padEnd(2, "0"));
+  return cents > 0 ? cents : null;
+}
 const compact = (n) => (n == null ? "—" : n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
 
 function OwnerQueuePanel() {
@@ -3450,9 +3457,11 @@ function OwnerQueuePanel() {
     const body = {};
     const raw = amounts[row.id];
     if (row.dimension === "payment" && raw !== undefined && raw !== "") {
-      const cents = Math.round(Number(raw) * 100);
-      if (!Number.isFinite(cents) || cents <= 0) {
-        setError("Enter the amount in dollars, greater than zero.");
+      // a money authorization: the decimal TOKEN becomes integer cents (never through a binary float —
+      // 10.075 * 100 rounds to 1007); more than two fractional digits is refused, not rounded
+      const cents = dollarsToCents(raw);
+      if (cents === null) {
+        setError("Enter the amount in dollars with at most two decimals, greater than zero.");
         setBusy(null);
         return;
       }

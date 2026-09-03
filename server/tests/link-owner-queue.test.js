@@ -177,7 +177,8 @@ describe('approveRow', () => {
     const { db } = await parked();
     const row = openRows(db)[0];
     await Q.approveRow(db, { authorityId: row.id, actor: ACTOR, now: NOW, bridge: inline });
-    await expect(Q.approveRow(db, { authorityId: row.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/approved/) });
+    // released by the approval ⇒ the card is gone (stale-card check); an un-released approved row reads "approved" (see the account-wide test)
+    await expect(Q.approveRow(db, { authorityId: row.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/no longer awaiting/) });
     expect(approvals(db)).toHaveLength(1);
     const human = await parked({ path: { agent_completable: false } });
     await expect(Q.approveRow(human.db, { authorityId: openRows(human.db)[0].id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/human/) });
@@ -196,6 +197,23 @@ describe('approveRow', () => {
     await expect(Q.approveRow(sup.db, { authorityId: uid(), actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 404 });
     for (const s of [human, price, foreign, sup]) expect(approvals(s.db)).toHaveLength(0);
     expect(approvals(odb)).toHaveLength(0);
+  });
+
+  test('a stale card refuses: the domain was rejected / watched or the placement moved since the page loaded', async () => {
+    const { db, d } = await parked();
+    const row = openRows(db)[0];
+    await Q.decideDomain(db, { domainId: d.id, decision: 'rejected', actor: ACTOR, now: NOW });
+    await expect(Q.approveRow(db, { authorityId: row.id, actor: ACTOR, now: LATER, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/left the queue/) });
+    // a worker claim / a Judge move on the placement itself
+    const s2 = await parked();
+    const row2 = openRows(s2.db)[0];
+    placementOf(s2.db, row2).claimed_at = NOW;
+    await expect(Q.approveRow(s2.db, { authorityId: row2.id, actor: ACTOR, now: LATER, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/no longer awaiting/) });
+    placementOf(s2.db, row2).claimed_at = null;
+    placementOf(s2.db, row2).status = 'prospect';
+    await expect(Q.approveRow(s2.db, { authorityId: row2.id, actor: ACTOR, now: LATER, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/no longer awaiting/) });
+    expect(approvals(db)).toHaveLength(N); // the reject audit rows only
+    expect(approvals(s2.db)).toHaveLength(0);
   });
 
   test('payment: the quote is the default amount, max_payable = amount + tolerance, bad amounts refuse', async () => {

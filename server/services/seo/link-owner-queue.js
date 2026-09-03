@@ -196,6 +196,12 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     const row = await trx(AUTH).where({ id: authorityId }).forUpdate().first();
     const domain = await trx('seo_link_domains').where({ id: placement.domain_id }).forUpdate().first();
     if (!row || !domain) refuse(404, 'authority row not found');
+    // the card must still BE a card under the lock: another tab's Reject / Watch, a worker claim or a Judge move
+    // since the page loaded means this approval would authorize something the owner no longer sees
+    const placementNow = await trx('seo_link_prospects').where({ id: placement.id }).forUpdate().first();
+    if (!placementNow || placementNow.status !== PARKED || placementNow.parked_from_status !== PARKABLE || placementNow.claimed_at) refuse(409, `the placement is no longer awaiting your decision (${placementNow ? placementNow.status : 'gone'}) — refresh the queue`);
+    if (!BRIDGE_STATES.includes(domain.agent_state)) refuse(409, `the domain is ${domain.agent_state.replace(/_/g, ' ')} — it left the queue; refresh`);
+    Object.assign(placement, placementNow);
     await loadApprovals(trx, [row]);
     const whyNot = whyNotApprovable(row);
     if (whyNot) refuse(409, `not approvable: ${whyNot}`);
