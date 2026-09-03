@@ -772,9 +772,10 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
       <div style={{ ...eyebrow, marginBottom: SP.xs }}>Common questions</div>
       <div data-glass="soft" role="region" aria-label="Payment questions" style={{ position: 'relative', padding: `0 ${SP.sm}px`, ...PAY_BOX }}>
         <PayFaqItem question="Why is there a card fee, and how do I avoid it?">
-          Credit cards carry a surcharge of up to {pct}% — the exact surcharge and total are shown
-          before you confirm. Debit cards, prepaid cards, and bank transfers have no added card
-          surcharge{zelle ? ', and Zelle has no fees' : ''}.
+          Credit cards entered directly carry a surcharge of up to {pct}% — the exact surcharge and
+          total are shown before you confirm. Apple Pay, Google Pay, and Link are currently charged at
+          the quoted amount with no surcharge, and debit cards, prepaid cards, and bank transfers have
+          no added card surcharge{zelle ? ', and Zelle has no fees' : ''}.
         </PayFaqItem>
         <PayFaqItem question="How long does a bank (ACH) payment take?">
           Bank transfers take a few business days to clear — there’s nothing more you need to do
