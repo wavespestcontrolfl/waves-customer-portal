@@ -1417,7 +1417,9 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     // linkage is the target), customer (locked first), lead; later flag stamps re-read the draft
     // row (existingDraft) once the queue drains.
     mockState.existingDraft = a;
-    mockState.firstQueue = [a, a, { id: 'call-1', customer_id: customerRow?.id || null }, customerRow, leadRow];
+    // The call row is read twice: unlocked for the target, then FOR UPDATE under the customer lock as the recheck.
+    const callRow = { id: 'call-1', customer_id: customerRow?.id || null };
+    mockState.firstQueue = [a, a, callRow, customerRow, ...(customerRow ? [callRow] : []), leadRow];
     const result = await handleClarifyReply({ phone: '+17735550142', body });
     await result.repricePromise;
     return result;
@@ -1451,10 +1453,18 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
   test('an operator relink of the call after the ask parked wins over the cached customer target; an unlink means no customer write', async () => {
     const a = AWAITING();
     mockState.existingDraft = a;
-    mockState.firstQueue = [a, a, { id: 'call-1', customer_id: 'cust-Z' }, { id: 'cust-Z', address_line1: null }, { id: 'lead-1', address: null }];
+    mockState.firstQueue = [a, a, { id: 'call-1', customer_id: 'cust-Z' }, { id: 'cust-Z', address_line1: null }, { id: 'call-1', customer_id: 'cust-Z' }, { id: 'lead-1', address: null }];
     let r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
     expect(mockRecordCallProperty).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-Z' }));
     expect(mockRecordCallProperty).not.toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
+    // A relink landing BETWEEN the unlocked read and the customer lock: the locked recheck sees it and the former customer is skipped.
+    jest.clearAllMocks(); mockState.updates = [];
+    mockState.firstQueue = [a, a, { id: 'call-1', customer_id: 'cust-1' }, { id: 'cust-1', address_line1: null }, { id: 'call-1', customer_id: 'cust-Q' }, { id: 'lead-1', address: null }];
+    r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
+    expect(mockRecordCallProperty).not.toHaveBeenCalled();
+    expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
+    expect(writeback().customer).toBe('call_relinked');
+    expect(mockState.firsts.filter((t) => ['customers', 'call_log'].includes(t)).slice(-2)).toEqual(['customers', 'call_log']);
     jest.clearAllMocks(); mockState.updates = [];
     mockState.firstQueue = [a, a, { id: 'call-1', customer_id: null }, { id: 'lead-1', address: null }];
     r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
@@ -1525,6 +1535,17 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
     expect(mockRecordCallProperty).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', address_line2: 'Apt 204' }));
     expect(writeback()).toEqual(expect.objectContaining({ lead: 'different_building', customer: 'second_property' }));
+    // The customer's OWN (mirror) address gets its primary row first, so the unit lands as the secondary.
+    expect(mockEnsurePrimaryProperty).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1', address_line1: '9 Home St' }), { conn: expect.anything(), source: 'clarify_unit_reply' });
+    expect(mockEnsurePrimaryProperty.mock.invocationCallOrder[0]).toBeLessThan(mockRecordCallProperty.mock.invocationCallOrder[0]);
+  });
+
+  test('existing customer elsewhere with NO primary row yet: the mirror\'s primary is created first and enqueued, the unit is the secondary', async () => {
+    mockEnsurePrimaryProperty.mockResolvedValue({ created: true, propertyId: 'prop-home' });
+    await reply({ id: 'lead-1', address: null }, { id: 'cust-1', address_line1: '9 Home St', address_line2: null, city: 'Venice', zip: '34285' });
+    expect(writeback()).toEqual(expect.objectContaining({ customer: 'second_property', propertyId: 'prop-1', primaryEnsuredId: 'prop-home' }));
+    expect(mockEnqueueCallPropertyLookup).toHaveBeenCalledWith({ propertyId: 'prop-1' });
+    expect(mockEnqueueCallPropertyLookup).toHaveBeenCalledWith({ propertyId: 'prop-home' });
   });
 
   test('an existing BUILDING-LEVEL property row at the address (a manager\'s common-area property, or the call\'s own unitless insert) is preserved — the unit becomes its own row, the old row is never rewritten', async () => {
@@ -1644,6 +1665,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
       { id: 'call-1', customer_id: 'cust-A', twilio_call_sid: 'CA-A', metadata: { lead_id: 'lead-A' } },
       { id: 'lead-A' },
       { id: 'cust-A', address_line1: null },
+      { id: 'call-1', customer_id: 'cust-A' },
       { id: 'lead-A', address: null },
     ];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });

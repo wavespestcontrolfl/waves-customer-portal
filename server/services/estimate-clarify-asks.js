@@ -257,9 +257,23 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
   // address edit takes customer → leads (customer-address-fanout), and the
   // opposite order here could deadlock and roll the whole reply back (codex
   // r2 P1 on #3785). Both write decisions read rows taken after that lock.
-  const customerRow = customerId
+  let customerRow = customerId
     ? await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first()
     : null;
+  // The target customer came from an UNLOCKED read of the call row. With
+  // the customer row now held, re-read the call linkage FOR UPDATE
+  // (customers → call_log — the call pipeline's claim-fence order, never
+  // the reverse) and hold it through the writes: a PUT /calls/:id/customer
+  // relink/unlink landing between the two reads is the durable correction,
+  // so the write to the former customer is skipped, not raced (codex r3 P1
+  // on #3788).
+  if (customerRow && flags.unit_call_log_id) {
+    const cur = await trx('call_log').where({ id: String(flags.unit_call_log_id) }).forUpdate().first('customer_id');
+    if (cur && String(cur.customer_id || '') !== String(customerId)) {
+      out.customer = 'call_relinked';
+      customerRow = null;
+    }
+  }
   if (leadId) {
     // Locked before the fill/append decision — an admin edit landing
     // between an unlocked read and the write would be overwritten (codex
@@ -278,8 +292,8 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
       out.lead = splitStreetLineUnit(leadAddress).unit ? 'already_has_unit' : 'different_building';
     }
   }
-  if (customerId) {
-    if (customerRow) {
+  if (customerId && customerRow) {
+    {
       const { recordCallProperty, syncPrimaryAddress, ensurePrimaryProperty } = require('./customer-properties');
       const { unitLineValueKey } = require('../utils/address-normalizer');
       const ownAddress = String(customerRow.address_line1 || '').trim();
@@ -305,6 +319,15 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
       // call would re-insert the building beside a rewritten row anyway
       // (codex r1 P0 + P1 on #3788; supersedes the #3785 r4 upgrade).
       const recordUnitProperty = async () => {
+        if (ownAddress) {
+          // A populated mirror with no primary row yet (lazy backfill):
+          // recordCallProperty would otherwise make the replied unit the
+          // primary while customers.address_* still points at the
+          // customer's own address (codex r3 P2 on #3788). The mirror's
+          // row is ensured first, so the unit lands as the secondary.
+          const ensured = await ensurePrimaryProperty(customerRow, { conn: trx, source: 'clarify_unit_reply' });
+          if (ensured?.created && ensured.propertyId) out.primaryEnsuredId = String(ensured.propertyId);
+        }
         const rec = await recordCallProperty({
           customerId,
           address_line1: building.street_line_1,
@@ -1192,9 +1215,13 @@ async function handleClarifyReply({ phone, body }) {
     // call-pipeline insert — after commit, fire-and-forget (codex r4 P2 on
     // #3785): the recovery sweep only covers source 'call_pipeline', so
     // without this the row would never gain coordinates or a type.
-    if (locked.unitWriteback?.propertyCreated && locked.unitWriteback.propertyId) {
+    const createdPropertyIds = [
+      locked.unitWriteback?.propertyCreated ? locked.unitWriteback.propertyId : null,
+      locked.unitWriteback?.primaryEnsuredId || null,
+    ].filter(Boolean);
+    for (const propertyId of createdPropertyIds) {
       try {
-        require('./call-property-lookup').enqueueCallPropertyLookup({ propertyId: locked.unitWriteback.propertyId });
+        require('./call-property-lookup').enqueueCallPropertyLookup({ propertyId });
       } catch (enqErr) {
         logger.warn(`[estimate-clarify] property lookup enqueue failed: ${enqErr.message}`);
       }
