@@ -43,10 +43,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => mockGates[gate] !== false),
 }));
 const mockPreDispatchCheck = jest.fn(async () => ({ ok: true }));
-jest.mock('../services/composer-customer-links', () => ({
-  autopayLinkSendCheck: jest.fn(async () => ({ present: false })),
-  bodyMayCarrySecureLink: (b) => /\/secure\//i.test(String(b || '')),
-}));
+jest.mock('../services/composer-customer-links', () => ({ autopayLinkSendCheck: jest.fn(async () => ({ present: false })) }));
 jest.mock('../services/estimate-clarify-asks', () => ({
   claimClarifyDispatch: jest.fn(),
   clarifyPreDispatchCheck: jest.fn(() => mockPreDispatchCheck),
@@ -424,15 +421,4 @@ describe('Auto Pay setup links never ride draft approval (GH Codex #3812 r3 P1)'
     });
   });
 
-  test('a body without /secure never consults the seam', async () => {
-    autopayLinkSendCheck.mockClear();
-    await withServer(async (baseUrl) => {
-      await fetch(`${baseUrl}/admin/drafts/draft-9/revise`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ revisedResponse: 'See you Tuesday' }),
-      });
-    });
-    expect(autopayLinkSendCheck).not.toHaveBeenCalled();
-  });
 });

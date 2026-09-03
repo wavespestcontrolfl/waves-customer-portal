@@ -76,6 +76,7 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.orderBy = jest.fn(() => b);
   b.offset = jest.fn(() => b);
   b.limit = jest.fn(async () => rows);
+  b.select = jest.fn(async () => rows);
   b.first = jest.fn(async () => firstRow);
   b.update = jest.fn(async () => 1);
   return b;
@@ -491,13 +492,14 @@ describe('buildAutopaySetupLink', () => {
 
 describe('autopayLinkSendCheck (delivery seam)', () => {
   const BODY = 'Set it up here: https://portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY';
-  const live = { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() + 86400e3), customer_id: 'c1' };
+  const TOKEN = 'abcDEF123_-xyz789QWERTY';
+  const live = { id: 'r1', kind: 'customer', token: TOKEN, status: 'pending', expires_at: new Date(Date.now() + 86400e3), customer_id: 'c1' };
   beforeEach(() => {
     isEnabled.mockReset().mockImplementation((g) => g === 'autopayCustomerSms');
   });
-  function wire({ row, owner = { phone: '(941) 555-0184' }, template = { is_active: true } }) {
+  function wire({ row, rows, owner = { phone: '(941) 555-0184' }, template = { is_active: true } }) {
     mockBuilders = {
-      appointment_card_requests: chainBuilder({ firstRow: row }),
+      appointment_card_requests: chainBuilder({ rows: rows || (row ? [row] : []) }),
       sms_templates: chainBuilder({ firstRow: template }),
     };
     setupLinkIneligibility.mockReset().mockResolvedValue({ reason: null, customer: owner });
@@ -612,6 +614,32 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
     expect(r.error).toMatch(/not on the Waves portal/);
   });
 
+  test('a backslash-separated path still opens the page — it is normalized and judged', async () => {
+    wire({ row: { ...live, expires_at: new Date(Date.now() - 1000) } });
+    const r = await autopayLinkSendCheck('https://portal.wavespestcontrol.com\\secure\\abcDEF123_-xyz789QWERTY', '9415550184');
+    expect(r.present).toBe(true);
+    expect(r.ok).toBe(false);
+  });
+
+  test('TOKEN-FIRST: a live bearer token anywhere in the text outside a canonical link refuses the send', async () => {
+    wire({ row: live });
+    for (const body of [
+      'Your code: abcDEF123_-xyz789QWERTY',
+      'https://evil.example/go?t=abcDEF123_-xyz789QWERTY',
+      'portal.wavespestcontrol.com/anything/abcDEF123_-xyz789QWERTY',
+    ]) {
+      const r = await autopayLinkSendCheck(body, '9415550184');
+      expect(r.present).toBe(true);
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/not a plain Waves portal link/);
+    }
+  });
+
+  test('a token-shaped run that is no bearer (no row) is not present — one lookup, no refusal', async () => {
+    wire({ rows: [] });
+    expect(await autopayLinkSendCheck('Ref ABCDEFGHIJKLMNOPQRSTUV thanks', '9415550184')).toEqual({ present: false });
+  });
+
   test('a subdomain look-alike is not a Waves link', async () => {
     wire({ row: live });
     const r = await autopayLinkSendCheck('x.portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY', '9415550184');
@@ -631,16 +659,10 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
   });
 
   test('every /secure token is judged — a visit link first does not shadow an Auto Pay link after it', async () => {
-    const rows = {
-      visitTOKENvisitTOKEN00: { ...live, id: 'v1', kind: 'visit' },
-      'abcDEF123_-xyz789QWERTY': { ...live, expires_at: new Date(Date.now() - 1000) },
-    };
-    const acr = chainBuilder();
-    let lastToken = null;
-    acr.where = jest.fn((q) => { lastToken = q?.token; return acr; });
-    acr.first = jest.fn(async () => rows[lastToken] || null);
-    mockBuilders = { appointment_card_requests: acr, sms_templates: chainBuilder({ firstRow: { is_active: true } }) };
-    setupLinkIneligibility.mockReset().mockResolvedValue({ reason: null, customer: { phone: '(941) 555-0184' } });
+    wire({ rows: [
+      { ...live, id: 'v1', kind: 'visit', token: 'visitTOKENvisitTOKEN00' },
+      { ...live, expires_at: new Date(Date.now() - 1000) },
+    ] });
     const body = 'Card: https://portal.wavespestcontrol.com/secure/visitTOKENvisitTOKEN00 and ' + BODY;
     const r = await autopayLinkSendCheck(body, '9415550184');
     expect(r.ok).toBe(false);
@@ -648,16 +670,9 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
   });
 
   test('two Auto Pay links: one owned by another customer refuses the whole send', async () => {
-    const rows = {
-      'abcDEF123_-xyz789QWERTY': { ...live },
-      otherCUSTOMERtoken0000: { ...live, id: 'r2', customer_id: 'c2' },
-    };
     const owners = { c1: { phone: '(941) 555-0184' }, c2: { phone: '+19998887777' } };
-    const acr = chainBuilder(); let lastToken = null;
-    acr.where = jest.fn((q) => { lastToken = q?.token; return acr; });
-    acr.first = jest.fn(async () => rows[lastToken] || null);
+    wire({ rows: [{ ...live }, { ...live, id: 'r2', customer_id: 'c2', token: 'otherCUSTOMERtoken0000' }] });
     setupLinkIneligibility.mockReset().mockImplementation(async (id) => ({ reason: null, customer: owners[id] }));
-    mockBuilders = { appointment_card_requests: acr, sms_templates: chainBuilder({ firstRow: { is_active: true } }) };
     const body = BODY + ' or https://portal.wavespestcontrol.com/secure/otherCUSTOMERtoken0000';
     const r = await autopayLinkSendCheck(body, '9415550184');
     expect(r.ok).toBe(false);

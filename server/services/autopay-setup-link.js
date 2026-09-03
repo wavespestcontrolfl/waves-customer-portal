@@ -197,7 +197,10 @@ async function setupLinkIneligibility(customerId) {
   if (exempt) return { reason: exempt };
 
   const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
-  if (await customerOnAutopay(customer)) return { reason: 'autopay_already_active' };
+  // failClosed: an unreadable payment_methods state must not read as "not
+  // enrolled" — the throw becomes the mint's skip / the seam's 503
+  // (GH Codex #3812 r7 P2).
+  if (await customerOnAutopay(customer, { failClosed: true })) return { reason: 'autopay_already_active' };
   // A PAUSED enrollment is still configured (method + pointer intact) —
   // customerOnAutopay says false, but "set up" here would neither resume
   // the pause nor add anything (GH Codex #3726 r3 P2). Resuming is the

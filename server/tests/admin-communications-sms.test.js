@@ -395,10 +395,10 @@ describe('admin communications SMS route', () => {
       require('../services/autopay-setup-link').setupLinkIneligibility.mockResolvedValue({ reason: null, customer: owner });
       db.mockImplementation((table) => {
         const first = jest.fn();
-        if (table === 'appointment_card_requests') first.mockResolvedValue(row);
-        else if (table === 'sms_templates') first.mockResolvedValue({ is_active: true });
+        if (table === 'sms_templates') first.mockResolvedValue({ is_active: true });
         else if (table === 'customers') first.mockResolvedValue(owner);
-        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), first };
+        const select = jest.fn(async () => (table === 'appointment_card_requests' && row ? [{ token: 'abcDEF123_-xyz789QWERTY', ...row }] : []));
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select };
       });
     }
     const send = (baseUrl, extra = { customerId: 'cust-A' }) => fetch(`${baseUrl}/admin/communications/sms`, {
@@ -450,11 +450,11 @@ describe('admin communications SMS route', () => {
       require('../services/autopay-setup-link').setupLinkIneligibility.mockResolvedValue({ reason: null, customer: { id: 'cust-A', phone: '+15551234567' } });
       db.mockImplementation((table) => {
         const first = jest.fn();
-        if (table === 'appointment_card_requests') first.mockResolvedValue({ id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() - 1000), customer_id: 'cust-A' });
-        else if (table === 'review_requests') first.mockResolvedValue({ id: 'rr-1', customer_id: 'cust-A', status: 'pending', sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123' });
+        if (table === 'review_requests') first.mockResolvedValue({ id: 'rr-1', customer_id: 'cust-A', status: 'pending', sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123' });
         else if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
         else if (table === 'sms_templates') first.mockResolvedValue({ is_active: true });
-        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), first };
+        const select = jest.fn(async () => (table === 'appointment_card_requests' ? [{ id: 'r1', kind: 'customer', token: 'abcDEF123_-xyz789QWERTY', status: 'pending', expires_at: new Date(Date.now() - 1000), customer_id: 'cust-A' }] : []));
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select };
       });
       await withServer(async (baseUrl) => {
         const res = await send(baseUrl, { customerId: 'cust-A', reviewRequestId: 'rr-1', body: `${SECURE_BODY} Review us: portal.wavespestcontrol.com/rate/tok-abc123` });

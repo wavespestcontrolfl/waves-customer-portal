@@ -453,23 +453,22 @@ async function buildAutopaySetupLink(customerId) {
 // 16 random bytes base64url = 22 chars; the visit lane's card requests share
 // the page and the table). Bodies carry the link scheme-stripped
 // (stripSmsLinkScheme), so the match is host + path, scheme optional.
-// Case-insensitive: the React route is not case-sensitive, so /Secure/<tok>
-// still opens the page and must still be judged (GH Codex #3812 r4 P1).
-const SECURE_PATH_RE = /\/secure\/([A-Za-z0-9_-]{16,})/gi;
-
 // Percent-escapes decode before detection: React Router decodes the
 // pathname, so "/secur%65/<token>" still opens the page and must still be
 // judged (GH Codex #3812 r5 P1). Malformed escapes are left as typed.
 function decodeLinkText(body) {
-  return String(body || '').replace(/(?:%[0-9A-Fa-f]{2})+/g, (seq) => {
+  // WHATWG parsing treats a backslash as a path separator for special
+  // schemes — "portal…\\secure\\<token>" still opens the page (r7 P1).
+  return String(body || '').replace(/\\/g, '/').replace(/(?:%[0-9A-Fa-f]{2})+/g, (seq) => {
     try { return decodeURIComponent(seq); } catch { return seq; }
   });
 }
 
-// Cheap presence probe for callers that refuse on presence alone (drafts).
-function bodyMayCarrySecureLink(body) {
-  return /\/secure\//i.test(decodeLinkText(body));
-}
+// Bearer tokens are randomBytes(16).toString('base64url') — 22 URL-safe
+// characters — for both the standalone and the visit lane. A band rather
+// than an exact width so a longer mint never slips past; a run that is no
+// token simply finds no row.
+const TOKEN_RUN_RE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{20,64}(?![A-Za-z0-9_-])/g;
 // Every whitespace-delimited run of the (decoded) body that carries a
 // /secure/ path, with wrapping punctuation shed and a bare "Label:" prefix
 // dropped ("Link:portal…" is how operators type it). Each run is PARSED as
@@ -529,30 +528,53 @@ function canonicalSecureToken(run, host) {
  */
 async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
   const text = decodeLinkText(body);
-  if (!SECURE_PATH_RE.test(text)) return { present: false };
-  SECURE_PATH_RE.lastIndex = 0;
   const refuse = (error) => ({ present: true, ok: false, error });
   const host = new URL(publicPortalUrl()).host.toLowerCase();
-  const tokens = [];
+
+  // 1. Every run carrying a /secure/ path must parse as a canonical link.
+  const canonicalTokens = [];
   for (const run of secureLinkRuns(text)) {
     const token = canonicalSecureToken(run, host);
     if (!token) return refuse('A /secure link in this message is not on the Waves portal — remove it before sending.');
-    if (!tokens.includes(token)) tokens.push(token);
+    if (!canonicalTokens.includes(token)) canonicalTokens.push(token);
   }
-  if (!tokens.length) return refuse('A /secure link in this message is not on the Waves portal — remove it before sending.');
+
+  // 2. TOKEN-FIRST: the bearer is the token, and a working link must carry
+  // it verbatim (decoded above) whatever the surrounding text looks like.
+  // Every token-shaped run is looked up; a live standalone token that is
+  // not inside a canonical link refuses — that closes the obfuscation
+  // class (percent-encoding, backslashes, hostile outer URLs, look-alike
+  // hosts) under one rule instead of one detector per trick.
+  const candidates = [...new Set([...canonicalTokens, ...(text.match(TOKEN_RUN_RE) || [])])];
+  if (!candidates.length) return { present: false };
   const { KIND, setupLinkIneligibility } = require('./autopay-setup-link');
+  const rows = await db('appointment_card_requests')
+    .whereIn('token', candidates)
+    .select('id', 'kind', 'token', 'status', 'expires_at', 'customer_id');
+  const byToken = new Map(rows.filter((r) => r.kind === KIND).map((r) => [r.token, r]));
+  for (const [token] of byToken) {
+    if (!canonicalTokens.includes(token)) {
+      return refuse('An Auto Pay setup link in this message is not a plain Waves portal link — remove it and re-insert it from Insert Link.');
+    }
+  }
   const live = [];
-  for (const token of tokens) {
-    const row = await db('appointment_card_requests')
-      .where({ token })
-      .first('id', 'kind', 'status', 'expires_at', 'customer_id');
-    if (row && row.kind !== KIND) continue;
-    if (!row || row.status !== 'pending' || (row.expires_at && new Date(row.expires_at).getTime() <= Date.now())) {
+  for (const token of canonicalTokens) {
+    const row = byToken.get(token);
+    if (!row) {
+      // A canonical /secure link whose token is unknown or belongs to the
+      // visit lane: the visit lane keeps its own gates; an unknown token is
+      // a dead link.
+      if (rows.some((r) => r.token === token)) continue;
+      return refuse('This Auto Pay setup link is expired or no longer live — remove it and insert a fresh one.');
+    }
+    if (row.status !== 'pending' || (row.expires_at && new Date(row.expires_at).getTime() <= Date.now())) {
       return refuse('This Auto Pay setup link is expired or no longer live — remove it and insert a fresh one.');
     }
     live.push({ token, customerId: row.customer_id });
   }
   if (!live.length) return { present: false };
+
+  // 3. Levers, eligibility, ownership, trust — per live link.
   const lever = await autopaySmsLever();
   if (lever) return refuse(`${AUTOPAY_SKIP_REASONS[lever]} — remove the Auto Pay link before sending.`);
   for (const { customerId } of live) {
@@ -585,5 +607,4 @@ module.exports = {
   AUTOPAY_SKIP_REASONS,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
-  bodyMayCarrySecureLink,
 };
