@@ -1296,7 +1296,10 @@ async function maybeDraftEstimateForCall({
           sa.postal_code = serviceAddressOverride.postal_code || null;
           sa.state = 'FL';
         }
-        if (unitLineOverride && !String(sa.street_line_2 || '').trim()) sa.street_line_2 = String(unitLineOverride);
+        // The customer's texted unit REPLACES whatever the rolling extraction
+        // holds on line 2 — after a reprocess that may be another property's
+        // unit (codex r3 P1).
+        if (unitLineOverride) sa.street_line_2 = String(unitLineOverride);
       }
     }
     // A CONCLUSIVELY clean context retires the call-side conflict verdict.

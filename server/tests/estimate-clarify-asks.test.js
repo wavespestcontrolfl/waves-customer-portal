@@ -1512,9 +1512,9 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
 
   test('legacy in-flight ask (no unit_* targets, call-origin): targets and quote signals come from the unit\'s OWN call row, never the merged generic linkage', async () => {
     const a = AWAITING({ lead_id: 'lead-B', unit_lead_id: undefined, unit_customer_id: undefined, unit_quote_promised: undefined, unit_quote_requested: undefined }, { customer_id: 'cust-B' });
-    // first() order: fresh, call_log (A), lead by A's sid, customer (locked), lead, unsent draft.
+    // first() order: fresh, call_log (A), lead by A's metadata stamp, customer (locked), lead, unsent draft.
     mockState.firstQueue = [a, a,
-      { id: 'call-1', customer_id: 'cust-A', twilio_call_sid: 'CA-A', ai_extraction: { quote_requested: true }, ai_extraction_enriched: null },
+      { id: 'call-1', customer_id: 'cust-A', twilio_call_sid: 'CA-A', metadata: { lead_id: 'lead-A' }, ai_extraction: { quote_requested: true }, ai_extraction_enriched: null, v2_extraction_status: 'valid' },
       { id: 'lead-A' },
       { id: 'cust-A', address_line1: null },
       { id: 'lead-A', address: null },
@@ -1553,6 +1553,32 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     // Both targets were guarded in the locked phase (two estimates updates), and the bedroom one got the operator bell.
     expect(mockState.updates.filter((u) => u.table === 'estimates').length).toBeGreaterThanOrEqual(2);
     expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', 'Bedroom count received — re-price the unit draft', expect.stringMatching(/different estimate/), expect.anything());
+  });
+
+  test('legacy ask: a schema-FAILED V2 payload\'s quote flags are ignored (no re-draft), a valid one counts', async () => {
+    const a = AWAITING({ unit_lead_id: undefined, unit_customer_id: undefined, unit_quote_promised: undefined, unit_quote_requested: undefined });
+    mockState.existingDraft = a;
+    mockState.firstQueue = [a, a,
+      { id: 'call-1', customer_id: 'cust-1', twilio_call_sid: 'CA-1', metadata: { lead_id: 'lead-1' }, ai_extraction: {}, ai_extraction_enriched: { service_request: { quote_requested: true } }, v2_extraction_status: 'schema_failed' },
+      { id: 'lead-1' }, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, null,
+    ];
+    const r1 = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
+    await r1.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+  });
+
+  test('combined reply while the call\'s draft has not committed: the unit re-run has NO supersede target; the bedroom draft is guarded and belled, never archived by the unit run', async () => {
+    const a = AWAITING({ missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-bed' });
+    mockState.existingDraft = a;
+    mockState.firstQueue = [a, a, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, null];
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ lane: 'green', created: true, estimateId: 'est-new' });
+    const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204, 2 bedrooms' });
+    await result.repricePromise;
+    const call = mockMaybeDraftEstimateForCall.mock.calls[0][0];
+    expect(call.supersedeEstimateId).toBeUndefined();
+    expect(call.bedroomCountOverride).toBeUndefined();
+    expect(mockState.updates.some((u) => u.table === 'estimates')).toBe(true);
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', 'Bedroom count received — re-price the unit draft', expect.any(String), expect.anything());
   });
 
   test('unit answered first on a combined ask: the still-open bedroom item re-points to the replacement draft', async () => {

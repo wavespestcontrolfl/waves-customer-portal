@@ -181,14 +181,26 @@ function customerAddressLine(row) {
 async function legacyUnitTargets(trx, flags) {
   const callLogId = flags.unit_call_log_id ? String(flags.unit_call_log_id) : null;
   if (!callLogId) return { leadId: null, customerId: null, quotePromised: false, quoteRequested: false };
-  const callRow = await trx('call_log').where({ id: callLogId }).first('customer_id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched');
+  const callRow = await trx('call_log').where({ id: callLogId })
+    .first('customer_id', 'twilio_call_sid', 'metadata', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status');
   if (!callRow) return { leadId: null, customerId: null, quotePromised: false, quoteRequested: false };
-  const leadRow = callRow.twilio_call_sid
-    ? await trx('leads').where({ twilio_call_sid: callRow.twilio_call_sid }).whereNull('deleted_at').first('id')
-    : null;
   const parse = (v) => { if (!v) return null; if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } } return v; };
+  // The call's durable lead linkage is the metadata stamp — a call that
+  // REUSED an existing lead leaves that lead's twilio_call_sid on its
+  // original call (codex r3 P1; context-builder follows the stamp first).
+  const stampedLeadId = parse(callRow.metadata)?.lead_id || null;
+  const leadRow = stampedLeadId
+    ? await trx('leads').where({ id: String(stampedLeadId) }).whereNull('deleted_at').first('id')
+    : (callRow.twilio_call_sid
+      ? await trx('leads').where({ twilio_call_sid: callRow.twilio_call_sid }).whereNull('deleted_at').first('id')
+      : null);
   const v1 = parse(callRow.ai_extraction) || {};
-  const svc = parse(callRow.ai_extraction_enriched)?.service_request || {};
+  // A schema-failed V2 payload is persisted for audit but excluded from
+  // side effects (call-recording-processor) — read its quote signals only
+  // when the extraction is valid (codex r3 P1).
+  const svc = callRow.v2_extraction_status === 'valid'
+    ? (parse(callRow.ai_extraction_enriched)?.service_request || {})
+    : {};
   return {
     leadId: leadRow?.id ? String(leadRow.id) : null,
     customerId: callRow.customer_id ? String(callRow.customer_id) : null,
@@ -221,7 +233,10 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
     ? await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first()
     : null;
   if (leadId) {
-    const leadRow = await trx('leads').where({ id: leadId }).whereNull('deleted_at').first();
+    // Locked before the fill/append decision — an admin edit landing
+    // between an unlocked read and the write would be overwritten (codex
+    // r3 P2). Customer lock first (above), then the lead: fanout order.
+    const leadRow = await trx('leads').where({ id: leadId }).whereNull('deleted_at').forUpdate().first();
     const leadAddress = String(leadRow?.address || '').trim();
     if (leadRow && !leadAddress) {
       const formatted = normalizeLeadAddress({ line1: building.street_line_1, line2: unitLine, city: building.city, state: 'FL', zip: building.postal_code });
@@ -1039,21 +1054,25 @@ async function handleClarifyReply({ phone, body }) {
       const bedroomTargetId = recorded.includes('bedroom_count') && freshFlags.bedroom_estimate_id
         ? String(freshFlags.bedroom_estimate_id) : null;
       const unitTargetId = unitRedraft?.supersedeEstimateId || null;
-      const lockedEstimateId = unitTargetId || bedroomTargetId;
-      const extraBedroomTarget = bedroomTargetId && unitTargetId && bedroomTargetId !== unitTargetId ? bedroomTargetId : null;
+      // With a unit re-draft in play the guarded/superseded target is the
+      // UNIT's own (possibly none — the call's draft has not committed
+      // yet); the bedroom target is never promoted into its place (codex
+      // r3 P1). Without a unit re-draft, today's bedroom behavior stands.
+      const lockedEstimateId = unitRedraft ? unitTargetId : (unitTargetId || bedroomTargetId);
+      const extraBedroomTarget = unitRedraft && bedroomTargetId && bedroomTargetId !== unitTargetId ? bedroomTargetId : null;
       // Estimate-level send guard, stamped in the SAME locked phase that
       // records the answer: the linked draft's dollars are about to be
       // replaced, so admin send / schedule / public accept refuse it
       // until the replacement lands (repricePendingActive — time-boxed so
       // a process restart can never strand a draft).
       let repriceGuarded = false;
-      const repriceAttempt = lockedEstimateId ? require('crypto').randomUUID() : null;
+      const repriceAttempt = (lockedEstimateId || extraBedroomTarget) ? require('crypto').randomUUID() : null;
       let extraBedroomGuarded = false;
-      if (repriceAttempt) {
+      if (repriceAttempt && lockedEstimateId) {
         repriceGuarded = await setEstimateRepricePending(trx, lockedEstimateId, new Date().toISOString(), repriceAttempt);
-        if (extraBedroomTarget) {
-          extraBedroomGuarded = await setEstimateRepricePending(trx, extraBedroomTarget, new Date().toISOString(), repriceAttempt);
-        }
+      }
+      if (repriceAttempt && extraBedroomTarget) {
+        extraBedroomGuarded = await setEstimateRepricePending(trx, extraBedroomTarget, new Date().toISOString(), repriceAttempt);
       }
       const remaining = freshMissing.filter((item) => !recorded.includes(item));
       const answeredFlagsObj = {
