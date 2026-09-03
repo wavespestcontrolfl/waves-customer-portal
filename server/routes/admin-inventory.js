@@ -3244,7 +3244,7 @@ router.get('/restock-requests', async (req, res, next) => {
         'c.last_name',
         'c.address_line1',
         'c.city',
-        ...(hasOrders ? ['vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at")] : []),
+        ...(hasOrders ? ['vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at"), db.raw("vo.request_payload->>'orderedQuantity' as order_ordered_quantity")] : []),
       )
       .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); })
       .orderByRaw("case prr.priority when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end")
@@ -3289,6 +3289,9 @@ router.get('/restock-requests', async (req, res, next) => {
           error: !row.order_error ? null : showSpend ? row.order_error : String(row.order_error).split(':')[0],
           placedAt: row.order_placed_at || null,
           revokedAt: row.order_revoked_at || null,
+          // What the order actually bought, in the request's unit (packages
+          // round up) — the tab's receive default.
+          orderedQuantity: row.order_placed_at && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null,
         } : null,
         neededBy: row.needed_by,
         reason: row.reason,
@@ -3365,7 +3368,10 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
         err.statusCode = 404;
         throw err;
       }
-      const quantity = numberOrNull(req.body?.quantity) ?? numberOrNull(request.requested_quantity);
+      // Default = what the automatic order actually bought (packages round
+      // up), else the requested figure (Codex r2 P1).
+      const orderedQuantity = await require('../services/procurement/order-dispatch').orderedQuantityFor(trx, request.id);
+      const quantity = numberOrNull(req.body?.quantity) ?? orderedQuantity ?? numberOrNull(request.requested_quantity);
       const unit = String(req.body?.unit || request.unit || product.inventory_unit || '').trim();
       if (!quantity || quantity <= 0 || !unit) {
         const err = new Error('Receive quantity and unit are required');

@@ -164,30 +164,53 @@ const COUNT_PACK_RE = /^(\d+(?:\.\d+)?)\s*(?:each|ea|ct|count|pcs?|pieces?|units
  * Returns { quantity, packSize } or { error, message } — an unreadable or
  * cross-dimension pack size never becomes a number in a cart (Codex r1 P1).
  */
-function vendorOrderQuantity({ adapter, request, pricing }) {
-  const requested = num(request.requested_quantity);
-  const unit = normalizeInventoryUnit(request.unit);
-  if (!requested || requested <= 0 || !unit) return { error: 'no_quantity', message: `request has no positive quantity/unit (${request.requested_quantity} ${request.unit || ''})` };
-  if (!adapter.packagedQuantity) {
-    if (unit !== 'each') return { error: 'count_unit_required', message: `${adapter.key || 'this vendor'} orders by item count, but the request is in ${request.unit}; set the product's inventory unit to each` };
-    return { quantity: Math.ceil(requested), packSize: null };
-  }
-  const packRaw = String(pricing?.quantity || '').trim();
+const measurable = (d) => d === 'volume' || d === 'weight';
+
+// Count-ordering vendors (Sticker Mule): the vendor quantity IS the item
+// count, so the request must be stocked in each.
+function countOrderQuantity({ adapter, requested, unit, requestUnit }) {
+  if (unit !== 'each') return { error: 'count_unit_required', message: `${adapter.key || 'this vendor'} orders by item count, but the request is in ${requestUnit}; set the product's inventory unit to each` };
+  const quantity = Math.ceil(requested);
+  return { quantity, packSize: null, orderedQuantity: quantity };
+}
+
+// Package-ordering vendors (SiteOne): packages = ceil(requested / pack size),
+// same dimension only. orderedQuantity is what those packages hold in the
+// request's unit — the receive default (Codex r2 P1: 130 fl oz asked of a
+// 128 fl oz jug orders 2 jugs = 256 fl oz, and THAT is what arrives).
+function packagedOrderQuantity({ requested, unit, requestUnit, packRaw }) {
   if (unit === 'each') {
     const m = packRaw.match(COUNT_PACK_RE);
     const per = m ? Number(m[1]) : null;
     if (!per || per <= 0) return { error: 'no_pack_size', message: `price row pack size "${packRaw || '—'}" is not a count for a product stocked in each` };
-    return { quantity: Math.ceil(requested / per - 1e-9), packSize: `${per} each` };
+    const quantity = Math.ceil(requested / per - 1e-9);
+    return { quantity, packSize: `${per} each`, orderedQuantity: quantity * per };
   }
   const pack = parsePackSize(packRaw);
   const requestedOz = convertToOz(requested, unit);
   const packOz = pack ? convertToOz(pack.amount, pack.unit) : null;
-  if (!requestedOz || !packOz) return { error: 'no_pack_size', message: `price row pack size "${packRaw || '—'}" cannot be read against a request in ${request.unit}` };
+  if (!requestedOz || !packOz) return { error: 'no_pack_size', message: `price row pack size "${packRaw || '—'}" cannot be read against a request in ${requestUnit}` };
   const reqDim = unitDefinition(unit)?.dimension;
   const packDim = unitDefinition(pack.unit)?.dimension;
-  const measurable = (d) => d === 'volume' || d === 'weight';
-  if (measurable(reqDim) && measurable(packDim) && reqDim !== packDim) return { error: 'pack_unit_mismatch', message: `price row pack size "${packRaw}" (${packDim}) does not match a request in ${request.unit} (${reqDim})` };
-  return { quantity: Math.ceil(requestedOz / packOz - 1e-9), packSize: `${pack.amount} ${pack.unit}` };
+  if (measurable(reqDim) && measurable(packDim) && reqDim !== packDim) return { error: 'pack_unit_mismatch', message: `price row pack size "${packRaw}" (${packDim}) does not match a request in ${requestUnit} (${reqDim})` };
+  const quantity = Math.ceil(requestedOz / packOz - 1e-9);
+  const orderedQuantity = Number(((quantity * packOz) / convertToOz(1, unit)).toFixed(4));
+  return { quantity, packSize: `${pack.amount} ${pack.unit}`, orderedQuantity };
+}
+
+/**
+ * The quantity typed into the VENDOR's order field, derived from the request
+ * (inventory unit) and the eligible price row's pack size — see
+ * countOrderQuantity / packagedOrderQuantity. Returns { quantity, packSize,
+ * orderedQuantity } or { error, message }: an unreadable or cross-dimension
+ * pack size never becomes a number in a cart (Codex r1 P1).
+ */
+function vendorOrderQuantity({ adapter, request, pricing }) {
+  const requested = num(request.requested_quantity);
+  const unit = normalizeInventoryUnit(request.unit);
+  if (!requested || requested <= 0 || !unit) return { error: 'no_quantity', message: `request has no positive quantity/unit (${request.requested_quantity} ${request.unit || ''})` };
+  const args = { adapter, requested, unit, requestUnit: request.unit, packRaw: String(pricing?.quantity || '').trim() };
+  return adapter.packagedQuantity ? packagedOrderQuantity(args) : countOrderQuantity(args);
 }
 
 /**
@@ -243,6 +266,20 @@ async function assertManualActionAllowed(trx, requestId, action) {
   if (action === 'cancel' && row.placed_at && !meta(row.evidence).revokedAt) {
     refuse('auto_order_out', `An automatic order for this request${row.external_order_number ? ` (#${row.external_order_number})` : ''} may already have gone out. Receive it when it arrives, or cancel it with the vendor and record the revoke (ops/agents/auto-order-revoke.js --order=${row.id}) — only then cancel the request.`);
   }
+}
+
+/**
+ * The inventory quantity the automatic order actually bought, in the
+ * request's unit — the receive default (Codex r2 P1). Packages round UP, so
+ * what arrives can exceed requested_quantity (130 fl oz asked of a 128 fl oz
+ * jug = 2 jugs = 256 fl oz); receiving the requested figure would understate
+ * stock and could trigger another order. null when there is no dispatched
+ * automatic order for the request, or its claim recorded no conversion.
+ */
+async function orderedQuantityFor(conn, requestId) {
+  const row = await conn('vendor_orders').where({ restock_request_id: requestId }).whereNotNull('placed_at').first('request_payload');
+  const q = num(meta(row?.request_payload).orderedQuantity);
+  return q && q > 0 ? q : null;
 }
 
 // Month-to-date money that is spent OR may be: live reservations (placing)
@@ -306,8 +343,12 @@ async function findDispatchable(conn = db) {
  */
 async function deliverBell(conn, { notify, ledgerId, requestId, productName, vendorName, title, body }) {
   const notifyAdmin = notify || ((...args) => require('../notification-service').notifyAdmin(...args));
+  // notifyAdmin swallows its own insert/dedupe failures and returns null
+  // (notification-service.js) — a resolved promise is not a landed bell,
+  // only a truthy notification row is (Codex r2 P1).
+  let landed = null;
   try {
-    await notifyAdmin('system', title, body, {
+    landed = await notifyAdmin('system', title, body, {
       bell: true,
       link: RESTOCK_TAB,
       dedupeKey: `auto-order:${ledgerId}`,
@@ -316,6 +357,10 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
     });
   } catch (err) {
     logger.warn(`[order-dispatch] bell failed for ledger ${ledgerId} (re-rung next run): ${err.message}`);
+    return false;
+  }
+  if (!landed) {
+    logger.warn(`[order-dispatch] bell for ledger ${ledgerId} was not persisted (re-rung next run)`);
     return false;
   }
   try {
@@ -351,38 +396,49 @@ async function reringPendingBells({ conn = db, notify = null } = {}) {
   return { rung, pending };
 }
 
-async function park(conn, { ledger, request, product, vendor, adapterKey, reason, message, amountCents = null, evidence = null, status = 'needs_review', notify, placed = null, markRequestOrdered = false }) {
-  const postSubmit = POST_SUBMIT_REASONS.has(reason);
-  if (postSubmit && status !== 'needs_review') throw new Error(`post-submit reason ${reason} must park as needs_review`);
-  const dry = reason === 'dry_run';
-  const bell = {
-    title: dry ? `Auto-order dry run: ${product.name} (${vendor.name})` : `Auto-order ${status === 'failed' ? 'failed' : 'needs review'}: ${product.name} (${vendor.name})`,
-    body: dry
-      ? `SiteOne dry run filled the cart for ${request.requested_quantity} ${request.unit || ''} — total ${dollars(amountCents)}. Nothing was submitted; unset SITEONE_BOT_DRY_RUN to order for real.`
-      : postSubmit
-        ? `${message} Do NOT re-order: check the ${vendor.name} account${placed?.externalOrderNumber ? ` (order ${placed.externalOrderNumber})` : ''} and reconcile by hand — cancel with the vendor or receive the stock; ops/agents/auto-order-revoke.js records the revoke.`
-        : `${message} The restock request stays open — order manually, then mark it ordered.`,
-  };
-  // The bell text is part of the park: persisted with the outcome so a
-  // failed send is re-rung, never lost.
+// The bell a park rings — persisted with the outcome (evidence.bell) so a
+// failed send is re-rung, never lost. Post-submit reasons say do-NOT-re-order.
+function parkBell({ reason, status, product, vendor, request, amountCents, message, placed }) {
+  if (reason === 'dry_run') {
+    return {
+      title: `Auto-order dry run: ${product.name} (${vendor.name})`,
+      body: `SiteOne dry run filled the cart for ${request.requested_quantity} ${request.unit || ''} — total ${dollars(amountCents)}. Nothing was submitted; unset SITEONE_BOT_DRY_RUN to order for real.`,
+    };
+  }
+  const title = `Auto-order ${status === 'failed' ? 'failed' : 'needs review'}: ${product.name} (${vendor.name})`;
+  if (POST_SUBMIT_REASONS.has(reason)) {
+    return { title, body: `${message} Do NOT re-order: check the ${vendor.name} account${placed?.externalOrderNumber ? ` (order ${placed.externalOrderNumber})` : ''} and reconcile by hand — cancel with the vendor or receive the stock; ops/agents/auto-order-revoke.js records the revoke.` };
+  }
+  return { title, body: `${message} The restock request stays open — order manually, then mark it ordered.` };
+}
+
+// The ledger row's parked state. placed_at = when the vendor call was
+// DISPATCHED (every post-submit park): the marker monthlySpentCents counts.
+// A placed order's number/total stay on the row even though it needs a human.
+function parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed }) {
   const patch = { status, error: `${reason}: ${message}`.slice(0, 400), evidence: JSON.stringify({ ...(evidence || {}), bell }), updated_at: new Date() };
   if (amountCents != null) patch.amount_cents = amountCents;
-  // placed_at = when the vendor call was DISPATCHED (placed rows and every
-  // post-submit park): it is the marker monthlySpentCents counts.
   if (postSubmit) patch.placed_at = new Date();
   if (placed) {
-    // The vendor order EXISTS: keep its number/total on the row even though
-    // the outcome needs a human.
     patch.external_order_number = placed.externalOrderNumber || null;
     if (placed.response) patch.response_payload = JSON.stringify(placed.response);
   }
-  // Ledger, request transition (when the order exists) and the critical
-  // audit row commit together — the green path's shape; a crash leaves
-  // either all three or none. The ledger write is CONDITIONAL on the row
-  // still being 'placing': a park only ever moves a live claim, so a row
-  // another dispatcher or pod already settled (placed, or parked by its own
-  // stale recovery) keeps that outcome — no overwrite, no second audit
-  // (pre-push P1).
+  return patch;
+}
+
+/**
+ * Park a live claim as needs_review / failed: ledger, request transition
+ * (when the order exists) and the critical audit row commit together — the
+ * green path's shape; a crash leaves either all three or none. The ledger
+ * write is CONDITIONAL on the row still being 'placing': a row another
+ * dispatcher or pod already settled keeps that outcome — no overwrite, no
+ * second audit (pre-push P1). Then the bell.
+ */
+async function park(conn, { ledger, request, product, vendor, adapterKey, reason, message, amountCents = null, evidence = null, status = 'needs_review', notify, placed = null, markRequestOrdered = false }) {
+  const postSubmit = POST_SUBMIT_REASONS.has(reason);
+  if (postSubmit && status !== 'needs_review') throw new Error(`post-submit reason ${reason} must park as needs_review`);
+  const bell = parkBell({ reason, status, product, vendor, request, amountCents, message, placed });
+  const patch = parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed });
   const transitioned = await conn.transaction(async (trx) => {
     const n = await trx('vendor_orders').where({ id: ledger.id, status: 'placing' }).update(patch);
     if (!n) return false;
@@ -398,107 +454,283 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
   return { requestId: request.id, ledgerId: ledger.id, status, reason, ...(bellDelivered ? {} : { bellPending: true }) };
 }
 
+// Why the sweep's own request is no longer authorized NOW, or null. The
+// request may be days old (a gated run raised it); since then a receive may
+// have landed, automation may be off, the product retired, or its vendor /
+// reorder quantity / unit edited — money is never spent on a superseded
+// configuration (Codex r1 P1 + pre-push P0).
+function claimIneligibility({ product, request, vendor }) {
+  const onHand = num(product.inventory_on_hand);
+  const threshold = num(product.low_stock_threshold);
+  if (product.active === false) return 'product_inactive';
+  if (product.auto_reorder_enabled !== true) return 'auto_reorder_disabled';
+  if (onHand == null || threshold == null) return 'stock_untracked';
+  if (onHand > threshold) return 'stock_no_longer_low';
+  if ((product.auto_reorder_vendor_id || null) !== vendor.id) return 'vendor_changed';
+  if (num(product.reorder_quantity) !== num(request.requested_quantity) || normalizeInventoryUnit(product.inventory_unit) !== normalizeInventoryUnit(request.unit)) return 'quantity_changed';
+  return null;
+}
+
+/**
+ * CLAIM under the request lock + the product row lock: state re-checked,
+ * ledger row inserted 'placing', commit. Returns { skipped[, cancelled] } or
+ * the claim ({ request, vendor, adapterKey, product, ledger, pricing, order }).
+ */
+// The request's vendor must be active, have an adapter, and be gated on.
+async function resolveClaimVendor(trx, { request, registry }) {
+  const m = meta(request.metadata);
+  if (!m.vendorId) return { skipped: 'no_vendor' };
+  const vendor = await trx('vendors').where({ id: m.vendorId }).first('id', 'name', 'code', 'active');
+  const adapterKey = adapterKeyFor(vendor);
+  if (!vendor || vendor.active === false || !adapterKey || !registry[adapterKey]) return { skipped: 'no_adapter' };
+  if (!gateEnvValue(VENDOR_GATE[adapterKey])) return { skipped: 'vendor_gated' };
+  return { vendor, adapterKey, m };
+}
+
+// Withdraw a request the catalog no longer authorizes — the owner's own
+// action or a receive made it moot, no bell. closed_by stays null: a system
+// cancel, not a technician's (the FK is technicians.id).
+async function cancelAtClaim(trx, { request, product, m, ineligible }) {
+  await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({
+    status: 'cancelled',
+    closed_at: new Date(),
+    metadata: JSON.stringify({ ...m, autoOrderCancelled: ineligible, autoOrderCancelledAt: new Date().toISOString() }),
+    updated_at: new Date(),
+  });
+  logger.info(`[order-dispatch] ${product.name}: request ${request.id} cancelled at claim (${ineligible})`);
+  return { skipped: ineligible, cancelled: true };
+}
+
+/**
+ * Under the product row lock: no other live request for the product, and no
+ * prior dispatched order that is neither received nor revoked.
+ *
+ * Sibling check: a manual / forecast request for the same product raised
+ * alongside the auto row (the partial unique index only spans auto rows)
+ * means staff are ordering — never auto-order on top of it (pre-push
+ * audit P0). CONTRACT: every path that creates a restock request (the
+ * readiness exception in admin-protocols.js, the WaveGuard forecast in
+ * admin-inventory.js, the Intelligence Bar tool, the sweep) inserts
+ * inside a transaction that first locks this products_catalog row FOR
+ * UPDATE, so a staff request either commits before this read or waits
+ * for this claim to commit — the read is serialized, not advisory
+ * (pre-push P0). And once this claim commits, those same paths call
+ * assertNoLiveAutoOrder under that lock and REFUSE (409) while the claim
+ * row is placing or dispatched: the lock covers the read, the claim row
+ * covers the vendor call — never both orders.
+ *
+ * Prior-order belt (pre-push P0): a PRIOR automatic order for this product
+ * that was dispatched (placed_at set) and is neither received nor revoked is
+ * stock that may be on its way — never claim a second order on top of it,
+ * however the earlier request was closed. Its park's bell already asked for
+ * the reconciliation.
+ */
+async function lockedProductGuards(trx, { request }) {
+  const sibling = await trx('product_restock_requests').where({ product_id: request.product_id }).whereIn('status', ['open', 'ordered']).whereNot('id', request.id).first('id', 'source', 'status');
+  if (sibling) return { skipped: 'sibling_live_request', sibling };
+  const unreconciled = await trx('vendor_orders as vo')
+    .join('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
+    .where('prr.product_id', request.product_id)
+    .whereNot('prr.id', request.id)
+    .whereNotNull('vo.placed_at')
+    .whereNot('prr.status', 'received')
+    .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
+    .first('vo.id');
+  if (unreconciled) return { skipped: 'prior_order_unreconciled', ledgerId: unreconciled.id };
+  return null;
+}
+
+// The eligible price row is read under the same lock so the claim's payload
+// records the SKU + vendor quantity the order will carry.
+async function insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity }) {
+  const { vendorPricingFor } = require('./auto-reorder');
+  const pricing = await vendorPricingFor(trx, product.id, vendor.id);
+  const order = pricing?.vendor_sku ? vendorOrderQuantity({ adapter: registry[adapterKey], request, pricing }) : null;
+  const payload = { productId: product.id, quantity, unit: request.unit || null, vendorSku: pricing?.vendor_sku || null, vendorQuantity: order?.quantity ?? null, packSize: order?.packSize ?? null, orderedQuantity: order?.orderedQuantity ?? null };
+  const inserted = await trx('vendor_orders').insert({
+    restock_request_id: request.id,
+    vendor_id: vendor.id,
+    adapter: adapterKey,
+    status: 'placing',
+    request_payload: JSON.stringify(payload),
+  }).onConflict('restock_request_id').ignore().returning('*');
+  const ledger = inserted && inserted[0];
+  return { ledger, pricing, order };
+}
+
+async function claimRequest(trx, { requestId, registry }) {
+  const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
+  if (!request) return { skipped: 'not_found' };
+  if (request.status !== 'open' || request.source !== 'auto_reorder') return { skipped: 'not_open_auto_request' };
+  const resolved = await resolveClaimVendor(trx, { request, registry });
+  if (resolved.skipped) return resolved;
+  const { vendor, adapterKey, m } = resolved;
+  const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit');
+  if (!product) return { skipped: 'no_product' };
+  const ineligible = claimIneligibility({ product, request, vendor });
+  if (ineligible) return cancelAtClaim(trx, { request, product, m, ineligible });
+  const guarded = await lockedProductGuards(trx, { request });
+  if (guarded) return guarded;
+  const quantity = Number(request.requested_quantity);
+  if (!Number.isFinite(quantity) || quantity <= 0) return { skipped: 'no_quantity' };
+  const { ledger, pricing, order } = await insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity });
+  if (!ledger) return { skipped: 'already_claimed' };
+  return { request, vendor, adapterKey, product, quantity, ledger, pricing, order };
+}
+
+/**
+ * Binding total BEFORE anything is sent, for adapters that do not quote at
+ * placement (Sticker Mule): the vendor's own figure for this exact order
+ * from history, cap-reserved atomically. Returns { quoteCents } to proceed or
+ * { parked } — the park result to return as this request's outcome.
+ */
+async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quantity, now, env }) {
+  let bq;
+  try { bq = await adapter.bindingQuote({ vendorSku, quantity }); }
+  catch (err) { return { parked: await park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: `binding total lookup failed: ${err.message}` }) }; }
+  if (!bq || !Number.isFinite(bq.cents) || bq.cents <= 0) return { parked: await park(conn, { ...ctx, reason: 'no_binding_total', message: `${vendor.name} has no prior order of item ${vendorSku} at ${quantity} on the account, so there is no binding total to cap; place one identical order by hand first.` }) };
+  const quoteCents = bq.cents;
+  const cap = await reserveUnderCaps(conn, ctx.ledger.id, quoteCents, { now, env });
+  if (!cap.ok) return { parked: await park(conn, { ...ctx, reason: cap.reason, message: `${cap.message} (${vendor.name} total for the last identical order${bq.source ? `, ${bq.source}` : ''})`, amountCents: quoteCents }) };
+  if (adapter.preSubmitTotal !== 'vendor') {
+    // A historical charge is not a vendor-confirmed current total: price,
+    // tax or shipping may have moved since, and a cap can only be
+    // enforced BEFORE money moves. Park with everything the office needs
+    // for a one-minute manual reorder (pre-push audit P0; owner ruling
+    // pending on accepting history-total placement).
+    return { parked: await park(conn, { ...ctx, reason: 'no_vendor_confirmed_total', message: `${vendor.name}'s API confirms no current total before ordering; the last identical order (${bq.source || 'history'}) was ${dollars(quoteCents)}, which fits the caps. Reorder item ${vendorSku} × ${quantity} by hand.`, amountCents: quoteCents }) };
+  }
+  return { quoteCents };
+}
+
+// What an adapter.place() rejection means. Run-level errors are the caller's
+// (claim released, batch aborts); everything else is this request's park.
+function parkForPlaceError(conn, err, { ctx, vendor, quoteCents }) {
+  if (err.refuse) return park(conn, { ...ctx, reason: err.refuse, message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
+  if (err.ambiguous) return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.`, amountCents: quoteCents, evidence: err.evidence || null });
+  return park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
+}
+
+/**
+ * Green path: ledger placed + request ordered + audit in ONE transaction, no
+ * bell — unless the office closed the request mid-flight (one reconcile
+ * bell) or stale recovery already parked the row (the order facts attach to
+ * the park, status stays needs_review, audited placed_after_stale_park).
+ */
+async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
+  const { ledger, request, product, vendor, adapterKey, notify } = ctx;
+  const orderFacts = {
+    external_order_number: placed.externalOrderNumber || null,
+    amount_cents: finalCents,
+    response_payload: placed.response ? JSON.stringify(placed.response) : null,
+    placed_at: new Date(),
+    updated_at: new Date(),
+  };
+  // The office closed the request while the vendor call was in flight: an
+  // order exists that the tab no longer expects — say so once.
+  const closedMidFlightBell = (freshStatus) => ({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(placed.amountCents ?? quoteCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. Reconcile by hand.` });
+  const outcome = await conn.transaction(async (trx) => {
+    const fresh = await trx('product_restock_requests').where({ id: request.id }).forUpdate().first('status');
+    const stillOpen = fresh?.status === 'open';
+    const bell = stillOpen ? null : closedMidFlightBell(fresh?.status);
+    // Green transition only from a row still 'placing' (pre-push P1).
+    const n = await trx('vendor_orders').where({ id: ledger.id, status: 'placing' }).update({
+      ...orderFacts,
+      status: 'placed',
+      evidence: JSON.stringify({ ...(placed.evidence || {}), ...(bell ? { bell } : {}) }),
+      error: stillOpen ? null : `request_state_changed: request was ${fresh?.status || 'missing'} when the order landed`,
+    });
+    if (stillOpen) await trx('product_restock_requests').where({ id: request.id }).update({ status: 'ordered', updated_at: new Date() });
+    if (!n) {
+      await trx('vendor_orders').where({ id: ledger.id }).update({
+        ...orderFacts,
+        error: conn.raw("COALESCE(error, '') || ?", [` | order confirmed placed after stale recovery: ${placed.externalOrderNumber || '?'}`]),
+      });
+      await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed_after_stale_park', amount_cents: finalCents, external_order_number: placed.externalOrderNumber || null, reason: 'the row was parked by stale recovery while the vendor call ran; the order exists', trx });
+      return { bell: null, settledElsewhere: true };
+    }
+    await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed', amount_cents: finalCents, external_order_number: placed.externalOrderNumber || null, trx });
+    return { bell };
+  });
+  const bellDelivered = outcome.bell ? await deliverBell(conn, { notify, ledgerId: ledger.id, requestId: request.id, productName: product.name, vendorName: vendor.name, ...outcome.bell }) : true;
+  logger.info(`[order-dispatch] placed ${vendor.name} order ${placed.externalOrderNumber || '?'} for ${product.name} (${dollars(placed.amountCents ?? quoteCents)})`);
+  return {
+    requestId: request.id,
+    ledgerId: ledger.id,
+    status: outcome.settledElsewhere ? 'needs_review' : 'placed',
+    ...(outcome.settledElsewhere ? { reason: 'placed_after_stale_park' } : {}),
+    externalOrderNumber: placed.externalOrderNumber || null,
+    amountCents: finalCents,
+    ...(bellDelivered ? {} : { bellPending: true }),
+  };
+}
+
+/**
+ * An unexpected error after the claim. After the vendor call the order
+ * exists (or may): a failed ledger / request / audit write is a
+ * reconciliation, NEVER a "failed — order manually" (that is the
+ * double-purchase path). Before it, park as a definite failure rather than
+ * leave a silent 'placing' row. If even the park fails, the outcome is
+ * 'unrecorded' — the run turns red on it (Codex r2 P1) and stale recovery
+ * parks the row next tick.
+ */
+async function settleAfterError(conn, err, { ctx, vendor, submitted, placed, quoteCents }) {
+  const { ledger, request, product } = ctx;
+  logger.error(`[order-dispatch] ${product.name}: ${err.message}`);
+  try {
+    if (submitted) {
+      return await park(conn, { ...ctx, reason: 'persist_after_placement', message: `${vendor.name} order ${placed?.externalOrderNumber || '(number unknown)'}${placed?.amountCents != null ? ` (${dollars(placed.amountCents)})` : ''} was placed but recording it failed: ${err.message}.`, amountCents: placed?.amountCents ?? quoteCents ?? null, evidence: placed?.evidence || null, placed });
+    }
+    return await park(conn, { ...ctx, status: 'failed', reason: 'dispatch_error', message: err.message });
+  } catch (parkErr) {
+    logger.error(`[order-dispatch] could not park ledger ${ledger.id}: ${parkErr.message}`);
+    return { requestId: request.id, ledgerId: ledger.id, status: 'unrecorded', reason: submitted ? 'persist_after_placement' : 'dispatch_error', error: `${err.message}; park failed: ${parkErr.message}` };
+  }
+}
+
 /**
  * Dispatch ONE open auto_reorder request. Returns { requestId, status,
  * reason } and never throws for a per-request outcome; throws only a
  * run-level error (err.runLevel) after releasing the claim.
  */
-async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
-  if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated' };
-  const registry = adapters || loadAdapters();
+// Every adapter needs the eligible price row: it is the vendor/SKU
+// authorization the sweep used, and the pack size the quantity needs. A
+// catalog siteone_sku or the request's cached SKU is not eligibility. Returns
+// the park result, or null when the order is priced and sized.
+function parkIfUnpriced(conn, { ctx, pricing, order, vendor, product }) {
+  if (!pricing?.vendor_sku) return park(conn, { ...ctx, reason: 'no_price', message: `${vendor.name} has no eligible price row (vendor SKU) for ${product.name}; the dispatcher never orders blind.` });
+  if (order.error) return park(conn, { ...ctx, reason: order.error, message: `${order.message}; fix the ${vendor.name} price row's pack size.` });
+  return null;
+}
 
-  // Claim under the request lock: state re-checked, ledger row inserted, commit.
-  const claim = await conn.transaction(async (trx) => {
-    const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
-    if (!request) return { skipped: 'not_found' };
-    if (request.status !== 'open' || request.source !== 'auto_reorder') return { skipped: 'not_open_auto_request' };
-    const m = meta(request.metadata);
-    if (!m.vendorId) return { skipped: 'no_vendor' };
-    const vendor = await trx('vendors').where({ id: m.vendorId }).first('id', 'name', 'code', 'active');
-    const adapterKey = adapterKeyFor(vendor);
-    if (!vendor || vendor.active === false || !adapterKey || !registry[adapterKey]) return { skipped: 'no_adapter' };
-    if (!gateEnvValue(VENDOR_GATE[adapterKey])) return { skipped: 'vendor_gated' };
-    // Product row lock + the sweep's own eligibility, re-checked NOW: the
-    // request may be days old (a gated run raised it), and since then a
-    // receive may have landed, auto-reorder may have been switched off, or
-    // the product retired. Ordering on that request is buying stock nobody
-    // asked for — withdraw it instead, reason on the row, no bell (the
-    // owner's own action or a receive made it moot). (Codex r1 P1)
-    const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit');
-    if (!product) return { skipped: 'no_product' };
-    const onHand = num(product.inventory_on_hand);
-    const threshold = num(product.low_stock_threshold);
-    // The request's cached vendor + quantity must still be the product's
-    // CURRENT configuration: an edit since the sweep (new vendor, new
-    // reorder quantity or unit) supersedes the request, it does not travel
-    // with it.
-    const configChanged = (product.auto_reorder_vendor_id || null) !== vendor.id ? 'vendor_changed'
-      : num(product.reorder_quantity) !== num(request.requested_quantity) || normalizeInventoryUnit(product.inventory_unit) !== normalizeInventoryUnit(request.unit) ? 'quantity_changed'
-        : null;
-    const ineligible = product.active === false ? 'product_inactive'
-      : product.auto_reorder_enabled !== true ? 'auto_reorder_disabled'
-        : onHand == null || threshold == null ? 'stock_untracked'
-          : onHand > threshold ? 'stock_no_longer_low'
-            : configChanged;
-    if (ineligible) {
-      await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({
-        status: 'cancelled',
-        closed_at: new Date(), // closed_by stays null: a system cancel, not a technician's (the FK is technicians.id)
-        metadata: JSON.stringify({ ...m, autoOrderCancelled: ineligible, autoOrderCancelledAt: new Date().toISOString() }),
-        updated_at: new Date(),
-      });
-      logger.info(`[order-dispatch] ${product.name}: request ${request.id} cancelled at claim (${ineligible})`);
-      return { skipped: ineligible, cancelled: true };
-    }
-    // Sibling check: a manual / forecast request for the same product raised
-    // alongside the auto row (the partial unique index only spans auto rows)
-    // means staff are ordering — never auto-order on top of it (pre-push
-    // audit P0). CONTRACT: every path that creates a restock request (the
-    // readiness exception in admin-protocols.js, the WaveGuard forecast in
-    // admin-inventory.js, the Intelligence Bar tool, the sweep) inserts
-    // inside a transaction that first locks this products_catalog row FOR
-    // UPDATE, so a staff request either commits before this read or waits
-    // for this claim to commit — the read is serialized, not advisory
-    // (pre-push P0). And once this claim commits, those same paths call
-    // assertNoLiveAutoOrder under that lock and REFUSE (409) while the claim
-    // row is placing or dispatched: the lock covers the read, the claim row
-    // covers the vendor call — never both orders.
-    const sibling = await trx('product_restock_requests').where({ product_id: request.product_id }).whereIn('status', ['open', 'ordered']).whereNot('id', request.id).first('id', 'source', 'status');
-    if (sibling) return { skipped: 'sibling_live_request', sibling };
-    // Belt to the cancel guard's braces (pre-push P0): a PRIOR automatic
-    // order for this product that was dispatched (placed_at set) and is
-    // neither received nor revoked is stock that may be on its way — never
-    // claim a second order on top of it, however the earlier request was
-    // closed. The earlier park's bell already asked for the reconciliation.
-    const unreconciled = await trx('vendor_orders as vo')
-      .join('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
-      .where('prr.product_id', request.product_id)
-      .whereNot('prr.id', request.id)
-      .whereNotNull('vo.placed_at')
-      .whereNot('prr.status', 'received')
-      .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
-      .first('vo.id');
-    if (unreconciled) return { skipped: 'prior_order_unreconciled', ledgerId: unreconciled.id };
-    const quantity = Number(request.requested_quantity);
-    if (!Number.isFinite(quantity) || quantity <= 0) return { skipped: 'no_quantity' };
-    // The eligible price row is read under the same lock so the claim's
-    // payload records the SKU + vendor quantity the order will carry.
-    const { vendorPricingFor } = require('./auto-reorder');
-    const pricing = await vendorPricingFor(trx, product.id, vendor.id);
-    const order = pricing?.vendor_sku ? vendorOrderQuantity({ adapter: registry[adapterKey], request, pricing }) : null;
-    const inserted = await trx('vendor_orders').insert({
-      restock_request_id: request.id,
-      vendor_id: vendor.id,
-      adapter: adapterKey,
-      status: 'placing',
-      request_payload: JSON.stringify({ productId: product.id, quantity, unit: request.unit || null, vendorSku: pricing?.vendor_sku || null, vendorQuantity: order?.quantity ?? null, packSize: order?.packSize ?? null }),
-    }).onConflict('restock_request_id').ignore().returning('*');
-    const ledger = inserted && inserted[0];
-    if (!ledger) return { skipped: 'already_claimed' };
-    return { request, vendor, adapterKey, product, quantity, ledger, pricing, order };
-  });
-  if (claim.skipped) return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}) };
+// SiteOne's place() needs the vendor login and the cap reservation hook
+// (cart total = screen; checkout total = the binding reservation). A lookup
+// that THROWS (DB hiccup) is run-level: nothing was sent, so the claim is
+// released for tomorrow's tick instead of burning the request's one-shot
+// claim as 'failed' (pre-push P1). A lookup that RETURNS null/incomplete is
+// configuration and parks inside place().
+async function siteonePlaceArgs(conn, { base, vendor, ledger, releaseClaim, now, env }) {
+  let credentials;
+  try { credentials = await getVendorLoginCredentials(conn, vendor.id); }
+  catch (e) { await releaseClaim(); const err = new Error(`vendor credential lookup failed: ${e.message}`); err.runLevel = true; throw err; }
+  return { ...base, credentials, beforeSubmit: (cents) => reserveUnderCaps(conn, ledger.id, cents, { now, env }) };
+}
 
+// Detector: the vendor's read-back total should equal the reserved one. If it
+// came out higher and breaks a cap, the order exists but parks for the owner
+// (cancel with the vendor / revoke); the request is ordered. Returns the park
+// result, or null when the final total fits.
+async function parkIfOverCapAfterPlacement(conn, { adapter, ctx, vendor, ledger, placed, finalCents, quoteCents, now, env }) {
+  if (adapter.quotesAtPlace || finalCents == null || finalCents <= (quoteCents ?? 0)) return null;
+  const finalCap = await reserveUnderCaps(conn, ledger.id, finalCents, { now, env });
+  if (finalCap.ok) return null;
+  return park(conn, { ...ctx, markRequestOrdered: true, reason: 'over_cap_after_placement', message: `${vendor.name} charged ${dollars(finalCents)} for order ${placed.externalOrderNumber || '?'}: ${finalCap.message}.`, amountCents: finalCents, evidence: placed.evidence || null, placed });
+}
+
+// Stages after a committed claim: price → binding total → vendor call →
+// post-submit detector → record. Every exit is a park, a record, or a
+// run-level throw after releasing the claim.
+async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
   const { request, vendor, adapterKey, product, ledger, pricing, order } = claim;
   const adapter = registry[adapterKey];
   const ctx = { ledger, request, product, vendor, adapterKey, notify };
@@ -506,136 +738,43 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
   let submitted = false; // true once the vendor call left the process
   let placed = null;
   let quoteCents = null;
-
   try {
-    // Every adapter needs the eligible price row: it is the vendor/SKU
-    // authorization the sweep used, and the pack size the quantity needs.
-    // A catalog siteone_sku or the request's cached SKU is not eligibility.
-    if (!pricing?.vendor_sku) return await park(conn, { ...ctx, reason: 'no_price', message: `${vendor.name} has no eligible price row (vendor SKU) for ${product.name}; the dispatcher never orders blind.` });
-    if (order.error) return await park(conn, { ...ctx, reason: order.error, message: `${order.message}; fix the ${vendor.name} price row's pack size.` });
+    const unpriced = await parkIfUnpriced(conn, { ctx, pricing, order, vendor, product });
+    if (unpriced) return unpriced;
     const vendorSku = pricing.vendor_sku;
     const quantity = order.quantity;
-
     if (!adapter.quotesAtPlace) {
-      // The vendor's OWN total for this exact order, read before anything is
-      // sent. A missing match refuses; a read failure is a definite
-      // pre-submit failure (nothing was ordered).
-      let bq;
-      try { bq = await adapter.bindingQuote({ vendorSku, quantity }); }
-      catch (err) { return await park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: `binding total lookup failed: ${err.message}` }); }
-      if (!bq || !Number.isFinite(bq.cents) || bq.cents <= 0) return await park(conn, { ...ctx, reason: 'no_binding_total', message: `${vendor.name} has no prior order of item ${vendorSku} at ${quantity} on the account, so there is no binding total to cap; place one identical order by hand first.` });
-      quoteCents = bq.cents;
-      const cap = await reserveUnderCaps(conn, ledger.id, quoteCents, { now, env });
-      if (!cap.ok) return await park(conn, { ...ctx, reason: cap.reason, message: `${cap.message} (${vendor.name} total for the last identical order${bq.source ? `, ${bq.source}` : ''})`, amountCents: quoteCents });
-      if (adapter.preSubmitTotal !== 'vendor') {
-        // A historical charge is not a vendor-confirmed current total: price,
-        // tax or shipping may have moved since, and a cap can only be
-        // enforced BEFORE money moves. Park with everything the office needs
-        // for a one-minute manual reorder (pre-push audit P0; owner ruling
-        // pending on accepting history-total placement).
-        return await park(conn, { ...ctx, reason: 'no_vendor_confirmed_total', message: `${vendor.name}'s API confirms no current total before ordering; the last identical order (${bq.source || 'history'}) was ${dollars(quoteCents)}, which fits the caps. Reorder item ${vendorSku} × ${quantity} by hand.`, amountCents: quoteCents });
-      }
+      const binding = await resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quantity, now, env });
+      if (binding.parked) return binding.parked;
+      quoteCents = binding.quoteCents;
     }
-
-    const placeArgs = { vendorSku, quantity, quoteCents };
-    if (adapterKey === 'siteone') {
-      // A lookup that THROWS (DB hiccup) is run-level: nothing was sent, so
-      // the claim is released for tomorrow's tick instead of burning the
-      // request's one-shot claim as 'failed' (pre-push P1). A lookup that
-      // RETURNS null/incomplete is configuration and parks inside place().
-      try { placeArgs.credentials = await getVendorLoginCredentials(conn, vendor.id); }
-      catch (e) { await releaseClaim(); const err = new Error(`vendor credential lookup failed: ${e.message}`); err.runLevel = true; throw err; }
-      // Cart total = screen; checkout total = the binding reservation.
-      placeArgs.beforeSubmit = (cents) => reserveUnderCaps(conn, ledger.id, cents, { now, env });
-    }
-
+    const base = { vendorSku, quantity, quoteCents };
+    const placeArgs = adapterKey === 'siteone' ? await siteonePlaceArgs(conn, { base, vendor, ledger, releaseClaim, now, env }) : base;
     try {
       placed = await adapter.place(placeArgs);
     } catch (err) {
       if (err.runLevel) { await releaseClaim(); throw err; }
-      if (err.refuse) return await park(conn, { ...ctx, reason: err.refuse, message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
-      if (err.ambiguous) {
-        submitted = true;
-        return await park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.`, amountCents: quoteCents, evidence: err.evidence || null });
-      }
-      return await park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
+      if (err.ambiguous) submitted = true;
+      return await parkForPlaceError(conn, err, { ctx, vendor, quoteCents });
     }
     if (placed.dryRun) return await park(conn, { ...ctx, reason: 'dry_run', message: 'dry run', amountCents: placed.amountCents, evidence: placed.evidence || null });
     submitted = true; // from here every failure is post-placement: needs_review, never "order manually"
     const finalCents = placed.amountCents ?? quoteCents ?? null;
-
-    // Detector: the vendor's read-back total should equal the reserved one.
-    // If it came out higher and breaks a cap, the order exists but parks for
-    // the owner (cancel with the vendor / revoke); the request is ordered.
-    if (!adapter.quotesAtPlace && finalCents != null && finalCents > (quoteCents ?? 0)) {
-      const finalCap = await reserveUnderCaps(conn, ledger.id, finalCents, { now, env });
-      if (!finalCap.ok) {
-        return await park(conn, { ...ctx, markRequestOrdered: true, reason: 'over_cap_after_placement', message: `${vendor.name} charged ${dollars(finalCents)} for order ${placed.externalOrderNumber || '?'}: ${finalCap.message}.`, amountCents: finalCents, evidence: placed.evidence || null, placed });
-      }
-    }
-
-    // Green path: ledger placed + request ordered + audit, one transaction, no bell.
-    const outcome = await conn.transaction(async (trx) => {
-      const fresh = await trx('product_restock_requests').where({ id: request.id }).forUpdate().first('status');
-      const stillOpen = fresh?.status === 'open';
-      // The office closed the request while the vendor call was in flight:
-      // an order exists that the tab no longer expects — say so once (the
-      // bell is persisted with the outcome, like a park's).
-      const bell = stillOpen ? null : { title: `Auto-order placed on a ${fresh?.status || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(placed.amountCents ?? quoteCents)}) landed after the restock request was marked ${fresh?.status || 'missing'}. Reconcile by hand.` };
-      const orderFacts = {
-        external_order_number: placed.externalOrderNumber || null,
-        amount_cents: finalCents,
-        response_payload: placed.response ? JSON.stringify(placed.response) : null,
-        placed_at: new Date(),
-        updated_at: new Date(),
-      };
-      // Green transition only from a row still 'placing' (pre-push P1): a
-      // SiteOne run past the 30-minute mark may already have been parked
-      // needs_review by recoverStalePlacing ("may or may not have gone out").
-      const n = await trx('vendor_orders').where({ id: ledger.id, status: 'placing' }).update({
-        ...orderFacts,
-        status: 'placed',
-        evidence: JSON.stringify({ ...(placed.evidence || {}), ...(bell ? { bell } : {}) }),
-        error: stillOpen ? null : `request_state_changed: request was ${fresh?.status || 'missing'} when the order landed`,
-      });
-      if (!n) {
-        // Now we KNOW it went out: attach the order's number/total to the
-        // parked row (status stays needs_review — its do-not-re-order bell
-        // is still the right instruction), move the request to ordered so
-        // the tab expects the stock, and audit the confirmation — never a
-        // second 'placed' outcome over the park.
-        await trx('vendor_orders').where({ id: ledger.id }).update({
-          ...orderFacts,
-          error: conn.raw("COALESCE(error, '') || ?", [` | order confirmed placed after stale recovery: ${placed.externalOrderNumber || '?'}`]),
-        });
-        if (stillOpen) await trx('product_restock_requests').where({ id: request.id }).update({ status: 'ordered', updated_at: new Date() });
-        await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed_after_stale_park', amount_cents: finalCents, external_order_number: placed.externalOrderNumber || null, reason: 'the row was parked by stale recovery while the vendor call ran; the order exists', trx });
-        return { stillOpen, bell: null, settledElsewhere: true };
-      }
-      if (stillOpen) await trx('product_restock_requests').where({ id: request.id }).update({ status: 'ordered', updated_at: new Date() });
-      await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed', amount_cents: finalCents, external_order_number: placed.externalOrderNumber || null, trx });
-      return { stillOpen, bell };
-    });
-    const bellDelivered = outcome.bell ? await deliverBell(conn, { notify, ledgerId: ledger.id, requestId: request.id, productName: product.name, vendorName: vendor.name, ...outcome.bell }) : true;
-    logger.info(`[order-dispatch] placed ${vendor.name} order ${placed.externalOrderNumber || '?'} for ${product.name} (${dollars(placed.amountCents ?? quoteCents)})`);
-    return { requestId: request.id, ledgerId: ledger.id, status: outcome.settledElsewhere ? 'needs_review' : 'placed', ...(outcome.settledElsewhere ? { reason: 'placed_after_stale_park' } : {}), externalOrderNumber: placed.externalOrderNumber || null, amountCents: finalCents, ...(bellDelivered ? {} : { bellPending: true }) };
+    const overCap = await parkIfOverCapAfterPlacement(conn, { adapter, ctx, vendor, ledger, placed, finalCents, quoteCents, now, env });
+    if (overCap) return overCap;
+    return await recordPlaced(conn, { ctx, placed, finalCents, quoteCents });
   } catch (err) {
     if (err.runLevel) throw err;
-    logger.error(`[order-dispatch] ${product.name}: ${err.message}`);
-    try {
-      // After the vendor call the order exists (or may): a failed ledger /
-      // request / audit write is a reconciliation, NEVER a "failed — order
-      // manually" (that is the double-purchase path). Before it, park as a
-      // definite failure rather than leave a silent 'placing' row.
-      if (submitted) {
-        return await park(conn, { ...ctx, reason: 'persist_after_placement', message: `${vendor.name} order ${placed?.externalOrderNumber || '(number unknown)'}${placed?.amountCents != null ? ` (${dollars(placed.amountCents)})` : ''} was placed but recording it failed: ${err.message}.`, amountCents: placed?.amountCents ?? quoteCents ?? null, evidence: placed?.evidence || null, placed });
-      }
-      return await park(conn, { ...ctx, status: 'failed', reason: 'dispatch_error', message: err.message });
-    } catch (parkErr) {
-      logger.error(`[order-dispatch] could not park ledger ${ledger.id}: ${parkErr.message}`);
-      return { requestId: request.id, ledgerId: ledger.id, status: 'placing', reason: 'dispatch_error', error: err.message };
-    }
+    return settleAfterError(conn, err, { ctx, vendor, submitted, placed, quoteCents });
   }
+}
+
+async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
+  if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated' };
+  const registry = adapters || loadAdapters();
+  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry }));
+  if (claim.skipped) return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}) };
+  return dispatchClaimed(conn, claim, { registry, notify, now, env });
 }
 
 // A `placing` row older than this had its process die mid-dispatch: the
@@ -654,6 +793,7 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
     .select('vo.id', 'vo.adapter', 'vo.amount_cents', 'vo.created_at', 'prr.id as request_id', 'pc.name as product_name', 'v.id as vendor_id', 'v.name as vendor_name');
   const recovered = [];
   const bellPending = [];
+  const unrecovered = [];
   for (const row of stale) {
     try {
       const parked = await park(conn, {
@@ -664,10 +804,13 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
       recovered.push(row.id);
       if (parked.bellPending) bellPending.push(row.id);
     } catch (err) {
+      // A possibly-submitted order still sitting 'placing' with no bell: the
+      // run must go red on it, not report success (Codex r2 P1).
       logger.error(`[order-dispatch] stale placing ${row.id} not recovered: ${err.message}`);
+      unrecovered.push(row.id);
     }
   }
-  return { recovered, bellPending };
+  return { recovered, bellPending, unrecovered };
 }
 
 async function runVendorOrderDispatch({ conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
@@ -699,6 +842,11 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
   if (runLevelError) throw runLevelError;
   const problems = [];
   if (failed.length) problems.push(`${failed.length} order(s) failed (${failed.map((f) => f.reason).join(', ')})`);
+  // A vendor call that ran but whose outcome could not be written — the
+  // order may exist with no ledger state and no bell (Codex r2 P1).
+  const unrecorded = results.filter((r) => r.status === 'unrecorded');
+  if (unrecorded.length) problems.push(`${unrecorded.length} outcome(s) UNRECORDED — reconcile by hand (ledger ${unrecorded.map((r) => r.ledgerId).join(', ')})`);
+  if (recovered.unrecovered.length) problems.push(`${recovered.unrecovered.length} stale placing row(s) could not be parked (ledger ${recovered.unrecovered.join(', ')})`);
   // An undelivered bell is a parked order nobody knows about: red until it lands.
   if (bellsPending.length) problems.push(`${bellsPending.length} bell(s) not delivered, re-rung next run (ledger ${bellsPending.join(', ')})`);
   if (problems.length) throw new Error(`vendor order dispatch: ${problems.join('; ')}`);
@@ -717,6 +865,7 @@ module.exports = {
   vendorOrderQuantity,
   assertNoLiveAutoOrder,
   assertManualActionAllowed,
+  orderedQuantityFor,
   AUTO_ORDER_GATE: GATE,
   _internals: { adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS },
 };

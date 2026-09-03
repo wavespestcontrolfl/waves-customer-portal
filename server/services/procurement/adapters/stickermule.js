@@ -102,29 +102,27 @@ function orderTotalCents(order) {
   return null;
 }
 
-async function place({ vendorSku, quantity, quoteCents = null }, { fetchImpl = fetch } = {}) {
-  if (!configured()) throw new RefusedError('no_api_key', 'STICKERMULE_API_KEY is not set');
-  const qty = Math.round(Number(quantity));
-  if (!Number.isFinite(qty) || qty <= 0) throw new RefusedError('bad_quantity', `quantity ${quantity} is not a positive count`);
-
-  // Everything below, up to the POST, is read-only: a refusal here leaves no
-  // order behind.
+// Account prerequisites, all read-only: the saved item that IS this SKU, and
+// exactly one address + one payment method. A refusal here leaves no order.
+async function resolveAccountPrerequisites({ vendorSku, fetchImpl }) {
   const items = listOf(await call('GET', '/api/items', null, { fetchImpl }), 'items');
   const item = items.find((i) => String(i?.id) === String(vendorSku));
   if (!item) throw new RefusedError('item_not_found', `Sticker Mule item ${vendorSku} is not on the account (reorder-only API: place the first order by hand)`);
-
   const addresses = listOf(await call('GET', '/api/addresses', null, { fetchImpl }), 'addresses');
   if (addresses.length !== 1) throw new RefusedError(addresses.length ? 'multiple_addresses' : 'no_address', `account has ${addresses.length} shipping addresses; exactly one is required`);
   const payments = listOf(await call('GET', '/api/payments', null, { fetchImpl }), 'payments');
   if (payments.length !== 1) throw new RefusedError(payments.length ? 'multiple_payments' : 'no_payment', `account has ${payments.length} payment methods; exactly one is required`);
+  return { item, address: addresses[0], payment: payments[0] };
+}
 
-  const request = { items: [{ id: item.id, quantity: qty }], addressId: addresses[0].id, paymentId: payments[0].id };
+// The POST and its order number. The POST left the process: a timeout, a 5xx,
+// or a missing number may still mean an order exists — `ambiguous`, never
+// re-POSTed; the dispatcher parks it for a human.
+async function submitOrder(request, { fetchImpl }) {
   let response;
   try {
     response = await call('POST', '/api/orders', request, { fetchImpl });
   } catch (err) {
-    // The POST left the process: a timeout or a 5xx may still have created
-    // the order. Never re-POST — the dispatcher parks it for a human.
     err.ambiguous = true;
     throw err;
   }
@@ -135,23 +133,32 @@ async function place({ vendorSku, quantity, quoteCents = null }, { fetchImpl = f
     err.body = response;
     throw err;
   }
+  return { response, number: String(number) };
+}
 
-  // The pre-check price is a stale quote; the ledger stores what the vendor
-  // actually charged when the list exposes it. A failed read-back is not an
-  // order failure — fall back to the quote and flag it in evidence.
-  let amountCents = null;
-  let readBack = null;
+// What the vendor actually charged, from the order list. A failed read-back
+// is not an order failure — { amountCents: null } and the caller falls back
+// to the quote, flagged in evidence.
+async function readBackTotal(number, { fetchImpl }) {
   try {
     const orders = listOf(await call('GET', '/api/orders', null, { fetchImpl }), 'orders');
-    readBack = orders.find((o) => String(o?.number) === String(number)) || null;
-    amountCents = orderTotalCents(readBack);
-  } catch { readBack = null; }
+    const readBack = orders.find((o) => String(o?.number) === String(number)) || null;
+    return { readBack, amountCents: orderTotalCents(readBack) };
+  } catch { return { readBack: null, amountCents: null }; }
+}
 
+async function place({ vendorSku, quantity, quoteCents = null }, { fetchImpl = fetch } = {}) {
+  if (!configured()) throw new RefusedError('no_api_key', 'STICKERMULE_API_KEY is not set');
+  const qty = Math.round(Number(quantity));
+  if (!Number.isFinite(qty) || qty <= 0) throw new RefusedError('bad_quantity', `quantity ${quantity} is not a positive count`);
+  const { item, address, payment } = await resolveAccountPrerequisites({ vendorSku, fetchImpl });
+  const { response, number } = await submitOrder({ items: [{ id: item.id, quantity: qty }], addressId: address.id, paymentId: payment.id }, { fetchImpl });
+  const { readBack, amountCents } = await readBackTotal(number, { fetchImpl });
   return {
-    externalOrderNumber: String(number),
+    externalOrderNumber: number,
     amountCents: amountCents ?? quoteCents ?? null,
     response,
-    evidence: { itemId: item.id, addressId: addresses[0].id, paymentId: payments[0].id, totalSource: amountCents != null ? 'vendor' : 'quote', readBack },
+    evidence: { itemId: item.id, addressId: address.id, paymentId: payment.id, totalSource: amountCents != null ? 'vendor' : 'quote', readBack },
   };
 }
 

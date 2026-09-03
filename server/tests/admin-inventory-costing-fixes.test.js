@@ -171,6 +171,21 @@ describe('POST /restock-requests/:id/action', () => {
     });
   });
 
+  test('receive defaults to what the automatic order actually bought (packages round up), not the requested figure (r2 P1)', async () => {
+    const { stockUpdates, movements } = wireRestock({
+      id: 'req-1', product_id: 'prod-1', status: 'ordered', requested_quantity: 2, unit: 'gal',
+      ledger: { id: 'vo-7', status: 'placed', placed_at: new Date(), evidence: {}, request_payload: JSON.stringify({ quantity: 2, unit: 'gal', vendorQuantity: 2, packSize: '2.5 gal', orderedQuantity: 5 }) },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'receive' }),
+      });
+      expect(res.status).toBe(200);
+      expect(stockUpdates[0].inventory_on_hand).toBe(15); // 10 on hand + 5 gal (two 2.5 gal jugs), not + 2
+      expect(movements).toHaveLength(1);
+    });
+  });
+
   test('cancel while a dispatched automatic order is unreceived and unrevoked → 409 naming the revoke script (pre-push P0)', async () => {
     const { statusUpdates } = wireRestock({
       id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal',

@@ -13,7 +13,7 @@
 //
 //   railway run --service Postgres node ops/agents/auto-order-revoke.js --order=<vendor_orders.id>            # dry run
 //   railway run --service Postgres node ops/agents/auto-order-revoke.js --order=<vendor_orders.id> --execute
-//   railway run --service Postgres node ops/agents/auto-order-revoke.js --list                                # placed rows this month (placing shown, not revocable)
+//   railway run --service Postgres node ops/agents/auto-order-revoke.js --list                                # dispatched rows this month: placed + post-submit needs_review (placing shown, not revocable)
 //
 // Run from the repo root (resolves the server's modules). Output carries ids,
 // vendor names and amounts only.
@@ -36,21 +36,75 @@ const LIST = process.argv.includes('--list');
 const orderId = arg('order');
 const dollars = (c) => `$${(Number(c || 0) / 100).toFixed(2)}`;
 
+const parseEvidence = (raw) => (typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return {}; } })() : raw) || {};
+
+// --list: every automatic order this month whose vendor call was dispatched
+// or is in flight — placing (shown, not revocable), placed, and post-submit
+// needs_review rows (placed_at set: "may or may not have gone out"), which
+// are precisely the ones an operator must reconcile (Codex r2 P2).
+async function listDispatched() {
+  const rows = await db('vendor_orders as vo')
+    .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
+    .leftJoin('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
+    .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
+    .where('vo.created_at', '>=', startOfETMonth(new Date()))
+    .whereRaw("(vo.status IN ('placing', 'placed') OR (vo.status = 'needs_review' AND vo.placed_at IS NOT NULL))")
+    .orderBy('vo.created_at', 'desc')
+    .select('vo.id', 'vo.status', 'vo.amount_cents', 'vo.external_order_number', 'vo.placed_at', 'vo.evidence', 'v.name as vendor', 'pc.name as product', 'prr.status as request_status');
+  if (!rows.length) console.log('No dispatched automatic orders this month.');
+  for (const r of rows) {
+    const revoked = parseEvidence(r.evidence).revokedAt ? '  REVOKED' : '';
+    console.log(`${r.id}  ${r.status.padEnd(12)} ${(r.vendor || '?').padEnd(14)} ${dollars(r.amount_cents).padStart(9)}  #${r.external_order_number || '—'}  ${r.product || '?'}  (request ${r.request_status})${revoked}`);
+  }
+}
+
+// Whether this ledger row is a dispatched order an operator may revoke now.
+// Returns null when it is, else the message to print (exit 0) or an Error
+// (exit 1) for a row the dispatcher still owns.
+function revokeBlocker(row) {
+  const evidence = parseEvidence(row.evidence);
+  if (evidence.revokedAt) return `Already revoked at ${evidence.revokedAt} — nothing to do.`;
+  // A needs_review row is revocable only when its vendor call was DISPATCHED
+  // (placed_at set). Recording the revoke is what lets the office cancel the
+  // request; a pre-submit park (nothing sent) needs no revoke and its request
+  // cancels freely.
+  if (row.status === 'needs_review' && !row.placed_at) return 'needs_review with nothing dispatched — no vendor order to revoke; cancel the request on the Restock tab.';
+  if (row.status === 'failed') return 'Row is failed (nothing was ordered) — revoke does not apply.';
+  // The vendor call may be in flight: reopening the request now would let
+  // staff order while the dispatcher still lands the original (double
+  // purchase). The dispatcher itself resolves a placing row — revoke only
+  // after it has.
+  if (row.status === 'placing') return new Error('Row is still placing — the dispatcher owns it until it resolves; re-run once it is placed or needs_review.');
+  return null;
+}
+
+// The revoke itself: ledger → needs_review with the STRUCTURED
+// evidence.revokedAt marker the cancel guard and the dispatcher's prior-order
+// belt read (order-dispatch.js), request ordered → open, critical audit row.
+// Eligibility AND idempotency are re-checked on the LOCKED row: two --execute
+// runs that both passed the unlocked check must not double-revoke (Codex r2
+// P2).
+async function revoke(row) {
+  await db.transaction(async (trx) => {
+    const locked = await trx('vendor_orders').where({ id: row.id }).forUpdate().first('status', 'placed_at', 'evidence');
+    if (!locked || !(locked.status === 'placed' || (locked.status === 'needs_review' && locked.placed_at))) throw new Error(`ledger row is ${locked?.status || 'missing'} — not a dispatched order; re-run`);
+    if (parseEvidence(locked.evidence).revokedAt) throw new Error(`ledger row was revoked at ${parseEvidence(locked.evidence).revokedAt} by a concurrent run — nothing to do`);
+    const revokedAt = new Date().toISOString();
+    await trx('vendor_orders').where({ id: row.id }).update({
+      status: 'needs_review',
+      error: `revoked: operator revoke ${revokedAt} (was ${locked.status})`.slice(0, 400),
+      evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ revokedAt })]),
+      updated_at: new Date(),
+    });
+    const req = await trx('product_restock_requests').where({ id: row.restock_request_id }).forUpdate().first('status');
+    if (req?.status === 'ordered') await trx('product_restock_requests').where({ id: row.restock_request_id }).update({ status: 'open', updated_at: new Date() });
+    await auditVendorOrder({ vendor_order_id: row.id, restock_request_id: row.restock_request_id, vendor_id: row.vendor_id, adapter: row.adapter, outcome: 'revoked', amount_cents: row.amount_cents, external_order_number: row.external_order_number, reason: `operator revoke (was ${locked.status})`, actor_type: 'technician', trx });
+  });
+}
+
 (async () => {
   try {
-    if (LIST) {
-      const rows = await db('vendor_orders as vo')
-        .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
-        .leftJoin('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
-        .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
-        .where('vo.created_at', '>=', startOfETMonth(new Date()))
-        .whereIn('vo.status', ['placing', 'placed'])
-        .orderBy('vo.created_at', 'desc')
-        .select('vo.id', 'vo.status', 'vo.amount_cents', 'vo.external_order_number', 'vo.placed_at', 'v.name as vendor', 'pc.name as product', 'prr.status as request_status');
-      if (!rows.length) console.log('No placing/placed automatic orders this month.');
-      for (const r of rows) console.log(`${r.id}  ${r.status.padEnd(12)} ${(r.vendor || '?').padEnd(14)} ${dollars(r.amount_cents).padStart(9)}  #${r.external_order_number || '—'}  ${r.product || '?'}  (request ${r.request_status})`);
-      process.exit(0);
-    }
+    if (LIST) { await listDispatched(); process.exit(0); }
     if (!orderId) { console.error('--order=<vendor_orders.id> (or --list) is required'); process.exit(2); }
 
     const row = await db('vendor_orders as vo')
@@ -61,43 +115,13 @@ const dollars = (c) => `$${(Number(c || 0) / 100).toFixed(2)}`;
       .first('vo.*', 'v.name as vendor', 'pc.name as product', 'prr.status as request_status');
     if (!row) { console.error(`vendor_orders ${orderId} not found`); process.exit(1); }
     console.log(`Ledger ${row.id}: ${row.status}, ${row.vendor || '?'} #${row.external_order_number || '—'} ${dollars(row.amount_cents)} for ${row.product || '?'}; request ${row.restock_request_id} is ${row.request_status}`);
-    const evidence = (typeof row.evidence === 'string' ? (() => { try { return JSON.parse(row.evidence); } catch { return {}; } })() : row.evidence) || {};
-    if (evidence.revokedAt) { console.log(`Already revoked at ${evidence.revokedAt} — nothing to do.`); process.exit(0); }
-    // A needs_review row is revocable only when its vendor call was DISPATCHED
-    // (placed_at set: a post-submit park — "may or may not have gone out").
-    // Recording the revoke is what lets the office cancel the request; a
-    // pre-submit park (nothing sent) needs no revoke and its request cancels
-    // freely.
-    if (row.status === 'needs_review' && !row.placed_at) { console.log('needs_review with nothing dispatched — no vendor order to revoke; cancel the request on the Restock tab.'); process.exit(0); }
-    if (row.status === 'failed') { console.log('Row is failed (nothing was ordered) — revoke does not apply.'); process.exit(0); }
-    if (row.status === 'placing') {
-      // The vendor call may be in flight: reopening the request now would let
-      // staff order while the dispatcher still lands the original (double
-      // purchase). The dispatcher itself resolves a placing row (placed /
-      // needs_review / failed / released) — revoke only after it has.
-      console.error('Row is still placing — the dispatcher owns it until it resolves; re-run once it is placed or needs_review.');
-      process.exit(1);
-    }
+    const blocker = revokeBlocker(row);
+    if (blocker instanceof Error) { console.error(blocker.message); process.exit(1); }
+    if (blocker) { console.log(blocker); process.exit(0); }
 
-    console.log(`Would set ledger → needs_review${row.request_status === 'ordered' ? ', request → open' : ''}, write audit row procurement.vendor_order.revoked.`);
+    console.log(`Would set ledger → needs_review${row.request_status === 'ordered' ? ', request → open' : ''}, stamp evidence.revokedAt, write audit row procurement.vendor_order.revoked.`);
     if (!EXECUTE) { console.log('Dry run. Re-run with --execute to apply.'); process.exit(0); }
-
-    await db.transaction(async (trx) => {
-      const locked = await trx('vendor_orders').where({ id: row.id }).forUpdate().first('status', 'placed_at');
-      if (!locked || !(locked.status === 'placed' || (locked.status === 'needs_review' && locked.placed_at))) throw new Error(`ledger row is ${locked?.status || 'missing'} — not a dispatched order; re-run`);
-      const revokedAt = new Date().toISOString();
-      // evidence.revokedAt is the STRUCTURED marker the cancel guard and the
-      // dispatcher's prior-order belt read (order-dispatch.js).
-      await trx('vendor_orders').where({ id: row.id }).update({
-        status: 'needs_review',
-        error: `revoked: operator revoke ${revokedAt} (was ${locked.status})`.slice(0, 400),
-        evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ revokedAt })]),
-        updated_at: new Date(),
-      });
-      const req = await trx('product_restock_requests').where({ id: row.restock_request_id }).forUpdate().first('status');
-      if (req?.status === 'ordered') await trx('product_restock_requests').where({ id: row.restock_request_id }).update({ status: 'open', updated_at: new Date() });
-      await auditVendorOrder({ vendor_order_id: row.id, restock_request_id: row.restock_request_id, vendor_id: row.vendor_id, adapter: row.adapter, outcome: 'revoked', amount_cents: row.amount_cents, external_order_number: row.external_order_number, reason: `operator revoke (was ${locked.status})`, actor_type: 'technician', trx });
-    });
+    await revoke(row);
     console.log('Revoked. Cancel with the vendor by hand if the order shipped.');
     process.exit(0);
   } catch (err) {

@@ -2941,7 +2941,7 @@ function RestockRequestsTab({ showToast, onUpdate }) {
                         <div style={{ display: "grid", gap: 6, minWidth: 220 }}>
                           <div style={{ display: "grid", gridTemplateColumns: "1fr 80px", gap: 6 }}>
                             <input
-                              value={draft.quantity ?? request.requestedQuantity ?? ""}
+                              value={draft.quantity ?? request.order?.orderedQuantity ?? request.requestedQuantity ?? ""}
                               onChange={(e) => setReceiveDrafts((prev) => ({ ...prev, [request.id]: { ...(prev[request.id] || {}), quantity: e.target.value } }))}
                               style={sInput}
                               placeholder="Qty"

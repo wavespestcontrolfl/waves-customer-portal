@@ -30,7 +30,7 @@ jest.mock('../services/vendor-credentials', () => ({ getVendorLoginCredentials: 
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
 jest.mock('../services/procurement/auto-reorder', () => ({ vendorPricingFor: jest.fn(async () => mockState.pricing) }));
 
-const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null };
+const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null };
 
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
@@ -40,6 +40,7 @@ jest.mock('../models/db', () => {
     q.first = async (...cols) => {
       if (cols[0] === 'vo.status') return mockState.liveAutoOrder; // assertNoLiveAutoOrder's aliased join
       if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
+      if (cols[0] === 'request_payload') return mockState.dispatchedLedger; // orderedQuantityFor
       if (table === 'product_restock_requests') {
         if (cols[0] === 'status') return { status: mockState.freshRequestStatus };
         if (cols[0] === 'id') return mockState.sibling; // the sibling live-request probe
@@ -87,7 +88,7 @@ function mockAdapter(overrides = {}) {
 
 let notify;
 beforeEach(() => {
-  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null });
+  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null });
   for (const k of Object.keys(ENV)) process.env[k] = ENV[k];
   notify = jest.fn(async () => ({ id: 'n1' }));
   auditVendorOrder.mockClear();
@@ -265,7 +266,7 @@ test('SiteOne: no static quote, the cap check runs through beforeSubmit and a dr
   const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, place });
   expect(r).toMatchObject({ status: 'needs_review', reason: 'dry_run' });
   expect(notify.mock.calls[0][1]).toMatch(/dry run/);
-  expect(JSON.parse(mockState.ledgerRows[0].request_payload)).toMatchObject({ vendorSku: 'S1-77', quantity: 256, unit: 'fl_oz', vendorQuantity: 2, packSize: '1 gal' });
+  expect(JSON.parse(mockState.ledgerRows[0].request_payload)).toMatchObject({ vendorSku: 'S1-77', quantity: 256, unit: 'fl_oz', vendorQuantity: 2, packSize: '1 gal', orderedQuantity: 256 });
 });
 
 test('SiteOne with no eligible price row parks no_price even when the catalog carries a siteone_sku (r1 P1)', async () => {
@@ -294,16 +295,16 @@ test('vendorOrderQuantity: packages by pack size in the same dimension; counts f
   const s1 = { key: 'siteone', packagedQuantity: true };
   const sm = { key: 'stickermule', packagedQuantity: false };
   const q = (adapter, requested_quantity, unit, quantity) => dispatch.vendorOrderQuantity({ adapter, request: { requested_quantity, unit }, pricing: { quantity } });
-  expect(q(s1, '256', 'fl_oz', '1 gal')).toEqual({ quantity: 2, packSize: '1 gal' });
-  expect(q(s1, '100', 'fl_oz', '1 gal')).toEqual({ quantity: 1, packSize: '1 gal' });
-  expect(q(s1, '2.5', 'gal', '2.5 gal')).toEqual({ quantity: 1, packSize: '2.5 gal' });
-  expect(q(s1, '40', 'lb', '16 lb')).toEqual({ quantity: 3, packSize: '16 lb' });
-  expect(q(s1, '250', 'each', '100 each')).toEqual({ quantity: 3, packSize: '100 each' });
-  expect(q(s1, '250', 'each', '100')).toEqual({ quantity: 3, packSize: '100 each' });
+  expect(q(s1, '256', 'fl_oz', '1 gal')).toEqual({ quantity: 2, packSize: '1 gal', orderedQuantity: 256 });
+  expect(q(s1, '100', 'fl_oz', '1 gal')).toEqual({ quantity: 1, packSize: '1 gal', orderedQuantity: 128 }); // what actually arrives = the receive default (r2 P1)
+  expect(q(s1, '2.5', 'gal', '2.5 gal')).toEqual({ quantity: 1, packSize: '2.5 gal', orderedQuantity: 2.5 });
+  expect(q(s1, '40', 'lb', '16 lb')).toEqual({ quantity: 3, packSize: '16 lb', orderedQuantity: 48 });
+  expect(q(s1, '250', 'each', '100 each')).toEqual({ quantity: 3, packSize: '100 each', orderedQuantity: 300 });
+  expect(q(s1, '250', 'each', '100')).toEqual({ quantity: 3, packSize: '100 each', orderedQuantity: 300 });
   expect(q(s1, '128', 'fl_oz', '16 lb').error).toBe('pack_unit_mismatch');
   expect(q(s1, '128', 'fl_oz', '').error).toBe('no_pack_size');
   expect(q(s1, '250', 'each', '1 gal').error).toBe('no_pack_size');
-  expect(q(sm, '500', 'each', '500')).toEqual({ quantity: 500, packSize: null });
+  expect(q(sm, '500', 'each', '500')).toEqual({ quantity: 500, packSize: null, orderedQuantity: 500 });
   expect(q(sm, '500', 'fl_oz', '500').error).toBe('count_unit_required');
   expect(q(s1, '0', 'fl_oz', '1 gal').error).toBe('no_quantity');
 });
@@ -526,6 +527,45 @@ test('a credential lookup that THROWS is run-level: claim released, nothing park
   expect(mockState.deletes).toContain('vendor_orders'); // claim released
   expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status)).toHaveLength(0); // never parked
   expect(notify).not.toHaveBeenCalled();
+});
+
+test('a bell notifyAdmin swallowed (null return) is NOT delivered: bellPending, no bellAt stamp, re-rung next run (r2 P1)', async () => {
+  notify = jest.fn(async () => null); // notification-service returns null when its insert/dedupe failed
+  mockState.pricing = null;
+  const r = await run(mockAdapter());
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'no_price', bellPending: true });
+  expect(mockState.updates.some((u) => u.table === 'vendor_orders' && typeof u.row.evidence === 'string' && u.row.evidence.includes('bellAt'))).toBe(false);
+});
+
+test('vendor call ran but neither the record nor the park could be written → status unrecorded, and the run goes red on it (r2 P1)', async () => {
+  const dbFn = require('../models/db');
+  const realTx = dbFn.transaction;
+  let n = 0;
+  dbFn.transaction = async (fn) => { n += 1; if (n >= 3) throw new Error('db gone'); return fn(dbFn); }; // claim + cap reservation land, record + park do not
+  try {
+    const r = await run(mockAdapter());
+    expect(r).toMatchObject({ status: 'unrecorded', reason: 'persist_after_placement' });
+    expect(r.error).toMatch(/db gone.*park failed/);
+  } finally { dbFn.transaction = realTx; }
+});
+
+test('a stale placing row whose park fails keeps the run red (r2 P1)', async () => {
+  const dbFn = require('../models/db');
+  const realTx = dbFn.transaction;
+  dbFn.transaction = async () => { throw new Error('ledger write failed'); };
+  mockState.stale = [{ id: 'ledger-old', adapter: 'stickermule', amount_cents: 31400, created_at: new Date(Date.now() - 3600e3), request_id: 'req-old', product_name: 'Sticker', vendor_id: 'vend-sm', vendor_name: 'Sticker Mule' }];
+  try {
+    const a = mockAdapter();
+    await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } })).rejects.toThrow(/1 stale placing row\(s\) could not be parked \(ledger ledger-old\)/);
+  } finally { dbFn.transaction = realTx; }
+});
+
+test('orderedQuantityFor: the dispatched claim payload, in the request unit; null without a dispatched order (r2 P1)', async () => {
+  const dbFn = require('../models/db');
+  mockState.dispatchedLedger = null;
+  expect(await dispatch.orderedQuantityFor(dbFn, 'req-1')).toBeNull();
+  mockState.dispatchedLedger = { request_payload: JSON.stringify({ quantity: 130, unit: 'fl_oz', vendorQuantity: 2, packSize: '128 fl oz', orderedQuantity: 256 }) };
+  expect(await dispatch.orderedQuantityFor(dbFn, 'req-1')).toBe(256);
 });
 
 test('a prior dispatched order for the product that is neither received nor revoked blocks the claim — no second order on top of stock that may be on its way (pre-push P0)', async () => {

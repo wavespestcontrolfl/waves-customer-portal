@@ -1297,7 +1297,10 @@ async function updateRestockRequest(input) {
 
   let receivePlan = null;
   if (action === 'receive') {
-    const qty = toNumber(input.quantity) ?? toNumber(request.requested_quantity);
+    // Default = what the automatic order actually bought (packages round
+    // up), else the requested figure (Codex r2 P1).
+    const orderedQuantity = await require('../procurement/order-dispatch').orderedQuantityFor(db, request.id);
+    const qty = toNumber(input.quantity) ?? orderedQuantity ?? toNumber(request.requested_quantity);
     const enteredUnit = input.unit || request.unit || product.inventory_unit;
     if (!qty || qty <= 0 || !enteredUnit) return { error: 'Receive quantity and unit are required' };
     const inventoryUnit = product.inventory_unit || enteredUnit;

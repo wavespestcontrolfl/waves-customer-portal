@@ -241,11 +241,13 @@ async function login(page, creds) {
   }
 }
 
-async function place(
-  { vendorSku, quantity, credentials, beforeSubmit, dryRun = String(process.env.SITEONE_BOT_DRY_RUN || '').toLowerCase() === 'true', approvedShipTo = process.env.SITEONE_APPROVED_SHIP_TO },
-  { launchBrowser = chromium ? defaultLaunch : null, resolveHostIps = filler.resolvePublicIps, upload = uploadEvidence } = {},
-) {
-  if (!launchBrowser) throw runLevel('siteone bot: playwright unavailable');
+// ---- place() stages ---------------------------------------------------------
+// Each stage is a real step of the purchase with its own refusals; place()
+// only sequences them. Refusals (RefusedError) park; run-level errors abort
+// the batch; anything thrown after the click is `ambiguous`.
+
+// Arguments the bot can act on at all — all refusals, before any browser work.
+function validatePlaceArgs({ vendorSku, quantity, credentials, approvedShipTo }) {
   if (!credentials || !credentials.password || !(credentials.email || credentials.username)) throw new RefusedError('no_credentials', 'SiteOne login is not stored on the vendor row');
   if (!credentials.accountNumber) throw new RefusedError('no_account_number', 'SiteOne account number is not on the vendor row (bill-to-account only)');
   const qty = Math.round(Number(quantity));
@@ -253,8 +255,12 @@ async function place(
   if (!vendorSku) throw new RefusedError('no_sku', 'product has no SiteOne SKU');
   const shipToTokens = String(approvedShipTo || '').split(',').map((t) => normalizeText(t)).filter(Boolean);
   if (!shipToTokens.length) throw new RefusedError('ship_to_unconfigured', 'SITEONE_APPROVED_SHIP_TO is not set — the bot never submits to an unverified address');
+  return { qty, shipToTokens };
+}
 
-  const evidence = { blockedHosts: {}, dryRun };
+// Egress lock: DNS pinned to the verified public IPs of the allowed hosts,
+// every off-host request aborted (counted into evidence), WebSockets closed.
+async function openLockedBrowser({ launchBrowser, resolveHostIps, evidence }) {
   const rules = [];
   const pinned = new Set();
   for (const h of allowedHosts()) {
@@ -264,166 +270,203 @@ async function place(
     pinned.add(h);
   }
   if (!pinned.has('www.siteone.com')) throw runLevel('siteone bot: www.siteone.com did not resolve to a public IPv4');
-
   let browser;
+  try { browser = await launchBrowser({ hostResolverRules: rules.join(',') }); }
+  catch (e) { throw runLevel(`siteone bot: browser launch failed: ${String(e.message).slice(0, 120)}`); }
+  const context = await browser.newContext({ serviceWorkers: 'block' });
+  const page = await context.newPage();
+  if (typeof context.route === 'function') {
+    await context.route('**/*', (route) => {
+      const url = route.request().url();
+      let ok = false;
+      try { ok = filler.requestAllowed({ url, allowedHosts: pinned }); } catch { ok = false; }
+      if (ok) return route.continue();
+      const host = filler.hostOf(url) || 'unknown';
+      evidence.blockedHosts[host] = (evidence.blockedHosts[host] || 0) + 1;
+      return route.abort();
+    });
+  }
+  if (typeof context.routeWebSocket === 'function') {
+    try { await context.routeWebSocket('**/*', (ws) => { try { ws.close(); } catch { /* noop */ } }); } catch { /* noop */ }
+  }
+  return { browser, page };
+}
+
+// Search the SKU, open the hit, confirm its code EXACTLY, set the quantity,
+// add. Fail CLOSED: an unreadable SKU (selector drift) must never let the
+// first search hit into the cart.
+async function addProductToCart(page, { vendorSku, qty, evidence, upload }) {
+  await page.locator(SELECTORS.searchInput).first().fill(String(vendorSku));
+  await page.locator(SELECTORS.searchInput).first().press('Enter');
+  await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
+  await page.waitForTimeout(2000);
+  const hit = page.locator(SELECTORS.productLink).first();
+  if (!(await hit.count())) { await shot(page, 'search', evidence, upload); throw new RefusedError('sku_not_found', `SiteOne search for ${vendorSku} returned no product`, evidence); }
+  await hit.click();
+  await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
+  await page.waitForTimeout(1500);
+  const pageSkuRaw = (await page.locator(SELECTORS.productSku).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim();
+  if (!pageSkuRaw) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_unreadable', `could not read the product SKU on the page for ${vendorSku} (SELECTORS.productSku)`, evidence); }
+  if (normalizeSku(pageSkuRaw) !== normalizeSku(vendorSku)) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_mismatch', `product page shows "${pageSkuRaw.slice(0, 60)}", expected ${vendorSku}`, evidence); }
+  if (await visible(page, SELECTORS.unavailable)) { await shot(page, 'product', evidence, upload); throw new RefusedError('unavailable', `SiteOne lists ${vendorSku} as unavailable`, evidence); }
+  await page.locator(SELECTORS.qtyInput).first().fill(String(qty));
+  await page.locator(SELECTORS.addToCart).first().click();
+  await page.waitForTimeout(2000);
+}
+
+// The cart must be exactly [this SKU × qty packages] — one line, the right
+// code, the right count — before its total means anything. Returns the cart
+// total in cents (the dry-run stop / cap screen; the checkout total binds).
+async function verifyCartAndReadTotal(page, { vendorSku, qty, evidence, upload }) {
+  await gotoCart(page);
+  const lines = await cartLines(page);
+  const exact = lines.length === 1 && normalizeSku(lines[0].sku) === normalizeSku(vendorSku) && lines[0].qty === qty;
+  if (!exact) {
+    await shot(page, 'cart', evidence, upload);
+    evidence.cartLines = lines.map((l) => ({ sku: l.sku.slice(0, 60), qty: Number.isFinite(l.qty) ? l.qty : null }));
+    throw new RefusedError('cart_mismatch', `SiteOne cart is not exactly ${vendorSku} × ${qty}: ${lines.length ? lines.map((l) => `${l.sku || '?'} × ${Number.isFinite(l.qty) ? l.qty : '?'}`).join(', ') : 'empty'}`, evidence);
+  }
+  const totalText = await page.locator(SELECTORS.cartTotal).first().textContent().catch(() => '');
+  const amountCents = parseMoney(totalText);
+  await shot(page, 'cart', evidence, upload);
+  if (!amountCents) throw new RefusedError('no_cart_total', `could not read the cart total ("${String(totalText || '').trim().slice(0, 40)}")`, evidence);
+  evidence.cartTotalCents = amountCents;
+  return amountCents;
+}
+
+// Exactly ONE element for an identity / money reading, inside the checkout:
+// zero is unreadable, more than one is ambiguous — the text the bot would
+// compare might not be the order's (pre-push P0s). Returns { count, text,
+// visible }; the caller names the refusal.
+async function readExactlyOne(page, selector) {
+  const els = page.locator(selector);
+  const count = await els.count().catch(() => 0);
+  if (count !== 1) return { count, text: '', visible: false };
+  const text = await els.first().textContent().catch(() => '');
+  const isVisible = await els.first().isVisible({ timeout: 1500 }).catch(() => false);
+  return { count, text: String(text || ''), visible: isVisible };
+}
+
+// Checkout tender: no card / MFA / terms prompt (the bot never answers them),
+// bill-to-account offered AND confirmed CHECKED — the click is not proof; a
+// checkout defaulting to a saved card shows no card field (Codex r1 P1).
+async function verifyBillToAccount(page, { evidence, upload }) {
+  const refuse = async (reason, message) => { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  if (await visible(page, SELECTORS.mfaField)) await refuse('mfa_required', 'SiteOne checkout asks for a verification code — bot never supplies it');
+  if (await visible(page, SELECTORS.cardField)) await refuse('card_required', 'SiteOne checkout asks for card entry — bot never supplies it');
+  const terms = page.locator(SELECTORS.termsCheckbox).first();
+  if ((await terms.count()) && !(await terms.isChecked().catch(() => true))) await refuse('terms_required', 'SiteOne checkout requires accepting terms — owner action');
+  const bill = page.locator(SELECTORS.billToAccount).first();
+  if (!(await bill.count())) await refuse('no_bill_to_account', 'bill-to-account option not offered at checkout');
+  try { await bill.click({ timeout: 5000 }); }
+  catch (e) { await refuse('bill_to_account_unselectable', `bill-to-account option could not be selected (${String(e.message).slice(0, 80)})`); }
+  await page.waitForTimeout(1500);
+  const selected = (await page.locator(SELECTORS.billToAccountSelected).count().catch(() => 0)) > 0 || (await bill.isChecked().catch(() => false)) === true;
+  if (!selected) await refuse('bill_to_account_unverified', 'bill-to-account is not confirmed selected at checkout — the bot never submits on another tender');
+  evidence.billToAccountVerified = true;
+}
+
+// WHICH account, and WHERE to: the displayed values, compared to what the
+// owner configured — a saved default that drifted (another branch account,
+// an old address) is exactly the unattended order this refuses. The account
+// must be the ONE whole digit run equal to the vendor row's number (12345 is
+// not 912345); every approved ship-to token must appear whole.
+async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload }) {
+  const refuse = async (reason, message) => { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  const account = await readExactlyOne(page, SELECTORS.checkoutAccount);
+  if (account.count > 1) await refuse('account_ambiguous', `${account.count} billing-account readings at checkout — cannot tell which the order bills`);
+  const accountText = normalizeText(account.text);
+  if (!accountText) await refuse('account_unverified', 'could not read the billing account shown at checkout');
+  const wantDigits = String(credentials.accountNumber).replace(/\D/g, '');
+  const accountRuns = digitRuns(accountText);
+  if (!wantDigits || accountRuns.length !== 1 || accountRuns[0] !== wantDigits) { evidence.checkoutAccount = accountText.slice(0, 60); await refuse('account_mismatch', `checkout bills account "${accountText.slice(0, 40)}", not the vendor row's ${credentials.accountNumber}`); }
+  const shipTo = await readExactlyOne(page, SELECTORS.checkoutShipTo);
+  if (shipTo.count > 1) await refuse('ship_to_ambiguous', `${shipTo.count} ship-to readings at checkout — cannot tell which the order ships to`);
+  const shipToText = normalizeText(shipTo.text);
+  if (!shipToText) await refuse('ship_to_unverified', 'could not read the ship-to address shown at checkout');
+  const missing = shipToTokens.filter((t) => !hasToken(shipToText, t));
+  if (missing.length) { evidence.checkoutShipTo = shipToText.slice(0, 120); await refuse('ship_to_mismatch', `checkout ships to "${shipToText.slice(0, 80)}" — approved ship-to token(s) not found: ${missing.join(', ')}`); }
+  evidence.accountVerified = true;
+  evidence.shipToVerified = shipToText.slice(0, 120);
+}
+
+// The CHECKOUT total (tax + shipping applied) is the binding amount: exactly
+// one VISIBLE element (responsive checkouts keep hidden desktop/mobile
+// copies; a stale hidden node is not the figure the vendor charges), parsed
+// as exactly one $ amount. Returns cents.
+async function readCheckoutTotal(page, { evidence, upload }) {
+  const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  const total = await readExactlyOne(page, SELECTORS.checkoutTotal);
+  if (total.count !== 1) await refuse(total.count ? 'checkout_total_ambiguous' : 'no_checkout_total', total.count ? `${total.count} checkout-total elements — cannot tell which the order charges` : 'no checkout-total element at checkout');
+  if (!total.visible) await refuse('checkout_total_hidden', 'the checkout-total element is not visible — not the figure the order charges');
+  const finalCents = parseMoney(total.text);
+  await shot(page, 'pre-submit', evidence, upload);
+  if (!finalCents) throw new RefusedError('no_checkout_total', `could not read the checkout total ("${total.text.trim().slice(0, 40)}")`, evidence);
+  evidence.checkoutTotalCents = finalCents;
+  return finalCents;
+}
+
+// The click and its confirmation number. Anything thrown after the click is
+// `ambiguous`: the order may exist — the dispatcher parks, never re-submits.
+async function submitAndReadOrderNumber(page, { evidence, upload }) {
+  try {
+    await page.locator(SELECTORS.placeOrder).first().click();
+    await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
+    await page.waitForTimeout(2500);
+  } catch (e) {
+    const err = new Error(`siteone submit outcome unknown: ${String(e.message).slice(0, 120)}`);
+    err.ambiguous = true; err.evidence = evidence;
+    throw err;
+  }
+  await shot(page, 'confirmation', evidence, upload);
+  const numText = (await page.locator(SELECTORS.orderNumber).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ');
+  const m = numText.match(/([A-Z0-9-]{5,})\s*$/i);
+  if (!m) {
+    const err = new Error('siteone: order submitted but no confirmation number was found');
+    err.ambiguous = true; err.evidence = evidence;
+    throw err;
+  }
+  return m[1];
+}
+
+async function place(
+  { vendorSku, quantity, credentials, beforeSubmit, dryRun = String(process.env.SITEONE_BOT_DRY_RUN || '').toLowerCase() === 'true', approvedShipTo = process.env.SITEONE_APPROVED_SHIP_TO },
+  { launchBrowser = chromium ? defaultLaunch : null, resolveHostIps = filler.resolvePublicIps, upload = uploadEvidence } = {},
+) {
+  if (!launchBrowser) throw runLevel('siteone bot: playwright unavailable');
+  const { qty, shipToTokens } = validatePlaceArgs({ vendorSku, quantity, credentials, approvedShipTo });
+  const evidence = { blockedHosts: {}, dryRun };
+  const gate = async (cents, what) => {
+    const verdict = await beforeSubmit(cents);
+    if (!verdict || verdict.ok !== true) throw new RefusedError(verdict?.reason || 'over_cap', verdict?.message || `cap check refused the ${what}`, evidence);
+  };
+  let browser = null;
   let page = null;
   let submitted = false; // the place-order click happened: the cart is the vendor's now
   try {
-    try { browser = await launchBrowser({ hostResolverRules: rules.join(',') }); }
-    catch (e) { throw runLevel(`siteone bot: browser launch failed: ${String(e.message).slice(0, 120)}`); }
-    const context = await browser.newContext({ serviceWorkers: 'block' });
-    page = await context.newPage();
-    if (typeof context.route === 'function') {
-      await context.route('**/*', (route) => {
-        const url = route.request().url();
-        let ok = false;
-        try { ok = filler.requestAllowed({ url, allowedHosts: pinned }); } catch { ok = false; }
-        if (!ok) {
-          const host = filler.hostOf(url) || 'unknown';
-          evidence.blockedHosts[host] = (evidence.blockedHosts[host] || 0) + 1;
-          return route.abort();
-        }
-        return route.continue();
-      });
-    }
-    if (typeof context.routeWebSocket === 'function') {
-      try { await context.routeWebSocket('**/*', (ws) => { try { ws.close(); } catch { /* noop */ } }); } catch { /* noop */ }
-    }
-
+    ({ browser, page } = await openLockedBrowser({ launchBrowser, resolveHostIps, evidence }));
     await login(page, credentials);
-
     // Start from an EMPTY cart: whatever an earlier dry run or refused run
     // left behind must not ride along under this order's total.
     const leftover = await clearCart(page);
     if (leftover) { await shot(page, 'cart-leftover', evidence, upload); throw new RefusedError('cart_not_empty', `SiteOne cart still holds ${leftover} line(s) the bot could not remove — empty it by hand`, evidence); }
-
-    // Search the SKU, open the first hit, confirm its code, set the quantity.
-    await page.locator(SELECTORS.searchInput).first().fill(String(vendorSku));
-    await page.locator(SELECTORS.searchInput).first().press('Enter');
-    await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
-    await page.waitForTimeout(2000);
-    const hit = page.locator(SELECTORS.productLink).first();
-    if (!(await hit.count())) { await shot(page, 'search', evidence, upload); throw new RefusedError('sku_not_found', `SiteOne search for ${vendorSku} returned no product`, evidence); }
-    await hit.click();
-    await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
-    await page.waitForTimeout(1500);
-    const pageSkuRaw = (await page.locator(SELECTORS.productSku).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim();
-    // Fail CLOSED: an unreadable SKU (selector drift) must never let the
-    // first search hit into the cart; the match is exact, not substring.
-    if (!pageSkuRaw) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_unreadable', `could not read the product SKU on the page for ${vendorSku} (SELECTORS.productSku)`, evidence); }
-    if (normalizeSku(pageSkuRaw) !== normalizeSku(vendorSku)) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_mismatch', `product page shows "${pageSkuRaw.slice(0, 60)}", expected ${vendorSku}`, evidence); }
-    if (await visible(page, SELECTORS.unavailable)) { await shot(page, 'product', evidence, upload); throw new RefusedError('unavailable', `SiteOne lists ${vendorSku} as unavailable`, evidence); }
-    await page.locator(SELECTORS.qtyInput).first().fill(String(qty));
-    await page.locator(SELECTORS.addToCart).first().click();
-    await page.waitForTimeout(2000);
-
-    // The cart must be exactly [this SKU × qty packages] — one line, the
-    // right code, the right count — before its total means anything.
-    await gotoCart(page);
-    const lines = await cartLines(page);
-    const exact = lines.length === 1 && normalizeSku(lines[0].sku) === normalizeSku(vendorSku) && lines[0].qty === qty;
-    if (!exact) {
-      await shot(page, 'cart', evidence, upload);
-      evidence.cartLines = lines.map((l) => ({ sku: l.sku.slice(0, 60), qty: Number.isFinite(l.qty) ? l.qty : null }));
-      throw new RefusedError('cart_mismatch', `SiteOne cart is not exactly ${vendorSku} × ${qty}: ${lines.length ? lines.map((l) => `${l.sku || '?'} × ${Number.isFinite(l.qty) ? l.qty : '?'}`).join(', ') : 'empty'}`, evidence);
-    }
-
-    // Cart total = the quote. Screenshot BEFORE anything is submitted.
-    const totalText = await page.locator(SELECTORS.cartTotal).first().textContent().catch(() => '');
-    const amountCents = parseMoney(totalText);
-    await shot(page, 'cart', evidence, upload);
-    if (!amountCents) throw new RefusedError('no_cart_total', `could not read the cart total ("${String(totalText || '').trim().slice(0, 40)}")`, evidence);
-    evidence.cartTotalCents = amountCents;
-
-    const gate = await beforeSubmit(amountCents);
-    if (!gate || gate.ok !== true) throw new RefusedError(gate?.reason || 'over_cap', gate?.message || 'cap check refused the order', evidence);
+    await addProductToCart(page, { vendorSku, qty, evidence, upload });
+    const amountCents = await verifyCartAndReadTotal(page, { vendorSku, qty, evidence, upload });
+    await gate(amountCents, 'order');
     if (dryRun) return { dryRun: true, amountCents, externalOrderNumber: null, evidence };
 
-    // Checkout: bill-to-account only. Any payment / MFA / terms prompt parks.
     await page.locator(SELECTORS.checkoutButton).first().click();
     await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
     await page.waitForTimeout(2000);
     if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone bot: checkout left the trusted host');
-    for (const [sel, reason] of [[SELECTORS.mfaField, 'mfa_required'], [SELECTORS.cardField, 'card_required']]) {
-      if (await visible(page, sel)) { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, `SiteOne checkout asks for ${reason === 'mfa_required' ? 'a verification code' : 'card entry'} — bot never supplies it`, evidence); }
-    }
-    const terms = page.locator(SELECTORS.termsCheckbox).first();
-    if ((await terms.count()) && !(await terms.isChecked().catch(() => true))) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('terms_required', 'SiteOne checkout requires accepting terms — owner action', evidence); }
-    const bill = page.locator(SELECTORS.billToAccount).first();
-    if (!(await bill.count())) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('no_bill_to_account', 'bill-to-account option not offered at checkout', evidence); }
-    try { await bill.click({ timeout: 5000 }); }
-    catch (e) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('bill_to_account_unselectable', `bill-to-account option could not be selected (${String(e.message).slice(0, 80)})`, evidence); }
-    await page.waitForTimeout(1500);
-    // Fail CLOSED: the click is not proof. A checkout defaulting to a saved
-    // card shows no card field, so only a CHECKED bill-to-account control
-    // clears the tender rule.
-    const accountSelected = (await page.locator(SELECTORS.billToAccountSelected).count().catch(() => 0)) > 0
-      || (await bill.isChecked().catch(() => false)) === true;
-    if (!accountSelected) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('bill_to_account_unverified', 'bill-to-account is not confirmed selected at checkout — the bot never submits on another tender', evidence); }
-    evidence.billToAccountVerified = true;
-    // WHICH account, and WHERE to: the displayed values, compared to what the
-    // owner configured — a saved default that drifted (another branch
-    // account, an old address) is exactly the unattended order this refuses.
-    // Exactly one billing-account reading and one ship-to reading, inside the
-    // checkout sections: zero is unreadable, more than one is ambiguous — the
-    // text the bot would compare might not be the order's.
-    const accountEls = page.locator(SELECTORS.checkoutAccount);
-    const accountCount = await accountEls.count().catch(() => 0);
-    if (accountCount > 1) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('account_ambiguous', `${accountCount} billing-account readings at checkout — cannot tell which the order bills`, evidence); }
-    const accountText = accountCount === 1 ? normalizeText(await accountEls.first().textContent().catch(() => '')) : '';
-    const wantDigits = String(credentials.accountNumber).replace(/\D/g, '');
-    if (!accountText) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('account_unverified', 'could not read the billing account shown at checkout', evidence); }
-    // EXACT match on a whole digit run: 12345 is not 912345, and a label
-    // carrying two account-like numbers is ambiguous, not a match.
-    const accountRuns = digitRuns(accountText);
-    if (!wantDigits || accountRuns.length !== 1 || accountRuns[0] !== wantDigits) { await shot(page, 'checkout', evidence, upload); evidence.checkoutAccount = accountText.slice(0, 60); throw new RefusedError('account_mismatch', `checkout bills account "${accountText.slice(0, 40)}", not the vendor row's ${credentials.accountNumber}`, evidence); }
-    const shipToEls = page.locator(SELECTORS.checkoutShipTo);
-    const shipToCount = await shipToEls.count().catch(() => 0);
-    if (shipToCount > 1) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('ship_to_ambiguous', `${shipToCount} ship-to readings at checkout — cannot tell which the order ships to`, evidence); }
-    const shipToText = shipToCount === 1 ? normalizeText(await shipToEls.first().textContent().catch(() => '')) : '';
-    if (!shipToText) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('ship_to_unverified', 'could not read the ship-to address shown at checkout', evidence); }
-    const missing = shipToTokens.filter((t) => !hasToken(shipToText, t));
-    if (missing.length) { await shot(page, 'checkout', evidence, upload); evidence.checkoutShipTo = shipToText.slice(0, 120); throw new RefusedError('ship_to_mismatch', `checkout ships to "${shipToText.slice(0, 80)}" — approved ship-to token(s) not found: ${missing.join(', ')}`, evidence); }
-    evidence.accountVerified = true;
-    evidence.shipToVerified = shipToText.slice(0, 120);
-    // The CHECKOUT total (tax + shipping applied) is the binding amount: the
-    // cart pre-check above only screens; this is the cap that gates the click.
-    // Exactly ONE visible total element (pre-push P0): responsive checkouts
-    // keep hidden desktop/mobile copies, and `.first()` on a duplicate or a
-    // stale hidden node would cap-check a figure the vendor is not charging.
-    const totalEls = page.locator(SELECTORS.checkoutTotal);
-    const totalCount = await totalEls.count().catch(() => 0);
-    if (totalCount !== 1) { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(totalCount ? 'checkout_total_ambiguous' : 'no_checkout_total', totalCount ? `${totalCount} checkout-total elements — cannot tell which the order charges` : 'no checkout-total element at checkout', evidence); }
-    if (!(await totalEls.first().isVisible({ timeout: 1500 }).catch(() => false))) { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError('checkout_total_hidden', 'the checkout-total element is not visible — not the figure the order charges', evidence); }
-    const checkoutText = await totalEls.first().textContent().catch(() => '');
-    const finalCents = parseMoney(checkoutText);
-    await shot(page, 'pre-submit', evidence, upload);
-    if (!finalCents) throw new RefusedError('no_checkout_total', `could not read the checkout total ("${String(checkoutText || '').trim().slice(0, 40)}")`, evidence);
-    evidence.checkoutTotalCents = finalCents;
-    const finalGate = await beforeSubmit(finalCents);
-    if (!finalGate || finalGate.ok !== true) throw new RefusedError(finalGate?.reason || 'over_cap', finalGate?.message || 'cap check refused the checkout total', evidence);
-
-    const placeBtn = page.locator(SELECTORS.placeOrder).first();
-    if (!(await placeBtn.count())) throw new RefusedError('no_place_order', 'place-order button not found', evidence);
+    await verifyBillToAccount(page, { evidence, upload });
+    await verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload });
+    const finalCents = await readCheckoutTotal(page, { evidence, upload });
+    await gate(finalCents, 'checkout total');
+    if (!(await page.locator(SELECTORS.placeOrder).first().count())) throw new RefusedError('no_place_order', 'place-order button not found', evidence);
     submitted = true;
-    try {
-      await placeBtn.click();
-      await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
-      await page.waitForTimeout(2500);
-    } catch (e) {
-      const err = new Error(`siteone submit outcome unknown: ${String(e.message).slice(0, 120)}`);
-      err.ambiguous = true; err.evidence = evidence;
-      throw err;
-    }
-    await shot(page, 'confirmation', evidence, upload);
-    const numText = (await page.locator(SELECTORS.orderNumber).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ');
-    const m = numText.match(/([A-Z0-9-]{5,})\s*$/i);
-    if (!m) {
-      const err = new Error('siteone: order submitted but no confirmation number was found');
-      err.ambiguous = true; err.evidence = evidence;
-      throw err;
-    }
-    return { externalOrderNumber: m[1], amountCents: finalCents, evidence, dryRun: false };
+    const externalOrderNumber = await submitAndReadOrderNumber(page, { evidence, upload });
+    return { externalOrderNumber, amountCents: finalCents, evidence, dryRun: false };
   } finally {
     // Nothing was submitted (dry run, refusal, error): leave no cart behind
     // for the next run to find. Best effort — the next run clears it anyway.
