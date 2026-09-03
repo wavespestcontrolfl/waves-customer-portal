@@ -812,6 +812,13 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     const res = await cardHoldCancelPreview('svc1', now);
     expect(res).toMatchObject({ held: true, feeApplies: true, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
   });
+  it('OUTSIDE-window hold beside a /secure row mid-charge → still charge_in_flight (the competing check precedes every verdict, free ones included)', async () => {
+    stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'charging' } });
+    mockApptTime.mockResolvedValue(new Date('2026-07-13T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+    expect(mockApptTime).not.toHaveBeenCalled();
+  });
   it('hold committed between the two reads → re-runs the held preview instead of calling it settled', async () => {
     stubDb([null, { ...holdRow, status: 'held' }, holdRow]);
     mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));

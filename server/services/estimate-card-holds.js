@@ -1897,6 +1897,25 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
   // charge (pre-push Codex P1). Decided before the rail gate — parking is
   // durable state, not a fee decision.
   if (hold.parked_at) return { held: true, feeApplies: false, feeAmount, parked: true, rule: describe('hold_parked') };
+  // Competing consents (a /secure appointment-card row beside the hold) —
+  // checked BEFORE any verdict, chargeable or free (Codex #3800 r2 → r6):
+  // a competing row already in charging/charge_review is a PaymentIntent
+  // that can still land, so even an outside-window / booking-age "no fee"
+  // verdict would lie; and for a live competing consent chargeNoShowFee
+  // refuses to pick a winner and bells the office. Fail toward
+  // undetermined on an unreadable table, same as the charge path.
+  try {
+    const laneRow = await db('appointment_card_requests')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('id', 'fee_status');
+    if (laneRow) {
+      const inFlight = laneRow.fee_status === 'charging' || laneRow.fee_status === 'charge_review';
+      return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe(inFlight ? 'charge_in_flight' : 'competing_consent') };
+    }
+  } catch (err) {
+    logger.warn('[estimate-card-holds] competing-consent lookup for cancel preview failed — reporting undetermined', { error: err.message });
+    return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'card consent lookup failed', onFailure: 'unknown' }) };
+  }
   // Rail OFF (ONE_TIME_CARD_HOLD kill switch) with a historical held row:
   // no fee can be collected, so nothing below may report one — including
   // the fee-may-apply posture of a FAILED time lookup, which would make the
@@ -1955,28 +1974,6 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
     } catch (err) {
       logger.warn('[estimate-card-holds] sticky-window lookup for cancel preview failed — reporting fee-may-apply', { error: err.message });
       return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'reschedule history lookup failed' }) };
-    }
-  }
-  if (feeApplies) {
-    // Competing consents (a /secure appointment-card row beside the hold):
-    // chargeNoShowFee refuses to pick a winner and bells the office, so the
-    // notice must not promise a charge (Codex #3800 r2 P2). Fail toward
-    // undetermined on an unreadable table, same as the charge path.
-    try {
-      const laneRow = await db('appointment_card_requests')
-        .where({ scheduled_service_id: scheduledServiceId })
-        .first('id', 'fee_status');
-      if (laneRow) {
-        // The competing row may already be mid-charge (its fee claim won
-        // before the hold was recorded): that PaymentIntent can still land,
-        // so it is an in-flight charge, not "nothing charged" (Codex #3800
-        // r5 P1).
-        const inFlight = laneRow.fee_status === 'charging' || laneRow.fee_status === 'charge_review';
-        return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe(inFlight ? 'charge_in_flight' : 'competing_consent') };
-      }
-    } catch (err) {
-      logger.warn('[estimate-card-holds] competing-consent lookup for cancel preview failed — reporting undetermined', { error: err.message });
-      return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'card consent lookup failed', onFailure: 'unknown' }) };
     }
   }
   return { held: true, feeApplies, feeAmount, rule: describe(ruleCode, { start, sticky }) };
