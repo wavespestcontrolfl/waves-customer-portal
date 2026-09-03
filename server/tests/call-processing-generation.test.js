@@ -555,6 +555,17 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     expect(source).toContain('supersedeTargetIds.has(String(row.id))');
   });
 
+  test('the commercial creator supersedes the same SET: locked first, excluded from the pre-probe, the call recheck and the open listing, archived after the insert', () => {
+    const source = src('../services/estimator-engine/commercial-proposal.js');
+    const lockAt = source.indexOf('lockSupersededDraftInTx(trx, { estimateId, attempt');
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(lockAt).toBeLessThan(source.indexOf('callRejectedForDrafting(trx, call.id'));
+    expect(source).toContain('.filter((row) => !supersedeIdSet.has(String(row.id)))');
+    expect(source).toContain("q.whereNotIn('id', supersedeTargets.map((t) => t.id))");
+    expect(source).toContain('.filter((row) => !supersedeTargetIds.has(String(row.id)))');
+    expect(source.indexOf('archiveSupersededDraftInTx(trx, target')).toBeGreaterThan(source.indexOf("category: 'COMMERCIAL'"));
+  });
+
   test('the reply handler stamps the fence under the same call-row lock the creators hold, and the engine adopts it', () => {
     const clarify = src('../services/estimate-clarify-asks.js');
     const lockAt = clarify.indexOf("unitCallLinkage(trx, flags.unit_call_log_id, { lock: true })");

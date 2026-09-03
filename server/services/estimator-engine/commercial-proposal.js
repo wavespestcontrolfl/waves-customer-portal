@@ -46,6 +46,8 @@ const {
   listOpenEstimatesByPhone,
   phoneLookupValues,
   withAutomatedEstimatePhoneLock,
+  lockSupersededDraftInTx,
+  archiveSupersededDraftInTx,
 } = require('../estimate-automation-duplicates');
 const { normalizeFrequency } = require('../estimate-proposal');
 
@@ -353,7 +355,16 @@ async function maybeBuildCommercialProposalDraft({
     // check below stays authoritative, but a repeat call/text about an
     // already-open estimate must not spend the 90s brief budget on a
     // scaffold the guard will discard.
-    const preOpen = await listOpenEstimatesByPhone(customerPhone);
+    // A clarify-reply re-run supersedes the call's own building-level
+    // draft(s) — a commercial scaffold included (pre-push codex P1 on the
+    // unit write-back): those rows are the ones being replaced, never the
+    // duplicates that block this run. Same set the residential creator
+    // takes; locked, excluded, and archived-after-insert below.
+    const supersedeEstimateIds = Array.isArray(context?.supersedeEstimateIds) && context.supersedeEstimateIds.length
+      ? context.supersedeEstimateIds.map(String)
+      : (context?.supersedeEstimateId ? [String(context.supersedeEstimateId)] : []);
+    const supersedeIdSet = new Set(supersedeEstimateIds);
+    const preOpen = (await listOpenEstimatesByPhone(customerPhone)).filter((row) => !supersedeIdSet.has(String(row.id)));
     const preConflict = conflictingOpenEstimate(preOpen, intent.address);
     if (preConflict) {
       return { created: false, blocked: true, existingEstimateId: preConflict.id };
@@ -391,6 +402,7 @@ async function maybeBuildCommercialProposalDraft({
           // Marker-only invalidated terminals are not live drafts
           // (codex P1, PR #3304 GH r6).
           .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+          .modify((q) => { if (supersedeEstimateIds.length) q.whereNotIn('id', supersedeEstimateIds); })
           .first();
         if (existingForCall) return { duplicate: existingForCall };
         return callback(trx);
@@ -398,6 +410,17 @@ async function maybeBuildCommercialProposalDraft({
     };
 
     const creation = await runSerialized(async (trx) => {
+      // The draft(s) this re-run replaces: locked FIRST (estimates → call_log,
+      // the residential creator's order), excluded from every duplicate
+      // read below, archived only AFTER the replacement insert in this same
+      // transaction — a block or any other early return leaves them standing.
+      const supersedeTargets = [];
+      for (const estimateId of supersedeEstimateIds) {
+        const target = await lockSupersededDraftInTx(trx, { estimateId, attempt: context?.supersedeAttempt || null });
+        if (target) supersedeTargets.push(target);
+        else logger.info('[commercial-proposal] supersede target no longer an unsent draft — left alone', { estimateId });
+      }
+      const supersedeTargetIds = new Set(supersedeTargets.map((t) => String(t.id)));
       // Call-scoped in-lock recheck on EVERY serialization path (codex
       // P1, PR #3304 r4 — mirrors the residential fix): the phone-lock
       // path serialized only by phone, and two composers with DIFFERENT
@@ -411,6 +434,8 @@ async function maybeBuildCommercialProposalDraft({
           // Marker-only invalidated terminals are not live drafts
           // (codex P1, PR #3304 GH r6).
           .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+          .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'superseded_at', '') = ''")
+          .modify((q) => { if (supersedeTargets.length) q.whereNotIn('id', supersedeTargets.map((t) => t.id)); })
           .first();
         if (existingForCall) return { duplicate: existingForCall };
         // LIVE call-linkage fence, same as the residential creator (codex
@@ -471,7 +496,8 @@ async function maybeBuildCommercialProposalDraft({
           if (staleReason) return { staleLinkage: staleReason };
         }
       }
-      const openEstimates = await listOpenEstimatesByPhone(customerPhone, { database: trx });
+      const openEstimates = (await listOpenEstimatesByPhone(customerPhone, { database: trx }))
+        .filter((row) => !supersedeTargetIds.has(String(row.id)));
       const conflicting = conflictingOpenEstimate(openEstimates, intent.address);
       if (conflicting) return { duplicate: conflicting };
 
@@ -495,6 +521,8 @@ async function maybeBuildCommercialProposalDraft({
             version: 1,
             callLogId: call?.id || null,
             callSid: call?.twilio_call_sid || null,
+            ...(supersedeTargets.length ? { supersedesEstimateId: supersedeTargets[0].id } : {}),
+            ...(supersedeTargets.length > 1 ? { supersedesEstimateIds: supersedeTargets.map((t) => t.id) } : {}),
             // Same provenance stamp as the standard draft path (PR #3304).
             ...(context?.ownerProcGeneration != null ? { composedGeneration: context.ownerProcGeneration } : {}),
             ...(origin?.channel && origin.channel !== 'call'
@@ -534,6 +562,12 @@ async function maybeBuildCommercialProposalDraft({
         service_interest: intent.service_interest_label || 'Commercial service program',
         category: 'COMMERCIAL',
       }).returning(['id', 'token']);
+
+      // Replacement inserted — NOW retire what it supersedes (same
+      // transaction; a rollback un-archives them together with the insert).
+      for (const target of supersedeTargets) {
+        await archiveSupersededDraftInTx(trx, target, { reason: context?.supersedeReason || 'superseded_by_redraft' });
+      }
 
       return { estimate };
     });

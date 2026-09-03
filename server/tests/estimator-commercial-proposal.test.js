@@ -17,9 +17,12 @@ jest.mock('../models/db', () => {
     const builder = {
       where() { return builder; },
       whereIn() { return builder; },
+      whereNotIn() { return builder; },
       whereNull() { return builder; },
       orWhere() { return builder; },
       whereExists() { return builder; },
+      // The supersede-set exclusion is applied through knex's modify().
+      modify(fn) { fn(builder); return builder; },
       whereRaw(...args) { mockState.whereRaws.push({ table, args }); return builder; },
       orderBy() { return builder; },
       forUpdate() { return builder; },
