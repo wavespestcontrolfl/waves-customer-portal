@@ -313,8 +313,15 @@ const PREDICATES = Object.freeze({
   // A delivered video recap
   // (service_recaps.sent_at — set only on provider confirmation,
   // recap-delivery.js) is a completion notice too (codex P2 r5).
+  // A SUCCESSFUL pest-recap text (pest-recap.js step 5) writes neither
+  // completionSmsStatus nor a service_recaps row — it keeps the
+  // recap_sms_sent_at claim (released on failure/block) and leaves a
+  // messaging_audit_log row with provider sent_at and
+  // metadata.original_message_type = 'pest_recap' keyed to the record. That
+  // audit row is the provider-confirmed evidence; the claim alone stays a
+  // time marker (#3746 codex P2 r8).
   completed_record_without_comms_marker: {
-    label: 'Completed non-project visits (>24h) that owe a completion notice and have no sibling with a terminal one (sent / recap sent / consent-blocked SMS, or sent report email on the artifact record)',
+    label: 'Completed non-project visits (>24h) that owe a completion notice and have no sibling with a terminal one (sent / recap sent / consent-blocked SMS, a provider-sent pest-recap text, or sent report email on the artifact record)',
     href: '/admin/dispatch',
     sql: aggregate(`
         SELECT ss.id, ss.scheduled_date AS ord
@@ -334,7 +341,14 @@ const PREDICATES = Object.freeze({
                       sib.structured_notes->>'completionSmsStatus' IN (${TERMINAL_SMS_STATUSES.map((s) => `'${s}'`).join(', ')})
                       OR (sib.report_view_token IS NOT NULL AND EXISTS (
                            SELECT 1 FROM service_report_deliveries d
-                            WHERE d.service_record_id = sib.id AND d.status = 'sent'))))
+                            WHERE d.service_record_id = sib.id AND d.status = 'sent'))
+                      OR EXISTS (
+                           SELECT 1 FROM messaging_audit_log a
+                            WHERE a.audience = 'customer' AND a.purpose = 'service_completion'
+                              AND a.channel = 'sms'
+                              AND a.metadata->>'original_message_type' = 'pest_recap'
+                              AND a.metadata->>'service_record_id' = sib.id::text
+                              AND a.sent_at IS NOT NULL AND a.blocked_code IS NULL)))
            AND NOT EXISTS (
                  SELECT 1 FROM service_recaps rc
                   WHERE rc.scheduled_service_id = ss.id AND rc.sent_at IS NOT NULL)`),
