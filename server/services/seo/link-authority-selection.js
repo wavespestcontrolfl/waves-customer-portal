@@ -12,6 +12,7 @@
 
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { SIGNUP_LINK_TYPES } = require('./link-path-investigation-schema');
+const { isOutreachLocked } = require('./link-registry');
 
 const AUTH = 'seo_link_placement_authorities';
 // The aggregate states the bridge OWNS. `new`/`investigating`/`watching`/
@@ -73,7 +74,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id))]).select('id', 'updated_at', 'link_type', 'legal_terms_hash', 'payment_required', 'revision_payment', 'revision', 'baseline');
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
-  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'updated_at');
+  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'updated_at', 'outreach_status', 'outreach_sent_at');
   const byDomain = new Map();
   for (const p of placements) byDomain.set(p.domain_id, [...(byDomain.get(p.domain_id) || []), p]);
   const rowsByProspect = new Map();
@@ -94,11 +95,14 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     const all = byDomain.get(d.id) || [];
     const mine = all.filter((p) => expected.includes(p.location_key));
     const offShapeOpen = all.some((p) => !expected.includes(p.location_key) && (rowsByProspect.get(p.id) || []).some((r) => !r.satisfied_at));
-    const onBest = mine.filter((p) => p.path_id === d.best_path_id);
+    // a PINNED conversation (locked send state / sent stamp — the mover refuses it) is this domain's placement for its
+    // location wherever it sits: bridged in place, never a path-mismatch or rotation source until the lock releases
+    const pinned = (p) => isOutreachLocked(p);
+    const onBest = mine.filter((p) => p.path_id === d.best_path_id || pinned(p));
     const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), best ? ts(best.updated_at) : 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
     const staleRow = (r, p) => (best && rotationOutcome(r, best) !== null)
       || (!r.satisfied_at && (ts(r.decided_at) < cutoff || ts(r.decided_at) < ts(p.updated_at)));
-    const withRows = mine.filter((p) => rowsByProspect.has(p.id));
+    const withRows = mine.filter((p) => rowsByProspect.has(p.id) && !pinned(p));
     let why = null;
     if (forced.has(d.id)) why = 'forced';
     else if (BRIDGE_STATES.includes(d.agent_state) && expected.some((l) => !onBest.some((p) => p.location_key === l && rowsByProspect.has(p.id)))) why = 'unbridged';

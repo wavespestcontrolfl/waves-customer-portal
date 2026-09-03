@@ -64,7 +64,7 @@ function makeDb(seed = {}) {
       select(...cols) { st.cols = cols.length ? cols : null; return q; },
       forUpdate() { return q; },
       async first(...cols) { if (cols.length) st.cols = cols; return resolve()[0]; },
-      async update(patch) { if (db._failUpdate === table) throw new Error(`injected failure on ${table}`); const hit = rows.filter(matches); for (const r of hit) Object.assign(r, patch); return hit.length; },
+      async update(patch) { if (db._failUpdate === table) throw new Error(`injected failure on ${table}`); if (db._beforeUpdate) db._beforeUpdate(table, db); const hit = rows.filter(matches); for (const r of hit) Object.assign(r, patch); return hit.length; },
       insert(row) {
         const created = { id: uid(), ...row };
         if (table === 'seo_link_placement_authorities' && rows.some((r) => r.prospect_id === row.prospect_id && r.dimension === row.dimension && r.instance_key === row.instance_key)) throw new Error('duplicate key value violates unique constraint "seo_link_placement_authorities_prospect_id_dimension_instance_key_unique"');
@@ -79,6 +79,7 @@ function makeDb(seed = {}) {
   const db = Object.assign((table) => builder(table), {
     _failUpdate: null,
     _beforeResolve: null,
+    _beforeUpdate: null,
     raw: async (sql) => { raws.push(sql); return {}; },
     transaction: async (cb) => cb(db),
     _tables: tables,
@@ -223,13 +224,15 @@ describe('outreach-lane paths', () => {
     // the pitch already went out: the initial communication instance is satisfied from that evidence, never re-sent
     expect(rows(db)[0]).toMatchObject({ prospect_id: manual.id, dimension: 'communication', instance_key: '-:1', satisfied_at: NOW, satisfied_reason: 'sent' });
     expect(domainState(db)).toBe('acquiring');
-    // bound to ANOTHER live path ⇒ that path's placement: nothing is created
+    // bound to ANOTHER live path ⇒ that path's placement: a SENT conversation is pinned there (bridged in place, not re-selected); nothing is created
     const other = outreachPath(d);
     db._tables.seo_link_acquisition_paths.push(other);
     Object.assign(manual, { path_id: other.id });
     db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 1000);
     const r2 = await run(db, { now: new Date(NOW.getTime() + 60000) });
-    expect(r2.errors).toEqual([{ domain: 'example.org', skipped: 'outreach conversation in flight on another path (contacted)' }]);
+    expect(r2).toMatchObject({ selected: 0, errors: [] });
+    const r3 = await run(db, { domainIds: [d.id], now: new Date(NOW.getTime() + 120000) });
+    expect(r3).toMatchObject({ pinned: 1, placementsCreated: 0, errors: [] });
     expect(placements(db)).toHaveLength(1);
   });
   test('an ambiguous send (send_error / sending) is never parked — it stays in the reconciliation lifecycle; only a DRAFTED message is approval-ready', async () => {
@@ -602,6 +605,29 @@ describe('re-decision', () => {
     expect(rows(db).filter((x) => x.prospect_id === gone.id).map((x) => x.end_outcome)).toEqual(['superseded']);
     expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
   });
+  test('a SENT conversation on a re-ranked same-shape path is PINNED: bridged in place, never re-selected nightly, never a retry slot', async () => {
+    const { db, d } = scenario({ make: outreachPath });
+    const old = outreachPath(d); // live, no longer best
+    db._tables.seo_link_acquisition_paths.push(old);
+    const sent = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: d.id, path_id: old.id, status: 'contacted', outreach_status: 'sent', outreach_sent_at: EARLIER, link_type: 'resource', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(sent);
+    db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: sent.id, path_id: old.id, dimension: 'communication', instance_kind: '-', instance_key: '-:1', level: 'OWNER_OUTREACH', decision_inputs_hash: 'old', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: EARLIER, satisfied_reason: 'sent' });
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // bridged in place
+    const r = await run(db, { domainIds: [d.id] });
+    expect(r).toMatchObject({ pinned: 1, skippedLeased: 0, placementsCreated: 0, ended: 0, errors: [] });
+    expect(placements(db)).toHaveLength(1);
+    expect(placements(db)[0]).toMatchObject({ path_id: old.id, status: 'contacted' });
+    expect(domainState(db)).toBe('acquiring');
+  });
+  test('the park compare-and-swap includes the outreach state: a send that started after the snapshot is never parked under it', async () => {
+    const { db, d, p } = scenario({ make: outreachPath });
+    const pl = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: d.id, path_id: p.id, status: 'prospect', outreach_status: 'drafted', link_type: 'resource', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(pl);
+    db._beforeUpdate = (table) => { if (table === 'seo_link_prospects' && pl.outreach_status === 'drafted') pl.outreach_status = 'sending'; }; // the owner clicked send
+    const r = await run(db);
+    expect(r.parked).toBe(0);
+    expect(placements(db)[0]).toMatchObject({ status: 'prospect', outreach_status: 'sending', authority: 'OWNER_OUTREACH' });
+  });
   test('a placement still LEASED on its old path is left alone this run (the registry mover waits for claimed_at IS NULL)', async () => {
     const { db, d, p } = scenario();
     const old = pathRow(d, { superseded_by: p.id });
@@ -662,6 +688,10 @@ describe('aggregateState (§3.1)', () => {
     ['live beside an owner-held sibling is qualified, not acquired', [{ status: 'live', rows: [A('OWNER_FREE', true)] }, { status: 'awaiting_owner', rows: [A('OWNER_FREE')] }], 'qualified'],
     ['a carried satisfied payment never masks INVALID', [{ status: 'prospect', rows: [A('OWNER_PAYMENT', true), A('INVALID')] }], 'investigating'],
     ['a carried satisfied communication never masks DENY', [{ status: 'prospect', outreach: true, rows: [A('OWNER_OUTREACH', true), A('DENY')] }], 'rejected'],
+    ['a historical lost placement with no rows casts no vote', [{ status: 'prospect', rows: [A('DENY')] }, { status: 'lost', rows: [] }], 'rejected'],
+    ['an off-shape contacted row cannot hold the domain at acquiring', [{ status: 'live', rows: [A('OWNER_FREE', true)] }, { status: 'contacted', offShape: true, rows: [] }], 'acquired'],
+    ['an off-shape awaiting_owner row cannot hold the domain at qualified', [{ status: 'prospect', rows: [A('INVALID')] }, { status: 'awaiting_owner', offShape: true, rows: [] }], 'investigating'],
+    ['an off-shape live link still reads acquired', [{ status: 'live', offShape: true, rows: [] }, { status: 'rejected', rows: [] }], 'acquired'],
     ['a handoff park is acquiring', [{ status: 'ready_for_payment', rows: [A('OWNER_PAYMENT')] }], 'acquiring'],
     ['an UNLEASED authorized sibling still wins over a leased one', [{ status: 'prospect', claimed_at: NOW, rows: [A('AUTO_FREE')] }, { status: 'prospect', rows: [A('AUTO_FREE')] }], 'ready_to_acquire'],
     ['the same payment row on a non-outreach placement is pending', [{ status: 'prospect', rows: [A('AUTO_FREE'), { ...A('OWNER_PAYMENT'), dimension: 'payment' }] }], 'qualified'],

@@ -44,7 +44,7 @@ const { isEnabled } = require('../../config/feature-gates');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { claimProspectDomain, findPlacementRow, targetPageOf } = require('./prospect-domain-lock');
-const { OUTREACH_ACQUISITION_TYPES, LEVEL_SEVERITY, settleRetiredPlacements, movePatch } = require('./link-registry');
+const { OUTREACH_ACQUISITION_TYPES, LEVEL_SEVERITY, settleRetiredPlacements, movePatch, isOutreachLocked } = require('./link-registry');
 const P = require('./link-authority-policy');
 const { selectDomains, expectedLocations, rotationOutcome, ts, BRIDGE_STATES } = require('./link-authority-selection');
 
@@ -96,7 +96,7 @@ const authorized = (r) => Boolean(r.satisfied_at) || isAuto(r.level) || (isOwner
 const DEFERRABLE_PAYMENT_LEVELS = Object.freeze(['OWNER_PAYMENT', 'AUTO_PAID_WITHIN_POLICY', 'OWNER_MANUAL_PAYMENT']);
 const deferred = (r, outreach) => outreach === true && r.dimension === 'payment' && DEFERRABLE_PAYMENT_LEVELS.includes(r.level);
 
-const freshCounters = () => ({ placementsCreated: 0, rowsWritten: 0, redecided: 0, ended: 0, parked: 0, released: 0, invalidatedApprovals: 0, invalidatedWaivers: 0, aggregateChanges: 0, skippedLeased: 0, parkedDomains: [] });
+const freshCounters = () => ({ placementsCreated: 0, rowsWritten: 0, redecided: 0, ended: 0, parked: 0, released: 0, invalidatedApprovals: 0, invalidatedWaivers: 0, aggregateChanges: 0, skippedLeased: 0, pinned: 0, parkedDomains: [] });
 
 // ---------------------------------------------------------------------------
 // One domain, one transaction. Counters are LOCAL to the transaction and
@@ -196,7 +196,10 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     const byId = new Map(moved.map((p) => [p.id, p]));
     placements = placements.map((p) => byId.get(p.id) || p);
     const stuck = placements.filter((p) => p.path_id !== path.id);
-    out.skippedLeased += stuck.length;
+    // a PINNED conversation (locked send state / sent stamp) stays on the path it was claimed on until the worker's
+    // release-time settle: this domain's placement for that location, not re-decided here and not a nightly retry
+    out.pinned += stuck.filter(isOutreachLocked).length;
+    out.skippedLeased += stuck.filter((p) => !isOutreachLocked(p)).length;
     placements = placements.filter((p) => p.path_id === path.id);
   }
   // A placement OUTSIDE the lane's shape (GBP-keyed rows after a re-rank to an
@@ -331,7 +334,11 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     // not this run's to move (the next run re-reads it)
     if (Object.keys(patch).length) await trx('seo_link_prospects').where({ id: placement.id }).update(patch);
     if (transition) {
-      const applied = await trx('seo_link_prospects').where({ id: placement.id, status: placement.status }).whereNull('claimed_at').update({ ...transition, updated_at: now });
+      // compare-and-swap on status, lease AND the outreach state that produced `draftReady` — a send that started
+      // after the snapshot (drafted → sending) must not be parked under it
+      const cas = trx('seo_link_prospects').where({ id: placement.id, status: placement.status }).whereNull('claimed_at');
+      if (placement.outreach_status == null) cas.whereNull('outreach_status'); else cas.where('outreach_status', placement.outreach_status);
+      const applied = await cas.update({ ...transition, updated_at: now });
       if (applied) {
         status = transition.status;
         if (status === PARKED) {
@@ -351,7 +358,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   // now. `rejected` is left only on the owner's explicit "Acquire anyway" (a
   // valid waiver) — the bridge cannot tell its own rejection from the owner's.
   if (BRIDGE_STATES.includes(domain.agent_state) || (domain.agent_state === 'rejected' && waiver)) {
-    const all = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status', 'path_id', 'claimed_at');
+    const all = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status', 'path_id', 'claimed_at', 'location_key');
     // the bridged placements' status + lease come from THIS read, not the
     // pre-decision snapshot: a claim or report that landed meanwhile (the
     // worker locks the row without this domain lock) is what the aggregate sees
@@ -362,7 +369,9 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     const otherPathIds = [...new Set(others.map((p) => p.path_id).filter(Boolean))];
     const otherPaths = otherPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', otherPathIds).select('id', 'acquisition_type') : [];
     const outreachById = new Map(otherPaths.map((p) => [p.id, OUTREACH_ACQUISITION_TYPES.includes(p.acquisition_type)]));
-    for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id), outreach: outreachById.get(p.path_id) === true, claimed_at: p.claimed_at || null });
+    // an off-shape row (the other lane's keys) is INERT in the aggregate except for a live/indexed link it already won:
+    // its workflow status cannot progress (no authority) and must not hold the domain at acquiring / qualified
+    for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id), outreach: outreachById.get(p.path_id) === true, claimed_at: p.claimed_at || null, offShape: !shape.has(p.location_key) });
     const next = aggregateState([...seen.values()]);
     if (next !== domain.agent_state) {
       const moved = await trx('seo_link_domains').where({ id: domain.id, agent_state: domain.agent_state }).update({ agent_state: next, updated_at: now });
@@ -381,7 +390,9 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
 // placement's current BLOCKING decision is INVALID; rejected ONLY when every
 // one is DENY (a single DENY beside a pending sibling never rejects; a carried
 // satisfied instance — the pitch went out, the money left — is history, not a
-// decision, and never masks a terminal level).
+// decision, and never masks a terminal level; a placement with NO blocking
+// row — a historical lost/rejected one, an unbridged one — casts no vote; an
+// `offShape` placement counts only for a live/indexed link it already won).
 // "authorized" = satisfied, AUTO_*, or OWNER_* with a valid approval; a
 // DEFERRED row (payment on an outreach placement, `outreach: true`) is not
 // pending — it is settled at checkout, after the send.
@@ -392,10 +403,12 @@ function aggregateState(placements) {
   const authorizedPending = (p) => p.status === PARKABLE && !leased(p) && pending(p).length > 0 && pending(p).every(authorized);
   const ownerPending = (p) => p.status === PARKABLE && pending(p).some((r) => !authorized(r) && isOwner(r.level));
   const blocking = (p) => rows(p).filter((r) => !r.satisfied_at);
-  const every = (level) => placements.length > 0 && placements.every((p) => blocking(p).length > 0 && blocking(p).every((r) => r.level === level));
-  const active = (p) => leased(p) || ACQUIRING_STATUSES.includes(p.status);
-  const held = (p) => p.status === PARKED || ownerPending(p);
-  if (placements.some(authorizedPending)) return 'ready_to_acquire';
+  const live = (p) => !p.offShape;
+  const judged = placements.filter((p) => live(p) && blocking(p).length > 0);
+  const every = (level) => judged.length > 0 && judged.every((p) => blocking(p).every((r) => r.level === level));
+  const active = (p) => live(p) && (leased(p) || ACQUIRING_STATUSES.includes(p.status));
+  const held = (p) => live(p) && (p.status === PARKED || ownerPending(p));
+  if (placements.some((p) => live(p) && authorizedPending(p))) return 'ready_to_acquire';
   if (placements.some((p) => ['live', 'indexed'].includes(p.status)) && !placements.some(active) && !placements.some(held)) return 'acquired';
   if (placements.some(active)) return 'acquiring';
   if (placements.some(held)) return 'qualified';

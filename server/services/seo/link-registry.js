@@ -427,6 +427,10 @@ const SUCCESSOR_COLUMNS = ['id', 'superseded_by', 'submission_url', 'link_type',
 // never moves (a send may still be executing, or needs human
 // reconciliation) — it keeps the retired path, which nothing can claim.
 const OUTREACH_LOCKED = new Set(['sending', 'sent', 'send_error']);
+// a placement the mover REFUSES to move: a locked send state or a sent stamp —
+// the conversation belongs to the path it was claimed on (exported so the
+// bridge's selection can treat such a row as pinned in place)
+const isOutreachLocked = (row) => OUTREACH_LOCKED.has(row.outreach_status) || Boolean(row.outreach_sent_at);
 const PLACEMENT_MOVE_COLUMNS = ['id', 'path_id', 'link_type', 'outreach_status', 'outreach_sent_at', 'outreach_send_token', 'leased_path_revision'];
 
 /**
@@ -457,7 +461,7 @@ function movePatch(row, target, now, { syncUrl = false } = {}) {
   // signup lane: a send may be executing against the path it was claimed
   // on, or the row awaits human reconciliation; the retired path stays
   // (nothing can claim it) and the attempt/send stays attributed to it
-  if (OUTREACH_LOCKED.has(row.outreach_status) || row.outreach_sent_at) return null;
+  if (isOutreachLocked(row)) return null;
   // The transition CONSUMES the lease stamp: a same-path reconcile at release
   // fires once per lease, never again on every later release or operator
   // draft of the same (now settled) row.
@@ -593,7 +597,7 @@ module.exports = {
   APPROVAL_DECISIONS, APPROVAL_ACTIONS, ACTIONS_BY_DIMENSION, APPROVABLE_LEVELS,
   INTAKE_ITEM_STATES, INTAKE_DROP_REASONS, normalizeRawUrl, intakeItemKey,
   NEVER_TARGET_HOSTS, isNeverTargetHost,
-  mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, isStandingConfidence, normalizeSubmissionUrl, pathKey, movePatch,
+  mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, isStandingConfidence, normalizeSubmissionUrl, pathKey, movePatch, isOutreachLocked,
   acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain,
   settleRetiredPlacements,
 };
