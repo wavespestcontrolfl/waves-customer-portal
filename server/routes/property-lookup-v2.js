@@ -4188,9 +4188,13 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // access were never selectable and property-level palms only reached the
     // disarmed palm reserve — 30 palms priced $0 here and $505/yr on the
     // website form for the same home.
-    const tsTier = String(o.treeShrubTier || 'standard').trim().toLowerCase();
+    // Default only when genuinely absent/blank; every PRESENT value is
+    // validated — `|| default` would wave false / 0 through (pre-push r7 P1).
+    const enumInput = (value, fallback) => (isBlankInput(value) ? fallback
+      : (typeof value === 'string' ? value.trim().toLowerCase() : value));
+    const tsTier = enumInput(o.treeShrubTier, 'standard');
     if (!TREE_SHRUB_TIERS.has(tsTier)) throw treeShrubInputError('Tree & Shrub program must be light, standard, or enhanced.');
-    const tsAccess = String(o.treeShrubAccess || 'easy').trim().toLowerCase();
+    const tsAccess = enumInput(o.treeShrubAccess, 'easy');
     if (!TREE_SHRUB_ACCESS.has(tsAccess)) throw treeShrubInputError('Tree & Shrub access must be easy, moderate, or difficult.');
     // Palms: the same resolution the property block uses below — the
     // operator's count, else a stored inventory count, else the vision

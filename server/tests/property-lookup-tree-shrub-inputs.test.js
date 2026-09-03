@@ -64,7 +64,11 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
   });
 
   test('a malformed program or access is refused at the boundary, never defaulted', () => {
-    for (const options of [{ treeShrubTier: 'premium' }, { treeShrubTier: 'gold' }, { treeShrubAccess: 'impossible' }]) {
+    // Present-but-falsy values are malformed, not defaults.
+    for (const options of [
+      { treeShrubTier: 'premium' }, { treeShrubTier: 'gold' }, { treeShrubAccess: 'impossible' },
+      { treeShrubTier: false }, { treeShrubTier: 0 }, { treeShrubAccess: false }, { treeShrubAccess: 0 }, { treeShrubTier: ['standard'] },
+    ]) {
       let caught;
       try { translateV2CallToV1Input(baseProfile(), ['TREE_SHRUB'], options); } catch (err) { caught = err; }
       expect(caught).toBeTruthy();
@@ -74,6 +78,9 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
       // browser preview as CLIENT_FALLBACK (serverRecomputeFromEstimateData).
       expect(caught.failClosed).toBe(true);
     }
+    // Blank means default, never a rejection.
+    expect(translateV2CallToV1Input(baseProfile(), ['TREE_SHRUB'], { treeShrubTier: '', treeShrubAccess: null })
+      .services.treeShrub).toMatchObject({ tier: 'standard', access: 'easy' });
     // Not selected ⇒ the options are inert, never validated.
     expect(() => translateV2CallToV1Input(baseProfile(), ['PEST'], { treeShrubTier: 'gold' })).not.toThrow();
   });

@@ -133,7 +133,14 @@ function extractTreeShrubEstimate(estimateData) {
   const mappedTier = normalizedEnum(mappedSelected?.tier);
   const optionAccess = normalizedEnum(requestOptions.treeShrubAccess);
 
-  const lineItems = estimateData.engineResult?.lineItems;
+  // Mapped T&S evidence present ⇒ the mapped branch below is THE record; a
+  // revision that changed bed area or tree count must not be recorded off
+  // the stale raw line's measurements either (pre-push r7 P1). Raw-only
+  // fields (bedAreaSource, onSiteMin) read null there rather than stale.
+  const tsMeta = estimateData.result?.results?.tsMeta;
+  const hasMappedTs = !!(tsMeta && typeof tsMeta === 'object');
+
+  const lineItems = hasMappedTs ? null : estimateData.engineResult?.lineItems;
   if (Array.isArray(lineItems)) {
     const quote = lineItems.find((item) => item?.service === 'tree_shrub');
     if (quote) {
@@ -160,8 +167,7 @@ function extractTreeShrubEstimate(estimateData) {
     }
   }
 
-  const tsMeta = estimateData.result?.results?.tsMeta;
-  if (tsMeta && (positiveNumber(tsMeta.eb) || positiveNumber(tsMeta.et))) {
+  if (hasMappedTs && (positiveNumber(tsMeta.eb) || positiveNumber(tsMeta.et))) {
     const profile = engineRequest?.profile || {};
     return {
       bedSqFt: positiveNumber(tsMeta.eb),

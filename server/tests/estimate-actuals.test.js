@@ -276,9 +276,17 @@ describe('extractTreeShrubEstimate', () => {
       result: { results: { tsMeta: { eb: 1500, et: 4, bedAreaIsEstimated: false }, ts: [{ tier: 'standard', selected: false }, { tier: 'enhanced', selected: true }] } },
       engineRequest: { profile: { homeSqFt: 2000 }, options: { treeShrubAccess: 'difficult' } },
     })).toEqual({
-      bedSqFt: 1500, bedAreaSource: 'explicit', bedAreaEstimated: false, treeCount: 4,
-      access: 'difficult', tier: 'enhanced', onSiteMin: 25,
+      // The MAPPED record wins wholesale — raw-only fields read null rather
+      // than the stale line's values.
+      bedSqFt: 1500, bedAreaSource: null, bedAreaEstimated: false, treeCount: 4,
+      access: 'difficult', tier: 'enhanced', onSiteMin: null,
     });
+    // A revision that changed the measurements records the mapped ones.
+    expect(extractTreeShrubEstimate({
+      engineResult: { lineItems: [{ service: 'tree_shrub', bedArea: 1500, treeCount: 4, access: 'easy', tier: 'standard', onSiteMin: 25 }] },
+      result: { results: { tsMeta: { eb: 2600, et: 9, bedAreaIsEstimated: true }, ts: [{ tier: 'standard', selected: true }] } },
+      engineRequest: { profile: {}, options: {} },
+    })).toMatchObject({ bedSqFt: 2600, treeCount: 9, bedAreaEstimated: true, access: 'easy', tier: 'standard' });
     // The v4.8 builder's replayed access is THE priced access on the mapped
     // path too.
     expect(extractTreeShrubEstimate({
