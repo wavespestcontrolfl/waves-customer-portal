@@ -680,11 +680,15 @@ function noticeAmount(n) {
 function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
   const [notices, setNotices] = useState([]);
   const [choice, setChoice] = useState({});
+  // id of the notice whose Apply/Ignore is in flight; every row's controls
+  // lock while one is pending so a second action cannot re-enable the first
+  // row mid-flight or race its reload.
   const [busy, setBusy] = useState(null);
+  const pending = busy !== null;
   const [error, setError] = useState("");
   const load = useCallback(async () => {
     try {
-      const data = await adminFetch("/admin/invoices/payment-notices?status=parked");
+      const data = await adminFetch("/admin/invoices/payment-notices?status=parked&limit=100");
       setNotices(Array.isArray(data?.notices) ? data.notices : []);
       setError("");
     } catch (err) {
@@ -704,7 +708,7 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
     const picked = ordered.find((c) => c.invoice_id === invoiceId);
     // The apply route only settles an exact-cent match; near-amount leads are
     // dropdown context, recorded from the invoice itself.
-    if (!picked?.exact_amount) return;
+    if (!picked?.exact_amount || pending) return;
     const label = picked.invoice_number;
     if (!window.confirm(`Mark ${label} paid via Zelle (${noticeAmount(n)} from ${n.payer_name || "unknown payer"}) and send the receipt (email + SMS)?`)) return;
     setBusy(n.id);
@@ -725,13 +729,16 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
       showToast(err.message || "Could not apply the Zelle payment");
       // The server may have re-parked the notice as apply_failed, another
       // operator may have resolved it, or the settlement may have committed
-      // before the response was lost — show its authoritative state.
+      // before the response was lost — show the authoritative state of the
+      // queue AND the invoice list/stats (harmless on an ordinary refusal).
       await load();
+      onRefresh?.();
     } finally {
       setBusy(null);
     }
   };
   const ignore = async (n) => {
+    if (pending) return;
     if (!window.confirm(`Ignore this Zelle notice (${noticeAmount(n)} from ${n.payer_name || "unknown payer"})? It will not be recorded.`)) return;
     setBusy(n.id);
     try {
@@ -798,7 +805,7 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
                   value={selected}
                   onChange={(e) => setChoice((prev) => ({ ...prev, [n.id]: e.target.value }))}
                   style={sInput(isMobile)}
-                  disabled={busy === n.id}
+                  disabled={pending}
                 >
                   {ordered.map((c) => (
                     <option key={c.invoice_id} value={c.invoice_id}>{noticeCandidateLabel(c)}</option>
@@ -814,16 +821,16 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
             <div style={{ display: "flex", gap: 8, justifyContent: isMobile ? "stretch" : "flex-end" }}>
               <button
                 type="button"
-                style={{ ...sBtn(D.heading, D.white, isMobile), flex: isMobile ? 1 : undefined, opacity: !selectedExact || busy === n.id ? 0.5 : 1 }}
-                disabled={!selectedExact || busy === n.id}
+                style={{ ...sBtn(D.heading, D.white, isMobile), flex: isMobile ? 1 : undefined, opacity: !selectedExact || pending ? 0.5 : 1 }}
+                disabled={!selectedExact || pending}
                 onClick={() => apply(n)}
               >
                 Apply &amp; send receipt
               </button>
               <button
                 type="button"
-                style={{ ...sBtn(D.card, D.text, isMobile), border: `1px solid ${D.border}`, flex: isMobile ? 1 : undefined, opacity: busy === n.id ? 0.5 : 1 }}
-                disabled={busy === n.id}
+                style={{ ...sBtn(D.card, D.text, isMobile), border: `1px solid ${D.border}`, flex: isMobile ? 1 : undefined, opacity: pending ? 0.5 : 1 }}
+                disabled={pending}
                 onClick={() => ignore(n)}
               >
                 Ignore
