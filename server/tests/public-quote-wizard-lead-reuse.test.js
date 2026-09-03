@@ -64,6 +64,15 @@ describe('findPriorOpenWizardLeadId', () => {
     expect(calls.where).toContainEqual(['created_at', '<', createdAt]);
   });
 
+  test('onlyLeadId re-validates one chosen target through the exact same predicate', async () => {
+    const { dbh, calls } = chainMock(null);
+    await expect(_internals.findPriorOpenWizardLeadId(dbh, { ...SAME, onlyLeadId: 'lead-target' })).resolves.toBeNull();
+    expect(calls.where).toContainEqual(['id', 'lead-target']);
+    expect(calls.whereIn).toEqual([['status', OPEN_LEAD_STATUSES]]);
+    // The live-courtship (open estimate) predicate is part of the re-check.
+    expect(calls.whereRaw.some(([sql]) => /estimate_id IS NULL OR EXISTS/.test(sql))).toBe(true);
+  });
+
   test('without a current row (the tokenless insert path) no created_at ceiling is applied', async () => {
     const { dbh, calls } = chainMock(null);
     await _internals.findPriorOpenWizardLeadId(dbh, SAME);
@@ -120,7 +129,7 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // After the label lands (either path) the target is re-checked: a
     // target the office closed in the window makes this a fresh inquiry,
     // reopened on THIS row only (codex r12 P1).
-    expect(src).toMatch(/const targetOpen = await db\('leads'\)\.where\(\{ id: duplicateOfLeadId \}\)\.whereIn\('status', OPEN_LEAD_STATUSES\)\.whereNull\('deleted_at'\)\.first\('id'\);/);
+    expect(src).toMatch(/const targetOpen = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, onlyLeadId: duplicateOfLeadId \}\);/);
     expect(src).toMatch(/if \(!targetOpen\) \{\n\s+await db\('leads'\)\.where\(\{ id: lead\.id, status: 'duplicate' \}\)\.update\(\{ status: 'new'/);
     expect(src).toMatch(/if \(!lead && !additionalProperties\.length\) \{\n\s+duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
     // The replace path carries the marker forward...

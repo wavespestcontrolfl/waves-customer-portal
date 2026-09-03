@@ -29,7 +29,9 @@ function duplicateOfFromExtracted(extractedData) {
 
 // `excludeLeadId` is the caller's OWN row (the token path re-checks a row the
 // property-lookup stage already minted) — a row is never its own prior.
-async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKey, excludeLeadId = null, beforeCreatedAt = null } = {}, now = Date.now()) {
+// `onlyLeadId` re-validates ONE already-chosen target against the exact same
+// predicate (open lead, live courtship, identity) after the label lands.
+async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKey, excludeLeadId = null, beforeCreatedAt = null, onlyLeadId = null } = {}, now = Date.now()) {
   const emailLc = String(email || '').trim().toLowerCase();
   const phoneDigits = String(phone || '').replace(/\D/g, '').slice(-10);
   const addressLc = String(address || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -62,6 +64,7 @@ async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKe
     .modify((qb) => {
       if (excludeLeadId) qb.whereNot('id', excludeLeadId);
       if (beforeCreatedAt) qb.where('created_at', '<', beforeCreatedAt);
+      if (onlyLeadId) qb.where('id', onlyLeadId);
     })
     .orderBy('created_at', 'desc')
     .first('id');
@@ -1847,11 +1850,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // The label was computed from a read of the target; if the office closed
     // that original between the read and the write (lost / won / deleted),
     // this submission is a fresh inquiry, not a repeat of a closed one
-    // (codex #3834 r12 P1). Re-check after the write on both paths and
-    // reopen THIS row — scoped to the label it just received, so a staff
-    // transition on this row in the meantime still wins.
+    // (codex #3834 r12 P1). Re-check after the write on both paths — through
+    // the SAME predicate the lookup used (open lead, live courtship: no
+    // declined / expired / archived estimate, identity), so the two cannot
+    // drift — and reopen THIS row, scoped to the label it just received, so
+    // a staff transition on this row in the meantime still wins.
     if (duplicateOfLeadId) {
-      const targetOpen = await db('leads').where({ id: duplicateOfLeadId }).whereIn('status', OPEN_LEAD_STATUSES).whereNull('deleted_at').first('id');
+      const targetOpen = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, onlyLeadId: duplicateOfLeadId });
       if (!targetOpen) {
         await db('leads').where({ id: lead.id, status: 'duplicate' }).update({ status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
         duplicateOfLeadId = null;
