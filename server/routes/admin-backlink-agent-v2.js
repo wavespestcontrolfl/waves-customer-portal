@@ -9,9 +9,8 @@ const linkIntake = require('../services/seo/link-registry-intake');
 const { etDateString } = require('../utils/datetime-et');
 const { SIGNUP_TYPES } = require('../services/seo/link-prospect-worker');
 const linkPolicy = require('../services/seo/link-authority-policy');
-const { REGISTRY_ACTIONS, LANE_OWNED_STATES, applyRegistryAction } = require('../services/seo/link-registry');
+const { REGISTRY_ACTIONS, applyRegistryAction } = require('../services/seo/link-registry');
 const ownerQueue = require('../services/seo/link-owner-queue');
-const { BRIDGE_STATES } = require('../services/seo/link-authority-selection');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -416,11 +415,11 @@ router.patch('/registry/:id', async (req, res, next) => {
     if (!nextState) return res.status(400).json({ error: `invalid action; must be one of ${Object.keys(REGISTRY_ACTIONS).join(', ')}` });
     const domain = await db('seo_link_domains').where({ id: req.params.id }).first('id', 'domain', 'agent_state', 'score_reasons');
     if (!domain) return res.status(404).json({ error: 'not found' });
-    // Reject / Watch on a domain the bridge has decided is the SAME decision the Owner-queue buttons make: ONE audited,
-    // attributed path (decideDomain writes the per-row decision records, then the registry action) — never a state-only
-    // sibling. Pre-bridge states (new / investigating …) have no authority rows to audit and take the plain action below;
-    // lane-owned states keep the plain action's 409.
-    if ((action === 'reject' || action === 'watch') && BRIDGE_STATES.includes(domain.agent_state) && !LANE_OWNED_STATES.includes(domain.agent_state)) {
+    // Reject / Watch is the SAME decision the Owner-queue buttons make, whatever the state: ONE audited, attributed path
+    // (decideDomain writes the per-row decision records, invalidates approvals and waivers, then the registry action) —
+    // never a state-only sibling. A domain that left the queue (Reopen → investigating) can still carry approved rows.
+    // Lane-owned states are refused by the service with the same 409. Reopen stays the plain action below.
+    if (action === 'reject' || action === 'watch') {
       let r;
       try {
         r = await ownerQueue.decideDomain(db, { domainId: domain.id, decision: action === 'reject' ? 'rejected' : 'watch', actor: actorOf(req), note });

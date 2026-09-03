@@ -20,6 +20,7 @@ const { notifyAdmin } = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const P = require('../services/seo/link-authority-policy');
+const R = require('../services/seo/link-registry');
 const bridge = require('../services/seo/link-authority-bridge');
 const Q = require('../services/seo/link-owner-queue');
 const { makeDb, uid } = require('./helpers/link-authority-store');
@@ -334,7 +335,11 @@ describe('approveRow', () => {
     Object.assign(f2, { satisfied_at: NOW, satisfied_reason: 'charged' });
     rows(none.db).push({ ...f2, id: uid(), instance_kind: '2027', instance_key: '2027:1', satisfied_at: undefined, satisfied_reason: undefined, approval_id: undefined });
     const card2 = (await Q.listOwnerQueue(none.db)).cards.find((x) => x.placement.id === f2.prospect_id);
-    expect(card2.rows.find((r) => r.action === 'renewal').quote_cents).toBeNull();
+    const r2 = card2.rows.find((r) => r.action === 'renewal');
+    // …and the row is not approvable at all — a typed amount cannot stand in for a quote the investigator never priced
+    expect(r2).toMatchObject({ quote_cents: null, approvable: false, why_not: expect.stringMatching(/renewal price not verified/) });
+    await expect(Q.approveRow(none.db, { authorityId: r2.id, actor: ACTOR, approvedAmountCents: 3900, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/renewal price not verified/) });
+    expect(approvals(none.db)).toHaveLength(0);
   });
 
   test('a payment approval on an attested path freezes the agreement url too (never only accept_terms)', async () => {
@@ -518,7 +523,9 @@ describe('decideDomain (Reject / Watch)', () => {
     expect(domainState(db)).toBe('ready_to_acquire');
     await expect(Q.decideDomain(db, { domainId: d.id, decision: 'rejected', actor: ACTOR, now: NOW })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/lane-owned/) });
     const fresh = scenario({ domain: { agent_state: 'investigating' } });
-    await expect(Q.decideDomain(fresh.db, { domainId: fresh.d.id, decision: 'rejected', actor: ACTOR, now: NOW })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/not awaiting/) });
+    // a pre-bridge domain is decidable (the Registry table's Reject is this decision): nothing to audit, the state moves
+    expect(await Q.decideDomain(fresh.db, { domainId: fresh.d.id, decision: 'rejected', actor: ACTOR, now: NOW })).toMatchObject({ agent_state: 'rejected', audited: 0, invalidated: 0, waivers_invalidated: 0 });
+    expect(fresh.db._tables.seo_link_domains[0]).toMatchObject({ agent_state: 'rejected', rejected_by: 'owner' });
     await expect(Q.decideDomain(fresh.db, { domainId: fresh.d.id, decision: 'maybe', actor: ACTOR, now: NOW })).rejects.toMatchObject({ status: 400 });
     await expect(Q.decideDomain(fresh.db, { domainId: uid(), decision: 'watch', actor: ACTOR, now: NOW })).rejects.toMatchObject({ status: 404 });
     expect(approvals(db)).toHaveLength(1);
@@ -595,6 +602,33 @@ describe('acquireAnyway', () => {
     expect(Q.waivableFloors(null, ok.d, policy)).toEqual([]);
     const passing = scenario({ domain: { agent_state: 'rejected' } });
     expect(Q.waivableFloors(passing.p, passing.d, policy)).toEqual([]);
+  });
+
+  test('a Reject after Acquire anyway ends the waiver: the next nightly run leaves the domain rejected; a Reopen after leaving the queue still invalidates a live approval', async () => {
+    const s = scenario({ domain: { agent_state: 'rejected', score: 40 } });
+    await Q.acquireAnyway(s.db, { domainId: s.d.id, actor: ACTOR, now: NOW, bridge: inline });
+    expect(domainState(s.db)).toBe('qualified');
+    const r = await Q.decideDomain(s.db, { domainId: s.d.id, decision: 'rejected', actor: ACTOR, now: LATER });
+    expect(r.waivers_invalidated).toBe(1);
+    expect(waivers(s.db)[0]).toMatchObject({ invalidated_at: LATER, invalidated_reason: expect.stringMatching(/owner rejected/) });
+    // the sweep still selects the domain (its placements were bumped) but honours no waiver: every row re-decides to
+    // DENY, the parks lift into 'prospect' (nothing to wait for) and the owner's rejection stands — the worker excludes
+    // rejected domains, so nothing executes
+    const n = await nightly(s.db, { now: LATER2 });
+    expect(n.invalidatedWaivers).toBe(0); // already ended by the decision
+    expect(storedDomain(s.db)).toMatchObject({ agent_state: 'rejected', rejected_by: 'owner' });
+    expect(openRows(s.db).every((r) => r.level === 'DENY')).toBe(true);
+    expect(placements(s.db).every((p) => p.status === 'prospect' && !p.claimed_at)).toBe(true);
+    // Reopen → investigating with an approved row still attached (its bridge run was gated): the Registry Reject from
+    // THAT state is the same decision — the approval is invalidated, never left for a later bridge pass
+    const { db, d } = await parked();
+    const gated = async () => ({ gated: true, skipped: 'gated', selected: 0, decided: 0, parked: 0, released: 0, aggregateChanges: 0, errors: [] });
+    const a = await Q.approveRow(db, { authorityId: openRows(db)[0].id, actor: ACTOR, now: NOW, bridge: gated });
+    await R.applyRegistryAction(db, storedDomain(db), 'reopen', LATER);
+    expect(domainState(db)).toBe('investigating');
+    const r2 = await Q.decideDomain(db, { domainId: d.id, decision: 'watch', actor: ACTOR, now: LATER2 });
+    expect(r2).toMatchObject({ agent_state: 'watching', invalidated: 1 });
+    expect(approvals(db).find((x) => x.id === a.approval.id)).toMatchObject({ invalidated_at: LATER2, invalidated_reason: expect.stringMatching(/owner watches/) });
   });
 
   test('the owner\'s own registry Reject is lifted by the waiver too (the click is the owner\'s)', async () => {

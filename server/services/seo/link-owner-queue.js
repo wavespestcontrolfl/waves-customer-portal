@@ -82,6 +82,9 @@ function whyNotApprovable(row, path = null) {
   // an attested path whose agreement the owner cannot open (no terms url in the evidence) authorizes nothing —
   // neither the acceptance nor the payment it accompanies — until re-investigation restores the url
   if (path && path.legal_attestation === true && !legalTermsUrlOf(path)) return 'the agreement is not viewable (no terms url in the evidence) — re-investigate before approving';
+  // a renewal instance is approvable only against a verified renewal quote: with none on the path the owner would be
+  // authorizing a charge the investigator never priced — price entry (re-investigation with the renewal quote) comes first
+  if (path && row.dimension === 'payment' && actionFor(row) === 'renewal' && !(Number.isSafeInteger(path.renewal_cost_cents) && path.renewal_cost_cents > 0)) return 'renewal price not verified — re-investigate with the renewal quote before approving';
   return null;
 }
 
@@ -384,7 +387,8 @@ async function decideDomain(db, { domainId, decision, actor, note = null, now = 
     const domain = await trx('seo_link_domains').where({ id: domainId }).forUpdate().first();
     if (!domain) refuse(404, 'registry domain not found');
     if (R.LANE_OWNED_STATES.includes(domain.agent_state)) refuse(409, `agent_state '${domain.agent_state}' is lane-owned: a placement is already approved or in flight — reject or watch it from the board first`);
-    if (!BRIDGE_STATES.includes(domain.agent_state)) refuse(409, `agent_state '${domain.agent_state}' is not awaiting your decision`);
+    // every other state is decidable here — the Registry table's Reject / Watch is THIS decision too, and a domain that
+    // left the queue (Reopen → investigating) can still carry approved rows a plain state flip would leave live
     const placements = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'path_id', 'status');
     const ids = placements.map((p) => p.id);
     const open = ids.length ? await loadApprovals(trx, await trx(AUTH).whereIn('prospect_id', ids).whereNull('ended_at').whereNull('satisfied_at')) : [];
@@ -393,7 +397,12 @@ async function decideDomain(db, { domainId, decision, actor, note = null, now = 
     // here — otherwise a Reopen or the watch re-investigation would let the bridge release that authorization without a
     // fresh click. The bridge's own invalidation is the ONE writer of invalidated_at on approvals.
     const audited = open.filter((r) => R.APPROVABLE_LEVELS.includes(r.level));
-    const invalidated = await require('./link-authority-bridge').invalidateApprovals(trx, audited.filter((r) => r.approved), `owner ${decision === 'watch' ? 'watches' : 'rejected'} the domain`, now);
+    const word = decision === 'watch' ? 'watches' : 'rejected';
+    const invalidated = await require('./link-authority-bridge').invalidateApprovals(trx, audited.filter((r) => r.approved), `owner ${word} the domain`, now);
+    // an active floor waiver (Acquire anyway) is the owner's EARLIER word: left valid, the next bridge sweep would honour
+    // it and lift this very rejection — the waiver ends with the decision (a new Acquire anyway writes a new one)
+    const waiversInvalidated = await trx('seo_link_floor_waivers').where({ domain_id: domain.id }).whereNull('invalidated_at')
+      .update({ invalidated_at: now, invalidated_reason: `owner ${word} the domain`, updated_at: now });
     const pathIds = [...new Set(audited.map((r) => r.path_id).filter(Boolean))];
     const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds) : [];
     const pathById = new Map(paths.map((p) => [p.id, p]));
@@ -424,7 +433,7 @@ async function decideDomain(db, { domainId, decision, actor, note = null, now = 
     const applied = await R.applyRegistryAction(trx, domain, action, now);
     if (!applied.updated) refuse(409, 'the domain moved to a lane-owned state meanwhile — refresh the queue');
     if (ids.length) await trx('seo_link_prospects').whereIn('id', ids).update({ updated_at: now });
-    return { domainId: domain.id, domain: domain.domain, agent_state: applied.nextState, watch_recheck_at: applied.watchRecheckAt, audited: approvals.length, invalidated, placements: ids.length };
+    return { domainId: domain.id, domain: domain.domain, agent_state: applied.nextState, watch_recheck_at: applied.watchRecheckAt, audited: approvals.length, invalidated, waivers_invalidated: waiversInvalidated, placements: ids.length };
   });
 }
 
