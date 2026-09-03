@@ -957,7 +957,7 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
   let attempts = 0;
   // Four model attempts. Every retry sees EVERY prior rejection with the
   // exact words that tripped it (a last-reason-only retry fixed one thing
-  // and broke another — Kathy Allen parked that way). From the third attempt
+  // and broke another — a real review parked that way). From the third attempt
   // the account facts are withheld so the model has less to over-claim from.
   const ladder = [
     { reviewOnly: false },
