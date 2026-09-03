@@ -122,7 +122,8 @@ const LANE_RUNTIME = {
   // ── Voice AI agent ──
   // offline: streams from Anthropic only with a canned spoken error — no second provider (Codex r12).
   // direct_sdk: both relay implementations stream through the Anthropic SDK, not llm/call.js (Codex r14).
-  voice_relay: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
+  // M3 (Codex r19): replies go straight to the caller mid-call; the ordered transcript is written back to call_log on close.
+  voice_relay: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
 
   // ── Photos & property ──
   // direct_sdk: the photo lanes call Anthropic directly and Gemini over raw HTTP, not llm/call.js (Codex r13);
@@ -131,9 +132,11 @@ const LANE_RUNTIME = {
   // lawn-diagnostic stages (raw Gemini / OpenAI fetches + the SDK) are direct_sdk too (Codex r15).
   // offline (Codex r15): the pest / lawn / tree-shrub fetches and treatment_zone's Gemini attempts carry no AbortSignal,
   // so a stalled provider hangs the request past any interactive hard timeout — same condition as chart_builder_image.
-  pest_id: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
+  // M3 (Codex r19): pest_id persists pest_identifications and returns the teaser + claim token with no staff review; tree_shrub
+  // scores with autoConfirm=true and marks its photos customer-visible on completion.
+  pest_id: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   lawn_assess: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
-  tree_shrub: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
+  tree_shrub: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   treatment_zone: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement' },
   // offline (Codex r18): the caption ladder passes no timeoutMs, so a stalled first Gemini rung never reaches either fallback.
   tech_caption_vision: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id' },
@@ -150,7 +153,8 @@ const LANE_RUNTIME = {
   // offline (Codex r17): runPerception / runWriter await unbounded raw Gemini + OpenAI fetches before either fallback can run.
   lawn_diag_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   lawn_challenge: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'compliance_check' },
-  lawn_diag_writer: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'service_report' },
+  // M3 (Codex r19): the public lawn analyzer persists customer_summary and returns the teaser without staff review.
+  lawn_diag_writer: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'service_report', maturity: 'M3' },
   // direct_sdk + offline (Codex r18): the WDO treatment-photo path in admin-projects.js is one anthropic.messages.create with no fallback.
   wdo_project_brief: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null },
   // internal_write: a project-scoped lookup persists the answer to projects.wdo_history (admin-projects.js) — Codex r9.
@@ -170,7 +174,8 @@ const LANE_RUNTIME = {
   retention_drafts: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M2', ...LONG_BATCH },
 
   // ── Service reports ──
-  report_copy: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
+  // draft_for_human + M2 (Codex r19): /generate-report copy lands in the tech's editable notes and reaches the customer only through the later completion action.
+  report_copy: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
   treatment_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   rodent_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   project_report: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
@@ -196,7 +201,8 @@ const LANE_RUNTIME = {
   invoice_pdf: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 120_000 },
 
   // ── Content & SEO ──
-  blog_draft: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', ...LONG_BATCH },
+  // M3 (Codex r19): a scheduled draft can ride the 'publishing' claim through pages-poll auto-merge after the preview + Codex gates.
+  blog_draft: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', ...LONG_BATCH },
   blog_optimize: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', ...LONG_BATCH },
   newsletter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M2', ...LONG_BATCH },
   content_misc: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy' },
@@ -237,7 +243,8 @@ const LANE_RUNTIME = {
   mentions_prober: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'search', fallback_class: 'measurement', eval_family: null, ...LONG_BATCH },
   // direct_sdk (Codex r16): classifySentiment builds its own Anthropic client (seo/llm-mention-prober.js), not llm/call.js.
   mentions_sentiment: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification' },
-  image_gen: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'image', fallback_class: 'offline', eval_family: null, expected_duration_ms: 180_000 },
+  // customer_visible + M3 (Codex r19): hero/body images are committed into the auto-mergeable post PR — same boundary as hero_alt.
+  image_gen: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'image', fallback_class: 'offline', eval_family: null, maturity: 'M3', expected_duration_ms: 180_000 },
   // draft_for_human + M2 (Codex r18): a Veo clip is only made for a draft campaign run and lands in the approval queue.
   video_gen: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'video', fallback_class: 'offline', eval_family: null, maturity: 'M2', ...LONG_BATCH },
   events: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification', maturity: 'M3', ...LONG_BATCH },
