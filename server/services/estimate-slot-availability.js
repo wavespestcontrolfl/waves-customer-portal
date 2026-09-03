@@ -30,7 +30,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
-const { violatesTravelGap, travelGapEnabled, travelBufferMinutes } = require('./scheduling/travel-gap');
+const {
+  violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
+} = require('./scheduling/travel-gap');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
@@ -1773,6 +1775,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       lat: coords.lat,
       lng: coords.lng,
       durationMinutes: serviceProfile.durationMinutes,
+      // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer.
+      bufferMinutes: customerFacingBufferMinutes(),
       dateFrom: segFrom,
       dateTo: segTo,
       topN: Number.MAX_SAFE_INTEGER,
@@ -1985,6 +1989,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     lat: coords.lat,
     lng: coords.lng,
     durationMinutes: serviceProfile.durationMinutes,
+    bufferMinutes: customerFacingBufferMinutes(),
     dateFrom,
     dateTo,
     topN: 200, // broad — debug surface wants everything

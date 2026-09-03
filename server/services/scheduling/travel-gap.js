@@ -65,6 +65,16 @@ function travelBufferMinutes() {
   return Math.round(n);
 }
 
+/**
+ * find-time's `bufferMinutes` for CUSTOMER-FACING callers only (estimate
+ * picker, /book, the debug view): the fixed buffer when the gate is on, else
+ * 0. Staff and optimizer callers (admin find-time, IB schedule tool,
+ * auto-dispatch candidate slots) never pass it and keep legacy geometry.
+ */
+function customerFacingBufferMinutes() {
+  return travelGapEnabled() ? travelBufferMinutes() : 0;
+}
+
 function coordsOf(point) {
   if (!point) return null;
   const lat = point.lat != null ? Number(point.lat) : NaN;
@@ -165,6 +175,7 @@ module.exports = {
   DEFAULT_TRAVEL_BUFFER_MINUTES,
   travelGapEnabled,
   travelBufferMinutes,
+  customerFacingBufferMinutes,
   requiredGapMinutes,
   travelGapViolation,
   travelGapConflicts,

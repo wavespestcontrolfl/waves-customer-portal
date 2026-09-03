@@ -108,6 +108,15 @@ describe('buildBookingAvailability — travel-gap mirror (GATE_SLOT_TRAVEL_GAP)'
     expect(dayStarts(await buildPalmetto())).toEqual(['09:00', '14:00']);
   });
 
+  test('find-time gets the customer-facing buffer only when the gate is on', async () => {
+    await build();
+    expect(findAvailableSlots).toHaveBeenLastCalledWith(expect.objectContaining({ bufferMinutes: 0 }));
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    process.env.SLOT_TRAVEL_BUFFER_MINUTES = '20';
+    await build();
+    expect(findAvailableSlots).toHaveBeenLastCalledWith(expect.objectContaining({ bufferMinutes: 20 }));
+  });
+
   test('gate on: the touching hour is dropped, the clear one survives', async () => {
     process.env.GATE_SLOT_TRAVEL_GAP = 'true';
     expect(dayStarts(await buildPalmetto())).toEqual(['14:00']);

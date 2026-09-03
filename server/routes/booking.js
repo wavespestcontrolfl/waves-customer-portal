@@ -7,7 +7,7 @@ const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { violatesTravelGap } = require('../services/scheduling/travel-gap');
+const { violatesTravelGap, customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
@@ -898,6 +898,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     durationMinutes: duration,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
+    // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
+    // against neighbouring stops; 0 when the gate is off.
+    bufferMinutes: customerFacingBufferMinutes(),
     // Relocating an existing visit (public self-reschedule): drop its own row
     // from the occupied-route set so it doesn't block the slot it's moving
     // out of. Default [] = identical behavior for every other caller.

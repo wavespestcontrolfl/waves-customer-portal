@@ -29,6 +29,7 @@ jest.mock('../services/route-optimizer', () => ({
 
 const db = require('../models/db');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
 
 const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_DRIVE_TIME_CALIBRATION'];
 const saved = {};
@@ -82,9 +83,19 @@ test('gate off: legacy geometry — drive only, no buffer', async () => {
   expect(after.start_time).toBe('11:01');                  // 11:00 + drive
 });
 
-test('gate on: the 15-minute buffer applies against the stop on both sides, never on the HQ legs', async () => {
+test('gate on but no bufferMinutes opt (staff / optimizer callers): legacy geometry, the buffer never leaks in', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
   const { before, after } = byInsertion((await findAvailableSlots(BASE)).slots);
+  expect(before.latest_start_min).toBe(600 - 1 - 60);
+  expect(after.start_time).toBe('11:01');
+  expect(customerFacingBufferMinutes()).toBe(15);
+  delete process.env.GATE_SLOT_TRAVEL_GAP;
+  expect(customerFacingBufferMinutes()).toBe(0);
+});
+
+test('gate on, customer-facing buffer passed: 15 minutes against the stop on both sides, never on the HQ legs', async () => {
+  process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+  const { before, after } = byInsertion((await findAvailableSlots({ ...BASE, bufferMinutes: customerFacingBufferMinutes() })).slots);
   expect(before.start_time).toBe('08:01');                 // HQ start leg unbuffered
   expect(before.latest_start_min).toBe(600 - 1 - 15 - 60); // 08:44
   expect(after.start_time).toBe('11:16');                  // 11:00 + 1 drive + 15 buffer
@@ -93,7 +104,7 @@ test('gate on: the 15-minute buffer applies against the stop on both sides, neve
 test('gate on: the env buffer is honoured, and an explicit bufferMinutes opt overrides it', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
   process.env.SLOT_TRAVEL_BUFFER_MINUTES = '30';
-  const env = byInsertion((await findAvailableSlots(BASE)).slots);
+  const env = byInsertion((await findAvailableSlots({ ...BASE, bufferMinutes: customerFacingBufferMinutes() })).slots);
   expect(env.after.start_time).toBe('11:31');
   const explicit = byInsertion((await findAvailableSlots({ ...BASE, bufferMinutes: 5 })).slots);
   expect(explicit.after.start_time).toBe('11:06');
@@ -105,7 +116,7 @@ test('gate on: a gap too small for duration + drive + buffer disappears', async 
   // zero turnaround — it must not be offered once the buffer applies.
   const second = { ...STOP, id: 's2', window_start: '12:00', window_end: '13:00' };
   db.mockImplementation((table) => (table === 'technicians' ? chain([{ id: 't1', name: 'A' }]) : chain([STOP, second])));
-  const { slots } = await findAvailableSlots(BASE);
+  const { slots } = await findAvailableSlots({ ...BASE, bufferMinutes: customerFacingBufferMinutes() });
   expect(slots.some((s) => s.insertion.after_stop_id === 's1' && s.insertion.before_stop_id === 's2')).toBe(false);
   delete process.env.GATE_SLOT_TRAVEL_GAP;
   const legacy = await findAvailableSlots(BASE);

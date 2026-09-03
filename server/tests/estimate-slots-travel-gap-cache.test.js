@@ -29,6 +29,7 @@ jest.mock('../config/feature-gates', () => ({
 }));
 
 const db = require('../models/db');
+const { findAvailableSlots } = require('../services/scheduling/find-time');
 const estimateSlotAvailability = require('../services/estimate-slot-availability');
 const { getAvailableSlots } = estimateSlotAvailability;
 
@@ -123,8 +124,13 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
     expect(off.metadata.cacheHit).toBe(false);
     expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(true);
 
+    // Route lane: find-time got NO buffer while the gate was off.
+    expect(findAvailableSlots).toHaveBeenLastCalledWith(expect.objectContaining({ bufferMinutes: 0 }));
+
     process.env.GATE_SLOT_TRAVEL_GAP = 'true';
     expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(false);
+    // …and the customer-facing buffer once it is on.
+    expect(findAvailableSlots).toHaveBeenLastCalledWith(expect.objectContaining({ bufferMinutes: 15 }));
     expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(true);
 
     process.env.SLOT_TRAVEL_BUFFER_MINUTES = '25';

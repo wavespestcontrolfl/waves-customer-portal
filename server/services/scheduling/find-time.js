@@ -18,7 +18,6 @@ const logger = require('../logger');
 const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
-const { travelGapEnabled, travelBufferMinutes } = require('./travel-gap');
 
 const DAY_START_HOUR = 8;   // 8:00 AM
 const DAY_END_HOUR = 17;    // 5:00 PM
@@ -98,9 +97,10 @@ async function findAvailableSlots(opts) {
     // (identical legacy behavior for every other caller).
     earliestStartMin = 0,
     // Turnaround minutes between the new stop and a NEIGHBOURING STOP (never an
-    // HQ leg) on top of the modeled drive — GATE_SLOT_TRAVEL_GAP's fixed
-    // buffer (scheduling/travel-gap.js). Off → 0 → legacy geometry.
-    bufferMinutes = travelGapEnabled() ? travelBufferMinutes() : 0,
+    // HQ leg) on top of the modeled drive. Customer-facing callers pass
+    // travel-gap.js customerFacingBufferMinutes() (GATE_SLOT_TRAVEL_GAP);
+    // default 0 = legacy geometry for staff and optimizer callers.
+    bufferMinutes = 0,
   } = opts;
   const stopBuffer = Math.max(0, Number(bufferMinutes) || 0);
   const excludeSet = new Set((excludeServiceIds || []).map(String));
