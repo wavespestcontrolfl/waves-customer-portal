@@ -392,8 +392,14 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
     // Sibling check: a manual / forecast request for the same product raised
     // alongside the auto row (the partial unique index only spans auto rows)
     // means staff are ordering — never auto-order on top of it (pre-push
-    // audit P0). A sibling that lands after this commit is the office's to
-    // reconcile via the tab's order line.
+    // audit P0). CONTRACT: every path that creates a restock request (the
+    // readiness exception in admin-protocols.js, the WaveGuard forecast in
+    // admin-inventory.js, the Intelligence Bar tool, the sweep) inserts
+    // inside a transaction that first locks this products_catalog row FOR
+    // UPDATE, so a staff request either commits before this read or waits
+    // for this claim to commit — the read is serialized, not advisory
+    // (pre-push P0). A sibling that lands after this commit is the office's
+    // to reconcile via the tab's order line.
     const sibling = await trx('product_restock_requests').where({ product_id: request.product_id }).whereIn('status', ['open', 'ordered']).whereNot('id', request.id).first('id', 'source', 'status');
     if (sibling) return { skipped: 'sibling_live_request', sibling };
     const quantity = Number(request.requested_quantity);

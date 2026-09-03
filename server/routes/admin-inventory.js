@@ -3068,53 +3068,61 @@ router.get('/waveguard-forecast', async (req, res, next) => {
 router.post('/waveguard-forecast/:productId/restock-request', async (req, res, next) => {
   try {
     if (!(await db.schema.hasTable('product_restock_requests'))) return res.status(404).json({ error: 'Restock requests are not available' });
-    const product = await db('products_catalog').where({ id: req.params.productId }).first();
-    if (!product) return res.status(404).json({ error: 'Product not found' });
     const actor = req.technicianId || req.technician?.id || null;
     const actorName = req.technician?.name || req.technician?.email || null;
-    const requestedQuantity = numberOrNull(req.body?.requestedQuantity);
-    const unit = String(req.body?.unit || product.inventory_unit || product.rate_unit || '').trim();
-    if (!requestedQuantity || requestedQuantity <= 0 || !unit) {
-      return res.status(400).json({ error: 'Requested quantity and unit are required' });
-    }
-    assertSupportedInventoryUnit(unit);
+    // One transaction, product row LOCKED before the insert: the auto-order
+    // dispatcher checks for a live sibling request under this same lock
+    // before it claims an order, so a staff request either lands before that
+    // check (the dispatcher stands down) or waits for the claim to commit
+    // (the tab shows the order) — never both orders (pre-push P0).
+    const outcome = await db.transaction(async (trx) => {
+      const product = await trx('products_catalog').where({ id: req.params.productId }).forUpdate().first();
+      if (!product) return { status: 404, body: { error: 'Product not found' } };
+      const requestedQuantity = numberOrNull(req.body?.requestedQuantity);
+      const unit = String(req.body?.unit || product.inventory_unit || product.rate_unit || '').trim();
+      if (!requestedQuantity || requestedQuantity <= 0 || !unit) {
+        return { status: 400, body: { error: 'Requested quantity and unit are required' } };
+      }
+      assertSupportedInventoryUnit(unit);
 
-    const existing = await db('product_restock_requests')
-      .where({ product_id: product.id })
-      .whereIn('status', ['open', 'ordered'])
-      .where('source', 'waveguard_inventory_forecast')
-      .first();
-    if (existing && req.body?.allowDuplicate !== true) {
-      return res.json({ success: true, existing: true, restockRequest: existing });
-    }
+      const existing = await trx('product_restock_requests')
+        .where({ product_id: product.id })
+        .whereIn('status', ['open', 'ordered'])
+        .where('source', 'waveguard_inventory_forecast')
+        .first();
+      if (existing && req.body?.allowDuplicate !== true) {
+        return { status: 200, body: { success: true, existing: true, restockRequest: existing } };
+      }
 
-    const now = new Date();
-    const [restockRequest] = await db('product_restock_requests')
-      .insert({
-        product_id: product.id,
-        status: 'open',
-        priority: String(req.body?.priority || 'high').toLowerCase(),
-        requested_quantity: requestedQuantity,
-        unit,
-        current_stock: numberOrNull(product.inventory_on_hand),
-        target_stock: numberOrNull(req.body?.targetStock),
-        vendor: product.best_vendor || null,
-        needed_by: req.body?.neededBy || null,
-        reason: String(req.body?.reason || '').trim() || `Forecasted WaveGuard inventory demand for ${product.name}`,
-        source: 'waveguard_inventory_forecast',
-        created_by: actor,
-        created_by_name: actorName,
-        metadata: {
-          forecastDays: numberOrNull(req.body?.forecastDays),
-          committedDemand: numberOrNull(req.body?.committedDemand),
-          projectedRemaining: numberOrNull(req.body?.projectedRemaining),
-          firstShortDate: req.body?.firstShortDate || null,
-        },
-        created_at: now,
-        updated_at: now,
-      })
-      .returning('*');
-    res.json({ success: true, existing: false, restockRequest });
+      const now = new Date();
+      const [restockRequest] = await trx('product_restock_requests')
+        .insert({
+          product_id: product.id,
+          status: 'open',
+          priority: String(req.body?.priority || 'high').toLowerCase(),
+          requested_quantity: requestedQuantity,
+          unit,
+          current_stock: numberOrNull(product.inventory_on_hand),
+          target_stock: numberOrNull(req.body?.targetStock),
+          vendor: product.best_vendor || null,
+          needed_by: req.body?.neededBy || null,
+          reason: String(req.body?.reason || '').trim() || `Forecasted WaveGuard inventory demand for ${product.name}`,
+          source: 'waveguard_inventory_forecast',
+          created_by: actor,
+          created_by_name: actorName,
+          metadata: {
+            forecastDays: numberOrNull(req.body?.forecastDays),
+            committedDemand: numberOrNull(req.body?.committedDemand),
+            projectedRemaining: numberOrNull(req.body?.projectedRemaining),
+            firstShortDate: req.body?.firstShortDate || null,
+          },
+          created_at: now,
+          updated_at: now,
+        })
+        .returning('*');
+      return { status: 200, body: { success: true, existing: false, restockRequest } };
+    });
+    res.status(outcome.status).json(outcome.body);
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     if (err.code === '23514') return res.status(400).json({ error: 'Invalid priority or request status' });
