@@ -431,14 +431,15 @@ router.post('/owner-queue/rows/:id/approve', (req, res, next) => ownerQueueCall(
   logger.info(`[backlink-owner-queue] ${actorOf(req)} approved ${r.approval.dimension}/${r.approval.action} ${r.approval.instance_key} on ${r.attached.length} row(s); bridge ${r.bridge.gated ? 'gated' : r.bridge.skipped || `released ${r.bridge.released}`}`);
   return r;
 }));
-// POST …/owner-queue/domains/:id/reject | /watch — { note? }
-for (const decision of ['rejected', 'watch']) {
-  router.post(`/owner-queue/domains/:id/${decision === 'rejected' ? 'reject' : 'watch'}`, (req, res, next) => ownerQueueCall(res, next, async () => {
-    const r = await ownerQueue.decideDomain(db, { domainId: req.params.id, decision, actor: actorOf(req), note: (req.body || {}).note || null });
-    logger.info(`[backlink-owner-queue] ${actorOf(req)} ${decision}: ${r.domain} → ${r.agent_state} (${r.audited} row(s) audited)`);
-    return r;
-  }));
-}
+// POST …/owner-queue/domains/:id/reject | /watch — { note? }. Literal paths: the public-route scanner
+// (tests/route-surface) must be able to prove what every mount exposes.
+const decideDomainHandler = (decision) => (req, res, next) => ownerQueueCall(res, next, async () => {
+  const r = await ownerQueue.decideDomain(db, { domainId: req.params.id, decision, actor: actorOf(req), note: (req.body || {}).note || null });
+  logger.info(`[backlink-owner-queue] ${actorOf(req)} ${decision}: ${r.domain} → ${r.agent_state} (${r.audited} row(s) audited)`);
+  return r;
+});
+router.post('/owner-queue/domains/:id/reject', decideDomainHandler('rejected'));
+router.post('/owner-queue/domains/:id/watch', decideDomainHandler('watch'));
 // POST /api/admin/backlink-agent/registry/:id/acquire-anyway — { note? } (a floor waiver, never an approval)
 router.post('/registry/:id/acquire-anyway', (req, res, next) => ownerQueueCall(res, next, async () => {
   const r = await ownerQueue.acquireAnyway(db, { domainId: req.params.id, actor: actorOf(req), note: (req.body || {}).note || null });
