@@ -706,13 +706,15 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
   if (visitItems.length) {
     const customerIds = [...new Set(visitItems.map((i) => i.call_customer_id))];
     const propertyIds = new Map();
+    const propertyKeys = new Map();
     const propRows = await conn('customer_properties')
       .whereIn('customer_id', customerIds)
-      .select('id', 'customer_id');
+      .select('id', 'customer_id', 'address_line1');
     for (const r of propRows) {
       const list = propertyIds.get(String(r.customer_id)) || [];
       list.push(String(r.id));
       propertyIds.set(String(r.customer_id), list);
+      propertyKeys.set(String(r.id), addressKey(r.address_line1));
     }
     const multiProperty = (customerId) => (propertyIds.get(String(customerId)) || []).length > 1;
 
@@ -765,12 +767,14 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
         const ownProperties = propertyIds.get(String(item.call_customer_id)) || [];
         const done = mine.some((v) => {
           if (v.status !== 'completed' || !strictlyAfter(v.completed_at, item.created_at)) return false;
-          // The visit's EFFECTIVE address: a stamped service_address_* or a
-          // property row that is not the account's own is service somewhere
-          // else and proves nothing about the on-file address.
-          if (v.property_id && !ownProperties.includes(String(v.property_id))) return false;
-          if (v.service_address_line1 && addressKey(v.service_address_line1) !== onFile) return false;
-          return true;
+          // POSITIVE linkage to the on-file address, or nothing: the visit's
+          // effective address is its stamped service_address_* when present,
+          // else the address of the account's own property row it points
+          // at. A visit with neither is only associated with the customer
+          // and proves nothing about where service happened.
+          if (v.service_address_line1) return addressKey(v.service_address_line1) === onFile;
+          if (!v.property_id || !ownProperties.includes(String(v.property_id))) return false;
+          return propertyKeys.get(String(v.property_id)) === onFile;
         });
         if (done) flag(item.id, 'visit_completed_at_address');
       }
