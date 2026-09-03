@@ -45,7 +45,7 @@ jest.mock('../config/feature-gates', () => ({
 const mockPreDispatchCheck = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/composer-customer-links', () => ({
   autopayLinkSendCheck: jest.fn(async () => ({ present: false })),
-  expiringLinkSendCheck: jest.fn(async () => ({ present: false })),
+  immediateOnlyLinkSendCheck: jest.fn(async () => ({ present: false })),
 }));
 jest.mock('../services/estimate-clarify-asks', () => ({
   claimClarifyDispatch: jest.fn(),
@@ -387,9 +387,9 @@ describe('Auto Pay setup links never ride draft approval (GH Codex #3812 r3 P1)'
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('revise with a contract signing link → 409 through the same fence (expiring bearers are immediate-send only)', async () => {
-    const { expiringLinkSendCheck } = require('../services/composer-customer-links');
-    expiringLinkSendCheck.mockResolvedValueOnce({ present: true, label: 'Contract signing' });
+  test('revise with a contract signing link → 409 through the same fence (per-row bearers are immediate-send only)', async () => {
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    immediateOnlyLinkSendCheck.mockResolvedValueOnce({ present: true, label: 'Contract signing' });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/drafts/draft-9/revise`, {
         method: 'PUT',

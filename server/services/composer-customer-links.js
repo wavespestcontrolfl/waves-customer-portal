@@ -610,39 +610,59 @@ async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) 
   return { present: true, ok: true, tokens: live.map((l) => l.token) };
 }
 
-// Immediate-send-only bearer links beyond Auto Pay (pre-push Codex P1 on
-// the step-2 rows: the composer's client-side refusal is transient state,
-// a loaded draft or a scheduled body has none). Contract signing links are
-// always time-boxed; a prep page is only when the row carries an expiry.
-// Presence-only — the callers (/schedule-sms, draft approve/revise) refuse
-// on any hit; the immediate /sms path is untouched (the link is live now).
-// Canonical portal host + path only, like the Auto Pay seam: a look-alike
-// host is not a Waves bearer and is simply not this seam's business.
-const EXPIRING_LINK_KINDS = [
+// Immediate-send-only bearer links beyond Auto Pay (pre-push Codex P1 +
+// GH Codex #3844 r1 P1): the composer's client-side refusal is transient
+// state — a loaded draft or a scheduled body has none — and ONLY the
+// immediate /sms path re-runs bearerLinkSendCheck at delivery (the
+// scheduler and draft approve/revise dispatch straight into
+// sendCustomerMessage). So every per-row bearer that seam judges is
+// immediate-only: a contract signing link (time-boxed, rotates), a visit-
+// lane card request, a payer statement pay link, and a prep page when its
+// row carries an expiry. Presence-only — the callers (/schedule-sms, draft
+// approve/revise) refuse on any hit. Canonical portal host + path only,
+// like the Auto Pay seam: a look-alike host is not a Waves bearer and is
+// simply not this seam's business. Customer-kind /secure links are the
+// Auto Pay seam's (its own presence check runs first at every caller).
+const IMMEDIATE_ONLY_LINK_KINDS = [
   {
     label: 'Contract signing',
     fragment: /\/contract\//i,
-    path: /^\/contract\/([A-Za-z0-9_-]{16,})$/i,
-    expires: async () => true,
+    token: (run, host) => canonicalPortalToken(run, host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i),
+    applies: async () => true,
   },
   {
     label: 'Prep guide',
     fragment: /\/prep\//i,
-    path: /^\/prep\/([a-f0-9]{32})$/i,
-    expires: async (token) => {
+    token: (run, host) => canonicalPortalToken(run, host, /^\/prep\/([a-f0-9]{32})$/i),
+    applies: async (token) => {
       const row = await db('scheduled_services').where({ prep_token: token }).first('prep_expires_at');
       return !!row?.prep_expires_at;
     },
   },
+  {
+    label: 'Statement pay',
+    fragment: /\/pay\/statement\//i,
+    token: (run, host) => canonicalPortalToken(run, host, /^\/pay\/statement\/([0-9a-f]{64})$/i),
+    applies: async () => true,
+  },
+  {
+    label: 'Card request',
+    fragment: /\/secure\//i,
+    token: canonicalSecureToken,
+    applies: async (token) => {
+      const row = await db('appointment_card_requests').where({ token }).first('kind');
+      return row?.kind === 'visit';
+    },
+  },
 ];
 
-async function expiringLinkSendCheck(body) {
+async function immediateOnlyLinkSendCheck(body) {
   const runs = decodedRuns(body);
   const host = new URL(publicPortalUrl()).host.toLowerCase();
-  for (const kind of EXPIRING_LINK_KINDS) {
+  for (const kind of IMMEDIATE_ONLY_LINK_KINDS) {
     for (const run of linkRuns(runs, kind.fragment)) {
-      const token = canonicalPortalToken(run, host, kind.path);
-      if (token && await kind.expires(token)) return { present: true, label: kind.label };
+      const token = kind.token(run, host);
+      if (token && await kind.applies(token)) return { present: true, label: kind.label };
     }
   }
   return { present: false };
@@ -659,12 +679,16 @@ async function expiringLinkSendCheck(body) {
  *               or expired link matches nothing → refuse).
  *   card      — /secure/<token> visit-lane rows (kind 'visit'; the Auto Pay
  *               seam judges kind 'customer'): status must still be pending.
- *   statement — /pay/statement/<token>: a payable payer_statements row whose
- *               ACTIVE payer's AP phone is the recipient number (a statement
- *               is the payer's, never a customer's — no customer-id trust).
+ *   statement — /pay/statement/<token>: GATE_PAYER_STATEMENTS still on (the
+ *               pay page 404s the moment it is off — GH Codex #3844 r1 P1),
+ *               a payable payer_statements row whose ACTIVE payer's AP phone
+ *               is the recipient number (a statement is the payer's, never
+ *               a customer's — no customer-id trust).
  * For contract and card, the row's customer must own the recipient number,
  * and — when the route trusts a customer id — be that customer. FAIL
- * CLOSED on any miss. { ok: true } when nothing applies or all checks out.
+ * CLOSED on any miss. { ok: true } when nothing applies or all checks out;
+ * `cards` rides back with every live visit-lane link so the caller can
+ * consume the card request's one-text-ever claim after a real send.
  */
 async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
   const runs = decodedRuns(body);
@@ -701,6 +725,9 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
   for (const run of linkRuns(runs, /\/pay\/statement\//i)) {
     const token = canonicalPortalToken(run, host, /^\/pay\/statement\/([0-9a-f]{64})$/i);
     if (!token) return refuse('A statement link in this message is not on the Waves portal — remove it before sending.');
+    if (!require('../config/feature-gates').isEnabled('payerStatements')) {
+      return refuse('Payer statements are switched off (GATE_PAYER_STATEMENTS) — remove the statement link before sending.');
+    }
     const { isPayableStatementStatus } = require('./payer-statement-settle');
     const stmt = await db('payer_statements').where({ token }).first('id', 'payer_id', 'status');
     if (!stmt || !isPayableStatementStatus(stmt.status)) {
@@ -712,16 +739,46 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
     }
   }
 
+  const cards = [];
   for (const run of secureLinkRuns(runs)) {
     const token = canonicalSecureToken(run, host);
     if (!token) continue; // the Auto Pay seam already refused a non-canonical /secure run
-    const row = await db('appointment_card_requests').where({ token }).first('id', 'kind', 'status', 'customer_id');
+    const row = await db('appointment_card_requests').where({ token }).first('id', 'kind', 'status', 'customer_id', 'scheduled_service_id');
     if (!row || row.kind !== 'visit') continue; // unknown → the Auto Pay seam's verdict; customer-kind → its own
     if (row.status !== 'pending') return refuse('This card request link is no longer live — remove it and insert a fresh one.');
     const bad = await owned(row.customer_id, 'card request link');
     if (bad) return bad;
+    if (!cards.some((c) => c.token === token)) cards.push({ token, scheduledServiceId: row.scheduled_service_id });
   }
-  return { ok: true };
+  return cards.length ? { ok: true, cards } : { ok: true };
+}
+
+/**
+ * Consume a card request's one-text-ever claim after the composer's /sms
+ * send actually left (GH Codex #3844 r1 P1). requestCardForAppointment's
+ * inline delivery deliberately leaves both markers unconsumed (the /book
+ * wizard's customer may abandon the step), so the operator's text has to
+ * stamp them itself or the previsit / office triggers would reuse the
+ * pending row and text the same payment-adjacent ask again. Same two
+ * markers the service's own SMS path writes: the visit's card_link_sent_at
+ * (the send claim every later trigger checks first) and the request row's
+ * sent_at (the durable outcome marker the stale-claim lease reads).
+ * Value-guarded: a visit already claimed, or a row that left 'pending'
+ * meanwhile, is left alone. Throws on a write failure — the caller logs
+ * (the text is already out).
+ */
+async function consumeCardRequestClaims(cards) {
+  const stamp = new Date();
+  for (const { token, scheduledServiceId } of cards) {
+    await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .whereNull('card_link_sent_at')
+      .update({ card_link_sent_at: stamp, updated_at: stamp });
+    await db('appointment_card_requests')
+      .where({ token, status: 'pending' })
+      .whereNull('sent_at')
+      .update({ sent_at: stamp, updated_at: stamp });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -825,6 +882,9 @@ async function buildCardRequestLink(visit) {
     url: result.secureUrl,
     line: `${String(body).replace(/\s*\n+\s*/g, ' ').trim()}\n\n`,
     standalone: true,
+    // Immediate sends only — the delivery seam that consumes the one-text
+    // claim runs on /sms alone (immediateOnlyLinkSendCheck is the server fence).
+    immediateOnly: true,
     appointment: { id: visit.id, scheduledDate: dateOnly(visit.scheduled_date), serviceType: visit.service_type || null },
   };
 }
@@ -870,6 +930,13 @@ async function buildPrepGuideLink(customerIds) {
   // same expired token — refuse rather than insert a dead link.
   if (visit.prep_expires_at && new Date(visit.prep_expires_at).getTime() <= Date.now()) {
     return { url: null, line: '', reason: 'The prep guide link for this appointment has expired' };
+  }
+  // prep-public renders the guide from the template's ACTIVE version and
+  // 404s without one (renderGuideForSource) — a deactivated guide would
+  // mint a link that cannot render (GH Codex #3844 r1 P1). Same predicate.
+  const loaded = await require('./email-template-library').loadTemplateByKey(config.emailTemplateKey);
+  if (!loaded?.activeVersion) {
+    return { url: null, line: '', reason: `The ${config.label} prep guide has no active version in Email Templates — activate it before texting a prep link` };
   }
   const token = await ensureServicePrepToken(visit.id, config.emailTemplateKey);
   const url = `${publicPortalUrl()}/prep/${token}`;
@@ -973,7 +1040,9 @@ async function buildContractSigningLink(customerIds, req) {
  * recipient number must equal the AP phone of an active payer one of the
  * account's rows bills to; a homeowner's number never qualifies. Newest
  * payable statement (finalized/sent/viewed — the settle module's own
- * predicate). Raw URL, same as the follow-up emails.
+ * predicate) across EVERY active payer whose AP phone is the number — one
+ * account can bill rows to several payer records sharing a contact (GH
+ * Codex #3844 r1 P2). Raw URL, same as the follow-up emails.
  */
 async function buildStatementLink(customerIds, recipientLast10) {
   if (!require('../config/feature-gates').isEnabled('payerStatements')) {
@@ -986,22 +1055,26 @@ async function buildStatementLink(customerIds, recipientLast10) {
   }
   const payers = await db('payers').whereIn('id', payerIds).where({ active: true }).select('id', 'display_name', 'ap_phone');
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-  const payer = payers.find((p) => last10(p.ap_phone) && last10(p.ap_phone) === String(recipientLast10 || ''));
-  if (!payer) {
+  const matching = payers.filter((p) => last10(p.ap_phone) && last10(p.ap_phone) === String(recipientLast10 || ''));
+  if (!matching.length) {
     return { url: null, line: '', reason: "This number is not the payer's AP phone on file — statement links go to the bill-to contact only" };
   }
   const { isPayableStatementStatus } = require('./payer-statement-settle');
   const statements = await db('payer_statements')
-    .where({ payer_id: payer.id })
+    .whereIn('payer_id', matching.map((p) => p.id))
     .orderBy('created_at', 'desc')
     .limit(20);
   const stmt = statements.find((s) => isPayableStatementStatus(s.status) && s.token) || null;
-  if (!stmt) return { url: null, line: '', reason: `No payable statement for ${payer.display_name}` };
+  const names = matching.map((p) => p.display_name).join(' / ');
+  if (!stmt) return { url: null, line: '', reason: `No payable statement for ${names}` };
+  const payer = matching.find((p) => String(p.id) === String(stmt.payer_id)) || matching[0];
   const url = `${publicPortalUrl()}/pay/statement/${stmt.token}`;
   const number = `S-${stmt.id}`;
   return {
     url,
     line: `You can view and pay statement ${number} securely here: ${url}\n\n`,
+    // Immediate sends only — payability + the gate are re-checked on /sms alone.
+    immediateOnly: true,
     statement: { id: stmt.id, number, total: Number(stmt.total) || 0, payerName: payer.display_name },
   };
 }
@@ -1020,8 +1093,9 @@ module.exports = {
   AUTOPAY_SKIP_REASONS,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
-  expiringLinkSendCheck,
+  immediateOnlyLinkSendCheck,
   bearerLinkSendCheck,
+  consumeCardRequestClaims,
   buildAppointmentPageLink,
   CARD_REQUEST_SKIP_REASONS,
   buildCardRequestLink,

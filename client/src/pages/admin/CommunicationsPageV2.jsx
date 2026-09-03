@@ -1204,17 +1204,19 @@ function SmsTab() {
       });
       return;
     }
-    // An expiring bearer credential (Auto Pay setup, contract signing, prep
-    // guide — anything the server minted with an expiresAt) and the
-    // schedule picker has no upper bound — a send scheduled past expiry
-    // delivers a dead link. Immediate sends only, same rule as review links.
+    // A per-row bearer credential (Auto Pay setup, contract signing, prep
+    // guide — anything the server minted with an expiresAt — plus the
+    // kinds it flags immediateOnly: card request, statement pay) is only
+    // re-checked at delivery on the immediate send; the schedule picker has
+    // no upper bound and a draft dispatches without a re-check. Immediate
+    // sends only, same rule as review links (the server re-fences).
     {
-      const expiring = Object.entries(insertedCustomerLinks).find(([, entry]) => entry?.expiresAt);
-      if (expiring && (scheduledFor || loadedMessageDraft?.id)) {
-        const name = CUSTOMER_COMPOSER_LINKS.find((l) => l.key === expiring[0])?.name || "This";
+      const bearer = Object.entries(insertedCustomerLinks).find(([, entry]) => entry?.expiresAt || entry?.immediateOnly);
+      if (bearer && (scheduledFor || loadedMessageDraft?.id)) {
+        const name = CUSTOMER_COMPOSER_LINKS.find((l) => l.key === bearer[0])?.name || "This";
         setSendResult({
           ok: false,
-          text: `${name}s expire — send now, or remove that link first.`,
+          text: `${name}s are re-checked at delivery — send now, or remove that link first.`,
         });
         return;
       }
@@ -1850,9 +1852,10 @@ function SmsTab() {
           recipientKey: requestRecipientKey,
           customerId: linkCustomerId,
           requestId: d.requestId || null,
-          // Expiring bearer links refuse scheduled/draft sends (see the
-          // send boundary) — the server says which kinds expire.
+          // Expiring / immediate-only bearer links refuse scheduled and
+          // draft sends (see the send boundary) — the server says which.
           expiresAt: d.expiresAt || null,
+          immediateOnly: !!d.immediateOnly,
         },
       }));
       setSendResult({ ok: true, text: (CUSTOMER_LINK_NOTES[kind] || (() => "Link added."))(d) });

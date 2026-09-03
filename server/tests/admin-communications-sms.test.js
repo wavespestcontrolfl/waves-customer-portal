@@ -430,6 +430,70 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    test('a live visit-lane card request link: the send consumes the one-text claim (visit + request markers)', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM2' });
+      const owner = { id: 'cust-A', phone: '+15551234567' };
+      const card = { id: 'r9', kind: 'visit', status: 'pending', customer_id: 'cust-A', scheduled_service_id: 'v-77' };
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'customers') first.mockResolvedValue(owner);
+        else if (table === 'appointment_card_requests') first.mockResolvedValue(card);
+        // The Auto Pay seam's token lookup sees the same visit-lane row and leaves it alone.
+        const select = jest.fn(async () => (table === 'appointment_card_requests' ? [{ token: 'abcDEF123_-xyz789QWERTY', ...card }] : []));
+        const update = jest.fn(async (payload) => { stamps.push({ table, payload }); return 1; });
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select, update };
+      });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(200);
+        expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+          metadata: expect.objectContaining({ original_message_type: 'manual' }),
+        }));
+        const visitStamp = stamps.find((s) => s.table === 'scheduled_services');
+        const requestStamp = stamps.find((s) => s.table === 'appointment_card_requests');
+        expect(Object.keys(visitStamp.payload).sort()).toEqual(['card_link_sent_at', 'updated_at']);
+        expect(Object.keys(requestStamp.payload).sort()).toEqual(['sent_at', 'updated_at']);
+      });
+    });
+
+    test('a suppressed (non-provider) send leaves the card request claim open', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, suppressed: true });
+      const card = { id: 'r9', kind: 'visit', status: 'pending', customer_id: 'cust-A', scheduled_service_id: 'v-77' };
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+        else if (table === 'appointment_card_requests') first.mockResolvedValue(card);
+        const select = jest.fn(async () => (table === 'appointment_card_requests' ? [{ token: 'abcDEF123_-xyz789QWERTY', ...card }] : []));
+        const update = jest.fn(async (payload) => { stamps.push({ table, payload }); return 1; });
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select, update };
+      });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(200);
+        expect(stamps.find((s) => s.table === 'scheduled_services')).toBeUndefined();
+        expect(stamps.find((s) => s.table === 'appointment_card_requests')).toBeUndefined();
+      });
+    });
+
+    test('schedule-sms refuses a body carrying a live visit-lane card request link — only /sms consumes the claim', async () => {
+      const card = { id: 'r9', kind: 'visit', status: 'pending', customer_id: 'cust-A', scheduled_service_id: 'v-77' };
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'appointment_card_requests') first.mockResolvedValue(card);
+        const select = jest.fn(async () => (table === 'appointment_card_requests' ? [{ token: 'abcDEF123_-xyz789QWERTY', ...card }] : []));
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select, update: jest.fn(async () => 1) };
+      });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: SECURE_BODY, messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/Card request links are re-checked at delivery/);
+      });
+    });
+
     test('schedule-sms refuses a body carrying a live Auto Pay link — immediate sends only', async () => {
       wireAutopayDb({ row: { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() + 86400e3), customer_id: 'cust-A' } });
       await withServer(async (baseUrl) => {
@@ -462,7 +526,7 @@ describe('admin communications SMS route', () => {
           body: JSON.stringify({ to: '+15551234567', body: 'Please sign: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY', messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
         });
         expect(res.status).toBe(400);
-        expect((await res.json()).error).toMatch(/^Contract signing links expire/);
+        expect((await res.json()).error).toMatch(/^Contract signing links are re-checked at delivery/);
       });
     });
 

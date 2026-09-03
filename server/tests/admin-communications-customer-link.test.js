@@ -86,6 +86,8 @@ jest.mock('../services/composer-customer-links', () => ({
   buildContractSigningLink: jest.fn(),
   buildStatementLink: jest.fn(),
 }));
+// The card funnel's own live-status set — the route narrows its visit pick to it.
+jest.mock('../services/appointment-card-request', () => ({ LIVE_VISIT_STATUSES: ['pending', 'confirmed'] }));
 jest.mock('../services/review-request', () => ({
 }));
 
@@ -391,7 +393,8 @@ describe('POST /admin/communications/customer-link', () => {
       expect(body.appointment).toEqual({ id: 'v1', scheduledDate: '2026-09-08', serviceType: 'Flea Treatment' });
     });
 
-    wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([]) });
+    const visits = makeVisitsBuilder([]);
+    wireDb({ customers: soloCustomer(), visits });
     builders.buildCardRequestLink.mockResolvedValue({ url: null, line: '', reason: 'No upcoming appointment for this customer' });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'card_request' });
@@ -399,6 +402,9 @@ describe('POST /admin/communications/customer-link', () => {
       expect(builders.buildCardRequestLink).toHaveBeenCalledWith(null);
       // Card requests anchor on the phone OWNER's visits only, never a sibling's.
       expect(db.mock.calls.filter(([t]) => t === 'scheduled_services').length).toBeGreaterThan(0);
+      // …and only on the funnel's own live statuses — a soonest 'rescheduled'
+      // placeholder must not be picked here and rejected there (Codex r1 P1).
+      expect(visits.whereIn).toHaveBeenCalledWith('status', ['pending', 'confirmed']);
       expect((await res.json()).error).toMatch(/No upcoming appointment/);
     });
   });

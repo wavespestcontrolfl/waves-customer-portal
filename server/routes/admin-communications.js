@@ -437,12 +437,16 @@ router.post('/sms', async (req, res, next) => {
       logger.warn(`[communications] Auto Pay link pre-send check failed — aborting send: ${autopayErr.message}`);
       return abortUnsent(503, 'Could not verify the inserted Auto Pay setup link — try again in a moment.');
     }
-    // The other per-row bearers (contract signing, visit-lane card request):
-    // liveness + recipient ownership NOW, fail closed — same bar as above.
+    // The other per-row bearers (contract signing, visit-lane card request,
+    // payer statement): liveness + recipient ownership NOW, fail closed —
+    // same bar as above. Live card requests ride back so the send below can
+    // consume their one-text-ever claim.
+    let cardLinks = null;
     try {
       const { bearerLinkSendCheck } = require('../services/composer-customer-links');
       const bearerCheck = await bearerLinkSendCheck(cleanBody, normalizePhoneLast10(to), { trustedCustomerId: trustedCustomerId || null });
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
+      if (bearerCheck.cards) cardLinks = bearerCheck.cards;
     } catch (bearerErr) {
       logger.warn(`[communications] bearer link pre-send check failed — aborting send: ${bearerErr.message}`);
       return abortUnsent(503, 'Could not verify a customer link in this message — try again in a moment.');
@@ -635,6 +639,20 @@ router.post('/sms', async (req, res, next) => {
         }
       } catch (stampErr) {
         logger.warn(`[communications] Auto Pay link sent_at stamp failed (text already sent): ${stampErr.message}`);
+      }
+    }
+    // Composer-carried card request links: the text that just left IS the
+    // visit's one card-request text — consume the claim the inline mint
+    // left open (GH Codex #3844 r1 P1), same real-send guard and fail-soft
+    // rule as the Auto Pay stamp above.
+    if (cardLinks && result?.sent) {
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        if (isRealProviderSend(result)) {
+          await require('../services/composer-customer-links').consumeCardRequestClaims(cardLinks);
+        }
+      } catch (stampErr) {
+        logger.warn(`[communications] card request claim stamp failed (text already sent): ${stampErr.message}`);
       }
     }
     if (claimedReviewRequestId) {
@@ -1383,14 +1401,16 @@ function isElapsedSameDayReschedulePlaceholder(svc, now = new Date()) {
 // today's elapsed 'rescheduled' placeholders must not read as "no
 // upcoming appointment" when a later visit exists. Ordering is fully
 // deterministic (id tie-breaker), so offset pages can't skip or repeat
-// rows within a request.
-async function soonestUpcomingVisit(customerIds) {
+// rows within a request. `statuses` narrows the candidate set for a
+// caller whose downstream funnel accepts fewer (the card request's
+// LIVE_VISIT_STATUSES has no 'rescheduled').
+async function soonestUpcomingVisit(customerIds, statuses = ['pending', 'confirmed', 'rescheduled']) {
   const PAGE = 25;
   let svc = null;
   for (let offset = 0; ; offset += PAGE) {
     const candidates = await db('scheduled_services')
       .whereIn('customer_id', customerIds)
-      .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+      .whereIn('status', statuses)
       .where('scheduled_date', '>=', etDateString())
       .where((qb) => qb
         .whereNull('source_action')
@@ -1711,7 +1731,12 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       // owner only, never an account sibling (pre-push Codex P0: the
       // document delivery's SMS_RECIPIENT_UNTRUSTED bar is the customer's
       // own phone, not any phone on the account). STRICT_OWNER_KINDS below.
-      card_request: async (ids, primaryId) => builders.buildCardRequestLink(await soonestUpcomingVisit([primaryId])),
+      // The card funnel only accepts its own live statuses — a soonest
+      // 'rescheduled' placeholder would be picked here and then rejected
+      // there, hiding a later eligible visit (GH Codex #3844 r1 P1).
+      card_request: async (ids, primaryId) => builders.buildCardRequestLink(
+        await soonestUpcomingVisit([primaryId], require('../services/appointment-card-request').LIVE_VISIT_STATUSES),
+      ),
       prep_guide: (ids) => builders.buildPrepGuideLink(ids),
       service_report: (ids) => builders.buildServiceReportLink(ids),
       contract: (ids, primaryId) => builders.buildContractSigningLink([primaryId], req),
@@ -1816,6 +1841,9 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       contract: result.contract || undefined,
       statement: result.statement || undefined,
       expiresAt: result.expiresAt || undefined,
+      // Immediate-send-only kinds (card request, statement): the composer
+      // refuses to schedule or draft them; /schedule-sms + drafts re-fence.
+      immediateOnly: result.immediateOnly || undefined,
       // Auto Pay: the resolved owner rides back so the composer can select
       // it — the /sms send then carries customerId and the link's owner
       // policy applies (GH Codex #3812 r3 P1). standalone: the line is a
@@ -2135,13 +2163,16 @@ router.post('/schedule-sms', async (req, res, next) => {
       if (autopayCheck.present) {
         return res.status(400).json({ error: 'Auto Pay setup links expire — send them now, or remove the link before scheduling' });
       }
-      // Same fence for the other time-boxed bearers the composer inserts
-      // (contract signing, expiring prep pages) — the client refusal is
-      // transient state; this is the authoritative one.
-      const { expiringLinkSendCheck } = require('../services/composer-customer-links');
-      const expiring = await expiringLinkSendCheck(cleanBody);
-      if (expiring.present) {
-        return res.status(400).json({ error: `${expiring.label} links expire — send them now, or remove the link before scheduling` });
+      // Same fence for the other per-row bearers the composer inserts
+      // (contract signing, card request, statement pay, expiring prep
+      // pages): only the immediate /sms path re-checks them at delivery —
+      // the scheduler dispatches straight into sendCustomerMessage (GH
+      // Codex #3844 r1 P1). The client refusal is transient state; this is
+      // the authoritative one.
+      const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+      const immediateOnly = await immediateOnlyLinkSendCheck(cleanBody);
+      if (immediateOnly.present) {
+        return res.status(400).json({ error: `${immediateOnly.label} links are re-checked at delivery — send them now, or remove the link before scheduling` });
       }
     }
 

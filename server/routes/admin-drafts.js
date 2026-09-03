@@ -132,14 +132,16 @@ async function derivedOfficeNumber(row, recipientCustomerId, preloadedCustomer =
 
 const immediateOnlyLinkInDraft = (label) => `${label} links cannot go out through draft approval — send them from the composer, where the link is re-checked at delivery.`;
 // Presence only (customer-kind /secure links or a look-alike host, then the
-// other time-boxed bearers — contract signing, expiring prep pages): the
-// composer-links seams do the lookups; a draft never sends one at all.
-// Returns the refusal message, or null.
+// other per-row bearers — contract signing, card request, statement pay,
+// expiring prep pages): the composer-links seams do the lookups; a draft
+// never sends one at all (draft approve/revise dispatch straight into
+// sendCustomerMessage — no delivery re-check). Returns the refusal
+// message, or null.
 async function draftImmediateOnlyLinkRefusal(body) {
-  const { autopayLinkSendCheck, expiringLinkSendCheck } = require('../services/composer-customer-links');
+  const { autopayLinkSendCheck, immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
   if ((await autopayLinkSendCheck(body, null)).present) return immediateOnlyLinkInDraft('Auto Pay setup');
-  const expiring = await expiringLinkSendCheck(body);
-  return expiring.present ? immediateOnlyLinkInDraft(expiring.label) : null;
+  const immediateOnly = await immediateOnlyLinkSendCheck(body);
+  return immediateOnly.present ? immediateOnlyLinkInDraft(immediateOnly.label) : null;
 }
 
 async function releaseDraftClaim(draftId, fields = {}) {
