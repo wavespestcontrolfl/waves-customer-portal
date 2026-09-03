@@ -22,7 +22,11 @@ jest.mock('../services/referral-engine', () => ({
   enrollPromoter: jest.fn(),
   getLiveSettings: jest.fn(async () => ({ program_active: true })),
 }));
-jest.mock('../routes/estimate-public', () => ({ isEstimateCustomerViewable: jest.fn() }));
+jest.mock('../routes/estimate-public', () => ({
+  isEstimateCustomerViewable: jest.fn(),
+  findLinkedUpcomingAppointment: jest.fn(),
+  adoptionServiceModesForContract: jest.fn(() => ['recurring']),
+}));
 jest.mock('../services/review-request', () => ({
   createInline: jest.fn(),
   checkUnscheduledAskGates: jest.fn(async () => ({ allowed: true })),
@@ -218,6 +222,50 @@ describe('buildLatestEstimateLink', () => {
     const r = await buildLatestEstimateLink(['c1']);
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/No open estimate/);
+  });
+});
+
+describe('resolveConfirmationEstimate (call-booking confirmation accept line)', () => {
+  const { findLinkedUpcomingAppointment } = require('../routes/estimate-public');
+  const row = { id: 'e-ok', token: 'tk-ok', customer_id: 'c1', status: 'sent', service_type: 'Pest', estimate_data: '{"x":1}' };
+
+  beforeEach(() => {
+    mockBuilders = { estimates: chainBuilder({ rows: [row] }) };
+    isEstimateCustomerViewable.mockReturnValue(true);
+    findLinkedUpcomingAppointment.mockReset();
+  });
+
+  test('answers the newest open estimate only when the accept would adopt THIS visit', async () => {
+    const { resolveConfirmationEstimate } = require('../services/composer-customer-links');
+    findLinkedUpcomingAppointment.mockResolvedValueOnce({ id: 'v1' });
+    const hit = await resolveConfirmationEstimate({ customerId: 'c1', scheduledServiceId: 'v1' });
+    expect(hit).toEqual(expect.objectContaining({ id: 'e-ok' }));
+    // Pinned to the booked visit, with the parsed estimate_data.
+    expect(findLinkedUpcomingAppointment).toHaveBeenCalledWith(row, { x: 1 }, expect.objectContaining({ appointmentId: 'v1' }));
+
+    findLinkedUpcomingAppointment.mockResolvedValueOnce({ id: 'v-other' });
+    expect(await resolveConfirmationEstimate({ customerId: 'c1', scheduledServiceId: 'v1' })).toBeNull();
+  });
+
+  test('a pinned estimate id that is no longer the newest open estimate yields no line — never a different estimate', async () => {
+    const { resolveConfirmationEstimate } = require('../services/composer-customer-links');
+    findLinkedUpcomingAppointment.mockResolvedValue({ id: 'v1' });
+    expect(await resolveConfirmationEstimate({ customerId: 'c1', scheduledServiceId: 'v1', estimateId: 'e-stale' })).toBeNull();
+    expect(findLinkedUpcomingAppointment).not.toHaveBeenCalled();
+    expect(await resolveConfirmationEstimate({ customerId: 'c1', scheduledServiceId: 'v1', estimateId: 'e-ok' }))
+      .toEqual(expect.objectContaining({ id: 'e-ok' }));
+  });
+
+  test('appendEstimateAcceptLine mints at send time and falls back to the plain body on a mint failure', async () => {
+    const { appendEstimateAcceptLine } = require('../services/composer-customer-links');
+    const { shortenOrPassthrough, existingShortUrlFor } = require('../services/short-url');
+    existingShortUrlFor.mockResolvedValueOnce(null);
+    const out = await appendEstimateAcceptLine('Booked for Monday.', row, { scheduledServiceId: 'v1' });
+    expect(out).toMatch(/^Booked for Monday\.\n\nYou can accept your estimate and choose your plan here: .*\/estimate\/tk-ok$/);
+    expect(await appendEstimateAcceptLine('Booked for Monday.', null)).toBe('Booked for Monday.');
+    shortenOrPassthrough.mockRejectedValueOnce(new Error('short-url down'));
+    existingShortUrlFor.mockResolvedValueOnce(null);
+    expect(await appendEstimateAcceptLine('Booked for Monday.', row, { scheduledServiceId: 'v1' })).toBe('Booked for Monday.');
   });
 });
 

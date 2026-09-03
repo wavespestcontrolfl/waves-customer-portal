@@ -517,24 +517,6 @@ function sidFromRecordingUrl(url) {
   return (url && (String(url).match(/\/Recordings\/(RE[a-f0-9]{32})/i) || [])[1]) || null;
 }
 
-// Open-estimate accept line for the call-booking confirmation, minted at
-// SEND time: the caller resolved (never minted) the estimate up front, so
-// the permanent short_codes row exists only for a text that is actually
-// going out (GH codex #3814 r1 P2). Best-effort — a mint failure sends the
-// plain confirmation rather than losing it.
-async function appendEstimateLinkAtSend(body, estimate, scheduledServiceId) {
-  if (!estimate || !body) return body;
-  try {
-    const { mintEstimateLink } = require('./composer-customer-links');
-    const { url } = await mintEstimateLink(estimate, { purpose: 'call_booking_confirmation', reuseExisting: true });
-    if (!url) return body;
-    return `${String(body).trimEnd()}\n\nYou can accept your estimate and choose your plan here: ${url}`;
-  } catch (err) {
-    logger.warn(`[call-proc] open-estimate link mint failed for visit ${scheduledServiceId}: ${err.message}`);
-    return body;
-  }
-}
-
 async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {}) {
   if (!call?.id) return { quarantined: false };
   const recordingUrl = call.recording_url || null;
@@ -14062,22 +14044,10 @@ const CallRecordingProcessor = {
               if (smsBody && !redirectImpliedToAni && recipientIsSavedCustomerPhone
                 && estimateLinkGateOn && estimateLinkPrereqOn) {
                 try {
-                  const { findLatestOpenEstimate } = require('./composer-customer-links');
-                  const { estimate: openEstimate } = await findLatestOpenEstimate([customerId]);
-                  if (openEstimate) {
-                    const { findLinkedUpcomingAppointment, adoptionServiceModesForContract } = require('../routes/estimate-public');
-                    let estData = openEstimate.estimate_data;
-                    if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = {}; } }
-                    estData = estData || {};
-                    const offered = await findLinkedUpcomingAppointment(openEstimate, estData, {
-                      appointmentId: String(scheduledServiceId),
-                      serviceModes: adoptionServiceModesForContract(openEstimate, estData),
-                    });
-                    if (offered && String(offered.id) === String(scheduledServiceId)) {
-                      estimateForConfirmationLink = openEstimate;
-                    } else {
-                      logger.info(`[call-proc] open-estimate link withheld for visit ${scheduledServiceId}: the accept would not adopt this booking`);
-                    }
+                  const { resolveConfirmationEstimate } = require('./composer-customer-links');
+                  estimateForConfirmationLink = await resolveConfirmationEstimate({ customerId, scheduledServiceId });
+                  if (!estimateForConfirmationLink) {
+                    logger.info(`[call-proc] open-estimate link withheld for visit ${scheduledServiceId}: no open estimate, or the accept would not adopt this booking`);
                   }
                 } catch (estErr) {
                   logger.warn(`[call-proc] open-estimate link skipped for customer ${customerId}: ${estErr.message}`);
@@ -14184,7 +14154,7 @@ const CallRecordingProcessor = {
                     }
                     : await sendCustomerMessage({
                       to: smsRecipient,
-                      body: await appendEstimateLinkAtSend(smsBody, estimateForConfirmationLink, scheduledServiceId),
+                      body: await require('./composer-customer-links').appendEstimateAcceptLine(smsBody, estimateForConfirmationLink, { scheduledServiceId }),
                       channel: 'sms',
                       audience: 'customer',
                       purpose: 'appointment_confirmation',
@@ -14220,7 +14190,15 @@ const CallRecordingProcessor = {
                           .where({ scheduled_service_id: scheduledServiceId })
                           // never re-open a sibling-suppressed row (codex)
                           .where({ cancelled: false, suppressed_by_sibling: false })
-                          .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                          // The held text owed an estimate accept line: stamp
+                          // the estimate so the sweep's canonical renderer can
+                          // re-verify and append it (GH codex #3814 r2 P2).
+                          .update({
+                            confirmation_sent: false,
+                            confirmation_sent_at: null,
+                            confirmation_estimate_id: estimateForConfirmationLink?.id || null,
+                            updated_at: new Date(),
+                          });
                         if (rearmed > 0) {
                           // The sweep's canonical confirmation fans out to
                           // EVERY appointment contact — the secondary loop

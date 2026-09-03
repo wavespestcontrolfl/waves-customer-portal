@@ -254,6 +254,45 @@ async function mintEstimateLink(estimate, { purpose = 'composer_insert', reuseEx
   };
 }
 
+// The call-booking confirmation's accept line resolves the NEWEST open
+// estimate, and only when the accept page would adopt this very visit
+// (findLinkedUpcomingAppointment pinned to it). `estimateId` pins a choice
+// already persisted on the reminder row (appointment_reminders
+// .confirmation_estimate_id): the stranded-confirmation sweep re-delivering
+// a held text must not switch to an estimate created since — a stale pin
+// yields no line, never a different estimate's.
+async function resolveConfirmationEstimate({ customerId, scheduledServiceId, estimateId = null }) {
+  const { estimate } = await findLatestOpenEstimate([customerId]);
+  if (!estimate) return null;
+  if (estimateId && String(estimate.id) !== String(estimateId)) return null;
+  const { findLinkedUpcomingAppointment, adoptionServiceModesForContract } = require('../routes/estimate-public');
+  let estData = estimate.estimate_data;
+  if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = {}; } }
+  estData = estData || {};
+  const offered = await findLinkedUpcomingAppointment(estimate, estData, {
+    appointmentId: String(scheduledServiceId),
+    serviceModes: adoptionServiceModesForContract(estimate, estData),
+  });
+  return offered && String(offered.id) === String(scheduledServiceId) ? estimate : null;
+}
+
+// Accept line for a confirmation text, minted at SEND time: callers resolve
+// (never mint) the estimate up front, so the permanent short_codes row
+// exists only for a text that is actually going out (GH codex #3814 r1
+// P2). Best-effort — a mint failure sends the plain confirmation rather
+// than losing it.
+async function appendEstimateAcceptLine(body, estimate, { scheduledServiceId = null } = {}) {
+  if (!estimate || !body) return body;
+  try {
+    const { url } = await mintEstimateLink(estimate, { purpose: 'call_booking_confirmation', reuseExisting: true });
+    if (!url) return body;
+    return `${String(body).trimEnd()}\n\nYou can accept your estimate and choose your plan here: ${url}`;
+  } catch (err) {
+    logger.warn(`[composer-links] open-estimate accept line skipped for visit ${scheduledServiceId}: ${err.message}`);
+    return body;
+  }
+}
+
 async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert' } = {}) {
   const found = await findLatestOpenEstimate(customerIds);
   if (!found.estimate) return { url: null, line: '', reason: found.reason };
@@ -326,5 +365,7 @@ module.exports = {
   buildLatestEstimateLink,
   findLatestOpenEstimate,
   mintEstimateLink,
+  resolveConfirmationEstimate,
+  appendEstimateAcceptLine,
   buildReferralLink,
 };
