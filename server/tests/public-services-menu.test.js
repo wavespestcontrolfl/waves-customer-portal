@@ -162,6 +162,14 @@ describe('catalog drift never leaks into an instant quote', () => {
     expect(menuItem(pest6()).public_instant_quote).toBe(true);
     // admin edits the row to 4 visits — the map still says bimonthly → not instant
     expect(requestMatchesCatalogRow('pest_general_bimonthly', pest6({ visits_per_year: 4 }))).toBe(false);
+    // cockroach_control is a two-treatment package: a row edited away from
+    // two visits stops advertising an instant price (pre-push codex P1).
+    const roach = (over = {}) => row({ service_key: 'cockroach_control', name: 'Cockroach Treatment Service', visits_per_year: 2, ...over });
+    expect(requestMatchesCatalogRow('cockroach_control', roach())).toBe(true);
+    expect(requestMatchesCatalogRow('cockroach_control', roach({ visits_per_year: 1 }))).toBe(false);
+    expect(requestMatchesCatalogRow('cockroach_control', roach({ visits_per_year: 3 }))).toBe(false);
+    expect(requestMatchesCatalogRow('cockroach_control', roach({ visits_per_year: null }))).toBe(false);
+    expect(requestMatchesCatalogRow('cockroach_control', roach({ billing_type: 'recurring', frequency: 'semiannual' }))).toBe(false);
     expect(menuItem(pest6({ visits_per_year: 4 })).public_instant_quote).toBe(false);
     // admin edits only the frequency word — still not instant
     expect(requestMatchesCatalogRow('pest_general_bimonthly', pest6({ frequency: 'quarterly' }))).toBe(false);

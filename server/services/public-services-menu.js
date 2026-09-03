@@ -144,9 +144,19 @@ function expectedCadenceForRequest(request) {
 // True when the catalog row (as it is NOW) still describes the product the
 // mapped request prices: recurring rows must match visits/year AND
 // frequency; one-time rows must not have become recurring.
+// The standalone cockroach request prices ONE knockdown and presents the
+// two-treatment package (pest_base.initial_roach.display.regular_standalone
+// .treatments = 2, pinned by public-quote-cockroach-instant.test.js). The
+// catalog row must still describe that package — an admin edit to its
+// visits_per_year (a one-visit row, or a three-visit program) would otherwise
+// keep advertising two included treatments (pre-push codex P1).
+const COCKROACH_PACKAGE_VISITS = 2;
 function requestMatchesCatalogRow(serviceKey, row) {
   const request = PUBLIC_QUOTE_REQUESTS[serviceKey];
   if (!request || !row) return false;
+  if (request.pestInitialRoach) {
+    return row.billing_type !== 'recurring' && Number(row.visits_per_year) === COCKROACH_PACKAGE_VISITS;
+  }
   const expected = expectedCadenceForRequest(request);
   if (expected == null) return row.billing_type !== 'recurring';
   return Number(row.visits_per_year) === expected[0] && String(row.frequency || '') === expected[1];
@@ -256,4 +266,5 @@ async function isPublicSelectableServiceKey(serviceKey, conn = db) {
   return !!(await publicSelectableService(serviceKey, conn));
 }
 
-module.exports = { LAWN_TRACKS, loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FORMERLY_PUBLIC_KEYS, FAMILY_LABELS };
+module.exports = {
+  COCKROACH_PACKAGE_VISITS, LAWN_TRACKS, loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FORMERLY_PUBLIC_KEYS, FAMILY_LABELS };

@@ -8,7 +8,7 @@
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST } = require('../services/pricing-engine/constants');
 const { _internals, PUBLIC_QUOTE_SERVICE_KEYS } = require('../routes/public-quote');
-const { quoteServicesForKey, PUBLIC_INSTANT_QUOTE_KEYS } = require('../services/public-services-menu');
+const { quoteServicesForKey, PUBLIC_INSTANT_QUOTE_KEYS, COCKROACH_PACKAGE_VISITS } = require('../services/public-services-menu');
 const { buildPublicQuoteServiceInterest, buildCompactPublicQuoteServiceInterest, derivePerApplication, isManualQuoteLine } = _internals;
 
 const BASE_PROPERTY = { homeSqFt: 1800, lotSqFt: 8783, stories: 1, yearBuilt: 2005 };
@@ -39,6 +39,8 @@ describe('cockroach_control as a public instant quote', () => {
   test('the line presents the two-treatment package (visit 2 included, no charge)', () => {
     const line = roachLine({ ...BASE_PROPERTY, services: quoteServicesForKey('cockroach_control') });
     expect(PEST.pestInitialRoach.display.regular_standalone.treatments).toBe(2);
+    // The menu's catalog-row guard and the estimate copy describe the same package.
+    expect(COCKROACH_PACKAGE_VISITS).toBe(PEST.pestInitialRoach.display.regular_standalone.treatments);
     expect(line.treatments).toBe(2);
     expect(line.detail).toMatch(/Includes 2 treatment visits\./);
     // ONE knockdown fee — the package count never multiplies the price.
