@@ -47,9 +47,11 @@ const ADAPTERS = {
   },
   gemini: {
     hasKey: () => !!geminiKey(),
-    listUrl: () => `https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${geminiKey()}`,
-    retrieveUrl: (id) => `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(id)}?key=${geminiKey()}`,
-    headers: () => ({}),
+    // Key travels in the x-goog-api-key header, never the URL — URLs end up
+    // in proxy logs and error tooling.
+    listUrl: () => 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',
+    retrieveUrl: (id) => `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(id)}`,
+    headers: () => ({ 'x-goog-api-key': geminiKey() }),
     items: (body) => (body.models || [])
       .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
       .map((m) => ({ id: String(m.name || '').replace(/^models\//, ''), label: m.displayName || m.name, createdAt: null })),
@@ -107,23 +109,34 @@ async function listProvider(provider, { fetchImpl = fetch, force = false } = {})
   }
 }
 
+// Modalities the live search can serve. The list endpoints describe text
+// generation only — none of the three says whether a model accepts images —
+// so `vision` results are returned flagged `capUnverified` and the client
+// says so; image / video / embedding selectors are locked and never search.
+const SEARCHABLE_CAPS = new Set(['text', 'vision']);
+
 /**
- * search('fable 5.1', { providers: ['anthropic'] }) →
- *   { query, results: [{ provider, id, label, createdAt }], unavailable: [{ provider, reason }] }
+ * search('fable 5.1', { providers: ['anthropic'], cap: 'vision' }) →
+ *   { query, cap, capUnverified, results: [{ provider, id, label, createdAt }], unavailable: [{ provider, reason }] }
  * Results newest-first, capped at MAX_RESULTS. Empty query → empty results
  * (the picker is the browse surface for the catalog; search is for the new).
+ * An unsearchable cap → no results and reason 'cap_not_searchable'.
  */
-async function search(query, { providers = PROVIDERS, fetchImpl = fetch } = {}) {
+async function search(query, { providers = PROVIDERS, cap = 'text', fetchImpl = fetch } = {}) {
   const q = tokens(query);
+  if (!SEARCHABLE_CAPS.has(cap)) {
+    return { query: query || '', cap, capUnverified: false, results: [], unavailable: [{ provider: 'all', reason: 'cap_not_searchable' }] };
+  }
   const wanted = providers.filter((p) => PROVIDERS.includes(p));
   const lists = await Promise.all(wanted.map((p) => listProvider(p, { fetchImpl })));
   const unavailable = lists.filter((l) => !l.available).map((l) => ({ provider: l.provider, reason: l.reason }));
-  if (!q.length) return { query: query || '', results: [], unavailable };
+  const capUnverified = cap === 'vision';
+  if (!q.length) return { query: query || '', cap, capUnverified, results: [], unavailable };
   const results = lists
     .flatMap((l) => l.items.filter((m) => matches(m, q)).map((m) => ({ provider: l.provider, ...m })))
     .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0) || a.id.localeCompare(b.id))
     .slice(0, MAX_RESULTS);
-  return { query, results, unavailable };
+  return { query, cap, capUnverified, results, unavailable };
 }
 
 /**
@@ -148,4 +161,4 @@ function clearCache() {
   cache.clear();
 }
 
-module.exports = { search, probe, listProvider, clearCache, normalize, matches, tokens, PROVIDERS, LIST_TTL_MS };
+module.exports = { search, probe, listProvider, clearCache, normalize, matches, tokens, PROVIDERS, SEARCHABLE_CAPS, LIST_TTL_MS };

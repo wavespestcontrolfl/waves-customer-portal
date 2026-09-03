@@ -103,6 +103,30 @@ describe('search', () => {
     expect(anthropicCalls()).toBe(1); // served from cache
   });
 
+  it('sends the Gemini key as a header, never in the URL', async () => {
+    const fetchImpl = fakeFetch([['generativelanguage', GEMINI]]);
+    await discovery.search('flash', { providers: ['gemini'], fetchImpl });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).not.toContain('key=');
+    expect(init.headers['x-goog-api-key']).toBe('g');
+    await discovery.probe('gemini', 'gemini-3.8-flash', { fetchImpl });
+    const [probeUrl, probeInit] = fetchImpl.mock.calls[1];
+    expect(probeUrl).not.toContain('key=');
+    expect(probeInit.headers['x-goog-api-key']).toBe('g');
+  });
+
+  it('flags vision searches as unverified and refuses unsearchable modalities', async () => {
+    const fetchImpl = fakeFetch([['api.anthropic.com', ANTHROPIC]]);
+    const text = await discovery.search('opus', { providers: ['anthropic'], cap: 'text', fetchImpl });
+    expect(text.capUnverified).toBe(false);
+    const vision = await discovery.search('opus', { providers: ['anthropic'], cap: 'vision', fetchImpl });
+    expect(vision.capUnverified).toBe(true);
+    expect(vision.results.map((r) => r.id)).toEqual(['claude-opus-5']);
+    const embed = await discovery.search('embedding', { providers: ['openai'], cap: 'embedding', fetchImpl });
+    expect(embed.results).toEqual([]);
+    expect(embed.unavailable).toEqual([{ provider: 'all', reason: 'cap_not_searchable' }]);
+  });
+
   it('returns no results for an empty query but still reports availability', async () => {
     const fetchImpl = fakeFetch([['api.anthropic.com', ANTHROPIC], ['api.openai.com', OPENAI], ['generativelanguage', GEMINI]]);
     const out = await discovery.search('', { fetchImpl });

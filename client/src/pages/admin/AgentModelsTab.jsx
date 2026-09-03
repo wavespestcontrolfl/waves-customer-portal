@@ -60,6 +60,7 @@ const PROVIDER_LABEL = {
 
 const UNAVAILABLE_REASON = {
   no_key: "no API key on this server",
+  cap_not_searchable: "this modality is not searchable",
   http_401: "API key rejected",
   http_403: "API key rejected",
   http_400: "API key rejected",
@@ -712,6 +713,7 @@ function FindModelDialog({ target, onClose, onPick }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState(null);
   const [unavailable, setUnavailable] = useState([]);
+  const [capUnverified, setCapUnverified] = useState(false);
   const [searching, setSearching] = useState(false);
   const [probing, setProbing] = useState(null);
   const [problem, setProblem] = useState(null);
@@ -729,11 +731,12 @@ function FindModelDialog({ target, onClose, onPick }) {
       setProblem(null);
       try {
         const out = await adminFetch(
-          `/admin/agents/models/search?q=${encodeURIComponent(query)}&providers=${encodeURIComponent(target.accepts.providers.join(","))}`,
+          `/admin/agents/models/search?q=${encodeURIComponent(query)}&providers=${encodeURIComponent(target.accepts.providers.join(","))}&cap=${encodeURIComponent(target.accepts.cap)}`,
         );
         if (id !== requestRef.current) return;
         setResults(out.results || []);
         setUnavailable(out.unavailable || []);
+        setCapUnverified(!!out.capUnverified);
       } catch (e) {
         if (id === requestRef.current) setProblem(e?.message || "Search failed");
       } finally {
@@ -786,6 +789,12 @@ function FindModelDialog({ target, onClose, onPick }) {
         {unavailable.length > 0 && (
           <div className="text-12 text-ink-secondary">
             Not searched: {unavailable.map((u) => `${PROVIDER_LABEL[u.provider] || u.provider} (${UNAVAILABLE_REASON[u.reason] || u.reason})`).join(", ")}.
+          </div>
+        )}
+        {capUnverified && results?.length > 0 && (
+          <div className="text-12 text-alert-fg" role="alert">
+            This selector needs image input. Provider lists don't say whether a model accepts images, so only pick one you know
+            does — a text-only model here breaks the photo lanes after restart.
           </div>
         )}
         {searching && !results ? (

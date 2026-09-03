@@ -1013,11 +1013,12 @@ router.get('/models', (_req, res) => {
 
 // Live model search across the providers' list endpoints (cached 10 min) so a
 // model released today is pickable without a deploy. ?q=fable 5.1
-// &providers=anthropic,openai. Read-only, no tokens spent.
+// &providers=anthropic,openai&cap=text|vision. Read-only, no tokens spent.
 router.get('/models/search', async (req, res, next) => {
   try {
     const providers = String(req.query.providers || '').split(',').map((s) => s.trim()).filter(Boolean);
-    const out = await modelDiscovery.search(String(req.query.q || '').slice(0, 80), providers.length ? { providers } : {});
+    const cap = String(req.query.cap || 'text');
+    const out = await modelDiscovery.search(String(req.query.q || '').slice(0, 80), { ...(providers.length ? { providers } : {}), cap });
     res.json(out);
   } catch (err) {
     next(err);
