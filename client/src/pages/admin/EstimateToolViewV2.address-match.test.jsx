@@ -173,6 +173,30 @@ describe("address match is a suggestion, never a silent link", () => {
     expect(screen.getByText(/This address matches/)).toBeInTheDocument();
   });
 
+  it("a customer-record deep link is linked, shows Unlink, and skips suggestions until unlinked", async () => {
+    render(
+      <MemoryRouter>
+        <EstimateToolViewV2 initialCustomerId="cust-wife" />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText(/Linked customer:/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Start typing an address..."), {
+      target: { value: ADDRESS },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Property Lookup" }));
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/estimator/property-lookup"))).toBe(true),
+    );
+    expect(screen.queryByText(/This address matches/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Unlink" }));
+    expect(screen.queryByText(/Linked customer:/)).not.toBeInTheDocument();
+
+    await lookUp();
+    expect(screen.getByText("Jane Doe")).toBeInTheDocument();
+  });
+
   it("does not second-guess a customer the operator already linked", async () => {
     customersAtStreet = [WIFE, HUSBAND];
     renderTool();

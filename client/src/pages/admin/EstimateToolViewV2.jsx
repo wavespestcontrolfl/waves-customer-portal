@@ -6046,6 +6046,30 @@ export default function EstimateToolViewV2({
                       ? " · 15% loyalty discount applied"
                       : ""}
                   </span>
+                  {!editMode?.id && (
+                    <button
+                      type="button"
+                      onClick={unlinkCustomer}
+                      className="bg-transparent border-0 p-0 cursor-pointer text-14 text-zinc-600 underline underline-offset-2 hover:text-zinc-900 shrink-0"
+                    >
+                      Unlink
+                    </button>
+                  )}
+                </div>
+              )}
+              {/* ID-only linked state: the customer-record deep link seeds
+                  form.customerId with no match object. The estimate IS linked
+                  (lookup skips suggestions, save carries the id), so the
+                  operator needs the same Unlink here. Not in edit mode — the
+                  revise PUT keeps the row's customer_id regardless (codex
+                  #3768 r1). */}
+              {!existingCustomerMatch && form.customerId && !editMode?.id && (
+                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900 flex items-center gap-2">
+                  <span className="flex-1 min-w-0">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
+                    Linked customer:{" "}
+                    <strong>{form.customerName || "from the customer record"}</strong>
+                  </span>
                   <button
                     type="button"
                     onClick={unlinkCustomer}
