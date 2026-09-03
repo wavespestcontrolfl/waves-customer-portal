@@ -22684,13 +22684,17 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // Regulated check sees the RAW normalized rows too (the aligned breakdown
   // can drop a WDO row) — neither chips nor page copy may mint on an FDACS
   // certificate surface (codex pre-push P1).
+  const rawOneTimeRows = normalizeOneTimeBreakdown(estData)?.items || [];
   const regulatedSurface = hasRegulatedCertificateServiceMix(services, [
     ...oneTimeBreakdownItems,
-    ...(normalizeOneTimeBreakdown(estData)?.items || []),
+    ...rawOneTimeRows,
   ]);
+  // Single-service check spans the aligned AND raw rows: alignment can omit
+  // a raw billable row, and a mixed quote must never inherit the retained
+  // row's hero/AI/chips (codex pre-push P0).
   const oneTimeServiceCopy = !regulatedSurface
     && (contractPayload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate))
-    ? oneTimeOnlyIntelligenceCopy(oneTimeBreakdownItems)
+    ? oneTimeOnlyIntelligenceCopy([...oneTimeBreakdownItems, ...rawOneTimeRows])
     : null;
   const askChips = regulatedSurface
     ? []
@@ -22715,7 +22719,10 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
       ...(manualDiscountItemizedInSections ? { manualDiscountItemizedInSections: true } : {}),
     },
     askChips,
-    ...(oneTimeServiceCopy ? { oneTimeServiceCopy } : {}),
+    // Invariant (docs/public-route-contracts.md): oneTimeServiceCopy.askChips
+    // IS pricing.askChips — hero-only packs carry the category chips the
+    // page actually renders, never an empty list beside a populated one.
+    ...(oneTimeServiceCopy ? { oneTimeServiceCopy: { ...oneTimeServiceCopy, askChips } } : {}),
     oneTimeBreakdown: contractPayload.oneTimeBreakdown,
     quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
   };

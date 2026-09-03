@@ -19,7 +19,8 @@
 //
 // A row that resolves to no key renders exactly as before (fail-safe: no
 // pack entry means no new claims). Pre-slab and Bora-Care keep their
-// existing dedicated copy in estimate-public.js and are deliberately absent.
+// existing dedicated hero/legacy-note copy in estimate-public.js; their
+// packs here add the row bullets only.
 // ============================================================
 
 const PACK = require('./estimate-one-time-copy.json');
@@ -67,6 +68,19 @@ const SERVICE_KEY_TO_COPY = {
   pest_cleanout: 'one_time_pest',
   one_time_mosquito: 'one_time_mosquito',
   one_time_lawn: 'one_time_lawn',
+  rodent_inspection: 'rodent_inspection',
+  rodent_sanitation: 'rodent_sanitation',
+  rodent_bait_setup: 'rodent_bait_setup',
+  termite_bait: 'termite_bait',
+  pre_slab_termiticide: 'pre_slab_termiticide',
+  termite_slab_pretreat: 'pre_slab_termiticide',
+  bora_care: 'bora_care',
+  boracare: 'bora_care',
+  plugging: 'plugging',
+  dethatching: 'dethatching',
+  top_dressing: 'top_dressing',
+  palm_injection: 'palm_injection',
+  tree_shrub: 'tree_shrub_one_time',
 };
 
 // Label-only fallback for legacy rows with no service key. WDO is
@@ -158,9 +172,13 @@ function resolveOneTimeServiceCopy(item = {}) {
 // Hero strings keep {first}/{city} for the renderer; {Visits} is filled
 // here from the row's visit count.
 function oneTimeOnlyIntelligenceCopy(items = []) {
+  // Raw (un-normalized) rows carry no `kind` — a member-discount row is a
+  // negative price, and an adjustment row is never a service.
   const rows = (Array.isArray(items) ? items : []).filter((item) => item
     && item.kind !== 'discount' && item.kind !== 'included'
-    && item.quoteRequired !== true && item.kind !== 'quote_required');
+    && item.quoteRequired !== true && item.kind !== 'quote_required'
+    && String(item.service || '').toLowerCase() !== 'one_time_adjustment'
+    && !(Number(item.amount ?? item.price) < 0));
   if (!rows.length) return null;
   const keys = new Set(rows.map(oneTimeCopyKeyFor));
   if (keys.size !== 1) return null;

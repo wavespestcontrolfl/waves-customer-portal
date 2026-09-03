@@ -289,5 +289,185 @@
       "h1": "Hello {first}, your lawn treatment quote is ready!",
       "sub": "One targeted application priced from your measured turf — approve online and pick a day. Licensed & insured."
     }
+  },
+  "rodent_inspection": {
+    "outcome": "Know exactly where they are getting in — and what it takes to stop it — before you spend on sealing.",
+    "includes": [
+      "Exterior entry-point survey — roofline, soffits, utility penetrations, garage",
+      "Interior and attic evidence check: droppings, rub marks, nesting, gnaw damage",
+      "Written findings with a trapping and exclusion recommendation",
+      "Inspection fee credited when you book the recommended service"
+    ],
+    "assurance": null,
+    "terms": "Pay on service day. No contract.",
+    "hero": {
+      "eyebrow": "Your rodent inspection",
+      "h1": "Hello {first}, your rodent inspection quote is ready!",
+      "sub": "A flat-priced technician visit that maps the entry points and puts the plan in writing — approve online and pick a day. Licensed & insured."
+    }
+  },
+  "rodent_sanitation": {
+    "outcome": "The droppings, nesting, and the scent trail that draws the next ones — gone, so the exclusion is not wasted.",
+    "includes": [
+      "PPE-protected removal of droppings and nesting material",
+      "Disinfection with an EPA-registered antimicrobial — professional-grade, not household cleaner",
+      "Optional contaminated insulation removal and replacement",
+      "Coordinated with exclusion so the cleanup holds",
+      "Sized to light, standard, or heavy contamination"
+    ],
+    "assurance": null,
+    "terms": "Pay on service day. No contract.",
+    "hero": {
+      "eyebrow": "Your rodent sanitation",
+      "h1": "Hello {first}, your rodent sanitation quote is ready!",
+      "sub": "Droppings, nesting, and the pheromone trail removed and disinfected, timed with exclusion — approve online and pick a day. Licensed & insured."
+    }
+  },
+  "rodent_bait_setup": {
+    "outcome": "Rodent pressure handled outside — before it gets into the structure.",
+    "includes": [
+      "Placement of tamper-resistant exterior bait stations",
+      "Activity logged at each station in your service report",
+      "Stations serviced and bait replenished on the plan’s schedule",
+      "Damaged stations replaced at no charge"
+    ],
+    "assurance": null,
+    "terms": "Setup is billed once; station servicing bills on its scheduled cadence.",
+    "hero": {
+      "eyebrow": "Your rodent bait stations",
+      "h1": "Hello {first}, your rodent bait station plan is ready!",
+      "sub": "Tamper-resistant exterior stations placed and serviced on a schedule — approve online and pick your setup day. Licensed & insured."
+    }
+  },
+  "termite_bait": {
+    "outcome": "Stations on duty around the whole perimeter — termites work around the clock, so do the stations.",
+    "includes": [
+      "In-ground station installation every 8–10 feet around the structure",
+      "Always-on monitoring — not just at scheduled visits",
+      "Automatic bait switch when termites hit a station",
+      "Annual inspection and renewal pricing built in",
+      "Coordination with real-estate WDO inspections when you need them"
+    ],
+    "assurance": null,
+    "terms": "Installation is billed once; monitoring renews on the plan’s term.",
+    "hero": {
+      "eyebrow": "Your termite bait stations",
+      "h1": "Hello {first}, your termite bait station quote is ready!",
+      "sub": "In-ground stations installed around the structure with monitoring built in — approve online and pick your install day. Licensed & insured."
+    }
+  },
+  "pre_slab_termiticide": {
+    "outcome": "The cheapest termite protection a home will ever get — applied before the slab is poured.",
+    "includes": [
+      "Pre-pour Termidor application across the slab footprint",
+      "Treatment of plumbing penetrations and expansion joints",
+      "Coordinated with your builder’s pour schedule",
+      "Treatment certificate issued for the lender and the CO",
+      "Optional extended warranty add-on"
+    ],
+    "assurance": null,
+    "terms": "Warranty terms depend on the selected warranty option.",
+    "hero": {
+      "eyebrow": "Your pre-slab termite treatment",
+      "h1": "Hello {first}, your pre-slab termite treatment quote is ready!",
+      "sub": "Soil treatment across the measured slab footprint, timed to the pour, certificate included — approve online and we coordinate the day with your builder. Licensed & insured."
+    }
+  },
+  "bora_care": {
+    "outcome": "The wood itself protected — termites, wood-boring beetles, carpenter ants, and wood-decay fungi, in one treatment.",
+    "includes": [
+      "Bora-Care applied to bare, accessible wood — sill plates, studs, headers, band joists, and attic framing where accessible",
+      "Applied to wetness on all exposed sides; foaming and gallery injection where drywood activity calls for it",
+      "Once dry inside the wood it does not volatilize or break down — treated areas are safe once dry, and your technician confirms the timing",
+      "Treatment areas documented in your service report"
+    ],
+    "assurance": null,
+    "terms": "Pay on service day. No recurring schedule.",
+    "hero": {
+      "eyebrow": "Your Bora-Care wood treatment",
+      "h1": "Hello {first}, your Bora-Care treatment quote is ready!",
+      "sub": "A borate wood treatment for the measured attic and surface areas — approve online and pick a day. Licensed & insured."
+    }
+  },
+  "plugging": {
+    "outcome": "Bare spots stitched back together with live plugs of your own grass — no re-sod.",
+    "includes": [
+      "Live sod plugs matched to your existing grass",
+      "Grid placement at the recommended spacing",
+      "Soil prep at each plug hole",
+      "Watering and follow-up recommendations",
+      "Pairs with dethatching or top dressing for a full renovation"
+    ],
+    "assurance": null,
+    "terms": "Pay on service day. No recurring schedule, no tier discount.",
+    "hero": {
+      "eyebrow": "Your lawn plugging",
+      "h1": "Hello {first}, your lawn plugging quote is ready!",
+      "sub": "Live plugs matched to your grass, placed on a grid across the measured area — approve online and pick a day. Licensed & insured."
+    }
+  },
+  "dethatching": {
+    "outcome": "Real mechanical dethatching, done at the right time of year for your grass — not heavy raking.",
+    "includes": [
+      "Power dethatching pass across the lawn",
+      "Removal and disposal of thatch debris",
+      "Recommendation on top dressing or plugging for damaged areas",
+      "Timed so dethatching does not stress the lawn"
+    ],
+    "assurance": null,
+    "terms": "Pay on service day. No recurring schedule, no tier discount.",
+    "hero": {
+      "eyebrow": "Your lawn dethatching",
+      "h1": "Hello {first}, your lawn dethatching quote is ready!",
+      "sub": "A power dethatching pass across the measured turf with the debris hauled off — approve online and pick a day. Licensed & insured."
+    }
+  },
+  "top_dressing": {
+    "outcome": "A thin layer of compost or sand that levels the turf, adds organic matter, and breaks down thatch over time.",
+    "includes": [
+      "Compost or sand matched to the goal — leveling or feeding",
+      "Even distribution at the right depth",
+      "Coordinated with dethatching for maximum effect",
+      "Watering and mowing recommendations afterward"
+    ],
+    "assurance": null,
+    "terms": "Pay on service day. No recurring schedule, no tier discount.",
+    "hero": {
+      "eyebrow": "Your lawn top dressing",
+      "h1": "Hello {first}, your lawn top dressing quote is ready!",
+      "sub": "Compost or sand spread evenly across the measured turf — approve online and pick a day. Licensed & insured."
+    }
+  },
+  "palm_injection": {
+    "outcome": "Nutrients and protection delivered inside the palm — past the bark, where drenches and sprays cannot reach.",
+    "includes": [
+      "Palm species ID and diagnosis of the issue",
+      "Injection of nutrients, antibiotics, or insecticide based on the diagnosis — dosed per palm",
+      "Recommendations on watering, mulching, and frond care",
+      "Coordinated with your tree & shrub program if you have one"
+    ],
+    "assurance": null,
+    "terms": "Pay on service day. Priced per palm, not a flat rate.",
+    "hero": {
+      "eyebrow": "Your palm injections",
+      "h1": "Hello {first}, your palm injection quote is ready!",
+      "sub": "Trunk injections dosed per palm from the diagnosis — approve online and pick a day. Licensed & insured."
+    }
+  },
+  "tree_shrub_one_time": {
+    "outcome": "One visit for the ornamentals that need help now — insects, mites, disease, and feeding, matched to what is planted.",
+    "includes": [
+      "Ornamentals inspected — scale, whitefly, lacebug, mealybugs, aphids, and disease pressure",
+      "Targeted treatment and soil drench where the diagnosis calls for it",
+      "Foliar feeding tuned to the species mix",
+      "Recommendations on pruning, watering, and mulch depth"
+    ],
+    "assurance": "30-day callback — if activity returns within a month, so do we, free",
+    "terms": "Pay on service day. No recurring schedule, no tier discount.",
+    "hero": {
+      "eyebrow": "Your one-time tree & shrub visit",
+      "h1": "Hello {first}, your tree & shrub visit quote is ready!",
+      "sub": "One targeted visit for the measured beds and ornamentals — approve online and pick a day. Licensed & insured, 30-day callback included."
+    }
   }
 }

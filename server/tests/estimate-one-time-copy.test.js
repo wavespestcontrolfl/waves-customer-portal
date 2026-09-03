@@ -45,12 +45,23 @@ describe('oneTimeCopyKeyFor', () => {
     expect(oneTimeCopyKeyFor({ service: 'pest_initial_cleanout', label: 'Initial Pest Cleanout' })).toBe('one_time_pest');
     expect(oneTimeCopyKeyFor({ service: 'one_time_mosquito', label: 'One-Time Mosquito Treatment' })).toBe('one_time_mosquito');
     expect(oneTimeCopyKeyFor({ service: 'one_time_lawn', label: 'One-Time Lawn Treatment' })).toBe('one_time_lawn');
+    expect(oneTimeCopyKeyFor({ service: 'rodent_inspection', label: 'Rodent Inspection' })).toBe('rodent_inspection');
+    expect(oneTimeCopyKeyFor({ service: 'rodent_sanitation', label: 'Rodent Sanitation' })).toBe('rodent_sanitation');
+    expect(oneTimeCopyKeyFor({ service: 'rodent_bait_setup', label: 'Rodent Bait Station Setup' })).toBe('rodent_bait_setup');
+    expect(oneTimeCopyKeyFor({ service: 'termite_bait', label: 'Termite Bait Station Installation' })).toBe('termite_bait');
+    expect(oneTimeCopyKeyFor({ service: 'pre_slab_termiticide', label: 'Pre-Slab Termite Treatment' })).toBe('pre_slab_termiticide');
+    expect(oneTimeCopyKeyFor({ service: 'bora_care', label: 'Bora-Care Wood Treatment' })).toBe('bora_care');
+    expect(oneTimeCopyKeyFor({ service: 'plugging', label: 'Lawn Plugging Service' })).toBe('plugging');
+    expect(oneTimeCopyKeyFor({ service: 'dethatching', label: 'Lawn Dethatching' })).toBe('dethatching');
+    expect(oneTimeCopyKeyFor({ service: 'top_dressing', label: 'Lawn Top Dressing' })).toBe('top_dressing');
+    expect(oneTimeCopyKeyFor({ service: 'palm_injection', label: 'Palm Injection' })).toBe('palm_injection');
+    expect(oneTimeCopyKeyFor({ service: 'tree_shrub', label: 'One-Time Tree & Shrub Visit' })).toBe('tree_shrub_one_time');
   });
 
-  test('rows that must NOT inherit a pack: knockdown add-on, pre-slab, Bora-Care, setup fee, discounts, quote-required', () => {
+  test('rows that must NOT inherit a pack: knockdown add-on, guarantee/bond rows, setup fee, discounts, quote-required', () => {
     expect(oneTimeCopyKeyFor({ service: 'pest_initial_roach', label: 'Initial German Roach Knockdown' })).toBeNull();
-    expect(oneTimeCopyKeyFor({ service: 'pre_slab_termiticide', label: 'Pre-Slab Termite Treatment' })).toBeNull();
-    expect(oneTimeCopyKeyFor({ service: 'bora_care', label: 'Bora-Care Wood Treatment' })).toBeNull();
+    expect(oneTimeCopyKeyFor({ service: 'rodent_guarantee', label: 'Annual Rodent Guarantee' })).toBeNull();
+    expect(oneTimeCopyKeyFor({ service: 'termite_bond', label: 'Termite Bond' })).toBeNull();
     expect(oneTimeCopyKeyFor({ service: 'waveguard_setup', label: 'WaveGuard Setup' })).toBeNull();
     expect(oneTimeCopyKeyFor({ service: 'one_time_adjustment', label: 'WaveGuard Member Discount', amount: -50, kind: 'discount' })).toBeNull();
     expect(oneTimeCopyKeyFor({ ...roach2, kind: 'quote_required', quoteRequired: true, amount: null })).toBeNull();
@@ -58,7 +69,7 @@ describe('oneTimeCopyKeyFor', () => {
     expect(oneTimeCopyKeyFor({ service: 'one_time_pest', label: 'One-Time Pest Control', detail: 'roach cleanout + fleas requested' })).toBe('one_time_pest');
     expect(oneTimeCopyKeyFor({ service: 'rodent_exclusion', label: 'Rodent Exclusion', detail: 'after trapping' })).toBe('rodent_exclusion');
     // An unrecognized service key gets NO pack (fail-safe), even with a matching label.
-    expect(oneTimeCopyKeyFor({ service: 'rodent_inspection', label: 'Rodent Inspection' })).toBeNull();
+    expect(oneTimeCopyKeyFor({ service: 'rodent_bird_box', label: 'Rodent Bird Box' })).toBeNull();
     expect(oneTimeCopyKeyFor({ service: 'pest_control', label: 'One-Time Pest Control' })).toBeNull();
     // WDO is a regulated certificate surface — never a pack, by key or by name.
     expect(oneTimeCopyKeyFor({ service: 'wdo_inspection', label: 'WDO Inspection' })).toBeNull();
@@ -106,6 +117,9 @@ describe('resolveOneTimeServiceCopy', () => {
   test('one-time pest keeps the 30-day callback; termite and rodent exclusion/trapping carry NO guarantee line', () => {
     expect(resolveOneTimeServiceCopy({ service: 'one_time_pest', label: 'One-Time Pest Control' }).assurance).toMatch(/^30-day callback/);
     for (const row of [
+      { service: 'termite_bait', label: 'Termite Bait Station Installation' },
+      { service: 'pre_slab_termiticide', label: 'Pre-Slab Termite Treatment' },
+      { service: 'bora_care', label: 'Bora-Care Wood Treatment' },
       { service: 'termite_foam', label: 'Termite Foam Treatment' },
       { service: 'trenching', label: 'Termite Trenching' },
       { service: 'rodent_exclusion', label: 'Rodent Exclusion' },
@@ -192,6 +206,32 @@ describe('React /data contract', () => {
     expect(contract.askChips).toEqual([]);
     expect(contract.oneTimeBreakdown.items[0].copy).toBeUndefined();
     expect(contract.oneTimeServiceCopy).toBeUndefined();
+  });
+
+  test('a mixed quote whose aligned breakdown dropped the second service still mints no page copy', () => {
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 350, items: [roach2] } },
+      { status: 'sent' },
+      { result: { recurring: { services: [] }, oneTime: { items: [
+        { ...roach2, price: 350, name: roach2.label },
+        { service: 'wasp', label: 'Wasp Nest Treatment', name: 'Wasp Nest Treatment', price: 150 },
+      ] } } },
+    );
+    expect(contract.oneTimeServiceCopy).toBeUndefined();
+    expect(contract.oneTimeBreakdown.items[0].copy.key).toBe('german_roach');
+  });
+
+  test('a hero-only pack (termite foam) echoes the category chips it renders — oneTimeServiceCopy.askChips === askChips', () => {
+    const foam = { service: 'termite_foam', label: 'Termite Foam Treatment', amount: 180 };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 180, items: [foam] } },
+      { status: 'sent' },
+      { result: { recurring: { services: [] }, oneTime: { items: [{ ...foam, price: 180, name: foam.label }] } } },
+    );
+    expect(contract.oneTimeServiceCopy.hero.eyebrow).toBe('Your termite foam treatment');
+    expect(contract.oneTimeServiceCopy.aiTitle).toBeUndefined();
+    expect(contract.askChips.length).toBeGreaterThan(0);
+    expect(contract.oneTimeServiceCopy.askChips).toEqual(contract.askChips);
   });
 
   test('a regulated surface whose aligned breakdown dropped the WDO row still mints no page copy', () => {

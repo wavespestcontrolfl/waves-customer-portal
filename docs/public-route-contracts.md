@@ -582,7 +582,8 @@ add-on still describes the cleanout); `oneTimeServiceCopy` is omitted on
 mixed one-time quotes and on any estimate with a recurring service; a
 regulated certificate surface (WDO in the aligned OR raw rows) never
 carries either key. When `oneTimeServiceCopy` is present its
-`askChips` ARE `pricing.askChips` (regulated surfaces still get `[]`), and the
+`askChips` ARE `pricing.askChips` — a pack with its own chips supplies
+them, a hero-only pack echoes the category chips the page renders — and the
 server-rendered page reads the same pack, so the two paths cannot drift.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
