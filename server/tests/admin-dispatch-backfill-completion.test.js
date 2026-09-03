@@ -828,12 +828,8 @@ describe('hashCompletionRequest — flagless backfill resumes reach the re-deriv
     // hashing it stranded confirmed same-key retries on a payload
     // mismatch. The pin keeps asserting the EXACT set so any further
     // drift is a deliberate edit here, not an accident.
-    // completionPhotos moved to the MODE segment on #3745 r4: the committed
-    // record owns the uploads, and the client cannot persist the data URLs
-    // across a reload — a photo-less post-commit replay must still resume,
-    // while the pre-commit composite keeps binding them.
     expect(attemptsSource).toMatch(
-      /const \{\s*idempotencyKey, timeOnSite, completionTelemetry, backfill,\s*reportReconcileConfirmed, completionPhotos, \.\.\.stableBody\s*\} = body \|\| \{\};/,
+      /const \{\s*idempotencyKey, timeOnSite, completionTelemetry, backfill,\s*reportReconcileConfirmed, \.\.\.stableBody\s*\} = body \|\| \{\};/,
     );
     // Fix round 13: a NORMAL completion's timeOnSite is the panel's
     // auto-elapsed timer STRING (ticks every second) — hashing it turned

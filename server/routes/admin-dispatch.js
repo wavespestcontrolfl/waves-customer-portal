@@ -12947,6 +12947,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             type: sentSmsType,
             channel: sentSmsChannel,
             reviewCarried: !bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl),
+            // Block-scoped inside this try; the accepted-error catch reads it
+            // from the snapshot for the invoice bookkeeping below.
+            invoiceLinkAllowed: allowCompletionInvoiceLink,
           } : null;
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
@@ -13224,6 +13227,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           record.structured_notes = acceptedNotes;
           if (snap.reviewCarried !== false) await markBundledReviewDelivered();
           else await markBundledReviewFailed();
+          // The text reached the customer, so the invoice bookkeeping the
+          // success branch performs after acceptance still applies: a
+          // delivered pay-link text must not leave the invoice in draft, and a
+          // delivered combined receipt must claim receipt_sent_at so the
+          // deferred receipt job skips its SMS leg (GitHub Codex r5 P1). Both
+          // are idempotent (markDeliverySent is a status sync; the claim is
+          // whereNull) and best-effort like their success-path twins.
+          if (invoice?.id && invoiceCreated && payUrl && snap.invoiceLinkAllowed) {
+            try {
+              const InvoiceService = require('../services/invoice');
+              invoice = await InvoiceService.markDeliverySent(invoice.id, {
+                sms: true,
+                source: snap.type || 'completion_sms_with_invoice',
+                payUrl,
+              });
+            } catch (statusErr) {
+              logger.warn(`[dispatch] Invoice delivery status sync failed for ${invoice.id} after an accepted send: ${statusErr.message}`);
+            }
+          }
+          if (snap.type === 'service_complete_paid_receipt' && invoice?.id) {
+            await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
+              .update({ receipt_sent_at: db.fn.now(), updated_at: new Date() })
+              .catch((stampErr) => logger.warn(`[dispatch] combined-receipt claim failed for invoice ${invoice.id} after an accepted send — the deferred receipt may also text: ${stampErr.message}`));
+          }
           logger.warn(`[dispatch] Completion SMS for service_record ${record.id} was accepted by the provider (${e.providerOutcome?.providerMessageId || 'no message id'}) but a post-send write failed (${e.message}) — recorded as sent, no failure bell, do not re-send`);
         } else {
           const failedDelta = {

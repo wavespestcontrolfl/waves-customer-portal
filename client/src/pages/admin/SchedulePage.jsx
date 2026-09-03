@@ -855,49 +855,6 @@ export function completionResumeOwed(serviceId) {
   }
 }
 
-// The committed body persists BESIDE the marker (codex P1 #3745 r4): a panel
-// reopened after a reload used to rebuild the request, and a rebuilt body
-// 409s completion_resume_payload_mismatch — after which the handler dropped
-// the marker with the report/completion text still unsent. Photos are
-// stripped before storage (completionPhotos can run to 1.5 MB × 5 data URLs,
-// past the localStorage quota); the server's resume hash no longer binds
-// them because the committed record already owns the uploads
-// (completion-attempts.js completionRequestHashSegments). Best-effort: a
-// quota failure leaves the marker alone, which is exactly today's behavior.
-export function completionResumeOwedBodyKey(serviceId) {
-  return `${completionResumeOwedKey(serviceId)}:body`;
-}
-export function completionResumeBodyForStorage(body) {
-  if (!body || typeof body !== "object") return null;
-  const { completionPhotos, ...rest } = body;
-  return rest;
-}
-export function persistCompletionResumeOwed(serviceId, body) {
-  try {
-    localStorage.setItem(completionResumeOwedKey(serviceId), "1");
-  } catch {
-    return; // storage unavailable — the mounted panel's in-memory retry still works
-  }
-  try {
-    const stored = completionResumeBodyForStorage(body);
-    if (stored) localStorage.setItem(completionResumeOwedBodyKey(serviceId), JSON.stringify(stored));
-  } catch { /* quota — marker alone still reopens the panel */ }
-}
-export function restoreCompletionResumeOwedBody(serviceId) {
-  if (!completionResumeOwed(serviceId)) return null;
-  try {
-    const raw = localStorage.getItem(completionResumeOwedBodyKey(serviceId));
-    const parsed = raw ? JSON.parse(raw) : null;
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-export function clearCompletionResumeOwed(serviceId) {
-  try { localStorage.removeItem(completionResumeOwedKey(serviceId)); } catch { /* ignore */ }
-  try { localStorage.removeItem(completionResumeOwedBodyKey(serviceId)); } catch { /* ignore */ }
-}
-
 // The completion route's "committed but NOT finalized" 503s: the closeout
 // row is saved, the attempt was released to the immediately-resumable state,
 // and a re-submit under the same key resumes the missing side effect. Every
@@ -10614,13 +10571,7 @@ export function CompletionPanel({
   const recapRequestRef = useRef(0);
   const recapAbortRef = useRef(null);
   const draftSnapshotRef = useRef(null);
-  // ONE restored snapshot for the whole committed chain (pre-push codex P1
-  // #3745 r4): the persisted body carries the original idempotencyKey, and
-  // the status poll must use that SAME key — a fresh key would classify the
-  // original attempt as succeeded_other_key and discard its stored response.
-  // Lazy: one localStorage read + JSON.parse per mount, not per render.
-  const [restoredResumeBody] = useState(() => restoreCompletionResumeOwedBody(service?.id));
-  const completionIdempotencyKeyRef = useRef(restoredResumeBody?.idempotencyKey || null);
+  const completionIdempotencyKeyRef = useRef(null);
   // Consecutive completion_side_effects_running retries in the current
   // submit chain — see SIDE_EFFECTS_RETRY_MS for the contract.
   const sideEffectsRetryRef = useRef(0);
@@ -10632,17 +10583,15 @@ export function CompletionPanel({
   // survives give-up so the instructed MANUAL retry also replays the
   // committed body, not a fresh rebuild (codex P1 r5); a non-committed
   // failure leaves the flag false and the next submit sends fresh state.
-  // Restored from the persisted committed body when the durable marker is
-  // set (codex P1 #3745 r4) — photos stripped, which the server's resume
-  // hash tolerates — so a reopened panel replays instead of rebuilding.
-  const lastSubmitBodyRef = useRef(restoredResumeBody);
+  const lastSubmitBodyRef = useRef(null);
   // Initialized from the DURABLE marker: a panel reopened on a marker-owed
   // visit is mid-committed-chain even though the in-memory refs died with
   // the previous mount — without this, the reopened panel's fresh key gets
   // service_already_completed once the original attempt finishes and the
   // cross-key branch would reject it as a generic failure, leaving the
-  // marker and visit repeatedly reopenable (codex P1 #3187 r9). A marker
-  // whose body did not persist (quota) still lands on the existing
+  // marker and visit repeatedly reopenable (codex P1 #3187 r9). The BODY
+  // snapshot deliberately does not persist (photos are in-memory Files);
+  // a reopened resume of a still-stranded attempt lands on the existing
   // completion_resume_payload_mismatch handler → Billing Recovery.
   const sideEffectsCommittedRef = useRef(completionResumeOwed(service?.id));
   // Unmount ends the quiet poll: without this, closing the panel mid-delay
@@ -13220,7 +13169,9 @@ export function CompletionPanel({
     // mount (they'd target whichever visit the operator opened next).
     if (completionPanelClosedRef.current) {
       localStorage.removeItem(completionDraftKey(service.id));
-      clearCompletionResumeOwed(service.id);
+      try {
+        localStorage.removeItem(completionResumeOwedKey(service.id));
+      } catch { /* ignore */ }
       return "closed";
     }
     const photoResult = result?.completionPhotoUpload;
@@ -13251,7 +13202,9 @@ export function CompletionPanel({
       );
     }
     localStorage.removeItem(completionDraftKey(service.id));
-    clearCompletionResumeOwed(service.id);
+    try {
+      localStorage.removeItem(completionResumeOwedKey(service.id));
+    } catch { /* storage unavailable — marker never existed either */ }
     setCompletionResult(result || null);
     setSuccess(true);
     const smsNeedsAttention = ["blocked", "failed"].includes(
@@ -13287,7 +13240,9 @@ export function CompletionPanel({
     lastSubmitBodyRef.current = null;
     completionIdempotencyKeyRef.current = null;
     localStorage.removeItem(completionDraftKey(service.id));
-    clearCompletionResumeOwed(service.id);
+    try {
+      localStorage.removeItem(completionResumeOwedKey(service.id));
+    } catch { /* ignore */ }
     // Parent-equivalent success bookkeeping — onSubmit never resolved, so
     // the parent's own status flip / cache refresh never ran.
     if (onCompletedElsewhere) onCompletedElsewhere(service.id);
@@ -14178,7 +14133,9 @@ export function CompletionPanel({
         // chain so the re-submit replays the SAME body through the server's
         // resume claim — a rebuilt body (fresh station capturedAt) would 409
         // completion_resume_payload_mismatch instead of resuming.
-        persistCompletionResumeOwed(service.id, lastSubmitBodyRef.current);
+        try {
+          localStorage.setItem(completionResumeOwedKey(service.id), "1");
+        } catch { /* storage full — the mounted panel's retry still works */ }
         sideEffectsCommittedRef.current = true;
       } else if (e?.code === "completion_resume_payload_mismatch") {
         // A marker-resume rebuilt from the draft can differ from the
@@ -14188,7 +14145,9 @@ export function CompletionPanel({
         // snapshot with it.
         sideEffectsCommittedRef.current = false;
         lastSubmitBodyRef.current = null;
-        clearCompletionResumeOwed(service.id);
+        try {
+          localStorage.removeItem(completionResumeOwedKey(service.id));
+        } catch { /* ignore */ }
         alert(
           "This closeout is already saved — the retry didn't match the original submission (photos don't survive a reload). The office can bill the visit from Billing Recovery.",
         );
@@ -14210,7 +14169,9 @@ export function CompletionPanel({
         // exits through the generic path with the chain state cleared, and
         // without the marker DispatchPageV2 refuses to reopen the completed
         // visit after a reload (codex P1 r4). Success removes it.
-        persistCompletionResumeOwed(service.id, lastSubmitBodyRef.current);
+        try {
+          localStorage.setItem(completionResumeOwedKey(service.id), "1");
+        } catch { /* storage unavailable — the mounted panel's retry still works */ }
         sideEffectsCommittedRef.current = true;
         sideEffectsRetryRef.current = sideEffectsRetryCount;
         return pollCompletionSideEffects(reconcileConfirmed);
@@ -14220,7 +14181,9 @@ export function CompletionPanel({
         // the durable marker is what lets DispatchPageV2 reopen a COMPLETED
         // visit's panel after a reload (codex P1 r3; same marker as
         // backfill_invoice_mint_failed).
-        persistCompletionResumeOwed(service.id, lastSubmitBodyRef.current);
+        try {
+          localStorage.setItem(completionResumeOwedKey(service.id), "1");
+        } catch { /* storage unavailable — the mounted panel's retry still works */ }
         if (!completionPanelClosedRef.current) {
           alert(retryPlan.message);
           setSubmitting(false);

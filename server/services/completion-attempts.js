@@ -79,16 +79,9 @@ function completionRequestHashSegments(body) {
   // attempt, not strand it on a payload mismatch — so the bit is excluded
   // from both segments, like idempotencyKey and completionTelemetry
   // (codex P1 on the reconciliation round).
-  // completionPhotos ride in the MODE segment, not the core (#3745 r4): the
-  // committed record owns the uploads (pre-commit gate or the post-commit
-  // upload stamp), so a post-commit resume legally omits them — the client
-  // cannot persist 1.5 MB × 5 data URLs across a reload, and a rebuilt body
-  // without them used to 409 completion_resume_payload_mismatch. The
-  // pre-commit composite still binds them (a same-key retry may not swap
-  // photos before anything is committed).
   const {
     idempotencyKey, timeOnSite, completionTelemetry, backfill,
-    reportReconcileConfirmed, completionPhotos, ...stableBody
+    reportReconcileConfirmed, ...stableBody
   } = body || {};
   const core = crypto.createHash('sha256')
     .update(JSON.stringify(sortObjectKeys(stableBody)))
@@ -106,8 +99,6 @@ function completionRequestHashSegments(body) {
       timeOnSite: backfill === true || isOperatorTimeOnSite(timeOnSite)
         ? (timeOnSite == null ? null : (typeof timeOnSite === 'number' ? timeOnSite : String(timeOnSite).trim()))
         : null,
-      // Omitted and empty hash identically (the request default is []).
-      completionPhotos: Array.isArray(completionPhotos) && completionPhotos.length ? completionPhotos : null,
     })))
     .digest('hex');
   return { core, mode };
