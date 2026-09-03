@@ -1636,6 +1636,14 @@ export default function DispatchPageV2({
   }, []);
 
   const handleComplete = useCallback((service) => {
+    // A durable resume marker means CompletionPanel already committed this
+    // closeout and owes a replay — it bypasses the project-backed guard (a
+    // cut-over typed visit can still carry a leftover linked project, and
+    // the guard would otherwise strand the committed side effects).
+    if (completionResumeMarked(service)) {
+      setCompletingService(service);
+      return;
+    }
     if (isProjectBackedCompletion(service)) {
       if (projectCompletionIsClosed(service)) return;
       if (service?.linkedProject?.id) {
