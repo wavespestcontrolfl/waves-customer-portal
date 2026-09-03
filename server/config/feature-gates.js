@@ -1030,8 +1030,10 @@ const gates = {
   // that building; otherwise the building + unit as a property row on the
   // account (owner ruling 2026-09-03). Off → the reply is stamped on the
   // Triage Inbox card only (the office enters it by hand). Reads
-  // GATE_ESTIMATE_CLARIFY_ASKS' lane; meaningless alone. The call's
-  // estimate is NOT re-drafted by this lane (PR C2 of the #3775 split).
+  // GATE_ESTIMATE_CLARIFY_ASKS' lane; meaningless alone. The answer is
+  // stamped on the call row as a fence every draft creator checks, and the
+  // call's unsent building-level draft(s) are HELD for the operator (PR
+  // C2a of the #3775 split); the automatic re-draft is PR C2b.
   clarifyUnitWriteback: process.env.GATE_CLARIFY_UNIT_WRITEBACK === 'true',
 
   // Ads Budget Live Push — allow the 2-hourly capacity-based budget cron

@@ -383,6 +383,28 @@ function splitStreetLineUnit(value) {
   return { street, unit };
 }
 
+// The UNIT-FIRST line form ("Apt 204, 123 Main St, Sarasota, FL 34232"):
+// a leading comma segment that is nothing but a designator + value (or
+// "#value"). splitStreetLineUnit reads that segment as the street, so
+// callers that must recognize the unit wherever it sits check this first.
+// Returns { unit, rest } (rest = the remaining segments joined) or null.
+// One or more designator + value pairs ("Apt 204", "Bldg 9 Apt 204",
+// "Building 2, Floor 3" collapses to one segment only when comma-free) or
+// a lone "#value" — the same vocabulary the trailing peel accepts, so no
+// second grammar (codex r6 P1 on #3796).
+const UNIT_FIRST_SEGMENT_RE = /^(?:(?:(?:apt|apartment|unit|ste|suite|bldg|building|fl|floor|spc|space|lot)\.?\s*#?\s*[A-Za-z0-9-]+\s*)+|#\s*[A-Za-z0-9-]+)$/i;
+function splitUnitFirstLine(value) {
+  const segments = cleanString(value).split(',').map((s) => s.trim()).filter(Boolean);
+  if (segments.length < 2 || !UNIT_FIRST_SEGMENT_RE.test(segments[0])) return null;
+  return { unit: normalizeUnitLine(segments[0]), rest: segments.slice(1).join(', ') };
+}
+
+// The unit a line carries in EITHER supported position — trailing/inline
+// ("123 Main St Apt 204, …") or unit-first ("Apt 204, 123 Main St, …").
+function unitAnywhereOnLine(value) {
+  return splitUnitFirstLine(value)?.unit || splitStreetLineUnit(value).unit || '';
+}
+
 // splitStreetLineUnit plus the PLACE tail — every comma segment after the
 // street and its unit segments, joined back with ', ' ("100 Main St, Apt 4,
 // Sarasota, FL 34236" → tail "Sarasota, FL 34236"; '' when there is none).
@@ -636,6 +658,8 @@ module.exports = {
   unitLineValueKey,
   splitStreetLineUnit,
   splitStreetLineUnitParts,
+  splitUnitFirstLine,
+  unitAnywhereOnLine,
   splitStreetAndCity,
   titleCaseWords,
   normalizeState,

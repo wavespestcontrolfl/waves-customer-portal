@@ -142,6 +142,93 @@ async function callSideBlockForEstimateData(dbc, data) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Call-level UNIT-ANSWER fence (clarify write-back, PR C2 of the #3775
+// split). When the caller texts back the apartment/unit a completed-call
+// clarify ask requested, the reply handler stamps it on the call row —
+// under that row's FOR UPDATE, in one transaction with the CRM writes —
+// and EVERY call-origin draft creator reads it inside its own insert
+// transaction while holding the same row lock (callRejectedForDrafting
+// lockCallRow). A composer that built its context before the answer
+// arrived therefore cannot insert a whole-building draft after the reply
+// committed: it is blocked here and the unit re-run (which carries the
+// answer) composes the replacement. The lock, not the phone dedupe lock,
+// is what closes the window — creators hold the phone lock only around
+// their insert, but the call row is locked by every creator in the same
+// place (codex r5 P1 on #3785).
+//
+// Later composers (a force-reprocess weeks on) do not fight the fence:
+// maybeDraftEstimateForCall ADOPTS a stamped answer into its context.
+const CALL_UNIT_ANSWER_KEY = 'unit_answer';
+
+async function stampCallUnitAnswer(dbc, callLogId, { unit, building = null, askDraftId = null } = {}) {
+  if (!callLogId || !unit) return false;
+  const payload = {
+    unit: String(unit),
+    building: building && building.street_line_1
+      ? { street_line_1: building.street_line_1, city: building.city || null, postal_code: building.postal_code || null }
+      : null,
+    ask_draft_id: askDraftId ? String(askDraftId) : null,
+    at: new Date().toISOString(),
+  };
+  const changed = await dbc('call_log')
+    .where({ id: callLogId })
+    .update({
+      // Atomic JSONB path write: only this one key changes, so the
+      // processor's claim/linkage stamps on the same column are never
+      // overwritten by a stale blob.
+      metadata: dbc.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), ?, ?::jsonb)", [`{${CALL_UNIT_ANSWER_KEY}}`, JSON.stringify(payload)]),
+    });
+  return Number(changed) > 0;
+}
+
+async function callUnitAnswer(dbc, callLogId) {
+  if (!callLogId) return null;
+  const row = await dbc('call_log').where({ id: callLogId }).first('metadata');
+  if (!row) return null;
+  let md = row.metadata;
+  if (typeof md === 'string') { try { md = JSON.parse(md); } catch { md = null; } }
+  const fence = md && typeof md === 'object' ? md[CALL_UNIT_ANSWER_KEY] : null;
+  return fence && typeof fence === 'object' && fence.unit ? fence : null;
+}
+
+// The decision, pure, on the draft's FINAL address (what the row will
+// persist — never a context flag, which proves nothing about the address
+// the composer returned; codex r1 P1 on #3796). A draft passes when that
+// address names exactly the fenced unit at the asked building, or is for a
+// DIFFERENT building than the one the ask was about. At the asked
+// building, a whole-building draft AND one naming a different unit (a
+// stale or misheard extraction — exactly what the customer's answer
+// corrects) are blocked; so is a draft with no address at all. A fence
+// with no building applies to every unitless or differing draft.
+function unitAnswerFenceReason(fence, { address = null } = {}) {
+  if (!fence || !fence.unit) return null;
+  const { unitLineValueKey, unitAnywhereOnLine, splitUnitFirstLine } = require('./address-normalizer');
+  const fencedKey = unitLineValueKey(String(fence.unit));
+  const line = String(address || '').trim();
+  if (!line) return 'unit_answer_pending';
+  const b = fence.building;
+  if (b && b.street_line_1) {
+    const { sameStreetAddress } = require('../services/estimator-engine/address-compare');
+    const buildingLine = [b.street_line_1, b.city, b.postal_code ? `FL ${b.postal_code}` : null].filter(Boolean).join(', ');
+    // Compared on the STREET: a structural unit-first line ("Bldg 9, 123
+    // Main St, …") is not another building (codex r5 P1 on #3796).
+    if (!sameStreetAddress(splitUnitFirstLine(line)?.rest || line, buildingLine)) return null;
+  }
+  // The unit in EITHER supported position — the composer may return the
+  // unit-first form the override deliberately preserves (codex r4 P2).
+  const lineUnit = unitAnywhereOnLine(line);
+  if (lineUnit && unitLineValueKey(lineUnit) === fencedKey) return null;
+  return 'unit_answer_pending';
+}
+
+// Read + decide, for the creators' in-lock check. Callers hold the call
+// row lock through their insert (same contract as callPassStillOwned).
+async function callUnitAnswerFence(dbc, callLogId, { address = null } = {}) {
+  const fence = await callUnitAnswer(dbc, callLogId);
+  return unitAnswerFenceReason(fence, { address });
+}
+
 module.exports = {
   ESTIMATE_DELIVERY_CLAIM_TTL_MS,
   CALL_EXTRACTION_RETRY_WINDOW_MS,
@@ -151,4 +238,8 @@ module.exports = {
   callReprocessInFlight,
   callPassStillOwned,
   callSideBlockForEstimateData,
+  stampCallUnitAnswer,
+  callUnitAnswer,
+  unitAnswerFenceReason,
+  callUnitAnswerFence,
 };

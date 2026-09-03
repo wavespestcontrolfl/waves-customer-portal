@@ -1121,6 +1121,29 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           };
         }
       }
+      // UNIT-ANSWER fence for EVERY call-origin insert (clarify write-back,
+      // codex r5 P1 on #3785): the customer's texted unit is stamped on the
+      // call row under the same lock this transaction holds (above), so a
+      // composer that built a whole-building draft before the answer
+      // arrived is blocked here instead of inserting it unguarded after
+      // the reply's own lookup ran. The FINAL address is what is judged —
+      // the engine applies a stamped answer to the composer's address
+      // deterministically — so a draft that would persist the whole
+      // building (or a stale unit) at the asked building is blocked; a
+      // draft for another building is untouched.
+      {
+        const { callUnitAnswerFence } = require('../../utils/estimate-claim-sql');
+        const fenceReason = await callUnitAnswerFence(trx, call.id, { address: intent.address });
+        if (fenceReason) {
+          return {
+            duplicateBlock: {
+              blocked: true,
+              reason: fenceReason,
+              message: 'The caller texted their unit after this draft was composed — the re-draft with the unit replaces it.',
+            },
+          };
+        }
+      }
       // GENERATION fence for EVERY call-origin insert (codex P1, PR #3304
       // — generation-rework GH round): the sid/stamp branch below
       // re-verifies linkage, but a lead-less or phone_touched composer

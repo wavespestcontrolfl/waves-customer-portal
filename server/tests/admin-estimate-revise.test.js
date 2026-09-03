@@ -330,6 +330,35 @@ describe('reviseAdminEstimate', () => {
     expect(estimate.status).toBe('sent');
   });
 
+  test('a clarify re-price marker stamped between the pre-read and the row lock survives the rewrite; the revision reports only the attempt it observed before recomputing', async () => {
+    const withMarker = (row, attempt) => {
+      const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : { ...(row.estimate_data || {}) };
+      return { ...row, estimate_data: JSON.stringify({ ...data, estimatorEngine: { ...(data.estimatorEngine || {}), callLogId: 'call-1', reprice_pending_at: '2026-09-03T12:00:00Z', reprice_attempt: attempt } }) };
+    };
+    // Pre-read clean, a reply stamps the guard before the FOR UPDATE read.
+    let db1 = makeReviseDatabase({ estimate: sentEstimate, lockedEstimate: withMarker(sentEstimate, 'att-new') });
+    let out = await reviseAdminEstimate({ database: db1.database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
+    let eng = JSON.parse(db1.updates[0].estimate_data).estimatorEngine;
+    expect(eng.reprice_pending_at).toBe('2026-09-03T12:00:00Z');
+    expect(eng.reprice_attempt).toBe('att-new');
+    expect(out.observedRepriceAttempt).toBeNull();
+    // Pre-read already guarded: that attempt is the one this revision priced in — lifted INSIDE the locked write.
+    const guarded = withMarker(sentEstimate, 'att-seen');
+    db1 = makeReviseDatabase({ estimate: guarded, lockedEstimate: guarded });
+    out = await reviseAdminEstimate({ database: db1.database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
+    expect(out.observedRepriceAttempt).toBe('att-seen');
+    eng = JSON.parse(db1.updates[0].estimate_data).estimatorEngine;
+    expect(eng.reprice_pending_at).toBeUndefined();
+    expect(eng.reprice_attempt).toBeUndefined();
+    expect(eng.callLogId).toBe('call-1');
+    // Observed one attempt, the locked row carries a NEWER one: preserved, not lifted.
+    db1 = makeReviseDatabase({ estimate: withMarker(sentEstimate, 'att-seen'), lockedEstimate: withMarker(sentEstimate, 'att-newer') });
+    out = await reviseAdminEstimate({ database: db1.database, estimateId: 'est-1', body: reviseBody, technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
+    eng = JSON.parse(db1.updates[0].estimate_data).estimatorEngine;
+    expect(eng.reprice_attempt).toBe('att-newer');
+    expect(eng.reprice_pending_at).toBe('2026-09-03T12:00:00Z');
+  });
+
   test('preserves existing customer linkage and satellite snapshot when the body omits them', async () => {
     const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
     await reviseAdminEstimate({

@@ -428,6 +428,15 @@ async function maybeBuildCommercialProposalDraft({
           const rejected = await callRejectedForDrafting(trx, call.id, { lockCallRow: true });
           if (rejected) return { staleLinkage: rejected };
         }
+        // UNIT-ANSWER fence, same as the residential creator (clarify
+        // write-back, codex r5 P1 on #3785): a scaffold composed for the
+        // whole building before the caller texted their unit is blocked
+        // under the call-row lock; a later composer adopts the answer.
+        {
+          const { callUnitAnswerFence } = require('../../utils/estimate-claim-sql');
+          const fenceReason = await callUnitAnswerFence(trx, call.id, { address: intent.address });
+          if (fenceReason) return { staleLinkage: fenceReason };
+        }
         // GENERATION fence for EVERY call-origin insert — commercial
         // scaffolds included (codex P1, PR #3304 — generation-rework GH
         // round, mirrors the residential creator): lead-less and
@@ -525,6 +534,13 @@ async function maybeBuildCommercialProposalDraft({
       return { estimate };
     });
 
+    if (creation.staleLinkage === 'unit_answer_pending') {
+      // Preserved, not collapsed into stale_call_linkage: the engine exits
+      // quietly on this reason instead of the "existing estimate covers
+      // this prospect" bell.
+      logger.info('[commercial-proposal] scaffold abandoned — the caller answered the unit after this run composed; the re-draft with the unit replaces it');
+      return { created: false, blocked: true, reason: 'unit_answer_pending' };
+    }
     if (creation.staleLinkage) {
       logger.info(`[commercial-proposal] scaffold abandoned — the call's lead linkage changed while composing (${creation.staleLinkage}); the corrected run rebuilds it`);
       return { created: false, blocked: true, reason: 'stale_call_linkage' };

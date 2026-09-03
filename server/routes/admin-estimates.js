@@ -799,9 +799,9 @@ router.put('/:id', async (req, res, next) => {
     if (!dryRun) {
       logger.info(`[estimates] Revised estimate ${estimate.id} in place (status ${estimate.status})`);
       // An operator revision IS the explicit price correction a pending
-      // bedroom re-price waits for — lift the stale-price send guard.
-      await require('../services/estimate-clarify-asks').clearEstimateRepricePending(estimate.id)
-        .catch((err) => logger.warn(`[estimates] reprice guard clear failed for ${estimate.id}: ${err.message}`));
+      // re-price waits for; reviseAdminEstimate lifts the marker it
+      // observed inside its own locked write (a newer attempt stamped after
+      // its pre-read keeps its guard — codex r2/r3 P1 on #3796).
       notifyPricingFallbackAfterCommit(estimate, pricingFallbackReason);
     }
     res.json({
@@ -3573,9 +3573,30 @@ router.put('/:id/proposal', async (req, res, next) => {
         ['estimate-group-send', String(groupId)],
       );
     }
-    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'estimate_group_id', 'status');
+    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'estimate_group_id', 'status', 'estimate_data');
     if (!locked || (locked.estimate_group_id || null) !== groupId) {
       throw retry('This estimate changed groups while you were editing — reload and retry.');
+    }
+    // The engine block is carried from the LOCKED row, never the pre-read:
+    // a clarify re-price guard stamped between the two would otherwise be
+    // dropped by this whole-blob write. And the guard this save OBSERVED on
+    // the pre-read is lifted HERE — an authored proposal IS the operator's
+    // re-price, and reviseAdminEstimate (the residential path that lifts
+    // it) refuses commercial rows, so without this every later send of a
+    // held commercial scaffold failed as reprice_pending (codex r4 P1 on
+    // #3796). A NEWER attempt the locked row carries stays.
+    {
+      const lockedEngine = parseEstimateData(locked.estimate_data)?.estimatorEngine;
+      if (lockedEngine && typeof lockedEngine === 'object') {
+        const nextEngine = { ...lockedEngine };
+        const observedEngine = existingData.estimatorEngine && typeof existingData.estimatorEngine === 'object' ? existingData.estimatorEngine : {};
+        if (observedEngine.reprice_pending_at && nextEngine.reprice_pending_at
+          && String(nextEngine.reprice_attempt || '') === String(observedEngine.reprice_attempt || '')) {
+          delete nextEngine.reprice_pending_at;
+          delete nextEngine.reprice_attempt;
+        }
+        nextData.estimatorEngine = nextEngine;
+      }
     }
     if (groupId) {
       const inFlightMember = await trx('estimates')

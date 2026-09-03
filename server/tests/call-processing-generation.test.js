@@ -448,6 +448,73 @@ describe('callPassStillOwned — the every-call-origin-insert fence', () => {
   });
 });
 
+describe('unit-answer fence (clarify write-back) — stamp, read, decide', () => {
+  const { unitAnswerFenceReason, callUnitAnswerFence, callUnitAnswer, stampCallUnitAnswer } = require('../utils/estimate-claim-sql');
+  const FENCE = { unit: 'Apt 204', building: { street_line_1: '1048 Example Lakes Cir', city: 'Sarasota', postal_code: '34232' }, at: '2026-09-03T12:00:00Z' };
+  const dbcFor = (metadata) => {
+    const dbc = (table) => {
+      const b = {};
+      b.where = () => b;
+      b.first = async () => (table === 'call_log' ? { metadata } : null);
+      b.update = async (payload) => { dbc.updates.push({ table, payload }); return 1; };
+      return b;
+    };
+    dbc.updates = [];
+    dbc.raw = (sql, params) => ({ __raw: sql, params });
+    return dbc;
+  };
+
+  test('no fence = nothing to compare', () => {
+    expect(unitAnswerFenceReason(null, { address: '1048 Example Lakes Cir, Sarasota, FL 34232' })).toBeNull();
+    expect(unitAnswerFenceReason({}, { address: '1048 Example Lakes Cir' })).toBeNull();
+  });
+
+  test('a whole-building draft at the asked building is blocked; only a FINAL address carrying the answer passes, in either position and any spelling', () => {
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Circle, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir Apt 204, Sarasota, FL 34232' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir, Unit 204, Sarasota, FL 34232' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir #204, Sarasota, FL 34232' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: 'Apt 204, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '#204, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBeNull();
+  });
+
+  test('a draft for ANOTHER building is not the fence\'s business; a DIFFERENT unit at the asked building — trailing, unit-first, structural, or multi-part — is the stale one the answer corrects', () => {
+    expect(unitAnswerFenceReason(FENCE, { address: '5 Other Rd, Venice, FL 34285' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '5 Other Rd Apt 9, Venice, FL 34285' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: 'Bldg 9, 5 Other Rd, Venice, FL 34285' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir Apt 9, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason(FENCE, { address: 'Apt 9, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason(FENCE, { address: 'Bldg 9, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason(FENCE, { address: 'Floor 2, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason(FENCE, { address: 'Bldg 9 Apt 9, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+  });
+
+  test('no address at all did not see the answer — blocked; a fence with no building blocks any unitless or differing draft', () => {
+    expect(unitAnswerFenceReason(FENCE, { address: '' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason({ unit: 'Apt 204' }, { address: '5 Other Rd, Venice, FL 34285' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason({ unit: 'Apt 204' }, { address: '5 Other Rd Apt 9, Venice, FL 34285' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason({ unit: 'Apt 204' }, { address: '5 Other Rd Apt 204, Venice, FL 34285' })).toBeNull();
+  });
+
+  test('read + decide from the call row (string or object metadata); a missing row or key is no fence', async () => {
+    expect(await callUnitAnswerFence(dbcFor({ unit_answer: FENCE }), 'call-1', { address: '1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(await callUnitAnswerFence(dbcFor(JSON.stringify({ unit_answer: FENCE })), 'call-1', { address: '1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(await callUnitAnswerFence(dbcFor({ lead_id: 'lead-1' }), 'call-1', { address: '1048 Example Lakes Cir' })).toBeNull();
+    expect(await callUnitAnswer(dbcFor(null), 'call-1')).toBeNull();
+    expect(await callUnitAnswer(() => ({ where: () => ({ first: async () => null }) }), 'call-1')).toBeNull();
+  });
+
+  test('the stamp is an atomic JSONB path write of exactly the unit_answer key', async () => {
+    const dbc = dbcFor({});
+    expect(await stampCallUnitAnswer(dbc, 'call-1', { unit: 'Apt 204', building: FENCE.building, askDraftId: 'draft-1' })).toBe(true);
+    const [{ payload }] = dbc.updates;
+    expect(payload.metadata.__raw).toMatch(/jsonb_set\(COALESCE\(metadata, '\{\}'::jsonb\)/);
+    expect(payload.metadata.params[0]).toBe('{unit_answer}');
+    expect(JSON.parse(payload.metadata.params[1])).toEqual(expect.objectContaining({ unit: 'Apt 204', building: FENCE.building, ask_draft_id: 'draft-1' }));
+    expect(await stampCallUnitAnswer(dbc, 'call-1', { unit: '' })).toBe(false);
+  });
+});
+
 describe('generation fence + call-lock wiring (source pins)', () => {
   // The creators' fences and the reservation's call lock live inside heavily
   // mocked transactions no unit suite executes end-to-end — pin the wiring in
@@ -477,6 +544,43 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     expect(source).toContain("staleLinkage: 'stale_processing_generation'");
     expect(source.indexOf('callRejectedForDrafting(trx, call.id')).toBeLessThan(fenceAt);
     expect(source.indexOf("['sid', 'stamp'].includes(context?.leadLinkage)", fenceAt)).toBeGreaterThan(fenceAt);
+  });
+
+  test('both creators check the unit-answer fence on the FINAL address under the call-row lock: after the rejected check, before the generation fence', () => {
+    for (const rel of ['../services/estimator-engine/draft-builder.js', '../services/estimator-engine/commercial-proposal.js']) {
+      const source = src(rel);
+      const unitFenceAt = source.indexOf('callUnitAnswerFence(trx, call.id, { address: intent.address })');
+      expect(unitFenceAt).toBeGreaterThan(-1);
+      expect(source.indexOf('callRejectedForDrafting(trx, call.id')).toBeLessThan(unitFenceAt);
+      expect(source.indexOf('callPassStillOwned(trx, call.id', unitFenceAt)).toBeGreaterThan(unitFenceAt);
+    }
+    // The engine neither bells "an estimate already covers this" nor retries a fenced insert — residential AND commercial.
+    const engine = src('../services/estimator-engine/index.js');
+    expect(engine).toContain("draft.duplicateBlock?.reason === 'unit_answer_pending'");
+    expect(engine).toContain("commercialOutcome.reason === 'unit_answer_pending'");
+    expect(src('../services/estimator-engine/commercial-proposal.js')).toContain("creation.staleLinkage === 'unit_answer_pending'");
+    // A stamped answer is applied to the composer's FINAL address deterministically, before any creator judges it.
+    expect(engine.indexOf('intent.address = withUnitOverride(intent.address, context)')).toBeGreaterThan(engine.indexOf('const { intent, model } = composed;'));
+    expect(engine.indexOf('intent.address = withUnitOverride(intent.address, context)')).toBeLessThan(engine.indexOf('let draft = await createDraftEstimate('));
+  });
+
+  test('the reply handler stamps the fence under the same call-row lock the creators hold; the engine adopts it (dry runs included); the revision lifts only the marker it observed, inside its locked write', () => {
+    const clarify = src('../services/estimate-clarify-asks.js');
+    const lockAt = clarify.indexOf("unitCallLinkage(trx, flags.unit_call_log_id, { lock: true })");
+    const stampAt = clarify.indexOf('stampCallUnitAnswer(trx, flags.unit_call_log_id');
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(stampAt).toBeGreaterThan(lockAt);
+    const engine = src('../services/estimator-engine/index.js');
+    expect(engine).toContain('callUnitAnswer(db, callLogId)');
+    expect(engine).toContain('if (context && !context.error && !unitLineOverride) {');
+    expect(src('../routes/admin-estimates.js')).not.toContain('clearEstimateRepricePending');
+    const persistence = src('../services/admin-estimate-persistence.js');
+    expect(persistence).toMatch(/REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS = \[[^\]]*'reprice_pending_at',\s*'reprice_attempt',/);
+    const liftAt = persistence.indexOf('delete lockedEngine.reprice_pending_at;');
+    expect(liftAt).toBeGreaterThan(-1);
+    expect(persistence.indexOf('revisedFields.estimate_data = JSON.stringify(pendingData);')).toBeGreaterThan(liftAt);
+    // …and the commercial proposal save lifts its observed marker the same way.
+    expect(src('../routes/admin-estimates.js')).toContain('delete nextEngine.reprice_pending_at;');
   });
 
   test('slot reservation locks the call row FOR UPDATE before its verdict and holds it through the commit', () => {
