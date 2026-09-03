@@ -120,6 +120,20 @@ describe('lawn pricing production follow-up', () => {
     expect(confirmed).toBeNull();
   });
 
+  test('water adjacency only qualifies the lot-ratio turf signal', () => {
+    // Prod case class: county-verified lakefront lot, HIGH
+    // confidence, turf well under 55% of lot — "water adjacency" alone used
+    // to flag every such lot for review.
+    const base = { aiConfidence: 88, treeDensity: 'LIGHT', nearWater: 'YES', estimatedTurfSf: 21000 };
+    const clean = needsTurfManualConfirmation({ ...base, lotSqFt: 60000 }, ['LAWN']);
+    expect(clean.reasons).toEqual([]);
+
+    // Same lake lot, but the AI turf eats 69% of the parcel — the ratio
+    // signal fires and water adjacency rides along as the likely cause.
+    const inflated = needsTurfManualConfirmation({ ...base, lotSqFt: 30337 }, ['LAWN']);
+    expect(inflated.reasons).toEqual(['estimated turf is 69% of lot', 'water adjacency']);
+  });
+
   test('profile builder flags suspicious large turf estimates from obstructed imagery', () => {
     const profile = buildEnrichedProfile(
       {

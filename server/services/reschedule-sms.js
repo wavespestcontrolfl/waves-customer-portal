@@ -206,6 +206,8 @@ class RescheduleSMS {
           selectedOption.window, pending.reason_code, 'customer_sms',
           {
             sourceSurface: 'sms_reply',
+            // Customer-facing move: the rebooker probe applies GATE_SLOT_TRAVEL_GAP.
+            travelGap: true,
             notifyRequested: true,
             ...(observedSchedule ? { expect: observedSchedule } : {}),
           },

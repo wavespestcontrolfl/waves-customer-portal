@@ -36,9 +36,18 @@ Codes:
 - financial: personal hardship — job loss, medical bills, budget cuts (not a price objection)
 - no_longer_needed: problem resolved, DIY from now on, service no longer wanted
 - other: a clear reason that fits none of the above (death, dispute, property change)
-- unclassified: no discernible reason in the text
+- unclassified: no discernible reason in the text`;
 
-Respond with JSON only: {"code": "<one code>"}`;
+// Structured-output contract (llm/call.js jsonSchema): the provider constrains
+// the reply to one taxonomy code; normalize below still allowlists it.
+const CODE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['code'],
+  properties: {
+    code: { type: 'string', enum: CHURN_REASON_CODES },
+  },
+};
 
 function normalize(code) {
   const c = String(code || '').trim().toLowerCase();
@@ -57,6 +66,7 @@ async function classifyChurnReason(text) {
     system: SYSTEM,
     text: `Cancellation message:\n"""${detail.slice(0, 1500)}"""`,
     jsonMode: true,
+    jsonSchema: CODE_SCHEMA,
     maxTokens: 100,
   };
   try {

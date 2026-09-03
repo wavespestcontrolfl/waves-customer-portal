@@ -197,9 +197,33 @@ Severity — ONLY P0 blocks publishing, so reserve it for the unambiguous:
   block. When you are unsure whether something crosses the line, use P1.
 - P2: technically loose but not a violation.
 
-Return ONLY JSON, no prose:
-{"findings":[{"severity":"P0|P1|P2","code":"REENTRY_SAFETY_CLAIM|BANNED_TOPIC","claim":"<exact quoted text from the content>","issue":"<which rule it breaks and why>","fix":"<compliant rewrite>"}]}
 An empty findings array means the content is compliant.`;
+
+// Structured-output contract (llm/call.js jsonSchema): the provider constrains
+// the reply to this shape. validateResponse below still runs — it rejects a
+// route on a semantically unusable finding, which a schema cannot express.
+const RESPONSE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['findings'],
+  properties: {
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['severity', 'code', 'claim', 'issue', 'fix'],
+        properties: {
+          severity: { type: 'string', enum: ['P0', 'P1', 'P2'] },
+          code: { type: 'string', enum: ['REENTRY_SAFETY_CLAIM', 'BANNED_TOPIC'] },
+          claim: { type: 'string', description: 'Exact quoted text from the content' },
+          issue: { type: 'string', description: 'Which rule it breaks and why' },
+          fix: { type: 'string', description: 'A compliant rewrite of the claim' },
+        },
+      },
+    },
+  },
+};
 
 // Schema validation runs INSIDE the dispatcher (Codex PR #3295 r1) so a
 // malformed or mis-coded response REJECTS that route and the second provider
@@ -277,6 +301,7 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
       maxTokens: 6000,
       timeoutMs: COMPLIANCE_TIMEOUT_MS,
       jsonMode: true,
+      jsonSchema: RESPONSE_SCHEMA,
       system: SYSTEM_PROMPT,
       text: `City: ${city || '(none)'}\nKeyword: ${keyword || '(none)'}\nTag: ${tag || '(none)'}\nTitle: ${title || '(none)'}\n\n--- CONTENT ---\n${body}`,
     }, { validate: validateResponse });

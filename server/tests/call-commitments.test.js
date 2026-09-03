@@ -395,18 +395,16 @@ describe('recordCallCommitments keeps the deterministic seeds when the model leg
   });
 });
 
-describe('the model pass survives a model that rejects sampling controls (codex gh-r13 P1)', () => {
+describe('the model pass sends no sampling controls (current models reject them)', () => {
   const { extractCommitmentsWithModel, callEndedAt } = require('../services/call-commitments');
-  test('a "temperature is deprecated" 400 is retried once without temperature, under the same per-attempt budget', async () => {
+  test('one request, no temperature, under the per-attempt budget', async () => {
     const transcript = 'Agent: I will email you the WDO paperwork tonight, thank you for calling Waves today.';
     const create = jest.fn()
-      .mockImplementationOnce(async () => { throw new Error('400 `temperature` is deprecated for this model'); })
       .mockImplementationOnce(async () => ({ content: [{ type: 'text', text: JSON.stringify({ commitments: [{ party: 'waves', kind: 'send_paperwork', description: 'Email the WDO paperwork', channel: 'email', due_text: 'tonight', due_at: null, confidence: 0.9, evidence: [{ quote: 'I will email you the WDO paperwork tonight', speaker: 'agent' }] }] }) }] }));
     const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
-    expect(create).toHaveBeenCalledTimes(2);
-    expect(create.mock.calls[0][0].temperature).toBe(0);
-    expect(create.mock.calls[1][0].temperature).toBeUndefined();
-    expect(create.mock.calls[1][1]).toMatchObject({ maxRetries: 0 });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0].temperature).toBeUndefined();
+    expect(create.mock.calls[0][1]).toMatchObject({ maxRetries: 0 });
     expect(out.items.map((i) => i.kind)).toEqual(['send_paperwork']);
   });
   test('callEndedAt: inbound rows end at ring + duration, bridged rows at bridge + duration, other rows at created_at', () => {

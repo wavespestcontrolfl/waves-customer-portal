@@ -36,7 +36,7 @@ never from docs, which go stale.
 | `WORKHORSE` | Drafting + content generation |
 | `FAST` | High-volume classification, tagging, signals |
 | `VOICE` | Customer-facing copy where warm/natural beats raw reasoning: SMS replies, service recaps, social posts. High-stakes messages (cancellations, complaints) escalate to FLAGSHIP at the call site |
-| `VISION` | Image scoring — needs the `temperature` parameter (pinned 0.2 to match the Gemini scorer), which the Opus line removed |
+| `VISION` | Image scoring, called with the SDK directly. No Anthropic call sends `temperature` (current models 400 on sampling controls); the Gemini scorer keeps its own |
 
 ## 3. DEEP call sites — the helper is mandatory
 

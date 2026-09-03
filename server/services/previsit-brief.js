@@ -68,7 +68,9 @@ const WDO_BRIEF_TYPE = 'wdo_inspection';
 // v2 (codex #3423 r15): the grounding-validator tightening must invalidate
 // cached v1 briefs — an unchanged grounding hash would keep serving
 // pre-tightening bodies (e.g. a cached retired-name mention) forever.
-const PROMPT_VERSION = 'previsit_brief_v3';
+// v4: schema-constrained output (jsonSchema) — separates prompt-only JSON
+// briefs from provider-constrained ones in the cache key.
+const PROMPT_VERSION = 'previsit_brief_v4';
 
 // Deterministic validator rejections repeat on every retry while the
 // grounding (and prompt version) are unchanged — the same facts produce the
@@ -926,10 +928,24 @@ Rules:
 - Plain, terse field language. No greetings, no markdown, no headings.
 - Closed vocabulary: copy service names, cadence/plan labels ("one-time", "recurring", "quarterly"), tier names, and status words VERBATIM from the facts — never introduce one that the facts do not literally contain, and never paraphrase a service into a different label. When unsure whether a word appears in the facts, use one that does.
 - mentioned_terms: list EVERY product name and EVERY pest/organism/disease you mention anywhere in your response, lowercased. Empty array only if you mention none. A term you mention but do not list makes the response invalid.
-- If the facts include no prior visit, last_visit_summary MUST be the empty string — never write "no prior visits" prose or describe past work.
+- If the facts include no prior visit, last_visit_summary MUST be the empty string — never write "no prior visits" prose or describe past work.`;
 
-Return VALID JSON ONLY:
-{"priorities": ["<up to 3 short action items for this visit>"], "watch_items": ["<known issues/quirks worth a glance, from the facts>"], "last_visit_summary": "<1-2 sentences on the last visit, from the facts, or empty string when the facts include no prior visit>", "open_scope": "<open estimate/quote scope in one sentence, or empty string>", "customer_context": "<1-2 sentences of customer quirks/preferences from calls, notes, flags>", "mentioned_terms": ["<every product and pest/organism/disease named in this response, lowercased>"]}`;
+// Structured-output contract (llm/call.js jsonSchema): the provider constrains
+// the reply to this shape; validateBriefJson below still runs every domain
+// check (grounding, banned genera, self-reported terms) on the result.
+const BRIEF_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['priorities', 'watch_items', 'last_visit_summary', 'open_scope', 'customer_context', 'mentioned_terms'],
+  properties: {
+    priorities: { type: 'array', items: { type: 'string' }, description: 'Up to 3 short action items for this visit' },
+    watch_items: { type: 'array', items: { type: 'string' }, description: 'Known issues/quirks worth a glance, from the facts' },
+    last_visit_summary: { type: 'string', description: '1-2 sentences on the last visit, from the facts, or empty string when the facts include no prior visit' },
+    open_scope: { type: 'string', description: 'Open estimate/quote scope in one sentence, or empty string' },
+    customer_context: { type: 'string', description: '1-2 sentences of customer quirks/preferences from calls, notes, flags' },
+    mentioned_terms: { type: 'array', items: { type: 'string' }, description: 'Every product and pest/organism/disease named in this response, lowercased' },
+  },
+};
 
 function sanitizeList(value, max, itemMax = 200) {
   const list = Array.isArray(value) ? value : [];
@@ -2382,6 +2398,7 @@ async function generateBriefBody(grounding, deps = {}) {
   const callModel = deps.callModel
     || ((payload, opts) => dispatchWithFallback(MODELS.TEXT_POLICIES.visitBrief, {
       jsonMode: true,
+      jsonSchema: BRIEF_SCHEMA,
       // 1000 truncated real responses mid-JSON (prod 08-14/15: 36 empty_json
       // legs + "not_an_object (response truncated at max_tokens=1000)") —
       // the body plus mentioned_terms self-report doesn't reliably fit.
@@ -2396,7 +2413,7 @@ async function generateBriefBody(grounding, deps = {}) {
   try {
     const resp = await callModel({
       system: SYSTEM_PROMPT,
-      text: `Grounding facts:\n${JSON.stringify(grounding.llmFacts, null, 2)}\n\nReturn only the JSON object.`,
+      text: `Grounding facts:\n${JSON.stringify(grounding.llmFacts, null, 2)}`,
     }, { validate });
     if (!resp || !resp.ok || !resp.json) {
       logger.warn(`[previsit-brief] LLM miss (${resp?.reason || 'no json'}); using deterministic template`);

@@ -56,6 +56,7 @@
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
+ *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
@@ -68,6 +69,7 @@
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
+ *   GATE_PAY_PAGE_FAQ=true      (public /pay page: short FAQ accordion under the Pay button — card fee, bank timing, Zelle, saved card; copy-only, no money moves; dark in dev AND prod)
  *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE.
  *     ⚠ PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true
  *     AND GATE_AUTO_APPLY_ACCOUNT_CREDIT=true are BOTH also set — the prod
@@ -299,6 +301,16 @@ const gates = {
   // environment. Gate off: the pay page and all pay flows are byte-
   // identical to today. Kill switch: unset or any non-'true' value.
   payIncludeBalance: process.env.GATE_PAY_INCLUDE_BALANCE === 'true',
+
+  // Pay-page FAQ (2026-09-03): a short accordion under the Pay button that
+  // restates facts the page already carries — the credit-card surcharge and
+  // how to avoid it, how long a bank (ACH) payment takes, Zelle, and whether
+  // the card is saved. Display-only; no money moves and no new data rides
+  // the public /pay payload beyond a boolean. Customer-facing copy, so
+  // fail-closed ==='true' in EVERY environment. Gate off: the GET payload
+  // and the page are byte-identical to today. Kill switch: unset or any
+  // non-'true' value.
+  payPageFaq: process.env.GATE_PAY_PAGE_FAQ === 'true',
 
   // Visit groups (docs/design/visit-group-scope.md rev 5): parent
   // service_visits rows grouping same-stop scheduled_services. CREATION
@@ -1782,6 +1794,16 @@ const gates = {
   // would calibrate the estimator while logGateStatus reported it disabled.
   driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
 
+  // Slot Travel Gap — the customer-facing pickers (estimate, one-tap, /book,
+  // reschedule, re-service, voice, rain-out, AI assistant) and every commit
+  // gate behind them require modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES
+  // (default 15) between a candidate window and its neighbouring stops. Off →
+  // pure half-open overlap, byte for byte (back-to-back windows across a
+  // 30-minute drive were offered and reserved — 2026-09-03 field report).
+  // Consumers read gateEnvValue at CALL time (services/scheduling/travel-gap.js)
+  // so a flip needs no redeploy; kill switch: unset GATE_SLOT_TRAVEL_GAP.
+  slotTravelGap: gateEnvValue('GATE_SLOT_TRAVEL_GAP'),
+
   // Vision Delta Scoring — one VISION-tier call per treatment outcome's best
   // before/after photo pair (server/services/vision-delta.js); the verdict
   // feeds the agronomic wiki as photo-verified visual change. Paid vision
@@ -2154,8 +2176,8 @@ const gates = {
   // Ops queue (2026-09-02): the Agents hub "Queue" tab — a read-only
   // projection of every long-running lane's persisted state (pending /
   // parked / failed) in one place. No actions live there. OFF unless set,
-  // dev AND prod — GET /api/admin/agents/queue/availability answers
-  // { available: false }, /queue is 404, and the tab is not rendered.
+  // dev AND prod — GET /api/admin/agents/control/hub (features.queue) answers
+  // features.queue false, /queue is 404, and the tab is not rendered.
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   adminOpsQueue: gateEnvValue('GATE_ADMIN_OPS_QUEUE'),
   // Intelligence Bar tool activity (2026-09-02): POST /query answers carry a

@@ -56,6 +56,18 @@ function listwiseRerankEnabled() {
   return process.env.NEWSLETTER_LISTWISE_RERANK !== 'false';
 }
 
+// Structured-output contract (llm/call.js jsonSchema): the provider constrains
+// the reply to this shape; parseListwiseRanking still drops unknown and
+// duplicate ids, which a schema cannot express.
+const RANKING_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['ranking'],
+  properties: {
+    ranking: { type: 'array', items: { type: 'string' }, description: 'Every candidate id exactly once, most disappointing to miss first' },
+  },
+};
+
 /** Parse {ranking:[ids]} — unknown/duplicate ids dropped (fail-closed). */
 function parseListwiseRanking(text, candidateIds) {
   const jsonMatch = String(text || '').match(/\{[\s\S]*\}/);
@@ -125,8 +137,9 @@ async function applyListwiseRerank(scored) {
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
       maxTokens: 1200,
       jsonMode: true,
-      system: 'You are a precise, demanding local-events editor. You output strict JSON and nothing else.',
-      text: `Rank ALL of these candidate events from the one local readers would be MOST disappointed to learn about only after it happened, down to the least. Judge reader disappointment — rarity, draw, one-time-ness — not category variety. Return STRICT JSON only: {"ranking": ["<id>", ...]} using every id exactly once.\n\n${lines.join('\n')}`,
+      jsonSchema: RANKING_SCHEMA,
+      system: 'You are a precise, demanding local-events editor.',
+      text: `Rank ALL of these candidate events from the one local readers would be MOST disappointed to learn about only after it happened, down to the least. Judge reader disappointment — rarity, draw, one-time-ness — not category variety. Use every id exactly once.\n\n${lines.join('\n')}`,
     });
     const text = response?.json ? JSON.stringify(response.json) : (response?.text || '');
     const ranking = parseListwiseRanking(text, pool.map((ev) => ev.id));

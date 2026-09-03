@@ -262,6 +262,9 @@ async function commitVoiceBooking({
   db, customerId, dateStr, windowStart, windowEnd, insertData, callLogId,
   catalogRow, slot, thirdParty, unverifiedNote, leadId,
   callSid = null, sessionKey = null,
+  // The visit's own pin (property linkage geocode, else the customer's) for
+  // the travel-gap probe; null → buffer-only.
+  coords = null,
 }) {
   const { acquireOccupancyLock, findConflictingVisits } = require('../scheduling/occupancy');
   const { acquireSelfBookingDayCapLock, countActiveSelfBookingsForDay } = require('../availability');
@@ -374,6 +377,7 @@ async function commitVoiceBooking({
         // treats all three as inactive, and counting them here made the very
         // slot the office just freed report slot_taken to its replacement.
         excludeStatuses: ['cancelled', 'skipped', 'rescheduled'],
+        travel: { lat: coords?.lat ?? null, lng: coords?.lng ?? null },
       });
       if (clash.length) return { status: 'slot_taken' };
 
@@ -906,6 +910,7 @@ async function requestBookingText(input = {}, ctx = {}) {
     insertData, callLogId, catalogRow, slot, thirdParty, unverifiedNote,
     leadId: leadIdAtCommit,
     callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null,
+    coords: (bookingCoords && bookingCoords.lat && bookingCoords.lng) ? bookingCoords : null,
   });
   if (commit.status === 'superseded') {
     return 'This session was superseded by a reconnect — NOTHING was booked. Do NOT call any more '

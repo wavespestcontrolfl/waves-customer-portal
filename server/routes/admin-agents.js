@@ -5,6 +5,8 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const leadAttribution = require('../services/lead-attribution');
 const agentActivity = require('../services/agent-activity');
+const modelSwitchboard = require('../services/model-switchboard');
+const modelDiscovery = require('../services/model-discovery');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
@@ -1001,16 +1003,56 @@ router.get('/activity', async (req, res, next) => {
   }
 });
 
+// Models tab: every AI lane resolved against the live registry
+// (config/models.js + the per-lane env pins), plus the model catalog the
+// picker may offer. Read-only — the switch itself is a Railway env change the
+// client composes; nothing here writes. See services/model-switchboard.js.
+router.get('/models', (_req, res) => {
+  res.json(modelSwitchboard.getSwitchboard());
+});
+
+// Live model search across the providers' list endpoints (cached 10 min) so a
+// model released today is pickable without a deploy. ?q=fable 5.1
+// &providers=anthropic,openai&cap=text|vision. Read-only, no tokens spent.
+router.get('/models/search', async (req, res, next) => {
+  try {
+    const providers = String(req.query.providers || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const cap = String(req.query.cap || 'text');
+    const out = await modelDiscovery.search(String(req.query.q || '').slice(0, 80), { ...(providers.length ? { providers } : {}), cap });
+    res.json(out);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Entitlement check for a searched id before the composer offers its env
+// line: the provider's retrieve endpoint (no tokens). Nothing is written.
+router.post('/models/probe', async (req, res, next) => {
+  try {
+    const { provider, id } = req.body || {};
+    res.json(await modelDiscovery.probe(String(provider || ''), String(id || '')));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ── Ops queue (GATE_ADMIN_OPS_QUEUE) — read-only, admin-only (router-level
-// requireAdmin). Availability is a separate probe so the hub can decide
-// whether to render the tab without paying for the full read.
+// requireAdmin).
 function opsQueueGateOn() {
   const { gateEnvValue } = require('../config/feature-gates');
   return gateEnvValue('GATE_ADMIN_OPS_QUEUE') === true;
 }
 
-router.get('/queue/availability', (_req, res) => {
-  res.json({ available: opsQueueGateOn() });
+// Hub probe: one read that tells the Agents hub which gated surfaces exist
+// (so a dark gate renders nothing new) and the product areas its area strip
+// filters by. Feature flags land as their server layers ship — ledger, runs,
+// cost and verification are the agent-control phases; queue is the existing
+// ops-queue gate. Cheap by design: no ledger read, no DB.
+router.get('/control/hub', (_req, res) => {
+  res.json({
+    features: { queue: opsQueueGateOn(), ledger: false, runs: false, cost: false, verification: false },
+    areas: modelSwitchboard.AREAS,
+  });
 });
 
 router.get('/queue', async (_req, res, next) => {

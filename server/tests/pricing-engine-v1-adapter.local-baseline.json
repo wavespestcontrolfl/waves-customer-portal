@@ -66,10 +66,10 @@
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 2849,
-      "annualAfterDiscount": 2279.2,
-      "monthlyTotal": 189.93,
-      "savings": 569.8,
+      "annualBeforeDiscount": 3004,
+      "annualAfterDiscount": 2403.2,
+      "monthlyTotal": 200.27,
+      "savings": 600.8,
       "serviceCount": 4
     },
     "results": {
@@ -112,17 +112,17 @@
       ],
       "ts": [
         {
-          "mo": 31.17,
+          "mo": 40.33,
           "recommended": false,
           "name": "Light"
         },
         {
-          "mo": 41.08,
+          "mo": 54,
           "recommended": true,
           "name": "Standard"
         },
         {
-          "mo": 54,
+          "mo": 71.92,
           "recommended": false,
           "name": "Enhanced"
         }
@@ -146,8 +146,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 2378.2,
-      "year2": 2279.2
+      "year1": 2502.2,
+      "year2": 2403.2
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -494,10 +494,10 @@
     "recurring": {
       "tier": "Gold",
       "discount": 0.15,
-      "annualBeforeDiscount": 1708.36,
-      "annualAfterDiscount": 1452.11,
-      "monthlyTotal": 121.01,
-      "savings": 256.25,
+      "annualBeforeDiscount": 1796.36,
+      "annualAfterDiscount": 1526.91,
+      "monthlyTotal": 127.24,
+      "savings": 269.45,
       "serviceCount": 3
     },
     "results": {
@@ -540,17 +540,17 @@
       ],
       "ts": [
         {
-          "mo": 31.17,
+          "mo": 36.42,
           "recommended": false,
           "name": "Light"
         },
         {
-          "mo": 41.08,
+          "mo": 48.42,
           "recommended": true,
           "name": "Standard"
         },
         {
-          "mo": 54,
+          "mo": 64.17,
           "recommended": false,
           "name": "Enhanced"
         }
@@ -565,8 +565,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1551.11,
-      "year2": 1452.11
+      "year1": 1625.91,
+      "year2": 1526.91
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {

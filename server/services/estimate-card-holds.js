@@ -1309,71 +1309,77 @@ function freeCancelReason({ start, now = new Date(), windowHours, anchorAt = nul
 }
 // `onFailure` — what the rail's cancel handler does when its own lookup
 // fails at commit time: the appointment rail parks review ('review'); the
-// estimate-hold rail releases the hold free ('release'); 'unknown' when the
-// failure happened before rail ownership was established. The unresolved
+// estimate-hold rail releases the hold free ('release'). The unresolved
 // copy must state the rail's real outcome, not a shared guess.
+// Fixed sentences by rule code (willCharge false). Dynamic verdicts —
+// time-, fee- or history-dependent — are built by CANCEL_FEE_RULE_BUILDERS.
+const CANCEL_FEE_RULE_TEXT = {
+  no_card: 'No card is saved for this visit, so nothing will be charged.',
+  rail_off: 'A card is saved, but fee collection is switched off, so nothing will be charged.',
+  // No lookup was made (dark rail short-circuits), so no claim about a card.
+  rail_dark: 'Late-cancel fee collection is switched off, so nothing will be charged.',
+  not_secured: 'A card was requested for this visit but never saved, so nothing will be charged.',
+  no_agreed_fee: 'A card is saved, but no late-cancel fee was agreed for this visit, so nothing will be charged.',
+  secured_no_fee_terms: 'This visit was secured without a late-cancel fee agreement (an existing saved card or prepaid coverage; no fee terms were shown), so nothing will be charged.',
+  payer_billed: 'A card is saved, but a third-party payer is billed for this visit, so the homeowner\'s card will not be charged.',
+  hold_parked: 'The saved card hold for this visit is parked — it follows the customer\'s rebooked visit — so this cancel charges nothing.',
+  card_hold_lane: 'This visit\'s fee is handled by the estimate card hold, not the appointment card — this cancel starts no new charge; check the hold\'s status on the visit.',
+  card_removed: 'The customer removed the saved card, so nothing can be charged.',
+};
+const CANCEL_FEE_RULE_BUILDERS = {
+  fee_settled: ({ detail }) => [false, `The fee for this visit was already settled${detail ? ` (${detail})` : ''}, so nothing more will be charged.`],
+  no_time: ({ hours }) => [false, `A card is saved, but this visit has no scheduled time to measure the ${hours}-hour window from, so nothing will be charged.`],
+  past_start: ({ start }) => [false, `A card is saved, but the visit's start time (${fmtETWhen(start)}) has already passed, so nothing will be charged.`],
+  booking_age: ({ hours, anchorAt, now }) => {
+    const ago = anchorAt ? fmtAgo(now.getTime() - new Date(anchorAt).getTime()) : 'moments';
+    return [false, `A card is saved, but the fee terms were agreed only ${ago} ago — inside the ${hours}-hour window — so the free-cancel period is still open and nothing will be charged.`];
+  },
+  // Boundary-neutral on purpose: the card-hold rail charges AT exactly N
+  // hours and the appointment rail frees it — "outside the window" is true
+  // for both once the predicate said no fee.
+  outside_window: ({ hours, start }) => [false, `A card is saved. The visit starts ${fmtETWhen(start)}, outside the ${hours}-hour late-cancel window, so this is a free cancel and nothing will be charged.`],
+  in_window: ({ hours, start, fee }) => [true, `A card is saved and the visit starts ${fmtETWhen(start)}, within the ${hours}-hour late-cancel window. ${fee} will be charged — rule: cancellations within ${hours} hours of the visit.`],
+  sticky: ({ hours, sticky, fee }) => [true, `A card is saved. The customer rescheduled on ${fmtETWhen(sticky?.rescheduledAt)} while inside the ${hours}-hour window of the earlier slot (${fmtETWhen(sticky?.originalStart)}), so the window carried over to this visit. ${fee} will be charged — rule: a reschedule made inside the window doesn't reset it.`],
+  // A fee event already running or parked for review (fee_status
+  // charging / charge_review): a PaymentIntent may still land, the cancel
+  // handler exits before its waiver branch, so no waiver can help — the
+  // client withholds it for this code (Codex #3806 r4 P1).
+  charge_in_flight: () => [null, 'A fee charge for this visit is already in progress or under billing review. This cancel starts no new charge and cannot waive that one — check the visit\'s billing before promising the customer either way.'],
+  // The customer's card capture is mid-completion ('completing') at
+  // preview time (Codex #3806 r5 P1): the completion tail can promote the
+  // row to 'completed' WITH fee consent before the cancel handler reads it,
+  // and that handler charges by the late-cancel rule unless the waiver was
+  // sent — so this is neither "never saved" nor a running charge. The
+  // waiver stamps 'waived' either way (a still-completing row is stamped
+  // terminal at cancel time; a finished one honors waiveFee), so the
+  // client offers it like the retryable unresolved code.
+  capture_in_flight: ({ fee }) => [null, `The customer is saving a card for this visit right now. If that finishes with fee consent before you confirm, the late-cancel rule applies and ${fee} may be charged; if it doesn't, nothing will be charged. Waive it now if this is a Waves-initiated cancel.`],
+  // Two live card agreements on one visit (an estimate hold beside a
+  // /secure appointment-card row): chargeNoShowFee refuses to pick a winner
+  // and bells the office, so the preview promises neither outcome.
+  competing_consent: () => [null, 'This visit carries two card agreements (an estimate card hold and a saved appointment card). The charge path refuses to pick one, so nothing is charged automatically — the office is notified to decide which applies and bill the fee by hand.'],
+  // Genuinely indeterminate (Codex #3800 r4 P1): the check runs AGAIN at
+  // confirm time and a recovered lookup may charge, so never promise
+  // "nothing will be charged" here. onFailure names the rail's real
+  // repeat-failure outcome: 'review' (appointment rail parks), 'release'
+  // (estimate-hold rail releases free), or 'unknown' when the failure
+  // happened before rail ownership was established.
+  unresolved: ({ detail, onFailure }) => [null, `Couldn't verify the fee terms right now${detail ? ` (${detail})` : ''}. The check runs again when you confirm and may charge the fee, release the card free, or park it for review — ${UNRESOLVED_TAIL[onFailure] || UNRESOLVED_TAIL.unknown}`],
+};
+const UNRESOLVED_TAIL = {
+  release: 'if it still can\'t verify then, the hold is released free; check the visit\'s billing afterwards.',
+  review: 'if it still can\'t verify then, the cancel is parked for billing review.',
+  unknown: 'check the visit\'s billing after cancelling.',
+};
 function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now = new Date(), anchorAt = null, sticky = null, detail = null, onFailure = 'review' }) {
-  const fee = fmtFeeAmount(feeAmount);
-  const hours = Number(windowHours) > 0 ? Number(windowHours) : cardHoldCancelWindowHours();
-  const rule = (willCharge, text) => ({ code, willCharge, text });
-  switch (code) {
-    case 'no_card':
-      return rule(false, 'No card is saved for this visit, so nothing will be charged.');
-    case 'rail_off':
-      return rule(false, 'A card is saved, but fee collection is switched off, so nothing will be charged.');
-    case 'rail_dark':
-      // No lookup was made (dark rail short-circuits), so no claim about a card.
-      return rule(false, 'Late-cancel fee collection is switched off, so nothing will be charged.');
-    case 'not_secured':
-      return rule(false, 'A card was requested for this visit but never saved, so nothing will be charged.');
-    case 'no_agreed_fee':
-      return rule(false, 'A card is saved, but no late-cancel fee was agreed for this visit, so nothing will be charged.');
-    case 'secured_no_fee_terms':
-      return rule(false, 'This visit was secured without a late-cancel fee agreement (an existing saved card or prepaid coverage; no fee terms were shown), so nothing will be charged.');
-    case 'payer_billed':
-      return rule(false, 'A card is saved, but a third-party payer is billed for this visit, so the homeowner\'s card will not be charged.');
-    case 'hold_parked':
-      return rule(false, 'The saved card hold for this visit is parked — it follows the customer\'s rebooked visit — so this cancel charges nothing.');
-    case 'card_hold_lane':
-      return rule(false, 'This visit\'s fee is handled by the estimate card hold, not the appointment card — this cancel starts no new charge; check the hold\'s status on the visit.');
-    case 'fee_settled':
-      return rule(false, `The fee for this visit was already settled${detail ? ` (${detail})` : ''}, so nothing more will be charged.`);
-    case 'no_time':
-      return rule(false, `A card is saved, but this visit has no scheduled time to measure the ${hours}-hour window from, so nothing will be charged.`);
-    case 'past_start':
-      return rule(false, `A card is saved, but the visit's start time (${fmtETWhen(start)}) has already passed, so nothing will be charged.`);
-    case 'booking_age': {
-      const ago = anchorAt ? fmtAgo(now.getTime() - new Date(anchorAt).getTime()) : 'moments';
-      return rule(false, `A card is saved, but the fee terms were agreed only ${ago} ago — inside the ${hours}-hour window — so the free-cancel period is still open and nothing will be charged.`);
-    }
-    case 'outside_window':
-      // Boundary-neutral on purpose: the card-hold rail charges AT exactly
-      // N hours and the appointment rail frees it — "outside the window"
-      // is true for both once the predicate said no fee.
-      return rule(false, `A card is saved. The visit starts ${fmtETWhen(start)}, outside the ${hours}-hour late-cancel window, so this is a free cancel and nothing will be charged.`);
-    case 'card_removed':
-      return rule(false, 'The customer removed the saved card, so nothing can be charged.');
-    case 'in_window':
-      return rule(true, `A card is saved and the visit starts ${fmtETWhen(start)}, within the ${hours}-hour late-cancel window. ${fee} will be charged — rule: cancellations within ${hours} hours of the visit.`);
-    case 'sticky':
-      return rule(true, `A card is saved. The customer rescheduled on ${fmtETWhen(sticky?.rescheduledAt)} while inside the ${hours}-hour window of the earlier slot (${fmtETWhen(sticky?.originalStart)}), so the window carried over to this visit. ${fee} will be charged — rule: a reschedule made inside the window doesn't reset it.`);
-    case 'capture_in_flight':
-      return rule(null, 'The customer is saving a card for this visit right now (secure link mid-completion), so fee terms may land in a moment. This cancel can\'t preview them — check the visit\'s billing after cancelling.');
-    case 'competing_consent':
-      return rule(null, 'This visit carries two card agreements (an estimate card hold and a saved appointment card). The charge path refuses to pick one, so nothing is charged automatically — the office is notified to decide which applies and bill the fee by hand.');
-    case 'charge_in_flight':
-      return rule(null, 'A fee charge for this visit is already in progress or under billing review. This cancel starts no new charge — check the visit\'s billing before promising the customer either way.');
-    case 'unresolved':
-    default:
-      // Genuinely indeterminate (Codex #3800 r4 P1): the check runs AGAIN
-      // at confirm time and a recovered lookup may charge, so never promise
-      // "nothing will be charged" here.
-      return rule(null, `Couldn't verify the fee terms right now${detail ? ` (${detail})` : ''}. The check runs again when you confirm and may charge the fee, release the card free, or park it for review — ${onFailure === 'release'
-        ? 'if it still can\'t verify then, the hold is released free; check the visit\'s billing afterwards.'
-        : onFailure === 'review'
-          ? 'if it still can\'t verify then, the cancel is parked for billing review.'
-          : 'check the visit\'s billing after cancelling.'}`);
-  }
+  if (CANCEL_FEE_RULE_TEXT[code]) return { code, willCharge: false, text: CANCEL_FEE_RULE_TEXT[code] };
+  const build = CANCEL_FEE_RULE_BUILDERS[code] || CANCEL_FEE_RULE_BUILDERS.unresolved;
+  const [willCharge, text] = build({
+    fee: fmtFeeAmount(feeAmount),
+    hours: Number(windowHours) > 0 ? Number(windowHours) : cardHoldCancelWindowHours(),
+    start, now, anchorAt, sticky, detail, onFailure,
+  });
+  return { code, willCharge, text };
 }
 
 // Sticky cancel window (owner ruling 2026-08-10): a customer-initiated
@@ -1848,6 +1854,9 @@ async function cardHoldReminderLine(scheduledServiceId) {
 // be noise). Mirrors handleCardHoldCancellation's decision inputs exactly;
 // feeApplies is false when the feature flag is off because chargeNoShowFee
 // would no-op anyway.
+// Verdict for a /secure appointment-card row found beside a HELD hold, by the
+// row's fee_status; anything unlisted is a live competing consent.
+const COMPETING_LANE_RULE = { charging: 'charge_in_flight', charge_review: 'charge_in_flight', charged: 'fee_settled' };
 async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { retried = false } = {}) {
   const hold = await heldCardForScheduledService(scheduledServiceId);
   if (!hold) {
@@ -1909,8 +1918,13 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
       .where({ scheduled_service_id: scheduledServiceId })
       .first('id', 'fee_status');
     if (laneRow) {
-      const inFlight = laneRow.fee_status === 'charging' || laneRow.fee_status === 'charge_review';
-      return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe(inFlight ? 'charge_in_flight' : 'competing_consent') };
+      // A competing row whose fee already LANDED is a settled fee, not a
+      // consent still to be picked (Codex #3800 r7 P1): "bill by hand"
+      // copy there invites a double charge. charging / charge_review stay
+      // in flight; every other state is the live competing consent.
+      const code = COMPETING_LANE_RULE[laneRow.fee_status] || 'competing_consent';
+      const settled = code === 'fee_settled';
+      return { held: true, feeApplies: !settled, feeAmount, ...(settled ? {} : { unresolved: true }), rule: describe(code, { detail: 'charged on the appointment card' }) };
     }
   } catch (err) {
     logger.warn('[estimate-card-holds] competing-consent lookup for cancel preview failed — reporting undetermined', { error: err.message });
@@ -1935,7 +1949,8 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
     logger.warn('[estimate-card-holds] appt-time resolution for cancel preview failed — reporting fee-may-apply', { error: err.message });
     return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'appointment time lookup failed' }) };
   }
-  let feeApplies = isCardHoldEnabled() && !!start && isWithinCancelWindow({ hold, serviceStart: start, now });
+  // The rail gate already returned above; only the time and the window decide here.
+  let feeApplies = !!start && isWithinCancelWindow({ hold, serviceStart: start, now });
   let ruleCode = feeApplies ? 'in_window' : freeCancelReason({ start, now, windowHours, anchorAt: hold.held_at });
   let sticky = null;
   // NO card-revocation check on the direct in-window verdict — deliberately.
@@ -1948,7 +1963,7 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
   // owner ruling, not a preview change.
   const previewStartMs = start ? new Date(start).getTime() : NaN;
   const previewStartLive = Number.isFinite(previewStartMs) && (previewStartMs - now.getTime()) > -CARD_HOLD_POST_START_GRACE_MS;
-  if (!feeApplies && isCardHoldEnabled() && previewStartLive && hold.sticky_window_disclosed && isStickyCancelWindowEnabled()) {
+  if (!feeApplies && previewStartLive && hold.sticky_window_disclosed && isStickyCancelWindowEnabled()) {
     // Sticky window — the preview must agree with handleCardHoldCancellation
     // or the operator's confirm prompt lies (same enforcement gate, same
     // evidence). A THROWN lookup is unresolved, not fee-free (same posture

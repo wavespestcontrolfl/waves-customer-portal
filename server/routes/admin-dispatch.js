@@ -3445,6 +3445,7 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
 // (/secure) rail — merged so the client confirm prompts work unchanged;
 // the lanes are mutually exclusive per visit (the appointment rail skips
 // any visit with a hold row).
+const APPT_RAIL_SILENT_CODES = new Set(['no_card', 'card_hold_lane', 'rail_dark']);
 router.get('/:serviceId/card-hold', async (req, res, next) => {
   try {
     const CardHolds = require('../services/estimate-card-holds');
@@ -3457,8 +3458,11 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
     if (holdPreview.held) return res.json(holdPreview);
     const ApptCardRequests = require('../services/appointment-card-request');
     const apptPreview = await ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId);
-    const apptCode = apptPreview.rule?.code;
-    if (holdPreview.rule?.code !== 'no_card' && (apptCode === 'no_card' || apptCode === 'card_hold_lane')) {
+    // The appointment rail "has nothing to say" when it found no row, when
+    // it deferred to the hold lane, or when it is DARK (no lookup at all —
+    // Codex #3800 r7 P1): its gate is independent of the hold rail's, so a
+    // closed-state or unresolved hold verdict must survive rail_dark too.
+    if (holdPreview.rule?.code !== 'no_card' && APPT_RAIL_SILENT_CODES.has(apptPreview.rule?.code)) {
       return res.json(holdPreview);
     }
     res.json({

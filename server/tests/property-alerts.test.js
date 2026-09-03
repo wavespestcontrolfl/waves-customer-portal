@@ -258,7 +258,7 @@ describe('delivery', () => {
     const knex = knexFor({
       notification_prefs: [{ customer_id: 'cust-1', quiet_hours_start: '00:00', quiet_hours_end: '23:59' }],
     });
-    const outcome = await deliverAlert(CANDIDATE, { knex });
+    const outcome = await deliverAlert(CANDIDATE, { knex, now: JAN_NOW });
     expect(outcome).toEqual({ delivered: false, reason: 'quiet_hours' });
     expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
     expect(knex.__inserts).toHaveLength(0);

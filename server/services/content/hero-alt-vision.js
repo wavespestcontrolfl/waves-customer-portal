@@ -18,8 +18,8 @@
  */
 
 const logger = require('../logger');
-const { anthropicCreateWithSamplingRetry } = require('../llm/call');
 const MODELS = require('../../config/models');
+const { anthropicText } = require('../llm/call');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -72,10 +72,9 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
 
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropicCreateWithSamplingRetry(anthropic, {
+    const response = await anthropic.messages.create({
       model: MODELS.VISION,
       max_tokens: 300,
-      temperature: 0.2, // VISION tier keeps temperature; repeatable descriptions
       messages: [{
         role: 'user',
         content: [
@@ -85,7 +84,7 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
       }],
     });
 
-    const alt = sanitizeAlt(response.content?.[0]?.text);
+    const alt = sanitizeAlt(anthropicText(response));
     if (!alt) {
       logger.warn('[hero-alt-vision] unusable vision output — keeping writer alt (fail-open)');
       return null;

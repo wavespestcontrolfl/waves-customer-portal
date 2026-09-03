@@ -36,7 +36,6 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
-const { anthropicCreateWithSamplingRetry } = require('./llm/call');
 
 // A due time typed by the office arrives either as an ISO instant (the
 // panel converts its datetime-local value with the ET helper) or, from any
@@ -494,19 +493,14 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   const anthropic = client || ((Anthropic && process.env.ANTHROPIC_API_KEY) ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null);
   if (!anthropic) return { items: [], skipped: 'no_provider' };
   const startedAt = Date.now();
-  // FLAGSHIP (Opus 4.8+) rejects sampling controls with a 400; the shared
-  // strip-and-retry in llm/call.js is the one mechanism every direct SDK
-  // caller uses (Codex #3738 r13 P1). The client shim keeps this pass's
-  // budget on both attempts: maxRetries 0 because the pipeline has its own
-  // retry lanes — a claim-holding pass must not sit through the SDK's
-  // per-attempt timeouts.
-  const budgeted = { messages: { create: (request) => anthropic.messages.create(request, { timeout: MODEL_TIMEOUT_MS, maxRetries: 0 }) } };
-  const response = await anthropicCreateWithSamplingRetry(budgeted, {
+  // No sampling controls on the request (current Anthropic models 400 on
+  // them). maxRetries 0 because the pipeline has its own retry lanes — a
+  // claim-holding pass must not sit through the SDK's per-attempt timeouts.
+  const response = await anthropic.messages.create({
     model: MODELS.FLAGSHIP,
     max_tokens: 2000,
-    temperature: 0,
     messages: [{ role: 'user', content: buildCommitmentsPrompt({ transcript, callStartedAt }) }],
-  });
+  }, { timeout: MODEL_TIMEOUT_MS, maxRetries: 0 });
   const text = (response?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
   let parsed;
   try {

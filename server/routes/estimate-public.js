@@ -22378,6 +22378,9 @@ function comparisonEngineInputs(estData) {
         req.options || {},
       );
       if (base && typeof base === 'object') {
+        // Stored-result palm provenance — a legacy engineRequest must not
+        // adopt the v4.8 property-palm promotion on replay (pre-push r2 P0).
+        require('../services/estimate-tree-shrub-knob-replay').applyTreeShrubPalmReplay(base, estData);
         return extractEngineInputs({ ...estData, engineInputs: base });
       }
     } catch (_err) { /* fall through to the stored input shapes */ }

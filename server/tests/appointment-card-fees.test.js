@@ -1033,10 +1033,6 @@ describe('appointmentCardCancelPreview', () => {
     res = await appointmentCardCancelPreview('svc-1');
     expect(res.rule).toMatchObject({ code: 'secured_no_fee_terms', willCharge: false });
     expect(res.rule.text).not.toMatch(/never saved|A card is saved/);
-    mockTableHandlers = handlersWith({ request: { ...REQUEST(), status: 'completing' } });
-    res = await appointmentCardCancelPreview('svc-1');
-    expect(res).toMatchObject({ secured: false, feeApplies: false, unresolved: true, rule: { code: 'capture_in_flight', willCharge: null } });
-    expect(res.rule.text).not.toMatch(/never saved/);
     mockTableHandlers = handlersWith({ hold: { id: 'h-parked' } });
     res = await appointmentCardCancelPreview('svc-1');
     expect(res.rule).toMatchObject({ code: 'card_hold_lane', willCharge: false });
@@ -1054,12 +1050,20 @@ describe('appointmentCardCancelPreview', () => {
     expect(res).toMatchObject({ secured: true, feeApplies: false, feeAmount: 49, rule: { code: 'outside_window', willCharge: false } });
     expect(res.rule.text).toMatch(/outside the 24-hour late-cancel window, so this is a free cancel and nothing will be charged\.$/);
   });
-  test('in-flight charge (fee_status charging) → distinct rule: a charge may still land, no "nothing will be charged" promise', async () => {
+  test('fee already charging → charge_in_flight (not the retryable unresolved code): no waiver offer, no "nothing charged" promise', async () => {
     mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_status: 'charging' } });
     const res = await appointmentCardCancelPreview('svc-1');
     expect(res).toMatchObject({ secured: true, feeApplies: true, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
     expect(res.rule.text).toMatch(/already in progress or under billing review/);
     expect(res.rule.text).not.toMatch(/Nothing will be charged/);
+  });
+  test('capture mid-completion (completing) → capture_in_flight: undetermined, waivable, never "never saved" (Codex #3806 r5 P1)', async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), status: 'completing' } });
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ unresolved: true, feeAmount: 49, rule: { code: 'capture_in_flight', willCharge: null } });
+    expect(res.rule.text).toMatch(/saving a card for this visit right now/);
+    expect(res.rule.text).toMatch(/\$49 late-cancel fee may be charged/);
+    expect(res.rule.text).not.toMatch(/never saved|nothing will be charged\.$/);
   });
   test('unresolved (thrown time lookup) → willCharge null and the rule says the cancel parks for review', async () => {
     mockApptTime = null;

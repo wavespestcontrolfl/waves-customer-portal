@@ -23,4 +23,7 @@ if [ ! -d node_modules/lint-staged ]; then
   exit 0
 fi
 
-exec npx lint-staged
+# --verbose: lint-staged hides the output of SUCCESSFUL tasks by default,
+# which would swallow eslint's warn-only structural signals (complexity /
+# max-depth). Warnings still never block — eslint exits 0 on warnings.
+exec npx lint-staged --verbose
