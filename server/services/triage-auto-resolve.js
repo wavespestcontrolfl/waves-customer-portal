@@ -690,20 +690,23 @@ async function loadEmailEvidence(conn, items, flag) {
 
 // caller_not_authorized → a HUMAN (admin or portal account holder — never
 // the call pipeline or a dedupe merge) added a service contact, or changed
-// one's PHONE, to a number ending in the caller's last four after the card
-// (service-contact-events writes the masked number, the source and the
-// changed fields to activity_log.metadata). The classifier additionally
-// requires the number to be on a slot NOW.
+// one's PHONE, to EXACTLY the caller's number after the card: the event's
+// keyed phone fingerprint (service-contact-events writes it next to the
+// masked number, the source and the changed fields) equals the caller's.
+// The masked …1234 alone is ambiguous and is never compared; events
+// written before the fingerprint existed cannot match. The classifier
+// additionally requires the number to be on a slot NOW.
 async function loadContactEvidence(conn, items, flag) {
   const authItems = items.filter((i) => i.reason_code === 'caller_not_authorized' && i.call_customer_id);
   if (!authItems.length) return;
+  const { phoneFingerprint } = require('./service-contact-events');
   const rows = await conn('activity_log')
     .whereIn('customer_id', [...new Set(authItems.map((i) => i.call_customer_id))])
     .whereIn('action', ['service_contact_added', 'service_contact_updated'])
     .select('customer_id', 'action', 'created_at', 'metadata');
   for (const item of authItems) {
-    const last4 = phoneDigits(callerPhone(item)).slice(-4);
-    if (last4.length !== 4) continue;
+    const callerPrint = phoneFingerprint(callerPhone(item));
+    if (!callerPrint) continue;
     const hit = rows.some((r) => {
       if (String(r.customer_id) !== String(item.call_customer_id)) return false;
       if (!strictlyAfter(r.created_at, item.created_at)) return false;
@@ -713,7 +716,7 @@ async function loadContactEvidence(conn, items, flag) {
       // carries the unchanged phone — only a phone change is evidence.
       if (r.action === 'service_contact_updated'
         && !(Array.isArray(meta?.changed_fields) && meta.changed_fields.includes('phone'))) return false;
-      return String(meta?.phone || '').slice(-4) === last4;
+      return Boolean(meta?.phone_fingerprint) && meta.phone_fingerprint === callerPrint;
     });
     if (hit) flag(item.id, 'caller_phone_added');
   }
