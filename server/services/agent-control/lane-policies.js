@@ -97,10 +97,11 @@ const LANE_RUNTIME = {
   // ── Calls ──
   call_extraction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0', ...CALL_PIPELINE },
   // direct_sdk (Codex r15): V1 extraction and transcript relabeling are raw Gemini / OpenAI fetches in call-recording-processor.js.
-  call_extraction_v1: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'structured_extraction', ...CALL_PIPELINE },
+  // offline (Codex r16): each is one provider with no cross-provider answer, retried by the background call pipeline.
+  call_extraction_v1: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction', ...CALL_PIPELINE },
   call_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', ...LONG_BATCH },
   transcription: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'interactive', eval_family: 'transcription_contact', ...CALL_PIPELINE },
-  transcript_label: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'transcription_contact', ...CALL_PIPELINE },
+  transcript_label: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   contact_pass: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   call_sentiment: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   call_self_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
@@ -108,7 +109,7 @@ const LANE_RUNTIME = {
   // The hourly cron only verifies follow-ups (no model call); the model runs
   // per scored call and for the weekly recommendation — candidate-driven.
   // direct_sdk (Codex r12 sweep): csr_coach, wdo_history, signal_detector, retention_drafts, ads_advisor, wiki_qa,
-  // expense_categorize, tax_advisor call anthropic.messages.create directly — no adapter row until migrated (S2a).
+  // tax_advisor call anthropic.messages.create directly — no adapter row until migrated (S2a); expense_categorize left this list in #3821.
   // offline (Codex r14): contact_pass, lead_synopsis, contact_dictation, address_recovery and tech_dictation each
   // run one provider and degrade to null / a review path / typed notes — no cross-provider answer. lead_synopsis is also direct_sdk.
   // direct_sdk (Codex r15): contact_dictation and address_recovery are raw Gemini fetches (contact-dictation.js, address-validation/recovery.js).
@@ -141,9 +142,10 @@ const LANE_RUNTIME = {
   turf_ocr: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
   photo_scoring: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   vision_delta: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
-  lawn_quality_gate: { side_effect_class: 'read_only', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
+  // offline (Codex r16): lawn_quality_gate fails open on a miss and lawn_challenge falls to the caller's symptom downgrade — one Anthropic request each, no second provider.
+  lawn_quality_gate: { side_effect_class: 'read_only', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   lawn_diag_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
-  lawn_challenge: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'compliance_check' },
+  lawn_challenge: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'compliance_check' },
   lawn_diag_writer: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'service_report' },
   wdo_project_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: null },
   // internal_write: a project-scoped lookup persists the answer to projects.wdo_history (admin-projects.js) — Codex r9.
@@ -175,11 +177,15 @@ const LANE_RUNTIME = {
   wdo_appt_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: null },
 
   // ── Email ──
-  email_classify: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  // irreversible_external + M3 (Codex r16): a marketing_newsletter verdict runs executeAutoAction — Gmail archive and a one-click
+  // unsubscribe request with no approval, audited on the emails row (email-classifier.js → email-actions.js).
+  email_classify: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification', maturity: 'M3' },
   email_reply: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy' },
-  bounce_rescue: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
+  // M2 (Codex r16): the LLM decode leg only ever yields a `suggested` candidate emailed to the owner; applying it is an operator action.
+  bounce_rescue: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M2' },
   // direct_sdk (Codex r15): email/invoice-processor.js parses through its own new Anthropic() client.
-  invoice_pdf: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'structured_extraction', expected_duration_ms: 120_000 },
+  // offline (Codex r16): background email step, one request, continues without parsed data on a miss.
+  invoice_pdf: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 120_000 },
 
   // ── Content & SEO ──
   blog_draft: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', ...LONG_BATCH },
@@ -201,8 +207,10 @@ const LANE_RUNTIME = {
   // hero_alt, seo_intent, seo_advisor, prospect_score, events: anthropic.messages.create direct — direct_sdk (Codex r14).
   codex_remediation: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', ...LONG_BATCH },
   footprint_claim: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
-  seo_intent: { side_effect_class: 'read_only', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'classification' },
-  seo_advisor: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null, ...LONG_BATCH },
+  // offline (Codex r16): classifyQueryIntent calls Anthropic only and drops to keyword rules on a miss (seo-diagnosis-tools.js).
+  seo_intent: { side_effect_class: 'read_only', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification' },
+  // M3 (Codex r16): the Monday cron runs generateWeeklyReport unattended, persists seo_advisor_reports and texts the owner — same shape as agent_bi.
+  seo_advisor: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null, maturity: 'M3', ...LONG_BATCH },
   prospect_score: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification' },
   // event, not weekly: a healthy weekly tick over an empty board (or only
   // known directories, handled heuristically) makes no model call.
@@ -215,14 +223,16 @@ const LANE_RUNTIME = {
   signup_worker: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: null, maturity: 'M3', ...LONG_BATCH },
   link_investigator: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', ...LONG_BATCH },
   mentions_prober: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'search', fallback_class: 'measurement', eval_family: null, expected_cadence: 'daily', ...LONG_BATCH },
-  mentions_sentiment: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
+  // direct_sdk (Codex r16): classifySentiment builds its own Anthropic client (seo/llm-mention-prober.js), not llm/call.js.
+  mentions_sentiment: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification' },
   image_gen: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'image', fallback_class: 'offline', eval_family: null, expected_duration_ms: 180_000 },
   video_gen: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'video', fallback_class: 'offline', eval_family: null, ...LONG_BATCH },
   events: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification', maturity: 'M3', ...LONG_BATCH },
   // events_editorial (main 2026-09-03): curation + normalizing copy on the two-provider contentDraft policy; cron batch.
   // customer_visible: curation can flip events_raw.admin_status to approved, making model-selected events publishable with no human (pre-push P1).
   events_editorial: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3', ...LONG_BATCH },
-  ads_advisor: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null },
+  // M3 (Codex r16): the 8am cron runs generateDailyAdvice unattended, persists ad_advisor_reports and texts the owner.
+  ads_advisor: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null, maturity: 'M3' },
 
   // ── Intelligence Bar & knowledge ──
   // direct_sdk (Codex r14): the /query loop and the email/comms/procurement tools call anthropic.messages.create directly.
@@ -266,12 +276,14 @@ const LANE_RUNTIME = {
   agent_assistant: { side_effect_class: 'customer_visible', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', maturity: 'M3', ...AGENT_SESSION },
 
   // ── Back office ──
-  expense_categorize: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification' },
+  // ledger call (Codex r16): #3821 moved expense-categorizer.js onto dispatchWithFallback (highStakes policy), so every call records.
+  expense_categorize: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   tax_advisor: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null, expected_cadence: 'weekly', ...LONG_BATCH },
   // offline: direct Anthropic SDK calls, no second provider, failures reach the Express error path — Codex r10.
   // unrecordable/direct_sdk: both workflows call anthropic.messages.create directly, bypassing the adapters the call ledger records — Codex r11.
   inventory_research: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 180_000 },
-  job_screen: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  // M1 (Codex r16): every application is screened automatically for owner ranking; no status change or applicant outcome depends on it.
+  job_screen: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification', maturity: 'M1' },
 };
 
 /**
