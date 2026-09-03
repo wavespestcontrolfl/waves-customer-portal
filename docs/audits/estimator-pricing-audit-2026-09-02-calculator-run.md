@@ -1,7 +1,7 @@
 # Independent estimator pricing audit — run output
 
-Generated 2026-09-03T05:35:40.961Z. Constants source: **constants.js (in-code defaults)**.
-Scenarios: 1199 · independent-vs-engine matches: 1156 · mismatches: 0 · engine-only observations: 41.
+Generated 2026-09-03T05:43:01.163Z. Constants source: **constants.js (in-code defaults)**.
+Scenarios: 1199 · independent-vs-engine matches: 1156 · mismatches: 0 · expected a price but the engine returned none: 0 · engine-only observations: 43 (1156 + 0 + 0 + 43 = 1199).
 
 ## Findings raised by this run
 
@@ -92,9 +92,11 @@ Recorded span = check-in → check-out, which often includes driving to the next
 - [tree_shrub] palm count contribution (30 palms): property-level vs service-line: {"monthlyNoPalms":53.08,"monthlyPropertyPalms":53.08,"monthlyServiceLinePalms":95.17,"propertyPalmSource":"property","serviceLinePalmSource":"service_line"}
 - [tree_shrub] no bed area and no lot: fallback: {"bedArea":2000,"bedAreaSource":"fallback","treeCount":0,"treeCountSource":"default_zero","review":true,"reasons":["missing_bed_area_fallback"]}
 - [tree_shrub] explicit treeCount 0 vs absent with heavy density: {"explicitZero":{"monthly":45.25,"treeCount":0,"source":"explicit","review":false},"absent":{"monthly":58.75,"treeCount":10,"source":"density_estimate"}}
+- [specialty] foam drill points=25: {}
 - [specialty] palm {"treatmentType":"nutrition","palmCount":0}: {}
 - [specialty] palm {"treatmentType":"nutrition","palmCount":-2}: {}
 - [specialty] palm {"treatmentType":"nutrition","palmCount":2.5}: {}
+- [specialty] palm {"treatmentType":"combo","palmCount":3}: {}
 - [waveguard_discounts] Platinum + 25% manual discount (stacked, uncapped by design): {"platinumAnnual":1883.2,"withManual":1412.4,"manualDiscount":{"amount":470.8,"capReason":null},"marginWarnings":[{"service":"lawn_care","type":"waveguard_discount_below_margin_floor","margin":0.133,"marginFloor":0.35,"finalAnnual":460.8,"annualCost":399.31,"message":"lawn_care WaveGuard discount drops collected margin to 13.3% (below the 35% review floor) — price stands as discounted"},{"service":"pest_control","type":"manual_discount_below_margin_floor","margin":0.237,"marginFloor":0.35,"finalAnnual":239.77,"annualCost":183,"manualDiscountShare":118.63,"message":"pest_control manual discount
 - [waveguard_discounts] Platinum + FIXED $99,999 manual discount (zeroes the estimate?): {"year1Total":0,"manualDiscount":{"amount":1883.2,"value":99999}}
 - [commercial] commercial pest office 5,000 sf: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_pest","annual":715.83,"price":null,"perApp":178.96,"visits":4,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":0.45,"review":false}]}

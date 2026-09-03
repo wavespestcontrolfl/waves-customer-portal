@@ -48,6 +48,20 @@ const argValue = (flag) => {
 const WANT_DB = args.includes('--db');
 const JSON_OUT = argValue('--json');
 const MD_OUT = argValue('--md');
+// Reject unknown flags: a not-yet-built mode (the plan names --termite-plan
+// for PR A1) must never silently run the default matrix (codex P1 on PR #3792).
+// Only when run as the CLI: the golden test requires this file as a library
+// under jest's own argv.
+const KNOWN_FLAGS = new Map([['--db', 0], ['--json', 1], ['--md', 1]]);
+if (require.main === module) {
+  for (let i = 0; i < args.length; i += 1) {
+    if (!KNOWN_FLAGS.has(args[i])) {
+      console.error(`Unknown argument ${JSON.stringify(args[i])}. Known flags: ${[...KNOWN_FLAGS.keys()].join(' ')}`);
+      process.exit(2);
+    }
+    i += KNOWN_FLAGS.get(args[i]);
+  }
+}
 
 // ── Money helpers (kept local on purpose — this file must not import engine helpers) ──
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -353,7 +367,10 @@ function expectGermanRoach(severity = 'light') {
 }
 function expectFoamDrill(points = 5, urgency = 'ROUTINE', afterHours = false) {
   const cfg = constants.SPECIALTY.foamDrill;
-  const tier = cfg.tiers.find((t) => points <= t.maxPoints) || cfg.tiers[cfg.tiers.length - 1];
+  const tier = cfg.tiers.find((t) => points <= t.maxPoints);
+  // Above the top tier the engine fails closed (quote required, >20 points):
+  // the independent formula must expect NO price there, not the top tier's.
+  if (!tier) return { price: null, refusedOverMaxPoints: true, maxPoints: cfg.tiers[cfg.tiers.length - 1].maxPoints };
   const cost = tier.cans * cfg.canCost + tier.laborHrs * constants.GLOBAL.LABOR_RATE + cfg.bitsCost;
   let price = Math.max(cfg.floor, Math.round(cost / cfg.marginDivisor));
   const mult = urgency === 'SOON' ? (afterHours ? 1.5 : 1.25) : urgency === 'URGENT' ? (afterHours ? 2 : 1.5) : 1;
@@ -378,13 +395,19 @@ function expectPlugging(lawnSqFt, spacing = 12) {
   const price = Math.max(250, Math.round(cost / 0.55));
   return { plugs, cost: round2(cost), price, targetMargin: 0.45 };
 }
-function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize = 'medium', appsPerYear = null }) {
+function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize, appsPerYear = null }) {
   const P = constants.PALM;
   const t = P.treatments[treatmentType];
   let perPalm;
   if (t.pricingType === 'fixed') perPalm = t.pricePerPalm;
-  else if (t.pricingType === 'tiered') perPalm = (t.tiers.find((x) => x.size === palmSize) || t.tiers[1]).pricePerPalm;
-  else return null;
+  else if (t.pricingType === 'tiered') {
+    // The engine fails closed on a tiered treatment without a palm size
+    // (getTierByPalmSize) — expect NO price, never a defaulted medium tier.
+    if (!palmSize) return null;
+    const tier = t.tiers.find((x) => x.size === palmSize);
+    if (!tier) return null;
+    perPalm = tier.pricePerPalm;
+  } else return null;
   const apps = appsPerYear || t.defaultAppsPerYear;
   const rawPerVisit = round2(perPalm * palmCount);
   const perVisit = Math.max(rawPerVisit, P.minPerVisit);
@@ -444,10 +467,15 @@ const scenarios = [];
 function record(section, name, input, expected, actual, opts = {}) {
   const tol = opts.tolerance ?? 0.005;
   const diff = Number.isFinite(expected) && Number.isFinite(actual) ? round2(actual - expected) : null;
-  const status = expected === null || expected === undefined ? 'engine_only' : (actual === null || actual === undefined ? 'no_price' : (Math.abs(diff) <= tol ? 'match' : 'MISMATCH'));
+  // NO_PRICE = the independent formula expected a price and the engine
+  // returned none. It is a discrepancy like any other (a refused or errored
+  // line where a price was expected) and is counted, listed and raised as a
+  // finding — never silently dropped from the totals (codex P1 on PR #3792).
+  const status = expected === null || expected === undefined ? 'engine_only' : (actual === null || actual === undefined ? 'NO_PRICE' : (Math.abs(diff) <= tol ? 'match' : 'MISMATCH'));
   const row = { section, name, input, expected, actual, diff, status, ...opts.extra };
   scenarios.push(row);
   if (status === 'MISMATCH') findings.push({ severity: 'P1', section, name, detail: `independent ${expected} vs engine ${actual} (diff ${diff})` });
+  if (status === 'NO_PRICE') findings.push({ severity: 'P1', section, name, detail: `independent ${expected} but the engine returned no price for this line` });
   return row;
 }
 function flagIf(cond, severity, section, name, detail) { if (cond) findings.push({ severity, section, name, detail }); }
@@ -689,7 +717,8 @@ function runSpecialtyMatrix() {
   for (const points of [1, 5, 6, 10, 11, 15, 16, 20, 25]) {
     const exp = expectFoamDrill(points);
     const li = line(runEngine({ ...BASE, services: { foam: { points } } }).result, 'foam_drill');
-    record(section, `foam drill points=${points}`, { points }, exp.price, li ? li.price : null, { extra: { cost: exp.cost, targetMargin: exp.targetMargin, realizedMargin: exp.realizedMargin } });
+    record(section, `foam drill points=${points}`, { points }, exp.price, li ? li.price : null, { extra: { cost: exp.cost, targetMargin: exp.targetMargin, realizedMargin: exp.realizedMargin, refusedOverMaxPoints: !!exp.refusedOverMaxPoints } });
+    flagIf(exp.refusedOverMaxPoints && li, 'P1', section, `foam drill points=${points} priced above the ${exp.maxPoints}-point ceiling`, `engine price ${li && li.price} — expected a refusal`);
   }
   for (const sqft of [1000, 2000, 4500, 8000, 12000]) {
     for (const depth of ['eighth', 'quarter']) {
@@ -709,6 +738,9 @@ function runSpecialtyMatrix() {
     const r = runEngine({ ...BASE, services: { palmInjection: c } });
     const li = line(r.result, 'palm_injection');
     record(section, `palm ${JSON.stringify(c)}`, c, exp ? exp.annual : null, li ? li.annual : null, { extra: { perVisitExpected: exp ? exp.perVisit : null, perVisitActual: li ? li.perVisit : null, minimumApplied: exp ? exp.minimumApplied : null, engineError: r.ok ? null : r.error, palmSizeUsed: li ? li.palmSize : null } });
+    // A tiered treatment with no palm size must be refused by the engine (fail
+    // closed); pricing it silently would quote a defaulted size.
+    flagIf(exp === null && c.palmCount > 0 && Number.isInteger(c.palmCount) && li, 'P1', section, `palm ${JSON.stringify(c)} priced although a refusal was expected`, `engine annual ${li && li.annual}`);
   }
 }
 
@@ -903,6 +935,7 @@ async function main() {
     scenarioCount: scenarios.length,
     matches: scenarios.filter((s) => s.status === 'match').length,
     mismatches: scenarios.filter((s) => s.status === 'MISMATCH').length,
+    noPrice: scenarios.filter((s) => s.status === 'NO_PRICE').length,
     engineOnly: scenarios.filter((s) => s.status === 'engine_only').length,
     findings,
   };
@@ -911,7 +944,7 @@ async function main() {
   md.push('# Independent estimator pricing audit — run output');
   md.push('');
   md.push(`Generated ${summary.generatedAt}. Constants source: **${summary.engineConstantsSource}**.`);
-  md.push(`Scenarios: ${summary.scenarioCount} · independent-vs-engine matches: ${summary.matches} · mismatches: ${summary.mismatches} · engine-only observations: ${summary.engineOnly}.`);
+  md.push(`Scenarios: ${summary.scenarioCount} · independent-vs-engine matches: ${summary.matches} · mismatches: ${summary.mismatches} · expected a price but the engine returned none: ${summary.noPrice} · engine-only observations: ${summary.engineOnly} (${summary.matches} + ${summary.mismatches} + ${summary.noPrice} + ${summary.engineOnly} = ${summary.matches + summary.mismatches + summary.noPrice + summary.engineOnly}).`);
   md.push('');
   md.push('## Findings raised by this run');
   md.push('');
@@ -922,7 +955,7 @@ async function main() {
   md.push('');
   md.push('| section | scenario | independent | engine | diff |');
   md.push('|---|---|---:|---:|---:|');
-  for (const s of scenarios.filter((x) => x.status === 'MISMATCH')) md.push(`| ${s.section} | ${s.name} | ${s.expected} | ${s.actual} | ${s.diff} |`);
+  for (const s of scenarios.filter((x) => x.status === 'MISMATCH' || x.status === 'NO_PRICE')) md.push(`| ${s.section} | ${s.name} | ${s.expected} | ${s.status === 'NO_PRICE' ? 'no price returned' : s.actual} | ${s.diff ?? '—'} |`);
   md.push('');
   md.push('## Annual economics per recurring service (engine labor model; recorded visit spans shown for context only)');
   md.push('');
@@ -946,7 +979,7 @@ async function main() {
   if (MD_OUT) fs.writeFileSync(MD_OUT, text);
   if (JSON_OUT) fs.writeFileSync(JSON_OUT, JSON.stringify({ summary, scenarios, economics: economics.rows, hardCodedRates: hardCodedRateInventory(), markupSites: markupVsMarginAudit() }, null, 1));
   console.log(text);
-  console.log(`\n(${summary.scenarioCount} scenarios, ${summary.mismatches} mismatches, ${findings.length} findings)`);
+  console.log(`\n(${summary.scenarioCount} scenarios, ${summary.mismatches} mismatches, ${summary.noPrice} expected-price-but-none, ${findings.length} findings)`);
 }
 
 if (require.main === module) {

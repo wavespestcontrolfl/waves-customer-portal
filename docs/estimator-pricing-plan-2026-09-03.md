@@ -61,7 +61,7 @@ A 2,000 sf home today: **$610 install + $72 × 4 = $898 year one**, then $288/yr
 | Activity follow-up reserve | ASSUMED 0.25 extra visits/yr × $55 | $14 / yr |
 | **Steady-state annual cost** | | **≈ $137 / yr** |
 
-The replacement rate is a fraction of *installed cartridges* (two per station) replaced per annual service, label-driven (> 1/3 consumed or missing); 33% is a conservative planning input until the tech `/complete` product ledger records real swaps. `scripts/audit-estimator-pricing.js --termite-plan` prints setup × annual × replacement × minutes → year-one and steady-state margin.
+The replacement rate is a fraction of *installed cartridges* (two per station) replaced per annual service, label-driven (> 1/3 consumed or missing); 33% is a conservative planning input until the tech `/complete` product ledger records real swaps. PR A1 adds a `--termite-plan` mode to `scripts/audit-estimator-pricing.js` that prints setup × annual × replacement × minutes → year-one and steady-state margin (until then the script rejects the unknown flag).
 
 Candidate price shapes (setup fee + annual protection, both prepaid):
 
@@ -136,7 +136,7 @@ Retired from the customer-facing menu at flip: quarterly monitoring (activity-dr
 
 ### B1. Product rates first (data; one small code PR for the cost write path)
 
-1. **Worklist (read-only)**: `scripts/audit-pricing-data-quality.js --lawn-rates` — rate-less nutrition rows (protocol, window, product, role, `gates.targetN`), unlinked rows, lawn-named products missing `cost_per_unit` / `rate_unit` / `label_verified_at`, `oz`-rated liquids to hand-check.
+1. **Worklist (read-only)**: PR B1 adds a `--lawn-rates` mode to `scripts/audit-pricing-data-quality.js` (the script rejects the unknown flag until then) listing the rate-less nutrition rows (protocol, window, product, role, `gates.targetN`), unlinked rows, lawn-named products missing `cost_per_unit` / `rate_unit` / `label_verified_at`, `oz`-rated liquids to hand-check.
 2. **Candidates computed, never invented**: nutrition rate per 1,000 sf = target lb N ÷ (N analysis ÷ 100) from the bag analysis on the catalog row, printed beside `max_label_rate_per_1000`; `cost_per_unit = best_price ÷ unit_size` in the usable unit. Every cell confirmed by Adam before it is written.
 3. **Write path**: rates via draft → edit → publish, then the AGENTS.md fan-out (`protocols.json`, `products_catalog.default_rate_per_1000`, pricing.csv, plan-matcher) as one data migration. Costs: small code PR adding `costPerUnit` + `costUnit` to the inventory PUT allow-list behind the owner-only gate + the `InventoryPage.jsx:~2538` input; the first confirmed batch lands by migration.
 4. Exit: every lawn-protocol product has rate + unit + cost + unit; `server/scripts/audit-waveguard-protocol-material-costs.js` runs clean, variance recorded.

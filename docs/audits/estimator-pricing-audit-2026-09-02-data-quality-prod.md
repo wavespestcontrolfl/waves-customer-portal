@@ -1,6 +1,6 @@
 # Pricing data-quality audit (read-only)
 
-Generated 2026-09-03T05:35:47.131Z · database host ma….pr….rl….net · window since 2026-06-01
+Generated 2026-09-03T05:43:04.582Z · database host ma….pr….rl….net · window since 2026-06-01
 
 ## Service catalog overview
 
@@ -192,21 +192,21 @@ _(0 rows)_
 
 ## Completed-visit RECORDED span minutes (check-in→check-out, often includes drive — not on-site time) by service type since 2026-06-01 (n ≥ 3)
 
-| service_type | n | scheduled_est_avg | median_min | avg_min | p75_min | p90_min | price_avg | realized_per_hour_incl_20min_drive |
+| service_type | n | scheduled_est_avg | median_min | avg_min | p75_min | p90_min | price_avg | realized_per_hour_over_recorded_span |
 |---|---|---|---|---|---|---|---|---|
-| Quarterly Pest Control Service | 89 | 62 | 44 | 48 | 63 | 78 | 118.51 | 120.08 |
-| Pest Control Service | 33 | 63 | 57 | 58 | 65 | 78 | 173.96 | 141.98 |
-| Quarterly Pest Control | 24 | 60 | 54 | 53 | 66 | 85 | 123.00 | 117.60 |
-| Pest Control | 19 | 60 | 51 | 54 | 68 | 79 | 152.36 | 208.45 |
-| Every 6 Weeks Lawn Care Service | 17 | 60 | 44 | 51 | 50 | 56 | 65.49 | 66.46 |
-| Monthly Lawn Care Service | 7 | 66 | 37 | 40 | 46 | 54 | 41.49 | 61.61 |
-| Monthly Pest Control Service | 6 | 60 | 37 | 41 | 51 | 61 | 77.84 | 78.63 |
-| Lawn Care Visit | 6 | 60 | 46 | 61 | 69 | 100 | 32.77 | 53.53 |
+| Quarterly Pest Control Service | 89 | 62 | 44 | 48 | 63 | 78 | 118.51 | 304.85 |
+| Pest Control Service | 33 | 63 | 57 | 58 | 65 | 78 | 173.96 | 241.84 |
+| Quarterly Pest Control | 24 | 60 | 54 | 53 | 66 | 85 | 123.00 | 287.55 |
+| Pest Control | 19 | 60 | 51 | 54 | 68 | 79 | 152.36 | 539.26 |
+| Every 6 Weeks Lawn Care Service | 17 | 60 | 44 | 51 | 50 | 56 | 65.49 | 101.20 |
+| Monthly Lawn Care Service | 7 | 66 | 37 | 40 | 46 | 54 | 41.49 | 92.36 |
+| Monthly Pest Control Service | 6 | 60 | 37 | 41 | 51 | 61 | 77.84 | 123.78 |
+| Lawn Care Visit | 6 | 60 | 46 | 61 | 69 | 100 | 32.77 | 77.05 |
 | Pest Control Re-Service | 4 | 60 | 28 | 30 | 38 | 44 | 0.00 | NULL |
-| One-Time Pest Control Service | 3 | 60 | 36 | 37 | 39 | 40 | 184.67 | 192.34 |
-| Cockroach Treatment | 3 | 60 | 36 | 35 | 40 | 42 | 231.33 | 268.32 |
-| Lawn Care | 3 | 70 | 54 | 58 | 64 | 70 | 62.43 | 49.13 |
-| General Pest Control (Quarterly) | 3 | 60 | 37 | 37 | 41 | 43 | 107.67 | 115.24 |
+| One-Time Pest Control Service | 3 | 60 | 36 | 37 | 39 | 40 | 184.67 | 295.41 |
+| Cockroach Treatment | 3 | 60 | 36 | 35 | 40 | 42 | 231.33 | 445.06 |
+| Lawn Care | 3 | 70 | 54 | 58 | 64 | 70 | 62.43 | 67.22 |
+| General Pest Control (Quarterly) | 3 | 60 | 37 | 37 | 41 | 43 | 107.67 | 180.80 |
 
 ## job_costs (actual costing ledger) sanity by service type (n ≥ 3)
 

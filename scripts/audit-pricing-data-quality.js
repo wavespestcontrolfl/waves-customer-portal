@@ -27,12 +27,26 @@ const args = process.argv.slice(2);
 const argValue = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : null; };
 const JSON_OUT = argValue('--json');
 const MD_OUT = argValue('--md');
+// Reject unknown flags: a not-yet-built mode (the plan names --lawn-rates for
+// PR B1) must never silently run the default checks (codex P1 on PR #3792).
+const KNOWN_FLAGS = new Map([['--json', 1], ['--md', 1], ['--since', 1]]);
 const SINCE = argValue('--since') || '2026-06-01';
-// The window is a CLI value: validate the shape here and bind it as a query
-// parameter below (never interpolated into SQL — codex P1 on PR #3792).
-if (!/^\d{4}-\d{2}-\d{2}$/.test(SINCE)) {
-  console.error(`--since must be YYYY-MM-DD (got ${JSON.stringify(SINCE)})`);
-  process.exit(2);
+// CLI-only validation (a library require under another argv must not exit):
+// unknown flags are rejected, and the window is validated as YYYY-MM-DD and
+// bound as a query parameter below (never interpolated into SQL — codex P1
+// on PR #3792).
+if (require.main === module) {
+  for (let i = 0; i < args.length; i += 1) {
+    if (!KNOWN_FLAGS.has(args[i])) {
+      console.error(`Unknown argument ${JSON.stringify(args[i])}. Known flags: ${[...KNOWN_FLAGS.keys()].join(' ')}`);
+      process.exit(2);
+    }
+    i += KNOWN_FLAGS.get(args[i]);
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(SINCE)) {
+    console.error(`--since must be YYYY-MM-DD (got ${JSON.stringify(SINCE)})`);
+    process.exit(2);
+  }
 }
 
 const CHECKS = [
@@ -249,7 +263,7 @@ const CHECKS = [
                  round((percentile_cont(0.75) within group (order by mins))::numeric) as p75_min,
                  round((percentile_cont(0.9) within group (order by mins))::numeric) as p90_min,
                  round(avg(price)::numeric,2) as price_avg,
-                 round(avg(price / nullif(mins + 20, 0) * 60) filter (where mins between 1 and 600 and price > 0)::numeric, 2) as realized_per_hour_incl_20min_drive
+                 round(avg(price / nullif(mins, 0) * 60) filter (where mins between 1 and 600 and price > 0)::numeric, 2) as realized_per_hour_over_recorded_span
           from v where mins between 1 and 600 group by 1 having count(*) >= 3 order by n desc`,
   },
   {
