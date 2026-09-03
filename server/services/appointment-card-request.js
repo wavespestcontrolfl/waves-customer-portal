@@ -477,6 +477,41 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
 // service's own SMS delivery and the composer's /sms send (which takes
 // the same card_link_sent_at claim before dispatch). Returns true when the
 // marker landed.
+// The one-text-ever send claim on the visit row: card_link_sent_at NULL →
+// stamp. On a lost claim, the stale-claim lease (Codex #2771 r4): a worker
+// that died between its claim and the send leaves the stamp set with no
+// text out — and every later trigger would skip forever. The request row's
+// sent_at is the durable outcome marker (stamped on success AND on
+// uncertain outcomes), so an old stamp (older than STALE_CLAIM_MS) with no
+// marker may be adopted by exactly one retrier via the value-guarded
+// UPDATE. A pending row whose token differs from the one this run holds
+// means a concurrent run owns it — never adopt that. Shared by the
+// service's own SMS delivery and the composer's /sms send. Returns true
+// when this run holds the claim under `stamp`.
+async function claimCardLinkSend(visitId, stamp, token) {
+  const claimed = await db('scheduled_services')
+    .where({ id: visitId })
+    .whereNull('card_link_sent_at')
+    .update({ card_link_sent_at: stamp, updated_at: stamp });
+  if (claimed === 1) return true;
+  const current = await db('scheduled_services')
+    .where({ id: visitId })
+    .first('card_link_sent_at');
+  const row = await db('appointment_card_requests')
+    .where({ scheduled_service_id: visitId })
+    .first('status', 'token', 'sent_at');
+  const priorStamp = current?.card_link_sent_at ? new Date(current.card_link_sent_at) : null;
+  const stale = priorStamp && (Date.now() - priorStamp.getTime()) > STALE_CLAIM_MS;
+  const rowBlocks = row && (row.sent_at || row.status !== 'pending' || (row.token && row.token !== token));
+  if (!stale || rowBlocks) return false;
+  const adopted = await db('scheduled_services')
+    .where({ id: visitId, card_link_sent_at: priorStamp })
+    .update({ card_link_sent_at: stamp, updated_at: stamp });
+  if (adopted !== 1) return false;
+  logger.warn(`[appt-card-request] reclaimed stale send claim for visit ${visitId}`);
+  return true;
+}
+
 async function markCardLinkSendOutcome(visitId, stamp) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -894,37 +929,11 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       return { requested: true, action: 'link_created', reason: 'created', secureUrl };
     }
 
-    // 4. One text, ever — atomic claim on the visit row.
+    // 4. One text, ever — atomic claim on the visit row (claimCardLinkSend:
+    // module level so the composer's /sms send claims — and recovers a
+    // stale claim — exactly the same way).
     const stamp = new Date();
-    let claimed = await db('scheduled_services')
-      .where({ id: visit.id })
-      .whereNull('card_link_sent_at')
-      .update({ card_link_sent_at: stamp, updated_at: stamp });
-    if (claimed !== 1) {
-      // Stale-claim lease (Codex #2771 r4): a worker that died between
-      // this claim and the send leaves the stamp set with no text out —
-      // and every later trigger would skip forever. The request row's
-      // sent_at is the durable outcome marker (stamped on success AND on
-      // uncertain outcomes below), so an old stamp with no marker may be
-      // adopted by exactly one retrier via the value-guarded UPDATE. A
-      // row whose token differs from the one this run rendered means a
-      // concurrent run owns it — never adopt that.
-      const current = await db('scheduled_services')
-        .where({ id: visit.id })
-        .first('card_link_sent_at');
-      const row = await db('appointment_card_requests')
-        .where({ scheduled_service_id: visit.id })
-        .first('status', 'token', 'sent_at');
-      const priorStamp = current?.card_link_sent_at ? new Date(current.card_link_sent_at) : null;
-      const stale = priorStamp && (Date.now() - priorStamp.getTime()) > STALE_CLAIM_MS;
-      const rowBlocks = row && (row.sent_at || row.status !== 'pending' || (row.token && row.token !== token));
-      if (!stale || rowBlocks) return skip('link_already_sent');
-      claimed = await db('scheduled_services')
-        .where({ id: visit.id, card_link_sent_at: priorStamp })
-        .update({ card_link_sent_at: stamp, updated_at: stamp });
-      if (claimed !== 1) return skip('link_already_sent');
-      logger.warn(`[appt-card-request] reclaimed stale send claim for visit ${visit.id}`);
-    }
+    if (!await claimCardLinkSend(visit.id, stamp, token)) return skip('link_already_sent');
 
     const releaseClaim = async () => {
       try {
@@ -3484,6 +3493,7 @@ module.exports = {
   dateLineFor,
   cancelFeeLine,
   LIVE_VISIT_STATUSES,
+  claimCardLinkSend,
   markCardLinkSendOutcome,
   _test: {
     dateLineFor,

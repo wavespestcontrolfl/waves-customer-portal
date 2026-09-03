@@ -37,6 +37,12 @@ jest.mock('../services/appointment-card-request', () => ({
   LIVE_VISIT_STATUSES: ['pending', 'confirmed'],
   requestCardForAppointment: jest.fn(async () => ({ requested: false, action: 'link_created', reason: 'request_exists', secureUrl: 'https://portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY' })),
   markCardLinkSendOutcome: jest.fn(async () => true),
+  // The service claim, observed through the route: NULL → stamp on the db mock.
+  claimCardLinkSend: jest.fn(async (visitId, stamp) => {
+    const db = require('../models/db');
+    const updated = await db('scheduled_services').where({ id: visitId }).whereNull('card_link_sent_at').update({ card_link_sent_at: stamp, updated_at: stamp });
+    return updated === 1;
+  }),
 }));
 jest.mock('../services/payer-statement-email', () => ({ markStatementSent: jest.fn() }));
 jest.mock('../services/sms-media', () => ({

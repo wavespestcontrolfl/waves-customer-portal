@@ -831,10 +831,11 @@ async function markStatementsSent(statementIds) {
  * claim mechanics the service's SMS path does — or two tabs, a resend, or
  * a later previsit/office trigger would text the same payment-adjacent
  * link again.
- *   claimCardRequestSends — BEFORE dispatch: the atomic claim on the
- *     visit's card_link_sent_at (NULL → stamp). A lost claim means another
- *     send owns this visit right now, or one already went out; every claim
- *     this call won is handed back and the send refuses.
+ *   claimCardRequestSends — BEFORE dispatch: the service's own claim
+ *     (claimCardLinkSend — NULL → stamp, else the stale-claim lease
+ *     adoption for a worker that died mid-send). A lost claim means
+ *     another send owns this visit right now, or one already went out;
+ *     every claim this call won is handed back and the send refuses.
  *   releaseCardRequestSends — the text never left (blocked, failed,
  *     suppressed, or a throw with no provider acceptance): value-guarded
  *     release so only THIS claim is cleared.
@@ -843,19 +844,13 @@ async function markStatementsSent(statementIds) {
  *     that cannot land PARKS the claim + alerts the office) stamps the
  *     request row's sent_at, the durable outcome marker the stale-claim
  *     lease reads. Returns false when any marker did not land.
- * A worker that dies between claim and send leaves the stamp with no
- * marker — the service's stale-claim lease (STALE_CLAIM_MS) recovers that
- * exactly as it does for its own sends.
  */
 async function claimCardRequestSends(cards) {
+  const { claimCardLinkSend } = require('./appointment-card-request');
   const stamp = new Date();
   const won = [];
   for (const card of cards) {
-    const claimed = await db('scheduled_services')
-      .where({ id: card.scheduledServiceId })
-      .whereNull('card_link_sent_at')
-      .update({ card_link_sent_at: stamp, updated_at: stamp });
-    if (claimed === 1) { won.push(card); continue; }
+    if (await claimCardLinkSend(card.scheduledServiceId, stamp, card.token)) { won.push(card); continue; }
     await releaseCardRequestSends({ stamp, cards: won });
     return { ok: false, error: 'This card request is already being sent, or was already texted — the customer gets one card request per appointment. Remove the link before sending.' };
   }

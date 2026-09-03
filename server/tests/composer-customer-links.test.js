@@ -34,6 +34,7 @@ jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: je
 // pricing-authority send gate the estimate builder consults) stays off.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => g === 'autopayCustomerSms') }));
 jest.mock('../services/appointment-card-request', () => ({
+  claimCardLinkSend: jest.fn(),
   markCardLinkSendOutcome: jest.fn(),
   renderTemplate: jest.fn(),
   requestCardForAppointment: jest.fn(),
@@ -89,7 +90,7 @@ const { enrollPromoter, getLiveSettings } = require('../services/referral-engine
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
 const { requestAutopaySetupLink, setupLinkIneligibility } = require('../services/autopay-setup-link');
 const { isEnabled } = require('../config/feature-gates');
-const { renderTemplate, requestCardForAppointment, markCardLinkSendOutcome } = require('../services/appointment-card-request');
+const { renderTemplate, requestCardForAppointment, claimCardLinkSend, markCardLinkSendOutcome } = require('../services/appointment-card-request');
 const { buildAppointmentLink } = require('../services/appointment-link');
 const { nextUpcomingVisit } = require('../services/prep-guide-sender');
 const { ensureServicePrepToken } = require('../services/project-email');
@@ -1253,28 +1254,26 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
   describe('card request send claim (the service\'s own one-text mechanics, run by the composer send)', () => {
     const cards = [{ token: TOKEN, scheduledServiceId: 'v1' }, { token: 'tok2ABCDEF_-0123456789', scheduledServiceId: 'v2' }];
 
-    test('claim: the atomic NULL → stamp on each visit; both won → the claim rides back', async () => {
-      mockBuilders = { scheduled_services: chainBuilder() };
+    test('claim: each visit through the service\'s own claim (NULL → stamp, else stale-lease adoption), one stamp; both won → the claim rides back', async () => {
+      claimCardLinkSend.mockReset().mockResolvedValue(true);
       const r = await claimCardRequestSends(cards);
       expect(r.ok).toBe(true);
       expect(r.claim.cards).toEqual(cards);
-      const visits = mockBuilders.scheduled_services;
-      expect(visits.where).toHaveBeenCalledWith({ id: 'v1' });
-      expect(visits.where).toHaveBeenCalledWith({ id: 'v2' });
-      expect(visits.whereNull).toHaveBeenCalledWith('card_link_sent_at');
-      expect(Object.keys(visits.update.mock.calls[0][0]).sort()).toEqual(['card_link_sent_at', 'updated_at']);
+      expect(claimCardLinkSend).toHaveBeenCalledWith('v1', r.claim.stamp, TOKEN);
+      expect(claimCardLinkSend).toHaveBeenCalledWith('v2', r.claim.stamp, cards[1].token);
     });
 
     test('claim: a visit already claimed refuses and hands back the claims won before it', async () => {
+      claimCardLinkSend.mockReset().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
       const visits = chainBuilder();
-      visits.update.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
       mockBuilders = { scheduled_services: visits };
       const r = await claimCardRequestSends(cards);
       expect(r.ok).toBe(false);
       expect(r.error).toMatch(/already being sent, or was already texted/);
-      // Third update = the value-guarded release of v1.
-      expect(visits.update.mock.calls[2][0]).toEqual(expect.objectContaining({ card_link_sent_at: null }));
+      // The value-guarded release of v1 — the only claim this call won.
       expect(visits.where).toHaveBeenCalledWith({ id: 'v1', card_link_sent_at: expect.any(Date) });
+      expect(visits.update).toHaveBeenCalledTimes(1);
+      expect(visits.update.mock.calls[0][0]).toEqual(expect.objectContaining({ card_link_sent_at: null }));
     });
 
     test('release: value-guarded on this claim\'s own stamp', async () => {
