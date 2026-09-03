@@ -319,7 +319,13 @@ const PREDICATES = Object.freeze({
   // messaging_audit_log row with provider sent_at and
   // metadata.original_message_type = 'pest_recap' keyed to the record. That
   // audit row is the provider-confirmed evidence; the claim alone stays a
-  // time marker (#3746 codex P2 r8).
+  // time marker (#3746 codex P2 r8). "Sent" means a REAL Twilio message id
+  // (SM/MM… — the same test appointment-reminders applies) or a push-routed
+  // send, which is proven device delivery: TwilioService.sendSMS returns
+  // success with a synthetic id (gate-blocked, template-disabled,
+  // owner-silence) when the Twilio gate, the pest_recap template, or the
+  // owner-SMS switch is off, and the adapter stamps sent_at for those too
+  // (#3771 codex P1 r1).
   completed_record_without_comms_marker: {
     label: 'Completed non-project visits (>24h) that owe a completion notice and have no sibling with a terminal one (sent / recap sent / consent-blocked SMS, a provider-sent pest-recap text, or sent report email on the artifact record)',
     href: '/admin/dispatch',
@@ -348,7 +354,8 @@ const PREDICATES = Object.freeze({
                               AND a.channel = 'sms'
                               AND a.metadata->>'original_message_type' = 'pest_recap'
                               AND a.metadata->>'service_record_id' = sib.id::text
-                              AND a.sent_at IS NOT NULL AND a.blocked_code IS NULL)))
+                              AND a.sent_at IS NOT NULL AND a.blocked_code IS NULL
+                              AND (a.provider_message_id ~ '^(SM|MM)' OR a.provider = 'push'))))
            AND NOT EXISTS (
                  SELECT 1 FROM service_recaps rc
                   WHERE rc.scheduled_service_id = ss.id AND rc.sent_at IS NOT NULL)`),

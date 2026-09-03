@@ -128,7 +128,11 @@ describe('PREDICATES registry', () => {
     expect(evidenceClause).toContain("AND a.channel = 'sms'");
     expect(evidenceClause).toContain("AND a.metadata->>'original_message_type' = 'pest_recap'");
     expect(evidenceClause).toContain("AND a.metadata->>'service_record_id' = sib.id::text");
-    expect(evidenceClause).toContain('AND a.sent_at IS NOT NULL AND a.blocked_code IS NULL)');
+    expect(evidenceClause).toContain('AND a.sent_at IS NOT NULL AND a.blocked_code IS NULL');
+    // Synthetic success ids (gate-blocked / template-disabled / owner-silence)
+    // also carry sent_at: only a real Twilio SM/MM id or a push-routed
+    // (proven device delivery) send is evidence (#3771 codex P1 r1).
+    expect(evidenceClause).toContain("AND (a.provider_message_id ~ '^(SM|MM)' OR a.provider = 'push'))");
   });
 
   test('duplicates are counted within ONE completion rail; cross-rail siblings are supported history', () => {
