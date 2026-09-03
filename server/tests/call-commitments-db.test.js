@@ -196,8 +196,9 @@ maybeDescribe('call_commitments (live Postgres)', () => {
 
   test('fulfillment: a DIRECTLY linked record marks a promise kept; a same-customer record is only a hint; nothing touches a human verdict', async () => {
     const call = await db('call_log').where({ id: callId }).first();
-    // A completed outbound call to the caller AFTER this call: association
-    // only (the callback row is human-dismissed, so it must stay dismissed).
+    // A short (abandoned) outbound call to the caller AFTER this call: not
+    // a returned callback (the callback row is human-dismissed anyway, so
+    // it must stay dismissed).
     const [outbound] = await db('call_log').insert({
       twilio_call_sid: 'CA' + '8'.repeat(30) + 'd2', direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE,
       status: 'completed', duration_seconds: 45, created_at: new Date(Date.now() - 10 * 60 * 1000),
@@ -243,9 +244,28 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     const photos = rows.find((r) => r.kind === 'send_photos');
     expect(photos.status).toBe('open');
     expect(photos.fulfillment).toBeNull();
-    // The outbound-call proof resolves as an association for an open callback.
-    const proof = await cc.resolveFulfillment(db, { kind: 'callback' }, call);
-    expect(proof).toMatchObject({ kind: 'outbound_call', record_id: outbound.id, strength: 'association' });
+    // A 45 s pickup-and-abandon is not a returned callback (digest parity: >= 60 s).
+    expect(await cc.resolveFulfillment(db, { kind: 'callback' }, call)).toBeNull();
+    // A CONNECTED outbound call to the caller after the call IS the returned callback: direct proof.
+    await db('call_log').where({ id: outbound.id }).update({ duration_seconds: 75 });
+    expect(await cc.resolveFulfillment(db, { kind: 'callback' }, call)).toMatchObject({ kind: 'outbound_call', record_id: outbound.id, strength: 'direct' });
+    // A LINKED call is returned only by an outbound call linked to the same customer.
+    expect(await cc.resolveFulfillment(db, { kind: 'callback' }, { ...call, customer_id: '00000000-0000-4000-8000-000000000001' })).toBeNull();
+    await db('call_log').where({ id: outbound.id }).update({ duration_seconds: 45 });
+  });
+
+  test('a human-typed text to the caller after the call returns a callback; the assistant\'s automatic reply does not', async () => {
+    const call = await db('call_log').where({ id: callId }).first();
+    const [auto] = await db('sms_log').insert({
+      direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, message_type: 'ai_assistant_reply', status: 'sent', created_at: new Date(Date.now() - 4 * 60 * 1000),
+    }).returning('id');
+    cleanup.smsIds.push(auto.id);
+    expect(await cc.resolveFulfillment(db, { kind: 'callback' }, call)).toBeNull();
+    const [manual] = await db('sms_log').insert({
+      direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, message_type: 'manual', status: 'sent', created_at: new Date(Date.now() - 3 * 60 * 1000),
+    }).returning('id');
+    cleanup.smsIds.push(manual.id);
+    expect(await cc.resolveFulfillment(db, { kind: 'callback' }, call)).toMatchObject({ kind: 'sms_sent', record_id: manual.id, strength: 'direct' });
     // …and the customer's own call_back promise matches a later completed
     // INBOUND call from their number (codex gh-r8 P2) — the outbound call
     // above is not that.
@@ -309,12 +329,13 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     const [lead] = await db('leads').insert({ phone: PHONE, twilio_call_sid: SID, estimate_id: est.id, status: 'estimate_sent' }).returning('id');
     try {
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
-      // Sent after the call but CREATED before it (an earlier call's draft): still not this call's proof.
+      // Sent after the call ended even though CREATED before it (an existing
+      // estimate re-sent on request — the watcher's rule, r14): direct proof.
       await db('estimates').where({ id: est.id }).update({ sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000) });
-      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
-      // Created and sent after the call STARTED but before it ENDED (created_at
-      // is ring time; this call ran 90 s): still not this call's proof (codex gh-r13 P1).
-      await db('estimates').where({ id: est.id }).update({ created_at: new Date(call.created_at.getTime() + 10 * 1000), sent_at: new Date(call.created_at.getTime() + 30 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+      // Sent after the call STARTED but before it ENDED (created_at is ring
+      // time; this call ran 90 s): not this call's proof (codex #3738 gh-r13 P1).
+      await db('estimates').where({ id: est.id }).update({ sent_at: new Date(call.created_at.getTime() + 30 * 1000) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
       // Created and sent after the call ended: direct proof.
       await db('estimates').where({ id: est.id }).update({ created_at: new Date(Date.now() - 120 * 1000), sent_at: new Date(Date.now() - 60 * 1000) });
@@ -336,6 +357,22 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, reusing)).toMatchObject({ record_id: est.id, strength: 'association', basis: 'estimate_sent_on_a_lead_reused_from_an_earlier_call' });
       await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ estimatorEngine: { callLogId: call.id } }) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, reusing)).toMatchObject({ record_id: est.id, strength: 'direct', basis: 'estimate_stamped_with_this_call' });
+      await db('estimates').where({ id: est.id }).update({ estimate_data: null });
+      // The same-customer association path: an estimate created before the
+      // call but sent after it is a hint like any other (r14).
+      await db('leads').where({ id: lead.id }).update({ estimate_id: null });
+      const [cust] = await db('customers').insert({ first_name: 'Assoc', phone: PHONE }).returning('id');
+      cleanup.customerIds.push(cust.id);
+      await db('estimates').where({ id: est.id }).update({ customer_id: cust.id, created_at: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toMatchObject({ record_id: est.id, strength: 'association' });
+      await db('estimates').where({ id: est.id }).update({ created_at: new Date(Date.now() - 120 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toMatchObject({ record_id: est.id, strength: 'association' });
+      // The association arm applies the same delivery witness: a same-customer
+      // report-tap mint with no delivery is not even a hint.
+      await db('estimates').where({ id: est.id }).update({ source: 'plan_restart', estimate_data: JSON.stringify({}) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toBeNull();
+      await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: new Date(Date.now() - 30 * 1000).toISOString() } }) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toMatchObject({ record_id: est.id, strength: 'association' });
     } finally {
       await db('leads').where({ id: lead.id }).del();
       await db('estimates').where({ id: est.id }).del();
@@ -362,6 +399,103 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     }
   });
 
+  test('fulfillment is measured from the END of the call: an estimate sent while the caller was still on the line is not proof of a promise made in that call', async () => {
+    const call = await db('call_log').where({ id: callId }).first(); // inbound, 90 s long
+    const midCall = new Date(call.created_at.getTime() + 30 * 1000);
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: midCall, created_at: midCall }).returning('id');
+    const [lead] = await db('leads').insert({ phone: PHONE, twilio_call_sid: SID, estimate_id: est.id, status: 'estimate_sent' }).returning('id');
+    try {
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      // Created mid-call (capture_lead's shape) but SENT after the call ended: direct proof.
+      await db('estimates').where({ id: est.id }).update({ sent_at: new Date(call.created_at.getTime() + 120 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+    } finally {
+      await db('leads').where({ id: lead.id }).del();
+      await db('estimates').where({ id: est.id }).del();
+    }
+  });
+
+  test('a relay call that REUSED a prospect lead (stamped relay_lead_id, the lead keeps its original SID) finds that lead\'s later estimate as a HINT, not direct proof (codex #3738 gh-r13 P1)', async () => {
+    const call = await db('call_log').where({ id: callId }).first();
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000) }).returning('id');
+    const [lead] = await db('leads').insert({ phone: PHONE, twilio_call_sid: 'CA' + '8'.repeat(30) + 'x0', estimate_id: est.id, status: 'estimate_sent' }).returning('id');
+    try {
+      const relayCall = { ...call, twilio_call_sid: 'CA' + '8'.repeat(30) + 'x1', customer_id: null, metadata: JSON.stringify({ relay_lead_id: lead.id }) };
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, relayCall)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'association', basis: 'estimate_sent_on_a_lead_reused_from_an_earlier_call' });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...relayCall, metadata: JSON.stringify({}) })).toBeNull();
+    } finally {
+      await db('leads').where({ id: lead.id }).del();
+      await db('estimates').where({ id: est.id }).del();
+    }
+  });
+
+  test('the estimator provenance stamp is direct proof on its own; the public-quote mirror on a stamped lead that carries another call\'s SID is a reused-lead hint (codex #3738 gh-r13 P1)', async () => {
+    const call = await db('call_log').where({ id: callId }).first();
+    const sentAfter = { status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000) };
+    const [stamped] = await db('estimates').insert({ ...sentAfter, estimate_data: JSON.stringify({ estimatorEngine: { callLogId: call.id } }) }).returning('id');
+    const [lead] = await db('leads').insert({ phone: PHONE, twilio_call_sid: 'CA' + '8'.repeat(30) + 'x2', status: 'new' }).returning('id');
+    const [mirror] = await db('estimates').insert({ ...sentAfter, estimate_data: JSON.stringify({ lead_id: lead.id }) }).returning('id');
+    try {
+      // Unlinked prospect: no customer, no lead stamp, no SID match — only the provenance stamp ties the estimate to this call.
+      const unlinked = { ...call, customer_id: null, twilio_call_sid: 'CA' + '8'.repeat(30) + 'x3', metadata: JSON.stringify({}) };
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, unlinked)).toMatchObject({ record_id: stamped.id, strength: 'direct' });
+      await db('estimates').where({ id: stamped.id }).del();
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, unlinked)).toBeNull();
+      // The lead this call is stamped with never got leads.estimate_id; the estimate carries the lead in estimate_data.lead_id.
+      // That lead carries ANOTHER call's SID (a reused lead): the mirror is a hint, not direct proof.
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...unlinked, metadata: JSON.stringify({ lead_id: lead.id }) })).toMatchObject({ record_id: mirror.id, strength: 'association', basis: 'estimate_sent_on_a_lead_reused_from_an_earlier_call' });
+      // The same mirror on a lead THIS call minted (its SID) is direct.
+      await db('leads').where({ id: lead.id }).update({ twilio_call_sid: unlinked.twilio_call_sid });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...unlinked, metadata: JSON.stringify({ lead_id: lead.id }) })).toMatchObject({ record_id: mirror.id, strength: 'direct' });
+    } finally {
+      await db('estimates').whereIn('id', [stamped.id, mirror.id]).del();
+      await db('leads').where({ id: lead.id }).del();
+    }
+  });
+
+  test('listOpenCommitments: overdue first, then soonest due, then oldest call; filters by customer and lead; hints optional', async () => {
+    const call = await db('call_log').where({ id: callId }).first();
+    const [cust] = await db('customers').insert({ first_name: 'Owed', phone: '+15555550188' }).returning('id');
+    cleanup.customerIds.push(cust.id);
+    const mk = async (sid, extra) => {
+      const [c] = await db('call_log').insert({
+        twilio_call_sid: sid, direction: 'inbound', from_phone: '+15555550188', to_phone: OUR_NUMBER, status: 'completed',
+        customer_id: cust.id, ...extra,
+      }).returning('id');
+      cleanup.callIds.push(c.id);
+      return c.id;
+    };
+    const oldCall = await mk('CA' + '8'.repeat(30) + 'q1', { created_at: new Date(Date.now() - 10 * 24 * 3600 * 1000), metadata: JSON.stringify({ lead_id: '11111111-2222-4333-8444-555555555555' }) });
+    const newCall = await mk('CA' + '8'.repeat(30) + 'q2', { created_at: new Date(Date.now() - 1 * 24 * 3600 * 1000) });
+    await cc.upsertCommitments(db, oldCall, [
+      { party: 'waves', kind: 'send_report', description: 'implicit overdue (old call, no due)', evidence: [] },
+    ], { generation: 1 });
+    await cc.upsertCommitments(db, newCall, [
+      { party: 'waves', kind: 'callback', description: 'due tomorrow', due_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(), evidence: [] },
+      { party: 'waves', kind: 'send_estimate', description: 'stated overdue', due_at: new Date(Date.now() - 3600 * 1000).toISOString(), evidence: [] },
+      { party: 'customer', kind: 'send_photos', description: 'customer side', evidence: [] },
+    ], { generation: 1 });
+
+    const waves = await cc.listOpenCommitments(db, { party: 'waves', customerId: cust.id });
+    // Both overdue rows lead; between them the EARLIER effective deadline
+    // (the report owed 3 days after a 10-day-old call) precedes the
+    // estimate that fell due an hour ago.
+    expect(waves.map((r) => r.description)).toEqual(['implicit overdue (old call, no due)', 'stated overdue', 'due tomorrow']);
+    expect(waves.map((r) => r.overdue)).toEqual([true, true, false]);
+    expect(waves[0]).toMatchObject({ customer_first_name: 'Owed', call_started_at: expect.any(Date) });
+    const all = await cc.listOpenCommitments(db, { customerId: cust.id });
+    expect(all).toHaveLength(4);
+    const byLead = await cc.listOpenCommitments(db, { leadId: '11111111-2222-4333-8444-555555555555' });
+    expect(byLead.map((r) => r.description)).toEqual(['implicit overdue (old call, no due)']);
+    // A relay call that reused the lead is stamped relay_lead_id, not lead_id.
+    const relayReuse = await mk('CA' + '8'.repeat(30) + 'q3', { metadata: JSON.stringify({ relay_lead_id: '11111111-2222-4333-8444-555555555555' }) });
+    await cc.upsertCommitments(db, relayReuse, [{ party: 'waves', kind: 'callback', description: 'relay reuse', evidence: [] }], { generation: 1 });
+    const byLeadWithRelay = await cc.listOpenCommitments(db, { leadId: '11111111-2222-4333-8444-555555555555' });
+    expect(byLeadWithRelay.map((r) => r.description).sort()).toEqual(['implicit overdue (old call, no due)', 'relay reuse']);
+    // The fixture call from the earlier tests is not this customer's.
+    expect(all.some((r) => r.call_log_id === call.id)).toBe(false);
+  });
+
   test('buildCallOutcomes: the paid total covers every later paid invoice, not just the capped list', async () => {
     const [cust] = await db('customers').insert({ first_name: 'Revenue', phone: '+15555550166' }).returning('id');
     cleanup.customerIds.push(cust.id);
@@ -385,6 +519,70 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     } finally {
       await db('invoices').whereIn('id', invoiceIds).del();
     }
+  });
+
+  test('relay commitments are owner-fenced in the write: a foreign claim owner refuses, the owning or unclaimed session records', async () => {
+    const [relay] = await db('call_log').insert({
+      twilio_call_sid: 'CA' + '8'.repeat(30) + 'd7', direction: 'inbound', from_phone: PHONE, to_phone: OUR_NUMBER, status: 'completed',
+      processing_status: null, metadata: JSON.stringify({ relay_session_claim_owner: 'nonce-replacement' }),
+    }).returning('id');
+    cleanup.callIds.push(relay.id);
+    const args = { callSid: 'CA' + '8'.repeat(30) + 'd7', transcript: 'Agent: Someone from the office will call you back tomorrow.\nCaller: Thanks.', estimateQueued: true };
+    // The superseded session (its nonce is no longer the owner) writes nothing.
+    expect(await cc.recordRelayCommitments(db, { ...args, sessionKey: 'nonce-old' })).toEqual({ found: 0, written: 0, superseded: true });
+    expect(await db('call_commitments').where({ call_log_id: relay.id })).toHaveLength(0);
+    // The owning session records.
+    const owned = await cc.recordRelayCommitments(db, { ...args, sessionKey: 'nonce-replacement' });
+    expect(owned.written).toBeGreaterThan(0);
+    expect(owned.superseded).toBeUndefined();
+    // An unclaimed row (no owner stamped) accepts an unverified session's own record.
+    await db('call_commitments').where({ call_log_id: relay.id }).del();
+    await db('call_log').where({ id: relay.id }).update({ metadata: JSON.stringify({}) });
+    expect((await cc.recordRelayCommitments(db, { ...args, sessionKey: 'nonce-unverified' })).written).toBeGreaterThan(0);
+  });
+
+  test('an untouched AI row the latest pass withdrew leaves the queue; a human-confirmed one stays', async () => {
+    const [c] = await db('call_log').insert({
+      twilio_call_sid: 'CA' + '8'.repeat(30) + 'q9', direction: 'inbound', from_phone: PHONE, to_phone: OUR_NUMBER, status: 'completed',
+      processing_status: 'processed', processing_token: null, processing_generation: 1,
+    }).returning('id');
+    cleanup.callIds.push(c.id);
+    await cc.upsertCommitments(db, c.id, [
+      { party: 'waves', kind: 'send_report', description: 'stale after reprocess', evidence: [] },
+      { party: 'waves', kind: 'callback', description: 'confirmed by the office', evidence: [] },
+    ], { generation: 1, procGeneration: 1 });
+    const rows = await db('call_commitments').where({ call_log_id: c.id });
+    await cc.applyHumanUpdate(db, rows.find((r) => r.kind === 'callback').id, { action: 'confirm', reviewedBy: 'office' });
+    // A reprocess CLAIMS the row (processing_generation advances) and then
+    // fails before recording commitments: nothing is stale — the last good
+    // pass's promises stay live (r15).
+    await db('call_log').where({ id: c.id }).update({ processing_generation: 2 });
+    const afterClaim = await cc.listOpenCommitments(db, { party: 'waves', limit: 200 });
+    expect(afterClaim.filter((r) => r.call_log_id === c.id).map((r) => r.description).sort()).toEqual(['confirmed by the office', 'stale after reprocess']);
+    // The next pass COMPLETES and detects only a new promise: the untouched
+    // send_report row is now stale; the human-confirmed callback stays.
+    await db('call_log').where({ id: c.id }).update({ processing_generation: 3 });
+    await cc.upsertCommitments(db, c.id, [
+      { party: 'waves', kind: 'send_estimate', description: 'found on pass 3', evidence: [] },
+    ], { generation: 3, procGeneration: 3 });
+    const open = await cc.listOpenCommitments(db, { party: 'waves', limit: 200 });
+    const mine = open.filter((r) => r.call_log_id === c.id).map((r) => r.description).sort();
+    expect(mine).toEqual(['confirmed by the office', 'found on pass 3']);
+  });
+
+  test('an association hint the facts no longer support is cleared on refresh; a lookup error leaves it', async () => {
+    const [c] = await db('call_log').insert({
+      twilio_call_sid: 'CA' + '8'.repeat(30) + 'q8', direction: 'inbound', from_phone: '+15555550166', to_phone: OUR_NUMBER, status: 'completed',
+      processing_status: 'processed', processing_token: null, processing_generation: 1, customer_id: null,
+    }).returning('id');
+    cleanup.callIds.push(c.id);
+    await cc.upsertCommitments(db, c.id, [{ party: 'waves', kind: 'send_estimate', description: 'hinted', evidence: [] }], { generation: 1, procGeneration: 1 });
+    const [row] = await db('call_commitments').where({ call_log_id: c.id });
+    await db('call_commitments').where({ id: row.id }).update({ fulfillment: JSON.stringify({ kind: 'estimate_sent', strength: 'association', basis: 'estimate_sent_to_same_customer_within_14_days', record_id: '00000000-0000-4000-8000-000000000000' }) });
+    // No customer on the call any more (relinked away): nothing resolves → the hint is cleared.
+    const out = await cc.refreshFulfillment(db, c.id);
+    expect(out).toMatchObject({ fulfilled: 0, hinted: 0, cleared: 1, failed: 0 });
+    expect((await db('call_commitments').where({ id: row.id }).first()).fulfillment).toBeNull();
   });
 
   test('deleting the call cascades its commitments', async () => {

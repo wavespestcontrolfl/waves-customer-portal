@@ -87,8 +87,12 @@ export function commitmentStatusTone(c) {
 // different processing state (a Reprocess, the sweep finishing): an OPEN
 // panel reloads with it, so its summary, commitments and next action never
 // lag the transcript beside them (Codex r9 P1).
-export default function CallIntelligencePanel({ callId, onJumpToQuote, onCallChanged, refreshKey = null }) {
-  const [open, setOpen] = useState(false);
+export default function CallIntelligencePanel({ callId, onJumpToQuote, onCallChanged, refreshKey = null, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
+  // A deep link that lands on an already-mounted list (the hash changed to
+  // another call) must still open this panel; useState only reads the prop
+  // on mount. A later false never closes what the operator opened.
+  useEffect(() => { if (defaultOpen) setOpen(true); }, [defaultOpen]);
   const [state, setState] = useState({ status: "idle", data: null, error: null });
   const [busy, setBusy] = useState(null);
   const [notice, setNotice] = useState(null);
@@ -150,7 +154,7 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote, onCallCha
   const isAdmin = state.isAdmin === true;
 
   return (
-    <div className="mt-1.5 ml-8 bg-zinc-50 border-hairline rounded-md">
+    <div className="mt-1.5 ml-8 bg-zinc-50 border-hairline rounded-md" id={`call-intel-${callId}`}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}

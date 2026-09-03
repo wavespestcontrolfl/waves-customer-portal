@@ -68,6 +68,7 @@ import {
 } from "lucide-react";
 import { CustomerActionBar } from "./StickyActionBar";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
+import OwedCommitmentsSummary from "./OwedCommitmentsSummary";
 import { formatAddress } from "../../utils/format-address";
 import {
   Card,
@@ -7102,6 +7103,7 @@ export default function Customer360ProfileV2({
           {activeTab === "comms" && (
             <div className="flex flex-col h-full">
               {" "}
+              <OwedCommitmentsSummary customerId={customerId} />
               <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
               <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-3 max-h-[400px]">
                 {commsLoading && (

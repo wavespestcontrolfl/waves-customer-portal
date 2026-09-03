@@ -235,6 +235,9 @@ describe('new_job_application bell', () => {
       .sort();
     expect(techVisible).toEqual([
       'appointment_reschedule_intent',
+      // The Owed tab is staff-wide; its overdue bell must reach the staff
+      // who work it (call-commitments-watchdog).
+      'call_commitment_overdue',
       'completion_sms_failed',
       'customer_voicemail_callback',
       'job_complete',
