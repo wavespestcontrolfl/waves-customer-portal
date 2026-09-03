@@ -87,14 +87,19 @@ describe('every spawned-row writer anchors the sole property', () => {
 
   test('every admin-schedule spawned-row writer copies the parent stamp AND anchors', () => {
     const src = read('routes/admin-schedule.js');
-    const anchored = src.match(/copyStampedServiceAddressFields\((\w+), (\w+), cols\);\n\s*await anchorSoleProperty\(\1, cols, (trx|conn)\);/g) || [];
+    const anchored = src.match(/copyStampedServiceAddressFields\((\w+), (\w+), cols\);\n\s*(?:if \(!propertyOwnedByEstimateLinkage\) )?await anchorSoleProperty\(\1, cols, (trx|conn)\);/g) || [];
     const allCopies = src.match(/copyStampedServiceAddressFields\(\w+, \w+, cols\);/g) || [];
     // Five extension/spawn writers + the direct admin-create child and
     // booster loops (GH codex #3837 r1 P1).
     expect(allCopies.length).toBe(7);
     expect(anchored.length).toBe(allCopies.length);
     // The direct-create loops spawn from the freshly inserted parent `svc`.
-    expect(src).toContain('copyStampedServiceAddressFields(childData, svc, cols);\n        await anchorSoleProperty(childData, cols, trx);');
-    expect(src).toContain('copyStampedServiceAddressFields(boosterData, svc, cols);\n          await anchorSoleProperty(boosterData, cols, trx);');
+    // Deferred estimate link (GH codex #3837 r2 P1): the rows carry no
+    // source_estimate_id yet, so the anchor is gated on the deferral — the
+    // parent's own anchor included, since the children copy the parent.
+    expect(src).toContain('copyStampedServiceAddressFields(childData, svc, cols);\n        if (!propertyOwnedByEstimateLinkage) await anchorSoleProperty(childData, cols, trx);');
+    expect(src).toContain('copyStampedServiceAddressFields(boosterData, svc, cols);\n          if (!propertyOwnedByEstimateLinkage) await anchorSoleProperty(boosterData, cols, trx);');
+    expect(src).toContain('const propertyOwnedByEstimateLinkage = !!linkedEstimateId && !insertLinkId;');
+    expect(src).toContain("if (cols.property_id && insertData.property_id === undefined && !propertyOwnedByEstimateLinkage) {");
   });
 });

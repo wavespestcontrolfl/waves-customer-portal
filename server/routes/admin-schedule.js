@@ -4806,6 +4806,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // unowned case, which acceptEstimateOnBook does not).
     const estimateNeedsAttach = !!(linkedEstimate && !linkedEstimate.customer_id);
     const insertLinkId = (acceptEstimateOnBook || estimateNeedsAttach) ? null : linkedEstimateId;
+    // While the estimate link is deferred, the rows carry no
+    // source_estimate_id yet, so the sole-property anchor cannot see that an
+    // estimate owns their address (GH codex #3837 r2 P1): a quote for a NEW
+    // address would anchor the whole series to the customer's old property,
+    // and the post-commit linkage only stamps rows still NULL. Leave the
+    // parent AND its spawned children unanchored — the linkage stamps them.
+    const propertyOwnedByEstimateLinkage = !!linkedEstimateId && !insertLinkId;
 
     // Resolve the prepay-on-book decision now that the estimate is validated.
     // Honor billingTerm='prepay_annual' ONLY for a server-eligible open quote on
@@ -5446,7 +5453,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // (copyStampedServiceAddressFields). Only the customer's SOLE active
       // property is unambiguous; multi-property customers stay
       // office-placed. Never overrides an explicit stamp.
-      if (cols.property_id && insertData.property_id === undefined) {
+      if (cols.property_id && insertData.property_id === undefined && !propertyOwnedByEstimateLinkage) {
         insertData.property_id = await require('../services/customer-properties')
           .soleActivePropertyId(customerId, trx);
       }
@@ -5575,7 +5582,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // was anchored at insert, and a child without it is refused by the
         // maybeGroupRow call below forever.
         copyStampedServiceAddressFields(childData, svc, cols);
-        await anchorSoleProperty(childData, cols, trx);
+        if (!propertyOwnedByEstimateLinkage) await anchorSoleProperty(childData, cols, trx);
         const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr, seriesBlackoutDates, skipWeekendsEffective);
         const childFinancials = calculateVisitFinancialsForAddons(pricing, childAddonLines);
         // Carry callback status + suppression onto recurring children: if an
@@ -5649,7 +5656,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.service_key_snapshot) boosterData.service_key_snapshot = childIdentity.service_key || pricing.primaryServiceKey || null;
           if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
           copyStampedServiceAddressFields(boosterData, svc, cols);
-          await anchorSoleProperty(boosterData, cols, trx);
+          if (!propertyOwnedByEstimateLinkage) await anchorSoleProperty(boosterData, cols, trx);
           const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates, skipWeekendsEffective);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
