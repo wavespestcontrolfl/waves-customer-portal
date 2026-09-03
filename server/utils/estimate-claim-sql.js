@@ -192,12 +192,14 @@ async function callUnitAnswer(dbc, callLogId) {
   return fence && typeof fence === 'object' && fence.unit ? fence : null;
 }
 
-// The decision, pure. A draft passes when it CARRIES the answer (its
-// override is the fenced unit), already names SOME unit (staff or a later
-// extraction supplied one — the fence is not a correction lane), or is for
-// a DIFFERENT building than the one the ask was about. A whole-building
-// draft at the asked building — or one with no address at all — did not
-// see the answer and is blocked.
+// The decision, pure. A draft passes when it CARRIES the answer — its
+// override is the fenced unit, or its address at the asked building names
+// exactly that unit — or when it is for a DIFFERENT building than the one
+// the ask was about. At the asked building, a whole-building draft AND one
+// naming a different unit (a stale or misheard extraction — exactly what
+// the customer's answer corrects) are blocked; so is a draft with no
+// address at all. A fence with no building applies to every unitless or
+// differing draft.
 function unitAnswerFenceReason(fence, { address = null, unitLineOverride = null } = {}) {
   if (!fence || !fence.unit) return null;
   const { unitLineValueKey, splitStreetLineUnit } = require('./address-normalizer');
@@ -205,13 +207,14 @@ function unitAnswerFenceReason(fence, { address = null, unitLineOverride = null 
   if (unitLineOverride && unitLineValueKey(String(unitLineOverride)) === fencedKey) return null;
   const line = String(address || '').trim();
   if (!line) return 'unit_answer_pending';
-  if (splitStreetLineUnit(line).unit) return null;
   const b = fence.building;
   if (b && b.street_line_1) {
     const { sameStreetAddress } = require('../services/estimator-engine/address-compare');
     const buildingLine = [b.street_line_1, b.city, b.postal_code ? `FL ${b.postal_code}` : null].filter(Boolean).join(', ');
     if (!sameStreetAddress(line, buildingLine)) return null;
   }
+  const lineUnit = splitStreetLineUnit(line).unit;
+  if (lineUnit && unitLineValueKey(lineUnit) === fencedKey) return null;
   return 'unit_answer_pending';
 }
 

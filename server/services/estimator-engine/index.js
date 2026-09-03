@@ -331,15 +331,20 @@ function draftAmountLabel({ monthly, oneTime }) {
 
 // A unit the customer supplied AFTER the call (clarify write-back): the
 // re-run composes the address WITH it, since the original extraction and
-// the lead line may still describe the whole building. Never doubles a
-// unit the line already carries.
+// the lead line may still describe the whole building. A line already
+// carrying the SAME unit (any spelling — the write-back formats it as its
+// own comma segment, "street, Apt 204, city") is left alone; a DIFFERENT
+// unit is the stale or misheard one the customer's answer corrects, so it
+// is replaced — never kept beside the answer.
 function withUnitOverride(line, context) {
   const unit = String(context?.unitLineOverride || '').trim();
   if (!unit || !line) return line;
-  const { splitStreetLineUnit } = require('../../utils/address-normalizer');
-  // The WHOLE line: a lead line the write-back already formatted carries
-  // the unit as its own comma segment ("street, Apt 204, city").
-  if (splitStreetLineUnit(String(line)).unit) return line;
+  const { splitStreetLineUnitParts, unitLineValueKey } = require('../../utils/address-normalizer');
+  const parsed = splitStreetLineUnitParts(String(line));
+  if (parsed.unit) {
+    if (unitLineValueKey(parsed.unit) === unitLineValueKey(unit)) return line;
+    return [`${parsed.street} ${unit}`, parsed.tail].filter(Boolean).join(', ');
+  }
   const parts = String(line).split(',');
   parts[0] = `${parts[0].trim()} ${unit}`;
   return parts.map((p, i) => (i === 0 ? p : ` ${p.trim()}`)).join(',');
@@ -350,6 +355,15 @@ function addressFromContext(context) {
 }
 
 function addressFromContextBase(context) {
+  // The item-bound building of a clarify re-run outranks EVERY other
+  // source — the extraction (a reprocess may name another building) and,
+  // for a fallback context with no extraction at all, the lead/customer
+  // lines (which could describe another property entirely; pre-push codex
+  // P1 on the unit write-back).
+  const ov = context.serviceAddressOverride;
+  if (ov?.street_line_1) {
+    return [ov.street_line_1, ov.city, ['FL', ov.postal_code].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  }
   const sa = context.extraction?.property?.service_address;
   if (sa?.street_line_1) {
     // Street-only extractions (city/ZIP nullable in the schema) borrow
@@ -1318,6 +1332,10 @@ async function maybeDraftEstimateForCall({
     }
     if (context && !context.error && (unitLineOverride || serviceAddressOverride?.street_line_1)) {
       if (unitLineOverride) context.unitLineOverride = String(unitLineOverride);
+      // Honored by addressFromContext directly (extraction or not); ALSO
+      // stamped into the extraction below so the unit-scope model sees the
+      // subpremise on street_line_2.
+      if (serviceAddressOverride?.street_line_1) context.serviceAddressOverride = serviceAddressOverride;
       if (context.extraction && typeof context.extraction === 'object') {
         context.extraction.property = context.extraction.property && typeof context.extraction.property === 'object'
           ? context.extraction.property : {};

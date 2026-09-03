@@ -475,14 +475,21 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir Apt 204, Sarasota, FL 34232' })).toBeNull();
   });
 
-  test('a draft for ANOTHER building, or one already naming some unit, is not the fence\'s business', () => {
+  test('a draft for ANOTHER building is not the fence\'s business; a DIFFERENT unit at the asked building is the stale one the answer corrects — blocked', () => {
     expect(unitAnswerFenceReason(FENCE, { address: '5 Other Rd, Venice, FL 34285' })).toBeNull();
-    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir Apt 9, Sarasota, FL 34232' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '5 Other Rd Apt 9, Venice, FL 34285' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir Apt 9, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir, Apt 9, Sarasota, FL 34232', unitLineOverride: 'Apt 9' })).toBe('unit_answer_pending');
+    // The same unit in another spelling is the answer.
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir, Unit 204, Sarasota, FL 34232' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir #204, Sarasota, FL 34232' })).toBeNull();
   });
 
   test('no address at all did not see the answer — blocked; a fence with no building blocks any unitless draft', () => {
     expect(unitAnswerFenceReason(FENCE, { address: '' })).toBe('unit_answer_pending');
     expect(unitAnswerFenceReason({ unit: 'Apt 204' }, { address: '5 Other Rd, Venice, FL 34285' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason({ unit: 'Apt 204' }, { address: '5 Other Rd Apt 9, Venice, FL 34285' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason({ unit: 'Apt 204' }, { address: '5 Other Rd Apt 204, Venice, FL 34285' })).toBeNull();
   });
 
   test('read + decide from the call row (string or object metadata); a missing row or key is no fence', async () => {
