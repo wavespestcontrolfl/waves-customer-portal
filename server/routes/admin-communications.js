@@ -1952,6 +1952,15 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     // owner's too (name + address on the page, ownership re-checked at /sms).
     const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_guide'];
     const strictOwner = STRICT_OWNER_KINDS.includes(kind);
+    // Appointment pages and service reports are account-scoped (any sibling's
+    // visit or report) but the TEXT is a customer-specific bearer, so the
+    // resolved phone owner rides back for them too: the /sms send then
+    // carries customerId and the recipient's own consent policy applies —
+    // without it a typed-in number sends as an unverified conversational
+    // lead, whose consent read can miss the customer's notification_prefs
+    // entirely when the number is formatted differently on file (GH Codex
+    // #3844 r4 P1).
+    const ownerRidesBack = strictOwner || ['appointment', 'service_report'].includes(kind);
     if (!primaryId || strictOwner) {
       const phoneRows = await db('customers')
         .whereNull('deleted_at')
@@ -1992,11 +2001,12 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       // Immediate-send-only kinds (card request, statement): the composer
       // refuses to schedule or draft them; /schedule-sms + drafts re-fence.
       immediateOnly: result.immediateOnly || undefined,
-      // Auto Pay: the resolved owner rides back so the composer can select
-      // it — the /sms send then carries customerId and the link's owner
-      // policy applies (GH Codex #3812 r3 P1). standalone: the line is a
-      // complete greeted message, inserted as-is.
-      customerId: strictOwner ? primaryId : undefined,
+      // Owner-bound kinds (and the account-scoped bearers above): the
+      // resolved owner rides back so the composer can select it — the /sms
+      // send then carries customerId and the link's owner policy applies
+      // (GH Codex #3812 r3 P1). standalone: the line is a complete greeted
+      // message, inserted as-is.
+      customerId: ownerRidesBack ? primaryId : undefined,
       standalone: result.standalone || undefined,
     });
   } catch (err) {

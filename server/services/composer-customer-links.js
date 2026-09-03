@@ -715,11 +715,15 @@ async function immediateOnlyLinkSendCheck(body) {
  *               or expired link matches nothing → refuse) — OR be the
  *               composer's own unwritten insert: the caller names the
  *               contract (`contractId`), the token VERIFIES as the
- *               server's mint for that contract, unexpired (HMAC —
+ *               server's mint for that contract, unexpired (HMAC over the
+ *               id, a per-insert nonce and the expiry —
  *               composer-contract-token.js; a caller can never choose the
  *               bearer) and the contract's customer owns the recipient; the
  *               send then activates it under the row lock
- *               (activatePreparedShareLinks).
+ *               (activatePreparedShareLinks). Either way a marketing
+ *               customer guide refuses — that document rides the Document
+ *               Templates delivery's consent + opt-out footer, never a
+ *               conversational text (GH Codex #3844 r4 P1).
  *   prep      — /prep/<token>: the public page's own predicates at the send
  *               (GH Codex #3844 r3 P2) — the token still resolves
  *               (unexpired) and its guide still has an active version.
@@ -781,12 +785,13 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, contract
     const tokenHash = require('./contracts').hashContractToken(token);
     const row = await db('customer_contracts')
       .where({ share_token_hash: tokenHash })
-      .first('id', 'customer_id', 'status', 'share_token_expires_at');
+      .first('id', 'customer_id', 'status', 'share_token_expires_at', ...CONTRACT_GUIDE_COLUMNS);
     const terminal = (status) => ['signed', 'cancelled', 'voided', 'expired'].includes(String(status || '').toLowerCase());
     if (row) {
       const dead = terminal(row.status)
         || (row.share_token_expires_at && new Date(row.share_token_expires_at).getTime() <= Date.now());
       if (dead) return refuse('This contract signing link is expired or no longer live — remove it and insert a fresh one.');
+      if (await isMarketingGuideContract(row)) return refuse(MARKETING_GUIDE_REFUSAL);
       const bad = await owned(row.customer_id, 'contract signing link');
       if (bad) return bad;
       if (!contracts.some((c) => c.tokenHash === tokenHash)) contracts.push({ id: row.id, tokenHash, delivered: true });
@@ -794,8 +799,9 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, contract
     }
     // No stored link: the composer's own unwritten insert, or a dead one.
     // The composer names the contract and the token must VERIFY as the
-    // server's mint for that contract, unexpired (HMAC, 12h — the caller
-    // never chooses the bearer; pre-push Codex P0); the row's customer must
+    // server's mint for that contract, unexpired (HMAC over the id, a
+    // per-insert nonce and the expiry, 12h — the caller never chooses the
+    // bearer; pre-push Codex P0); the row's customer must
     // own the recipient, and the row must be one a fresh link may be
     // written over (the writer's own rule — an expired document request
     // re-opens, other expired contracts do not; pre-push Codex P1).
@@ -803,11 +809,12 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, contract
     if (!contractId || !require('../utils/composer-contract-token').verifyComposerContractToken(contractId, token)) {
       return refuse('This contract signing link is expired or no longer live — remove it and insert a fresh one.');
     }
-    const contract = await db('customer_contracts').where({ id: contractId }).first('id', 'customer_id', 'status', 'contract_type');
+    const contract = await db('customer_contracts').where({ id: contractId }).first('id', 'customer_id', 'status', ...CONTRACT_GUIDE_COLUMNS);
     const { shareLinkWritableStatuses } = require('../routes/admin-contracts');
     if (!contract || !shareLinkWritableStatuses(contract).includes(String(contract.status || '').toLowerCase())) {
       return refuse('This contract signing link is expired or no longer live — remove it and insert a fresh one.');
     }
+    if (await isMarketingGuideContract(contract)) return refuse(MARKETING_GUIDE_REFUSAL);
     const bad = await owned(contract.customer_id, 'contract signing link');
     if (bad) return bad;
     if (!contracts.some((c) => c.tokenHash === tokenHash)) contracts.push({ id: contract.id, tokenHash, delivered: false });
@@ -1245,6 +1252,33 @@ async function buildServiceReportLink(customerIds) {
 // requests, which re-issue on a fresh window).
 const CONTRACT_LINKABLE_STATUSES = ['draft', 'sent', 'viewed'];
 
+// The customer_contracts columns the marketing-guide predicate reads (plus
+// the template id its joined columns come from).
+const CONTRACT_GUIDE_COLUMNS = ['contract_type', 'document_template_id', 'document_render_summary', 'requires_signature_snapshot'];
+const MARKETING_GUIDE_REFUSAL = 'This is a customer guide — it goes out from Document Templates (marketing opt-in and opt-out footer), never the composer. Remove the link before sending.';
+
+/**
+ * A marketing customer guide (a bulk product-safety send, or a marketing
+ * customer_guide template needing no signature) is the Document Templates
+ * delivery's alone: the seasonal_tips opt-in, the marketing_seasonal policy
+ * and the opt-out footer live there (document-contract-delivery.js). The
+ * composer sends conversationally, so the contract row never picks one and
+ * the send seam refuses one however it got into the body (GH Codex #3844
+ * r4 P1). The delivery's own predicate, fed the template columns it joins.
+ */
+async function isMarketingGuideContract(row) {
+  if (!row || row.contract_type !== 'document_template') return false;
+  const template = row.document_template_id
+    ? await db('document_templates').where({ id: row.document_template_id }).first('category', 'document_type', 'requires_signature')
+    : null;
+  return require('./document-contract-delivery').isMarketingCustomerGuide({
+    ...row,
+    document_template_category: template?.category ?? null,
+    document_template_document_type: template?.document_type ?? null,
+    document_template_requires_signature: template?.requires_signature ?? null,
+  });
+}
+
 /**
  * Contract signing link — the phone-owning customer's newest contract
  * still awaiting a signature (the route passes that ONE row, never account
@@ -1253,7 +1287,8 @@ const CONTRACT_LINKABLE_STATUSES = ['draft', 'sent', 'viewed'];
  * a bearer nobody can use exists only once the /sms send ACTIVATES it
  * (bearerLinkSendCheck → activatePreparedShareLinks, the composer naming
  * the contract and the token proving it was minted here for it — an HMAC
- * over the contract id and a 12-hour expiry, composer-contract-token.js),
+ * over the contract id, a per-insert nonce and a 12-hour expiry,
+ * composer-contract-token.js),
  * which writes the hash with status sent and a window
  * opened from the send — the document delivery's prepare → activate →
  * send shape, spread across the insert and the send (GH Codex #3844 r3 P1
@@ -1264,16 +1299,26 @@ const CONTRACT_LINKABLE_STATUSES = ['draft', 'sent', 'viewed'];
  * live link stays the Contracts page's deliberate action. The recipient-
  * phone trust the document delivery enforces (SMS_RECIPIENT_UNTRUSTED)
  * already holds: /customer-link only resolves a customer whose phone is
- * the recipient, and the send re-checks ownership.
+ * the recipient, and the send re-checks ownership. Marketing customer
+ * guides are skipped — never the composer's to send (isMarketingGuideContract).
  */
 async function buildContractSigningLink(customerIds) {
-  const row = await db('customer_contracts')
-    .whereIn('customer_id', customerIds)
-    .where((qb) => qb
-      .whereIn('status', CONTRACT_LINKABLE_STATUSES)
-      .orWhere({ status: 'expired', contract_type: 'document_template' }))
-    .orderBy('created_at', 'desc')
-    .first('id', 'title', 'contract_type', 'requires_signature_snapshot', 'share_token_hash', 'share_token_expires_at');
+  const PAGE = 15;
+  let row = null;
+  for (let offset = 0; ; offset += PAGE) {
+    const rows = await db('customer_contracts')
+      .whereIn('customer_id', customerIds)
+      .where((qb) => qb
+        .whereIn('status', CONTRACT_LINKABLE_STATUSES)
+        .orWhere({ status: 'expired', contract_type: 'document_template' }))
+      .orderBy('created_at', 'desc')
+      .offset(offset)
+      .limit(PAGE);
+    for (const candidate of rows) {
+      if (!(await isMarketingGuideContract(candidate))) { row = candidate; break; }
+    }
+    if (row || rows.length < PAGE) break;
+  }
   if (!row) return { url: null, line: '', reason: 'No contract awaiting signature on this account' };
   const title = String(row.title || '').trim() || 'agreement';
   if (require('../routes/admin-contracts').deliveredLiveShareLink(row)) {

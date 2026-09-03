@@ -1819,9 +1819,11 @@ function SmsTab() {
       // A standalone line (Auto Pay: the reviewed SMS template, already
       // greeted) goes in as-is; the generic prefill wraps the others.
       const prefill = d.standalone ? clause : buildCustomerLinkPrefill({ firstName: d.firstName, clause });
-      // Auto Pay hands back the resolved owner: adopt it as the selected
-      // customer when none was picked, so the send carries customerId and
-      // the link's owner policy applies (server refuses otherwise).
+      // Owner-bound kinds (Auto Pay, card request, contract, prep guide,
+      // appointment page, service report) hand back the resolved owner:
+      // adopt it as the selected customer when none was picked, so the send
+      // carries customerId and the recipient's own consent policy applies
+      // (the server refuses the strict-owner kinds otherwise).
       const linkCustomerId = d.customerId || requestCustomerId;
       if (!requestCustomerId && d.customerId) {
         // The phone did not change — links already minted for this

@@ -403,6 +403,10 @@ describe('POST /admin/communications/customer-link', () => {
       const body = await res.json();
       expect(builders.buildAppointmentPageLink).toHaveBeenCalledWith(visit);
       expect(body.appointment).toEqual({ id: 'v1', scheduledDate: '2026-09-08', serviceType: 'Flea Treatment' });
+      // Account-scoped pick, but the text is a customer-specific bearer: the
+      // phone owner rides back so the /sms send carries customerId and the
+      // recipient's own consent policy applies (GH Codex #3844 r4 P1).
+      expect(body.customerId).toBe(CUSTOMER_UUID);
     });
 
     const visits = makeVisitsBuilder([]);
@@ -418,6 +422,25 @@ describe('POST /admin/communications/customer-link', () => {
       // placeholder must not be picked here and rejected there (Codex r1 P1).
       expect(visits.whereIn).toHaveBeenCalledWith('status', ['pending', 'confirmed']);
       expect((await res.json()).error).toMatch(/No upcoming appointment/);
+    });
+  });
+
+  test('service_report: dispatches the whole account id set, with the phone owner riding back (the text is customer-specific — GH Codex #3844 r4 P1)', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildServiceReportLink.mockResolvedValue({
+      url: 'https://wavespest.co/report/abc',
+      line: 'Here is your latest service report: https://wavespest.co/report/abc\n\n',
+      immediateOnly: true,
+      report: { id: 'r1', serviceDate: '2026-09-01', serviceType: 'Lawn Care' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'service_report' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(builders.buildServiceReportLink).toHaveBeenCalledWith([CUSTOMER_UUID]);
+      expect(body.customerId).toBe(CUSTOMER_UUID);
+      expect(body.immediateOnly).toBe(true);
+      expect(body.report).toEqual({ id: 'r1', serviceDate: '2026-09-01', serviceType: 'Lawn Care' });
     });
   });
 

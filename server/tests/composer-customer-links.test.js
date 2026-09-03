@@ -958,18 +958,18 @@ describe('buildServiceReportLink', () => {
 
 describe('buildContractSigningLink', () => {
   const { verifyComposerContractToken } = require('../utils/composer-contract-token');
-  const MINTED = /^https:\/\/portal\.wavespestcontrol\.com\/contract\/([A-Za-z0-9_-]{53})$/;
+  const MINTED = /^https:\/\/portal\.wavespestcontrol\.com\/contract\/([A-Za-z0-9_-]{69})$/;
   beforeEach(() => { createShareLink.mockReset(); });
 
   test('no contract awaiting signature → reason, nothing minted', async () => {
-    mockBuilders = { customer_contracts: chainBuilder({ firstRow: null }) };
+    mockBuilders = { customer_contracts: chainBuilder({ rows: [] }) };
     const r = await buildContractSigningLink(['c1']);
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/No contract awaiting signature/);
   });
 
   test('mints the token IN MEMORY and writes nothing — the /sms send activates it (GH Codex #3844 r3 P1 + pre-push P0)', async () => {
-    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Auto Pay Authorization', contract_type: 'autopay_authorization', share_token_hash: 'deadbeef', share_token_expires_at: new Date(Date.now() - 1000) } }) };
+    mockBuilders = { customer_contracts: chainBuilder({ rows: [{ id: 'k1', title: 'Auto Pay Authorization', contract_type: 'autopay_authorization', share_token_hash: 'deadbeef', share_token_expires_at: new Date(Date.now() - 1000) }] }) };
     const r = await buildContractSigningLink(['c1']);
     expect(r.url).toMatch(MINTED);
     // The token is the server's mint FOR THIS CONTRACT — the send verifies it before writing the hash.
@@ -984,17 +984,41 @@ describe('buildContractSigningLink', () => {
   });
 
   test('a delivered link whose window is still open refuses (courtesy — the send re-judges it under the row lock)', async () => {
-    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Auto Pay Authorization', contract_type: 'autopay_authorization', share_token_hash: 'deadbeef', share_token_expires_at: new Date(Date.now() + 86400e3) } }) };
+    mockBuilders = { customer_contracts: chainBuilder({ rows: [{ id: 'k1', title: 'Auto Pay Authorization', contract_type: 'autopay_authorization', share_token_hash: 'deadbeef', share_token_expires_at: new Date(Date.now() + 86400e3) }] }) };
     const r = await buildContractSigningLink(['c1']);
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/already sent and is still live/);
   });
 
   test('a review-only document request (no signature) does not ask for one', async () => {
-    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k2', title: 'Service Guide', contract_type: 'document_template', requires_signature_snapshot: false } }) };
+    mockBuilders = {
+      customer_contracts: chainBuilder({ rows: [{ id: 'k2', title: 'Service Guide', contract_type: 'document_template', document_template_id: 'dt-svc', requires_signature_snapshot: false }] }),
+      document_templates: chainBuilder({ firstRow: { category: 'service', document_type: 'customer_guide', requires_signature: false } }),
+    };
     const r = await buildContractSigningLink(['c1']);
     expect(r.line).toBe(`Please review your Service Guide here: ${r.url}\n\n`);
     expect(r.contract.requiresSignature).toBe(false);
+  });
+
+  test('a marketing customer guide is never the composer\'s to send — skipped for the next signable contract, by the delivery\'s own predicate over its joined template columns (GH Codex #3844 r4 P1)', async () => {
+    const guide = { id: 'g1', title: 'Product Safety Guide', contract_type: 'document_template', document_template_id: 'dt-mkt', requires_signature_snapshot: false };
+    const signable = { id: 'k1', title: 'Auto Pay Authorization', contract_type: 'autopay_authorization' };
+    mockBuilders = {
+      customer_contracts: chainBuilder({ rows: [guide, signable] }),
+      document_templates: chainBuilder({ firstRow: { category: 'marketing', document_type: 'customer_guide', requires_signature: false } }),
+    };
+    const r = await buildContractSigningLink(['c1']);
+    expect(r.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', requiresSignature: true });
+    expect(mockBuilders.document_templates.where).toHaveBeenCalledWith({ id: 'dt-mkt' });
+    expect(mockBuilders.document_templates.first).toHaveBeenCalledWith('category', 'document_type', 'requires_signature');
+  });
+
+  test('a bulk-sent guide (render summary bulkSend) is a marketing guide whatever its template says; only guides on file → the plain reason', async () => {
+    mockBuilders = { customer_contracts: chainBuilder({ rows: [{ id: 'g2', title: 'Bulk Guide', contract_type: 'document_template', document_template_id: 'dt-bulk', document_render_summary: JSON.stringify({ bulkSend: true }) }] }) };
+    mockBuilders.document_templates = chainBuilder({ firstRow: { category: 'service', document_type: 'customer_guide', requires_signature: true } });
+    const r = await buildContractSigningLink(['c1']);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/No contract awaiting signature/);
   });
 });
 
@@ -1137,6 +1161,22 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     expect(contracts.where).toHaveBeenCalledWith({ share_token_hash: hashContractToken(TOKEN) });
   });
 
+  test('a marketing customer guide refuses however it got into the body — pasted from the Contracts page (delivered) or the composer\'s own insert (GH Codex #3844 r4 P1)', async () => {
+    wire({ contract: { ...live, contract_type: 'document_template', document_template_id: 'dt-bulk', document_render_summary: { bulkSend: true } } });
+    // A bulk send is a marketing guide whatever its template says.
+    mockBuilders.document_templates = chainBuilder({ firstRow: { category: 'service', document_type: 'customer_guide', requires_signature: true } });
+    expect((await bearerLinkSendCheck(CONTRACT_BODY, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/customer guide.*Document Templates/);
+    const { mintComposerContractToken } = require('../utils/composer-contract-token');
+    const minted = mintComposerContractToken('k9');
+    wire();
+    mockBuilders.customer_contracts.first = jest.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'k9', customer_id: 'c1', status: 'draft', contract_type: 'document_template', document_template_id: 'dt-mkt', requires_signature_snapshot: false });
+    mockBuilders.document_templates = chainBuilder({ firstRow: { category: 'marketing', document_type: 'customer_guide', requires_signature: false } });
+    expect((await bearerLinkSendCheck(`Please review: portal.wavespestcontrol.com/contract/${minted}`, '9415550100', { trustedCustomerId: 'c1', contractId: 'k9' })).error).toMatch(/customer guide.*Document Templates/);
+    expect(mockBuilders.document_templates.where).toHaveBeenCalledWith({ id: 'dt-mkt' });
+  });
+
   describe('the composer\'s own unwritten insert (no stored hash — GH Codex #3844 r3 P1 + pre-push P0)', () => {
     const { mintComposerContractToken } = require('../utils/composer-contract-token');
     const MINTED = mintComposerContractToken('k9');
@@ -1152,7 +1192,7 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       const contracts = wireUnwritten();
       expect(await bearerLinkSendCheck(MINTED_BODY, '9415550100', { trustedCustomerId: 'c1', contractId: 'k9' })).toEqual({ ok: true, contracts: [{ id: 'k9', tokenHash: hashContractToken(MINTED), delivered: false }] });
       expect(contracts.where).toHaveBeenCalledWith({ id: 'k9' });
-      expect(contracts.first).toHaveBeenCalledWith('id', 'customer_id', 'status', 'contract_type');
+      expect(contracts.first).toHaveBeenCalledWith('id', 'customer_id', 'status', 'contract_type', 'document_template_id', 'document_render_summary', 'requires_signature_snapshot');
     });
 
     test('an expired document request re-opens (the writer\'s own rule); an expired contract of any other type does not (pre-push Codex P1)', async () => {
