@@ -1128,9 +1128,10 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
     expect(mockBuilders.customers.whereNull).toHaveBeenCalledWith('deleted_at');
     wireStmt([{ id: 'c1' }, { id: 'c2' }]);
     expect(await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, statements: [31] });
-    // One live row, or none (the AP phone is normally no customer's): no ambiguity.
+    // One live row rides back for /sms to trust (r9 P1); none (the AP phone
+    // is normally no customer's) stays a lead.
     wireStmt([{ id: 'c1' }]);
-    expect(await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, statements: [31] });
+    expect(await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, statements: [31], customerId: 'c1' });
     wireStmt([]);
     expect(await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, statements: [31] });
   });
@@ -1168,7 +1169,8 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
 
     test('the long appointment form resolves by reschedule_token; a household sibling on the same account passes', async () => {
       wireAccount({ recipientRows: [acct('c1')], linkCustomer: acct('c2'), visit: { id: 'v1', customer_id: 'c2' } });
-      expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
+      // The one live row on the number rides back for /sms to trust (r9 P1).
+      expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, customerId: 'c1' });
       expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ reschedule_token: RESCHEDULE });
       expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c2' });
     });
@@ -1192,6 +1194,17 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/more than one customer account/);
       wireAccount({ recipientRows: [acct('c1', 'acct-a'), acct('c2', 'acct-b')], linkCustomer: acct('c1', 'acct-a') });
       expect(await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+    });
+
+    test('a pasted bearer to a number two SAME-account siblings share refuses with no trusted customer — never an arbitrary row\'s consent (GH Codex #3844 r9 P1); a trusted sibling passes', async () => {
+      wireAccount({ recipientRows: [acct('c1'), acct('c2')], linkCustomer: acct('c1') });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/more than one customer — pick/);
+      wireAccount({ recipientRows: [acct('c1'), acct('c2')], linkCustomer: acct('c1') });
+      expect(await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: 'c2' })).toEqual({ ok: true });
+      // No bearer in the body → the owner rule never reads a row.
+      wireAccount({ recipientRows: [acct('c1'), acct('c2')] });
+      expect(await bearerLinkSendCheck('Plain text, no links', '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
+      expect(mockBuilders.customers.select).not.toHaveBeenCalled();
     });
 
     test('a visit on another account refuses; an unresolvable one refuses; a trusted customer off the account refuses', async () => {

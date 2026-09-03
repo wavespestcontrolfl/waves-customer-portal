@@ -452,6 +452,12 @@ router.post('/sms', async (req, res, next) => {
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
       if (bearerCheck.preps) prepLinkSends = bearerCheck.preps;
+      // A bearer send to a number exactly one live customer owns is that
+      // customer's text (a pasted URL never passes /customer-link to adopt
+      // its owner): trust the row the seam verified so the recipient's own
+      // consent policy applies, never the unverified-lead one (GH Codex
+      // #3844 r9 P1). The seam already refused an ambiguous number.
+      if (!trustedCustomerId && bearerCheck.customerId) trustedCustomerId = bearerCheck.customerId;
     } catch (bearerErr) {
       logger.warn(`[communications] bearer link pre-send check failed — aborting send: ${bearerErr.message}`);
       return abortUnsent(503, 'Could not verify a customer link in this message — try again in a moment.');
@@ -1735,6 +1741,73 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
 // just forgets the row client-side (the pending row is SHARED across
 // composers via createInline reuse, so canceling it would break a sibling
 // operator's valid send — the next insert reuses it instead).
+// The statement kind of /customer-link. A payer statement covers the
+// bill-to's whole book and goes to the PAYER's AP phone — which is normally
+// no customer's phone at all, so the builder resolves the payer from the
+// recipient number itself (GH Codex #3844 r2 P1). The statement is
+// authorized against the payer, but the text goes to a phone that may also
+// be a customer's — exactly one live row on the number rides back as
+// customerId so the composer selects it and the /sms send carries it: the
+// recipient's own consent policy then applies instead of the unverified-
+// lead classification, whose exact-phone consent read can miss a
+// differently formatted number on file (r6 P1). Several rows on the number
+// → the one the composer selected (it owns the number, so the /sms send
+// trusts it), else 409 — never a guess, and never the unverified-lead
+// policy for a number one of those rows has opted out (r7 P1). A body
+// customerId is otherwise irrelevant to the statement itself.
+async function statementLinkInsert(builders, last10, bodyCustomerId) {
+  const result = await builders.buildStatementLink(last10);
+  if (!result?.url) return { status: 404, body: { error: result?.reason || 'No payable statement for that number' } };
+  const owners = await db('customers')
+    .whereNull('deleted_at')
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .select('id');
+  const selected = owners.find((o) => String(o.id) === String(bodyCustomerId || ''));
+  if (!selected && owners.length > 1) {
+    return { status: 409, body: { error: 'That number is on file for more than one customer — pick the customer from the search dropdown before inserting a statement link.' } };
+  }
+  return {
+    status: 200,
+    body: {
+      kind: 'statement',
+      url: stripSmsLinkScheme(result.url),
+      line: stripSmsLinkScheme(result.line),
+      statement: result.statement || undefined,
+      immediateOnly: result.immediateOnly || undefined,
+      customerId: (selected || owners[0])?.id,
+    },
+  };
+}
+
+// /customer-link's recipient: the operator-selected customer (phone cross-
+// checked, then expanded to its account), else every live row on the
+// number — which must sit on ONE account (cross-account 409). Same fail-
+// closed contract as /reschedule-link. Returns { customerIds } or
+// { status, error }.
+async function resolveComposerRecipient(customerId, last10) {
+  if (customerId && UUID_RE.test(String(customerId))) {
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .first('id', 'phone', 'account_id');
+    if (!customer) return { status: 404, error: 'Customer not found' };
+    if (fullPhoneLast10(customer.phone) !== last10) return { status: 400, error: 'phone must match the selected customer' };
+    const customerIds = await customerIdsForAccount(customer.account_id || customer.id);
+    return customerIds.length ? { customerIds } : { status: 404, error: 'No customer found for that number' };
+  }
+  const matches = await db('customers')
+    .whereNull('deleted_at')
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .select('id', 'account_id');
+  if (!matches.length) return { status: 404, error: 'No customer found for that number' };
+  const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
+  if (accountKeys.length > 1) {
+    return { status: 409, error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first' };
+  }
+  const customerIds = await customerIdsForAccount(accountKeys[0]);
+  return customerIds.length ? { customerIds } : { status: 404, error: 'No customer found for that number' };
+}
+
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
     const kind = String(req.body?.kind || '');
@@ -1760,14 +1833,11 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       // push Codex P1). STRICT_OWNER_KINDS below.
       prep_guide: (ids, primaryId) => builders.buildPrepGuideLink([primaryId]),
       service_report: (ids) => builders.buildServiceReportLink(ids),
-      // A payer statement covers the bill-to's whole book and goes to the
-      // PAYER's AP phone — which is normally no customer's phone at all, so
-      // this kind never resolves a customer: the builder resolves the payer
-      // from the recipient number itself (GH Codex #3844 r2 P1). Any
-      // customerId the composer carries is irrelevant to it.
-      statement: () => builders.buildStatementLink(last10),
+      // Handled by statementLinkInsert before any customer resolution (the
+      // key here only admits the kind).
+      statement: null,
     };
-    if (!builderByKind[kind]) {
+    if (!(kind in builderByKind)) {
       return res.status(400).json({ error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` });
     }
 
@@ -1776,68 +1846,14 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
     }
     if (kind === 'statement') {
-      const result = await builderByKind.statement();
-      if (!result?.url) return res.status(404).json({ error: result?.reason || 'No payable statement for that number' });
-      // The statement is authorized against the PAYER (the builder), but the
-      // text goes to a phone that may also be a customer's — exactly one live
-      // row on the number rides back as customerId so the composer selects
-      // it and the /sms send carries it: the recipient's own consent policy
-      // then applies instead of the unverified-lead classification, whose
-      // exact-phone consent read can miss a differently formatted number on
-      // file (GH Codex #3844 r6 P1). Several rows on the number → the one the
-      // composer selected (it owns the number, so the /sms send trusts it),
-      // else 409 — never a guess, and never the unverified-lead policy for a
-      // number one of those rows has opted out (GH Codex #3844 r7 P1). A
-      // body customerId is irrelevant to the statement itself.
-      const owners = await db('customers')
-        .whereNull('deleted_at')
-        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-        .select('id');
-      const selected = owners.find((o) => String(o.id) === String(req.body?.customerId || ''));
-      if (!selected && owners.length > 1) {
-        return res.status(409).json({ error: 'That number is on file for more than one customer — pick the customer from the search dropdown before inserting a statement link.' });
-      }
-      return res.json({
-        kind,
-        url: stripSmsLinkScheme(result.url),
-        line: stripSmsLinkScheme(result.line),
-        statement: result.statement || undefined,
-        immediateOnly: result.immediateOnly || undefined,
-        customerId: (selected || owners[0])?.id,
-      });
+      const { status, body } = await statementLinkInsert(builders, last10, req.body?.customerId);
+      return res.status(status).json(body);
     }
 
     const customerId = req.body?.customerId;
-    let customerIds = [];
-    if (customerId && UUID_RE.test(String(customerId))) {
-      const customer = await db('customers')
-        .where({ id: customerId })
-        .whereNull('deleted_at')
-        .first('id', 'phone', 'account_id');
-      if (!customer) return res.status(404).json({ error: 'Customer not found' });
-      if (fullPhoneLast10(customer.phone) !== last10) {
-        return res.status(400).json({ error: 'phone must match the selected customer' });
-      }
-      customerIds = await customerIdsForAccount(customer.account_id || customer.id);
-    } else {
-      const matches = await db('customers')
-        .whereNull('deleted_at')
-        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-        .select('id', 'account_id');
-      if (!matches.length) {
-        return res.status(404).json({ error: 'No customer found for that number' });
-      }
-      const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
-      if (accountKeys.length > 1) {
-        return res.status(409).json({
-          error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
-        });
-      }
-      customerIds = await customerIdsForAccount(accountKeys[0]);
-    }
-    if (!customerIds.length) {
-      return res.status(404).json({ error: 'No customer found for that number' });
-    }
+    const recipient = await resolveComposerRecipient(customerId, last10);
+    if (recipient.error) return res.status(recipient.status).json({ error: recipient.error });
+    const { customerIds } = recipient;
 
     const recipientFirstName = await firstNameForPhone(last10, customerIds);
 
@@ -1875,6 +1891,16 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       if (strictOwner && phoneRows.length !== 1) {
         return res.status(409).json({
           error: 'That number is on file for more than one customer on this account — send this link from that customer\'s profile instead',
+        });
+      }
+      // A number two live siblings on the account share: the owner that
+      // rides back would be an arbitrary pick, and /sms would apply only
+      // that row's consent — refuse, like the strict kinds, until the
+      // operator picks (GH Codex #3844 r9 P1); the send seam refuses the
+      // same ambiguity.
+      if (!primaryId && ownerRidesBack && phoneRows.length > 1) {
+        return res.status(409).json({
+          error: 'That number is on file for more than one customer on this account — pick the customer from the search dropdown first',
         });
       }
       if (!primaryId) primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];

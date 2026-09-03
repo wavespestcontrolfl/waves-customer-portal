@@ -468,6 +468,22 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
+  test.each(['appointment', 'service_report'])('%s: 409 when two live siblings on the account share the phone and no customer was picked — the owner that rides back is never an arbitrary row (GH Codex #3844 r9 P1)', async (kind) => {
+    wireDb({ customers: makeCustomersBuilder({
+      selectResults: [
+        [{ id: CUSTOMER_UUID, account_id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002', account_id: CUSTOMER_UUID }], // number → one account
+        [{ id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002' }], // account expansion
+        [{ first_name: 'PersonA' }, { first_name: 'PersonA' }], // greeting name
+        [{ id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002' }], // phone rows on the account
+      ],
+    }) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/more than one customer on this account/);
+    });
+  });
+
   test.each(['prep_guide'])('%s: 409 when the phone belongs to more than one sibling — same rule as Auto Pay', async (kind) => {
     const other = 'bbbb2222-0000-4000-8000-000000000002';
     wireDb({

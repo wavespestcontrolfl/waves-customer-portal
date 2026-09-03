@@ -820,6 +820,7 @@ async function checkPrepLinks(ctx, preps) {
     if (!source.customerId) return refuseSend('This prep guide page has no customer on file — remove the prep link before sending.');
     const bad = await ownedByRecipient(ctx, source.customerId, 'prep guide link');
     if (bad) return bad;
+    ctx.bearers += 1;
     // The marker is keyed by the tagger's pest type; a guide outside
     // PREP_CONFIG (a project prep page) has no replay guard to satisfy.
     const pestType = Object.keys(PREP_CONFIG).find((k) => PREP_CONFIG[k].emailTemplateKey === source.templateKey);
@@ -833,13 +834,8 @@ async function checkPrepLinks(ctx, preps) {
 // Statement pay links: the gate, a payable row, and the ACTIVE payer's AP
 // phone as the recipient (a statement is the payer's, never a customer's).
 // Every verified statement id lands in `statements`.
-// The statement is the payer's, but the TEXT goes to a phone that may be a
-// customer's: the /sms send applies that customer's consent policy only when
-// it carries a trusted customer id, and with none a number on file for
-// several live customers would fall to the unverified-lead policy — whose
-// exact-phone consent read can miss a differently formatted number and
-// deliver past one row's sms_enabled=false (GH Codex #3844 r7 P1). The
-// insert route 409s this same ambiguity; the send refuses it too.
+// Every live customer row whose phone is the recipient number (the seam-
+// wide owner rule in bearerLinkSendCheck).
 async function liveCustomersOnNumber(toLast10) {
   return db('customers')
     .whereNull('deleted_at')
@@ -863,9 +859,7 @@ async function checkStatementLinks(ctx, statements) {
     if (!payer || !digitsLast10(payer.ap_phone) || digitsLast10(payer.ap_phone) !== ctx.toLast10) {
       return refuseSend("This statement link only goes to the payer's AP phone on file — remove it before sending.");
     }
-    if (!ctx.trustedCustomerId && !statements.length && (await liveCustomersOnNumber(ctx.toLast10)).length > 1) {
-      return refuseSend('That number is on file for more than one customer — pick the customer from the search dropdown before sending a statement link.');
-    }
+    ctx.bearers += 1;
     if (!statements.includes(stmt.id)) statements.push(stmt.id);
   }
   return null;
@@ -877,7 +871,9 @@ async function checkAppointmentLinks(ctx, shortRows, onRecipientAccount) {
   const visitById = async (where) => db('scheduled_services').where(where).first('id', 'customer_id');
   const bind = async (visit) => {
     if (!visit) return refuseSend('This appointment link no longer resolves — remove it and insert a fresh one.');
-    return onRecipientAccount(visit.customer_id, 'appointment link');
+    const bad = await onRecipientAccount(visit.customer_id, 'appointment link');
+    if (!bad) ctx.bearers += 1;
+    return bad;
   };
   for (const run of linkRuns(ctx.runs, /\/appointment\//i)) {
     const token = canonicalPortalToken(run, ctx.hosts, APPOINTMENT_TOKEN_RE);
@@ -906,7 +902,9 @@ async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
   };
   const bind = async (record) => {
     if (!record) return refuseSend('This service report is no longer viewable — remove the link before sending.');
-    return onRecipientAccount(record.customer_id, 'service report link');
+    const bad = await onRecipientAccount(record.customer_id, 'service report link');
+    if (!bad) ctx.bearers += 1;
+    return bad;
   };
   for (const run of linkRuns(ctx.runs, /\/report\//i)) {
     const token = canonicalPortalToken(run, ctx.hosts, REPORT_TOKEN_RE);
@@ -940,6 +938,7 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
     hosts: ownedPortalHosts(),
     toLast10: String(toLast10 || ''),
     trustedCustomerId,
+    bearers: 0, // verified bearers seen — the owner rule below applies to any
   };
   const statements = [];
   const preps = [];
@@ -947,7 +946,25 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
     || (await checkStatementLinks(ctx, statements))
     || (await checkAccountBoundLinks(ctx));
   if (refusal) return refusal;
-  return { ok: true, ...(statements.length ? { statements } : {}), ...(preps.length ? { preps } : {}) };
+  const out = { ok: true, ...(statements.length ? { statements } : {}), ...(preps.length ? { preps } : {}) };
+  // Owner rule for EVERY bearer send (GH Codex #3844 r7 + r9 P1s): the text
+  // goes to a phone that may be a customer's, and /sms applies that
+  // customer's consent policy only when it trusts a customer id — with none
+  // (a pasted URL, a direct /sms call, a same-account pair sharing the
+  // number) the send would fall to the unverified-lead policy, whose exact-
+  // phone consent read can miss a differently formatted number and deliver
+  // past a row's sms_enabled=false. Exactly one live row on the number
+  // rides back as `customerId` for /sms to adopt as the trusted customer;
+  // several refuse (never an arbitrary pick — the insert route 409s the
+  // same); none is a non-customer number (a payer's AP phone) and stays a lead.
+  if (ctx.bearers && !ctx.trustedCustomerId) {
+    const rows = await liveCustomersOnNumber(ctx.toLast10);
+    if (rows.length > 1) {
+      return refuseSend('That number is on file for more than one customer — pick the customer from the search dropdown before sending a customer link.');
+    }
+    if (rows.length === 1) out.customerId = rows[0].id;
+  }
+  return out;
 }
 
 /**

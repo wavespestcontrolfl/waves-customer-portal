@@ -495,6 +495,33 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    test('a bearer send with no selected customer adopts the one live owner of the number as the trusted customer — the recipient\'s own consent policy, not the lead one (GH Codex #3844 r9 P1); several owners refuse', async () => {
+      const STMT_BODY = `Pay here: portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`;
+      const wireOwners = (owners) => db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'payer_statements') first.mockResolvedValue({ id: 31, payer_id: 7, status: 'sent' });
+        else if (table === 'payers') first.mockResolvedValue({ id: 7, ap_phone: '+15551234567' });
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => (table === 'customers' ? owners : [])), update: jest.fn(async () => 1) };
+      });
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM9' });
+      wireOwners([{ id: 'cust-A' }]);
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY });
+        expect(res.status).toBe(200);
+        expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+          audience: 'customer', customerId: 'cust-A', identityTrustLevel: 'phone_matches_customer',
+        }));
+      });
+      sendCustomerMessage.mockClear();
+      wireOwners([{ id: 'cust-A' }, { id: 'cust-B' }]);
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/more than one customer/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    });
+
     test('a statement link on a throw AFTER provider acceptance is still stamped finalized → sent (GH Codex #3844 r3 P1); a throw before it is not', async () => {
       const STMT_BODY = `Pay here: portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`;
       const { markStatementSent } = require('../services/payer-statement-email');
