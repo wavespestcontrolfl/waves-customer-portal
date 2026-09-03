@@ -10,7 +10,8 @@ something changed. Silence is the normal output.
 
 Exit code is always 0 on a completed poll (an unreachable portal is a
 FINDING, not a script failure). Exit 2 only for a local misconfiguration
-(missing secret file / PORTAL_URL) so the cron's own error path surfaces it.
+(missing secret file, non-http PORTAL_URL, unbuildable request) so the cron's
+own error path surfaces it.
 
 State lives in /data/workspace/.waves-watchdog-state.json:
   { "consecutive_failures": n, "last_reasons": [...], "last_paged_at": iso|null,
@@ -20,8 +21,10 @@ Paging rules (deterministic — the portal computes the health, this only
 decides whether it is NEWS):
   * HTTP 401 / 403 / 404, or 503 "worker key not configured" → CONFIGURATION, not an
     outage (the lane gate is off, the worker gate is off, or the key/secret is
-    wrong). The portal answered, so the outage streak RESETS; one page per
-    24 h naming the fix.
+    wrong). The portal answered, so the outage streak RESETS (a paged outage
+    still gets its "reachable again" line) and the reason baseline is cleared
+    (the next 200 re-announces everything still failing); one page per 24 h
+    naming the fix.
   * unreachable / other non-200 / database.ok == false → failure streak += 1;
     page at exactly 3 consecutive (~30 min), then at most every 6 h while it
     stays down; one "back" page on recovery.
@@ -98,7 +101,13 @@ def save_state(state):
 def poll():
     """Return (state: "ok" | "down" | "config", snapshot|None, detail: str)."""
     url = f"{PORTAL_URL}/api/integrations/watchdog-worker/status"
-    req = urllib.request.Request(url, headers=signed_headers("GET", url, key_id=KEY_ID), method="GET")
+    try:
+        req = urllib.request.Request(url, headers=signed_headers("GET", url, key_id=KEY_ID), method="GET")
+    except (ValueError, OSError) as e:
+        # A malformed PORTAL_URL or an unreadable secret is local
+        # configuration (exit 2), never an outage finding.
+        print(f"watchdog_poll: cannot build the request for {url!r}: {e}", file=sys.stderr)
+        sys.exit(2)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
             status, raw = r.status, r.read()
@@ -125,7 +134,9 @@ def poll():
 def describe(reason, snap):
     kind = reason.split(":", 1)[0]
     if kind == "job":
-        _, name, state = reason.split(":", 2)
+        # Job names may themselves contain ':' (meta-capi-upload:qualified_lead);
+        # the state is always the LAST segment.
+        name, state = reason.split(":", 1)[1].rsplit(":", 1)
         for j in snap.get("jobs", {}).get("items", []):
             if j.get("job") == name:
                 age = j.get("last_success_age_minutes")
@@ -174,6 +185,9 @@ def main():
     if not os.path.exists(SECRET_FILES[KEY_ID]):
         print(f"watchdog_poll: secret file missing: {SECRET_FILES[KEY_ID]}", file=sys.stderr)
         sys.exit(2)
+    if not PORTAL_URL.startswith(("https://", "http://")):
+        print(f"watchdog_poll: PORTAL_URL is not an http(s) URL: {PORTAL_URL!r}", file=sys.stderr)
+        sys.exit(2)
 
     state = load_state()
     result, snap, detail = poll()
@@ -183,8 +197,16 @@ def main():
         # Deliberate portal state (kill switch, key scope, secret). The portal
         # answered, so any outage streak ends here — otherwise failures hours
         # apart would read as consecutive. Say so once a day.
+        if state["consecutive_failures"] >= PAGE_AFTER_FAILURES and state["last_paged_at"]:
+            # A paged outage that recovers into a configuration answer still
+            # owes the "back" page, or the DOWN alert would stand forever.
+            out.append(f"✅ Waves portal reachable again (down since {state['down_since']}) — now answering a configuration response.")
         state["consecutive_failures"] = 0
         state["down_since"] = None
+        # No snapshots are observed while configured-off, so the reason
+        # baseline is stale: drop it and let the first 200 catch up, or an
+        # incident that recovered and re-failed meanwhile would be swallowed.
+        state["last_reasons"] = []
         since = hours_since(state["config_paged_at"])
         if since is None or since >= REPAGE_CONFIG_HOURS:
             out.append(f"🔧 Waves watchdog not configured: {detail}. Polls continue; nothing is down.")

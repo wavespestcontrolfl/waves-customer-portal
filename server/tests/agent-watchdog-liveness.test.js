@@ -65,3 +65,11 @@ test('never polled → bell says so; env override sets the limit; failed persist
   expect(r).toEqual({ skipped: false, alerted: 0, ageMinutes: null, limit: 20 });
   expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('never polled');
 });
+
+test('a deduped bell (same ET day) reports alerted 0 — the row already exists', async () => {
+  lastRow = { at: new Date(NOW.getTime() - 90 * 60000) };
+  NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n1', deduped: true });
+  const r = await runWatchdogLivenessCheck({ now: NOW });
+  expect(r).toEqual({ skipped: false, alerted: 0, ageMinutes: 90, limit: DEFAULT_STALE_MINUTES });
+  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+});

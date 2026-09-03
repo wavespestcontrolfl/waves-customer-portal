@@ -59,7 +59,10 @@ async function runWatchdogLivenessCheck({ now = new Date() } = {}) {
     },
   );
   if (!notif) logger.error('[hermes-watchdog-liveness] bell did not persist — silence is unannounced');
-  return { skipped: false, alerted: notif ? 1 : 0, ageMinutes, limit };
+  // notifyAdmin returns the EXISTING row with deduped:true on every later
+  // tick of the same ET day; that is not a new alert (or the scheduler
+  // would log a warning every 23 min all day).
+  return { skipped: false, alerted: notif && !notif.deduped ? 1 : 0, ageMinutes, limit };
 }
 
 module.exports = { runWatchdogLivenessCheck, DEFAULT_STALE_MINUTES };
