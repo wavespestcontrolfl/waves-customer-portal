@@ -150,7 +150,9 @@ const LANE_RUNTIME = {
   turf_ocr: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   // draft_for_human + M2 (Codex r20): /photo-analysis/draft installs summary + captions into the tech's editable completion state; the later completion submits them.
   photo_scoring: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
-  vision_delta: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
+  // offline + M3 (Codex r22): sweepUnscoredOutcomes is a scheduled batch that retries a pair up to 3 attempts, then applies the verdict,
+  // score, attempt count and terminal stamp to treatment_outcomes with no human step.
+  vision_delta: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   // offline (Codex r16): lawn_quality_gate fails open on a miss and lawn_challenge falls to the caller's symptom downgrade — one Anthropic request each, no second provider.
   lawn_quality_gate: { side_effect_class: 'read_only', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   // offline (Codex r17): runPerception / runWriter await unbounded raw Gemini + OpenAI fetches before either fallback can run.
@@ -170,7 +172,8 @@ const LANE_RUNTIME = {
   // direct_sdk (Codex r18): answerWithAnthropic builds its own client after an OpenAI miss.
   estimate_assistant: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'retrieval_qa', maturity: 'M3' },
   estimator_sms_signal: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
-  intent_composer: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', expected_duration_ms: 120_000 },
+  // draft_for_human + M2 (Codex r22): the composed intent is priced deterministically by draft-builder into an estimate draft nobody sends until an operator reviews it.
+  intent_composer: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M2', expected_duration_ms: 120_000 },
   // M2 (Codex r20): persists the brief + an unpriced, disabled estimate scaffold; the operator prices, enables and sends.
   commercial_proposal: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
   churn_classify: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
@@ -314,7 +317,8 @@ const LANE_RUNTIME = {
 
   // ── Back office ──
   // ledger call (Codex r16): #3821 moved expense-categorizer.js onto dispatchWithFallback (highStakes policy), so every call records.
-  expense_categorize: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
+  // M3 (Codex r22): admin-tax create-without-category and the bulk categorizer persist the matched category immediately; verification comes later.
+  expense_categorize: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M3' },
   // M3 (Codex r18): the Sunday cron persists the report and texts the owner with no approval — same shape as seo_advisor / ads_advisor.
   tax_advisor: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null, maturity: 'M3', expected_cadence: 'weekly', ...LONG_BATCH },
   // offline: direct Anthropic SDK calls, no second provider, failures reach the Express error path — Codex r10.
